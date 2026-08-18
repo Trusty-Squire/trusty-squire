@@ -91,11 +91,26 @@ function describe(e: AuditEvent): { tone: string; label: string; detail: string 
           ? formatAmount(e.amount_cents, e.currency)
           : null;
       const tail = e.last4 !== undefined ? ` ··${e.last4}` : "";
+      const pendingManualCheck = e.payment_status === "payment_3ds_authenticated_pending_order";
+      const placeOrderAttempted = e.payment_status === "payment_place_order_attempted";
       const declined =
-        e.payment_status !== undefined && /declin|fail|reject/i.test(e.payment_status);
+        e.payment_status !== undefined &&
+        /declin|fail|reject|outcome_unknown/i.test(e.payment_status);
       return {
-        tone: declined ? "err" : "ok",
-        label: declined ? `Payment ${e.payment_status}` : "Payment",
+        tone: placeOrderAttempted
+          ? "neutral"
+          : pendingManualCheck
+            ? "warn"
+            : declined
+              ? "err"
+              : "ok",
+        label: placeOrderAttempted
+          ? "Place-order attempted"
+          : pendingManualCheck
+            ? "Payment pending — manual check required"
+            : declined
+              ? `Payment ${e.payment_status}`
+              : "Payment",
         detail: `${e.merchant ?? "unknown merchant"}${amount !== null ? ` — ${amount}` : ""}${tail}`,
       };
     }

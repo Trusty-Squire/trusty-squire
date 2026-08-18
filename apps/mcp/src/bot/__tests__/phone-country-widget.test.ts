@@ -603,3 +603,112 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
     }
   }, 30000);
 });
+
+// extractVisibleText's own comment claims it "reflects what a user would
+// actually see" — innerText excludes display:none/visibility:hidden but NOT
+// opacity:0, so the RPNI fixture's opacity:0 country <select> (real pattern,
+// found live on a Shopify checkout) dumped all 12 option names into the page
+// text. Left unfixed that floods/truncates the text a host reads to decide
+// what's on the page.
+describe("extractVisibleText — opacity:0 elements excluded", () => {
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
+  });
+  afterAll(async () => {
+    await browser?.close();
+  });
+
+  it("omits an opacity:0 native <select>'s options from page text", async () => {
+    const { ctrl, page } = await pageFor(RPNI_FIXTURE);
+    try {
+      const text = await ctrl.extractVisibleText();
+      for (const row of ISO_ROWS) {
+        if (row.name === "United States") continue; // visible flag placeholder text
+        expect(text).not.toContain(row.name);
+      }
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("still includes ordinary visible text", async () => {
+    const { ctrl, page } = await pageFor(RPNI_FIXTURE);
+    try {
+      const text = await ctrl.extractVisibleText();
+      expect(text).toContain("US"); // the visible flag placeholder
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  // innerText's pre-existing exclusions must survive the opacity:0 fix: a
+  // detached-clone read would degrade innerText to textContent semantics and
+  // re-include exactly this content (hidden "Loading…" skeletons false-trip
+  // the loading-shell gate; Shopify inline JSON scripts flood the text).
+  it("keeps excluding display:none, visibility:hidden, and <script> text", async () => {
+    const { ctrl, page } = await pageFor(
+      dataUrl(`
+        <div>VISIBLE_LINE</div>
+        <div style="display:none">DISPLAY_NONE_LINE</div>
+        <div style="visibility:hidden">VISIBILITY_HIDDEN_LINE</div>
+        <div style="opacity:0">OPACITY_ZERO_LINE</div>
+        <script type="application/json">{"payload":"SCRIPT_PAYLOAD_LINE"}</script>`),
+    );
+    try {
+      const text = await ctrl.extractVisibleText();
+      expect(text).toContain("VISIBLE_LINE");
+      expect(text).not.toContain("DISPLAY_NONE_LINE");
+      expect(text).not.toContain("VISIBILITY_HIDDEN_LINE");
+      expect(text).not.toContain("OPACITY_ZERO_LINE");
+      expect(text).not.toContain("SCRIPT_PAYLOAD_LINE");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("leaves the live DOM's style attributes byte-identical after reading", async () => {
+    const { ctrl, page } = await pageFor(
+      dataUrl(`
+        <style>.ghost{opacity:0}</style>
+        <div class="ghost" id="ghost">GHOST_LINE</div>
+        <div id="inline" style="opacity:0;width:48px">INLINE_LINE</div>
+        <div>VISIBLE_LINE</div>`),
+    );
+    try {
+      const text = await ctrl.extractVisibleText();
+      expect(text).not.toContain("GHOST_LINE");
+      expect(text).not.toContain("INLINE_LINE");
+      // Stylesheet-hidden element must not gain a residual style attribute…
+      expect(await page.locator("#ghost").getAttribute("style")).toBeNull();
+      // …and an inline-styled one must keep its exact original attribute.
+      expect(await page.locator("#inline").getAttribute("style")).toBe("opacity:0;width:48px");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  // A foreign-namespace element (createElementNS) has no .style; combined
+  // with a page-load fade-in rule like *{opacity:0} it must neither throw
+  // nor abandon already-hidden elements as display:none in the live DOM.
+  it("tolerates non-styleable namespaced elements without leaving residue", async () => {
+    const { ctrl, page } = await pageFor(
+      dataUrl(`
+        <style>*{opacity:0}</style>
+        <div id="faded">FADED_LINE</div>
+        <div>ALSO_FADED_LINE</div>
+        <script>
+          document.body.appendChild(document.createElementNS("urn:example", "weird-el"));
+        </script>`),
+    );
+    try {
+      const text = await ctrl.extractVisibleText();
+      expect(text).not.toContain("FADED_LINE");
+      expect(await page.locator("#faded").getAttribute("style")).toBeNull();
+      expect(await page.locator("#faded").evaluate((el) => getComputedStyle(el).display)).toBe(
+        "block",
+      );
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+});

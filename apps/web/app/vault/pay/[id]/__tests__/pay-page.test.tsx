@@ -248,6 +248,17 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(vouchflow.signPayload).not.toHaveBeenCalled();
   });
 
+  it("shows normal payment copy for a genuine zero-dollar approval", async () => {
+    bound = true;
+    approvalAmountCents = 0;
+    approvalCurrency = "USD";
+    render(<PaymentApprovalPage />);
+    await screen.findByRole("button", { name: /Approve payment/ });
+
+    const paymentLine = screen.getByText(/Pay with/);
+    expect(paymentLine.textContent).toContain("$0.00");
+  });
+
   it("blocks JIT approval when the server-bound card metadata cannot be loaded", async () => {
     failCardListAfterBind = true;
     render(<PaymentApprovalPage />);

@@ -1,6 +1,6 @@
 // near-text-hint.ts — shared disambiguator for ambiguous inventory
 // matches. Used by the synthesizer (promote-to-skill.ts) when it picks a
-// near_text_hint to emit, and by recipe replay (operate_use) when it
+// near_text_hint to emit, and by recipe replay (operate_recipe_run) when it
 // applies one.
 //
 // Kept as its own module so the synthesizer can validate its chosen

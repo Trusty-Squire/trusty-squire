@@ -7,11 +7,28 @@
     "product_query": "The Recovery Crème",
     "product_variant_id": "53574851297391",
     "product_price_cents": 8800,
-    "address": { "country": "US", "region": "NY", "postal_code": "10001" },
+    "address": {
+      "country": "US",
+      "region": "NY",
+      "postal_code": "10001",
+      "line1": "123 Test Street",
+      "city": "New York"
+    },
+    "contact": {
+      "email": "replay-eval+whitejade-purchase-r1@trustysquire.ai",
+      "first_name": "Replay",
+      "last_name": "Evaluation",
+      "phone": "(212) 555-0100"
+    },
     "card_ref": "whitejade-test-card"
   },
   "expected_end_state": {
-    "line_items": [{ "title_contains": "The Recovery Crème", "qty": 1 }],
+    "line_items": [
+      {
+        "title_contains": "The Recovery Crème",
+        "qty": 1
+      }
+    ],
     "total_cents": 8800,
     "reached": "checkout_review"
   },
@@ -22,7 +39,12 @@
     "tokens": 641810,
     "wall_clock_ms": 96930,
     "end_state": {
-      "line_items": [{ "title_contains": "The Recovery Crème", "qty": 1 }],
+      "line_items": [
+        {
+          "title_contains": "The Recovery Crème",
+          "qty": 1
+        }
+      ],
       "total_cents": 8800,
       "reached": "checkout_review"
     },
@@ -33,8 +55,13 @@
       "recorded_at": "2026-08-05T06:02:23.251Z",
       "browser_observations": 13,
       "evidence_sha256": "b7fca94eb9b27036ff3e4b5a91dc51c85c2e69f84bdb3fbc2eac0da91e608f68",
-      "capture_policy": "read-only-playwright-mcp-v3"
+      "capture_policy": "read-only-playwright-mcp-v3",
+      "trace_artifact": "traces/whitejade-purchase-r1.recipe.json",
+      "checkout_artifact": "traces/whitejade-purchase-r1.checkout.json"
     }
   },
-  "capture": { "status": "captured", "captured_at": "2026-08-04T21:05:00Z" }
+  "capture": {
+    "status": "captured",
+    "captured_at": "2026-08-04T21:05:00Z"
+  }
 }

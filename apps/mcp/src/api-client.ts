@@ -160,8 +160,20 @@ export class ApiClient {
     return this.post("/v1/pay/approvals", input);
   }
 
-  async getPaymentApproval(id: string, waitForSubmission = false): Promise<PaymentApproval> {
-    const query = waitForSubmission ? "?wait_for_submission=1" : "";
+  async getPaymentApproval(
+    id: string,
+    candidateRead: boolean | "immediate" | "peek" | "wait-peek" = false,
+  ): Promise<PaymentApproval> {
+    const query =
+      candidateRead === true
+        ? "?wait_for_submission=1"
+        : candidateRead === "immediate"
+          ? "?read_submission=1"
+          : candidateRead === "peek"
+            ? "?peek_submission=1"
+            : candidateRead === "wait-peek"
+              ? "?wait_for_submission=1&peek_submission=1"
+              : "";
     return this.get(`/v1/pay/approvals/${encodeURIComponent(id)}${query}`);
   }
 
@@ -187,11 +199,11 @@ export class ApiClient {
     return records.map(({ id, label }) => ({ id, label }));
   }
 
-  async notifyThreeDs(approvalId: string): Promise<{ sent: boolean }> {
-    // Empty object, NOT undefined: post() always sends Content-Type: application/json,
-    // and an empty body with that header trips Fastify's FST_ERR_CTP_EMPTY_JSON_BODY (400).
-    // The route ignores the body, so {} satisfies the JSON parser harmlessly.
-    return this.post(`/v1/pay/approvals/${encodeURIComponent(approvalId)}/notify-3ds`, {});
+  async notifyThreeDs(
+    approvalId: string,
+    mode: "detected_challenge" | "possible_out_of_band",
+  ): Promise<{ sent: boolean }> {
+    return this.post(`/v1/pay/approvals/${encodeURIComponent(approvalId)}/notify-3ds`, { mode });
   }
 
   async auditPayment(input: {
@@ -201,6 +213,11 @@ export class ApiClient {
     last4: string;
     status: string;
     mandate_id?: string;
+    // The vault card reference the charge attempt was bound to — never the
+    // raw PAN. Optional: only the caller-placed-charge-attempt audit event
+    // (operate_act's place-order guard) currently supplies it.
+    card_ref?: string;
+    approval_id?: string;
   }): Promise<{ id: string }> {
     return this.post("/v1/vault/payments/audit", {
       merchant: input.merchant,
@@ -209,6 +226,8 @@ export class ApiClient {
       last4: input.last4,
       status: input.status,
       ...(input.mandate_id !== undefined ? { mandateId: input.mandate_id } : {}),
+      ...(input.card_ref !== undefined ? { cardRef: input.card_ref } : {}),
+      ...(input.approval_id !== undefined ? { approvalId: input.approval_id } : {}),
     });
   }
 
@@ -674,6 +693,7 @@ export async function shortenVncUrl(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url: longUrl }),
+      signal: AbortSignal.timeout(5_000),
     });
     if (!res.ok) return longUrl;
     const body = (await res.json()) as { short_url?: unknown };

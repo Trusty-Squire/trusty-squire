@@ -37,6 +37,8 @@ import {
   buildVerificationSearchQuery,
   makeTwoCaptchaVaultProxy,
   toCompactElement,
+  paymentFieldForObservation,
+  matchAutocompleteSuggestions,
 } from "../provision-session.js";
 import {
   looksLikeCodeIdentifier,
@@ -74,6 +76,22 @@ describe("toCompactElement (BOT_OBSERVE_COMPACT)", () => {
     expect(c).toEqual({ ref: "@g1:x", label: "Continue", tag: "button" });
     // no null keys serialized
     expect(Object.values(c).every((v) => v !== null && v !== undefined)).toBe(true);
+  });
+
+  it("marks a card-number control as vaulted-card-only with its safe next tool", () => {
+    const card = el({
+      tag: "input",
+      type: "text",
+      autocomplete: "cc-number",
+      id: "pv-card-number",
+      labelText: "Card number",
+    });
+    expect(paymentFieldForObservation(card)).toBe("card_number");
+    expect(toCompactElement(card, "@e:card", NONE)).toMatchObject({
+      payment_field: "card_number",
+      interaction: "vaulted_card_only",
+      recommended_action: { tool: "operate_pay", phase: "fill_card" },
+    });
   });
 
   it("keeps role/type/href/testId; DROPS path from the default payload and the redundant container", () => {
@@ -339,6 +357,42 @@ describe("resolveTarget", () => {
   });
 });
 
+describe("matchAutocompleteSuggestions (3.1 — match-or-stop rule, pure)", () => {
+  it("matches exactly one option when the typed text is a prefix of its normalized text", () => {
+    expect(
+      matchAutocompleteSuggestions("350 5th Ave", ["350 5th Ave, New York, NY 10118, USA"]),
+    ).toEqual([0]);
+  });
+
+  it("is case- and whitespace-insensitive", () => {
+    expect(
+      matchAutocompleteSuggestions("  350   5TH ave ", ["350 5th Ave, New York, NY 10118, USA"]),
+    ).toEqual([0]);
+  });
+
+  it("never matches on a bare substring anywhere in the string — prefix only", () => {
+    // "5th Ave" appears inside the option's text but is not a PREFIX of it —
+    // must miss, not match. A substring match is exactly the loose rule the
+    // field-role guard (PR #447) exists to avoid on money-path fields.
+    expect(
+      matchAutocompleteSuggestions("5th Ave", ["350 5th Ave, New York, NY 10118, USA"]),
+    ).toEqual([]);
+  });
+
+  it("returns every candidate when the typed text is an ambiguous prefix of more than one option", () => {
+    expect(
+      matchAutocompleteSuggestions("350 5th Ave", [
+        "350 5th Ave, New York, NY 10118, USA",
+        "350 5th Avenue, Brooklyn, NY 11215, USA",
+      ]),
+    ).toEqual([0, 1]);
+  });
+
+  it("returns no candidates for empty typed text", () => {
+    expect(matchAutocompleteSuggestions("", ["anything"])).toEqual([]);
+  });
+});
+
 describe("buildAccessibilitySnapshot", () => {
   it("renders an AXI-style action tree with generated refs and regions", () => {
     const elements = [
@@ -506,7 +560,7 @@ describe("buildVerificationResult (Flow A — code-wall hand-back)", () => {
     expect(r.needs_user).toEqual({
       wall: "verification_code",
       // Steers to a retry first (emails lag the trigger), then the user-ask fallback.
-      message: expect.stringContaining("operate_await_verification AGAIN"),
+      message: expect.stringContaining('operate_act { kind: "await_verification" } AGAIN'),
       resume: "code",
     });
     expect(r.needs_user?.message.toLowerCase()).toContain("ask the user");

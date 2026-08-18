@@ -40,7 +40,7 @@ import { fileURLToPath } from "node:url";
 import canonicalize from "canonicalize";
 import { canonicalize as vouchflowCanonicalize } from "@vouchflow/web";
 import { exportJWK, SignJWT } from "jose";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiClient } from "../../api-client.js";
 import { executeOperatePay, type PaymentBrowser } from "../pay-operator.js";
 import { sealToRecipient } from "../payment-hpke.js";
@@ -327,11 +327,15 @@ async function runSeam(cfg: {
   const browser: PaymentBrowser = {
     isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
     readCheckoutSummary: vi.fn().mockResolvedValue(CHECKOUT),
+    readCheckoutConfirmSummary: vi.fn().mockResolvedValue(CHECKOUT),
     currentUrl: vi.fn().mockReturnValue(`${CHECKOUT.checkout_origin}/session/test`),
     fillAndSubmitCheckout: vi.fn(async (card: CheckoutCard) => {
       filledCards.push(card);
-      return { three_ds_required: false };
+      return { three_ds_required: false, order_confirmed: true };
     }),
+    fillCheckoutCardFields: vi.fn(),
+    submitFilledCheckout: vi.fn(),
+    clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
     waitForThreeDsResolution: vi.fn().mockResolvedValue("timeout"),
   };
 
@@ -373,6 +377,10 @@ async function runSeam(cfg: {
 }
 
 describe("web ↔ mcp mandate canonical form (cross-package seam)", () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("GUARD: the real web page.tsx AND mcp pay-operator.ts declare the SAME payload field set (in order)", () => {
     const webSource = readFileSync(
       fileURLToPath(new URL("../../../../web/app/vault/pay/[id]/page.tsx", import.meta.url)),
@@ -455,7 +463,7 @@ describe("web ↔ mcp mandate canonical form (cross-package seam)", () => {
       boundCardRef: "card_RIGHT",
       signCardRef: "card_WRONG",
     });
-    expect(result).toMatchObject({ status: "payment_approval_timeout" });
+    expect(result).toMatchObject({ status: "payment_mandate_rejected" });
     expect(filledCards).toHaveLength(0);
     expect(confirmationBodies).toHaveLength(1);
     expect(resolvedCardRefs).toHaveLength(0);
@@ -466,7 +474,7 @@ describe("web ↔ mcp mandate canonical form (cross-package seam)", () => {
       boundCardRef: "card_bound_by_server",
       signAmountCents: CHECKOUT.amount_cents + 100,
     });
-    expect(result).toMatchObject({ status: "payment_approval_timeout" });
+    expect(result).toMatchObject({ status: "payment_mandate_rejected" });
     expect(filledCards).toHaveLength(0);
     expect(confirmationBodies).toHaveLength(1);
     expect(resolvedCardRefs).toHaveLength(0);
@@ -477,7 +485,7 @@ describe("web ↔ mcp mandate canonical form (cross-package seam)", () => {
       boundCardRef: "card_bound_by_server",
       signApprovalId: "appr_other",
     });
-    expect(result).toMatchObject({ status: "payment_approval_timeout" });
+    expect(result).toMatchObject({ status: "payment_mandate_rejected" });
     expect(filledCards).toHaveLength(0);
     expect(confirmationBodies).toHaveLength(1);
     expect(resolvedCardRefs).toHaveLength(0);

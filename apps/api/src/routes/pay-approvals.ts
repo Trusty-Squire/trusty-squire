@@ -152,6 +152,10 @@ const bindCardBody = z.object({
   card_ref: z.string().min(1).max(64),
 });
 
+const notifyThreeDsBody = z.object({
+  mode: z.enum(["detected_challenge", "possible_out_of_band"]).default("detected_challenge"),
+});
+
 export const registerPayApprovalsRoute: FastifyPluginAsync<{
   deps: ApiDeps;
   requireWeb: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
@@ -294,7 +298,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     return reply.code(201).send({ id, nonce, agent, expires_at: expiresAt.toISOString() });
   });
 
-  fastify.post<{ Params: { id: string } }>(
+  fastify.post<{ Params: { id: string }; Body: unknown }>(
     "/v1/pay/approvals/:id/notify-3ds",
     { preHandler: opts.requireAgent },
     async (req, reply) => {
@@ -308,15 +312,19 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         reply.code(404).send({ error: "not_found" });
         return;
       }
+      const parsed = notifyThreeDsBody.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        reply.code(400).send({ error: "invalid_request" });
+        return;
+      }
       const account = await opts.deps.accountStore.findAccountById(auth.account_id);
       let sent = false;
       if (account?.telegram_chat_id != null) {
+        const amount = formatCurrencyAmount(record.amountCents, record.currency);
         const text =
-          "🔐 3-D Secure required — complete the challenge in the open checkout browser to finish your " +
-          formatCurrencyAmount(record.amountCents, record.currency) +
-          " payment to " +
-          record.merchant +
-          ".";
+          parsed.data.mode === "detected_challenge"
+            ? `🔐 3-D Secure required — approve the ${amount} payment to ${record.merchant} in your bank app to finish checkout.`
+            : `🔐 Authentication may be happening out of band for the ${amount} payment to ${record.merchant}. Check your bank app for an approval request to finish checkout.`;
         sent = await sendTelegramMessage(account.telegram_chat_id, text);
       }
       return reply.code(200).send({ sent });

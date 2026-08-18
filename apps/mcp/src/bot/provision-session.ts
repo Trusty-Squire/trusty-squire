@@ -23,15 +23,29 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   BrowserController,
+  CHECKOUT_SUBMIT_LABEL_RE,
+  clickDispatchStatusForError,
+  parseCheckoutAmount,
+  type ClickDispatchStatus,
+  type CheckoutSummary,
+  type FrameTarget,
   type InteractiveElement,
   type PageTargetSafetySignals,
 } from "./browser.js";
+import type {
+  CartCheckoutObservation,
+  PendingApprovalWait,
+  PendingCardFill,
+} from "./pay-operator.js";
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import type { ApiClient } from "../api-client.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
 import { pickVerificationLink } from "./email-verification.js";
-import { detectActiveProviderSessions, ensureOAuthSession } from "./google-login.js";
-import { loggedInEmail } from "./login-state.js";
+import {
+  acquireOperatorProfile,
+  OperatorProfileAcquisitionInterruptedError,
+  type OperatorProfileLease,
+} from "./operator-profile-pool.js";
 import { loginSessionGuidance } from "./skill-hint.js";
 import {
   type OperatorRecipe,
@@ -53,10 +67,18 @@ import {
   fillTemplate,
   hasRecipeTargetCandidate,
   isSingleUseUrl,
+  isCheckoutShapeKey,
+  isSameRecipeDomain,
   knownRecipeInputValue,
+  localeStableFieldRole,
   operatorRecipeDomain,
+  operatorRecipeKeyForDomain,
+  canonicalVerb,
+  extractActionPath,
+  checkoutFieldSetSignature,
+  checkoutShapeKey,
+  readRecipe,
   resolveRecipeFieldTarget,
-  resolveRecipeRepairTarget,
   resolveRecipeTarget,
   verifyFilledFieldValues,
   writeRecipe,
@@ -138,6 +160,51 @@ export interface ObservedElement {
   container?: string | null;
   topmost?: boolean | null;
   occluded_by?: string | null;
+  // The origin of the <iframe> this element lives in (same- or cross-origin),
+  // e.g. "https://checkout.merchant.com". Absent for an ordinary main-frame
+  // element — every pre-existing observation shape is unchanged. Load-bearing
+  // signal, not decoration: operate_act re-derives which frame to act in (and
+  // which domain-lock guard applies) from this, never from the top page's URL.
+  frame_origin?: string | null;
+  // PCI controls are deliberately still observable, but they are never ordinary
+  // planner inputs: only operate_pay may fill a vaulted card into them.
+  payment_field?: PaymentField;
+  interaction?: "vaulted_card_only";
+  recommended_action?: { tool: "operate_pay"; phase: "fill_card" };
+}
+
+export type PaymentField =
+  | "card_number"
+  | "expiry"
+  | "expiry_month"
+  | "expiry_year"
+  | "security_code"
+  | "cardholder_name";
+
+export interface CheckoutMoney {
+  amount_cents: number;
+  currency: string;
+}
+
+// A compact purchase-state overlay. This is intentionally separate from the
+// raw accessibility inventory: a cart is a business state, not a pile of DOM
+// controls, and small models must not infer it from repeated add buttons.
+export interface CheckoutState {
+  authority: "informational_only";
+  completeness: "best_effort";
+  authoritative_for_payment: false;
+  stage: "product" | "cart" | "checkout";
+  product_identity: string | null;
+  options_hash: string | null;
+  quantity: number | null;
+  subtotal: CheckoutMoney | null;
+  shipping: CheckoutMoney | null;
+  payable_total: CheckoutMoney | null;
+  cart_url: string | null;
+  next_action:
+    | { tool: "operate_act"; kind: "click"; intent: "proceed_to_checkout" }
+    | { tool: "operate_pay"; phase: "fill_card" }
+    | { tool: "operate_observe" };
 }
 
 export interface ScreenRegion {
@@ -186,7 +253,8 @@ export interface Observation {
   // COMPACT-mode element inventory as a tab-delimited table (docs/DESIGN-observe-
   // compact.md § Phase 4). The first line is a tab-joined HEADER naming the
   // columns present in this emit (a subset of ref,label,tag,role,type,value_len,
-  // checked,href,testId,topmost,occluded_by, always starting ref,label,tag);
+  // checked,href,testId,topmost,occluded_by,frame_origin, always starting
+  // ref,label,tag);
   // each following line is ONE element, tab-joined cells in header order. An
   // empty cell means the field is absent for that element. Tab, newline,
   // carriage-return and backslash inside a cell are backslash-escaped (\t \n \r
@@ -235,6 +303,15 @@ export interface Observation {
   // operate_act{observe:"none"} (action ran; no perception emitted — call
   // operate_observe before the next ref-targeted act).
   observed?: ObserveDetail;
+  // A provider-owned OAuth popup closed while a legacy two-step OAuth action
+  // was still settling. This is an expected browser lifecycle transition, not
+  // a failed login or a reason to abandon the session. The host should simply
+  // re-observe; the controller will retain or reattach the product page.
+  oauth?: {
+    state: "in_progress";
+    provider_page: "closed_or_detached";
+    next_action: "operate_observe";
+  };
   // Change 5 — fail-closed identity hand-back: set ONLY when an operate task
   // required a live Google session that was absent. The task did NOT start; the
   // host asks the user to connect, then retries. No browser was driven.
@@ -244,6 +321,14 @@ export interface Observation {
   // the signup email so the account is user-owned, and it is the same identity
   // whose inbox awaitVerification reads. Absent when no email was captured.
   user_email?: string;
+  // Present whenever this observation is part of a cart/checkout flow (and
+  // always after a cart mutation). It supplies one unambiguous next action.
+  checkout_state?: CheckoutState;
+  // The postcondition for a cart-add attempt. `unknown` is honest when the
+  // merchant did not expose a count we can verify; callers still receive the
+  // canonical cart URL and safe retry semantics from operate_act { kind: "cart_add" }.
+  cart_delta?: "+1" | "0" | "unknown";
+  selected_option?: string;
 }
 
 export interface AccessibilitySnapshot {
@@ -273,7 +358,8 @@ export type ProvisionAction =
   // type-ahead — so a country/state/etc. dropdown needs this. Routes to
   // browser.selectOption, which already handles both the native and the
   // <li role=option> custom shapes. target = the select/combobox (or its label);
-  // text = the option to match (e.g. "South Korea").
+  // text = the option to match (e.g. "South Korea"). Frame execution routes
+  // through BrowserController.selectInFrame, which owns its narrower contract.
   | {
       kind: "select";
       target: string;
@@ -298,6 +384,10 @@ export type ProvisionAction =
   | { kind: "oauth_click"; target: string }
   // Return to the product page after the OAuth handshake completes.
   | { kind: "oauth_settle" }
+  // Atomic operator OAuth action. A recovery product tab and explicit provider
+  // lifecycle tracking prevent a normal provider close from leaving the model
+  // on a detached Playwright handle.
+  | { kind: "oauth_login"; target: string }
   // Operator surface — declare a host to cross into mid-session (multi-app
   // tasks: GCP Console → Firebase → the user's app). Pushed to the allow-set
   // with source "mid_session" and audited; the goto gate then permits it.
@@ -350,8 +440,13 @@ interface ReplayState {
   nextIndex: number | null;
   expectedFields: Map<number, ReplayExpectedField>;
   verifiedFields: Set<number>;
-  paymentGuard: "pending" | "verified" | "failed";
   failure?: { reason: "field_missing" | "field_value_mismatch"; field: string };
+  // replay-per-leg-signature — index of this recipe's OWN first money field,
+  // or null when none exists. > 0 means there's a genuine non-money prefix
+  // (a catalog/storefront leg) ahead of it, which is what lets a field
+  // failure degrade to leg_fallback_required instead of the terminal
+  // human_required — see humanRequired in replayOperatorRecipe.
+  legStartIndex: number | null;
 }
 
 interface RecordedValueSource {
@@ -360,7 +455,29 @@ interface RecordedValueSource {
   literal: string;
 }
 
-interface Session {
+interface CartAddRecord {
+  productIdentity: string;
+  optionsHash: string;
+  idempotencyKey: string;
+  phase: "reserved" | "click_started" | "complete";
+  promise: Promise<CartAddResult> | null;
+  result: CartAddResult | null;
+}
+
+interface CartMutation {
+  productIdentity: string | null;
+  optionsHash: string | null;
+  cartDelta: "+1" | "0" | "unknown";
+  origin: string;
+}
+
+interface CartIdentityContext {
+  productIdentity: string;
+  optionsHash: string;
+  onActionReady?: () => void;
+}
+
+export interface Session {
   id: string;
   browser: BrowserController;
   allowedHosts: AllowedHostEntry[];
@@ -395,7 +512,7 @@ interface Session {
   // MEDIUM capture rounds for skill synthesis at verified success (docs/DESIGN-
   // operator-hints.md): inventory + action + url per step, no screenshots, raw
   // html only on the extract round. Accumulated live; written + promoted at
-  // operate_finish_task on a verified success.
+  // operate_finish on a verified success.
   captureRounds: OnboardingRoundCapture[];
   // Deliverable #1 measurement (docs/DESIGN-operator-hints.md): when the session
   // started and whether a registry hint was served this run, so finish emits the
@@ -403,7 +520,7 @@ interface Session {
   startedAt: number;
   hintServed: boolean;
   // The session's START url (service_url at operate_start, or the resolved
-  // entry on an operate_use replay). Persisted as the recipe's canonical
+  // entry on an operate_recipe_run replay). Persisted as the recipe's canonical
   // entry_url so a replay always opens at a STABLE page, never a mid-flow
   // single-use link inferred from the trace.
   startUrl: string;
@@ -417,13 +534,68 @@ interface Session {
   // gate spend a VAULTED 2Captcha key through the injecting proxy instead of a
   // raw env key. Undefined → the gate falls back to TWOCAPTCHA_API_KEY.
   api?: ApiClient;
-  // Set when a step used the text=/css= locator click fallback. Such a click
+  // Set when a step used the text=/css= locator action fallback. Such an action
   // resolves off-inventory, so it cannot be synthesized into a portable skill
   // step — this flag suppresses auto-promotion so no silently-incomplete skill
   // ships (captureAndPromoteSession).
   usedLocatorFallback: boolean;
   recipeRejectionReason: string | null;
   replayState: ReplayState | null;
+  // One session-wide payment lease is claimed before any await. The
+  // pending -> confirming transition prevents duplicate confirmation, while
+  // submitStarted forbids restoring retry state after a charge may have begun.
+  // "sealed" survives unverified field cleanup and blocks later payments.
+  // [P0] "awaiting_approval" is a NEW rest state (not held during a call —
+  // operate_pay no longer blocks): the human hasn't tapped approve yet. A
+  // later operate_pay call validates the stored approval before reusing it;
+  // stale or terminal resources are replaced. operate_payment_status reads it
+  // without changing it.
+  activePayment:
+    | { status: "operating"; lease: ActivePaymentLease }
+    | { status: "awaiting_approval"; state: PendingApprovalWait }
+    | { status: "pending"; pending: PendingCardFill }
+    | { status: "confirming"; pending: PendingCardFill; submitStarted: boolean }
+    | { status: "sealed" }
+    | null;
+  paymentFieldSealActive: boolean;
+  // Snapshot of the single approval a filled card belongs to, captured at
+  // fill time (setActivePendingCardFill / completeActivePaymentLeaseWithPendingFill)
+  // so the place-order guard below still has what it needs after activePayment
+  // itself has moved on to "confirming" or "sealed" (sealed drops `pending`).
+  // Cleared only at session (re)init or after verified full field cleanup.
+  placeOrderApproval: {
+    approvalId: string;
+    mandateId?: string;
+    merchant: string;
+    amountCents: number;
+    currency: string;
+    cardRef: string;
+    last4: string;
+  } | null;
+  // True once a checkout-submit-labeled operate_act click has fired against
+  // placeOrderApproval. A second one is refused — one human passkey approval
+  // authorizes at most one place-order attempt (see enforcePlaceOrderGuard).
+  placeOrderAttempted: boolean;
+  // The most recent real checkout total this session actually observed on a
+  // page (e.g. the cart step), scoped to that page's own origin. Split
+  // checkouts (Rakuten-style) show no total on the card-entry page itself;
+  // operate_pay {phase:"fill_card"} falls back to this ONLY when the live
+  // card-entry page has no readable total of its own, and only when the
+  // origin still matches. Replaced (never accumulated) on each successful
+  // observe of a page with a parseable total; never a caller-supplied value.
+  lastCartCheckout: CartCheckoutObservation | null;
+  // Per-line idempotency records are local to the one active browser/cart. A
+  // retry must inspect this before it ever reaches a merchant add button.
+  cartAdds: Map<string, CartAddRecord>;
+  cartAddsByIdempotencyKey: Map<string, CartAddRecord>;
+  cartUrls: Map<string, string>;
+  lastCartMutation: CartMutation | null;
+  // A finish first flips this bit, then waits for outstanding call leases.  A
+  // session-addressed operation always captures the Session object before it
+  // awaits, so a later session can never be substituted into an old callback.
+  closing: boolean;
+  callCount: number;
+  callDrainWaiters: Set<() => void>;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -440,138 +612,296 @@ function egressSeedHosts(session: Session): string[] {
   return session.allowedHosts.filter((e) => e.source !== "mid_session").map((e) => e.host);
 }
 
+function merchantSiblingSeedHosts(session: Session): string[] {
+  return session.allowedHosts.filter((e) => e.source !== "mid_session").map((e) => e.host);
+}
+
 const sessions = new Map<string, Session>();
 
 interface WarmBrowser {
   controller: BrowserController;
-  createdAt: number;
-  reuseCount: number;
+  lease: OperatorProfileLease;
 }
 
-function positiveEnvNumber(name: string, fallback: number): number {
-  const value = Number(process.env[name]);
-  return Number.isFinite(value) && value > 0 ? value : fallback;
+interface AcquiredBrowser {
+  controller: BrowserController;
+  profileDir: string;
 }
 
-const WARM_BROWSER_IDLE_TTL_MS = positiveEnvNumber(
-  "BOT_WARM_BROWSER_IDLE_TTL_MS",
-  6 * 60 * 60 * 1_000,
-);
-const WARM_BROWSER_MAX_REUSES = positiveEnvNumber("BOT_WARM_BROWSER_MAX_REUSES", 50);
-const WARM_BROWSER_MAX_AGE_MS = positiveEnvNumber(
-  "BOT_WARM_BROWSER_MAX_AGE_MS",
-  24 * 60 * 60 * 1_000,
-);
-
-let warmBrowser: WarmBrowser | null = null;
-let warmBrowserIdleTimer: ReturnType<typeof setTimeout> | null = null;
-// Sequential single-page model: one start may be booting OR one task may hold
-// the browser. This is also the lifecycle/payment safety lease — every reaper
-// checks it before closing shared Chrome.
-let starting = false;
-let inFlight = false;
-
-function clearWarmBrowserIdleTimer(): void {
-  if (warmBrowserIdleTimer === null) return;
-  clearTimeout(warmBrowserIdleTimer);
-  warmBrowserIdleTimer = null;
+interface StartingBrowser {
+  controller: BrowserController;
+  lease: OperatorProfileLease;
+  launch: Promise<void>;
+  cancelRequested: boolean;
 }
 
-async function closeWarmBrowserIfIdle(reason: string): Promise<boolean> {
-  if (warmBrowser === null) return false;
-  if (starting || inFlight) {
-    armWarmBrowserIdleTimer();
-    return false;
-  }
-  const browser = warmBrowser.controller;
-  warmBrowser = null;
-  clearWarmBrowserIdleTimer();
-  console.error(`[operator] recycling warm browser reason=${reason}`);
-  await browser.close().catch(() => undefined);
-  return true;
+interface CapacityWaiter {
+  generation: number;
+  cancelRequested: boolean;
+  abortController: AbortController;
+  wake: () => void;
+  settled: Promise<void>;
+  resolveSettled: () => void;
 }
 
-function armWarmBrowserIdleTimer(): void {
-  clearWarmBrowserIdleTimer();
-  if (warmBrowser === null) return;
-  warmBrowserIdleTimer = setTimeout(() => {
-    warmBrowserIdleTimer = null;
-    void closeWarmBrowserIfIdle("idle_ttl");
-  }, WARM_BROWSER_IDLE_TTL_MS);
-  warmBrowserIdleTimer.unref();
+// The pool is authoritative for cross-process capacity; these maps only retain
+// the local controller/lease pairing needed for lifecycle cleanup.  In
+// particular, they deliberately do not impose a process-global single-session
+// gate: each entry owns an isolated profile lease.
+const leasedBrowsers = new Map<BrowserController, WarmBrowser>();
+const startingBrowsers = new Set<StartingBrowser>();
+const capacityWaiters = new Set<CapacityWaiter>();
+let shutdownGeneration = 0;
+const START_CAPACITY_WAIT_MS = 30_000;
+const START_CAPACITY_RETRY_MS = 50;
+
+function isOperatorCapacityError(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith("operate_start capacity reached:");
 }
 
-// Every operate call reaches this module through start or a session lookup.
-// Resetting the one unref'd timer here measures genuine operator quiet.
-function touchWarmBrowser(): void {
-  armWarmBrowserIdleTimer();
-}
-
-function warmBrowserExpired(slot: WarmBrowser): "max_reuses" | "max_age" | null {
-  if (slot.reuseCount >= WARM_BROWSER_MAX_REUSES) return "max_reuses";
-  if (Date.now() - slot.createdAt >= WARM_BROWSER_MAX_AGE_MS) return "max_age";
-  return null;
-}
-
-async function acquireWarmBrowser(
+async function acquireOperatorProfileBounded(
   opts: StartOptions,
   sessionId: string,
-): Promise<BrowserController> {
-  const slot = warmBrowser;
-  if (slot !== null) {
-    const expired = warmBrowserExpired(slot);
-    const eligible = slot.controller.matchesLaunchOptions(opts);
-    const healthy = slot.controller.isConnected();
-    if (expired !== null || !eligible || !healthy) {
-      warmBrowser = null;
-      clearWarmBrowserIdleTimer();
-      await slot.controller.close().catch(() => undefined);
-      audit(sessionId, "browser_recycle", {
-        reason: expired ?? (!eligible ? "launch_config_mismatch" : "disconnected"),
-      });
-    } else {
+  generation: number,
+): Promise<OperatorProfileLease> {
+  let wake = (): void => undefined;
+  let resolveSettled = (): void => undefined;
+  const waiter: CapacityWaiter = {
+    generation,
+    cancelRequested: false,
+    abortController: new AbortController(),
+    wake: () => wake(),
+    settled: new Promise<void>((resolve) => {
+      resolveSettled = resolve;
+    }),
+    resolveSettled: () => resolveSettled(),
+  };
+  capacityWaiters.add(waiter);
+  const deadline = Date.now() + START_CAPACITY_WAIT_MS;
+  try {
+    for (;;) {
+      if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
+        throw new Error("operate_start cancelled: operator server is shutting down");
+      }
       try {
-        await slot.controller.resetPageForReuse();
-        slot.reuseCount += 1;
-        touchWarmBrowser();
-        audit(sessionId, "browser_reuse", { reuse_count: slot.reuseCount });
-        return slot.controller;
-      } catch {
-        warmBrowser = null;
-        clearWarmBrowserIdleTimer();
-        await slot.controller.close().catch(() => undefined);
-        audit(sessionId, "browser_recycle", { reason: "page_reset_failed" });
+        const lease = await acquireOperatorProfile(sessionId, {
+          ...(opts.profileDir !== undefined ? { sourceProfileDir: opts.profileDir } : {}),
+          deadline,
+          signal: waiter.abortController.signal,
+        });
+        if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
+          await lease.destroy();
+          throw new Error("operate_start cancelled: operator server is shutting down");
+        }
+        return lease;
+      } catch (error) {
+        if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
+          throw new Error("operate_start cancelled: operator server is shutting down");
+        }
+        if (
+          error instanceof OperatorProfileAcquisitionInterruptedError &&
+          error.reason === "cancelled"
+        ) {
+          throw new Error("operate_start cancelled: operator server is shutting down");
+        }
+        if (
+          error instanceof OperatorProfileAcquisitionInterruptedError &&
+          error.reason === "timeout"
+        ) {
+          if (error.phase === "seed_lock") {
+            throw new Error(
+              "operate_start failed: start deadline exceeded while waiting to acquire the shared seed lock",
+            );
+          }
+          throw new Error(
+            "operate_start failed: start deadline exceeded while acquiring an isolated operator profile",
+          );
+        }
+        if (isOperatorCapacityError(error) && Date.now() >= deadline) {
+          throw new Error(
+            "operate_start capacity wait timed out: 2 operator sessions are active; finish one and retry",
+          );
+        }
+        if (!isOperatorCapacityError(error)) {
+          throw error;
+        }
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+          const timer = setTimeout(resolve, START_CAPACITY_RETRY_MS);
+          waiter.wake = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+        });
       }
     }
+  } finally {
+    capacityWaiters.delete(waiter);
+    waiter.resolveSettled();
   }
-
-  const controller = new BrowserController({
-    ...(opts.profileDir !== undefined ? { profileDir: opts.profileDir } : {}),
-    ...(opts.proxyUrl !== undefined ? { proxyUrl: opts.proxyUrl } : {}),
-  });
-  await startBrowserBounded(controller, sessionId);
-  warmBrowser = { controller, createdAt: Date.now(), reuseCount: 0 };
-  touchWarmBrowser();
-  return controller;
 }
 
-async function releaseWarmBrowserPage(browser: BrowserController): Promise<void> {
-  if (warmBrowser?.controller !== browser) {
+async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promise<AcquiredBrowser> {
+  if ((process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0) {
+    throw new Error("operate_start does not support remote CDP with isolated profile leases");
+  }
+  const generation = shutdownGeneration;
+  const lease = await acquireOperatorProfileBounded(opts, sessionId, generation);
+  if (generation !== shutdownGeneration) {
+    await lease.destroy();
+    throw new Error("operate_start cancelled: operator server is shutting down");
+  }
+  const controller = new BrowserController({
+    profileDir: lease.profileDir,
+    ...(opts.proxyUrl !== undefined ? { proxyUrl: opts.proxyUrl } : {}),
+  });
+  const pending: StartingBrowser = {
+    controller,
+    lease,
+    launch: startBrowserBounded(controller, sessionId),
+    cancelRequested: false,
+  };
+  startingBrowsers.add(pending);
+  try {
+    await pending.launch;
+    if (pending.cancelRequested) {
+      throw new Error("operate_start cancelled: operator server is shutting down");
+    }
+    // Several unit harnesses replace BrowserController with the narrow legacy
+    // shape. Production controllers always expose identity; a harness without
+    // a real process simply leaves the descriptor worker-less.
+    if (typeof controller.operatorWorkerIdentity === "function") {
+      const worker = controller.operatorWorkerIdentity();
+      if (worker !== null) lease.bindWorker(worker);
+    }
+  } catch (err) {
+    if (!pending.cancelRequested) {
+      await closeLeasedBrowser(controller, lease, false);
+    }
+    throw err;
+  } finally {
+    startingBrowsers.delete(pending);
+  }
+  leasedBrowsers.set(controller, { controller, lease });
+  return { controller, profileDir: lease.profileDir };
+}
+
+async function releaseWarmBrowserPage(
+  browser: BrowserController,
+  reusable: boolean,
+): Promise<void> {
+  const slot = leasedBrowsers.get(browser);
+  if (slot === undefined) {
     await browser.close().catch(() => undefined);
     return;
   }
+  leasedBrowsers.delete(browser);
   try {
-    await browser.resetPageForReuse();
+    if (reusable) await browser.resetPageForReuse();
+    await closeLeasedBrowser(browser, slot.lease, reusable);
   } catch {
-    warmBrowser = null;
-    clearWarmBrowserIdleTimer();
-    await browser.close().catch(() => undefined);
+    await closeLeasedBrowser(browser, slot.lease, false);
   }
 }
 
+async function closeLeasedBrowser(
+  browser: BrowserController,
+  lease: OperatorProfileLease,
+  reusable: boolean,
+): Promise<void> {
+  const closeState = await browser.close().catch(() => "unknown" as const);
+  if (closeState !== "closed") {
+    await lease.retain(!reusable);
+    return;
+  }
+  if (reusable) await lease.returnWarm(closeState);
+  else await lease.destroy();
+}
+
 function sessionForCall(sessionId: string): Session | undefined {
-  touchWarmBrowser();
   return sessions.get(sessionId);
+}
+
+// Money rule (simplified 2026-08-16): the fence is the live human biometric
+// approval per charge, not a software re-check of replay field values. The
+// only surviving invariant — a card-charging trace step is never blind-
+// replayed — is enforced unconditionally where operate_pay steps are
+// encountered during replay (see replayOperatorRecipe), not here.
+function assertPaymentSessionAllowed(session: Session): void {
+  if (session.closing) {
+    throw new Error(`provision session ${session.id} is closing`);
+  }
+}
+
+// Resolve the compatibility omission once, at tool entry.  In particular, do
+// not repeat this lookup in completion callbacks: after an await, a different
+// session could otherwise become the sole process-local session.
+export function paymentSession(sessionId?: string): Session {
+  let session: Session | undefined;
+  if (sessionId !== undefined) {
+    session = sessionForCall(sessionId);
+    if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  } else {
+    if (sessions.size !== 1) {
+      throw new Error(
+        sessions.size === 0
+          ? "operate_pay requires one active operate_start browser session"
+          : "operate_pay requires session_id when multiple operator sessions are active",
+      );
+    }
+    session = sessions.values().next().value!;
+  }
+  assertPaymentSessionAllowed(session);
+  return session;
+}
+
+function acquireSessionCallLease(session: Session): () => void {
+  if (session.closing) throw new Error(`provision session ${session.id} is closing`);
+  session.callCount += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    session.callCount -= 1;
+    if (session.callCount === 0) {
+      for (const wake of session.callDrainWaiters) wake();
+      session.callDrainWaiters.clear();
+    }
+  };
+}
+
+async function waitForSessionCallsToDrain(session: Session): Promise<void> {
+  if (session.callCount === 0) return;
+  await new Promise<void>((resolve) => session.callDrainWaiters.add(resolve));
+}
+
+async function withSelectedProvisionSessionCall<T>(
+  session: Session,
+  fn: (session: Session) => Promise<T>,
+): Promise<T> {
+  const release = acquireSessionCallLease(session);
+  try {
+    return await fn(session);
+  } finally {
+    release();
+  }
+}
+
+export async function withProvisionSessionCall<T>(
+  sessionId: string,
+  fn: (session: Session) => Promise<T>,
+): Promise<T> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  return await withSelectedProvisionSessionCall(session, fn);
+}
+
+export async function withPaymentSessionCall<T>(
+  sessionId: string | undefined,
+  fn: (session: Session) => Promise<T>,
+): Promise<T> {
+  const session = paymentSession(sessionId);
+  return await withSelectedProvisionSessionCall(session, fn);
 }
 
 const settle = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -613,7 +943,7 @@ async function startBrowserBounded(browser: BrowserController, sessionId: string
   } catch (err) {
     if (err instanceof Error && err.message === "__browser_start_timeout__") {
       // Release the wedged Chrome/profile lock so the next operate_start isn't bricked.
-      await browser.close().catch(() => undefined);
+      await browser.close({ cancelStart: true }).catch(() => undefined);
       throw new Error(
         `operate_start: browser did not launch within ${Math.round(START_TIMEOUT_MS / 1000)}s. ` +
           "On a fresh machine the first launch downloads Chromium and starts a virtual display " +
@@ -640,8 +970,8 @@ const norm = (s: string | null | undefined): string =>
 // the ref the host already holds keeps resolving. The `@e:` sigil only
 // disambiguates a ref from a free-text label target (a label may legitimately end
 // in "_<digits>"). Staleness is guarded by IDENTITY, not a counter: a ref whose
-// element is now gone finds no match in resolveTarget → returns null → the caller
-// fails loudly ("no element matched") and the host re-observes.
+// element is now gone finds no match in resolveTarget → returns null → the public
+// tool returns structured target_stale guidance and the host re-observes.
 //
 // The exceptional identity form (issue #399) applies to same-base-identity
 // siblings distinguished ONLY by positional selectors. Those "volatile" members
@@ -684,6 +1014,14 @@ function baseIdentityFields(el: InteractiveElement): string[] {
     elementRef(el),
     el.href ?? "",
     el.type ?? "",
+    // Frame origin — WITHOUT this, an element's `selector` (folded into
+    // stableElementId below) is only unique within its own document, so a
+    // same-shaped selector in two different frames (or a frame vs. the main
+    // page) could hash to the SAME ref and let an act resolve to the wrong
+    // frame's element. Load-bearing for the frame domain-lock: the ref
+    // itself must be frame-scoped, not just the guard that later reads it.
+    el.frameOrigin ?? "",
+    el.framePath ?? "",
   ];
 }
 
@@ -817,12 +1155,14 @@ function parseProvisionRef(target: string): { id: string; ordinal: number | null
 }
 
 // A locator-form target the host supplies when NO `@e:` ref exists for the
-// control it needs to act on — a bare click-handler <div> the inventory never
-// emitted (no role/label/testid, and past the card-scan cap). Two forms:
-//   text="Add To Cart"  (quotes optional) — clickable element whose text matches
+// control it needs to act on — for example, a bare click-handler <div> the
+// inventory never emitted (no role/label/testid, and past the card-scan cap).
+// Two forms:
+//   text="Add To Cart"  (quotes optional) — matching clickable/typeable element
 //   css=#some-id                          — a raw CSS selector
-// Resolved directly against the live page by BrowserController.resolvePageTarget,
-// NOT against the extracted-element inventory (which by definition lacks it).
+// Resolved directly across live ordinary page/frame documents by
+// BrowserController.resolvePageTarget, NOT against the extracted-element
+// inventory (which by definition lacks it).
 export type LocatorTarget = { mode: "text" | "css"; value: string };
 
 export function parseLocatorTarget(target: string): LocatorTarget | null {
@@ -872,11 +1212,319 @@ export class AmbiguousProvisionTargetError extends Error {
   }
 }
 
+// A `type` into an autocomplete field (Google-Places-style address picker,
+// react-select/cmdk/Radix combobox) opened a suggestion popup, but the typed
+// text didn't resolve to exactly one option — same "N candidates matched,
+// stop and ask, never guess" shape as AmbiguousProvisionTargetError. Zero
+// candidates and >1 candidates are both a stop, never a confident wrong
+// commit (see matchAutocompleteSuggestions).
+export class AutocompleteCommitRequiredError extends Error {
+  readonly code = "autocomplete_commit_required";
+
+  constructor(
+    readonly typedText: string,
+    readonly candidates: readonly string[],
+  ) {
+    super(
+      candidates.length === 0
+        ? `autocomplete_commit_required: typing "${typedText}" opened a suggestion list but no ` +
+            `visible option started with the typed text. Retry with text that matches a suggestion, ` +
+            `or issue an explicit select/click on the option you want.`
+        : `autocomplete_commit_required: typing "${typedText}" matched ${candidates.length} ` +
+            `suggestions, not one. Narrow the typed text or issue an explicit select/click: ` +
+            `${candidates.slice(0, 8).join(", ")}`,
+    );
+  }
+}
+
+function normalizeAutocompleteText(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+// Match-or-stop rule for 3.1 — pure and unit-testable without a browser. A
+// suggestion is a candidate iff the typed text (normalized) is a prefix of
+// the option's normalized text (e.g. "350 5th Ave" → "350 5th Ave, New York,
+// NY 10118, USA"). Deliberately NOT a bare substring match anywhere in the
+// string — too loose, invites the label-swap-class wrong-fill the field-role
+// guard (PR #447) exists to prevent. Returns the indices of matching options;
+// the caller commits only when there is exactly one.
+export function matchAutocompleteSuggestions(
+  typedText: string,
+  optionTexts: readonly string[],
+): number[] {
+  const typed = normalizeAutocompleteText(typedText);
+  if (typed.length === 0) return [];
+  const indices: number[] = [];
+  optionTexts.forEach((text, index) => {
+    if (normalizeAutocompleteText(text).startsWith(typed)) indices.push(index);
+  });
+  return indices;
+}
+
+export interface TargetStaleResult {
+  status: "target_stale";
+  target: string;
+  // The latest completed observation. The next observe increments this value
+  // and supplies the authoritative replacement inventory.
+  after_generation: number;
+  reobserve_required: true;
+  // Best-effort semantic hints only. A label can legitimately map to more than
+  // one live ref, so callers must still choose from the next observation.
+  replacement_candidates: Record<string, string[]>;
+  retry_policy: "do_not_retry_old_ref";
+}
+
+// An @e: ref is an observation-scoped handle, not a locator. Preserve that
+// distinction in the error so an agent does not retry a stale handle or guess a
+// text locator after a SPA rerender.
+export class TargetStaleError extends Error {
+  readonly code = "target_stale";
+
+  constructor(readonly result: TargetStaleResult) {
+    super(`target_stale: re-observe before selecting a replacement for "${result.target}"`);
+  }
+}
+
+function replacementCandidates(elements: readonly InteractiveElement[]): Record<string, string[]> {
+  const refs = provisionElementRefs(elements);
+  const candidates: Record<string, string[]> = {};
+  for (const el of elements) {
+    const label = [
+      el.labelText,
+      el.ariaLabel,
+      el.visibleText,
+      el.placeholder,
+      el.testId,
+      el.name,
+      el.screenPath,
+    ].find(
+      (value): value is string => value !== null && value !== undefined && value.trim().length > 0,
+    );
+    const ref = refs.get(el);
+    if (label === undefined || ref === undefined) continue;
+    const key = label.replace(/\s+/g, " ").trim();
+    if (candidates[key] === undefined) {
+      if (Object.keys(candidates).length >= 20) continue;
+      candidates[key] = [];
+    }
+    if (candidates[key]!.length < 4) candidates[key]!.push(ref);
+  }
+  return candidates;
+}
+
+function staleTargetError(
+  session: Session,
+  target: string,
+  fresh: readonly InteractiveElement[],
+): TargetStaleError | null {
+  if (parseProvisionRef(target) === null) return null;
+  return new TargetStaleError({
+    status: "target_stale",
+    target,
+    after_generation: session.generation,
+    reobserve_required: true,
+    replacement_candidates: replacementCandidates(fresh),
+    retry_policy: "do_not_retry_old_ref",
+  });
+}
+
 function elementTargetKeys(el: InteractiveElement): string[] {
   return [el.screenPath ?? null, el.testId ?? null, elementRef(el)].flatMap((s) => {
     const v = (s ?? "").replace(/\s+/g, " ").trim();
     return v.length > 0 ? [v] : [];
   });
+}
+
+const PENDING_CARD_AUTOCOMPLETE_FIELDS = new Set([
+  "cc-number",
+  "cc-exp",
+  "cc-exp-month",
+  "cc-exp-year",
+  "cc-csc",
+  "cc-name",
+]);
+
+function isPendingCardFilledField(el: InteractiveElement): boolean {
+  const autocomplete = (el.autocomplete ?? "")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((token) => token.length > 0);
+  if (autocomplete.some((token) => PENDING_CARD_AUTOCOMPLETE_FIELDS.has(token))) return true;
+  if (
+    autocomplete.includes("billing") &&
+    autocomplete.some((token) =>
+      [
+        "address-line1",
+        "address-line2",
+        "address-level1",
+        "address-level2",
+        "postal-code",
+        "country",
+      ].includes(token),
+    )
+  ) {
+    return true;
+  }
+
+  const name = (el.name ?? "").toLowerCase();
+  const id = (el.id ?? "").toLowerCase();
+  const ariaLabel = (el.ariaLabel ?? "").toLowerCase();
+  const placeholder = (el.placeholder ?? "").toLowerCase();
+  return (
+    name.includes("cardnumber") ||
+    id.includes("card-number") ||
+    id.includes("cardnumber") ||
+    name.includes("cardholder") ||
+    name.includes("card-name") ||
+    id.includes("cardholder") ||
+    name.includes("cvv") ||
+    name.includes("cvc") ||
+    name.includes("security-code") ||
+    id.includes("cvv") ||
+    id.includes("cvc") ||
+    ((name.includes("exp") || id.includes("exp")) &&
+      (name.includes("month") ||
+        name.includes("year") ||
+        name.includes("date") ||
+        name.includes("expir") ||
+        id.includes("month") ||
+        id.includes("year") ||
+        id.includes("date") ||
+        id.includes("expir") ||
+        name === "exp" ||
+        id === "exp")) ||
+    placeholder.replace(/\s+/g, "") === "mm/yy" ||
+    ariaLabel.replace(/\s+/g, "") === "mm/yy" ||
+    ((name.includes("billing") || id.includes("billing")) &&
+      /address|line1|line2|city|locality|state|region|postal|zip|country/.test(`${name} ${id}`))
+  );
+}
+
+function pendingCardSecretKind(el: InteractiveElement): "pan" | "cvv" | null {
+  const autocomplete = (el.autocomplete ?? "").toLowerCase().split(/\s+/);
+  const signal = `${el.name ?? ""} ${el.id ?? ""}`.toLowerCase();
+  if (
+    autocomplete.includes("cc-number") ||
+    signal.includes("cardnumber") ||
+    signal.includes("card-number")
+  ) {
+    return "pan";
+  }
+  if (
+    autocomplete.includes("cc-csc") ||
+    signal.includes("cvv") ||
+    signal.includes("cvc") ||
+    signal.includes("security-code")
+  ) {
+    return "cvv";
+  }
+  return null;
+}
+
+function redactPaymentObservationText(
+  text: string,
+  elements: readonly InteractiveElement[],
+  active: boolean,
+): string {
+  if (!active) return text;
+  let redacted = text;
+  for (const element of elements) {
+    const kind = pendingCardSecretKind(element);
+    const value = element.value?.trim() ?? "";
+    if (kind === null || value.length === 0) continue;
+    if (kind === "pan") {
+      redacted = redactExactDigitSequence(redacted, value.replace(/\D/g, ""));
+    }
+    const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    redacted = redacted.replace(
+      kind === "cvv" ? new RegExp(`\\b${escaped}\\b`, "g") : new RegExp(escaped, "g"),
+      "[sealed payment]",
+    );
+  }
+  redacted = redactLuhnPanSpans(redacted);
+  return redacted.replace(
+    /\b(cvv|cvc|security\s+code)\s*[:#-]?\s*\d{3,4}\b/gi,
+    "$1 [sealed payment]",
+  );
+}
+
+function presentPaymentSafeString(value: string, paymentSealActive: boolean): string {
+  return paymentSealActive ? redactPaymentObservationText(value, [], true) : value;
+}
+
+const PAYMENT_PAN_MAX_SPAN_CHARS = 96;
+
+function redactExactDigitSequence(text: string, expectedDigits: string): string {
+  if (expectedDigits.length < 13) return text;
+  const digitMatches = Array.from(text.matchAll(/\d/g));
+  const replacements: Array<{ start: number; end: number }> = [];
+  for (let start = 0; start + expectedDigits.length <= digitMatches.length; start += 1) {
+    const matches = digitMatches.slice(start, start + expectedDigits.length);
+    if (matches.map((match) => match[0]).join("") !== expectedDigits) continue;
+    if (matches[matches.length - 1]!.index - matches[0]!.index + 1 > PAYMENT_PAN_MAX_SPAN_CHARS) {
+      continue;
+    }
+    replacements.push({
+      start: matches[0]!.index,
+      end: matches[matches.length - 1]!.index + 1,
+    });
+    start += expectedDigits.length - 1;
+  }
+  if (replacements.length === 0) return text;
+  let cursor = 0;
+  let result = "";
+  for (const replacement of replacements) {
+    result += `${text.slice(cursor, replacement.start)}[sealed payment]`;
+    cursor = replacement.end;
+  }
+  return result + text.slice(cursor);
+}
+
+function redactLuhnPanSpans(text: string): string {
+  const digitPositions = Array.from(text.matchAll(/\d/g), (match) => match.index);
+  const replacements: Array<{ start: number; end: number }> = [];
+  let startDigit = 0;
+  while (startDigit + 13 <= digitPositions.length) {
+    let matchedDigits = 0;
+    const maxDigits = Math.min(19, digitPositions.length - startDigit);
+    for (let length = maxDigits; length >= 13; length -= 1) {
+      const positions = digitPositions.slice(startDigit, startDigit + length);
+      if (positions[positions.length - 1]! - positions[0]! + 1 > PAYMENT_PAN_MAX_SPAN_CHARS) {
+        continue;
+      }
+      const digits = positions.map((position) => text[position]).join("");
+      if (passesLuhn(digits)) {
+        matchedDigits = length;
+        replacements.push({
+          start: positions[0]!,
+          end: positions[positions.length - 1]! + 1,
+        });
+        break;
+      }
+    }
+    startDigit += matchedDigits || 1;
+  }
+  if (replacements.length === 0) return text;
+  let cursor = 0;
+  let result = "";
+  for (const replacement of replacements) {
+    result += `${text.slice(cursor, replacement.start)}[sealed payment]`;
+    cursor = replacement.end;
+  }
+  return result + text.slice(cursor);
+}
+
+function observationSealedFieldKeys(
+  session: Session,
+  elements: readonly InteractiveElement[],
+): ReadonlySet<string> {
+  if (!session.paymentFieldSealActive) return session.sealedFieldKeys;
+  const sealed = new Set(session.sealedFieldKeys);
+  for (const el of elements) {
+    if (!isPendingCardFilledField(el)) continue;
+    for (const key of elementTargetKeys(el)) sealed.add(key);
+  }
+  return sealed;
 }
 
 // Resolve a host-supplied target string to one live element. Matching is by
@@ -992,6 +1640,107 @@ export function hostAllowed(url: string, allowedHosts: readonly string[]): boole
   if (DEFAULT_AUTH_HOSTS.some(ok)) return true;
   if (host.endsWith(".firebaseapp.com") || host.endsWith(".web.app")) return true;
   return false;
+}
+
+// Frame domain-lock (operator-frame-support) — the ONE non-negotiable of frame
+// support: an action on an element inside a child <iframe> must be checked
+// against THAT frame's own origin, never the top page's, or a rogue/payment
+// iframe embedded on an otherwise in-scope page could be acted on (or typed
+// into) unchecked just because the outer page already passed hostAllowed.
+// `el.frameUrl` is undefined/null for an ordinary main-frame element, so this
+// is a no-op for every pre-existing target. A frame on the page's own
+// registrable domain (the merchant's own checkout iframe — the case this
+// feature exists for) is freely reachable, exactly like main-frame content;
+// anything else goes through the SAME domain-scope check goto/allow_host
+// already use (hostAllowed) — reusing the existing guard, not inventing a
+// new trust classifier.
+type FrameScopedTarget = Pick<
+  InteractiveElement,
+  "frameOrigin" | "frameUrl" | "framePath" | "frameOpaque"
+>;
+
+function frameTargetFor(el: FrameScopedTarget): FrameTarget | null {
+  if (el.framePath === undefined || el.framePath === null) return null;
+  if (el.frameOrigin === undefined || el.frameOrigin === null) {
+    throw new Error("frame target lacks an origin");
+  }
+  return {
+    framePath: el.framePath,
+    frameOrigin: el.frameOrigin,
+    frameUrl: el.frameUrl ?? "",
+    ...(el.frameOpaque === true ? { frameOpaque: true } : {}),
+  };
+}
+
+function frameTargetAllowed(session: Session, el: FrameScopedTarget): boolean {
+  const target = frameTargetFor(el);
+  if (target === null) return true;
+  if (target.frameOpaque === true) return false;
+  const pageUrl = session.browser.currentUrl();
+  if (isSameRecipeDomain(target.frameOrigin, pageUrl)) return true;
+  return hostAllowed(target.frameOrigin, hostStrings(session));
+}
+
+function assertFrameTargetAllowed(session: Session, el: FrameScopedTarget, kind: string): void {
+  if (frameTargetAllowed(session, el)) return;
+  // An opaque (null-origin) frame gets its own TERMINAL refusal: the generic
+  // message below suggests allow_host, which can never succeed for a null
+  // origin — a remedy the model would loop on forever.
+  if (el.frameOpaque === true || el.frameOrigin === "null") {
+    throw new Error(
+      `${kind} refused: the target lives in an opaque (null-origin) frame — a sandboxed ` +
+        `iframe without allow-same-origin, or an unconfirmed about:blank/srcdoc document. ` +
+        `No host declaration can ever permit a null origin; this control is not reachable ` +
+        `through operate_act. Drive the page's own controls instead.`,
+    );
+  }
+  throw new Error(
+    `${kind} blocked by domain-scope: the target lives in a cross-domain frame ` +
+      `(${el.frameOrigin ?? el.frameUrl}) outside the allowed hosts ` +
+      `[${hostStrings(session).join(", ")}] + auth providers. ` +
+      `Declare it first with an allow_host action if this task spans it.`,
+  );
+}
+
+// type_secret is stricter still: a secret may be typed only into the main
+// frame or a frame on the page's OWN registrable domain — never into a
+// cross-domain (e.g. third-party payment) iframe, even one otherwise allowed
+// for navigation/click via hostAllowed's auth-provider carve-outs. A weak
+// model must never be able to type a credential into a rogue or payment
+// iframe just because that host happens to be allow-listed for OAuth.
+function assertSecretFrameTargetAllowed(session: Session, el: FrameScopedTarget): void {
+  const target = frameTargetFor(el);
+  if (target === null) return;
+  if (target.frameOpaque === true) {
+    throw new Error(
+      "type_secret refused: the target lives in an opaque frame. Secrets may only be " +
+        "typed into the main frame or a frame on the page's own domain.",
+    );
+  }
+  const pageUrl = session.browser.currentUrl();
+  if (isSameRecipeDomain(target.frameOrigin, pageUrl)) return;
+  throw new Error(
+    `type_secret refused: the target lives in a cross-domain frame ` +
+      `(${target.frameOrigin}), not the page's own domain. Secrets may only be ` +
+      `typed into the main frame or a frame on the page's own domain.`,
+  );
+}
+
+// upload/oauth_click have no frame-scoped browser primitive yet (see
+// BrowserController.clickInFrame/typeInFrame/selectInFrame —
+// click/type/type_secret/select only). Resolving one of these against a
+// frame element's `selector` on the MAIN page could silently act on an
+// unrelated element that happens to share the same structural selector (a
+// real risk for positional/nth-of-type selectors) rather than the intended
+// frame element — a correctness and domain-lock hazard, not just a missing
+// feature. Refuse explicitly instead.
+function assertNoFrameTarget(el: InteractiveElement, kind: string): void {
+  if (el.framePath === undefined || el.framePath === null) return;
+  throw new Error(
+    `operate_act kind="${kind}" does not yet support a target inside an <iframe> ` +
+      `(frame ${el.frameOrigin ?? "unknown"}). Use click/js_click/type/type_secret/select ` +
+      `for frame targets.`,
+  );
 }
 
 // A two-label public suffix we must never let a single allow_host widen to —
@@ -1267,7 +2016,7 @@ export function provisionPerceptionGuidance(pageText: string): string | undefine
   if (hasOneTimeSecretModal(pageText)) {
     parts.push(
       "One-time secret: the key/secret is shown HERE and will NOT be shown again. " +
-        "Extract it immediately with operate_extract (use secret_label to pick the " +
+        'Extract it immediately with operate_act { kind: "extract" } (use secret_label to pick the ' +
         "right field if several values are shown, and into_slot/store to capture it) " +
         "BEFORE clicking anything that could dismiss this modal or navigate away.",
     );
@@ -1304,7 +2053,7 @@ export function provisionPerceptionGuidance(pageText: string): string | undefine
       "Unlinked OAuth identity: the provider returned 'account not found' — your " +
         "Google/GitHub identity is not a linked account here, so the OAuth button " +
         "is sign-IN only. Do NOT keep clicking it. Switch to EMAIL signup/OTP " +
-        "(submit the email field, then operate_await_verification for the code) to " +
+        '(submit the email field, then operate_act { kind: "await_verification" } for the code) to ' +
         "create the account, then continue to the keys page.",
     );
   }
@@ -1390,10 +2139,53 @@ export function shouldBlockUnsafeProvisionAction(
   );
 }
 
+// Manual card-entry guard — a model must never be the thing that types a
+// payment card number into a page. When operate_pay fails, the recovery is
+// surfacing that failure, not routing around the vault by typing the PAN via
+// an ordinary `type`. "Card-number-shaped" = a 13–19 digit run (spaces/hyphens
+// allowed as grouping) that passes the Luhn checksum — requiring Luhn keeps
+// order numbers, tracking numbers, and other long digit strings from
+// false-positiving. Scoped to MODEL-SUPPLIED `type` text only: operate_pay's
+// vaulted-card fill methods and type_secret's
+// sealed-slot transfer never pass through this check.
+function passesLuhn(digits: string): boolean {
+  let sum = 0;
+  let double = false;
+  for (let i = digits.length - 1; i >= 0; i -= 1) {
+    let d = digits.charCodeAt(i) - 48;
+    if (double) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+    double = !double;
+  }
+  return sum % 10 === 0;
+}
+
+class ManualCardEntryBlockedError extends Error {}
+
+export function manualCardEntryBlockReason(text: string): string | null {
+  for (const match of text.matchAll(/\d(?:[\d\s-]*\d)?/g)) {
+    const digits = match[0].replace(/[\s-]/g, "");
+    if (digits.length >= 13 && digits.length <= 19 && passesLuhn(digits)) {
+      return (
+        "type refused: the value is card-number-shaped (a 13–19 digit Luhn-valid " +
+        "sequence). Manual payment-card entry is not permitted through operate_act — " +
+        "the model must never hold or type a card number. Card payment goes through " +
+        "operate_pay, which fills the user's vaulted card server-side. If operate_pay " +
+        "failed, report that failure to the user instead of entering a card by hand."
+      );
+    }
+  }
+  return null;
+}
+
 export function buildScreenOutline(
   elements: readonly InteractiveElement[],
   pageText: string,
   sealedFieldKeys: ReadonlySet<string> = new Set<string>(),
+  paymentSealActive = false,
 ): ScreenOutline | undefined {
   if (elements.length === 0) return undefined;
   const byRegion = new Map<string, ScreenRegion>();
@@ -1402,8 +2194,8 @@ export function buildScreenOutline(
     const role = id.split(":")[0] ?? "region";
     const existing = byRegion.get(id);
     const region: ScreenRegion = existing ?? {
-      id,
-      role,
+      id: presentPaymentSafeString(id, paymentSealActive),
+      role: presentPaymentSafeString(role, paymentSealActive),
       topmost: false,
       occluded_by: null,
       children: [],
@@ -1416,16 +2208,25 @@ export function buildScreenOutline(
       el.occludedBy !== null &&
       el.occludedBy !== undefined
     ) {
-      region.occluded_by = el.occludedBy;
+      region.occluded_by = presentPaymentSafeString(el.occludedBy, paymentSealActive);
     }
     if (region.children.length < 10) {
       region.children.push({
-        ref: el.screenPath ?? presentLabel(el, sealedFieldKeys),
-        role: el.role,
-        text: presentLabel(el, sealedFieldKeys),
-        href: el.href ?? null,
+        ref:
+          el.screenPath !== null && el.screenPath !== undefined
+            ? presentPaymentSafeString(el.screenPath, paymentSealActive)
+            : presentLabel(el, sealedFieldKeys, paymentSealActive),
+        role: el.role === null ? null : presentPaymentSafeString(el.role, paymentSealActive),
+        text: presentLabel(el, sealedFieldKeys, paymentSealActive),
+        href:
+          el.href === null || el.href === undefined
+            ? null
+            : presentPaymentSafeString(el.href, paymentSealActive),
         topmost: el.topmost ?? null,
-        occluded_by: el.occludedBy ?? null,
+        occluded_by:
+          el.occludedBy === null || el.occludedBy === undefined
+            ? null
+            : presentPaymentSafeString(el.occludedBy, paymentSealActive),
       });
     }
     byRegion.set(id, region);
@@ -1463,25 +2264,38 @@ function isSealedFieldValue(el: InteractiveElement, sealed: ReadonlySet<string>)
   if ((el.type ?? "").toLowerCase() === "password") return true;
   return elementTargetKeys(el).some((k) => sealed.has(k));
 }
-function presentFieldValue(el: InteractiveElement, sealed: ReadonlySet<string>): string | null {
+function presentFieldValue(
+  el: InteractiveElement,
+  sealed: ReadonlySet<string>,
+  paymentSealActive = false,
+): string | null {
   const v = el.value ?? null;
   if (v === null || v.length === 0) return v;
-  return isSealedFieldValue(el, sealed) ? SEALED_FIELD_PLACEHOLDER : v;
+  return isSealedFieldValue(el, sealed)
+    ? SEALED_FIELD_PLACEHOLDER
+    : presentPaymentSafeString(v, paymentSealActive);
 }
 // The host-facing LABEL. elementRef falls back to a field's VALUE when it has no
 // other label text — which would leak a sealed secret as the element's name. For
 // a sealed field, re-derive the label with the value stripped so it lands on the
 // next signal (placeholder/name) or `tag#index`, never the secret. Ref-keying
 // and targeting still use the raw elementRef, so resolution is unaffected.
-function presentLabel(el: InteractiveElement, sealed: ReadonlySet<string>): string {
-  if (!isSealedFieldValue(el, sealed)) return elementRef(el);
-  return elementRef({ ...el, value: null });
+function presentLabel(
+  el: InteractiveElement,
+  sealed: ReadonlySet<string>,
+  paymentSealActive = false,
+): string {
+  const label = isSealedFieldValue(el, sealed)
+    ? elementRef({ ...el, value: null })
+    : elementRef(el);
+  return presentPaymentSafeString(label, paymentSealActive);
 }
 
 export function buildAccessibilitySnapshot(
   elements: readonly InteractiveElement[],
   limit = 12000,
   sealedFieldKeys: ReadonlySet<string> = new Set<string>(),
+  paymentSealActive = false,
 ): AccessibilitySnapshot | undefined {
   if (elements.length === 0) return undefined;
   const refs = provisionElementRefs(elements);
@@ -1498,18 +2312,22 @@ export function buildAccessibilitySnapshot(
     entries.length > 24 || entries.some(([, group]) => group.length > 16);
   const lines: string[] = ["RootWebArea"];
   for (const [region, group] of entries.slice(0, 24)) {
-    lines.push(`  region "${region}"`);
+    lines.push(`  region "${presentPaymentSafeString(region, paymentSealActive)}"`);
     for (const el of group.slice(0, 16)) {
-      const label = presentLabel(el, sealedFieldKeys).replace(/"/g, '\\"');
-      const role = roleForAccessibility(el);
-      const shownValue = presentFieldValue(el, sealedFieldKeys);
+      const label = presentLabel(el, sealedFieldKeys, paymentSealActive).replace(/"/g, '\\"');
+      const role = presentPaymentSafeString(roleForAccessibility(el), paymentSealActive);
+      const shownValue = presentFieldValue(el, sealedFieldKeys, paymentSealActive);
       const flags = [
         el.value !== undefined && el.value !== null
           ? `value="${(shownValue ?? "").slice(0, 60)}"`
           : null,
         el.checked !== undefined && el.checked !== null ? `checked=${el.checked}` : null,
-        el.href !== undefined && el.href !== null ? `href="${el.href.slice(0, 120)}"` : null,
-        el.topmost === false ? `occluded_by="${el.occludedBy ?? "unknown"}"` : null,
+        el.href !== undefined && el.href !== null
+          ? `href="${presentPaymentSafeString(el.href, paymentSealActive).slice(0, 120)}"`
+          : null,
+        el.topmost === false
+          ? `occluded_by="${presentPaymentSafeString(el.occludedBy ?? "unknown", paymentSealActive)}"`
+          : null,
       ].filter((v): v is string => v !== null);
       lines.push(
         `    ${role} "${label}" ref=${refs.get(el) ?? provisionElementRef(el)}` +
@@ -1628,6 +2446,10 @@ export interface StartOptions {
   api?: ApiClient;
 }
 
+export interface HarnessStartOptions extends Omit<StartOptions, "profileDir" | "proxyUrl"> {
+  browser: BrowserController;
+}
+
 // Fail-closed precondition GATE — NOT autonomous recovery. An operate task that
 // acts as the user needs a LIVE Google session before it drives; absent /
 // expired / 2FA-challenged → hand back BEFORE the task starts, so the
@@ -1658,79 +2480,36 @@ export function googleSessionGate(
 }
 
 async function ensureProvisionPrimaryProviderSession(
-  opts: StartOptions,
-  sessionId: string,
+  browser: BrowserController,
 ): Promise<OAuthProviderId[]> {
-  const slot = warmBrowser;
-  if (slot !== null) {
-    const expired = warmBrowserExpired(slot);
-    const eligible = slot.controller.matchesLaunchOptions(opts);
-    const healthy = slot.controller.isConnected();
-    if (expired === null && eligible && healthy) {
-      const warmProviders = await slot.controller.detectSessionProviders();
-      if (warmProviders.includes("google")) {
-        touchWarmBrowser();
-        return warmProviders;
-      }
-    }
-
-    warmBrowser = null;
-    clearWarmBrowserIdleTimer();
-    await slot.controller.close().catch(() => undefined);
-    audit(sessionId, "browser_recycle", {
-      reason:
-        expired ??
-        (!eligible
-          ? "launch_config_mismatch"
-          : !healthy
-            ? "disconnected"
-            : "identity_probe_requires_cold_boot"),
-    });
-  }
-
-  const initial = await detectActiveProviderSessions(opts.profileDir).catch(
-    () => [] as OAuthProviderId[],
-  );
-  if (initial.includes("google")) return initial;
-
-  const result = await ensureOAuthSession({
-    provider: "google",
-    ...(opts.profileDir !== undefined ? { profileDir: opts.profileDir } : {}),
-  });
-  if (result.status !== "already_valid" && result.status !== "logged_in") {
-    return initial;
-  }
-
-  const after = await detectActiveProviderSessions(opts.profileDir).catch(
-    () => [] as OAuthProviderId[],
-  );
-  return after.includes("google") ? after : ["google", ...after];
+  if (typeof browser.detectSessionProviders !== "function") return [];
+  return await browser.detectSessionProviders().catch(() => [] as OAuthProviderId[]);
 }
 
 export async function startProvisionSession(opts: StartOptions): Promise<Observation> {
   const id = randomUUID();
-  touchWarmBrowser();
-  if (starting || inFlight) {
-    throw new Error("operate_start refused: another operator session is already in flight");
-  }
-  starting = true;
   let browser: BrowserController;
   let liveProviders: OAuthProviderId[];
-  try {
-    liveProviders = await ensureProvisionPrimaryProviderSession(opts, id);
-    // Change 5 — fail-closed identity gate BEFORE driving. If an operate task
-    // needs to act as the user and there's no live Google session, hand back now;
-    // do not start the browser or the task. No autonomous login is attempted.
-    if (opts.requireLiveIdentity === true) {
-      const gate = googleSessionGate(liveProviders);
-      if (!gate.ok) {
-        audit(id, "connect_gate", { ok: false, wall: "google_session" });
-        return { session_id: id, url: "", text: "", elements: [], needs_user: gate.needs_user };
-      }
+  let workerEmail: string | null;
+  const acquired = await acquireWarmBrowser(opts, id);
+  browser = acquired.controller;
+  // Probe the claimed/cloned worker. The canonical login-authoring profile and
+  // immutable seed are never opened by Chrome during an operator start.
+  liveProviders = await ensureProvisionPrimaryProviderSession(browser);
+  workerEmail =
+    typeof browser.detectGoogleAccountEmail === "function"
+      ? await browser.detectGoogleAccountEmail().catch(() => null)
+      : null;
+  // Change 5 — fail-closed identity gate BEFORE driving. If an operate task
+  // needs to act as the user and there's no live Google session, hand back now;
+  // do not start the browser or the task. No autonomous login is attempted.
+  if (opts.requireLiveIdentity === true) {
+    const gate = googleSessionGate(liveProviders);
+    if (!gate.ok) {
+      audit(id, "connect_gate", { ok: false, wall: "google_session" });
+      await releaseWarmBrowserPage(browser, true);
+      return { session_id: id, url: "", text: "", elements: [], needs_user: gate.needs_user };
     }
-    browser = await acquireWarmBrowser(opts, id);
-  } finally {
-    starting = false;
   }
   const targetHost = registrableHost(opts.serviceUrl);
   const seedHosts = [
@@ -1760,16 +2539,33 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     usedLocatorFallback: false,
     recipeRejectionReason: null,
     replayState: null,
+    activePayment: null,
+    paymentFieldSealActive: false,
+    placeOrderApproval: null,
+    placeOrderAttempted: false,
+    lastCartCheckout: null,
+    cartAdds: new Map(),
+    cartAddsByIdempotencyKey: new Map(),
+    cartUrls: new Map(),
+    lastCartMutation: null,
+    closing: false,
+    callCount: 0,
+    callDrainWaiters: new Set(),
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
     consentInboxRead: opts.consentInboxRead === true,
-    userEmail: loggedInEmail("google", opts.profileDir),
+    userEmail: workerEmail,
     ...(opts.api !== undefined ? { api: opts.api } : {}),
   };
   sessions.set(id, session);
-  inFlight = true;
   try {
+    if (typeof browser.setHostScopeAllowedHosts === "function") {
+      await browser.setHostScopeAllowedHosts(
+        () => hostStrings(session),
+        () => merchantSiblingSeedHosts(session),
+      );
+    }
     audit(id, "start", {
       service_url: opts.serviceUrl,
       allowed_hosts: hostStrings(session),
@@ -1807,10 +2603,77 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     };
   } catch (err) {
     sessions.delete(id);
-    await releaseWarmBrowserPage(browser);
-    inFlight = false;
-    touchWarmBrowser();
+    await releaseWarmBrowserPage(browser, false);
     throw err;
+  }
+}
+
+/** Start a normal guarded session on a caller-owned harness page. */
+export async function startHarnessProvisionSession(
+  opts: HarnessStartOptions,
+): Promise<Observation> {
+  const id = randomUUID();
+  if (opts.requireLiveIdentity === true) {
+    throw new Error("harness sessions cannot request live identity");
+  }
+  const targetHost = registrableHost(opts.serviceUrl);
+  const allowedHosts: AllowedHostEntry[] = [
+    ...(targetHost === null ? [] : [targetHost]),
+    ...(opts.extraAllowedHosts ?? []),
+  ]
+    .filter((host, index, hosts) => hosts.indexOf(host) === index)
+    .map((host) => ({
+      host,
+      source: "start" as const,
+    }));
+  const session: Session = {
+    id,
+    browser: opts.browser,
+    allowedHosts,
+    generation: 0,
+    secretSlots: new Map(),
+    sealedFieldKeys: new Set(),
+    lastElements: [],
+    prevObserve: null,
+    observeSnapshotFile: null,
+    actionTrace: [],
+    recordedValues: [],
+    committedSelectValues: new Map(),
+    captureRounds: [],
+    usedLocatorFallback: false,
+    recipeRejectionReason: null,
+    replayState: null,
+    activePayment: null,
+    paymentFieldSealActive: false,
+    placeOrderApproval: null,
+    placeOrderAttempted: false,
+    lastCartCheckout: null,
+    cartAdds: new Map(),
+    cartAddsByIdempotencyKey: new Map(),
+    cartUrls: new Map(),
+    lastCartMutation: null,
+    closing: false,
+    callCount: 0,
+    callDrainWaiters: new Set(),
+    startedAt: Date.now(),
+    hintServed: opts.hint !== undefined,
+    startUrl: opts.serviceUrl,
+    consentInboxRead: false,
+    userEmail: null,
+    ...(opts.api === undefined ? {} : { api: opts.api }),
+  };
+  sessions.set(id, session);
+  try {
+    audit(id, "start_harness", {
+      service_url: opts.serviceUrl,
+      allowed_hosts: hostStrings(session),
+    });
+    await opts.browser.goto(opts.serviceUrl);
+    return { ...(await observeSession(session)), hint: opts.hint ?? "" };
+  } catch (error) {
+    sessions.delete(id);
+    await opts.browser.close().catch(() => undefined);
+    throw error;
   }
 }
 
@@ -1881,64 +2744,455 @@ export function currentProvisionUrl(sessionId: string): string {
   return session.browser.currentUrl();
 }
 
-// operate_pay has a deliberately small input contract with no session id: it
-// acts on the one live operator checkout. Fail closed rather than guessing if
-// zero or multiple browser sessions exist.
 function activeProvisionSession(): Session {
-  touchWarmBrowser();
-  if (sessions.size !== 1) {
-    throw new Error(
-      sessions.size === 0
-        ? "operate_pay requires one active operate_start browser session"
-        : "operate_pay refused: multiple active browser sessions",
-    );
-  }
-  const session = sessions.values().next().value!;
-  if (session.replayState?.moneyPath === true && session.replayState.paymentGuard !== "verified") {
-    throw new Error(
-      "operate_pay refused: replay address/contact/quantity verification is not satisfied",
-    );
-  }
-  return session;
+  return paymentSession();
 }
 
 export function activeProvisionBrowser(): BrowserController {
   return activeProvisionSession().browser;
 }
 
-export async function activeProvisionBrowserForPayment(): Promise<BrowserController> {
-  const session = activeProvisionSession();
-  const state = session.replayState;
-  if (state?.moneyPath !== true) return session.browser;
-  const fresh = await session.browser.extractInteractiveElements();
-  session.lastElements = fresh;
-  for (const expected of state.expectedFields.values()) {
-    if (!state.verifiedFields.has(expected.stepIndex)) continue;
-    if (!(await isReplayFieldMounted(session, expected, fresh))) {
-      markReplayFailure(session, "field_missing", expected.hole);
-      throw new Error(
-        "operate_pay refused: replay address/contact/quantity verification is not satisfied",
-      );
-    }
-    const guard = await verifyReplayFieldWithElements(session, expected, fresh);
-    if (!guard.ok) {
-      markReplayFailure(session, guard.reason, expected.hole);
-      throw new Error(
-        "operate_pay refused: replay address/contact/quantity verification is not satisfied",
-      );
-    }
-  }
+export async function activeProvisionBrowserForPayment(
+  selectedSession?: Session,
+): Promise<BrowserController> {
+  const session = selectedSession ?? activeProvisionSession();
   return session.browser;
 }
 
-export function recordActivePaymentProvenance(cardRef: string): void {
-  if (sessions.size !== 1) return;
-  const session = sessions.values().next().value!;
+function placeOrderApprovalFromPendingFill(
+  pending: PendingCardFill,
+): NonNullable<Session["placeOrderApproval"]> {
+  return {
+    approvalId: pending.approval_id,
+    ...(pending.mandate_id !== undefined ? { mandateId: pending.mandate_id } : {}),
+    merchant: pending.checkout.merchant,
+    amountCents: pending.checkout.amount_cents,
+    currency: pending.checkout.currency,
+    cardRef: pending.card_ref,
+    last4: pending.last4,
+  };
+}
+
+export function setActivePendingCardFill(
+  pending: PendingCardFill,
+  selectedSession?: Session,
+): void {
+  const session = selectedSession ?? activeProvisionSession();
+  session.activePayment = { status: "pending", pending };
+  session.paymentFieldSealActive = true;
+  session.placeOrderApproval = placeOrderApprovalFromPendingFill(pending);
+  session.placeOrderAttempted = false;
+}
+
+export function retainActivePaymentFieldSeal(selectedSession?: Session): void {
+  const session = selectedSession ?? activeProvisionSession();
+  if (session.activePayment?.status !== "operating") {
+    session.activePayment = { status: "sealed" };
+  }
+  session.paymentFieldSealActive = true;
+}
+
+export function getActivePendingCardFill(selectedSession?: Session): PendingCardFill | null {
+  const state = (selectedSession ?? activeProvisionSession()).activePayment;
+  return state?.status === "pending" ? state.pending : null;
+}
+
+// [P0] Read-only: the outstanding approval a prior operate_pay call left
+// waiting on the human, if any. Backs operate_payment_status, which does not
+// touch session state and just reports on it.
+export function getActivePendingApproval(selectedSession?: Session): PendingApprovalWait | null {
+  const state = (selectedSession ?? activeProvisionSession()).activePayment;
+  return state?.status === "awaiting_approval" ? state.state : null;
+}
+
+export interface ActivePaymentLease {
+  phase: "fill_card" | "single";
+}
+
+export type ActivePaymentClaim =
+  | { kind: "lease"; lease: ActivePaymentLease; resumeApproval?: PendingApprovalWait }
+  | { kind: "confirm"; pending: PendingCardFill }
+  | { kind: "missing_confirm" };
+
+export function claimActivePaymentForOperatePay(
+  phase: "fill_card" | "confirm" | undefined,
+  selectedSession?: Session,
+): ActivePaymentClaim {
+  const session = selectedSession ?? activeProvisionSession();
+  const state = session.activePayment;
+  if (state?.status === "operating") {
+    throw new Error("operate_pay refused: another payment operation is already in progress");
+  }
+  if (state?.status === "confirming") {
+    throw new Error("operate_pay refused: another payment confirmation is already in progress");
+  }
+  if (state?.status === "sealed") {
+    throw new Error("operate_pay refused: payment field cleanup remains unverified");
+  }
+  if (state?.status === "pending") {
+    if (phase !== "confirm") {
+      throw new Error(
+        'operate_pay refused: a vaulted card fill is pending; phase="confirm" is required next',
+      );
+    }
+    session.activePayment = {
+      status: "confirming",
+      pending: state.pending,
+      submitStarted: false,
+    };
+    return { kind: "confirm", pending: state.pending };
+  }
+  if (phase === "confirm") return { kind: "missing_confirm" };
+  // [P0] Resuming an outstanding approval (status "awaiting_approval" — the
+  // human hasn't tapped approve yet) takes the SAME "operating" lease as a
+  // fresh call, carrying the prior approval/keypair through so the operator can
+  // validate the resource before either reusing it or minting a replacement.
+  const resumeApproval = state?.status === "awaiting_approval" ? state.state : undefined;
+  const lease: ActivePaymentLease = { phase: phase === "fill_card" ? "fill_card" : "single" };
+  session.activePayment = { status: "operating", lease };
+  if (lease.phase === "fill_card") session.paymentFieldSealActive = true;
+  return resumeApproval !== undefined
+    ? { kind: "lease", lease, resumeApproval }
+    : { kind: "lease", lease };
+}
+
+export function completeActivePaymentLeaseWithPendingFill(
+  lease: ActivePaymentLease,
+  pending: PendingCardFill,
+  selectedSession?: Session,
+): void {
+  const session = selectedSession ?? activeProvisionSession();
+  const state = session.activePayment;
+  if (state?.status !== "operating" || state.lease !== lease || lease.phase !== "fill_card") {
+    throw new Error(
+      "operate_pay fill_card completed without ownership of the active payment lease",
+    );
+  }
+  session.activePayment = { status: "pending", pending };
+  session.paymentFieldSealActive = true;
+  session.placeOrderApproval = placeOrderApprovalFromPendingFill(pending);
+  session.placeOrderAttempted = false;
+}
+
+// [P0] Mirrors completeActivePaymentLeaseWithPendingFill for the
+// still-pending-approval outcome: the human hasn't responded yet, so this
+// call ends with no card filled — just a resumable wait, picked up by the
+// NEXT operate_pay call for live-resource validation or read by
+// operate_payment_status.
+export function completeActivePaymentLeaseWithPendingApproval(
+  lease: ActivePaymentLease,
+  state: PendingApprovalWait,
+  selectedSession?: Session,
+): void {
+  const session = selectedSession ?? activeProvisionSession();
+  const current = session.activePayment;
+  if (current?.status !== "operating" || current.lease !== lease) {
+    throw new Error(
+      "operate_pay approval_pending completed without ownership of the active payment lease",
+    );
+  }
+  session.activePayment = { status: "awaiting_approval", state };
+}
+
+export function releaseActivePaymentLease(
+  lease: ActivePaymentLease,
+  paymentFieldsCleared = true,
+  selectedSession?: Session,
+): boolean {
+  const session = selectedSession ?? activeProvisionSession();
+  const state = session.activePayment;
+  if (state?.status !== "operating" || state.lease !== lease) return false;
+  session.activePayment = paymentFieldsCleared ? null : { status: "sealed" };
+  if (lease.phase === "fill_card") session.paymentFieldSealActive = !paymentFieldsCleared;
+  return true;
+}
+
+export function markActivePendingCardFillSubmitStarted(selectedSession?: Session): void {
+  const state = (selectedSession ?? activeProvisionSession()).activePayment;
+  if (state?.status === "confirming") state.submitStarted = true;
+}
+
+export function restoreActivePendingCardFillAfterConfirmThrow(
+  pending: PendingCardFill,
+  selectedSession?: Session,
+): boolean {
+  const session = selectedSession ?? activeProvisionSession();
+  const state = session.activePayment;
+  if (state?.status !== "confirming" || state.submitStarted) return false;
+  session.activePayment = { status: "pending", pending };
+  return true;
+}
+
+export function clearActivePendingCardFill(
+  paymentFieldsCleared = true,
+  selectedSession?: Session,
+): void {
+  const session = selectedSession ?? activeProvisionSession();
+  session.activePayment = paymentFieldsCleared ? null : { status: "sealed" };
+  session.paymentFieldSealActive = !paymentFieldsCleared;
+  // A verified full clear (paymentFieldsCleared=true) is a clean slate — no
+  // approval is pending a place-order attempt anymore. The real confirm call
+  // site always passes false (moving to "sealed"), which deliberately leaves
+  // placeOrderApproval/placeOrderAttempted untouched: the guard must keep
+  // binding to the SAME approval across the pending -> sealed transition.
+  if (paymentFieldsCleared) {
+    session.placeOrderApproval = null;
+    session.placeOrderAttempted = false;
+  }
+}
+
+export function recordActivePaymentProvenance(cardRef: string, selectedSession?: Session): void {
+  const session = selectedSession ?? activeProvisionSession();
   const last = session.actionTrace.at(-1)?.action;
   if (last?.kind === "operate_pay") return;
   const traceIndex = session.actionTrace.length;
   session.actionTrace.push({ action: { kind: "operate_pay", value: { hole: "card" } } });
   session.recordedValues.push({ traceIndex, hole: "card", literal: cardRef });
+}
+
+// operate_pay {phase:"fill_card"} fallback source (see Session.lastCartCheckout):
+// the most recent real total this SAME session actually read off a page,
+// returned only when it still matches the given (current, live) origin.
+export function activeCartCheckoutForOrigin(
+  origin: string,
+  selectedSession?: Session,
+): CartCheckoutObservation | null {
+  const cached = (selectedSession ?? activeProvisionSession()).lastCartCheckout;
+  return cached !== null && cached.checkout.checkout_origin === origin ? cached : null;
+}
+
+export interface CartAddResult {
+  status: "added" | "already_in_cart";
+  cart_delta: "+1" | "0" | "unknown";
+  cart_url: string | null;
+  checkout_state: CheckoutState;
+  postcondition: { product_identity: string; options_hash: string; quantity: number | null };
+}
+
+function canonicalCartIdentity(value: string): string {
+  const trimmed = value.trim();
+  try {
+    const url = new URL(trimmed);
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return trimmed;
+  }
+}
+
+function cartLineMatches(
+  line: { product_identities: string[]; option_signatures: string[] },
+  productIdentity: string,
+  optionsHash: string,
+): boolean {
+  const product = canonicalCartIdentity(productIdentity);
+  const options = canonicalCartIdentity(optionsHash);
+  return (
+    line.product_identities.some((candidate) => canonicalCartIdentity(candidate) === product) &&
+    line.option_signatures.some((candidate) => canonicalCartIdentity(candidate) === options)
+  );
+}
+
+async function cartLineQuantity(
+  session: Session,
+  productIdentity: string,
+  optionsHash: string,
+): Promise<number | null> {
+  const lines = await session.browser.readCheckoutReviewLineItems(true);
+  const matching = lines.filter((line) => cartLineMatches(line, productIdentity, optionsHash));
+  if (matching.length !== 1) return null;
+  return matching[0]!.quantity;
+}
+
+function alreadyInCartResult(result: CartAddResult): CartAddResult {
+  return {
+    ...result,
+    status: "already_in_cart",
+    cart_delta: "0",
+    checkout_state: { ...result.checkout_state },
+  };
+}
+
+async function reconcileReservedCartAdd(
+  session: Session,
+  record: CartAddRecord,
+): Promise<CartAddResult> {
+  if (record.result !== null) return alreadyInCartResult(record.result);
+  if (record.promise !== null) {
+    try {
+      return alreadyInCartResult(await record.promise);
+    } catch (error) {
+      if (record.phase === "reserved")
+        return await cartAdd(
+          session.id,
+          record.productIdentity,
+          record.optionsHash,
+          record.idempotencyKey,
+        );
+      const quantity = await cartLineQuantity(session, record.productIdentity, record.optionsHash);
+      if (quantity === null) throw error;
+      session.lastCartMutation = {
+        productIdentity: record.productIdentity,
+        optionsHash: record.optionsHash,
+        cartDelta: "0",
+        origin: originForUrl(session.browser.currentUrl()) ?? "",
+      };
+      const observed = await observeSession(session);
+      if (observed.checkout_state === undefined) throw error;
+      const result: CartAddResult = {
+        status: "already_in_cart",
+        cart_delta: "0",
+        cart_url: observed.checkout_state.cart_url,
+        checkout_state: { ...observed.checkout_state, quantity },
+        postcondition: {
+          product_identity: record.productIdentity,
+          options_hash: record.optionsHash,
+          quantity,
+        },
+      };
+      record.phase = "complete";
+      record.result = result;
+      return result;
+    }
+  }
+  throw new Error("cart add reservation has no operation");
+}
+
+async function performCartAdd(session: Session, record: CartAddRecord): Promise<CartAddResult> {
+  const beforeQuantity = await cartLineQuantity(
+    session,
+    record.productIdentity,
+    record.optionsHash,
+  );
+  if (beforeQuantity !== null && beforeQuantity > 0) {
+    session.lastCartMutation = {
+      productIdentity: record.productIdentity,
+      optionsHash: record.optionsHash,
+      cartDelta: "0",
+      origin: originForUrl(session.browser.currentUrl()) ?? "",
+    };
+    const observed = await observeSession(session);
+    if (observed.checkout_state === undefined) throw new Error("cart state was not observable");
+    return {
+      status: "already_in_cart",
+      cart_delta: "0",
+      cart_url: observed.checkout_state.cart_url,
+      checkout_state: { ...observed.checkout_state, quantity: beforeQuantity },
+      postcondition: {
+        product_identity: record.productIdentity,
+        options_hash: record.optionsHash,
+        quantity: beforeQuantity,
+      },
+    };
+  }
+
+  const addTargets = [
+    'text="Add to Cart"',
+    'text="Add to Bag"',
+    'text="かごに追加"',
+    'text="カートに追加"',
+  ];
+  let addError: unknown;
+  let observed: Observation | null = null;
+  for (const target of addTargets) {
+    try {
+      observed = await act(session.id, { kind: "click", target }, "compact", {
+        productIdentity: record.productIdentity,
+        optionsHash: record.optionsHash,
+        onActionReady: () => {
+          record.phase = "click_started";
+        },
+      });
+      addError = undefined;
+      break;
+    } catch (error) {
+      addError = error;
+      if (!(error instanceof Error) || !error.message.startsWith("no element matched locator")) {
+        throw error;
+      }
+    }
+  }
+  if (addError !== undefined || observed === null) throw addError;
+  const afterQuantity = await cartLineQuantity(session, record.productIdentity, record.optionsHash);
+  if (afterQuantity === null || afterQuantity <= 0) {
+    throw new Error("requested product/variant line was not observable after add");
+  }
+  const checkoutState = observed.checkout_state;
+  if (checkoutState === undefined) throw new Error("cart state was not observable after add");
+  const cartDelta =
+    beforeQuantity === null
+      ? afterQuantity === 1
+        ? "+1"
+        : "unknown"
+      : afterQuantity === beforeQuantity + 1
+        ? "+1"
+        : "unknown";
+  session.lastCartMutation = {
+    productIdentity: record.productIdentity,
+    optionsHash: record.optionsHash,
+    cartDelta,
+    origin: originForUrl(session.browser.currentUrl()) ?? "",
+  };
+  return {
+    status: "added",
+    cart_delta: cartDelta,
+    cart_url: checkoutState.cart_url,
+    checkout_state: { ...checkoutState, quantity: afterQuantity },
+    postcondition: {
+      product_identity: record.productIdentity,
+      options_hash: record.optionsHash,
+      quantity: afterQuantity,
+    },
+  };
+}
+
+export async function cartAdd(
+  sessionId: string,
+  productIdentity: string,
+  optionsHash: string,
+  idempotencyKey: string,
+): Promise<CartAddResult> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const lineKey = `${productIdentity}\u0000${optionsHash}`;
+  const byIdempotencyKey = session.cartAddsByIdempotencyKey.get(idempotencyKey);
+  if (
+    byIdempotencyKey !== undefined &&
+    (byIdempotencyKey.productIdentity !== productIdentity ||
+      byIdempotencyKey.optionsHash !== optionsHash)
+  ) {
+    throw new Error("idempotency_key is already bound to a different product/variant");
+  }
+  const existing = byIdempotencyKey ?? session.cartAdds.get(lineKey);
+  if (existing !== undefined) {
+    session.cartAddsByIdempotencyKey.set(idempotencyKey, existing);
+    return await reconcileReservedCartAdd(session, existing);
+  }
+
+  const record: CartAddRecord = {
+    productIdentity,
+    optionsHash,
+    idempotencyKey,
+    phase: "reserved",
+    promise: null,
+    result: null,
+  };
+  session.cartAdds.set(lineKey, record);
+  session.cartAddsByIdempotencyKey.set(idempotencyKey, record);
+  record.promise = performCartAdd(session, record)
+    .then((result) => {
+      record.phase = "complete";
+      record.result = result;
+      return result;
+    })
+    .catch((error: unknown) => {
+      if (record.phase === "reserved") {
+        session.cartAdds.delete(lineKey);
+        session.cartAddsByIdempotencyKey.delete(idempotencyKey);
+      }
+      throw error;
+    });
+  return await record.promise;
 }
 
 // PR3c — the user's own email captured at login (the authoritative signup
@@ -1998,6 +3252,48 @@ function shouldElideType(el: InteractiveElement): boolean {
   return el.tag === "button" || (el.role ?? "").toLowerCase() === "button";
 }
 
+// Keep this detection narrow and structural. It only annotates fields that are
+// recognizably part of collecting card data; address fields remain normal
+// checkout fields. The affordance is advisory metadata, never a relaxation of
+// the frame or PAN guards below.
+export function paymentFieldForObservation(el: InteractiveElement): PaymentField | null {
+  const autocomplete = (el.autocomplete ?? "").toLowerCase().split(/\s+/);
+  const signal = [el.name, el.id, el.ariaLabel, el.labelText, el.placeholder]
+    .filter((value): value is string => typeof value === "string")
+    .join(" ")
+    .toLowerCase();
+  if (autocomplete.includes("cc-number") || /card[\s_-]*number|cardnumber|\bpan\b/.test(signal)) {
+    return "card_number";
+  }
+  if (autocomplete.includes("cc-csc") || /\b(?:cvv|cvc)\b|security[\s_-]*code/.test(signal)) {
+    return "security_code";
+  }
+  if (autocomplete.includes("cc-exp-month") || /exp(?:iry|iration)?[\s_-]*month/.test(signal)) {
+    return "expiry_month";
+  }
+  if (autocomplete.includes("cc-exp-year") || /exp(?:iry|iration)?[\s_-]*year/.test(signal)) {
+    return "expiry_year";
+  }
+  if (
+    autocomplete.includes("cc-exp") ||
+    /\bmm\s*\/\s*yy\b|exp(?:iry|iration)?[\s_-]*(?:date)?\b/.test(signal)
+  ) {
+    return "expiry";
+  }
+  if (autocomplete.includes("cc-name") || /cardholder|card[\s_-]*name/.test(signal)) {
+    return "cardholder_name";
+  }
+  return null;
+}
+
+function annotatePaymentControl(out: ObservedElement, el: InteractiveElement): void {
+  const paymentField = paymentFieldForObservation(el);
+  if (paymentField === null) return;
+  out.payment_field = paymentField;
+  out.interaction = "vaulted_card_only";
+  out.recommended_action = { tool: "operate_pay", phase: "fill_card" };
+}
+
 // One element, compacted: ref/label/tag always; every other field omitted when
 // empty. `value`→`value_len` (never the raw value — keeps the sealed-field moat);
 // `checked` kept for real checkables (true OR false), omitted when null;
@@ -2016,10 +3312,17 @@ export function toCompactElement(
   // form keeps full fidelity for re-expansion, so callers that write the file
   // pass false.
   elide = false,
+  paymentSealActive = false,
 ): ObservedElement {
-  const out: ObservedElement = { ref, label: presentLabel(el, sealed), tag: el.tag };
-  if (el.role) out.role = el.role;
-  if (el.type && !(elide && shouldElideType(el))) out.type = el.type;
+  const out: ObservedElement = {
+    ref,
+    label: presentLabel(el, sealed, paymentSealActive),
+    tag: presentPaymentSafeString(el.tag, paymentSealActive),
+  };
+  if (el.role) out.role = presentPaymentSafeString(el.role, paymentSealActive);
+  if (el.type && !(elide && shouldElideType(el))) {
+    out.type = presentPaymentSafeString(el.type, paymentSealActive);
+  }
   // value_len is a LENGTH signal, not the value — report the REAL character count.
   // presentFieldValue masks a sealed field to "[sealed]" (8 chars), so using its
   // length made a correctly-filled 19-char email read as value_len:8 and misled
@@ -2028,11 +3331,19 @@ export function toCompactElement(
   const realLen = (el.value ?? "").length;
   if (realLen > 0) out.value_len = realLen;
   if (el.checked !== null && el.checked !== undefined) out.checked = el.checked;
-  if (el.href) out.href = el.href;
-  if (el.testId) out.testId = el.testId;
-  if (includePath && el.screenPath) out.path = el.screenPath;
+  if (el.href) out.href = presentPaymentSafeString(el.href, paymentSealActive);
+  if (el.testId) out.testId = presentPaymentSafeString(el.testId, paymentSealActive);
+  if (includePath && el.screenPath) {
+    out.path = presentPaymentSafeString(el.screenPath, paymentSealActive);
+  }
   if (el.topmost === false) out.topmost = false;
-  if (el.occludedBy) out.occluded_by = el.occludedBy;
+  if (el.occludedBy) {
+    out.occluded_by = presentPaymentSafeString(el.occludedBy, paymentSealActive);
+  }
+  if (el.frameOrigin) {
+    out.frame_origin = presentPaymentSafeString(el.frameOrigin, paymentSealActive);
+  }
+  annotatePaymentControl(out, el);
   return out;
 }
 
@@ -2054,6 +3365,10 @@ const ELEMENT_TABLE_COLUMNS = [
   "testId",
   "topmost",
   "occluded_by",
+  "frame_origin",
+  "payment_field",
+  "interaction",
+  "recommended_action",
 ] as const;
 type ElementColumn = (typeof ELEMENT_TABLE_COLUMNS)[number];
 
@@ -2083,6 +3398,14 @@ function elementCell(e: ObservedElement, col: ElementColumn): string | undefined
       return e.topmost === false ? "false" : undefined;
     case "occluded_by":
       return e.occluded_by ?? undefined;
+    case "frame_origin":
+      return e.frame_origin ?? undefined;
+    case "payment_field":
+      return e.payment_field;
+    case "interaction":
+      return e.interaction;
+    case "recommended_action":
+      return e.recommended_action === undefined ? undefined : JSON.stringify(e.recommended_action);
   }
 }
 
@@ -2141,6 +3464,31 @@ export function parseElementsTable(table: string): ObservedElement[] {
       else if (col === "testId") e.testId = raw;
       else if (col === "topmost") e.topmost = false;
       else if (col === "occluded_by") e.occluded_by = raw;
+      else if (col === "frame_origin") e.frame_origin = raw;
+      else if (
+        col === "payment_field" &&
+        [
+          "card_number",
+          "expiry",
+          "expiry_month",
+          "expiry_year",
+          "security_code",
+          "cardholder_name",
+        ].includes(raw)
+      )
+        e.payment_field = raw as PaymentField;
+      else if (col === "interaction" && raw === "vaulted_card_only") e.interaction = raw;
+      else if (col === "recommended_action") {
+        try {
+          const action = JSON.parse(raw) as { tool?: string; phase?: string };
+          if (action.tool === "operate_pay" && action.phase === "fill_card") {
+            e.recommended_action = { tool: "operate_pay", phase: "fill_card" };
+          }
+        } catch {
+          // A malformed optional advisory column is ignored, never allowed to
+          // break reconstruction of the actual actionable inventory.
+        }
+      }
     });
     out.push(e);
   }
@@ -2347,6 +3695,7 @@ export function buildCompactObservation(args: {
   guidance?: string;
   elements: readonly InteractiveElement[];
   sealed?: ReadonlySet<string>;
+  paymentSealActive?: boolean;
   prev: ObserveDeltaState | null;
   // Wire encoding of the emitted element set. Default "columnar" (the tab table).
   // The eval harness passes "json" to measure the columnar transform's marginal
@@ -2360,6 +3709,7 @@ export function buildCompactObservation(args: {
   const sealed = args.sealed ?? new Set<string>();
   const encode = args.encode ?? "columnar";
   const elide = args.elide ?? true;
+  const paymentSealActive = args.paymentSealActive ?? false;
   const refs = provisionElementRefs(elements);
   const refOf = (el: InteractiveElement): string => refs.get(el) ?? provisionElementRef(el);
 
@@ -2368,11 +3718,11 @@ export function buildCompactObservation(args: {
   const fileElements: ObservedElement[] = [];
   for (const el of elements) {
     const ref = refOf(el);
-    fullByRef.set(ref, toCompactElement(el, ref, sealed, false, elide));
+    fullByRef.set(ref, toCompactElement(el, ref, sealed, false, elide, paymentSealActive));
     serializedByRef.set(ref, JSON.stringify(fullByRef.get(ref)));
     // The persisted file keeps FULL fidelity (path included, no elision) so a
     // re-expansion after a host compaction loses nothing.
-    fileElements.push(toCompactElement(el, ref, sealed, true, false));
+    fileElements.push(toCompactElement(el, ref, sealed, true, false, paymentSealActive));
   }
   const nextState: ObserveDeltaState = { url, byRef: serializedByRef, text };
 
@@ -2441,127 +3791,647 @@ export function buildCompactObservation(args: {
   };
 }
 
+// Best-effort: on every observation, try to read a real checkout total off
+// the CURRENT live page and cache it as the fill_card fallback (see
+// Session.lastCartCheckout). Most pages have no parseable total — that's the
+// overwhelmingly common, expected outcome, not an error, so a throw here
+// simply leaves the existing cache untouched rather than clearing it. Scoped
+// to the observed page's own origin so a later cross-origin fallback read
+// (checked again at use time) can never happen even if this cache were stale.
+async function captureCartCheckoutForFillCardFallback(
+  session: Session,
+  url: string,
+): Promise<CheckoutSummary | null> {
+  let origin: string;
+  try {
+    origin = new URL(url).origin;
+  } catch {
+    return null;
+  }
+  try {
+    const checkout = await session.browser.readCheckoutSummary();
+    if (checkout.checkout_origin === origin) {
+      session.lastCartCheckout = { checkout, url, observedAt: Date.now() };
+      return checkout;
+    }
+  } catch {
+    // No readable total on this page — leave any previously cached total alone.
+  }
+  return null;
+}
+
+function checkoutStageFromUrl(url: string): CheckoutState["stage"] | null {
+  let pathname = "";
+  try {
+    pathname = decodeURIComponent(new URL(url).pathname).toLowerCase();
+  } catch {
+    return null;
+  }
+  if (
+    /(?:^|\/)(?:checkout|secure[-_]?checkout|payment|order[-_]?review|order\/review)(?:\.(?:php|html?))?(?:\/|$)/i.test(
+      pathname,
+    )
+  ) {
+    return "checkout";
+  }
+  if (
+    /(?:^|\/)(?:cart|shopping[-_]?cart|view[-_]?cart|basket|bag)(?:\.(?:php|html?))?(?:\/|$)/i.test(
+      pathname,
+    )
+  )
+    return "cart";
+  return null;
+}
+
+function checkoutStage(
+  url: string,
+  elements: readonly InteractiveElement[],
+): CheckoutState["stage"] | null {
+  const routeStage = checkoutStageFromUrl(url);
+  if (routeStage !== null) return routeStage;
+  if (elements.some((element) => paymentFieldForObservation(element) !== null)) return "checkout";
+  const contexts = elements
+    .flatMap((element) => [element.container, element.screenPath])
+    .filter((value): value is string => typeof value === "string");
+  if (
+    contexts.some((context) =>
+      /(?:^|[ >:/_-])(?:checkout|payment|order[-_ ]?review|お支払い|注文確認)(?:$|[ >:/_-])/i.test(
+        context,
+      ),
+    )
+  ) {
+    return "checkout";
+  }
+  if (
+    contexts.some((context) =>
+      /(?:^|[ >:/_-])(?:cart|basket|bag|カート|かご)(?:$|[ >:/_-])/i.test(context),
+    )
+  ) {
+    return "cart";
+  }
+  return null;
+}
+
+function observedCartQuantity(
+  elements: readonly InteractiveElement[],
+  text: string,
+): number | null {
+  for (const el of elements) {
+    const label = `${el.name ?? ""} ${el.id ?? ""} ${el.ariaLabel ?? ""} ${el.labelText ?? ""}`;
+    if (!/\b(?:quantity|qty)\b|(?:数量|個数)/i.test(label)) continue;
+    const value = el.value?.trim() ?? "";
+    if (/^\d+$/.test(value)) return Number(value);
+  }
+  const match = text.match(/(?:quantity|qty|数量|個数)\s*[:：x×]?\s*(\d+)/i);
+  return match?.[1] === undefined ? null : Number(match[1]);
+}
+
+const checkoutComponentBoundary = String.raw`(?:subtotal|merchandise\s+subtotal|shipping|delivery|tax|grand\s+total|order\s+total|total\s+due|amount\s+due|total|商品合計|小計|送料|配送料|税|合計)`;
+
+function labeledCheckoutMoney(
+  text: string,
+  label: string,
+  fallbackCurrency?: string,
+): CheckoutMoney | null {
+  const match = text.match(
+    new RegExp(
+      `(?:${label})\\s*[:：]?\\s*([\\s\\S]*?)(?=${checkoutComponentBoundary}\\s*[:：]?|$)`,
+      "iu",
+    ),
+  );
+  const value = match?.[1]?.trim();
+  if (value === undefined || value.length === 0) return null;
+  const parsed = parseCheckoutAmount([`Total ${value}`], fallbackCurrency);
+  return parsed !== null && fallbackCurrency !== undefined && parsed.currency !== fallbackCurrency
+    ? null
+    : parsed;
+}
+
+function shippingMoney(text: string, fallbackCurrency?: string): CheckoutMoney | null {
+  const pattern = new RegExp(
+    `(?:shipping|delivery|送料|配送料)\\s*[:：]?\\s*([\\s\\S]*?)(?=${checkoutComponentBoundary}\\s*[:：]?|$)`,
+    "giu",
+  );
+  const candidates: CheckoutMoney[] = [];
+  for (const match of text.matchAll(pattern)) {
+    const value = match[1]?.trim();
+    if (value === undefined || value.length === 0) continue;
+    if (
+      /\b(?:on|for)\s+(?:all\s+)?orders?\b|\borders?\s+(?:over|above|of)\b|\b(?:minimum|qualifying)\s+(?:order|spend|purchase)\b/iu.test(
+        value,
+      )
+    ) {
+      continue;
+    }
+    if (/^(?:free|complimentary|0|無料)(?:\s|$)/iu.test(value)) {
+      if (fallbackCurrency !== undefined) {
+        candidates.push({ amount_cents: 0, currency: fallbackCurrency });
+      }
+      continue;
+    }
+    if (!/^(?:(?:[A-Z]{3}\p{Sc}?|\p{Sc})\s*)?\d/iu.test(value)) continue;
+    const parsed = parseCheckoutAmount([`Total ${value}`], fallbackCurrency);
+    if (parsed === null) continue;
+    if (fallbackCurrency !== undefined && parsed.currency !== fallbackCurrency) continue;
+    candidates.push(parsed);
+  }
+  return candidates.at(-1) ?? null;
+}
+
+function originForUrl(url: string): string | null {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
+function cartMutationForUrl(session: Session, url: string): CartMutation | null {
+  const origin = originForUrl(url);
+  return origin !== null && session.lastCartMutation?.origin === origin
+    ? session.lastCartMutation
+    : null;
+}
+
+function cartUrlForState(
+  session: Session,
+  url: string,
+  elements: readonly InteractiveElement[],
+): string | null {
+  const origin = originForUrl(url);
+  if (origin === null) return null;
+  if (checkoutStageFromUrl(url) === "cart") {
+    session.cartUrls.set(origin, url);
+    return url;
+  }
+  const cartLink = elements.find((el) => {
+    const label = `${el.visibleText ?? ""} ${el.ariaLabel ?? ""} ${el.labelText ?? ""}`;
+    return (
+      el.href !== null &&
+      el.href !== undefined &&
+      /\b(?:cart|basket|bag)\b|(?:かご|カート)/i.test(label)
+    );
+  });
+  if (cartLink?.href !== undefined && cartLink.href !== null) {
+    try {
+      const resolved = new URL(cartLink.href, url);
+      if (resolved.origin === origin && checkoutStage(resolved.toString(), []) === "cart") {
+        session.cartUrls.set(origin, resolved.toString());
+        return resolved.toString();
+      }
+    } catch {
+      // A malformed href is not a canonical cart URL; fall through to the
+      // previously observed cart page rather than fabricating one.
+    }
+  }
+  return session.cartUrls.get(origin) ?? null;
+}
+
+function checkoutStateForObservation(
+  session: Session,
+  url: string,
+  text: string,
+  elements: readonly InteractiveElement[],
+  liveCheckout: CheckoutSummary | null,
+): CheckoutState | undefined {
+  const stage = checkoutStage(url, elements);
+  const mutation = cartMutationForUrl(session, url);
+  const origin = originForUrl(url);
+  const checkout =
+    origin !== null && liveCheckout?.checkout_origin === origin ? liveCheckout : undefined;
+  // Do not burden unrelated provision flows with an empty cart-shaped object.
+  if (stage === null && mutation === null) return undefined;
+  const payableTotal =
+    checkout === undefined
+      ? null
+      : { amount_cents: checkout.amount_cents, currency: checkout.currency };
+  const fallbackCurrency = checkout?.currency;
+  const resolvedStage = stage ?? "product";
+  return {
+    authority: "informational_only",
+    completeness: "best_effort",
+    authoritative_for_payment: false,
+    stage: resolvedStage,
+    product_identity: mutation?.productIdentity ?? null,
+    options_hash: mutation?.optionsHash ?? null,
+    quantity: observedCartQuantity(elements, text),
+    subtotal: labeledCheckoutMoney(
+      text,
+      String.raw`subtotal|merchandise\s+subtotal|商品合計|小計`,
+      fallbackCurrency,
+    ),
+    shipping: shippingMoney(text, fallbackCurrency),
+    payable_total: payableTotal,
+    cart_url: cartUrlForState(session, url, elements),
+    next_action:
+      resolvedStage === "checkout"
+        ? { tool: "operate_pay", phase: "fill_card" }
+        : resolvedStage === "cart"
+          ? { tool: "operate_act", kind: "click", intent: "proceed_to_checkout" }
+          : { tool: "operate_observe" },
+  };
+}
+
+function withCheckoutState(
+  observation: Observation,
+  state: CheckoutState | undefined,
+  mutation: CartMutation | null,
+): Observation {
+  return {
+    ...observation,
+    ...(state === undefined ? {} : { checkout_state: state }),
+    ...(mutation === null ? {} : { cart_delta: mutation.cartDelta }),
+  };
+}
+
+function isCartAffectingAction(
+  action: ProvisionAction,
+  el: InteractiveElement | null,
+  extraLabels: readonly string[] = [],
+): boolean {
+  const parts = [
+    "target" in action ? action.target : "",
+    el?.visibleText ?? "",
+    el?.ariaLabel ?? "",
+    el?.labelText ?? "",
+    el?.name ?? "",
+    el?.id ?? "",
+    el?.container ?? "",
+    el?.screenPath ?? "",
+    ...extraLabels,
+  ];
+  const target = parts.join(" ");
+  if (action.kind === "click" || action.kind === "js_click") {
+    if (
+      /(?:add\s+to\s+(?:cart|bag|basket)|remove\s+from\s+(?:cart|bag|basket)|update\s+(?:cart|bag|basket)|increase\s+quantity|decrease\s+quantity|かごに追加|カートに追加|カートから削除|数量を増やす|数量を減らす)/i.test(
+        target,
+      )
+    ) {
+      return true;
+    }
+    const hasQuantityContext =
+      /(?:\b(?:quantity|qty|cart|basket|bag)\b|数量|個数|カート|かご)/i.test(target);
+    if (hasQuantityContext && parts.some((part) => /^\s*(?:\+|[-−])\s*$/.test(part))) {
+      return true;
+    }
+    const rowContext = `${el?.container ?? ""} ${el?.screenPath ?? ""}`;
+    const actionLabels = [
+      "target" in action ? action.target : "",
+      el?.visibleText ?? "",
+      el?.ariaLabel ?? "",
+      el?.labelText ?? "",
+      el?.name ?? "",
+      el?.id ?? "",
+      ...extraLabels,
+    ];
+    return (
+      /(?:\b(?:cart|basket|bag)(?:\s+item|\s+line)?\b|カート|かご)/i.test(rowContext) &&
+      actionLabels.some((label) => /^\s*(?:(?:remove|delete|update)\b|削除|更新)/i.test(label))
+    );
+  }
+  return (
+    (action.kind === "type" || action.kind === "select") &&
+    /(?:\b(?:quantity|qty)\b|数量|個数)/i.test(target)
+  );
+}
+
 async function observeSession(
   session: Session,
   detail: "compact" | "full" = "compact",
 ): Promise<Observation> {
-  session.browser.recoverActivePage();
-  widenAllowedHostsFromCurrentUrl(session);
-  session.generation += 1;
-  const generation = session.generation;
-  const elements = await session.browser.extractInteractiveElements();
-  session.lastElements = elements;
-  const text = await session.browser.extractVisibleText();
-  const normalizedFull = text.replace(/\s+/g, " ").trim();
-  const normalizedText = normalizedFull.slice(0, 4000);
-  const guidance = provisionPerceptionGuidance(normalizedText);
-  const url = session.browser.currentUrl();
-  const refs = provisionElementRefs(elements);
-  const refOf = (el: InteractiveElement): string => refs.get(el) ?? provisionElementRef(el);
-  const textTruncated = normalizedFull.length > 4000;
-
-  // Compact (default): the delta path, computed by the pure core.
-  if (detail !== "full") {
-    const built = buildCompactObservation({
-      sessionId: session.id,
-      url,
-      text: normalizedText,
-      textTruncated,
-      ...(guidance !== undefined ? { guidance } : {}),
+  const oauthInProgress = (): Observation => {
+    session.prevObserve = null;
+    const oauth = session.browser.oauthTransitionStatus?.();
+    const observation: Observation = {
+      session_id: session.id,
+      url: oauth?.productUrl ?? session.startUrl,
+      text: "",
+      guidance:
+        "OAuth in progress: the provider detached or closed its page as expected. " +
+        "Do not switch login methods or close the session; call operate_observe again to read the retained product page.",
+      elements: [],
+      oauth: {
+        state: "in_progress",
+        provider_page: "closed_or_detached",
+        next_action: "operate_observe",
+      },
+    };
+    session.browser.completeOAuthTransitionRecovery();
+    return observation;
+  };
+  try {
+    session.browser.recoverActivePage();
+    const transition = session.browser.oauthTransitionStatus?.();
+    if (
+      transition?.providerPageClosed === true &&
+      transition.productPageViable &&
+      transition.browserConnected
+    ) {
+      return oauthInProgress();
+    }
+    widenAllowedHostsFromCurrentUrl(session);
+    session.generation += 1;
+    const generation = session.generation;
+    const elements = await session.browser.extractInteractiveElements();
+    session.lastElements = elements;
+    const sealedFieldKeys = observationSealedFieldKeys(session, elements);
+    const text = redactPaymentObservationText(
+      await session.browser.extractVisibleText(),
       elements,
-      sealed: session.sealedFieldKeys,
-      prev: session.prevObserve,
-    });
-    // Persist the COMPLETE snapshot (path INCLUDED) — the safety net that makes
-    // delta safe: the host re-expands the full inventory from here.
-    const snapshotFile = persistObserveSnapshot(
+      session.paymentFieldSealActive,
+    );
+    const normalizedFull = text.replace(/\s+/g, " ").trim();
+    const normalizedText = normalizedFull.slice(0, 4000);
+    const guidance = provisionPerceptionGuidance(normalizedText);
+    const url = session.browser.currentUrl();
+    const liveCheckout = await captureCartCheckoutForFillCardFallback(session, url);
+    const checkoutState = checkoutStateForObservation(
+      session,
+      url,
+      text.slice(0, 12_000),
+      elements,
+      liveCheckout,
+    );
+    const currentCartMutation = cartMutationForUrl(session, url);
+    const refs = provisionElementRefs(elements);
+    const refOf = (el: InteractiveElement): string => refs.get(el) ?? provisionElementRef(el);
+    const textTruncated = normalizedFull.length > 4000;
+
+    // Compact (default): the delta path, computed by the pure core.
+    if (detail !== "full") {
+      const built = buildCompactObservation({
+        sessionId: session.id,
+        url,
+        text: normalizedText,
+        textTruncated,
+        ...(guidance !== undefined ? { guidance } : {}),
+        elements,
+        sealed: sealedFieldKeys,
+        paymentSealActive: session.paymentFieldSealActive,
+        prev: session.prevObserve,
+      });
+      // Persist the COMPLETE snapshot (path INCLUDED) — the safety net that makes
+      // delta safe: the host re-expands the full inventory from here.
+      const snapshotFile = persistObserveSnapshot(
+        session,
+        generation,
+        url,
+        normalizedText,
+        textTruncated,
+        built.fileElements,
+      );
+      if (snapshotFile === null) {
+        // Persistence FAILED, so no recovery file exists. A delta (which omits
+        // unchanged elements) or a collapsed full snapshot (which omits chrome
+        // links) would be UNRECOVERABLE — the host would have no way to re-expand.
+        // Fall back to a FULL, UNCOLLAPSED response (every element inline). And
+        // INVALIDATE the delta baseline (null, not "leave it at the last good
+        // state"): the host's reconstruction is now THIS full set, so the next
+        // observe must emit a fresh FULL snapshot too, never a delta computed
+        // against the last-persisted baseline — that stale-baseline delta would
+        // desync a host that has already moved to this full state (a
+        // remove-then-restore-across-a-failed-persist sequence would silently drop
+        // the restored element otherwise).
+        session.prevObserve = null;
+        return withCheckoutState(
+          {
+            session_id: session.id,
+            url,
+            text: normalizedText,
+            ...(guidance !== undefined ? { guidance } : {}),
+            // Still a COMPACT response — carry the (uncollapsed) set as the columnar
+            // table so the host parses it the same way as any other compact observe.
+            ...emitElements([...built.fullByRef.values()], "columnar"),
+            delta: false,
+            elements_total: elements.length,
+            ...(textTruncated ? { text_truncated: true } : {}),
+          },
+          checkoutState,
+          currentCartMutation,
+        );
+      }
+      session.prevObserve = built.nextState;
+      return withCheckoutState(
+        {
+          ...built.observation,
+          snapshot_file: snapshotFile,
+        },
+        checkoutState,
+        currentCartMutation,
+      );
+    }
+
+    // Full (legacy rich) path — the explicit escape hatch. Byte-identical to the
+    // pre-delta full payload: every element with every field, screen, and
+    // accessibility, never a delta and never a chrome collapse.
+    session.prevObserve = null;
+    // Refresh the persisted snapshot as a SIDE EFFECT so a re-expansion after a
+    // full-only observe can't restore stale state (the previous compact snapshot).
+    // Deliberately NOT surfaced in the payload — the full escape hatch stays
+    // byte-equivalent to the legacy shape (no snapshot_file field added).
+    persistObserveSnapshot(
       session,
       generation,
       url,
       normalizedText,
       textTruncated,
-      built.fileElements,
+      elements.map((el) =>
+        toCompactElement(
+          el,
+          refOf(el),
+          sealedFieldKeys,
+          true,
+          false,
+          session.paymentFieldSealActive,
+        ),
+      ),
     );
-    if (snapshotFile === null) {
-      // Persistence FAILED, so no recovery file exists. A delta (which omits
-      // unchanged elements) or a collapsed full snapshot (which omits chrome
-      // links) would be UNRECOVERABLE — the host would have no way to re-expand.
-      // Fall back to a FULL, UNCOLLAPSED response (every element inline). And
-      // INVALIDATE the delta baseline (null, not "leave it at the last good
-      // state"): the host's reconstruction is now THIS full set, so the next
-      // observe must emit a fresh FULL snapshot too, never a delta computed
-      // against the last-persisted baseline — that stale-baseline delta would
-      // desync a host that has already moved to this full state (a
-      // remove-then-restore-across-a-failed-persist sequence would silently drop
-      // the restored element otherwise).
-      session.prevObserve = null;
-      return {
+    const screen = buildScreenOutline(
+      elements,
+      normalizedText,
+      sealedFieldKeys,
+      session.paymentFieldSealActive,
+    );
+    const accessibility = buildAccessibilitySnapshot(
+      elements,
+      undefined,
+      sealedFieldKeys,
+      session.paymentFieldSealActive,
+    );
+    return withCheckoutState(
+      {
         session_id: session.id,
         url,
         text: normalizedText,
         ...(guidance !== undefined ? { guidance } : {}),
-        // Still a COMPACT response — carry the (uncollapsed) set as the columnar
-        // table so the host parses it the same way as any other compact observe.
-        ...emitElements([...built.fullByRef.values()], "columnar"),
-        delta: false,
-        elements_total: elements.length,
-        ...(textTruncated ? { text_truncated: true } : {}),
-      };
+        ...(screen !== undefined ? { screen } : {}),
+        ...(accessibility !== undefined ? { accessibility } : {}),
+        elements: elements.map((el) => {
+          const observed: ObservedElement = {
+            ref: refOf(el),
+            label: presentLabel(el, sealedFieldKeys, session.paymentFieldSealActive),
+            tag: presentPaymentSafeString(el.tag, session.paymentFieldSealActive),
+            role:
+              el.role === null
+                ? null
+                : presentPaymentSafeString(el.role, session.paymentFieldSealActive),
+            type:
+              el.type === null
+                ? null
+                : presentPaymentSafeString(el.type, session.paymentFieldSealActive),
+            value: presentFieldValue(el, sealedFieldKeys, session.paymentFieldSealActive),
+            checked: el.checked ?? null,
+            href:
+              el.href === null || el.href === undefined
+                ? null
+                : presentPaymentSafeString(el.href, session.paymentFieldSealActive),
+            testId:
+              el.testId === null || el.testId === undefined
+                ? null
+                : presentPaymentSafeString(el.testId, session.paymentFieldSealActive),
+            path:
+              el.screenPath === null || el.screenPath === undefined
+                ? null
+                : presentPaymentSafeString(el.screenPath, session.paymentFieldSealActive),
+            container:
+              el.container === null || el.container === undefined
+                ? null
+                : presentPaymentSafeString(el.container, session.paymentFieldSealActive),
+            topmost: el.topmost ?? null,
+            occluded_by:
+              el.occludedBy === null || el.occludedBy === undefined
+                ? null
+                : presentPaymentSafeString(el.occludedBy, session.paymentFieldSealActive),
+            frame_origin:
+              el.frameOrigin === null || el.frameOrigin === undefined
+                ? null
+                : presentPaymentSafeString(el.frameOrigin, session.paymentFieldSealActive),
+          };
+          annotatePaymentControl(observed, el);
+          return observed;
+        }),
+      },
+      checkoutState,
+      currentCartMutation,
+    );
+  } catch (err) {
+    const oauth = session.browser.oauthTransitionStatus?.();
+    if (oauth?.providerPageClosed === true && oauth.productPageViable && oauth.browserConnected) {
+      // A read racing an expected provider-page close must not leak the raw
+      // Playwright "Target page, context or browser has been closed" exception
+      // into the model's plan. Discard the delta baseline because the next
+      // successful product-page read is a new authoritative snapshot.
+      return oauthInProgress();
     }
-    session.prevObserve = built.nextState;
-    return {
-      ...built.observation,
-      snapshot_file: snapshotFile,
-    };
+    throw err;
   }
+}
 
-  // Full (legacy rich) path — the explicit escape hatch. Byte-identical to the
-  // pre-delta full payload: every element with every field, screen, and
-  // accessibility, never a delta and never a chrome collapse.
-  session.prevObserve = null;
-  // Refresh the persisted snapshot as a SIDE EFFECT so a re-expansion after a
-  // full-only observe can't restore stale state (the previous compact snapshot).
-  // Deliberately NOT surfaced in the payload — the full escape hatch stays
-  // byte-equivalent to the legacy shape (no snapshot_file field added).
-  persistObserveSnapshot(
-    session,
-    generation,
-    url,
-    normalizedText,
-    textTruncated,
-    elements.map((el) => toCompactElement(el, refOf(el), session.sealedFieldKeys, true)),
+function isCheckoutSubmitLabeled(labels: readonly (string | null | undefined)[]): boolean {
+  return labels.some(
+    (label) => label !== null && label !== undefined && CHECKOUT_SUBMIT_LABEL_RE.test(label.trim()),
   );
-  const screen = buildScreenOutline(elements, normalizedText, session.sealedFieldKeys);
-  const accessibility = buildAccessibilitySnapshot(elements, undefined, session.sealedFieldKeys);
-  return {
-    session_id: session.id,
-    url,
-    text: normalizedText,
-    ...(guidance !== undefined ? { guidance } : {}),
-    ...(screen !== undefined ? { screen } : {}),
-    ...(accessibility !== undefined ? { accessibility } : {}),
-    elements: elements.map((el) => ({
-      ref: refOf(el),
-      label: presentLabel(el, session.sealedFieldKeys),
-      tag: el.tag,
-      role: el.role,
-      type: el.type,
-      value: presentFieldValue(el, session.sealedFieldKeys),
-      checked: el.checked ?? null,
-      href: el.href ?? null,
-      testId: el.testId ?? null,
-      path: el.screenPath ?? null,
-      container: el.container ?? null,
-      topmost: el.topmost ?? null,
-      occluded_by: el.occludedBy ?? null,
-    })),
-  };
+}
+
+function isPlaceOrderClickCandidate(el: InteractiveElement): boolean {
+  return isCheckoutSubmitLabeled([
+    el.ariaLabel,
+    el.value,
+    el.visibleText,
+    el.labelText,
+    el.iconLabel,
+    el.title,
+  ]);
+}
+
+// D2 — one human passkey approval authorizes at most one place-order attempt.
+// operate_act is otherwise fully generic (no merchant hostname/selector
+// knowledge); this reuses the SAME label heuristic (CHECKOUT_SUBMIT_LABEL_RE)
+// Squire's own retired single-phase submit used to find the pay/place-order
+// control, so a click/js_click only counts as a place-order attempt when it
+// targets a control that reads like one. Returns the approval snapshot when
+// THIS action is the first attempt; throws before the click executes on a
+// repeat. A fresh attempt requires a fresh operate_pay approval — since a
+// filled card can never be refilled in the same session (Pillar 2), that
+// means a new session.
+function enforcePlaceOrderGuard(
+  session: Session,
+  labels: readonly (string | null | undefined)[],
+): Session["placeOrderApproval"] {
+  if (session.placeOrderApproval === null || !isCheckoutSubmitLabeled(labels)) return null;
+  if (session.placeOrderAttempted) {
+    throw new Error(
+      "operate_act refused: a place-order attempt already fired for this approval " +
+        `(approval_id=${session.placeOrderApproval.approvalId}). One human passkey approval ` +
+        "authorizes at most one place-order attempt — a fresh operate_pay approval is required " +
+        "before placing the order again.",
+    );
+  }
+  const approval = session.placeOrderApproval;
+  session.placeOrderAttempted = true;
+  return approval;
+}
+
+// D1 — best-effort server-side record that a caller-placed charge was
+// attempted. Deliberately attempt semantics, not execution: Squire cannot
+// verify what the merchant did after the caller's click (it never re-reads
+// the total or the order-confirmation page here), only that the approval was
+// consumed and the place-order control was pressed. Never blocks the click —
+// mirrors the audit_recorded best-effort handling in pay-operator.ts.
+async function recordPlaceOrderAttemptAudit(
+  session: Session,
+  approval: NonNullable<Session["placeOrderApproval"]>,
+): Promise<void> {
+  if (session.api === undefined) return;
+  try {
+    await session.api.auditPayment({
+      merchant: approval.merchant,
+      amount_cents: approval.amountCents,
+      currency: approval.currency,
+      last4: approval.last4,
+      card_ref: approval.cardRef,
+      approval_id: approval.approvalId,
+      status: "payment_place_order_attempted",
+      ...(approval.mandateId !== undefined ? { mandate_id: approval.mandateId } : {}),
+    });
+  } catch {
+    // Best-effort — an audit write failure must never fail the caller's
+    // place-order action.
+  }
+}
+
+async function runClickWithPlaceOrderGuard(
+  session: Session,
+  click: (shouldTrack: (labels: readonly string[]) => boolean) => Promise<ClickDispatchStatus>,
+): Promise<void> {
+  let approval: Session["placeOrderApproval"] = null;
+  try {
+    const dispatchStatus = await click((labels) => {
+      approval = enforcePlaceOrderGuard(session, labels);
+      return approval !== null;
+    });
+    if (approval === null) return;
+    if (dispatchStatus === "not_dispatched") {
+      if (session.placeOrderApproval === approval) session.placeOrderAttempted = false;
+      return;
+    }
+  } catch (error) {
+    if (approval === null) throw error;
+    if (clickDispatchStatusForError(error) === "not_dispatched") {
+      if (session.placeOrderApproval === approval) session.placeOrderAttempted = false;
+    } else {
+      await recordPlaceOrderAttemptAudit(session, approval);
+    }
+    throw error;
+  }
+  await recordPlaceOrderAttemptAudit(session, approval);
 }
 
 export async function act(
   sessionId: string,
   action: ProvisionAction,
   detail: ObserveDetail = "compact",
+  cartIdentity?: CartIdentityContext,
 ): Promise<Observation> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
@@ -2574,9 +4444,24 @@ export async function act(
       `type_secret provenance must match the authoritative slot credential.${action.slot}`,
     );
   }
+  // Gate here — ahead of BOTH the locator and element `type` branches, and of
+  // replay's act() calls — so no model-supplied text path can reach a PAN fill.
+  if (action.kind === "type") {
+    const cardBlock = manualCardEntryBlockReason(action.text);
+    if (cardBlock !== null) throw new ManualCardEntryBlockedError(cardBlock);
+  }
   const { browser } = session;
   let completedAction: ProvisionAction = action;
   let sensitiveSource: RecordedValueSource | undefined;
+  let cartAffecting = false;
+  const bindCartIdentity = (affecting: boolean): void => {
+    // Generic operate_act cart controls stay usable without identity. Identity
+    // is a best-effort observation hint here; exact product/variant binding and
+    // retry suppression belong to operate_act { kind: "cart_add" }'s dedicated contract.
+    if (!affecting || cartIdentity === undefined) return;
+    cartAffecting = true;
+    cartIdentity.onActionReady?.();
+  };
   const auditTarget =
     "target" in action && parseLocatorTarget(action.target) !== null
       ? "<mode>=<redacted>"
@@ -2661,7 +4546,7 @@ export async function act(
       if (value === undefined) {
         throw new Error(
           `type_secret: no sealed slot named "${action.slot}". Capture it first with ` +
-            `operate_extract { into_slot: "${action.slot}" }. Known slots: ` +
+            `operate_act { kind: "extract", into_slot: "${action.slot}" }. Known slots: ` +
             `[${[...session.secretSlots.keys()].join(", ")}]`,
         );
       }
@@ -2670,6 +4555,31 @@ export async function act(
         hole: `credential.${action.slot}`,
         literal: value,
       };
+      const locator = parseLocatorTarget(action.target);
+      if (locator !== null) {
+        const resolved = await browser.resolvePageTarget(locator.mode, locator.value, "type");
+        if (!resolved.ok) {
+          if (resolved.reason === "none") {
+            throw new Error(`type_secret: no element matched locator "${action.target}".`);
+          }
+          throw new AmbiguousProvisionTargetError(action.target, resolved.candidates);
+        }
+        try {
+          if (resolved.frameTarget !== null) {
+            assertSecretFrameTargetAllowed(session, resolved.frameTarget);
+          }
+          session.usedLocatorFallback = true;
+          await browser.typeHandle(resolved.handle, value, true);
+        } finally {
+          await resolved.handle.dispose().catch(() => undefined);
+        }
+        audit(sessionId, "type_secret", {
+          slot: action.slot,
+          locator_mode: locator.mode,
+          host: registrableHost(browser.currentUrl()),
+        });
+        break;
+      }
       const fresh = await browser.extractInteractiveElements();
       session.lastElements = fresh;
       // resolveTarget recomputes identities (incl. volatile positional-group
@@ -2677,15 +4587,24 @@ export async function act(
       // changed since the last observe resolves to null, not a survivor (#399).
       const el = resolveTarget(fresh, action.target);
       if (el === null) {
+        const stale = staleTargetError(session, action.target, fresh);
+        if (stale !== null) throw stale;
         throw new Error(`type_secret: no element matched target "${action.target}".`);
       }
       resolvedEl = el;
+      // Frame domain-lock (operator-frame-support) — never let a secret cross
+      // into a rogue/third-party (e.g. payment) iframe. See
+      // assertSecretFrameTargetAllowed; a main-frame or same-domain-frame
+      // target is unaffected.
+      assertSecretFrameTargetAllowed(session, el);
       // Remember this field so the next observation masks its DOM value — the
       // host sealed this secret into a slot and must never read it back.
       for (const key of elementTargetKeys(el)) session.sealedFieldKeys.add(key);
       // Type the REAL value into the page. It crosses only browser↔page; the
       // value is never returned to the host and never logged.
-      await browser.type(el.selector, value);
+      const target = frameTargetFor(el);
+      if (target !== null) await browser.typeInFrame(target, el.selector, value);
+      else await browser.type(el.selector, value);
       audit(sessionId, "type_secret", {
         slot: action.slot,
         target: action.target,
@@ -2695,12 +4614,14 @@ export async function act(
     }
     case "select": {
       // Re-resolve against FRESH elements — the target may be the <select> or
-      // its <label>; browser.selectOption walks label→control and handles the
-      // native vs custom-listbox split. text is the fuzzy option matcher.
+      // its <label>. Main-frame execution uses selectOption; frame execution
+      // uses selectInFrame. text is the fuzzy option matcher in both paths.
       const fresh = await browser.extractInteractiveElements();
       session.lastElements = fresh;
       const el = resolveTarget(fresh, action.target);
       if (el === null) {
+        const stale = staleTargetError(session, action.target, fresh);
+        if (stale !== null) throw stale;
         throw new Error(
           `select: no element matched target "${action.target}". Visible: ` +
             fresh
@@ -2710,7 +4631,17 @@ export async function act(
         );
       }
       resolvedEl = el;
-      const committedText = await browser.selectOption(el.selector, action.text);
+      // Frame domain-lock (operator-frame-support) — the SAME gate a frame
+      // click/type passes; see frameTargetAllowed. A native <select> is not a
+      // secret field, so the stricter type_secret cross-origin rule does not
+      // apply, but the ordinary domain lock does.
+      assertFrameTargetAllowed(session, el, "select");
+      bindCartIdentity(isCartAffectingAction(action, el));
+      const selectFrame = frameTargetFor(el);
+      const committedText =
+        selectFrame !== null
+          ? await browser.selectInFrame(selectFrame, el.selector, action.text)
+          : await browser.selectOption(el.selector, action.text);
       session.committedSelectValues.set(el.selector, committedText);
       completedAction = { ...action, text: committedText };
       await settleAfterStateChange(browser);
@@ -2739,16 +4670,17 @@ export async function act(
       // page instead of the extracted-element list.
       const locator = parseLocatorTarget(action.target);
       if (locator !== null) {
-        // text=/css= is a CLICK escape hatch only. `type` gates on click
-        // affordance / non-editable text so it can't target a form input, and
-        // upload/oauth_click have bespoke flows — reject them explicitly.
-        if (action.kind !== "click" && action.kind !== "js_click") {
+        if (action.kind !== "click" && action.kind !== "js_click" && action.kind !== "type") {
           throw new Error(
             `operate_act kind="${action.kind}" does not accept a text=/css= locator target; ` +
-              `text=/css= is for clicking (click / js_click). Use an @e: ref from operate_observe.`,
+              `use an @e: ref from operate_observe.`,
           );
         }
-        const resolved = await browser.resolvePageTarget(locator.mode, locator.value);
+        const resolved = await browser.resolvePageTarget(
+          locator.mode,
+          locator.value,
+          action.kind === "type" ? "type" : "click",
+        );
         if (!resolved.ok) {
           if (resolved.reason === "none") {
             throw new Error(
@@ -2764,17 +4696,41 @@ export async function act(
         // guard couldn't see through — clicking "Save product" in live mode via
         // css=#submit. Re-run it against compact safety signals computed from the
         // resolved control now that we know what the locator actually points at.
-        // Mark the session non-promotable BEFORE the click: a locator click can't
+        // Mark the session non-promotable BEFORE the action: a locator action can't
         // be replayed from the inventory (the element was never in it), so a
         // skill synthesized from this run would silently omit the step. Setting
-        // it up front means a click that lands but then throws still can't leave
+        // it up front means an action that lands but then throws still can't leave
         // the session promotable (see captureAndPromoteSession) (codex).
         try {
           const resolvedBlock = shouldBlockUnsafeProvisionSignals(pageText, resolved.safetySignals);
           if (resolvedBlock !== null) throw new Error(resolvedBlock);
+          if (resolved.frameTarget !== null) {
+            assertFrameTargetAllowed(session, resolved.frameTarget, action.kind);
+          }
+          bindCartIdentity(isCartAffectingAction(action, null, resolved.labels));
           session.usedLocatorFallback = true;
-          if (action.kind === "click") await browser.clickHandle(resolved.handle);
-          else await browser.jsClickHandle(resolved.handle);
+          const isPlaceOrderCandidate = isCheckoutSubmitLabeled([
+            resolved.text,
+            ...resolved.labels,
+          ]);
+          if (
+            session.placeOrderApproval !== null &&
+            isPlaceOrderCandidate &&
+            (action.kind === "click" || action.kind === "js_click")
+          ) {
+            await runClickWithPlaceOrderGuard(session, (shouldTrack) =>
+              browser.clickWithDispatchTracking(
+                {
+                  kind: "handle",
+                  handle: resolved.handle,
+                  method: action.kind,
+                },
+                shouldTrack,
+              ),
+            );
+          } else if (action.kind === "click") await browser.clickHandle(resolved.handle);
+          else if (action.kind === "js_click") await browser.jsClickHandle(resolved.handle);
+          else await browser.typeHandle(resolved.handle, action.text);
         } finally {
           await resolved.handle.dispose().catch(() => undefined);
         }
@@ -2782,7 +4738,7 @@ export async function act(
           locator_mode: locator.mode,
           host: registrableHost(browser.currentUrl()),
         });
-        await settleAfterStateChange(browser);
+        if (action.kind !== "type") await settleAfterStateChange(browser);
         break;
       }
       // Re-resolve against FRESH elements every act — never trust a stale index.
@@ -2793,6 +4749,8 @@ export async function act(
       // changed since the last observe resolves to null, not a survivor (#399).
       const el = resolveTarget(fresh, action.target);
       if (el === null) {
+        const stale = staleTargetError(session, action.target, fresh);
+        if (stale !== null) throw stale;
         throw new Error(
           `no element matched target "${action.target}". Visible: ` +
             fresh
@@ -2802,26 +4760,169 @@ export async function act(
         );
       }
       resolvedEl = el;
-      if (action.kind === "click") await browser.click(el.selector);
-      else if (action.kind === "js_click") await browser.clickViaJs(el.selector);
-      else if (action.kind === "type") {
+      // Frame domain-lock (operator-frame-support) — see frameTargetAllowed.
+      // A main-frame or same-domain-frame target is unaffected.
+      assertFrameTargetAllowed(session, el, action.kind);
+      bindCartIdentity(isCartAffectingAction(action, el));
+      if (action.kind === "click" || action.kind === "js_click") {
+        const target = frameTargetFor(el);
+        if (session.placeOrderApproval !== null && isPlaceOrderClickCandidate(el)) {
+          await runClickWithPlaceOrderGuard(session, (shouldTrack) =>
+            browser.clickWithDispatchTracking(
+              target !== null
+                ? { kind: "frame", frame: target, selector: el.selector, method: action.kind }
+                : { kind: "selector", selector: el.selector, method: action.kind },
+              shouldTrack,
+            ),
+          );
+        } else if (action.kind === "click") {
+          if (target !== null) await browser.clickInFrame(target, el.selector);
+          else await browser.click(el.selector);
+        } else {
+          if (target !== null) await browser.clickViaJsInFrame(target, el.selector);
+          else await browser.clickViaJs(el.selector);
+        }
+      } else if (action.kind === "type" && frameTargetFor(el) !== null) {
+        // Frame targets skip the autocomplete-popup-commit machinery below —
+        // it operates on the main page's DOM only (markPreexistingType
+        // SuggestionPopups / detectTypeSuggestionPopup / commitTypeSuggestion
+        // are page-scoped). Out of scope for the checkout-option case frame
+        // support exists for; a plain frame-scoped fill covers it.
         session.committedSelectValues.delete(el.selector);
-        await browser.type(el.selector, action.text);
+        await browser.typeInFrame(frameTargetFor(el)!, el.selector, action.text);
+      } else if (action.kind === "type") {
+        session.committedSelectValues.delete(el.selector);
+        if (!isAutocompleteScopedTypeField(action.provenance, el)) {
+          // Free text only — e.g. a site-search/catalog-search box, which
+          // can legitimately open its own suggestion listbox too. 3.1 only
+          // applies to a form/recipe field where a committed value is
+          // actually required; forcing every incidental popup into
+          // commit-or-stop would break ordinary search typing.
+          await browser.type(el.selector, action.text);
+        } else {
+          // 3.1 — a Google-Places-style address field or a react-select/cmdk/
+          // Radix combobox can open a suggestion popup as a side effect of
+          // typing, not just of an explicit `select`. Snapshot pre-existing
+          // popups BEFORE typing (it can open mid-keystroke), then detect what
+          // opened afterward.
+          await browser.markPreexistingTypeSuggestionPopups();
+          await browser.type(el.selector, action.text);
+          // Cleanup (clear our tracking markers, and dismiss with Escape
+          // ONLY when a detected popup is plausibly still open) must run no
+          // matter how this resolves — no popup, an ambiguous stop, a
+          // failed commit, or success — mirroring selectFromCombobox's own
+          // try/finally. Scoping the try to only the
+          // suggestionTexts.length > 0 branch left the "preexisting"
+          // markers set by markPreexistingTypeSuggestionPopups uncleared on
+          // the no-popup path; markComboboxPreexistingElements only ADDS
+          // markers, so a stale one could exclude a genuine popup from
+          // detection on a LATER type/select into the same element. Escape
+          // fires on the ambiguous-stop and failed-commit paths (popup
+          // never interacted with / click may not have registered — still
+          // open either way) but NEVER after a confirmed commit: the widget
+          // already closed its popup on selection, so Escape would land on
+          // nothing and bubble to close an enclosing modal/dialog instead.
+          let dismissPopupWithEscape = false;
+          try {
+            const suggestionTexts = await browser.detectTypeSuggestionPopup(el.selector);
+            if (suggestionTexts.length > 0) {
+              dismissPopupWithEscape = true;
+              const candidates = matchAutocompleteSuggestions(action.text, suggestionTexts);
+              if (candidates.length !== 1) {
+                // Pass the MATCHED subset, not the full popup — passing every
+                // suggestion made candidates.length effectively the popup
+                // size (always > 0 here), so the constructor's zero-match
+                // branch was dead code and the multi-match message reported
+                // the wrong count.
+                throw new AutocompleteCommitRequiredError(
+                  action.text,
+                  candidates.map((i) => suggestionTexts[i]!),
+                );
+              }
+              const pickedText = suggestionTexts[candidates[0]!]!;
+              await browser.commitTypeSuggestion(candidates[0]!);
+              // Never trust that a click "looked right" — POSITIVELY confirm
+              // the commit took (same hard constraint as the field-role
+              // guard, PR #447: a miss is a stop, never a silent
+              // pass-through). Checking only the typed-into selector's own
+              // `.value` false-fails on react-select/cmdk-style widgets,
+              // which clear their search input on selection and render the
+              // committed choice in a nearby element instead —
+              // confirmAutocompleteCommitted checks that too, bounded to the
+              // field's own neighborhood, and returns false (never a guess)
+              // when nothing confirms it.
+              const committed = await browser.confirmAutocompleteCommitted(el.selector, pickedText);
+              if (!committed) {
+                throw new Error(
+                  `autocomplete commit for "${action.text}" did not take — nothing on the page ` +
+                    `confirms the field now holds "${pickedText}" after selecting it.`,
+                );
+              }
+              dismissPopupWithEscape = false;
+              // Rewrite the completed action to the field's LIVE post-commit
+              // value (not the raw typed draft) before it reaches
+              // recordTrace/recordedValues, so the recorded trace reflects
+              // what actually ended up on the page. Recording pickedText
+              // would diverge from the live value exactly when the commit
+              // was confirmed via a NEARBY element (react-select/cmdk clear
+              // their search input on selection), and the cold-path
+              // transition attestation (attestRecordedFieldsBeforeTransition
+              // → verifyFilledFieldValues) re-reads the live value — a
+              // pickedText literal would flag every such commit as a
+              // mismatch and disqualify recipe recording. Reading the same
+              // live value here is attestation-consistent by construction.
+              // Known limitation: after a nearby-signal-only commit the
+              // field itself can be empty, so the recorded literal is "" —
+              // that field won't cleanly template into a saved recipe, but
+              // the live run is unaffected.
+              const refreshed = await browser.extractInteractiveElements();
+              session.lastElements = refreshed;
+              const liveField = refreshed.find((field) => field.selector === el.selector);
+              const liveValue = typeof liveField?.value === "string" ? liveField.value : pickedText;
+              completedAction = { ...action, text: liveValue };
+            }
+          } finally {
+            await browser.discardTypeSuggestionPopup(dismissPopupWithEscape);
+          }
+        }
       } else if (action.kind === "upload") {
+        assertNoFrameTarget(el, "upload");
         await browser.uploadFile(el.selector, action.path);
         audit(sessionId, "upload", {
           target: action.target,
           path: action.path,
           host: registrableHost(browser.currentUrl()),
         });
-      } else await browser.startOAuth(el.selector);
+      } else {
+        assertNoFrameTarget(el, "oauth_click");
+        await browser.startOAuth(el.selector);
+      }
       if (action.kind !== "type") await settleAfterStateChange(browser);
+      break;
+    }
+    case "oauth_login": {
+      const pageText = await browser.extractVisibleText();
+      const blockReason = shouldBlockUnsafeProvisionAction(pageText, action);
+      if (blockReason !== null) throw new Error(blockReason);
+      // Atomic OAuth deliberately accepts only the observed stable ref. A raw
+      // locator would lose the same stale-reference guarantees as every other
+      // action before the provider transition begins.
+      const fresh = await browser.extractInteractiveElements();
+      session.lastElements = fresh;
+      const el = resolveTarget(fresh, action.target);
+      if (el === null) {
+        throw new Error(
+          `oauth_login: no element matched target "${action.target}". Re-observe and use the OAuth button ref.`,
+        );
+      }
+      resolvedEl = el;
+      assertNoFrameTarget(el, "oauth_login");
+      await browser.loginWithOAuth(el.selector);
+      await settleAfterStateChange(browser);
       break;
     }
   }
   await verifyRecordedFieldsAfterTransition(session, action, recordingTransitionFields);
-  await captureReplayRepairVerification(session, completedAction, resolvedEl);
-  await refreshReplayVerificationAfterAction(session, completedAction, resolvedEl);
   // Don't fold inbox-provider steps into the replayable recipe (see
   // INBOX_READ_HOSTS): replay re-reads the code via awaitVerification, and a
   // recorded inbox click would bake the email's subject into a shared recipe.
@@ -2829,19 +4930,96 @@ export async function act(
     recordTrace(session, completedAction, resolvedEl, sensitiveSource);
     recordCaptureRound(session, completedAction, resolvedEl, urlBeforeAction);
   }
+  if (cartAffecting) {
+    session.lastCartMutation = {
+      productIdentity: cartIdentity!.productIdentity,
+      optionsHash: cartIdentity!.optionsHash,
+      cartDelta: "unknown",
+      origin: originForUrl(browser.currentUrl()) ?? "",
+    };
+  }
   // `detail:"none"` returns a minimal ack (the action ran; no perception emitted)
   // so multi-field fills don't each echo the page. The host must call
   // operate_observe before its next ref-targeted act (refs aren't refreshed here).
-  if (detail === "none") {
-    return {
-      session_id: session.id,
-      url: browser.currentUrl(),
-      text: "",
-      elements: [],
-      observed: "none",
-    };
+  const observation =
+    detail === "none" && !cartAffecting && action.kind !== "oauth_login"
+      ? {
+          session_id: session.id,
+          url: browser.currentUrl(),
+          text: "",
+          elements: [],
+          observed: "none" as const,
+        }
+      : await observeSession(session, detail === "none" ? "compact" : detail);
+  return completedAction.kind === "select"
+    ? { ...observation, selected_option: completedAction.text }
+    : observation;
+}
+
+export interface FormSelectManyFieldResult {
+  label: string;
+  option: string;
+  status: "selected" | "failed";
+  selected_option?: string;
+  reason?: string;
+  repair?: TargetStaleResult;
+}
+
+export async function formSelectMany(
+  sessionId: string,
+  selections: Record<string, string>,
+): Promise<{ session_id: string; fields: FormSelectManyFieldResult[]; observation: Observation }> {
+  const fields: FormSelectManyFieldResult[] = [];
+
+  // Keep variant changes in one host call. Each successful select is followed
+  // by a real observe before the next target resolves: variant widgets commonly
+  // replace all dependent selects, so continuing from an old inventory is worse
+  // than reporting a partial result.
+  for (const [label, option] of Object.entries(selections)) {
+    try {
+      const actionResult = await act(
+        sessionId,
+        { kind: "select", target: label, text: option },
+        "none",
+      );
+      const selectedOption = actionResult.selected_option;
+      if (selectedOption === undefined) {
+        throw new Error("select: successful action omitted the selected option");
+      }
+      // `detail:none` is intentionally a minimal ack. The explicit observe here
+      // refreshes the DOM generation between every potentially mutating select.
+      await observe(sessionId, "compact");
+      fields.push({
+        label,
+        option,
+        status: "selected",
+        selected_option: selectedOption,
+      });
+    } catch (err) {
+      if (err instanceof TargetStaleError) {
+        fields.push({
+          label,
+          option,
+          status: "failed",
+          reason: err.message,
+          repair: err.result,
+        });
+      } else {
+        fields.push({
+          label,
+          option,
+          status: "failed",
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }
-  return await observeSession(session, detail);
+
+  return {
+    session_id: sessionId,
+    fields,
+    observation: await observe(sessionId, "compact"),
+  };
 }
 
 // PR3 privacy: in the operator model the host fills the USER's real email into
@@ -2964,7 +5142,7 @@ export function scrubKnownEmail(s: string, userEmail: string | null): string {
 function assertRecipeEmailScrubbed(recipe: OperatorRecipe, userEmail: string | null): void {
   const serialized = JSON.stringify(recipe);
   if (scrubKnownEmail(serialized, userEmail) !== serialized) {
-    throw new Error("operate_remember refused: known email remains in serialized recipe data");
+    throw new Error("operate_recipe_save refused: known email remains in serialized recipe data");
   }
 }
 
@@ -2986,6 +5164,11 @@ export function recipeTargetFor(
   userEmail: string | null = null,
 ): RecipeTarget | undefined {
   if (el === null) return undefined;
+  const scopedInventory = inventory.filter(
+    (candidate) =>
+      (candidate.frameOrigin ?? null) === (el.frameOrigin ?? null) &&
+      (candidate.framePath ?? null) === (el.framePath ?? null),
+  );
   const role =
     el.role ??
     (el.tag === "button"
@@ -3004,7 +5187,7 @@ export function recipeTargetFor(
     el.title ??
     el.name ??
     undefined;
-  const siblings = inventory.filter((candidate) => {
+  const siblings = scopedInventory.filter((candidate) => {
     if (candidate === el || candidate.selector === el.selector) return false;
     const candidateName =
       candidate.ariaLabel ??
@@ -3023,10 +5206,13 @@ export function recipeTargetFor(
       (el.href !== null && el.href !== undefined && candidate.href === el.href)
     );
   });
-  const nearText = siblings.length > 0 ? pickRowDisambiguator(el, siblings, inventory) : null;
+  const nearText = siblings.length > 0 ? pickRowDisambiguator(el, siblings, scopedInventory) : null;
   const domHint = pickStableDomHint(el);
   const hrefHint = pickHrefHint(el);
   const scrub = (value: string): string => scrubKnownEmail(value, userEmail);
+  // Locale-stable role for money-path fill safety (autocomplete > data-role >
+  // distinguishing input type). Never label text — labels flip under i18n.
+  const fieldRole = localeStableFieldRole(el);
   return {
     ...(domHint !== undefined
       ? {
@@ -3047,6 +5233,11 @@ export function recipeTargetFor(
     ...(el.visibleText !== null && el.visibleText.length > 0
       ? { visible_text: scrub(el.visibleText) }
       : {}),
+    ...(fieldRole !== null ? { field_role: fieldRole } : {}),
+    ...(el.frameOrigin !== undefined && el.frameOrigin !== null
+      ? { frame_origin: el.frameOrigin }
+      : {}),
+    ...(el.framePath !== undefined && el.framePath !== null ? { frame_path: el.framePath } : {}),
   };
 }
 
@@ -3058,7 +5249,7 @@ function recordTrace(
 ): void {
   // Never freeze a single-use link (email-verify / magic / reset token) into
   // the recipe — it's dead on the next replay. The host agent re-plans the
-  // verification step live (operate_await_verification fetches a FRESH link)
+  // verification step live (operate_act { kind: "await_verification" } fetches a FRESH link)
   // when it reaches that state, per the "recipe is a MAP, not a script" model.
   if (action.kind === "goto" && isSingleUseUrl(action.url)) {
     // Log only the host — never the token-bearing URL.
@@ -3150,6 +5341,10 @@ function recordTrace(
     case "oauth_click":
       a = { kind: "oauth_click", ...withText, ...withTarget };
       break;
+    case "oauth_login":
+      session.actionTrace.push({ action: { kind: "oauth_click", ...withText, ...withTarget } });
+      session.actionTrace.push({ action: { kind: "oauth_settle" } });
+      return;
   }
   const traceIndex = session.actionTrace.length;
   session.actionTrace.push({ action: a });
@@ -3196,13 +5391,26 @@ export function captureObserved(
   action: ProvisionAction,
   el: InteractiveElement | null,
 ): PostVerifyStep | null {
+  const frameScope =
+    el?.frameOrigin !== undefined &&
+    el.frameOrigin !== null &&
+    el.framePath !== undefined &&
+    el.framePath !== null
+      ? { frame_origin: el.frameOrigin, frame_path: el.framePath }
+      : {};
   switch (action.kind) {
     case "click":
     case "js_click":
     case "oauth_click":
+    case "oauth_login":
       return el === null
         ? null
-        : { kind: "click", selector: el.selector, reason: traceTextFor(el) ?? action.kind };
+        : {
+            kind: "click",
+            selector: el.selector,
+            reason: traceTextFor(el) ?? action.kind,
+            ...frameScope,
+          };
     case "type":
       // Non-secret value; the synthesizer applies the email/token/identity PII
       // scrub. type_secret is a different kind and is skipped above.
@@ -3213,6 +5421,7 @@ export function captureObserved(
             selector: el.selector,
             value: action.text,
             reason: traceTextFor(el) ?? "fill",
+            ...frameScope,
           };
     case "goto":
       return { kind: "navigate", url: action.url, reason: "navigate" };
@@ -3233,7 +5442,7 @@ function recordCaptureRound(
   session.captureRounds.push({
     service: captureService(session),
     round: session.captureRounds.length,
-    oauth: action.kind === "oauth_click",
+    oauth: action.kind === "oauth_click" || action.kind === "oauth_login",
     // The URL the inventory + action belong to (pre-action), NOT the post-
     // navigation URL — see urlBeforeAction in act().
     state: { url: urlAtObservation, title: "", html: "", screenshot: "" },
@@ -3270,9 +5479,9 @@ export async function captureAndPromoteSession(
 ): Promise<PromoteResult | { kind: "skipped"; reason: string }> {
   const session = sessionForCall(sessionId);
   if (session === undefined) return { kind: "skipped", reason: "unknown_session" };
-  // A run that used the text=/css= locator click fallback hit a control with no
+  // A run that used the text=/css= locator action fallback hit a control with no
   // inventory ref; the synthesizer can't represent that step, so promoting would
-  // ship a skill missing a click. Skip rather than emit a silently-broken skill.
+  // ship a skill missing an action. Skip rather than emit a silently-broken skill.
   if (session.usedLocatorFallback) {
     return { kind: "skipped", reason: "locator_fallback_unrepresentable" };
   }
@@ -3395,7 +5604,7 @@ function traceWithVerifiedProvenance(session: Session, inputs: KnownRecipeInputs
     }
     const authoritative = knownRecipeInputValue(inputs, source.hole);
     if (authoritative === undefined) {
-      throw new Error(`provenance ${source.hole} has no authoritative operate_remember input`);
+      throw new Error(`provenance ${source.hole} has no authoritative operate_recipe_save input`);
     }
     if (authoritative !== source.literal) {
       throw new Error(`provenance ${source.hole} does not match the injected value`);
@@ -3493,6 +5702,13 @@ export async function rememberRecipe(
     postcondition: Postcondition;
     verb?: OperatorVerb;
     inputs: KnownRecipeInputs;
+    /**
+     * Opt into the already-supported runtime entry form when the caller has a
+     * fresh same-domain service URL for each replay.  The stored key/domain
+     * and all action/value provenance stay unchanged; recipeEntryUrl still
+     * rejects a cross-domain runtime URL.
+     */
+    entry_mode?: "runtime_service_url";
   },
 ): Promise<{
   file: string;
@@ -3500,41 +5716,60 @@ export async function rememberRecipe(
   steps: number;
   secrets: string[];
   verified: PostconditionResult;
+  // replay-per-leg-signature — present only when this session's trace has a
+  // money field (a checkout-shaped leg exists to extract). A SECOND recipe,
+  // scoped to just that leg and keyed by the live checkout page's own
+  // field-name-set signature instead of domain — so it can be published and
+  // replayed on a completely different, unrelated store's checkout leg.
+  checkout_leg_file?: string;
 }> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   if (session.usedLocatorFallback) {
     throw new Error(
-      "operate_remember refused: this session used a text=/css= locator fallback that operator recipes cannot represent",
+      "operate_recipe_save refused: this session used a text=/css= locator fallback that operator recipes cannot represent",
     );
   }
   if (session.recipeRejectionReason !== null) {
-    throw new Error(`operate_remember refused: ${session.recipeRejectionReason}`);
+    throw new Error(`operate_recipe_save refused: ${session.recipeRejectionReason}`);
   }
   if (opts.inputs === undefined) {
-    throw new Error("operate_remember refused: complete provenance inputs are required");
+    throw new Error("operate_recipe_save refused: complete provenance inputs are required");
   }
   // Record only through the existing machine-checkable success gate. Previously
-  // operate_remember wrote first and operate_finish_task verified later, leaving
+  // operate_recipe_save wrote first and operate_finish verified later, leaving
   // an unverified recipe on disk when the postcondition failed.
   const verified = await verifyPostcondition(sessionId, opts.postcondition);
   if (!verified.confirmed) {
-    throw new Error(`operate_remember refused: postcondition not confirmed (${verified.reason})`);
+    throw new Error(
+      `operate_recipe_save refused: postcondition not confirmed (${verified.reason})`,
+    );
   }
   const secrets = [...session.secretSlots.keys()].map((slot) => ({ slot, stored: false as const }));
   const scrubbedStartUrl = scrubKnownEmail(session.startUrl, session.userEmail);
   const trace = traceWithVerifiedProvenance(session, opts.inputs);
   const postcondition = scrubRecipePostcondition(session, opts.postcondition, opts.inputs);
+  if (opts.entry_mode !== undefined && opts.verb === undefined) {
+    throw new Error("runtime recipe entry requires a keyed verb");
+  }
+  const verb = opts.verb !== undefined ? canonicalVerb(opts.verb) : undefined;
+  const actionPath = verb !== undefined ? extractActionPath(session.startUrl) : "";
   const recipe: OperatorRecipe = {
     name: opts.name,
     schema_version: 1,
     goal: opts.goal,
-    ...(opts.verb !== undefined
-      ? { verb: opts.verb, domain: operatorRecipeDomain(session.startUrl) }
+    ...(verb !== undefined
+      ? {
+          verb,
+          domain: operatorRecipeDomain(session.startUrl),
+          ...(actionPath.length > 0 ? { action_path: actionPath } : {}),
+        }
       : {}),
     // Canonical, stable replay entry — the page the session started at, never a
     // mid-flow single-use link inferred from the trace.
-    ...(isSingleUseUrl(session.startUrl) || scrubbedStartUrl !== session.startUrl
+    ...(opts.entry_mode === "runtime_service_url" ||
+    isSingleUseUrl(session.startUrl) ||
+    scrubbedStartUrl !== session.startUrl
       ? { entry_mode: "runtime_service_url" as const }
       : { entry_url: session.startUrl }),
     allowed_hosts: [...new Set(egressSeedHosts(session))],
@@ -3546,23 +5781,102 @@ export async function rememberRecipe(
   const unprovenancedMoneyField = findUnprovenancedMoneyField(recipe);
   if (unprovenancedMoneyField !== null) {
     throw new Error(
-      `operate_remember refused: money field lacks provenance (${unprovenancedMoneyField})`,
+      `operate_recipe_save refused: money field lacks provenance (${unprovenancedMoneyField})`,
     );
   }
   const file = await writeRecipe(recipe);
+  // No-regression guarantee (recipe-key-redesign): a recording that lands at
+  // the specific (verb, domain, action_path) file must also keep the
+  // crude-but-reliable degenerate (verb, domain) catch-all alive, so a later
+  // replay on an unrecognized path doesn't go cold where today it hits.
+  if (actionPath.length > 0) {
+    await refreshDegenerateCatchAll(recipe);
+  }
   audit(sessionId, "remember_recipe", {
     name: opts.name,
     steps: recipe.trace.length,
     secrets: secrets.length,
     file,
   });
+  const checkoutLegFile = await rememberCheckoutLeg(session, verb, trace).catch(() => null);
   return {
     file,
     name: opts.name,
     steps: recipe.trace.length,
     secrets: secrets.map((s) => s.slot),
     verified,
+    ...(checkoutLegFile !== null ? { checkout_leg_file: checkoutLegFile } : {}),
   };
+}
+
+// recipe-key-redesign — no-regression guarantee: on every recording that
+// lands at a specific (verb, domain, action_path) file, also refresh the
+// degenerate (verb, domain) catch-all whenever that slot is absent or
+// itself empty-path (i.e. it's already the crude catch-all, not some other
+// specific recording). Without this, a future recording that extracts a
+// path would quietly stop refreshing the catch-all a later unrecognized-path
+// replay still relies on.
+async function refreshDegenerateCatchAll(recipe: OperatorRecipe): Promise<void> {
+  if (recipe.verb === undefined || recipe.domain === undefined) return;
+  let shouldRefresh: boolean;
+  try {
+    const existing = await readRecipe(operatorRecipeKeyForDomain(recipe.verb, recipe.domain));
+    shouldRefresh = existing.action_path === undefined || existing.action_path.length === 0;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    shouldRefresh = true;
+  }
+  if (!shouldRefresh) return;
+  const degenerateRecipe: OperatorRecipe = { ...recipe, action_path: undefined };
+  await writeRecipe(degenerateRecipe);
+}
+
+// recipe-key-redesign — replaces the deleted MONEY_REPLAY_VERBS for the two
+// SAVE-TIME classifiers below (checkout-leg carving, unprovenanced-money-
+// field refusal). Distinct from the money REPLAY gate (which is now a pure
+// trace-content check, unconditional on verb) — these two are scope filters
+// unrelated to the payment fence, so they keep the verb-set shape MONEY_
+// REPLAY_VERBS had, just canonicalized (post-merge, 7 legacy verbs collapse
+// to 4 canonical ones).
+const MONEY_SHAPED_VERBS = new Set<OperatorVerb>(["purchase", "subscribe", "checkout", "book"]);
+
+// replay-per-leg-signature — split off and save the checkout portion of a
+// just-recorded money-path trace as its OWN recipe, keyed by the checkout
+// page's live field-name-set signature instead of domain. Best-effort and
+// silent on any reason it can't produce one (non-money verb, no money field
+// captured, empty live field set) — the whole-task recipe above is already
+// saved and stands on its own either way; this only ever ADDS a second,
+// narrower, cross-domain-reusable recipe alongside it.
+async function rememberCheckoutLeg(
+  session: Session,
+  verb: OperatorVerb | undefined,
+  trace: readonly TraceEntry[],
+): Promise<string | null> {
+  if (verb === undefined || !MONEY_SHAPED_VERBS.has(verb)) return null;
+  const legStart = checkoutLegStartIndex(trace);
+  if (legStart === null) return null;
+  const legTrace = trace.slice(legStart);
+  const fieldNames = await session.browser.extractCheckoutFieldNames();
+  const signature = checkoutFieldSetSignature(fieldNames);
+  if (signature === null) return null;
+  const legSlots = new Set(
+    legTrace
+      .filter((entry) => entry.action.kind === "type_secret")
+      .map((entry) => entry.action.slot)
+      .filter((slot): slot is string => slot !== undefined),
+  );
+  const checkoutRecipe: OperatorRecipe = {
+    name: `checkout-leg--${signature.slice(0, 12)}`,
+    schema_version: 1,
+    goal: "Fill the checkout leg's fields",
+    verb,
+    domain: checkoutShapeKey(signature),
+    allowed_hosts: [],
+    trace: legTrace,
+    secrets: [...legSlots].map((slot) => ({ slot, stored: false as const })),
+    postcondition: checkoutLegPostcondition(legTrace),
+  };
+  return await writeRecipe(checkoutRecipe);
 }
 
 // Read a single page snapshot for postcondition checking. Field VALUES are
@@ -3640,15 +5954,20 @@ export async function verifyActiveRecipePostcondition(
   return await verifyPostcondition(sessionId, state.boundPostcondition);
 }
 
-const MONEY_REPLAY_VERBS = new Set<OperatorVerb>([
-  "purchase",
-  "subscribe",
-  "checkout",
-  "renew",
-  "upgrade",
-  "book",
-  "reserve",
-]);
+// replay-per-leg-signature — the checkout leg's registry/local-store key,
+// computed from the CURRENT live page. Callers use this to resolve (and,
+// on a hit, replay via replayOperatorRecipe) a checkout-leg recipe
+// independently of whatever (or whether any) whole-task recipe applies to
+// this session's domain — the mechanism that lets a checkout plan recorded
+// on one store resolve on a different, unrelated store of the same
+// checkout platform. Returns null when the live page has no field-name-set
+// to key by (nothing to resolve yet).
+export async function checkoutShapeSignatureForSession(sessionId: string): Promise<string | null> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const fieldNames = await session.browser.extractCheckoutFieldNames();
+  return checkoutFieldSetSignature(fieldNames);
+}
 
 export type OperatorReplayResult =
   | {
@@ -3670,6 +5989,35 @@ export type OperatorReplayResult =
       observation: Observation;
       reason: "field_missing" | "field_value_mismatch";
       field: string;
+    }
+  | {
+      // replay-per-leg-signature — a replay field failure that occurred
+      // AFTER a genuine catalog/storefront prefix (legStartIndex > 0): the
+      // catalog/storefront leg already replayed fine, only the checkout leg
+      // needs cold driving. Distinct from human_required, which stays the
+      // terminal "stop, nothing narrower to fall back to" response for a
+      // single-leg (or leg-less) recipe. It is not resumable via resume_from,
+      // and recipe recording remains refused because recipeRejectionReason is
+      // set. The host may drive the checkout leg cold from from_step_index;
+      // any charge still goes through a fresh, human-approved operate_pay.
+      status: "leg_fallback_required";
+      observation: Observation;
+      leg: "checkout";
+      from_step_index: number;
+      reason: string;
+    }
+  | {
+      // replay-serve-live-domainlock — a goto/allow_host step's resolved
+      // target does not resolve to the recipe's own eTLD+1. Distinct from
+      // fallback_required: this is
+      // NEVER resumable — the host must abandon this recipe's replay and
+      // drive the remainder cold. Prevents a tampered/malicious shared recipe
+      // from steering the browser to an attacker origin.
+      status: "domain_lock_violation";
+      observation: Observation;
+      step_index: number;
+      host: string;
+      recipe_domain: string;
     };
 
 function replayTarget(action: TraceAction): RecipeTarget | null {
@@ -3696,6 +6044,28 @@ function boundReplayTarget(
 const MONEY_FIELD_TARGET =
   /(?:^|[\s._-])(?:address|street|line\s*[12]|city|state|province|postal|zip|country|e-?mail|phone|first\s*name|last\s*name|full\s*name|quantity|qty)(?:$|[\s._-])/i;
 
+// 3.1 must only engage for a form/recipe field where a committed value is
+// actually required (a checkout form field, or one the host tagged with a
+// recipe hole) — not arbitrary typing. The popup-shape detection
+// (role=listbox/menu/dialog, etc.) also matches an incidental suggestion
+// popup on an ordinary site-search/catalog-search box; without this scope,
+// typing a search query either auto-clicks a suggestion (navigating as a
+// side effect of "type") or throws, with no way to keep free text. Reuses
+// the existing MONEY_FIELD_TARGET shape check (moneyFieldName's sibling,
+// just read off the live element instead of a recorded TraceAction) rather
+// than inventing a new heuristic.
+function isAutocompleteScopedTypeField(
+  provenance: { hole: string } | undefined,
+  el: InteractiveElement,
+): boolean {
+  if (provenance !== undefined) return true;
+  const label = [el.testId, el.id, el.name, el.ariaLabel, el.labelText, el.placeholder]
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .join(" ")
+    .replace(/([a-z])([A-Z])/g, "$1 $2");
+  return MONEY_FIELD_TARGET.test(label);
+}
+
 function moneyFieldName(action: TraceAction): string | null {
   if (action.kind === "set_phone_country") return "phone_country";
   if (action.kind !== "type" && action.kind !== "select") return null;
@@ -3714,8 +6084,41 @@ function moneyFieldName(action: TraceAction): string | null {
   return MONEY_FIELD_TARGET.test(label) ? label || "field" : null;
 }
 
+// replay-per-leg-signature — the checkout leg is whatever portion of a
+// money-path trace touches money fields (address/contact/card-adjacent —
+// the exact same classifier moneyFieldName already uses for the fill
+// guard). Reusing it here means the leg boundary needs no new heuristic
+// (no URL/path pattern-matching, no platform name): the first step the
+// existing guard already treats as a money field IS where checkout starts.
+// Returns null when the trace has no money field at all (verb classified
+// money-path but nothing was actually captured, or a non-money recipe).
+function checkoutLegStartIndex(trace: readonly TraceEntry[]): number | null {
+  const index = trace.findIndex((entry) => moneyFieldName(entry.action) !== null);
+  return index === -1 ? null : index;
+}
+
+// A checkout-leg-only recipe still needs a postcondition (the schema
+// requires one), but it isn't the whole task's "order placed" signal — it
+// only covers the leg it replays. Anchor it to the LAST money field in the
+// leg holding a non-empty value, mirroring the field_text/min_value_len
+// pattern already used elsewhere (e.g. the OAuth Playground token check):
+// checks a length, never a value, so it can't leak what it proves.
+// legTrace is guaranteed non-empty and to start on a money field by
+// construction (checkoutLegStartIndex found it), so a label always exists.
+function checkoutLegPostcondition(legTrace: readonly TraceEntry[]): Postcondition {
+  const lastLabel = [...legTrace]
+    .reverse()
+    .map((entry) => moneyFieldName(entry.action))
+    .find((label): label is string => label !== null)!;
+  return {
+    kind: "execute_capability",
+    describe: "checkout leg fields filled and re-verified",
+    success_signal: { field_text: lastLabel, min_value_len: 1 },
+  };
+}
+
 function findUnprovenancedMoneyField(recipe: OperatorRecipe): string | null {
-  if (recipe.verb === undefined || !MONEY_REPLAY_VERBS.has(recipe.verb)) return null;
+  if (recipe.verb === undefined || !MONEY_SHAPED_VERBS.has(recipe.verb)) return null;
   for (const { action } of recipe.trace) {
     const field = moneyFieldName(action);
     if (field !== null && typeof action.value === "string") return field;
@@ -3780,9 +6183,24 @@ function markReplayFailure(
 ): void {
   rejectRecipeRecording(session, `replay transition failed (${field}: ${reason})`);
   if (session.replayState === null) return;
-  session.replayState.paymentGuard = "failed";
   session.replayState.failure = { reason, field };
   audit(session.id, "replay_field_value_guard", { ok: false, reason, field });
+}
+
+// replay-serve-live-domainlock — checks a replay-bound goto/allow_host
+// target against the recipe's own eTLD+1. Unlike the ordinary session goto
+// gate, recipe replay has no auth-host exceptions. Checkout-shape recipes
+// cannot execute goto/allow_host actions because they have no site domain.
+function replayTargetWithinRecipeDomain(url: string, recipeDomain: string): boolean {
+  return isSameRecipeDomain(url, recipeDomain);
+}
+
+function markReplayDomainLockViolation(session: Session, host: string, recipeDomain: string): void {
+  rejectRecipeRecording(
+    session,
+    `replay refused: "${host}" is outside the recipe's own domain "${recipeDomain}"`,
+  );
+  audit(session.id, "replay_domain_lock_violation", { host, recipe_domain: recipeDomain });
 }
 
 function verifyReplayFieldInElements(
@@ -3864,116 +6282,6 @@ async function isReplayFieldMounted(
     return await session.browser.hasPhoneCountryControl();
   }
   return expected.target !== null && hasRecipeTargetCandidate(elements, expected.target);
-}
-
-async function captureReplayRepairVerification(
-  session: Session,
-  action: ProvisionAction,
-  resolvedEl: InteractiveElement | null,
-): Promise<void> {
-  const state = session.replayState;
-  if (state === null || state.nextIndex === null || !state.moneyPath) return;
-  const stepIndex = state.nextIndex - 1;
-  const expected = state.expectedFields.get(stepIndex);
-  if (expected === undefined) return;
-  if (action.kind !== "type" && action.kind !== "select" && action.kind !== "set_phone_country") {
-    return;
-  }
-  if (
-    action.replayRepair === undefined ||
-    action.replayRepair.stepIndex !== stepIndex ||
-    action.replayRepair.hole !== expected.hole
-  ) {
-    throw new Error(`replay repair must bind to step ${stepIndex} and ${expected.hole}`);
-  }
-  const supplied =
-    action.kind === "type" || action.kind === "select"
-      ? action.text
-      : action.kind === "set_phone_country"
-        ? action.country
-        : null;
-  if (supplied === null) return;
-  if (supplied !== expected.expected) {
-    markReplayFailure(session, "field_value_mismatch", expected.hole);
-    throw new Error(`replay repair value mismatch for ${expected.hole}`);
-  }
-  if (action.kind === "set_phone_country") {
-    const guard = await verifyReplayField(session, expected);
-    if (!guard.ok) {
-      markReplayFailure(session, guard.reason, expected.hole);
-      throw new Error(`replay repair verification failed for ${expected.hole}: ${guard.reason}`);
-    }
-    state.verifiedFields.add(stepIndex);
-    return;
-  }
-  const recordedResolution =
-    expected.target === null
-      ? null
-      : resolveRecipeFieldTarget(session.lastElements, expected.target);
-  if (resolvedEl === null) {
-    throw new Error(`replay repair target mismatch for ${expected.hole}`);
-  }
-  const recordedTargetMatches = recordedResolution?.element.selector === resolvedEl.selector;
-  const semanticResolution =
-    expected.target === null
-      ? null
-      : resolveRecipeRepairTarget(session.lastElements, expected.target);
-  const replacementSemanticsMatch = semanticResolution?.selector === resolvedEl.selector;
-  if (!recordedTargetMatches && !replacementSemanticsMatch) {
-    throw new Error(`replay repair target mismatch for ${expected.hole}`);
-  }
-  const replacementTarget = recipeTargetFor(resolvedEl, session.lastElements, session.userEmail);
-  if (replacementTarget === undefined) {
-    throw new Error(`replay repair target could not be attested for ${expected.hole}`);
-  }
-  expected.target = replacementTarget;
-  const guard = await verifyReplayField(session, expected, action.kind === "select");
-  if (!guard.ok) {
-    markReplayFailure(session, guard.reason, expected.hole);
-    throw new Error(`replay repair verification failed for ${expected.hole}: ${guard.reason}`);
-  }
-  state.verifiedFields.add(stepIndex);
-}
-
-async function refreshReplayVerificationAfterAction(
-  session: Session,
-  action: ProvisionAction,
-  resolvedEl: InteractiveElement | null,
-): Promise<void> {
-  const state = session.replayState;
-  if (
-    state === null ||
-    !state.moneyPath ||
-    state.nextIndex !== null ||
-    state.paymentGuard !== "verified" ||
-    (action.kind !== "type" && action.kind !== "select" && action.kind !== "set_phone_country")
-  ) {
-    return;
-  }
-  const affected = [...state.expectedFields.values()].filter((expected) => {
-    if (action.kind === "set_phone_country") return expected.kind === "set_phone_country";
-    if (expected.target === null || resolvedEl === null) return false;
-    return (
-      resolveRecipeFieldTarget(session.lastElements, expected.target)?.element.selector ===
-      resolvedEl.selector
-    );
-  });
-  for (const expected of affected) {
-    state.verifiedFields.delete(expected.stepIndex);
-    state.paymentGuard = "pending";
-    const supplied = action.kind === "set_phone_country" ? action.country : action.text;
-    if (supplied !== expected.expected) {
-      markReplayFailure(session, "field_value_mismatch", expected.hole);
-      throw new Error(`replay field value mismatch for ${expected.hole}`);
-    }
-    const guard = await verifyReplayField(session, expected, action.kind === "select");
-    if (!guard.ok) {
-      markReplayFailure(session, guard.reason, expected.hole);
-      throw new Error(`replay field verification failed for ${expected.hole}: ${guard.reason}`);
-    }
-    state.verifiedFields.add(expected.stepIndex);
-  }
-  if (state.verifiedFields.size === state.expectedFields.size) state.paymentGuard = "verified";
 }
 
 function isReplayTransitionAction(action: ProvisionAction): boolean {
@@ -4073,63 +6381,6 @@ async function verifyRecordedFieldsAfterTransition(
   }
 }
 
-async function attestReplayFieldsBeforeTransition(
-  session: Session,
-  action: ProvisionAction,
-): Promise<
-  | { ok: true; fields: Set<number> }
-  | { ok: false; reason: "field_missing" | "field_value_mismatch"; field: string }
-> {
-  const state = session.replayState;
-  const fields = new Set<number>();
-  if (state === null || !state.moneyPath || !isReplayTransitionAction(action)) {
-    return { ok: true, fields };
-  }
-  const fresh = await session.browser.extractInteractiveElements();
-  session.lastElements = fresh;
-  for (const expected of state.expectedFields.values()) {
-    if (
-      !state.verifiedFields.has(expected.stepIndex) ||
-      (expected.target === null && expected.kind !== "set_phone_country")
-    ) {
-      continue;
-    }
-    const guard = await verifyReplayFieldWithElements(session, expected, fresh);
-    if (!guard.ok) {
-      return { ok: false, reason: guard.reason, field: expected.hole };
-    }
-    fields.add(expected.stepIndex);
-  }
-  return { ok: true, fields };
-}
-
-async function verifyReplayFieldsAfterTransition(
-  session: Session,
-  action: ProvisionAction,
-  attestedFields: ReadonlySet<number>,
-): Promise<
-  { ok: true } | { ok: false; reason: "field_missing" | "field_value_mismatch"; field: string }
-> {
-  const state = session.replayState;
-  if (state === null || !state.moneyPath || !isReplayTransitionAction(action)) {
-    return { ok: true };
-  }
-  const fresh = await session.browser.extractInteractiveElements();
-  session.lastElements = fresh;
-  for (const stepIndex of attestedFields) {
-    const expected = state.expectedFields.get(stepIndex);
-    if (expected === undefined) continue;
-    if (!(await isReplayFieldMounted(session, expected, fresh))) {
-      return { ok: false, reason: "field_missing", field: expected.hole };
-    }
-    const guard = await verifyReplayFieldWithElements(session, expected, fresh);
-    if (!guard.ok) {
-      return { ok: false, reason: guard.reason, field: expected.hole };
-    }
-  }
-  return { ok: true };
-}
-
 /**
  * Execute deterministic recipe steps until completion or one local miss.
  * A miss is returned to the host with a continuation index; after the host
@@ -4140,6 +6391,10 @@ export async function replayOperatorRecipe(
   recipe: OperatorRecipe,
   bindings: Readonly<Record<string, string>>,
   fromIndex = 0,
+  options: {
+    beforeStep?: (input: { step_index: number; action: TraceAction }) => Promise<void> | void;
+    beforeAction?: (input: { step_index: number; action: ProvisionAction }) => Promise<void> | void;
+  } = {},
 ): Promise<OperatorReplayResult> {
   const session = sessions.get(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
@@ -4149,13 +6404,42 @@ export async function replayOperatorRecipe(
   if (recipe.verb === undefined || recipe.domain === undefined) {
     throw new Error("legacy named recipes are hint-only and cannot replay deterministically");
   }
-  const isMoneyPath = MONEY_REPLAY_VERBS.has(recipe.verb);
+  // recipe-key-redesign money rule: the only surviving invariant is that a
+  // card-charging step is never blind-replayed — enforced unconditionally
+  // below where recorded.kind === "operate_pay" always forces a fallback to
+  // the fresh, human-approved operate_pay path. isMoneyPath here only feeds
+  // the leg-fallback narrowing (where to resume cold-driving), not a
+  // software field-verification gate.
+  const isMoneyPath = recipe.trace.some((entry) => entry.action.kind === "operate_pay");
   let state: ReplayState;
 
   const humanRequired = async (
     reason: "field_missing" | "field_value_mismatch",
     field: string,
   ): Promise<OperatorReplayResult> => {
+    // replay-per-leg-signature — a genuine catalog/storefront prefix exists
+    // ahead of the checkout leg (legStartIndex > 0): degrade to a leg-scoped
+    // fallback instead of aborting the whole replay. A recipe with no such
+    // prefix (legStartIndex is 0 or null — a simple/single-leg money-path
+    // recipe) has nothing narrower to fall back to, so it keeps today's
+    // behavior exactly: hard-stop at human_required.
+    if (state.moneyPath && state.legStartIndex !== null && state.legStartIndex > 0) {
+      const fromStepIndex = state.legStartIndex;
+      // Deliberately does NOT null out session.replayState — a resumed
+      // fallback should not silently reopen a failed replay.
+      // nextIndex is left unset (not stepIndex+1), so a resume_from
+      // attempt still hits "invalid replay continuation" below — this is
+      // not a resumable fallback the way fallback_required is.
+      markReplayFailure(session, reason, field);
+      audit(sessionId, "replay_leg_fallback", { reason, field, from_step_index: fromStepIndex });
+      return {
+        status: "leg_fallback_required",
+        observation: await observe(sessionId),
+        leg: "checkout",
+        from_step_index: fromStepIndex,
+        reason: `${reason}: ${field}`,
+      };
+    }
     markReplayFailure(session, reason, field);
     return { status: "human_required", observation: await observe(sessionId), reason, field };
   };
@@ -4174,7 +6458,7 @@ export async function replayOperatorRecipe(
       nextIndex: null,
       expectedFields: expected.fields,
       verifiedFields: new Set(),
-      paymentGuard: isMoneyPath ? "pending" : "verified",
+      legStartIndex: isMoneyPath ? checkoutLegStartIndex(recipe.trace) : null,
     };
     session.replayState = state;
     if (expected.missing !== null) return await humanRequired("field_missing", expected.missing);
@@ -4208,12 +6492,6 @@ export async function replayOperatorRecipe(
     reason: string,
   ): Promise<OperatorReplayResult> => {
     state.nextIndex = stepIndex + 1;
-    if (
-      step.action.kind === "operate_pay" &&
-      state.verifiedFields.size === state.expectedFields.size
-    ) {
-      state.paymentGuard = "verified";
-    }
     return {
       status: "fallback_required",
       observation: await observe(sessionId),
@@ -4224,9 +6502,25 @@ export async function replayOperatorRecipe(
     };
   };
 
+  const recipeDomain = recipe.domain;
+  const domainLockViolation = async (
+    stepIndex: number,
+    host: string,
+  ): Promise<OperatorReplayResult> => {
+    markReplayDomainLockViolation(session, host, recipeDomain);
+    return {
+      status: "domain_lock_violation",
+      observation: await observe(sessionId),
+      step_index: stepIndex,
+      host,
+      recipe_domain: recipeDomain,
+    };
+  };
+
   for (let i = fromIndex; i < recipe.trace.length; i += 1) {
     const step = recipe.trace[i] as TraceEntry;
     const recorded = step.action;
+    await options.beforeStep?.({ step_index: i, action: recorded });
     let action: ProvisionAction;
 
     if (recorded.kind === "extract") {
@@ -4242,6 +6536,11 @@ export async function replayOperatorRecipe(
     }
 
     if (recorded.kind === "goto") {
+      // This lock covers explicit goto/allow_host steps only. Organic redirects
+      // and OAuth popups remain governed by the existing session navigation model.
+      if (isCheckoutShapeKey(recipeDomain)) {
+        return await domainLockViolation(i, recorded.url_template ?? "<goto>");
+      }
       if (recorded.url_template === undefined) {
         return await fallback(step, i, "goto step has no URL");
       }
@@ -4255,10 +6554,25 @@ export async function replayOperatorRecipe(
       if (filled.missing.length > 0) {
         return await fallback(step, i, `missing bindings: ${filled.missing.join(", ")}`);
       }
+      if (!replayTargetWithinRecipeDomain(filled.url, recipeDomain)) {
+        let host: string;
+        try {
+          host = new URL(filled.url).hostname;
+        } catch {
+          host = filled.url;
+        }
+        return await domainLockViolation(i, host);
+      }
       action = { kind: "goto", url: filled.url };
     } else if (recorded.kind === "allow_host") {
+      if (isCheckoutShapeKey(recipeDomain)) {
+        return await domainLockViolation(i, recorded.host ?? "<allow_host>");
+      }
       if (recorded.host === undefined) {
         return await fallback(step, i, "allow_host step has no host");
+      }
+      if (!replayTargetWithinRecipeDomain(`https://${recorded.host}`, recipeDomain)) {
+        return await domainLockViolation(i, recorded.host);
       }
       action = { kind: "allow_host", host: recorded.host };
     } else if (recorded.kind === "press") {
@@ -4351,10 +6665,7 @@ export async function replayOperatorRecipe(
     }
 
     try {
-      const transitionAttestation = await attestReplayFieldsBeforeTransition(session, action);
-      if (!transitionAttestation.ok) {
-        return await humanRequired(transitionAttestation.reason, transitionAttestation.field);
-      }
+      await options.beforeAction?.({ step_index: i, action });
       await act(sessionId, action, "none");
       replayed += 1;
       const expected = state.expectedFields.get(i);
@@ -4363,38 +6674,17 @@ export async function replayOperatorRecipe(
         if (!guard.ok) return await humanRequired(guard.reason, expected.hole);
         state.verifiedFields.add(i);
       }
-      const transitionGuard = await verifyReplayFieldsAfterTransition(
-        session,
-        action,
-        transitionAttestation.fields,
-      );
-      if (!transitionGuard.ok) {
-        return await humanRequired(transitionGuard.reason, transitionGuard.field);
-      }
     } catch (error) {
+      if (error instanceof ManualCardEntryBlockedError) throw error;
       return await fallback(step, i, error instanceof Error ? error.message : String(error));
     }
-  }
-
-  if (isMoneyPath) {
-    const unverified = [...state.expectedFields.values()].find(
-      (expected) => !state.verifiedFields.has(expected.stepIndex),
-    );
-    if (unverified !== undefined) {
-      return await humanRequired("field_missing", unverified.hole);
-    }
-    state.paymentGuard = "verified";
-    audit(sessionId, "replay_field_value_guard", {
-      ok: true,
-      fields: state.expectedFields.size,
-    });
   }
 
   return {
     status: "complete",
     observation: await observe(sessionId),
     replayed_steps: replayed,
-    field_values_verified: isMoneyPath,
+    field_values_verified: true,
   };
 }
 
@@ -5008,7 +7298,7 @@ export function buildVerificationResult(
     wall: "verification_code",
     message:
       "No verification email found in the inbox YET. Most often it just hasn't " +
-      "arrived (they commonly take 10–30s) — call operate_await_verification AGAIN " +
+      'arrived (they commonly take 10–30s) — call operate_act { kind: "await_verification" } AGAIN ' +
       "in a few seconds. If it still fails, the code may have gone by SMS/" +
       "authenticator: ask the user for it and type it with operate_act. The " +
       "session stays live either way.",
@@ -5029,7 +7319,7 @@ export function buildConsentRefusal(sessionId: string): VerificationResult {
     message:
       "Inbox reading is not consented, so the operator did not read any mail. Ask " +
       "the user, in context: may the operator read your inbox to fetch the code for " +
-      "this signup? If YES, retry operate_await_verification with " +
+      'this signup? If YES, retry operate_act { kind: "await_verification" } with ' +
       "grant_inbox_consent:true (grants it for the rest of this session). If NO, " +
       "ask them for the code and type it with operate_act — the session is still " +
       "live either way. (To grant it permanently, re-run `connect` and allow inbox access.)",
@@ -5151,33 +7441,74 @@ export interface FinishResult {
   closed: true;
 }
 
-export async function finishProvisionSession(sessionId: string): Promise<FinishResult> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+export interface PreparedFinishResult<T> {
+  finish: FinishResult;
+  prepared: T;
+}
+
+function profileRequiresDestroy(session: Session): boolean {
+  return session.activePayment !== null || session.paymentFieldSealActive;
+}
+
+async function closeFinishingProvisionSession(session: Session): Promise<FinishResult> {
+  const sessionId = session.id;
   const url = session.browser.currentUrl();
   audit(sessionId, "finish", { url });
+  const destroyProfile = profileRequiresDestroy(session);
+  session.activePayment = null;
+  session.paymentFieldSealActive = false;
   sessions.delete(sessionId);
-  try {
-    await releaseWarmBrowserPage(session.browser);
-  } finally {
-    inFlight = false;
-  }
-  const expired = warmBrowser !== null ? warmBrowserExpired(warmBrowser) : null;
-  if (expired !== null) await closeWarmBrowserIfIdle(expired);
-  else touchWarmBrowser();
+  await releaseWarmBrowserPage(session.browser, !destroyProfile);
   return { session_id: sessionId, url, closed: true };
+}
+
+export async function finishProvisionSessionWithPreparation<T>(
+  sessionId: string,
+  prepare: () => Promise<T>,
+): Promise<PreparedFinishResult<T>> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  if (session.closing) throw new Error(`provision session ${sessionId} is already closing`);
+  session.closing = true;
+  try {
+    await waitForSessionCallsToDrain(session);
+    const prepared = await prepare();
+    const finish = await closeFinishingProvisionSession(session);
+    return { finish, prepared };
+  } catch (error) {
+    if (sessions.get(sessionId) === session) session.closing = false;
+    throw error;
+  }
+}
+
+export async function finishProvisionSession(sessionId: string): Promise<FinishResult> {
+  return (await finishProvisionSessionWithPreparation(sessionId, async () => undefined)).finish;
 }
 
 // Test/teardown helper — close every live session (used by the dev shim on exit).
 export async function closeAllProvisionSessions(): Promise<void> {
-  for (const id of [...sessions.keys()]) {
-    try {
-      await finishProvisionSession(id);
-    } catch {
-      /* best-effort */
-    }
+  shutdownGeneration += 1;
+  const waiters = [...capacityWaiters];
+  for (const waiter of waiters) {
+    waiter.cancelRequested = true;
+    waiter.abortController.abort();
+    waiter.wake();
   }
-  await closeWarmBrowserIfIdle("shutdown");
+  await Promise.all(waiters.map((waiter) => waiter.settled));
+  for (const pending of [...startingBrowsers]) {
+    pending.cancelRequested = true;
+    await pending.controller.close({ cancelStart: true }).catch(() => undefined);
+    await pending.launch.catch(() => undefined);
+    await closeLeasedBrowser(pending.controller, pending.lease, false).catch(() => undefined);
+  }
+  for (const [id, session] of [...sessions.entries()]) {
+    sessions.delete(id);
+    await releaseWarmBrowserPage(session.browser, false).catch(() => undefined);
+  }
+  for (const slot of [...leasedBrowsers.values()]) {
+    leasedBrowsers.delete(slot.controller);
+    await closeLeasedBrowser(slot.controller, slot.lease, false).catch(() => undefined);
+  }
 }
 
 export function activeSessionCount(): number {

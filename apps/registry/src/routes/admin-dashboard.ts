@@ -339,7 +339,7 @@ function renderDashboard(args: {
   healRun: Awaited<ReturnType<SkillStore["latestHealRun"]>>;
   healRuns: Awaited<ReturnType<SkillStore["listHealRuns"]>>;
 }): string {
-  // Tokens from DESIGN.md (the operator dashboard now follows the
+  // Tokens from docs/DESIGN.md (the operator dashboard now follows the
   // product design system: Linear-leaning dark, mono-forward).
   const css = `
     :root {

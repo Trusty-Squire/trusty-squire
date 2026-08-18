@@ -37,7 +37,7 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `GET` | `/v1/vault/payments/audit` | web/agent | List payment attempts, newest first, with keyset pagination |
 | `GET` | `/v1/pay/config` | agent | Return the configured Vouchflow mandate audience |
 | `POST` | `/v1/pay/approvals` | agent | Create an account-scoped approval: card-less expires in 18 minutes; has-card in 10 minutes |
-| `POST` | `/v1/pay/approvals/:id/notify-3ds` | agent | Send a Telegram 3-D Secure nudge to the account's linked chat and return `{ sent }` |
+| `POST` | `/v1/pay/approvals/:id/notify-3ds` | agent | Send linked Telegram guidance and return `{ sent }`; optional body `mode` is `detected_challenge` (default) or `possible_out_of_band` |
 | `GET` | `/v1/pay/approvals/:id` | web/agent | Read an account-owned approval; agents may read, wait for, or peek at its relay candidate |
 | `GET` | `/v1/pay/approvals/:id/ceremony` | none | Return the canonical purchase display plus opaque PRF/HPKE inputs for a pending approval |
 | `POST` | `/v1/pay/approvals/:id/bind-card` | web | Bind an account-owned card to a card-less pending approval |
@@ -60,6 +60,15 @@ card, payment, and egress-grant lifecycle events. Its `type` filter is derived
 from the canonical
 [`VAULT_AUDIT_TYPES`](../../packages/vault/src/types.ts) values rather than a
 second hand-maintained enum. Every event payload is display metadata only.
+
+`POST /v1/vault/payments/audit` requires `merchant`, `amountCents`, `currency`,
+four-digit `last4`, and `status`; `mandateId`, opaque `cardRef`, and `approvalId`
+are optional. Caller-placed split-checkout clicks use
+`status: "payment_place_order_attempted"` and bind those references to the
+fill-time approval. The resulting vault event keeps the existing
+`vault.payment_executed` type but describes an attempt, not a verified charge.
+The request and stored payload have no PAN or CVV field; the detailed boundary is
+owned by [`SECURITY.md`](../../SECURITY.md#client-encrypted-card-data).
 
 Payment approval creation requires non-empty `item` and `reason` strings and
 stores their trimmed values. The API records `agent` from a valid, non-empty

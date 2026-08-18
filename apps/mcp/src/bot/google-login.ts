@@ -15,8 +15,9 @@
 //   2. Headless (no DISPLAY) → run Chrome on a phone-shaped virtual
 //      display (Xvfb), bridge it out with x11vnc + noVNC + a cloudflared
 //      tunnel, and print one URL + a VNC password. The user logs in from
-//      any browser on any network. The public URL lives only until the
-//      active login or install flow reaches its completion gate.
+//      any browser on any network. The per-session stack and public URL
+//      are removed when the flow completes, times out, errors, or is
+//      interrupted; an operator-managed named tunnel remains external.
 //
 // Binaries the headless path needs: Xvfb, x11vnc, websockify
 // (with /usr/share/novnc), cloudflared, and Google Chrome. Missing ones
@@ -43,16 +44,27 @@ import chalk from "chalk";
 import { shortenVncUrl } from "../api-client.js";
 import {
   CHROME_PROFILE_DIR,
+  closeProfileWithProof,
+  currentProfileHolderPid,
   launchWithProfileGate,
+  profileProcessIdentity,
+  PROFILE_BUSY_MESSAGE,
   ProfileBusyError,
+  reapProfileHolderIfOwned,
+  type ProfileCloseState,
+  type ProfileProcessIdentity,
   waitForProfileFree,
+  withProfileOperationGuard,
 } from "./profile.js";
 import {
+  isSelfManagedChromeTerminationSignalExitEnabled,
   launchPlainLoginBrowser,
   launchSelfManagedLoginContext,
   resolveChannelBinary,
   selfLaunchEnabled,
+  setSelfManagedChromeTerminationSignalExitEnabled,
 } from "./browser.js";
+export { extractGoogleAccountEmail } from "./browser.js";
 import {
   startInstallCompletionListener,
   withInstallCompletionCallback,
@@ -61,6 +73,11 @@ import { markProviderLoggedIn } from "./login-state.js";
 import { randomBytes } from "node:crypto";
 import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
+import {
+  canPublishOperatorProfileSeed,
+  GOOGLE_LOGIN_COOKIE_MARKERS,
+  publishOperatorProfileSeed,
+} from "./operator-profile-pool.js";
 
 const require = createRequire(import.meta.url);
 
@@ -72,7 +89,13 @@ const require = createRequire(import.meta.url);
 // "logged-in marker lies" failure: the marker records a login whose auth
 // cookie the provider already invalidated. Honors UNIVERSAL_BOT_PROXY_URL;
 // unset (the default for end users) → direct, no change.
-function loginProxyOption(): { server: string; username?: string; password?: string } | undefined {
+export type LoginProxyDisposition = {
+  server: string;
+  username?: string;
+  password?: string;
+} | null;
+
+function loginProxyOption(): Exclude<LoginProxyDisposition, null> | undefined {
   const raw = process.env.UNIVERSAL_BOT_PROXY_URL;
   if (raw === undefined || raw.trim().length === 0) return undefined;
   try {
@@ -89,12 +112,29 @@ function loginProxyOption(): { server: string; username?: string; password?: str
   }
 }
 
+function selfLaunchProxyDisposition(
+  proxy: Exclude<LoginProxyDisposition, null> | undefined,
+): LoginProxyDisposition {
+  return proxy === undefined ? null : { server: proxy.server };
+}
+
 // --- stealth chromium (mirrors BrowserController) ----------------------
-interface PersistentLauncher {
+export interface PersistentLauncher {
   launchPersistentContext(
     userDataDir: string,
     options: Record<string, unknown>,
   ): Promise<BrowserContext>;
+}
+
+export async function launchPersistentLoginContext(
+  launcher: PersistentLauncher,
+  userDataDir: string,
+  options: Record<string, unknown>,
+): Promise<BrowserContext> {
+  return await launcher.launchPersistentContext(userDataDir, {
+    ...options,
+    channel: "chrome",
+  });
 }
 
 function resolveChromium(): PersistentLauncher {
@@ -127,7 +167,7 @@ const LOGIN_TARGETS: Record<OAuthProviderId, LoginTarget> = {
     label: "Google",
     loginUrl: "https://accounts.google.com/",
     cookieOrigin: "https://www.google.com",
-    cookies: ["__Secure-1PSID", "SAPISID", "SID"],
+    cookies: GOOGLE_LOGIN_COOKIE_MARKERS,
   },
   github: {
     provider: "github",
@@ -183,7 +223,7 @@ export async function contextHasProviderSession(
 }
 
 const PROVIDER_COOKIE_MARKERS: Record<OAuthProviderId, readonly string[]> = {
-  google: ["__Secure-1PSID", "SAPISID"],
+  google: GOOGLE_LOGIN_COOKIE_MARKERS,
   github: ["user_session"],
 };
 
@@ -263,42 +303,34 @@ async function validateProviderSession(
 export async function detectActiveProviderSessions(
   profileDir: string = CHROME_PROFILE_DIR,
 ): Promise<OAuthProviderId[]> {
-  // Quick best-effort gate — this runs at install boundaries, so a short
-  // wait is fine: reclaim a stale lock, or briefly yield to a live run.
-  await waitForProfileFree(profileDir, { deadlineMs: 15_000, pollMs: 500 });
-  const chromium = resolveChromium();
-  const ctx = await launchWithProfileGate(profileDir, () =>
-    chromium.launchPersistentContext(profileDir, {
-      // channel:"chrome" — launch the SAME system Chrome the login flow
-      // (runDisplayedChrome / runHeadlessChrome) uses. Without it Playwright
-      // reaches for its bundled Chromium, which isn't installed on boxes that
-      // run Chrome via the system channel — so this probe was the ONE launch
-      // in the connect flow that threw "Executable doesn't exist", surfacing
-      // as the spurious "Provider session check failed (continuing)" ✗ on
-      // every connect while the markers it left behind still printed
-      // "connected". The session cookies live in the profile dir regardless of
-      // which Chromium reads them, so matching the login launcher is enough.
-      channel: "chrome",
-      headless: true,
-      ignoreDefaultArgs: ["--enable-automation"],
-      args: ["--no-sandbox", "--disable-dev-shm-usage"],
-    }),
-  );
-  try {
-    const present: OAuthProviderId[] = [];
-    for (const id of Object.keys(LOGIN_TARGETS) as OAuthProviderId[]) {
-      // ALWAYS validate (not just cookie-present) — this kills the "GitHub
-      // marker lies" class on EVERY path, including the hot provision start, not
-      // just the install display. validateProviderSession is cheap: it returns
-      // a fast false when no cookie is present (no navigation), and only pays
-      // the github.com round-trip when a github cookie EXISTS and must be proven
-      // live. Google stays presence-based (it doesn't lie this way).
-      if (await validateProviderSession(ctx, LOGIN_TARGETS[id])) present.push(id);
+  return await withProfileOperationGuard(profileDir, async () => {
+    // Quick best-effort gate — this runs at install boundaries, so a short
+    // wait is fine: reclaim a stale lock, or briefly yield to a live run.
+    await waitForProfileFree(profileDir, { deadlineMs: 15_000, pollMs: 500 });
+    const chromium = resolveChromium();
+    const ctx = await launchWithProfileGate(profileDir, () =>
+      launchPersistentLoginContext(chromium, profileDir, {
+        headless: true,
+        ignoreDefaultArgs: ["--enable-automation"],
+        args: ["--no-sandbox", "--disable-dev-shm-usage"],
+      }),
+    );
+    try {
+      const present: OAuthProviderId[] = [];
+      for (const id of Object.keys(LOGIN_TARGETS) as OAuthProviderId[]) {
+        // ALWAYS validate (not just cookie-present) — this kills the "GitHub
+        // marker lies" class on EVERY path, including the hot provision start, not
+        // just the install display. validateProviderSession is cheap: it returns
+        // a fast false when no cookie is present (no navigation), and only pays
+        // the github.com round-trip when a github cookie EXISTS and must be proven
+        // live. Google stays presence-based (it doesn't lie this way).
+        if (await validateProviderSession(ctx, LOGIN_TARGETS[id])) present.push(id);
+      }
+      return present;
+    } finally {
+      await ctx.close();
     }
-    return present;
-  } finally {
-    await ctx.close();
-  }
+  });
 }
 
 // --- T5: Google auth-page state detection ------------------------------
@@ -604,7 +636,7 @@ function requireBinaries(names: readonly string[]): void {
 }
 
 // --- path 2: headless — virtual display + noVNC + cloudflared ----------
-interface HeadlessRig {
+export interface HeadlessRig {
   procs: ChildProcess[];
   display: string;
   // Temp dir websockify serves (branded vnc.html + the installed
@@ -684,34 +716,27 @@ function printBanner(opts: { tunnelUrl: string; vncPassword: string; label: stri
   );
 }
 
-function teardown(rig: HeadlessRig): void {
-  for (const p of rig.procs) {
-    try {
-      p.kill("SIGTERM");
-    } catch {
-      /* best-effort */
-    }
-    // SIGTERM is the polite request; the child may take a moment to
-    // exit. Meanwhile the parent's stdio pipes to the child keep
-    // Node's event loop alive — destroy them so Node can exit even
-    // if the child is mid-shutdown. unref() tells Node "this child
-    // doesn't count toward keeping the process alive."
-    try {
-      p.stdout?.destroy();
-    } catch {
-      /* best-effort */
-    }
-    try {
-      p.stderr?.destroy();
-    } catch {
-      /* best-effort */
-    }
-    try {
-      p.unref();
-    } catch {
-      /* best-effort */
-    }
-  }
+const headlessRigTeardowns = new WeakMap<HeadlessRig, Promise<void>>();
+
+function childHasExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (childHasExited(child)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const onExit = (): void => finish(true);
+    const timer = setTimeout(() => finish(childHasExited(child)), timeoutMs);
+    const finish = (exited: boolean): void => {
+      clearTimeout(timer);
+      child.removeListener("exit", onExit);
+      resolve(exited);
+    };
+    child.once("exit", onExit);
+  });
+}
+
+function removeHeadlessRigFiles(rig: HeadlessRig): void {
   if (rig.webDir !== undefined) {
     try {
       rmSync(rig.webDir, { recursive: true, force: true });
@@ -723,9 +748,310 @@ function teardown(rig: HeadlessRig): void {
     try {
       rmSync(rig.passFile, { force: true });
     } catch {
-      // best-effort — x11vnc's `rm:` prefix usually removed it already.
+      // best-effort
     }
   }
+}
+
+function releaseChildHandles(child: ChildProcess): void {
+  try {
+    child.stdout?.destroy();
+  } catch {
+    // best-effort
+  }
+  try {
+    child.stderr?.destroy();
+  } catch {
+    // best-effort
+  }
+  try {
+    child.unref();
+  } catch {
+    // best-effort
+  }
+}
+
+function forceTeardownHeadlessRig(rig: HeadlessRig): void {
+  for (const child of rig.procs) {
+    try {
+      if (!childHasExited(child)) child.kill("SIGKILL");
+    } catch {
+      // best-effort
+    }
+    releaseChildHandles(child);
+  }
+  removeHeadlessRigFiles(rig);
+}
+
+export function teardownHeadlessRig(rig: HeadlessRig, graceMs = 1_000): Promise<void> {
+  const existing = headlessRigTeardowns.get(rig);
+  if (existing !== undefined) return existing;
+  const teardown = (async (): Promise<void> => {
+    const running = rig.procs.filter((child) => !childHasExited(child));
+    for (const child of running) {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // best-effort
+      }
+    }
+    await Promise.all(running.map((child) => waitForChildExit(child, graceMs)));
+    const resistant = running.filter((child) => !childHasExited(child));
+    for (const child of resistant) {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // best-effort
+      }
+    }
+    await Promise.all(resistant.map((child) => waitForChildExit(child, graceMs)));
+    for (const child of rig.procs) releaseChildHandles(child);
+    removeHeadlessRigFiles(rig);
+  })();
+  headlessRigTeardowns.set(rig, teardown);
+  return teardown;
+}
+
+export async function teardownLoginBrowser(opts: {
+  profileDir: string;
+  identity: ProfileProcessIdentity | null;
+  closeBrowser: () => Promise<void>;
+  forceClose: () => unknown;
+  timeoutMs?: number;
+}): Promise<ProfileCloseState> {
+  return await closeProfileWithProof({
+    profileDir: opts.profileDir,
+    identity: opts.identity,
+    close: opts.closeBrowser,
+    forceClose: opts.forceClose,
+    ...(opts.timeoutMs !== undefined ? { closeTimeoutMs: opts.timeoutMs } : {}),
+  });
+}
+
+// --- shutdown coordination with the operator server -------------------
+// Every in-flight login run registers a cancel closure here so an external
+// shutdown owner (the MCP server's disconnect coordinator) can close the
+// OAuth-bootstrap Chrome instead of orphaning it. The closures wrap the run's
+// own proof-checked teardown (closeProfileWithProof over the launch-time
+// process identity), so cancellation never signals a PID it cannot prove
+// ownership of.
+const activeLoginBrowserCancels = new Set<() => Promise<void>>();
+
+// Exported for tests; runDisplayedChrome/runHeadlessChrome are the real
+// callers. Returns the unregister disposer for the normal completion path.
+export function trackActiveLoginBrowser(cancel: () => Promise<void>): () => void {
+  activeLoginBrowserCancels.add(cancel);
+  return (): void => {
+    activeLoginBrowserCancels.delete(cancel);
+  };
+}
+
+// Cancel every in-flight login run's browser (and headless rig, where one
+// exists). Called by the MCP server's shutdown path; idempotent and
+// best-effort — a failed teardown must not stall the process exit, whose
+// process-level exit hooks still force-kill anything identity-proven.
+export async function cancelActiveLoginBrowsers(): Promise<void> {
+  const pending = [...activeLoginBrowserCancels];
+  activeLoginBrowserCancels.clear();
+  await Promise.all(pending.map((cancel) => cancel().catch(() => undefined)));
+}
+
+interface TrackedLoginBrowserLifecycle {
+  cancel(): Promise<void>;
+  throwIfCancelled(): void;
+  browserLaunched(teardown: () => Promise<ProfileCloseState>): void;
+  finish(): Promise<ProfileCloseState>;
+}
+
+function createTrackedLoginBrowserLifecycle(
+  teardownRun?: () => Promise<void>,
+): TrackedLoginBrowserLifecycle {
+  let cancelled = false;
+  let launchSettled = false;
+  let resolveLaunchSettlement: (() => void) | undefined;
+  const launchSettlement = new Promise<void>((resolve) => {
+    resolveLaunchSettlement = resolve;
+  });
+  let teardownBrowser: (() => Promise<ProfileCloseState>) | undefined;
+  let browserTeardown: Promise<ProfileCloseState> | undefined;
+  let runTeardown: Promise<void> | undefined;
+  let cancellation: Promise<void> | undefined;
+  let finishing: Promise<ProfileCloseState> | undefined;
+
+  const settleLaunch = (): void => {
+    if (launchSettled) return;
+    launchSettled = true;
+    resolveLaunchSettlement?.();
+  };
+  const closeBrowser = (): Promise<ProfileCloseState> => {
+    if (teardownBrowser === undefined) return Promise.resolve("unknown");
+    browserTeardown ??= teardownBrowser();
+    return browserTeardown;
+  };
+  const closeRun = (): Promise<void> => {
+    if (teardownRun === undefined) return Promise.resolve();
+    runTeardown ??= teardownRun();
+    return runTeardown;
+  };
+  let lifecycle!: TrackedLoginBrowserLifecycle;
+  const untrack = trackActiveLoginBrowser(async () => await lifecycle.cancel());
+  lifecycle = {
+    cancel: (): Promise<void> => {
+      cancelled = true;
+      cancellation ??= (async () => {
+        await launchSettlement;
+        try {
+          await closeBrowser();
+        } finally {
+          await closeRun();
+        }
+      })();
+      return cancellation;
+    },
+    throwIfCancelled: (): void => {
+      if (cancelled) throw new Error("login browser cancelled during shutdown");
+    },
+    browserLaunched: (teardown): void => {
+      teardownBrowser = teardown;
+      settleLaunch();
+      lifecycle.throwIfCancelled();
+    },
+    finish: (): Promise<ProfileCloseState> => {
+      settleLaunch();
+      finishing ??= (async () => {
+        let closeState: ProfileCloseState = "unknown";
+        try {
+          closeState = await closeBrowser();
+        } finally {
+          try {
+            await closeRun();
+          } finally {
+            untrack();
+          }
+        }
+        return closeState;
+      })();
+      return finishing;
+    },
+  };
+  return lifecycle;
+}
+
+type LoginProcessRuntime = Pick<NodeJS.Process, "on" | "once" | "removeListener" | "exit">;
+
+// How registerHeadlessRigCleanup coordinates exit ownership with browser.ts's
+// self-managed Chrome signal handlers. Injectable for tests; the default is
+// the real process-wide flag.
+export interface LoginSignalExitCoordination {
+  enabled(): boolean;
+  set(enabled: boolean): void;
+}
+
+const selfManagedSignalExitCoordination: LoginSignalExitCoordination = {
+  enabled: isSelfManagedChromeTerminationSignalExitEnabled,
+  set: setSelfManagedChromeTerminationSignalExitEnabled,
+};
+
+// Attach the per-login rig to every process termination route. The function
+// returns a disposer for the normal completion path; callers must keep the
+// browser teardown in the getter so an interrupt can also release the Chrome
+// profile lock before Node exits. The hard cap prevents a wedged browser from
+// keeping Xvfb/x11vnc/websockify (or cloudflared) alive indefinitely.
+//
+// Exit ownership is coordinated through `signalExit`, one owner at a time:
+// - When self-managed signal exits are ENABLED (the CLI default), this login
+//   takes sole ownership for its duration — it suspends browser.ts's
+//   SIGKILL-and-exit handlers (which would otherwise preempt the capped
+//   graceful teardown below on the same signal) and restores them on
+//   disposal. The always-on `exit` hooks (here for the rig, browser.ts's for
+//   identity-proven Chromes) stay as the force-kill backstop.
+// - When they are DISABLED, a central shutdown coordinator (the MCP server's
+//   requestShutdown) already owns process exit and drains this login via
+//   cancelActiveLoginBrowsers(); installing exit-calling signal or
+//   uncaughtException handlers here would race it (and would violate the
+//   server's log-and-keep-serving process guards), so only the pure-cleanup
+//   `exit` hook is registered.
+export function registerHeadlessRigCleanup(
+  rig: HeadlessRig,
+  activeBrowserTeardown: () => (() => Promise<void>) | undefined,
+  runtime: LoginProcessRuntime = process,
+  signalExit: LoginSignalExitCoordination = selfManagedSignalExitCoordination,
+): () => void {
+  let finishing = false;
+  let signalExitSuspended = false;
+
+  const restoreSignalExitOwnership = (): void => {
+    if (!signalExitSuspended) return;
+    signalExitSuspended = false;
+    signalExit.set(true);
+  };
+
+  const teardownBrowserWithin = async (): Promise<void> => {
+    const closeBrowser = activeBrowserTeardown();
+    if (closeBrowser === undefined) return;
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 3_000);
+      void closeBrowser()
+        .catch(() => undefined)
+        .finally(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+    });
+  };
+
+  const exitAfterCleanup = (code: number): void => {
+    if (finishing) {
+      forceTeardownHeadlessRig(rig);
+      restoreSignalExitOwnership();
+      runtime.exit(code);
+      return;
+    }
+    finishing = true;
+    void teardownBrowserWithin().finally(async () => {
+      await teardownHeadlessRig(rig);
+      restoreSignalExitOwnership();
+      runtime.exit(code);
+    });
+  };
+
+  const onExit = (): void => forceTeardownHeadlessRig(rig);
+  const onSigterm = (): void => exitAfterCleanup(143);
+  const onSigint = (): void => exitAfterCleanup(130);
+  const onUncaughtException = (error: Error): void => {
+    console.error("[login] uncaught exception; tearing down the login browser", error);
+    exitAfterCleanup(1);
+  };
+  const onUnhandledRejection = (reason: unknown): void => {
+    console.error("[login] unhandled rejection; tearing down the login browser", reason);
+    exitAfterCleanup(1);
+  };
+
+  runtime.once("exit", onExit);
+  const ownsTerminationExit = signalExit.enabled();
+  if (ownsTerminationExit) {
+    signalExit.set(false);
+    signalExitSuspended = true;
+    runtime.on("SIGTERM", onSigterm);
+    runtime.on("SIGINT", onSigint);
+    runtime.once("uncaughtException", onUncaughtException);
+    runtime.once("unhandledRejection", onUnhandledRejection);
+  }
+
+  return (): void => {
+    if (finishing) return;
+    runtime.removeListener("exit", onExit);
+    if (!ownsTerminationExit) return;
+    runtime.removeListener("SIGTERM", onSigterm);
+    runtime.removeListener("SIGINT", onSigint);
+    runtime.removeListener("uncaughtException", onUncaughtException);
+    runtime.removeListener("unhandledRejection", onUnhandledRejection);
+    restoreSignalExitOwnership();
+  };
+}
+
+export function fallbackCloudflaredArgs(webPort: number): string[] {
+  return ["tunnel", "--protocol", "http2", "--url", `http://127.0.0.1:${webPort}`];
 }
 
 // Assemble the directory websockify serves: a copy of the installed
@@ -758,8 +1084,8 @@ function buildVncWebDir(): string {
 
 // Open the bot's Chrome at `url`, on whichever platform path applies
 // (with-display or headless+noVNC+cloudflared), and run `pollUntilDone`
-// against the live context until it resolves true OR the deadline
-// passes. Returns whether the poll succeeded.
+// against the live context until it resolves true, the deadline passes,
+// or the browser/status check fails. Returns whether the poll succeeded.
 //
 // Extracted so both `mcp login` (poll for Google/GitHub cookies in the
 // bot's profile) AND `install` (poll the API for the install claim)
@@ -809,27 +1135,58 @@ export interface RunInBotChromeOpts {
   // Plain-mode success hook, run after plainPollUntilDone returns true while the
   // browser is still open (read which provider cookies seeded, etc.).
   plainOnSuccess?: (profileDir: string) => Promise<void>;
+  onProxyDisposition?: (proxy: LoginProxyDisposition) => void;
+  onConfirmedLogin?: () => Promise<void>;
+  seedProvider?: OAuthProviderId | (() => OAuthProviderId | null);
 }
+
+const LOGIN_BROWSER_CLOSED_ERROR =
+  "the login browser closed before the session completed — re-run the command after closing any other Trusty Squire session";
+const LOGIN_STATUS_CHECK_STALLED_ERROR =
+  "the login status check stopped responding before the session completed";
 
 export async function runInBotChrome(
   opts: RunInBotChromeOpts,
 ): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
+  return await withProfileOperationGuard(opts.profileDir, async () => {
+    const result = await runInBotChromeWithProfileGuard(opts);
+    await finalizeLoginRun(opts, result);
+    return { status: result.status };
+  });
+}
+
+export interface LoginRunResult {
+  status: "completed" | "preflight_satisfied" | "timeout";
+  closeState: ProfileCloseState;
+}
+
+export async function finalizeLoginRun(
+  opts: Pick<RunInBotChromeOpts, "profileDir" | "onConfirmedLogin" | "seedProvider">,
+  result: LoginRunResult,
+  publishSeed: typeof publishOperatorProfileSeed = publishOperatorProfileSeed,
+): Promise<void> {
+  if (result.status === "completed" || result.status === "preflight_satisfied") {
+    await opts.onConfirmedLogin?.();
+  }
+  const provider =
+    typeof opts.seedProvider === "function" ? opts.seedProvider() : (opts.seedProvider ?? null);
+  const proof = { loginStatus: result.status, closeState: result.closeState, provider };
+  if (canPublishOperatorProfileSeed(proof)) {
+    await publishSeed(opts.profileDir, { proof });
+  }
+}
+
+async function runInBotChromeWithProfileGuard(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
   // `mcp login` runs in a SEPARATE process from the MCP server, so the
   // in-process OAuth mutex can't serialize it against an in-flight signup.
-  // Wait on Chrome's SingletonLock as a cross-process semaphore: reclaim
-  // it if a prior run died (stale), or wait our turn if a signup is
-  // genuinely live — then proceed. Without this, login either died on a
-  // stale lock OR crashed against a live one, before the noVNC rig could
-  // even start (the "relogin prompted, no noVNC, still failed" bug).
+  // Chrome's SingletonLock is the cross-process semaphore: reclaim a stale
+  // holder, but fail immediately for a live one. Waiting here used to leave a
+  // second connect apparently frozen while a duplicate noVNC stack accumulated.
   const free = await waitForProfileFree(opts.profileDir, {
-    deadlineMs: 120_000,
-    onWait: () =>
-      console.error("[login] the bot browser is busy with another run — waiting for it to finish…"),
+    deadlineMs: 0,
   });
   if (!free) {
-    throw new ProfileBusyError(
-      "the bot browser is busy with a signup that hasn't finished — wait a moment and re-run `mcp login`",
-    );
+    throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
   }
   if (hasDisplay()) {
     return await runDisplayedChrome(opts);
@@ -837,9 +1194,13 @@ export async function runInBotChrome(
   return await runHeadlessChrome(opts);
 }
 
-async function runDisplayedChrome(
+export async function runDisplayedChrome(
   opts: RunInBotChromeOpts,
-): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
+  runtime: {
+    resolveChannelBinary: typeof resolveChannelBinary;
+    launchPlainLoginBrowser: typeof launchPlainLoginBrowser;
+  } = { resolveChannelBinary, launchPlainLoginBrowser },
+): Promise<LoginRunResult> {
   // PLAIN-BROWSER path (connect claim): launch plain Chrome, never attach CDP,
   // detect completion off the API + SQLite cookie store. See
   // launchPlainLoginBrowser / RunInBotChromeOpts.plainProfileLogin.
@@ -847,29 +1208,48 @@ async function runDisplayedChrome(
     if (opts.plainPollUntilDone === undefined) {
       throw new Error("plainProfileLogin set without plainPollUntilDone");
     }
-    const binary = resolveChannelBinary("chrome");
+    const binary = runtime.resolveChannelBinary("chrome");
     if (binary === null) {
       throw new Error("no Chrome binary found for the plain login browser");
     }
     const proxyOpt = loginProxyOption();
-    const browser = await launchPlainLoginBrowser({
-      binary,
-      profileDir: opts.profileDir,
-      url: opts.url,
-      window: { width: 1280, height: 800 },
-      env: process.env,
-      // Self-launch/--proxy-server can't carry proxy auth — drop a credentialed
-      // proxy (direct). Connect from the box is the point anyway.
-      proxyServer:
-        proxyOpt !== undefined && proxyOpt.password === undefined ? proxyOpt.server : null,
-      extraArgs: ["--no-sandbox", "--disable-dev-shm-usage"],
-    });
+    const proxyDisposition =
+      proxyOpt !== undefined && proxyOpt.password === undefined
+        ? selfLaunchProxyDisposition(proxyOpt)
+        : null;
+    opts.onProxyDisposition?.(proxyDisposition);
+    const lifecycle = createTrackedLoginBrowserLifecycle();
+    let status: LoginRunResult["status"] = "timeout";
+    let closeState: ProfileCloseState = "unknown";
     try {
+      const browser = await runtime.launchPlainLoginBrowser({
+        binary,
+        profileDir: opts.profileDir,
+        url: opts.url,
+        window: { width: 1280, height: 800 },
+        env: process.env,
+        // Self-launch/--proxy-server can't carry proxy auth — drop a credentialed
+        // proxy (direct). Connect from the box is the point anyway.
+        proxyServer: proxyDisposition?.server ?? null,
+        extraArgs: ["--no-sandbox", "--disable-dev-shm-usage"],
+      });
+      lifecycle.browserLaunched(
+        async () =>
+          await teardownLoginBrowser({
+            profileDir: opts.profileDir,
+            identity: browser.identity,
+            closeBrowser: browser.teardown,
+            forceClose: browser.forceTeardown,
+          }),
+      );
       console.error(`\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`);
       const ok = await pollUntil(
         opts.deadline,
         () => opts.plainPollUntilDone!(opts.profileDir),
         opts.heartbeatMessage,
+        () => {
+          if (!browser.isRunning()) throw new Error(LOGIN_BROWSER_CLOSED_ERROR);
+        },
       );
       if (ok && opts.plainOnSuccess !== undefined) {
         try {
@@ -878,61 +1258,80 @@ async function runDisplayedChrome(
           /* swallow */
         }
       }
-      return { status: ok ? "completed" : "timeout" };
+      status = ok ? "completed" : "timeout";
     } finally {
-      await browser.teardown();
+      closeState = await lifecycle.finish();
     }
+    return { status, closeState };
   }
   const chromium = resolveChromium();
-  const context = await launchWithProfileGate(opts.profileDir, () =>
-    chromium.launchPersistentContext(opts.profileDir, {
-      channel: "chrome",
-      headless: false,
-      viewport: { width: 1280, height: 800 },
-      // Drop Playwright's default --enable-automation switch: it paints the
-      // "Chrome is being controlled by automated test software" infobar AND
-      // is itself an automation fingerprint the provider can read during the
-      // sign-in (so removing it also helps the session survive).
-      ignoreDefaultArgs: ["--enable-automation"],
-      args: [
-        "--disable-blink-features=AutomationControlled",
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-      ],
-      ...(loginProxyOption() !== undefined ? { proxy: loginProxyOption() } : {}),
-    }),
-  );
+  const proxyOpt = loginProxyOption();
+  opts.onProxyDisposition?.(proxyOpt ?? null);
+  const lifecycle = createTrackedLoginBrowserLifecycle();
+  let status: LoginRunResult["status"] = "timeout";
+  let closeState: ProfileCloseState = "unknown";
   try {
-    if (opts.preflight !== undefined && (await opts.preflight(context))) {
-      return { status: "preflight_satisfied" };
-    }
-    const page = context.pages()[0] ?? (await context.newPage());
-    await page.goto(opts.url, { waitUntil: "domcontentloaded" });
-    console.error(`\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`);
-    const ok = await pollUntil(
-      opts.deadline,
-      () => opts.pollUntilDone(context),
-      opts.heartbeatMessage,
+    const context = await launchWithProfileGate(
+      opts.profileDir,
+      () =>
+        launchPersistentLoginContext(chromium, opts.profileDir, {
+          headless: false,
+          viewport: { width: 1280, height: 800 },
+          // Drop Playwright's default --enable-automation switch: it paints the
+          // "Chrome is being controlled by automated test software" infobar AND
+          // is itself an automation fingerprint the provider can read during the
+          // sign-in (so removing it also helps the session survive).
+          ignoreDefaultArgs: ["--enable-automation"],
+          args: [
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+          ],
+          ...(proxyOpt !== undefined ? { proxy: proxyOpt } : {}),
+        }),
+      { failFast: true },
     );
-    if (ok && opts.onSuccess !== undefined) {
-      // Best-effort: a hook failure must not pretend the user's login
-      // didn't happen. They did the work; the caller will read the
-      // session marker (or not) on the next signup.
-      try {
-        await opts.onSuccess(context);
-      } catch {
-        /* swallow */
+    const holderPid = currentProfileHolderPid(opts.profileDir);
+    const identity = holderPid === null ? null : profileProcessIdentity(holderPid, opts.profileDir);
+    lifecycle.browserLaunched(
+      async () =>
+        await teardownLoginBrowser({
+          profileDir: opts.profileDir,
+          identity,
+          closeBrowser: () => context.close(),
+          forceClose: () => reapProfileHolderIfOwned(opts.profileDir, identity),
+        }),
+    );
+    const preflightSatisfied =
+      opts.preflight !== undefined &&
+      (await checkLoginStatusWithin(opts.deadline, () => opts.preflight!(context)));
+    if (preflightSatisfied) {
+      status = "preflight_satisfied";
+    } else {
+      const page = context.pages()[0] ?? (await context.newPage());
+      await page.goto(opts.url, { waitUntil: "domcontentloaded" });
+      console.error(`\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`);
+      const ok = await pollUntil(
+        opts.deadline,
+        () => opts.pollUntilDone(context),
+        opts.heartbeatMessage,
+      );
+      if (ok && opts.onSuccess !== undefined) {
+        try {
+          await opts.onSuccess(context);
+        } catch {
+          /* swallow */
+        }
       }
+      status = ok ? "completed" : "timeout";
     }
-    return { status: ok ? "completed" : "timeout" };
   } finally {
-    await context.close().catch(() => undefined);
+    closeState = await lifecycle.finish();
   }
+  return { status, closeState };
 }
 
-async function runHeadlessChrome(
-  opts: RunInBotChromeOpts,
-): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
+async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
   requireBinaries(["Xvfb", "x11vnc", "websockify", "cloudflared"]);
   if (!existsSync("/usr/share/novnc")) {
     throw new Error("noVNC web assets not found at /usr/share/novnc — install the `novnc` package");
@@ -965,36 +1364,18 @@ async function runHeadlessChrome(
   }
   const vncPassword = randomBytes(4).toString("hex"); // 8 chars — VNC's limit
   const rig: HeadlessRig = { procs: [], display };
-  // Teardown for the login browser — for the self-launch path this ALSO kills
-  // the spawned Chrome child (a bare context.close() over CDP leaves it
-  // running), for the persistent fallback it's just context.close(). Tracked
-  // so the signal handler can release the profile lock before exiting.
+  // The lifecycle below memoizes browser and rig teardown across normal
+  // completion, CLI signals, and server cancellation. Self-launched Chrome
+  // needs child teardown as well as context.close(); every forced close still
+  // goes through the launch-time process-identity proof.
   let activeTeardown: (() => Promise<void>) | undefined;
+  let plainBrowserIsRunning: (() => boolean) | undefined;
 
-  // Ensure nothing is orphaned if the process dies mid-flow. `exit`
-  // covers a normal return; SIGTERM/SIGINT cover an interrupted run —
-  // once a signal listener is registered the default terminate is
-  // suppressed, so the handler must clean up AND exit itself.
-  const onExit = (): void => teardown(rig);
-  const onSignal = (): void => {
-    const finish = (): void => {
-      teardown(rig);
-      process.exit(130);
-    };
-    if (activeTeardown !== undefined) {
-      // Tear down the browser to release the persistent-profile lock (and
-      // kill the self-launched Chrome) — but cap the wait: a wedged Chrome
-      // under Xvfb can hang indefinitely, and the rig MUST still be torn
-      // down. Whichever wins (clean teardown, or the 3s cap), `finish` runs.
-      const capped = new Promise<void>((r) => setTimeout(r, 3000));
-      Promise.race([activeTeardown().catch(() => undefined), capped]).then(finish, finish);
-    } else {
-      finish();
-    }
-  };
-  process.once("exit", onExit);
-  process.once("SIGTERM", onSignal);
-  process.once("SIGINT", onSignal);
+  // Cover normal cleanup, interrupts, and fatal process errors. The returned
+  // disposer removes process-global listeners once this login finishes.
+  const removeRigCleanup = registerHeadlessRigCleanup(rig, () => activeTeardown);
+  const lifecycle = createTrackedLoginBrowserLifecycle(async () => await teardownHeadlessRig(rig));
+  activeTeardown = lifecycle.cancel;
 
   try {
     // 1. Virtual display — phone-shaped.
@@ -1002,6 +1383,7 @@ async function runHeadlessChrome(
       spawnBg("Xvfb", [display, "-screen", "0", `${HEADLESS_W}x${HEADLESS_H}x24`, "-ac"]),
     );
     await new Promise((r) => setTimeout(r, 1500));
+    lifecycle.throwIfCancelled();
 
     // 2. Chrome on that display, persistent profile, window filling the display.
     //    Self-launch + connectOverCDP is the STATE.md 2026-06-12 launcher fix:
@@ -1036,7 +1418,6 @@ async function runHeadlessChrome(
     // plainPollUntilDone (API + on-disk cookies), never a live context.
     const plain = opts.plainProfileLogin === true;
     let context: BrowserContext | undefined;
-    let teardownContext: () => Promise<void>;
     if (plain) {
       if (opts.plainPollUntilDone === undefined) {
         throw new Error("plainProfileLogin set without plainPollUntilDone");
@@ -1044,18 +1425,33 @@ async function runHeadlessChrome(
       if (chromeBinary === null) {
         throw new Error("no Chrome binary found for the plain login browser");
       }
+      const proxyDisposition =
+        proxyOpt !== undefined && proxyOpt.password === undefined
+          ? selfLaunchProxyDisposition(proxyOpt)
+          : null;
+      opts.onProxyDisposition?.(proxyDisposition);
       const browser = await launchPlainLoginBrowser({
         binary: chromeBinary,
         profileDir: opts.profileDir,
         url: opts.url,
         window: { width: HEADLESS_W, height: HEADLESS_H },
         env: { ...process.env, DISPLAY: display },
-        proxyServer:
-          proxyOpt !== undefined && proxyOpt.password === undefined ? proxyOpt.server : null,
+        proxyServer: proxyDisposition?.server ?? null,
         extraArgs: sharedChromeArgs,
       });
-      teardownContext = browser.teardown;
+      lifecycle.browserLaunched(
+        async () =>
+          await teardownLoginBrowser({
+            profileDir: opts.profileDir,
+            identity: browser.identity,
+            closeBrowser: browser.teardown,
+            forceClose: browser.forceTeardown,
+          }),
+      );
+      plainBrowserIsRunning = browser.isRunning;
     } else if (useSelfLaunch && chromeBinary !== null) {
+      const proxyDisposition = selfLaunchProxyDisposition(proxyOpt);
+      opts.onProxyDisposition?.(proxyDisposition);
       const launched = await launchSelfManagedLoginContext({
         binary: chromeBinary,
         profileDir: opts.profileDir,
@@ -1065,43 +1461,66 @@ async function runHeadlessChrome(
         appMode: true,
         window: { width: HEADLESS_W, height: HEADLESS_H },
         env: { ...process.env, DISPLAY: display },
-        proxyServer: proxyOpt?.server ?? null,
+        proxyServer: proxyDisposition?.server ?? null,
         extraArgs: sharedChromeArgs,
       });
+      lifecycle.browserLaunched(
+        async () =>
+          await teardownLoginBrowser({
+            profileDir: opts.profileDir,
+            identity: launched.identity,
+            closeBrowser: launched.teardown,
+            forceClose: launched.forceTeardown,
+          }),
+      );
       context = launched.context;
-      teardownContext = launched.teardown;
     } else {
       const chromium = resolveChromium();
-      const persistent = await launchWithProfileGate(opts.profileDir, () =>
-        chromium.launchPersistentContext(opts.profileDir, {
-          channel: "chrome",
-          headless: false,
-          viewport: null, // use the real window size
-          env: { ...process.env, DISPLAY: display },
-          // Drop --enable-automation: kills the "controlled by automated test
-          // software" infobar and the matching automation fingerprint.
-          ignoreDefaultArgs: ["--enable-automation"],
-          ...(proxyOpt !== undefined ? { proxy: proxyOpt } : {}),
-          args: [
-            `--window-position=0,0`,
-            `--window-size=${HEADLESS_W},${HEADLESS_H}`,
-            `--app=${opts.url}`,
-            ...sharedChromeArgs,
-          ],
-        }),
+      opts.onProxyDisposition?.(proxyOpt ?? null);
+      const persistent = await launchWithProfileGate(
+        opts.profileDir,
+        () =>
+          launchPersistentLoginContext(chromium, opts.profileDir, {
+            headless: false,
+            viewport: null, // use the real window size
+            env: { ...process.env, DISPLAY: display },
+            // Drop --enable-automation: kills the "controlled by automated test
+            // software" infobar and the matching automation fingerprint.
+            ignoreDefaultArgs: ["--enable-automation"],
+            ...(proxyOpt !== undefined ? { proxy: proxyOpt } : {}),
+            args: [
+              `--window-position=0,0`,
+              `--window-size=${HEADLESS_W},${HEADLESS_H}`,
+              `--app=${opts.url}`,
+              ...sharedChromeArgs,
+            ],
+          }),
+        { failFast: true },
+      );
+      const persistentPid = currentProfileHolderPid(opts.profileDir);
+      const identity =
+        persistentPid === null ? null : profileProcessIdentity(persistentPid, opts.profileDir);
+      lifecycle.browserLaunched(
+        async () =>
+          await teardownLoginBrowser({
+            profileDir: opts.profileDir,
+            identity,
+            closeBrowser: () => persistent.close(),
+            forceClose: () => reapProfileHolderIfOwned(opts.profileDir, identity),
+          }),
       );
       context = persistent;
-      teardownContext = async (): Promise<void> => {
-        await persistent.close().catch(() => undefined);
-      };
     }
-    activeTeardown = teardownContext;
     try {
       // CDP path only: preflight + drive the first page to the URL. The plain
       // path has no context — plain Chrome's --app already opened opts.url.
       if (context !== undefined) {
-        if (opts.preflight !== undefined && (await opts.preflight(context))) {
-          return { status: "preflight_satisfied" };
+        if (
+          opts.preflight !== undefined &&
+          (await checkLoginStatusWithin(opts.deadline, () => opts.preflight!(context)))
+        ) {
+          const closeState = await lifecycle.finish();
+          return { status: "preflight_satisfied", closeState };
         }
         const page = context.pages()[0] ?? (await context.newPage());
         await page.goto(opts.url, { waitUntil: "domcontentloaded" });
@@ -1132,6 +1551,7 @@ async function runHeadlessChrome(
         ]),
       );
       await new Promise((r) => setTimeout(r, 1500));
+      lifecycle.throwIfCancelled();
 
       // 4. noVNC web bridge — serves our branded vnc.html plus the
       //    installed noVNC core from a temp dir; localhost only,
@@ -1145,6 +1565,7 @@ async function runHeadlessChrome(
         ]),
       );
       await new Promise((r) => setTimeout(r, 1500));
+      lifecycle.throwIfCancelled();
 
       // 5. Outbound tunnel.
       //
@@ -1160,14 +1581,18 @@ async function runHeadlessChrome(
       // the URL is ~80 chars and the cold-start hurts.
       let bannerUrl: string;
       if (usingNamedTunnel) {
+        // The persistent operator-managed named tunnel lives outside this
+        // process; run that service with `--protocol http2` too, avoiding the
+        // same QUIC datagram-manager drops as the per-session fallback.
         // No `/vnc.html` — websockify serves the same content as
         // index.html (buildVncWebDir writes both). Shorter URL fits
         // one line on a phone terminal.
         bannerUrl = `https://${namedTunnelHost}/#p=${vncPassword}`;
       } else {
-        const cf = spawnBg("cloudflared", ["tunnel", "--url", `http://127.0.0.1:${webPort}`]);
+        const cf = spawnBg("cloudflared", fallbackCloudflaredArgs(webPort));
         rig.procs.push(cf);
         const tunnelUrl = await awaitTunnelUrl(cf, 30000);
+        lifecycle.throwIfCancelled();
         const longVncUrl = `${tunnelUrl}/#p=${vncPassword}`;
 
         // G15 (deprecated by G16): shorten the cloudflared URL through
@@ -1178,6 +1603,7 @@ async function runHeadlessChrome(
         bannerUrl = longVncUrl;
         if (opts.apiBaseUrl !== undefined) {
           bannerUrl = await shortenVncUrl(opts.apiBaseUrl, longVncUrl);
+          lifecycle.throwIfCancelled();
         }
       }
 
@@ -1204,6 +1630,11 @@ async function runHeadlessChrome(
             ? opts.pollUntilDone(context)
             : opts.plainPollUntilDone!(opts.profileDir),
         opts.heartbeatMessage,
+        () => {
+          if (plainBrowserIsRunning !== undefined && !plainBrowserIsRunning()) {
+            throw new Error(LOGIN_BROWSER_CLOSED_ERROR);
+          }
+        },
       );
       if (ok) {
         if (context !== undefined) {
@@ -1222,21 +1653,22 @@ async function runHeadlessChrome(
           }
         }
       }
-      await teardownContext();
-      return { status: ok ? "completed" : "timeout" };
+      const closeState = await lifecycle.finish();
+      return { status: ok ? "completed" : "timeout", closeState };
     } finally {
-      // Idempotent (self-launch teardown guards with a `torn` flag; the
-      // persistent fallback's close() is .catch-wrapped), so the success-path
-      // call above and this finally can both fire safely.
-      await teardownContext();
+      // Shared and memoized with the success and cancellation paths, so this
+      // finally cannot double-tear the browser or rig.
+      await lifecycle.finish();
       // Torn down — the signal handler must not double-tear it.
       activeTeardown = undefined;
     }
   } finally {
-    teardown(rig);
-    process.removeListener("exit", onExit);
-    process.removeListener("SIGTERM", onSignal);
-    process.removeListener("SIGINT", onSignal);
+    try {
+      await lifecycle.finish();
+    } finally {
+      activeTeardown = undefined;
+      removeRigCleanup();
+    }
   }
 }
 
@@ -1254,11 +1686,15 @@ export async function pollUntil(
   heartbeatMessage:
     | string
     | (() => string) = "Still waiting for you to finish signing in — the URL/window above stays live until you do.",
+  assertStillLive?: () => void,
 ): Promise<boolean> {
   const beatEveryMs = 20_000;
+  const maxCheckMs = 15_000;
   let lastBeat = Date.now();
   while (Date.now() < deadline) {
-    if (await check()) return true;
+    if (await checkLoginStatusWithin(deadline, check, assertStillLive, maxCheckMs)) {
+      return true;
+    }
     await new Promise((r) => setTimeout(r, 3000));
     if (Date.now() - lastBeat >= beatEveryMs) {
       lastBeat = Date.now();
@@ -1269,6 +1705,44 @@ export async function pollUntil(
     }
   }
   return false;
+}
+
+export function checkLoginStatusWithin(
+  deadline: number,
+  check: () => Promise<boolean>,
+  assertStillLive?: () => void,
+  maxCheckMs = 15_000,
+): Promise<boolean> {
+  assertStillLive?.();
+  const checkTimeoutMs = Math.min(maxCheckMs, Math.max(1, deadline - Date.now()));
+  return new Promise<boolean>((resolve, reject) => {
+    let settled = false;
+    const finish = (settle: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(checkTimer);
+      if (livenessTimer !== undefined) clearInterval(livenessTimer);
+      settle();
+    };
+    const checkTimer = setTimeout(
+      () => finish(() => reject(new Error(LOGIN_STATUS_CHECK_STALLED_ERROR))),
+      checkTimeoutMs,
+    );
+    const livenessTimer =
+      assertStillLive === undefined
+        ? undefined
+        : setInterval(() => {
+            try {
+              assertStillLive();
+            } catch (err) {
+              finish(() => reject(err instanceof Error ? err : new Error(String(err))));
+            }
+          }, 1_000);
+    void check().then(
+      (result) => finish(() => resolve(result)),
+      (err: unknown) => finish(() => reject(err instanceof Error ? err : new Error(String(err)))),
+    );
+  });
 }
 
 // --- public entry ------------------------------------------------------
@@ -1332,6 +1806,8 @@ export async function ensureOAuthSession(opts?: {
         return hasProviderSession(ctx, target);
       },
       pollUntilDone: (ctx) => hasProviderSession(ctx, target),
+      onConfirmedLogin: async () => markProviderLoggedIn(provider, profileDir),
+      seedProvider: provider,
       ...(opts?.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
     });
     // Map runInBotChrome's status set to ensureOAuthSession's contract.
@@ -1343,35 +1819,10 @@ export async function ensureOAuthSession(opts?: {
     } else {
       mapped = { status: "timeout", detail: "no login completed before the deadline" };
     }
-    // A confirmed session — record it so the signup bot can auto-prefer
-    // this provider's OAuth path without a probe round-trip.
-    if (mapped.status === "logged_in" || mapped.status === "already_valid") {
-      markProviderLoggedIn(provider, profileDir);
-    }
     return mapped;
   } catch (err) {
     return { status: "error", detail: err instanceof Error ? err.message : String(err) };
   }
-}
-
-// PR3 signin-vault: pull the signed-in Google address out of an account page's
-// text. The OneGoogle account chip carries an aria-label like
-// "Google Account: Ada Lovelace (ada@example.com)" on every Google surface, so
-// prefer that anchored match; fall back to the first email-shaped token (the
-// myaccount.google.com page renders the address prominently). Pure + exported
-// for unit tests. (Eager capture-at-login was removed with the plain-login
-// switch — it needed a live CDP context to scrape myaccount.google.com, which
-// the plain connect browser no longer has; provision scrapes the email per-run
-// when the marker is unset, so this is now the only consumer besides tests.)
-const EMAIL_TOKEN_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i;
-export function extractGoogleAccountEmail(pageText: string): string | null {
-  const chip = /Google Account:[^()]*\(([^)]+)\)/i.exec(pageText);
-  if (chip?.[1] !== undefined) {
-    const m = EMAIL_TOKEN_RE.exec(chip[1]);
-    if (m !== null) return m[0].trim();
-  }
-  const any = EMAIL_TOKEN_RE.exec(pageText);
-  return any !== null ? any[0].trim() : null;
 }
 
 // Public entry for the install flow: opens the trustysquire /install
@@ -1381,33 +1832,44 @@ export function extractGoogleAccountEmail(pageText: string): string | null {
 // sign-in happens inside this Chrome instance — so the bot's profile gets
 // a provider session as a free side effect, and there's no separate
 // "log into Google for the bot" step after install.
-export async function openInstallConfirmInBotChrome(opts: {
-  confirmUrl: string;
-  // Returns true when the install ceremony is done. The login browser runs
-  // PLAIN (no CDP — Google's OAuth "secure browser" check rejects a CDP
-  // attach), so the predicate gets the profileDir, NOT a live context: it
-  // composes the API claim with either the normal wizard's per-run loopback
-  // Finish callback or forced re-login's on-disk provider-session seed.
-  pollUntilClaimed: (profileDir: string, wizardCompleted: boolean) => Promise<boolean>;
-  profileDir?: string;
-  timeoutMinutes?: number;
-  // G15: API base URL used to shorten the headless cloudflared
-  // tunnel URL before printing it in the banner. Same value the
-  // install handshake calls against; threaded down to the rig.
-  apiBaseUrl?: string;
-  // Phase-aware terminal copy supplied by connect.
-  heartbeatMessage?: string | (() => string);
-}): Promise<{ status: "claimed" | "timeout" | "error"; detail?: string }> {
+export async function openInstallConfirmInBotChrome(
+  opts: {
+    confirmUrl: string;
+    // Returns claimed only after the install ceremony succeeds. The login browser
+    // runs PLAIN (no CDP — Google's OAuth "secure browser" check rejects a CDP
+    // attach), so the predicate gets the profileDir, NOT a live context: it
+    // composes the API claim with either the normal wizard's per-run loopback
+    // Finish callback or forced re-login's on-disk provider-session seed.
+    pollUntilClaimed: (
+      profileDir: string,
+      wizardCompleted: boolean,
+    ) => Promise<InstallClaimPollResult>;
+    profileDir?: string;
+    timeoutMinutes?: number;
+    // G15: API base URL used to shorten the headless cloudflared
+    // tunnel URL before printing it in the banner. Same value the
+    // install handshake calls against; threaded down to the rig.
+    apiBaseUrl?: string;
+    // Phase-aware terminal copy supplied by connect.
+    heartbeatMessage?: string | (() => string);
+  },
+  runChrome: typeof runInBotChrome = runInBotChrome,
+): Promise<{
+  status: "claimed" | "timeout" | "error";
+  detail?: string;
+}> {
   const profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
   const timeoutMinutes = Math.max(1, opts.timeoutMinutes ?? 15);
   const deadline = Date.now() + timeoutMinutes * 60 * 1000;
   let completion: Awaited<ReturnType<typeof startInstallCompletionListener>> | undefined;
+  let observedGoogleIdentity = false;
+  const completedProviders = new Set<OAuthProviderId>();
 
   try {
     const doneUrl = new URL("/install/done", opts.confirmUrl).toString();
     completion = await startInstallCompletionListener(doneUrl, opts.confirmUrl);
     const confirmUrl = withInstallCompletionCallback(opts.confirmUrl, completion.callbackUrl);
-    const result = await runInBotChrome({
+    const result = await runChrome({
       profileDir,
       url: confirmUrl,
       deadline,
@@ -1420,7 +1882,16 @@ export async function openInstallConfirmInBotChrome(opts: {
       // stub to satisfy the (CDP-path) type.
       plainProfileLogin: true,
       pollUntilDone: () => Promise.resolve(false),
-      plainPollUntilDone: (dir) => opts.pollUntilClaimed(dir, completion?.isCompleted() === true),
+      plainPollUntilDone: async (dir) => {
+        const claim = await opts.pollUntilClaimed(dir, completion?.isCompleted() === true);
+        if (typeof claim === "object" && claim.provider !== null) {
+          completedProviders.add(claim.provider);
+        }
+        for (const provider of completion?.completedProviders() ?? []) {
+          completedProviders.add(provider);
+        }
+        return installClaimPollCompleted(claim);
+      },
       ...(opts.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
       ...(opts.heartbeatMessage !== undefined ? { heartbeatMessage: opts.heartbeatMessage } : {}),
       // The user's sign-in inside this Chrome leaves a provider session in the
@@ -1431,6 +1902,9 @@ export async function openInstallConfirmInBotChrome(opts: {
         for (const provider of ["google", "github"] as const) {
           if (profileHasProviderCookies(dir, provider)) {
             markProviderLoggedIn(provider, dir);
+            if (provider === "google" && completedProviders.has("google")) {
+              observedGoogleIdentity = true;
+            }
           }
         }
         // NB: eager Google-email capture (captureGoogleEmail) needed a live
@@ -1440,6 +1914,7 @@ export async function openInstallConfirmInBotChrome(opts: {
         // when unset, so dropping eager capture is safe and keeping CDP off
         // the OAuth login is the whole point of the plain path.
       },
+      seedProvider: () => (observedGoogleIdentity ? "google" : null),
     });
     if (result.status === "completed") {
       return { status: "claimed" };
@@ -1450,4 +1925,16 @@ export async function openInstallConfirmInBotChrome(opts: {
   } finally {
     await completion?.close().catch(() => undefined);
   }
+}
+
+export type InstallClaimPollResult =
+  | "pending"
+  | "expired"
+  | { status: "claimed"; provider: OAuthProviderId | null };
+
+export function installClaimPollCompleted(result: InstallClaimPollResult): boolean {
+  if (result === "expired") {
+    throw new Error("the install claim expired before sign-in completed");
+  }
+  return typeof result === "object" && result.status === "claimed";
 }

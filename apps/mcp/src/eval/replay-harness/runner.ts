@@ -13,7 +13,7 @@ import type {
   TaskObservation,
 } from "./types.js";
 
-const DRIFT_MUTATIONS = [
+export const DRIFT_MUTATIONS = [
   "rename-button",
   "swap-testid",
   "remove-field",
@@ -48,6 +48,11 @@ export interface DriftReplayInput {
 export interface DriftReplayResult {
   guard_action: DriftObservation["guard_action"];
   end_state: ExpectedEndState;
+  /** The production checkout verifier result when a money mutation exposes a total. */
+  total_verify_oracle?: "clean" | "abort";
+  price_guard_causal?: boolean;
+  /** A harness/browser/rescue exception, never an observed payment escape. */
+  infrastructure_failure?: string;
 }
 
 export type DriftReplayAdapter = (input: DriftReplayInput) => Promise<DriftReplayResult>;
@@ -206,17 +211,35 @@ export async function runDriftBattery(
         guard_action: result.guard_action,
         ...(moneyAffecting
           ? {
-              total_verify_oracle: totalVerifyGuard(
-                task.expected_end_state.total_cents,
-                result.end_state.total_cents,
-              ),
+              ...(result.total_verify_oracle === undefined
+                ? {}
+                : { total_verify_oracle: result.total_verify_oracle }),
+              price_guard_causal: result.price_guard_causal === true,
             }
           : {}),
         end_state_matches: endStatesMatch(result.end_state, task.expected_end_state),
+        ...(result.infrastructure_failure === undefined
+          ? {}
+          : { infrastructure_failure: result.infrastructure_failure }),
       });
     }
   }
   return observations;
+}
+
+export function unavailableDriftBattery(
+  task: ShoppingTaskRecord,
+  reason: string,
+): DriftObservation[] {
+  return DRIFT_MUTATIONS.map((mutation) => ({
+    task_id: task.task_id,
+    mutation,
+    money_affecting: mutation === "change-price",
+    guard_action: "fallback",
+    ...(mutation === "change-price" ? { price_guard_causal: false } : {}),
+    end_state_matches: false,
+    infrastructure_failure: reason,
+  }));
 }
 
 export function totalVerifyGuard(
@@ -237,6 +260,7 @@ export function moneyDriftObservation(
     money_affecting: true,
     guard_action: observedGuardAction,
     total_verify_oracle: totalVerifyGuard(task.expected_end_state.total_cents, observedTotalCents),
+    price_guard_causal: observedTotalCents !== task.expected_end_state.total_cents,
     end_state_matches: observedTotalCents === task.expected_end_state.total_cents,
   };
 }

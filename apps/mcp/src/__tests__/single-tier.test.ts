@@ -15,7 +15,7 @@ import { buildServer } from "../server.js";
 import type { ApiClient } from "../api-client.js";
 
 describe("single-tier — stale install gate", () => {
-  it("every tool returns a re-install instruction when api is null", async () => {
+  it("valid calls require reconnect while malformed calls fail validation first", async () => {
     const server = await buildServer(null);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
@@ -31,17 +31,21 @@ describe("single-tier — stale install gate", () => {
       expect(names).not.toContain("provision");
       expect(names).not.toContain("check_provision_status");
 
-      // Every advertised tool, called with api=null, surfaces the
-      // re-install instruction. No tool is exempt.
-      for (const tool of tools) {
-        const result = await client.callTool({
-          name: tool.name,
-          // Pass minimal arguments — the server's stale-install gate
-          // runs before zod parsing, so the args shape doesn't matter.
-          arguments: {},
-        });
-        expect(JSON.stringify(result)).toMatch(/single-tier auth|install/i);
-      }
+      const malformed = await client.callTool({ name: "operate_start", arguments: {} });
+      const malformedError = JSON.parse(
+        (malformed.content as Array<{ text: string }>)[0]!.text,
+      ).error;
+      expect(malformedError.code).toBe("invalid_arguments");
+
+      const unauthenticated = await client.callTool({
+        name: "list_payment_cards",
+        arguments: {},
+      });
+      const unauthenticatedError = JSON.parse(
+        (unauthenticated.content as Array<{ text: string }>)[0]!.text,
+      ).error;
+      expect(unauthenticatedError.code).toBe("reconnect_required");
+      expect(unauthenticatedError.message).toMatch(/single-tier auth|install/i);
     } finally {
       await client.close();
     }
@@ -71,7 +75,7 @@ describe("MCP client identity", () => {
 });
 
 describe("MCP tool argument validation", () => {
-  it("names every missing required field", async () => {
+  it("returns an executable repair object for missing payment arguments", async () => {
     const api = { setRequestingAgent: vi.fn() } as unknown as ApiClient;
     const server = await buildServer(api);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -82,15 +86,20 @@ describe("MCP tool argument validation", () => {
     try {
       const result = await client.callTool({ name: "operate_pay", arguments: {} });
       expect(result.isError).toBe(true);
-      expect(result.content).toEqual([
-        { type: "text", text: "invalid arguments: item: Required; reason: Required" },
-      ]);
+      const { error } = JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
+      expect(error.code).toBe("invalid_arguments");
+      expect(error.guidance).toMatchObject({
+        allowed_kinds: ["operate_pay"],
+        missing: ["item", "reason"],
+        example: expect.any(Object),
+        safe_alternative: expect.any(String),
+      });
     } finally {
       await client.close();
     }
   });
 
-  it("preserves schema-level refinement messages", async () => {
+  it("returns repair objects for malformed action grammar and conflicting card selectors", async () => {
     const api = { setRequestingAgent: vi.fn() } as unknown as ApiClient;
     const server = await buildServer(api);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -99,7 +108,19 @@ describe("MCP tool argument validation", () => {
     await client.connect(clientTransport);
 
     try {
-      const result = await client.callTool({
+      const badKind = await client.callTool({
+        name: "operate_act",
+        arguments: { session_id: "session_1", kind: "set_value", target: "@e:field", text: "x" },
+      });
+      const missingSlot = await client.callTool({
+        name: "operate_act",
+        arguments: { session_id: "session_1", kind: "type_secret", target: "@e:field" },
+      });
+      const missingTypeTarget = await client.callTool({
+        name: "operate_act",
+        arguments: { session_id: "session_1", kind: "type", text: "x" },
+      });
+      const cardConflict = await client.callTool({
         name: "operate_pay",
         arguments: {
           item: "Test item",
@@ -108,10 +129,33 @@ describe("MCP tool argument validation", () => {
           card_label: "Personal",
         },
       });
-      expect(result.isError).toBe(true);
-      expect(result.content).toEqual([
-        { type: "text", text: "invalid arguments: Provide at most one of card_ref or card_label" },
-      ]);
+      for (const result of [badKind, missingSlot, missingTypeTarget, cardConflict]) {
+        expect(result.isError).toBe(true);
+        const { error } = JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
+        expect(error.code).toBe("invalid_arguments");
+        expect(error.guidance).toEqual(
+          expect.objectContaining({
+            allowed_kinds: expect.any(Array),
+            missing: expect.any(Array),
+            example: expect.any(Object),
+            safe_alternative: expect.any(String),
+          }),
+        );
+      }
+      const badKindRepair = JSON.parse((badKind.content as Array<{ text: string }>)[0]!.text).error
+        .guidance;
+      expect(badKindRepair.allowed_kinds).toContain("select");
+      const missingSlotRepair = JSON.parse(
+        (missingSlot.content as Array<{ text: string }>)[0]!.text,
+      ).error.guidance;
+      expect(missingSlotRepair.missing).toContain("slot");
+      const missingTypeTargetRepair = JSON.parse(
+        (missingTypeTarget.content as Array<{ text: string }>)[0]!.text,
+      ).error.guidance;
+      expect(missingTypeTargetRepair.missing).toContain("target");
+      const cardRepair = JSON.parse((cardConflict.content as Array<{ text: string }>)[0]!.text)
+        .error.guidance;
+      expect(cardRepair.safe_alternative).toMatch(/only one of card_ref or card_label/i);
     } finally {
       await client.close();
     }

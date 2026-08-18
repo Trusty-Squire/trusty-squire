@@ -71,10 +71,18 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
 
 - `operate_start`, `operate_observe`, `operate_act` — open the real website and
   drive it one step at a time (signup, sign-in, form fill), clearing bot gates.
-- `operate_await_verification` — read the email verification code or link from
-  the user's own inbox, behind an explicit consent gate.
-- `operate_extract` — capture a revealed API key/secret straight into the
-  write-only vault (never back into the conversation).
+- For shopping, use `operate_act { kind: "cart_add" }` instead of clicking an
+  add-to-cart control directly. Keep its idempotency key stable across retries
+  and bind the canonical product identity plus selected-variant options hash.
+  For later cart controls, pass that identity pair to `operate_act` when known.
+  Follow the one `checkout_state.next_action`, but treat the state and its
+  money fields as informational only. Follow the
+  [README payment guide](https://github.com/Trusty-Squire/trusty-squire#one-prompt)
+  for `operate_pay` checkout-amount precedence.
+- `operate_act { kind: "await_verification" }` — read the email verification
+  code or link from the user's own inbox, behind an explicit consent gate.
+- `operate_act { kind: "extract" }` — capture a revealed API key/secret
+  straight into the write-only vault (never back into the conversation).
 - `list_credentials`, `use_credential` — find a stored credential and make an
   authenticated API call **without** the raw value returning to the agent; put
   `${SECRET}` (or `${SECRET.field}`) placeholders in the request and the server
@@ -87,14 +95,47 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   reference, or omit both selectors: one saved card is used automatically, no
   saved cards starts a just-in-time add-card approval, and multiple cards return
   their labels so the user can choose. Never guess among several cards. The tool
-  requests phone approval for the exact purchase, fills the checkout, nudges
-  the user's linked Telegram chat when configured and 3-D Secure is required,
-  and waits for them to resolve it before handing back an unresolved challenge.
+  requests phone approval for the exact purchase, fills the checkout, and waits
+  after any unconfirmed submit for native completion. When Telegram is linked,
+  the nudge distinguishes a detected 3-D Secure challenge from possible
+  out-of-band bank-app authentication before handing back an unresolved outcome.
   If add-card returns `needs_user.wall: "card_required"`, re-run for a fresh
   link; if `payment_approval_timeout` includes `card_persisted: true`, the added
   card remains available for the retry. Set `three_ds_wait_seconds` to `0` only
   when the user wants the immediate handoff without notification or waiting.
   Card fields never return through MCP.
+- Every payment response includes a `session_id`. Pass that same ID to every
+  follow-up `operate_pay` and canonical `operate_payment_status` call. Follow the
+  [README payment guide](https://github.com/Trusty-Squire/trusty-squire#one-prompt)
+  for polling arguments. Omit `session_id` only when this MCP process has
+  exactly one live session; it never guesses the newest checkout.
+- Treat `payment_outcome_unknown` as unconfirmed: do not claim success or
+  submit again blindly. The card may already have been charged — manually
+  check the merchant's order state before any retry.
+- On a split checkout whose card-entry step shows no total (or only a subtotal),
+  call `operate_pay` with `phase: "fill_card"` and follow the
+  [README payment guide](https://github.com/Trusty-Squire/trusty-squire#one-prompt)
+  for amount precedence. That one approval releases and fills the card,
+  charging nothing yet. Trusty Squire's part is then done: drive the checkout
+  to the order-confirmation step, VERIFY the live final total there matches
+  the approved `amount_cents`/currency yourself, and place the order via
+  `operate_act`, handling any 3-D Secure challenge directly. Prefer `click` or
+  `js_click` on the observed pay/place-order control: exactly one recognized
+  control click may dispatch for that approval, and a repeat is refused until a
+  fresh `operate_pay` approval in a new session. Do not use an ungated key press
+  or `oauth_click` to bypass that refusal. A dispatched recognized click records
+  a metadata-only attempt event; it does not prove the merchant charged the card.
+  Call `operate_pay` with `phase: "confirm"` any time after the fill
+  to close out the approval and release the session's pending-fill lock — it
+  does not need to happen before you place the order, and it never
+  reads a total, verifies an amount, or submits anything itself. `item` and
+  `reason` remain required on both calls. If the payment gets stuck or the
+  card is declined, recover with `operate_finish` and start a fresh session —
+  `operate_pay` does not support refilling a different card mid-session. An
+  unrecognized payment iframe is a hard stop.
+- Always call `operate_finish` when done, including when a payment remains unresolved.
+  The authoritative teardown contract is in the
+  [README tool guide](https://github.com/Trusty-Squire/trusty-squire#mcp-tools).
 
 **Safety rules the agent must follow:**
 
@@ -105,7 +146,15 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
 - **Stop for the user** at phone verification, a hard image CAPTCHA, an
   unsupported payment, 3-D Secure, or any decision that belongs to a person.
   `operate_pay` may proceed only after its explicit phone approval succeeds. Do
-  not guess, and do not claim a signup finished when it did not.
+  use `operate_act` for split-checkout navigation and order placement after a
+  successful card fill as described above; do not guess or claim a signup
+  finished when it did not.
+- Card controls marked `interaction: "vaulted_card_only"` must be handled with
+  their recommended `operate_pay { phase: "fill_card" }` action. Never type a
+  PAN or Luhn-valid card number through `operate_act`; a refusal points back to
+  `operate_pay`. Follow the
+  [README payment guide](https://github.com/Trusty-Squire/trusty-squire#one-prompt)
+  for checkout-amount precedence and split-checkout handling.
 - The user connects Google/GitHub themselves in the real browser during
   `connect`. Never ask for or type the user's password in chat.
 

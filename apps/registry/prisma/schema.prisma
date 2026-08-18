@@ -18,8 +18,38 @@ datasource db {
   url      = env("REGISTRY_DATABASE_URL")
 }
 
-// SkillRecord — Tier-2 Learned Skills (0.7.0). Post-0.8 this is the
-// registry's only published-recipe table.
+// OperatorRecipeRecord — shared Operator Recipes (replay-serve-live-
+// domainlock), keyed by (verb, eTLD+1). `POST /recipes` (unauthenticated)
+// writes here directly and the write is immediately live — `operate_recipe_run` /
+// `GET /recipes/:verb/:domain` read this table the instant it lands. There
+// is no candidate/promotion tier (the earlier housekeeper-vetted gate was
+// retired). Safety instead comes from the HARD DOMAIN-LOCK
+// (recipeDomainLockViolations in @trusty-squire/recipe-schema), enforced
+// both at write time (routes/recipes.ts) and again at replay time by the
+// mcp client, plus the share-eligibility gate against baked-in user data.
+// See docs/ARCHITECTURE.md and CLAUDE.md.
+model OperatorRecipeRecord {
+  // `${verb}--${domain}`, e.g. "get_api_key--example.com".
+  key            String   @id
+
+  verb           String
+  domain         String
+
+  // The full OperatorRecipeSchema-validated JSON.
+  payload_json   Json
+
+  schema_version Int
+
+  submitted_at   DateTime @default(now())
+  updated_at     DateTime @updatedAt
+
+  @@index([domain])
+}
+
+// SkillRecord — Tier-2 Learned Skills (0.7.0). Post-0.8 this was the
+// registry's only published-recipe table; the OperatorRecipe* models above
+// are the second (a distinct, simpler flow for operator-driver replay
+// plans, with its own minimal candidate/promote trust boundary).
 //
 // `payload_json` carries the full SkillSchema-validated JSON. Health
 // counters live as columns rather than inside the JSON so atomic SQL

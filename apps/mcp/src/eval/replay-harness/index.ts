@@ -1,4 +1,5 @@
 export * from "./corpus.js";
+export * from "./engine-adapter.js";
 export * from "./har-mutate.js";
 export * from "./har-substrate.js";
 export * from "./metrics.js";

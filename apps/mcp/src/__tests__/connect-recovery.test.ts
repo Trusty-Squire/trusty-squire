@@ -5,15 +5,30 @@
 //  #3 — the confirm browser / headless noVNC tunnel must stay open until
 //       explicit Finish during normal onboarding.
 
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import {
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   agentTokenStillValid,
   claimHeartbeatMessage,
+  connectCompletionOptions,
   decideProvisioned,
+  parseArgs,
   shouldCompleteInstallClaim,
+  withConnectProfileGuard,
 } from "../install/cli.js";
+import { clearBrowserProfile } from "../bot/login-state.js";
+import { withProfileOperationGuard } from "../bot/profile.js";
 import type { SessionData } from "../session.js";
 
 function fakeFetch(status: number): typeof fetch {
@@ -103,6 +118,27 @@ describe("decideProvisioned (fast-path gate: write config without a re-claim)", 
 });
 
 describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
+  it("keeps one canonical guard while a symlinked profile is reset", async () => {
+    const base = mkdtempSync(join(tmpdir(), "ts-connect-profile-"));
+    const target = join(base, "profile");
+    const alias = join(base, "profile-alias");
+    mkdirSync(target);
+    writeFileSync(join(target, "stale-state"), "stale");
+    symlinkSync(target, alias, "dir");
+    try {
+      await withConnectProfileGuard(alias, async (canonicalProfileDir) => {
+        expect(canonicalProfileDir).toBe(target);
+        clearBrowserProfile(canonicalProfileDir);
+        expect(realpathSync(alias)).toBe(target);
+        expect(existsSync(join(target, "stale-state"))).toBe(false);
+        await withProfileOperationGuard(alias, async () => undefined);
+      });
+      expect(lstatSync(alias).isSymbolicLink()).toBe(true);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
   it("completes force-relogin once the provider session has seeded", () => {
     expect(
       shouldCompleteInstallClaim(
@@ -169,17 +205,19 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
     expect(shouldCompleteInstallClaim(false, true, true, true)).toBe(false);
   });
 
-  it("is wired to the parsed --force-relogin flag in connect", () => {
-    const cliSource = readFileSync(
-      fileURLToPath(new URL("../install/cli.ts", import.meta.url)),
-      "utf8",
-    );
-    expect(cliSource).toMatch(/completeOnClaim:\s*args\.forceRelogin/);
-    expect(cliSource).toMatch(/completionProvider:\s*args\.forceReloginProvider\s*\?\?\s*"google"/);
-    expect(cliSource).toMatch(
-      /profileHasProviderCookies\(profileDir,\s*options\.completionProvider\)/,
-    );
-    expect(cliSource).toMatch(/wizardCompleted/);
+  it("maps parsed force-relogin flags to connect completion behavior", () => {
+    expect(connectCompletionOptions(parseArgs(["connect"]))).toEqual({
+      completeOnClaim: false,
+      completionProvider: "google",
+    });
+    expect(connectCompletionOptions(parseArgs(["connect", "--force-relogin"]))).toEqual({
+      completeOnClaim: true,
+      completionProvider: "google",
+    });
+    expect(connectCompletionOptions(parseArgs(["connect", "--force-relogin=github"]))).toEqual({
+      completeOnClaim: true,
+      completionProvider: "github",
+    });
   });
 });
 

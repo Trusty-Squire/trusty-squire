@@ -15,11 +15,12 @@ user's machine; an API on Fly.io handles persistence and orchestration.
 **One provisioning path:**
 
 **Interactive operator driver** — the host agent plans each step with
-`operate_start`, `operate_observe`, `operate_act`, `operate_extract`,
-and `operate_finish_task`/`operate_finish`; Trusty Squire supplies the scoped
-browser, DOM/screenshot observations, vault extraction, and registry hints.
+`operate_start`, `operate_observe`, `operate_act` (which owns `extract` and
+every other workflow/lifecycle kind), and `operate_finish`; Trusty Squire supplies
+the scoped browser, DOM/screenshot observations, vault extraction, and registry
+hints.
 Account-bound, vault-backed. Provisioning is free during beta (no signup quota).
-Closed-loop with the skill registry: successful runs publish a Skill that
+Closed-loop with the skill registry: eligible successful runs publish a Skill that
 subsequent provisions replay in ~30s instead of the ~6min a from-scratch
 host-driven run takes.
 
@@ -56,7 +57,7 @@ nothing else down.
 
 **How it's driven + monitored:** every host-driven provision capture
 feeds **auto-promote on real provisions** (`provision_*` captures), which
-publishes a skill on a virgin success. The daily **verify pass**
+attempts to publish an eligible skill on a virgin success. The daily **verify pass**
 (`ts-housekeeper`, now its own repo
 `Trusty-Squire/trusty-squire-housekeeper`) keeps the registry honest —
 promote skills that still work, demote ones that don't — so replay stays
@@ -70,9 +71,10 @@ silent failures.
   v16+ shipped.
 - **Email verification — the user's own inbox.** Signups are user-owned:
   the operator reads the verification code/link from the user's own Gmail
-  through their signed-in browser session (`operate_await_verification`),
-  behind a JIT consent gate. The Squire-alias inbound-mail subsystem
-  (`packages/inbox`, the resend-inbound webhook) was retired in 1.0.1 —
+  through their signed-in browser session
+  (`operate_act { kind: "await_verification" }`), behind a JIT consent gate. The
+  Squire-alias inbound-mail subsystem (`packages/inbox`, the resend-inbound
+  webhook) was retired in 1.0.1 —
   no aliases are minted and nothing receives inbound mail server-side.
   Operator-side OTP still arrives via the bot's own Gmail over IMAP
   (`operator-otp-poller.ts`, see `OPERATOR_IMAP_*` below). Resend is
@@ -114,12 +116,17 @@ silent failures.
     (`cf-turnstile-response` or `g-recaptcha-response`) populated, up
     to 30s timeout. Returns `captcha_blocked` on timeout so the MCP
     tool can surface a clear status to the user.
-  - User-inbox verification read (`operate_await_verification` reads the
-    code/link from the user's own signed-in Gmail behind a JIT consent
-    gate), verification-link click, and post-verify navigation primitives
-    the host agent drives via `operate_*`.
+  - User-inbox verification read (`operate_act { kind: "await_verification" }`
+    reads the code/link from the user's own signed-in Gmail behind a JIT consent
+    gate), verification-link click, and post-verify navigation
+    primitives the host agent drives via `operate_*`.
   - DOM/screenshot observation + vault-backed credential extraction +
-    operator-recipe replay (`operate_use`) the host agent composes per step.
+    operator-recipe replay (`operate_recipe_run`) the host agent composes per step.
+  - **Frame/iframe support (operator-frame-support).** Ordinary child-frame
+    controls now retain their frame origin through observation, action, and
+    operator-recipe replay. The user-facing contract lives in README's MCP-tool
+    reference; `frameTargetAllowed`/`assertSecretFrameTargetAllowed` in
+    `provision-session.ts` own the action-time security boundary.
 - **Single-tier install flow.** `npx @trusty-squire/mcp connect` does
   three things in one command:
   1. Issues a machine token (bot-internal credential for the operator
@@ -511,6 +518,84 @@ package would defeat the whole 0.7.0 thesis).
   path is honored without any env work. Set to `off` / `0` / `false`
   to suppress capture entirely.
 
+### Operator Recipe registry (replay-serve-live-domainlock)
+
+Operator Recipes use an action-path-aware local lookup plus a shared
+`(canonical verb, eTLD+1)` registry fallback, separate from registry Skills.
+[`docs/DESIGN-replay-engine.md`](docs/DESIGN-replay-engine.md) owns recipe
+identity, live-on-write registry behavior, domain lock, cross-user privacy,
+replay behavior, and the implementation map. Keep this section as a pointer;
+do not duplicate that conditional security contract in always-loaded guidance.
+
+### Per-leg recipe resolution + checkout shape signature (replay-per-leg-signature)
+
+Checkout legs use an exact field-name-set signature, so a recipe can transfer
+across stores only when their checkout shapes match. Whole-task recipes use the
+action-path-aware local key and maintain the degenerate catch-all; checkout-leg
+recipes keep their separate `shape:<sha256>` key. The current lookup, fallback,
+recording, and payment contracts live only in
+[`docs/DESIGN-replay-engine.md`](docs/DESIGN-replay-engine.md). The evidence
+record remains in
+[`docs/DESIGN-replay-shape-lookup.md`](docs/DESIGN-replay-shape-lookup.md).
+
+### Non-blocking payment approval (operate_payment_status)
+
+The public tool contract lives in the [README payment guide](README.md#one-prompt),
+the data flow in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#payment-flow), and
+the cross-session authorization boundary in [`SECURITY.md`](SECURITY.md#client-encrypted-card-data).
+This section records only implementation details.
+
+`operate_pay` (fill_card and single-page initiation — NOT `phase:"confirm"`,
+which was never a wait) no longer blocks the MCP call for up to 5 (18 for
+JIT) minutes polling for the human's phone tap. It makes ONE live
+`getPaymentApproval` check and, if not yet approved, returns
+`{session_id, status:"approval_pending", approval_id, approval_url, expires_at,
+phase, approved_amount_cents, next:{tool:"operate_payment_status", session_id,
+wait_seconds:15}}` — the friction-audit P0 fix (small models can't tell
+"pending" from "broken" on a silent multi-minute hang, so they panic-retry or
+kill the server).
+- **One canonical read-only tool, `operate_payment_status(session_id?, wait_seconds?)`.**
+  `wait_seconds` (0-15, default 0) is an instant peek at 0, a bound-wait
+  (client-side race in `readApprovalStatus`, `apps/mcp/src/tools/operate-pay.ts`)
+  above 0. Reports `pending`/`approved`/`expired` plus `candidate_submitted`
+  (the phone responded; call `operate_pay` again to actually verify the
+  mandate, open the card, and fill/charge — this tool never does that).
+  `paymentStatusResult()` in `operate-pay.ts` is the sole handler, called only
+  by `operate_payment_status`; no payment-status alias remains in the registry.
+- **Validated idempotent resume.** A still-pending call
+  hands its resumable state (approval id/nonce/keypair/checkout/rejected-
+  candidates — `PendingApprovalWait` in `pay-operator.ts`) to session state
+  via a NEW `activePayment` status, `"awaiting_approval"`
+  (`provision-session.ts`). A later `operate_pay` call for the same
+  checkout passes it through `claimActivePaymentForOperatePay`'s
+  `resumeApproval`. `executeOperatePay` first reads the approval resource and
+  reuses it only while its id matches, it is unexpired, and it is pending (or
+  approved with the signed candidate still present). A missing, expired,
+  rejected, consumed, or otherwise terminal resource has its old private key
+  cleared and is replaced with a fresh approval. Every initiation surfaces the
+  active approval URL, including reuse, so the host can notify the user again
+  without minting a duplicate authorization. `pollBudgetMs` bounds this call's
+  poll loop; omitted retains legacy full-deadline blocking for direct callers.
+  Reusing a live approval also reuses its operator keypair because the sealed
+  card was HPKE-encrypted to that exact keypair.
+- **Session-addressed resume.** `withPaymentSessionCall` resolves the optional
+  `session_id` exactly once at tool entry, requires it when more than one session
+  exists, and carries the selected `Session` through every await. Payment results
+  and tool hints repeat the same ID. `operate_finish*` closes admission, drains
+  entered calls, and follows the payment-state cleanup and profile-disposition
+  contract in `SECURITY.md`.
+- **Unreadable checkout totals.** Follow the README payment guide for the public
+  precedence contract; `executeOperatePay` in `pay-operator.ts` is the
+  authoritative implementation.
+- **Late-mounting cross-origin PCI iframe (fillAndSubmitCheckout /
+  fillCheckoutCardFields).** Before taking their `page.frames()` snapshot,
+  both paths wait up to 10 seconds for a PAN field. This lets a single-page
+  checkout complete within the existing approval when its cross-origin PCI
+  iframe mounts after the payment section renders. The wait changes only
+  when the snapshot is taken: `fillCheckoutCardFields` still writes only to
+  the main frame or a frame accepted by `recognizedPaymentProviderFrame`,
+  preserving split-checkout trust boundaries — `browser.ts`.
+
 ### Goose / local-dev MCP install
 
 `npx @trusty-squire/mcp connect --target=goose` writes the extension to
@@ -652,7 +737,7 @@ Key routing rules:
 
 ## Design System
 
-Read `DESIGN.md` (repo root) before any visual or UI change to `apps/web`.
+Read `docs/DESIGN.md` before any visual or UI change to `apps/web`.
 Fonts (Geist + JetBrains Mono), the color ramp, spacing/type/radius scales,
 component patterns, and motion are defined there. Don't deviate without
 explicit approval; flag any code that diverges. The vault is mono-forward

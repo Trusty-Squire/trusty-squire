@@ -7,11 +7,28 @@
     "product_query": "Collagen Glow Sheet Mask",
     "product_variant_id": "53507153789039",
     "product_price_cents": 1900,
-    "address": { "country": "US", "region": "NY", "postal_code": "10001" },
+    "address": {
+      "country": "US",
+      "region": "NY",
+      "postal_code": "10001",
+      "line1": "123 Test Street",
+      "city": "New York"
+    },
+    "contact": {
+      "email": "replay-eval+whitejade-purchase-r2@trustysquire.ai",
+      "first_name": "Replay",
+      "last_name": "Evaluation",
+      "phone": "(212) 555-0100"
+    },
     "card_ref": "whitejade-test-card"
   },
   "expected_end_state": {
-    "line_items": [{ "title_contains": "Collagen Glow Sheet Mask", "qty": 1 }],
+    "line_items": [
+      {
+        "title_contains": "Collagen Glow Sheet Mask",
+        "qty": 1
+      }
+    ],
     "total_cents": 2700,
     "reached": "checkout_review"
   },
@@ -22,7 +39,12 @@
     "tokens": 367569,
     "wall_clock_ms": 87338,
     "end_state": {
-      "line_items": [{ "title_contains": "Collagen Glow Sheet Mask", "qty": 1 }],
+      "line_items": [
+        {
+          "title_contains": "Collagen Glow Sheet Mask",
+          "qty": 1
+        }
+      ],
       "total_cents": 2700,
       "reached": "checkout_review"
     },
@@ -33,8 +55,13 @@
       "recorded_at": "2026-08-05T06:03:58.813Z",
       "browser_observations": 15,
       "evidence_sha256": "4586544bc53a465343a2746fcc2fac2151e6bc5797c7ff7c965d9dc8f36af1fa",
-      "capture_policy": "read-only-playwright-mcp-v3"
+      "capture_policy": "read-only-playwright-mcp-v3",
+      "trace_artifact": "traces/whitejade-purchase-r2.recipe.json",
+      "checkout_artifact": "traces/whitejade-purchase-r2.checkout.json"
     }
   },
-  "capture": { "status": "captured", "captured_at": "2026-08-04T21:05:00Z" }
+  "capture": {
+    "status": "captured",
+    "captured_at": "2026-08-04T21:05:00Z"
+  }
 }

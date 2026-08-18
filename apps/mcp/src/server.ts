@@ -15,7 +15,10 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { ApiClient } from "./api-client.js";
-import { TOOLS, findTool } from "./tools/index.js";
+import { setSelfManagedChromeTerminationSignalExitEnabled } from "./bot/browser.js";
+import { cancelActiveLoginBrowsers } from "./bot/google-login.js";
+import { closeAllProvisionSessions, withProvisionSessionCall } from "./bot/provision-session.js";
+import { buildToolRegistry, findTool } from "./tools/index.js";
 import { openSessionStorage } from "./session.js";
 import { VERSION } from "./version.js";
 
@@ -49,13 +52,14 @@ Routing rules for THIS server's tools:
   Trusty Squire web vault themselves.`;
 
 export async function buildServer(api: ApiClient | null): Promise<Server> {
+  const tools = buildToolRegistry();
   const server = new Server(
     { name: SERVER_NAME, version: VERSION },
     { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: TOOLS.map((t) => ({
+    tools: tools.map((t) => ({
       name: t.name,
       description: t.description,
       inputSchema: t.jsonInputSchema,
@@ -65,59 +69,124 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
-    const tool = findTool(req.params.name);
+    const tool = findTool(req.params.name, tools);
     if (tool === null) {
-      return errorContent(`unknown tool '${req.params.name}'`);
+      return errorContent("unknown_tool", `unknown tool '${req.params.name}'`);
     }
-    // Stale install gate runs before zod parsing: telling the user
-    // "you have invalid arguments" is worse than telling them "your
-    // install needs reconnecting" when both are true.
-    if (api === null) {
-      return errorContent(
-        `This install is from before single-tier auth and isn't bound to an account. ` +
-          `Run \`npx @trusty-squire/mcp connect\` to reconnect.`,
-      );
-    }
+    // Parse before checking account state. A malformed call is always a local,
+    // structured repair opportunity; it must not be misreported as an install
+    // problem (or allowed to escape the stdio request boundary).
     const parsed = tool.inputSchema.safeParse(req.params.arguments ?? {});
     if (!parsed.success) {
+      if (tool.schemaRepair !== undefined) {
+        return errorContent("invalid_arguments", "invalid arguments", {
+          guidance: tool.schemaRepair(req.params.arguments ?? {}, parsed.error.issues),
+        });
+      }
       return errorContent(
+        "invalid_arguments",
         `invalid arguments: ${parsed.error.issues
           .map((i) => (i.path.length > 0 ? `${i.path.join(".")}: ${i.message}` : i.message))
           .join("; ")}`,
       );
     }
+    if (api === null) {
+      return errorContent(
+        "reconnect_required",
+        `This install is from before single-tier auth and isn't bound to an account. ` +
+          `Run \`npx @trusty-squire/mcp connect\` to reconnect.`,
+      );
+    }
     try {
       api.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
-      const result = await tool.handler(parsed.data, api, {
-        notifyUser: async (message, data) => {
-          await server.sendLoggingMessage({
-            level: "notice",
-            logger: "trusty-squire",
-            data: { message, ...data },
-          });
-        },
-      });
+      const invoke = async () =>
+        await tool.handler(parsed.data, api, {
+          notifyUser: async (message, data) => {
+            await server.sendLoggingMessage({
+              level: "notice",
+              logger: "trusty-squire",
+              data: { message, ...data },
+            });
+          },
+        });
+      // Tool handlers await independently.  A finish must therefore close the
+      // admission gate and drain calls that already entered before it resets or
+      // pools a browser.  `operate_finish*` owns that transition itself.
+      const sessionId =
+        typeof parsed.data.session_id === "string" ? parsed.data.session_id : undefined;
+      const result =
+        sessionId !== undefined && !/^operate_finish(?:_task)?$/.test(tool.name)
+          ? await withProvisionSessionCall(sessionId, async () => await invoke())
+          : await invoke();
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
     } catch (err) {
-      return errorContent(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      const serverUnavailable =
+        /unknown provision session|requires one active operate_start browser session/i.test(
+          message,
+        );
+      const malformedAction = /^operate_act kind=.* requires /i.test(message);
+      return serverUnavailable
+        ? errorContent(
+            "server_unavailable",
+            `${message}. Retry once. Never kill or restart the shared operator process; it serves every lane/home.`,
+            {
+              retry: { max_attempts: 1 },
+            },
+          )
+        : errorContent(malformedAction ? "invalid_arguments" : "tool_execution_failed", message);
     }
   });
 
   return server;
 }
 
-function errorContent(message: string) {
+function errorContent(code: string, message: string, guidance?: Record<string, unknown>) {
   return {
     isError: true,
-    content: [{ type: "text" as const, text: message }],
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify({ error: { code, message, ...(guidance ?? {}) } }),
+      },
+    ],
   };
+}
+
+// Process-level backstop for the stdio server. Every tool handler is already
+// wrapped in try/catch, but an async error can still escape that boundary —
+// e.g. a Playwright event waiter whose rejection fires while another await is
+// pending (the uploadFile filechooser race that took the server down mid-run).
+// Node's default response to an unhandledRejection/uncaughtException is to
+// kill the process, which turns one bad operate_* call into "MCP server
+// unreachable" for the host agent. Log the escape and keep serving: the
+// in-flight call fails on its own (its awaited promise threw or timed out),
+// session/browser state is self-contained and recycled by the warm-browser
+// health checks, and no security gate depends on process death — a crash
+// leaves any half-done page action in exactly the same state, minus the
+// transport. Installed only for `mcp server`; the CLI keeps fail-fast.
+export function installServerProcessGuards(): void {
+  const describe = (reason: unknown): string =>
+    reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+  process.on("unhandledRejection", (reason) => {
+    process.stderr.write(
+      `[trusty-squire] unhandled rejection (server kept alive): ${describe(reason)}\n`,
+    );
+  });
+  process.on("uncaughtException", (err) => {
+    process.stderr.write(
+      `[trusty-squire] uncaught exception (server kept alive): ${describe(err)}\n`,
+    );
+  });
 }
 
 // Start the MCP stdio server. Throws on a fatal startup failure; bin.ts
 // owns the process-level error handling.
 export async function runServer(): Promise<void> {
+  installServerProcessGuards();
+  setSelfManagedChromeTerminationSignalExitEnabled(false);
   // Startup breadcrumb on stderr (which lands in the host agent's MCP
   // log). A silent no-op was the worst part of the entrypoint-guard
   // bug — this line makes "did the server actually start?" answerable
@@ -143,5 +212,54 @@ export async function runServer(): Promise<void> {
 
   const server = await buildServer(api);
   const transport = new StdioServerTransport();
+
+  // A stdio client can disappear without sending a signal (for example when
+  // its parent agent exits). Chrome keeps Node's event loop alive in that
+  // case, so close every active provisioning browser and explicitly exit.
+  // Keep the single promise so EOF, transport closure, and a signal racing
+  // together cannot run teardown twice.
+  let shutdown: Promise<void> | undefined;
+  const requestShutdown = (): void => {
+    if (shutdown !== undefined) return;
+
+    shutdown = (async () => {
+      process.stdin.removeListener("end", requestShutdown);
+      process.stdin.removeListener("close", requestShutdown);
+      process.removeListener("SIGTERM", requestShutdown);
+      process.removeListener("SIGINT", requestShutdown);
+
+      try {
+        // The OAuth-bootstrap login Chrome (google-login) is tracked apart
+        // from provision sessions — drain it too so it cannot outlive the
+        // server. Its own signal handlers stand down in server mode (see
+        // registerHeadlessRigCleanup), leaving this coordinator as the one
+        // exit owner.
+        await cancelActiveLoginBrowsers();
+        await closeAllProvisionSessions();
+        await server.close();
+      } catch (err) {
+        // Teardown is best-effort: the host is gone, so leave a breadcrumb but
+        // never let a failed browser close turn into an orphaned MCP process.
+        process.stderr.write(
+          `[trusty-squire] server shutdown cleanup failed: ${
+            err instanceof Error ? err.message : String(err)
+          }\n`,
+        );
+      }
+
+      // Browser/Chrome child processes can keep the event loop alive briefly
+      // even after their teardown. This mirrors bin.ts's forced CLI exit and
+      // makes disconnect a reliable process-lifecycle boundary.
+      process.exit(0);
+    })();
+  };
+
+  // Protocol.connect preserves a transport callback installed before it takes
+  // ownership, so this also covers an explicit transport close.
+  transport.onclose = requestShutdown;
+  process.stdin.once("end", requestShutdown);
+  process.stdin.once("close", requestShutdown);
+  process.once("SIGTERM", requestShutdown);
+  process.once("SIGINT", requestShutdown);
   await server.connect(transport);
 }

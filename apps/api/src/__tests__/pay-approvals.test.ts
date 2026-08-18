@@ -796,6 +796,7 @@ describe("payment approval relay", () => {
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/notify-3ds`,
       headers: { authorization: `Bearer ${agentToken}` },
+      payload: { mode: "detected_challenge" },
     });
 
     expect(response.statusCode).toBe(200);
@@ -805,6 +806,32 @@ describe("payment approval relay", () => {
     const body = JSON.parse((init as RequestInit).body as string);
     expect(body.text).toContain("Synthetic Books");
     expect(body.text).toContain("USD 25.99");
+    expect(body.text).toContain("bank app");
+    expect(body.text).toContain("3-D Secure required");
+  });
+
+  it("uses cautious Telegram copy for possible out-of-band authentication", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "synthetic-bot-token");
+    const account = await deps.accountStore.findAccountByEmail("payer@example.test");
+    await deps.accountStore.setTelegramChatId(account!.id, "555000111");
+    const created = await createApproval();
+    fetchMock.mockClear();
+
+    const response = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/notify-3ds`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: { mode: "possible_out_of_band" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const [, init] = fetchMock.mock.calls[0]!;
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.text).toContain("Authentication may be happening out of band");
+    expect(body.text).toContain("Check your bank app");
+    expect(body.text).not.toContain("3-D Secure required");
   });
 
   it("formats zero-decimal currencies without fake cents in 3-D Secure Telegram messages", async () => {

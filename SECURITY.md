@@ -90,13 +90,14 @@ fields.
 Before card entry or payment approval, the browser requires a one-time Vouchflow
 passkey enrollment and confirms that the platform authenticator supports the
 WebAuthn PRF extension. A payment approval is short-lived and account-scoped.
-The anonymous approval shell displays the canonical server values before any
-payment-context ceremony. One explicit **Approve payment** action then signs a
-payload binding the merchant, checkout origin, amount, currency, single-use
-nonce, card reference, operator-key hash, item description, purchase reason, and
-server-derived requesting-agent label while deriving the card-decryption key.
-The API uses the install's authenticated agent identity when present and
-otherwise signs `unknown-agent`; the client cannot supply the label.
+The anonymous approval shell displays the canonical purchase values before an
+amount-bound payment ceremony, including the amount used for a split checkout's
+card-fill approval. One explicit **Approve payment** action then signs a payload
+binding the merchant, checkout origin, amount, currency, single-use nonce, card
+reference, operator-key hash, item description, purchase reason, and server-derived
+requesting-agent label while deriving the card-decryption key. The API uses the
+install's authenticated agent identity when present and otherwise signs
+`unknown-agent`; the client cannot supply the label.
 
 Just-in-time add-card approvals may be created without a card reference, while
 still binding the operator's ephemeral public key at creation. The API permits
@@ -106,9 +107,112 @@ until a card is bound. This enforces the seal → bind → approve order on the
 server rather than relying on client convention. On resume, the operator fails
 closed unless the approval record contains a non-blank server-bound card
 reference, and uses that reference when re-creating the signed purchase payload.
-Immediately before filling a just-in-time checkout, it re-reads the live
-merchant, origin, amount, and currency and refuses submission if any signed
-field changed.
+Immediately before filling and submitting a single-page just-in-time checkout,
+it attempts to re-read the live merchant, origin, amount, and currency. When that
+read succeeds, it refuses submission if any signed field changed. When the page no
+longer exposes a machine-readable total, it keeps the original mandate-bound checkout
+values rather than minting another approval.
+
+A split checkout may collect card details before it exposes the final payable total.
+On every observation, the session best-effort captures the most recent real checkout
+total read from the current page, replacing the prior value only after a successful
+read and scoping it to that page's origin. The `fill_card` phase prefers the live
+card-entry page's own total. A subtotal is accepted as the payable amount only when
+the same scoped order summary states that shipping is free; recommendation sections
+are excluded before any amount is selected. When that page has no readable total,
+caller-supplied `amount_cents` and `currency` take precedence as the approval amount;
+an omitted merchant name falls back to the checkout hostname. If those values were
+not supplied, the operator may instead use the same session's captured value after
+re-checking that the current origin matches. The resulting single amount-bound
+approval displays and signs whichever amount was selected, releases the card, and
+authorizes a later charge up to that amount.
+After approval it requires the live page origin to equal the mandate's checkout
+origin, fills no submit control, and permits card data only in the main frame,
+same-registrable-domain HTTPS frames, or curated HTTPS payment-provider frames. A
+failed or unrecognized-frame fill clears partial card data; if cleanup itself cannot
+be confirmed, the session keeps the payment-field seal active. Both fill and cleanup
+are limited to the selected card controls and explicitly labeled billing controls
+inside a positively identified payment context. Generic merchant address and country
+controls are treated as shipping controls and are never sealed or cleared by this
+payment path. On success the raw card is zeroed in the operator, while the eligible
+page fields remain sealed and observation-masked for the checkout's review step;
+session state retains only approval and mandate metadata, the checkout binding, card
+reference, and last four digits.
+
+Unsupported-wallet detection follows the frame containing the actual visible PAN
+field. PayPal and Braintree hosted card fields fail closed, while an unrelated PayPal
+express-button frame does not disqualify a fillable merchant or recognized Shopify
+PCI card-field frame. When a checkout mounts multiple card forms, the operator fills
+one complete visible and enabled group containing PAN, name, expiry, and CVV. When
+multiple groups are complete, it uses the PAN's rendered center-point hit-test and
+selects only the unique topmost, non-occluded group; otherwise it fails with
+`payment_card_form_ambiguous`. Card filling stays inside that selected group. In the
+single-page flow, a charge control inside a card group is eligible only for the
+selected group, and both card fields and that charge control follow their HTML `form`
+relationship when mounted elsewhere in the DOM; a merchant checkout control outside
+every card group remains eligible. The split-checkout fill does not select or click a
+charge control. Once the payment context is selected, PAN, expiry, and CVV are the
+required card fields. Cardholder name and the remaining billing fields are filled
+best-effort, and a missing name input does not abort an otherwise fillable payment.
+
+Placing the order and verifying the final total are the CALLER's job, not the
+operator's. The operator never re-reads a live total for a split checkout, never
+clicks a charge control, and never submits anything after the fill: the fill-time
+approval already authorizes a charge up to the approved amount, and the caller is
+responsible for checking the live final total against that approved amount before
+placing the order itself through `operate_act`. At fill time, the session snapshots
+the approval ID, optional mandate ID,
+merchant, approved amount and currency, opaque card reference, and last four digits.
+A `click` or `js_click` whose resolved control label matches the shared
+checkout-submit heuristic consumes that snapshot before dispatch. The first
+recognized click may fire; a second recognized click for the same approval is refused
+before dispatch and requires a fresh `operate_pay` approval, which also requires a
+fresh session because same-session refill is forbidden. If dispatch is positively
+known not to have occurred, the attempt marker is rolled back. Non-charge-labeled
+clicks, key presses, and `oauth_click` remain outside this heuristic and are not gated
+by it. No merchant hostname or CSS selector participates in the decision.
+
+After a recognized place-order click dispatches, the MCP server best-effort writes a
+`vault.payment_executed` audit event through the existing payment-audit endpoint with
+`payment_status: "payment_place_order_attempted"`. The event binds the approved
+merchant, amount, currency, card reference, approval ID, optional mandate ID, and
+last four digits. It deliberately records an attempt rather than an executed charge:
+Trusty Squire cannot verify what the merchant did after the caller's click. The audit
+write never blocks or changes the click result, and no PAN or CVV can enter the
+payload.
+
+The card VALUES remain masked in every observation for the life of the pending fill
+regardless. That masking is driven by the session's payment-field seal, independent
+of which caller clicks the submit control, so the money-fence guarantee that the
+coding-agent model never sees a raw PAN/CVV holds whether the operator or the caller
+ends up submitting.
+The `confirm` phase is a pure close-out: it makes no browser or provider call, reads
+no total, verifies no amount, and emits no audit event itself (it never charges), so it also
+cannot mislabel or falsely claim a payment was executed. It reports the approved
+merchant, amount, and currency back to the caller and releases the pending-fill
+lease into a sealed state — the observation seal (and so the masking) stays active,
+since the operator never actually cleared the live fields, and the session then
+refuses further payment operations for its lifetime. There is deliberately no
+same-session path to fill a different card after a fill or a confirm: recovery from
+a stuck, declined, or abandoned payment is closing the session with `operate_finish`
+and starting a fresh one, not an in-place refill. Every payment entry is still
+claimed before asynchronous work begins, and a pending confirmation is claimed
+atomically, so overlapping `operate_pay` calls cannot race toward the same
+close-out. The single-page (`phase="single"`) checkout is unaffected by any of
+this: it still reads the live total, fills, and submits in one call exactly as
+before, including its own 3-D Secure wait and `payment_outcome_unknown` /
+`payment_3ds_required` handling.
+
+Payment state, the approval keypair, and the verified mandate remain attached to the
+addressed operate session. `operate_pay` and `operate_payment_status`
+resolve `session_id` once at tool entry and return that ID in
+their results and follow-up hints. Omitting the ID is accepted only when exactly one
+process-local session exists; no path selects a newest or arbitrary session. Closing a
+session first rejects new calls and drains calls that already entered. Remaining payment
+state never blocks teardown: close records that the profile is payment-sensitive, clears
+the active payment and payment-field seal, and destroys or quarantines the profile instead
+of returning it to the warm pool. No payment state or card-bearing browser profile can
+therefore carry into a later session.
 
 The phone decrypts the saved card locally, then HPKE-seals it directly to that
 ephemeral X25519 key using HKDF-SHA256 and AES-256-GCM. Each signed payload hash
@@ -123,13 +227,16 @@ marks the approval approved, and clears all persisted JWS and ciphertext bytes.
 Repeating confirmation for that same fingerprint is safe during the relay TTL,
 while a different, expired, wrong-account, or undelivered candidate fails closed.
 
-Review-format candidates remain accepted only for compatibility. A review seal
-is never final approval: operator confirmation clears its JWS and ciphertext but
-leaves the approval pending for a separately verified canonical purchase
-candidate. Review verification failures are bounded and returned to the caller;
-only transient JWKS fetch failures or timeouts may retry. Lifecycle logs contain
-identifiers, account hashes, candidate fingerprints, machine/release metadata,
-and failure codes, never card plaintext, JWS values, or sealed-card values.
+Review-format candidates already staged by a legacy deployment remain accepted
+only for compatibility; new review-bound API submissions fail with
+`stale_payment_client`. A review seal is never final approval: operator
+confirmation clears its JWS and ciphertext but leaves the approval pending for a
+separately verified canonical purchase candidate. Review verification failures
+are bounded and returned to the caller; only transient JWKS fetch failures or
+timeouts may retry. Lifecycle logs contain candidate kind and transition outcome
+alongside identifiers, account hashes, candidate fingerprints, machine/release
+metadata, and failure codes, never card plaintext, JWS values, or sealed-card
+values.
 
 The MCP operator fetches Vouchflow's JWKS and fails closed unless signature,
 issuer, audience, purchase context, payload hash, and user presence all verify.
@@ -144,10 +251,10 @@ may wait for the user to resolve the challenge, but it never completes the
 challenge itself.
 
 Payment audit events are deliberately metadata-only: merchant, amount,
-currency, card last four digits, status, and an optional mandate ID. The API
-validates `last4` as exactly four digits; the audit schema has no PAN or CVV
-fields, and stored events never include them. Payment audit events use the vault
-audit retention window, which defaults to 365 days.
+currency, card last four digits, status, and optional mandate, opaque card, and
+approval references. The API validates `last4` as exactly four digits; the audit
+schema has no PAN or CVV fields, and stored events never include them. Payment audit
+events use the vault audit retention window, which defaults to 365 days.
 
 ### Trust boundaries
 
@@ -155,8 +262,11 @@ audit retention window, which defaults to 365 days.
 - The **MCP server** may store a secret and use it through controlled tools.
 - The **agent** may see credential metadata, field names, masked values, and
   vault references — but **cannot read plaintext values** from the vault.
-- **Sealed slots** let browser automation type a secret (e.g. a password) into an
-  allowed login host without the agent ever reading the slot's contents.
+- **Sealed slots** let browser automation type a secret (e.g. a password) into
+  the main document or a child frame on that page's own registrable domain
+  without the agent ever reading the slot's contents. A raw slot value is
+  refused for every cross-domain or opaque frame, even when that frame's host is
+  otherwise allowed for navigation or OAuth.
 - **Egress grants** inject a secret into an outbound provider request only for
   allowed hosts and configured auth shapes.
 - **Audit logs** record operations and metadata, not secret values.
@@ -165,7 +275,9 @@ audit retention window, which defaults to 365 days.
   plus the constrained `brand` and `last4` display metadata.
 - During payment, the phone releases card data only to the ephemeral local
   operator key under the exact purchase binding. The API and coding-agent model
-  never see plaintext PAN or CVV.
+  never see plaintext PAN or CVV. Split-checkout card fields remain sealed in the
+  live page after fill, including after close-out confirmation; observations mask
+  their values, and arbitrary cross-origin frames cannot receive them.
 
 ### Using a credential without exposing the key: egress grants
 

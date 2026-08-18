@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { CheckoutSummary } from "../../bot/browser.js";
 import type { ColdBaseline, ExpectedEndState, ShoppingTaskRecord } from "./types.js";
 
 const DEFAULT_CORPUS_DIR = resolve(
@@ -87,6 +88,12 @@ function parseBaseline(value: unknown, label: string): ColdBaseline {
       browser_observations: value.provenance.browser_observations as number,
       evidence_sha256: value.provenance.evidence_sha256,
       capture_policy: value.provenance.capture_policy,
+      ...(typeof value.provenance.trace_artifact === "string"
+        ? { trace_artifact: value.provenance.trace_artifact }
+        : {}),
+      ...(typeof value.provenance.checkout_artifact === "string"
+        ? { checkout_artifact: value.provenance.checkout_artifact }
+        : {}),
     },
   };
 }
@@ -120,6 +127,7 @@ export function parseTaskRecord(value: unknown, file: string): ShoppingTaskRecor
     throw new Error(`${file}: params.address is required`);
   }
   const address = params.address;
+  const contact = params.contact;
   if (
     typeof params.product_query !== "string" ||
     typeof params.card_ref !== "string" ||
@@ -155,7 +163,23 @@ export function parseTaskRecord(value: unknown, file: string): ShoppingTaskRecor
         country: address.country,
         postal_code: address.postal_code,
         ...(typeof address.region === "string" ? { region: address.region } : {}),
+        ...(typeof address.line1 === "string" ? { line1: address.line1 } : {}),
+        ...(typeof address.city === "string" ? { city: address.city } : {}),
       },
+      ...(isObject(contact) &&
+      typeof contact.email === "string" &&
+      typeof contact.first_name === "string" &&
+      typeof contact.last_name === "string" &&
+      typeof contact.phone === "string"
+        ? {
+            contact: {
+              email: contact.email,
+              first_name: contact.first_name,
+              last_name: contact.last_name,
+              phone: contact.phone,
+            },
+          }
+        : {}),
       card_ref: params.card_ref,
     },
     expected_end_state: expectedEndState,
@@ -172,6 +196,17 @@ export function parseTaskRecord(value: unknown, file: string): ShoppingTaskRecor
         : {}),
     },
   };
+  const rawBaseline = value.cold_baseline;
+  if (
+    task.bucket === "repeat" &&
+    task.capture.status === "captured" &&
+    (!isObject(rawBaseline) ||
+      !isObject(rawBaseline.provenance) ||
+      typeof rawBaseline.provenance.trace_artifact !== "string" ||
+      typeof rawBaseline.provenance.checkout_artifact !== "string")
+  ) {
+    throw new Error(`${file}: captured repeat requires real trace_artifact and checkout_artifact`);
+  }
   if (task.capture.status === "captured" && !existsSync(resolveHarPath(task, dirname(file)))) {
     throw new Error(`${file}: captured HAR is missing (${task.har})`);
   }
@@ -204,4 +239,41 @@ export function endStatesMatch(actual: ExpectedEndState, expected: ExpectedEndSt
         actualItem.title_contains.toLowerCase().includes(wanted.title_contains.toLowerCase()),
     ),
   );
+}
+
+export function parseCheckoutArtifact(value: unknown, task: ShoppingTaskRecord): CheckoutSummary {
+  if (
+    !isObject(value) ||
+    typeof value.merchant !== "string" ||
+    value.merchant.length === 0 ||
+    typeof value.checkout_origin !== "string" ||
+    !Number.isInteger(value.amount_cents) ||
+    (value.amount_cents as number) < 0 ||
+    typeof value.currency !== "string" ||
+    value.currency.length === 0
+  ) {
+    throw new Error(`${task.task_id}: invalid checkout artifact`);
+  }
+  let checkoutOrigin: URL;
+  let entryOrigin: URL;
+  try {
+    checkoutOrigin = new URL(value.checkout_origin);
+    entryOrigin = new URL(task.entry_url);
+  } catch {
+    throw new Error(`${task.task_id}: checkout artifact has an invalid origin`);
+  }
+  if (checkoutOrigin.protocol !== "https:" || checkoutOrigin.origin !== entryOrigin.origin) {
+    throw new Error(`${task.task_id}: checkout artifact origin does not match the task`);
+  }
+  if (value.amount_cents !== task.expected_end_state.total_cents) {
+    throw new Error(
+      `${task.task_id}: checkout artifact total ${String(value.amount_cents)} does not match settled expected total ${task.expected_end_state.total_cents}`,
+    );
+  }
+  return {
+    merchant: value.merchant,
+    checkout_origin: checkoutOrigin.origin,
+    amount_cents: value.amount_cents as number,
+    currency: value.currency,
+  };
 }

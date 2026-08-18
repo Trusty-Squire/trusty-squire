@@ -8,7 +8,7 @@
 // callable tools over stdio. Tests skip the SDK and exercise handlers
 // directly with a mock api-client.
 
-import { z, type ZodTypeAny } from "zod";
+import { z, type ZodIssue, type ZodTypeAny } from "zod";
 import type { ApiClient } from "../api-client.js";
 import { listCredentialsTool } from "./list-credentials.js";
 import { listExtractFailuresTool, getExtractFailureTool } from "./extract-failures.js";
@@ -18,7 +18,7 @@ import { grantAppAccessTool } from "./grant-app-access.js";
 import { revokeAppAccessTool, listAppAccessTool } from "./revoke-app-access.js";
 import { auditLogTool } from "./audit-log.js";
 import { OPERATE_TOOLS } from "./provision-drive.js";
-import { listPaymentCardsTool, operatePayTool } from "./operate-pay.js";
+import { listPaymentCardsTool, operatePayTool, operatePaymentStatusTool } from "./operate-pay.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
   name: string;
@@ -32,6 +32,9 @@ export interface Tool<TArgs extends Record<string, unknown> = Record<string, unk
   // credential tools so Claude Code keeps their schemas resident
   // instead of deferring them behind Tool Search.
   meta?: Record<string, unknown>;
+  // Action tools can turn a schema miss into an executable repair object rather
+  // than leaving the model to infer the grammar from a prose validation error.
+  schemaRepair?: (args: unknown, issues: readonly ZodIssue[]) => Record<string, unknown>;
   handler: (args: TArgs, api: ApiClient | null, context?: ToolContext) => Promise<unknown>;
 }
 
@@ -55,33 +58,47 @@ export function assertApi(api: ApiClient | null): asserts api is ApiClient {
   }
 }
 
-// The agent-facing tool registry. The legacy async `provision` surface is no
-// longer exposed: host agents should drive signup explicitly through the
-// interactive provision_start/observe/act/extract/finish loop.
-export const TOOLS: Tool[] = [
-  listCredentialsTool,
-  // Vault lifecycle + write-only-sink proxy (the credential surface).
-  storeCredentialTool,
-  useCredentialTool,
-  // Egress grants: a deployed app uses a vaulted credential via the proxy.
-  grantAppAccessTool,
-  listAppAccessTool,
-  revokeAppAccessTool,
-  // Audit ledger: who-touched-my-keys (account-scoped, no secret values).
-  auditLogTool,
-  // Diagnostic tools: agent reads them after a failed extract so it
-  // can write a targeted fix without the user fetching by curl.
-  listExtractFailuresTool,
-  getExtractFailureTool,
-  listPaymentCardsTool,
-  operatePayTool,
-  // Interactive host-driven provisioning (provision_start/observe/act/
-  // captcha_gate/await_verification/extract/finish).
-  ...OPERATE_TOOLS,
-] as Tool[];
+const diagnosticsTools = [listExtractFailuresTool, getExtractFailureTool] as const;
 
-export function findTool(name: string): Tool | null {
-  return TOOLS.find((t) => t.name === name) ?? null;
+function diagnosticsProfileEnabled(env: NodeJS.ProcessEnv): boolean {
+  const value = (env.TRUSTY_SQUIRE_DIAGNOSTICS ?? "").trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
+}
+
+// Build the agent-facing tool registry. The legacy async `provision` surface is
+// no longer exposed: host agents drive signup through the interactive operator
+// loop. Maintainer-only DOM diagnostics are opt-in so their large, specialist
+// schemas do not occupy the default agent context.
+export function buildToolRegistry(env: NodeJS.ProcessEnv = process.env): Tool[] {
+  return [
+    listCredentialsTool,
+    // Vault lifecycle + write-only-sink proxy (the credential surface).
+    storeCredentialTool,
+    useCredentialTool,
+    // Egress grants: a deployed app uses a vaulted credential via the proxy.
+    grantAppAccessTool,
+    listAppAccessTool,
+    revokeAppAccessTool,
+    // Audit ledger: who-touched-my-keys (account-scoped, no secret values).
+    auditLogTool,
+    ...(diagnosticsProfileEnabled(env) ? diagnosticsTools : []),
+    listPaymentCardsTool,
+    operatePayTool,
+    // [P0] Non-blocking payment approval: read-only status + a bounded wait,
+    // so a host never has to block an RPC on the human's phone tap.
+    operatePaymentStatusTool,
+    // Interactive host-driven provisioning (operate_start/observe/act/finish
+    // plus recipe save/run; workflow kinds are consolidated under operate_act).
+    ...OPERATE_TOOLS,
+  ] as Tool[];
+}
+
+// The stable default surface used by direct integrations and registry tests.
+// buildServer() resolves the environment-aware registry once at startup.
+export const TOOLS: Tool[] = buildToolRegistry({});
+
+export function findTool(name: string, tools: readonly Tool[] = TOOLS): Tool | null {
+  return tools.find((t) => t.name === name) ?? null;
 }
 
 // Re-export zod so tool files can `import { z } from "../tools/index.js"`.
@@ -101,4 +118,5 @@ export {
   getExtractFailureTool,
   listPaymentCardsTool,
   operatePayTool,
+  operatePaymentStatusTool,
 };

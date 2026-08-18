@@ -97,11 +97,13 @@ contains the secret.
 
 An account with Telegram linked also receives best-effort, secret-free lifecycle
 alerts for credential store/rotate/delete/restore, card add/remove, payment
-execution, and egress-grant mint/revoke events. These sends decorate the single
+execution or caller-placed order attempts, and egress-grant mint/revoke events. These sends decorate the single
 vault audit-store dependency, so every producer shares the same notification
 path. Delivery is fire-and-forget and all Telegram failures are swallowed; a
 Telegram outage never delays or fails a vault operation. Messages use only
-service/label, action, timestamp, and the card's last four digits when relevant.
+non-secret display metadata: service/label or merchant/amount, action, timestamp,
+and the card's last four digits when relevant. A caller-placed click is labeled
+as attempted rather than executed because its merchant outcome is not verified.
 
 Credential retrieval and proxy execution/rejection are deliberately excluded
 from per-event Telegram pushes to avoid access spam. They remain visible in the

@@ -20,6 +20,28 @@ export interface RegistryPrismaClient {
   serviceState: ServiceStateDelegate;
   // Memory-overhaul Phase 4 — the drainable failure ledger.
   openIssue: OpenIssueDelegate;
+  // Shared Operator Recipes (replay-serve-live-domainlock) — POST /recipes
+  // writes here directly and the write is immediately live.
+  operatorRecipeRecord: OperatorRecipeRecordDelegate;
+}
+
+interface OperatorRecipeRecordRow {
+  key: string;
+  verb: string;
+  domain: string;
+  payload_json: unknown;
+  schema_version: number;
+  submitted_at: Date;
+  updated_at: Date;
+}
+
+interface OperatorRecipeRecordDelegate {
+  upsert(args: {
+    where: Record<string, unknown>;
+    create: Record<string, unknown>;
+    update: Record<string, unknown>;
+  }): Promise<OperatorRecipeRecordRow>;
+  findUnique(args: { where: Record<string, unknown> }): Promise<OperatorRecipeRecordRow | null>;
 }
 
 interface OpenIssueRow {
@@ -46,16 +68,12 @@ interface OpenIssueDelegate {
     where: Record<string, unknown>;
     data: Record<string, unknown>;
   }): Promise<{ count: number }>;
-  findUnique(args: {
-    where: Record<string, unknown>;
-  }): Promise<OpenIssueRow | null>;
+  findUnique(args: { where: Record<string, unknown> }): Promise<OpenIssueRow | null>;
   findMany(args: {
     where?: Record<string, unknown>;
     orderBy?: Record<string, unknown>;
   }): Promise<OpenIssueRow[]>;
-  deleteMany(args: {
-    where: Record<string, unknown>;
-  }): Promise<{ count: number }>;
+  deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
 }
 
 interface ServiceStateRow {
@@ -79,12 +97,8 @@ interface ServiceStateDelegate {
     create: Record<string, unknown>;
     update: Record<string, unknown>;
   }): Promise<ServiceStateRow>;
-  findUnique(args: {
-    where: Record<string, unknown>;
-  }): Promise<ServiceStateRow | null>;
-  findMany(args: {
-    orderBy?: Record<string, unknown>;
-  }): Promise<ServiceStateRow[]>;
+  findUnique(args: { where: Record<string, unknown> }): Promise<ServiceStateRow | null>;
+  findMany(args: { orderBy?: Record<string, unknown> }): Promise<ServiceStateRow[]>;
 }
 
 interface HealRunRow {
@@ -106,10 +120,7 @@ interface HealRunRow {
 interface HealRunDelegate {
   create(args: { data: Record<string, unknown> }): Promise<HealRunRow>;
   findFirst(args: { orderBy?: Record<string, unknown> }): Promise<HealRunRow | null>;
-  findMany(args: {
-    orderBy?: Record<string, unknown>;
-    take?: number;
-  }): Promise<HealRunRow[]>;
+  findMany(args: { orderBy?: Record<string, unknown>; take?: number }): Promise<HealRunRow[]>;
 }
 
 export type RegistryPrismaTransaction = Omit<
@@ -155,9 +166,7 @@ interface SkillCaptureDelegate {
     where: Record<string, unknown>;
     orderBy?: Array<Record<string, unknown>>;
   }): Promise<unknown[]>;
-  deleteMany(args: {
-    where: Record<string, unknown>;
-  }): Promise<{ count: number }>;
+  deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
 }
 
 interface UniversalBotFailureRecordDelegate {

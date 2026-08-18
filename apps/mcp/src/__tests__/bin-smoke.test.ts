@@ -10,7 +10,7 @@
 // directly and never spawn the artifact. These tests spawn it.
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readdirSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -170,6 +170,85 @@ describe("launched through a bin symlink", () => {
     expect(stderr).toMatch(/\[trusty-squire\] server v\d/);
   }, 30_000);
 
+  it("exits when the MCP client closes stdin", async () => {
+    const link = await linkTo("mcp-server-eof-link.js");
+    const child = await startMcpServer(link);
+    const exited = waitForExit(child);
+
+    child.stdin!.end();
+
+    await expect(exited).resolves.toEqual({ code: 0, signal: null });
+  }, 30_000);
+
+  it("gracefully exits on SIGTERM", async () => {
+    const link = await linkTo("mcp-server-sigterm-link.js");
+    const child = await startMcpServer(link);
+    const exited = waitForExit(child);
+
+    child.kill("SIGTERM");
+
+    // A null signal proves our handler performed cleanup and exited, rather
+    // than Node terminating the process directly on SIGTERM.
+    await expect(exited).resolves.toEqual({ code: 0, signal: null });
+  }, 30_000);
+
+  it("stdio survives every malformed action shape captured in the operator incident", async () => {
+    const link = await linkTo("mcp-server-malformed-actions.js");
+    const home = path.join(tmpDir, "malformed-actions-home");
+    await fs.mkdir(path.join(home, ".config", "trusty-squire"), { recursive: true });
+    await fs.writeFile(
+      path.join(home, ".config", "trusty-squire", "session.json"),
+      JSON.stringify({
+        api_base_url: "http://127.0.0.1:1",
+        agent_session_token: "test-session-token",
+        saved_at: new Date().toISOString(),
+      }),
+    );
+
+    const replies = await mcpConversation(link, home, [
+      // Exact audit shapes: set_value rather than select, type_secret without
+      // its sealed slot, and the mutually-exclusive card selectors together.
+      {
+        name: "operate_act",
+        arguments: { session_id: "s1", kind: "set_value", target: "この商品のみ注文", text: "2" },
+      },
+      {
+        name: "operate_act",
+        arguments: { session_id: "s1", kind: "type_secret", target: "pv-card-number" },
+      },
+      {
+        name: "operate_pay",
+        arguments: {
+          item: "Rakuten cart",
+          reason: "checkout",
+          card_ref: "card_a",
+          card_label: "Personal",
+        },
+      },
+      { name: "operate_act", arguments: { session_id: "s1", kind: "click" } },
+      // A real post-error request proves the child remains reachable, and its
+      // recovery guidance must teach retry-once rather than process killing.
+      { name: "operate_observe", arguments: { session_id: "lost-after-restart" } },
+      { method: "tools/list", params: {} },
+    ]);
+
+    for (const reply of replies.slice(0, 4)) {
+      expect(reply.result?.isError).toBe(true);
+      const error = JSON.parse(reply.result?.content?.[0]?.text ?? "{}") as {
+        error?: { code?: string };
+      };
+      expect(error.error?.code).toBe("invalid_arguments");
+    }
+    const unavailable = JSON.parse(replies[4]?.result?.content?.[0]?.text ?? "{}") as {
+      error?: { code?: string; message?: string; retry?: { max_attempts?: number } };
+    };
+    expect(unavailable.error?.code).toBe("server_unavailable");
+    expect(unavailable.error?.retry?.max_attempts).toBe(1);
+    expect(unavailable.error?.message).toMatch(/retry once/i);
+    expect(unavailable.error?.message).toMatch(/never kill or restart/i);
+    expect(replies[5]?.result?.tools?.length).toBeGreaterThan(0);
+  }, 30_000);
+
   it("`mcp connect` reaches the setup flow", async () => {
     const link = await linkTo("mcp-connect-link.js");
     // Bogus api-base + sandbox HOME: it fails at the API call, but only
@@ -182,6 +261,30 @@ describe("launched through a bin symlink", () => {
     // rc.6 voice pass — heading is "Trusty Squire" with a separate
     // dim subline "Setting up this machine."
     expect(out).toContain("Setting up this machine");
+  }, 30_000);
+
+  it("the server process survives an escaped async error (unhandledRejection backstop)", async () => {
+    // Operator crash hardening: an async rejection that escapes a tool
+    // handler's try/catch (the uploadFile filechooser race) used to kill the
+    // whole server — the host agent saw "MCP server unreachable" and gave up.
+    // Prove the guards in the BUILT artifact keep the process alive through
+    // both escape classes and that it can still do work afterwards.
+    const distServer = path.join(pkgRoot, "dist", "server.js");
+    const probe = `
+      import { installServerProcessGuards } from ${JSON.stringify(distServer)};
+      installServerProcessGuards();
+      Promise.reject(new Error("escaped-rejection"));
+      setTimeout(() => { throw new Error("escaped-exception"); }, 30);
+      setTimeout(() => { console.log("STILL-ALIVE"); process.exit(0); }, 120);
+    `;
+    const r = spawnSync(process.execPath, ["--input-type=module", "-e", probe], {
+      encoding: "utf8",
+      timeout: 25_000,
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("STILL-ALIVE");
+    expect(r.stderr).toContain("unhandled rejection (server kept alive): Error: escaped-rejection");
+    expect(r.stderr).toContain("uncaught exception (server kept alive): Error: escaped-exception");
   }, 30_000);
 
   it("`mcp install` is removed", async () => {
@@ -197,6 +300,160 @@ describe("launched through a bin symlink", () => {
 
 interface InitResponse {
   result?: { serverInfo?: { name?: string } };
+}
+
+interface McpResponse {
+  id?: number;
+  result?: {
+    isError?: boolean;
+    content?: Array<{ text?: string }>;
+    tools?: unknown[];
+  };
+}
+
+function mcpConversation(
+  scriptPath: string,
+  home: string,
+  requests: Array<
+    | { name: string; arguments: Record<string, unknown> }
+    | { method: string; params: Record<string, unknown> }
+  >,
+): Promise<McpResponse[]> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [scriptPath, "server"], {
+      env: {
+        ...process.env,
+        HOME: home,
+        XDG_CONFIG_HOME: path.join(home, ".config"),
+        TRUSTY_SQUIRE_SESSION_FILE: "1",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const replies = new Map<number, McpResponse>();
+    let buffer = "";
+    const expected = requests.length + 1;
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`stdio conversation timed out: ${buffer}`));
+    }, 20_000);
+    const finish = () => {
+      if (replies.size !== expected) return;
+      clearTimeout(timer);
+      child.kill("SIGKILL");
+      resolve(requests.map((_request, index) => replies.get(index + 2)!));
+    };
+    child.stdout.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString();
+      for (;;) {
+        const newline = buffer.indexOf("\n");
+        if (newline < 0) break;
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        const reply = JSON.parse(line) as McpResponse;
+        if (typeof reply.id === "number") replies.set(reply.id, reply);
+        if (replies.has(1)) finish();
+      }
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.stdin.write(
+      `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "stdio-resilience", version: "1" } } })}\n`,
+    );
+    child.stdin.write(
+      `${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} })}\n`,
+    );
+    for (const [index, request] of requests.entries()) {
+      const id = index + 2;
+      const method = "name" in request ? "tools/call" : request.method;
+      const params =
+        "name" in request ? { name: request.name, arguments: request.arguments } : request.params;
+      child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+    }
+  });
+}
+
+async function startMcpServer(scriptPath: string): Promise<ChildProcess> {
+  const child = spawn(process.execPath, [scriptPath, "server"], {
+    env: {
+      ...process.env,
+      HOME: tmpDir,
+      XDG_CONFIG_HOME: path.join(tmpDir, "server-shutdown-config"),
+      TRUSTY_SQUIRE_SESSION_FILE: "1",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  await mcpRequest(child, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "shutdown-smoke", version: "1" },
+    },
+  });
+  return child;
+}
+
+function mcpRequest(child: ChildProcess, request: object): Promise<McpResponse> {
+  return new Promise((resolve, reject) => {
+    let stdout = "";
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`MCP request timed out: ${JSON.stringify(request)}`));
+    }, 20_000);
+    const onData = (data: Buffer) => {
+      stdout += data.toString();
+      const newline = stdout.indexOf("\n");
+      if (newline === -1) return;
+      cleanup();
+      try {
+        resolve(JSON.parse(stdout.slice(0, newline)) as McpResponse);
+      } catch (err) {
+        reject(err as Error);
+      }
+    };
+    const onError = (err: Error) => {
+      cleanup();
+      reject(err);
+    };
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      cleanup();
+      reject(new Error(`MCP server exited before responding (code=${code} signal=${signal})`));
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.stdout!.off("data", onData);
+      child.off("error", onError);
+      child.off("exit", onExit);
+    };
+
+    child.stdout!.on("data", onData);
+    child.once("error", onError);
+    child.once("exit", onExit);
+    child.stdin!.write(`${JSON.stringify(request)}\n`);
+  });
+}
+
+function waitForExit(
+  child: ChildProcess,
+): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("MCP server did not exit within 20 seconds"));
+    }, 20_000);
+    child.once("exit", (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code, signal });
+    });
+    child.once("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
 }
 
 // Spawn `node <scriptPath> server`, send an MCP initialize, resolve with

@@ -1,7 +1,7 @@
 /* ------------------------------------------------------------------ */
-/* Trusty Squire — design system (see DESIGN.md)                        */
+/* Trusty Squire — design system (see docs/DESIGN.md)                        */
 /* Linear-leaning polished dark: layered near-blacks, hairline borders, */
-/* one indigo accent. Geist (UI) + JetBrains Mono (machine values)      */
+/* one indigo accent. Geist (UI) + Geist Mono (machine values)         */
 /* arrive via next/font (--font-sans, --font-mono).                     */
 /* Tailwind was dropped — no utilities were in use; this file is the    */
 /* one styling model now.                                               */
@@ -54,7 +54,7 @@ a{color:inherit;text-decoration:none}
 
 /* hero */
 .hero{position:relative;padding:var(--s-24) 0 var(--s-20);overflow:hidden}
-/* The one marketing glow — static, behind the hero only (DESIGN.md
+/* The one marketing glow — static, behind the hero only (docs/DESIGN.md
    decoration exception). Flat everywhere else on the page. */
 .glow{position:absolute;top:-160px;left:50%;transform:translateX(-50%);
   width:840px;height:520px;pointer-events:none;
@@ -129,7 +129,7 @@ h1 .dim{color:var(--muted)}
 .cap p .m{font-family:var(--mono);font-size:.9em;color:var(--fg)}
 
 /* pricing — flat hairline-ruled tiers, mono prices, one accent-marked focal
-   column (see DESIGN.md: no glossy cards, no gradients). */
+   column (see docs/DESIGN.md: no glossy cards, no gradients). */
 .price-hero{padding:var(--s-20) 0 var(--s-4);text-align:center}
 .price-hero h1{font-size:clamp(2rem,4vw,2.6rem);font-weight:600;
   letter-spacing:-.03em;line-height:1.08}
@@ -625,7 +625,7 @@ footer{border-top:1px solid var(--line);padding:var(--s-8) 0}
 .head-btn b{color:var(--accent);font-weight:600}
 
 /* Add key — the single focal CTA, so it takes the filled accent (the one
-   place DESIGN.md allows it). Icon-only "+", aria-labelled. Sized to match
+   place docs/DESIGN.md allows it). Icon-only "+", aria-labelled. Sized to match
    the .head-btn height so the header row stays aligned. */
 .add-btn{display:inline-flex;align-items:center;justify-content:center;
   width:36px;height:36px;border-radius:var(--r-md);text-decoration:none;

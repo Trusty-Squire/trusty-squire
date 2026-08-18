@@ -25,13 +25,10 @@ const argv = process.argv.slice(2);
 // Supports: --version, -v, -V, and "version" as a positional.
 // Must NOT interfere with `server` or `skill` subcommands.
 const isVersionFlag =
-  argv[0] === "version" ||
-  argv[0] === "--version" ||
-  argv[0] === "-v" ||
-  argv[0] === "-V";
+  argv[0] === "version" || argv[0] === "--version" || argv[0] === "-v" || argv[0] === "-V";
 
 if (isVersionFlag) {
-  console.log(VERSION);
+  process.stdout.write(`${VERSION}\n`);
   process.exit(0);
 }
 
@@ -44,8 +41,9 @@ const isSkill = argv[0] === "skill";
 async function dispatch(): Promise<number> {
   if (isServer) {
     await runServer();
-    // runServer is a stdio loop that runs until the host agent kills
-    // it — never returns. If it does return, treat as success.
+    // runServer force-exits when its client disconnects or it receives a
+    // termination signal. A return here is therefore only a normal startup
+    // path with no active stdio loop left to keep alive.
     return 0;
   }
   if (isSkill) {
@@ -66,8 +64,8 @@ dispatch()
     // actually reap them. Without this exit the CLI appears to hang
     // after printing "You're done."
     //
-    // The `server` branch never reaches here (the stdio loop blocks
-    // forever); `skill` returns its own code via T30 taxonomy.
+    // The `server` branch exits from runServer's disconnect/signal shutdown
+    // path; `skill` returns its own code via T30 taxonomy.
     if (!isServer) process.exit(code);
   })
   .catch((err: unknown) => {
@@ -77,8 +75,7 @@ dispatch()
     } else {
       const surface = isServer ? "server" : isSkill ? "skill" : "cli";
       console.error(
-        `[trusty-squire] ${surface} failed: ` +
-          (err instanceof Error ? err.message : String(err)),
+        `[trusty-squire] ${surface} failed: ` + (err instanceof Error ? err.message : String(err)),
       );
     }
     process.exit(1);

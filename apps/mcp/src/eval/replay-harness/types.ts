@@ -4,6 +4,18 @@ export interface ShoppingAddress {
   country: string;
   postal_code: string;
   region?: string;
+  /** Captured synthetic checkout address; required by repeat recipes. */
+  line1?: string;
+  city?: string;
+}
+
+/** Synthetic contact identity captured with a repeat checkout trace. */
+export interface ShoppingContact {
+  email: string;
+  first_name: string;
+  last_name: string;
+  /** Display-formatted when the checkout normalizes a North American number. */
+  phone: string;
 }
 
 export interface ExpectedEndState {
@@ -31,6 +43,8 @@ export interface ColdBaselineProvenance {
   browser_observations?: number;
   evidence_sha256?: string;
   capture_policy?: "read-only-playwright-mcp-v2" | "read-only-playwright-mcp-v3";
+  trace_artifact?: string;
+  checkout_artifact?: string;
 }
 
 export interface ColdBaselineRecording extends CostSample {
@@ -50,6 +64,7 @@ export interface ShoppingTaskRecord {
     product_variant_id?: string;
     product_price_cents?: number;
     address: ShoppingAddress;
+    contact?: ShoppingContact;
     card_ref: string;
   };
   expected_end_state: ExpectedEndState;
@@ -73,6 +88,8 @@ export interface TaskObservation {
   end_state_matches: boolean;
   fallbacks: number;
   total_steps: number;
+  /** A real replay started but did not produce a complete, measurable warm sample. */
+  warm_unavailable_reason?: string;
 }
 
 export type DriftMutationName =
@@ -89,7 +106,10 @@ export interface DriftObservation {
   money_affecting: boolean;
   guard_action: "clean" | "fallback" | "abort" | "missed";
   total_verify_oracle?: "clean" | "abort";
+  price_guard_causal?: boolean;
   end_state_matches: boolean;
+  /** Infrastructure is neither an observed correct state nor an escaped payment outcome. */
+  infrastructure_failure?: string;
 }
 
 export interface HarnessThresholds {
@@ -100,17 +120,20 @@ export interface HarnessThresholds {
   money_escape: number;
 }
 
+/** A deterministic replay makes no LLM call, so its turn/token speedup is ∞. */
+export type Speedup = number | "infinite";
+
 export interface HarnessMetrics {
   speedup_on_hit: {
-    turns: number;
-    tokens: number;
-    wall_clock: number;
+    turns: Speedup;
+    tokens: Speedup;
+    wall_clock: Speedup;
   };
   hit_rate: number;
   net_speedup: {
-    turns: number;
-    tokens: number;
-    wall_clock: number;
+    turns: Speedup;
+    tokens: Speedup;
+    wall_clock: Speedup;
   };
   clean_replay_correctness: number;
   task_success: number;
@@ -121,6 +144,7 @@ export interface HarnessMetrics {
   invariants: {
     novel_false_hits: number;
     missing_warm_samples: number;
+    infrastructure_failures: number;
   };
 }
 
@@ -144,4 +168,23 @@ export interface HarnessReport {
   metrics: HarnessMetrics;
   decision: "SHIP" | "NO-SHIP";
   reasons: string[];
+  evaluation?: {
+    cold_baseline_by_bucket: Record<CorpusBucket, CostSample>;
+    capture_failures: string[];
+    invalidated_reasons?: string[];
+    repeat_outcomes: Array<{
+      task_id: string;
+      expected_end_state: ExpectedEndState;
+      observed_end_state: ExpectedEndState;
+      divergent_fields: string[];
+      fallbacks: number;
+      verdict_class:
+        | "clean_replay"
+        | "fallback_cost"
+        | "guarded_abort"
+        | "escaped_wrong_end_state"
+        | "infrastructure";
+      assessment?: string;
+    }>;
+  };
 }

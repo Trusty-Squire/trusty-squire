@@ -1,18 +1,19 @@
 // Tests for the OAuth login-state marker — the signup bot reads this
 // to decide which providers it can auto-prefer for OAuth-first signup.
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  clearProviderCookies,
   clearProviderCookiesFromContext,
   loggedInProviders,
   markProviderLoggedIn,
   loggedInEmail,
   recordProviderEmail,
 } from "../login-state.js";
+import { acquireProfileOperationGuard, ProfileBusyError } from "../profile.js";
 
 describe("provider cookie clearing", () => {
   it("removes and verifies only the requested provider's actual cookie rows", async () => {
@@ -52,14 +53,15 @@ describe("provider cookie clearing", () => {
     await expect(clearProviderCookiesFromContext(context, "github")).resolves.toBe(false);
   });
 
-  it("uses the retrying profile gate for the persistent context launch", () => {
-    const source = readFileSync(
-      fileURLToPath(new URL("../login-state.ts", import.meta.url)),
-      "utf8",
-    );
-    expect(source).toMatch(
-      /launchWithProfileGate\(profileDir,\s*\(\) =>\s*chromium\.launchPersistentContext/,
-    );
+  it("refuses to open the canonical profile while another operation owns it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ts-login-state-guard-"));
+    const lease = acquireProfileOperationGuard(dir);
+    try {
+      await expect(clearProviderCookies(dir, "google")).rejects.toBeInstanceOf(ProfileBusyError);
+    } finally {
+      lease.release();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

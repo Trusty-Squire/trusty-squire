@@ -2,7 +2,13 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { loadShoppingCorpus, resolveHarPath, resolveShoppingCorpusDir } from "../corpus.js";
+import { chromium } from "playwright";
+import {
+  loadShoppingCorpus,
+  parseCheckoutArtifact,
+  resolveHarPath,
+  resolveShoppingCorpusDir,
+} from "../corpus.js";
 import { mutateHar, type HarFile } from "../har-mutate.js";
 import {
   assertLiveCheckoutEndState,
@@ -11,11 +17,20 @@ import {
   runLiveWhitejadeCheckout,
   whitejadeCartPermalink,
 } from "../har-substrate.js";
-import { buildHarnessReport } from "../metrics.js";
+import {
+  combineReplayMeasurements,
+  harnessActionBlockReason,
+  parseFallbackAction,
+} from "../engine-adapter.js";
+import { splitTwoContextReplay } from "../two-context-handoff.js";
+import { buildHarnessReport, computeMetrics } from "../metrics.js";
 import { renderReportJson, renderReportMarkdown } from "../reporter.js";
 import { runDriftBattery, runFrozenAllColdHarness, totalVerifyGuard } from "../runner.js";
 import type { DriftReplayAdapter } from "../runner.js";
 import type { DriftObservation, ShoppingTaskRecord, TaskObservation } from "../types.js";
+import { OperatorRecipeSchema } from "../../../bot/operator-recipe.js";
+import { BrowserController } from "../../../bot/browser.js";
+import type { Observation } from "../../../bot/provision-session.js";
 
 const corpusDir = resolveShoppingCorpusDir();
 const tasks = loadShoppingCorpus(corpusDir);
@@ -72,13 +87,23 @@ async function createFrozenReplayAdapter(
         wantedItem !== undefined &&
         body.toLowerCase().includes(wantedItem.title_contains.toLowerCase());
       const observedTotalCents = task.expected_end_state.total_cents + priceDelta;
+      const totalVerifyOracle = totalVerifyGuard(
+        task.expected_end_state.total_cents,
+        observedTotalCents,
+      );
       return {
         guard_action:
           mutation === "change-price"
-            ? totalVerifyGuard(task.expected_end_state.total_cents, observedTotalCents)
+            ? totalVerifyOracle
             : structuralGuardTriggered
               ? "fallback"
               : "clean",
+        ...(mutation === "change-price"
+          ? {
+              total_verify_oracle: totalVerifyOracle,
+              price_guard_causal: totalVerifyOracle === "abort",
+            }
+          : {}),
         end_state: {
           line_items:
             wantedItem === undefined || !itemObserved
@@ -221,6 +246,8 @@ it("runs all six drift mutations and total-verify vetoes every changed price", a
   const priceTrials = drift.filter((trial) => trial.money_affecting);
   expect(priceTrials).toHaveLength(repeatTasks.length);
   expect(priceTrials.every((trial) => trial.guard_action === "abort")).toBe(true);
+  expect(priceTrials.every((trial) => trial.total_verify_oracle === "abort")).toBe(true);
+  expect(priceTrials.every((trial) => trial.price_guard_causal === true)).toBe(true);
   expect(priceTrials.every((trial) => !trial.end_state_matches)).toBe(true);
 }, 120_000);
 
@@ -230,6 +257,9 @@ it("preserves a missed price guard while recording the abort oracle", async () =
   if (task === undefined) return;
   const drift = await runDriftBattery([task], readHar, async ({ mutation }) => ({
     guard_action: mutation === "change-price" ? "missed" : "clean",
+    ...(mutation === "change-price"
+      ? { total_verify_oracle: "abort" as const, price_guard_causal: true }
+      : {}),
     end_state: {
       ...task.expected_end_state,
       total_cents: task.expected_end_state.total_cents + (mutation === "change-price" ? 100 : 0),
@@ -239,11 +269,151 @@ it("preserves a missed price guard while recording the abort oracle", async () =
   expect(priceTrial).toMatchObject({
     guard_action: "missed",
     total_verify_oracle: "abort",
+    price_guard_causal: true,
     end_state_matches: false,
   });
   const report = buildHarnessReport([], drift);
   expect(report.metrics.money_escape).toBe(1);
   expect(report.decision).toBe("NO-SHIP");
+});
+
+it("keeps infrastructure drift out of money escapes", async () => {
+  const task = tasks.find((candidate) => candidate.task_id === "whitejade-purchase-r0");
+  expect(task).toBeDefined();
+  if (task === undefined) return;
+  const drift = await runDriftBattery([task], readHar, async () => ({
+    guard_action: "fallback",
+    end_state: { line_items: [], total_cents: -1, reached: "unobserved" },
+    infrastructure_failure: "browser target contract failed",
+  }));
+  const priceTrial = drift.find((trial) => trial.mutation === "change-price");
+  expect(priceTrial?.infrastructure_failure).toBe("browser target contract failed");
+  const report = buildHarnessReport([], drift);
+  expect(report.metrics.money_escape).toBe(0);
+  expect(report.metrics.drift_catch_rate).toBe(0);
+});
+
+it("rejects a checkout artifact captured before the settled total", () => {
+  const task = tasks.find((candidate) => candidate.task_id === "whitejade-purchase-r2");
+  expect(task).toBeDefined();
+  if (task === undefined || corpusDir === null) return;
+  const artifact = JSON.parse(
+    readFileSync(join(corpusDir, "traces", "whitejade-purchase-r2.checkout.json"), "utf8"),
+  ) as unknown;
+  expect(() => parseCheckoutArtifact(artifact, task)).toThrow(
+    "checkout artifact total 1900 does not match settled expected total 2700",
+  );
+});
+
+it("normalizes only the fallback model's explicit live-ref wrapper", () => {
+  expect(parseFallbackAction({ kind: "type", target: { ref: "@e:field_1" }, text: "Ada" })).toEqual(
+    { kind: "type", target: "@e:field_1", text: "Ada" },
+  );
+  expect(() => parseFallbackAction({ kind: "type", text: "Ada" })).toThrow(
+    "fallback rescue target must be a string or { ref: string }",
+  );
+});
+
+it("blocks recorded and rescued final-payment activations and submit keys", () => {
+  const observation = {
+    text: "Payment Finalize order",
+    elements: [
+      { ref: "@e:pay", label: "Pay now", tag: "button", role: "button", type: "submit" },
+      { ref: "@e:next", label: "Continue", tag: "button", role: "button", type: "button" },
+    ],
+  } as Observation;
+  expect(harnessActionBlockReason({ kind: "click", target: "@e:pay" }, observation)).toContain(
+    "final payment",
+  );
+  expect(harnessActionBlockReason({ kind: "js_click", target: "@e:pay" }, observation)).toContain(
+    "final payment",
+  );
+  expect(harnessActionBlockReason({ kind: "press", key: "Enter" })).toContain("submit-capable");
+  expect(harnessActionBlockReason({ kind: "click", target: "@e:next" }, observation)).toBeNull();
+});
+
+it("combines both replay contexts before computing fallback cost", () => {
+  const storefront = {
+    status: "complete" as const,
+    wall_clock_ms: 100,
+    total_steps: 3,
+    fallbacks: 1,
+    turns: 1,
+    tokens: 20,
+  };
+  const checkout = {
+    status: "complete" as const,
+    wall_clock_ms: 200,
+    total_steps: 5,
+    fallbacks: 1,
+    turns: 2,
+    tokens: 30,
+  };
+  expect(combineReplayMeasurements(storefront, checkout)).toEqual({
+    wall_clock_ms: 300,
+    total_steps: 8,
+    fallbacks: 2,
+    turns: 3,
+    tokens: 50,
+  });
+});
+
+it("reads settled line-item titles and quantities from the live checkout DOM", async () => {
+  const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`
+      <title>Checkout - White Jade</title>
+      <main>
+        <h1>Delivery</h1>
+        <label><input type="radio" checked>Standard shipping</label>
+        <table><tbody>
+          <tr role="row" class="product-line-item">
+            <td><a href="/products/serum">Live Serum</a></td>
+            <td>Quantity 2</td>
+            <td>$19.00</td>
+          </tr>
+        </tbody></table>
+        <div>Total USD $27.00</div>
+      </main>
+    `);
+    const controller = BrowserController.fromHarnessPage(page);
+    const summary = await controller.readSettledCheckoutReviewSummary("USD", 2_000);
+    expect(summary).toMatchObject({
+      amount_cents: 2700,
+      currency: "USD",
+      line_items: [{ title: "Live Serum", quantity: 2 }],
+    });
+    await controller.close();
+  } finally {
+    await browser.close();
+  }
+});
+
+it("computes the true median when one speedup is infinite", () => {
+  const observations: TaskObservation[] = [2, 1, 0].map((turns, index) => ({
+    task_id: `median-${index}`,
+    bucket: "repeat",
+    cold: { turns: 10, tokens: 100, wall_clock_ms: 1000 },
+    recipe_applied: true,
+    warm: { turns, tokens: 10, wall_clock_ms: 100 },
+    end_state_matches: true,
+    fallbacks: 0,
+    total_steps: 1,
+  }));
+  expect(computeMetrics(observations, []).speedup_on_hit.turns).toBe(10);
+});
+
+it("hands a fresh live checkout only post-checkout recipe actions", () => {
+  const recipe = OperatorRecipeSchema.parse(
+    JSON.parse(
+      readFileSync(join(corpusDir!, "traces", "whitejade-purchase-r0.recipe.json"), "utf8"),
+    ),
+  );
+  const { storefront, checkout } = splitTwoContextReplay(recipe);
+  expect(storefront.trace.at(-1)?.action.target?.css).not.toBe("#checkout");
+  expect(checkout.trace[0]?.action.kind).toBe("type");
+  expect(checkout.trace[0]?.action.target?.dom_hint?.id).toBe("email");
 });
 
 it("emits frozen real-LLM cold evidence, metrics, and one NO-SHIP line", async () => {
@@ -297,9 +467,14 @@ it("ships only when speed, correctness, and money safety all clear", () => {
     mutation: "change-price",
     money_affecting: true,
     guard_action: "abort",
+    total_verify_oracle: "abort",
+    price_guard_causal: true,
     end_state_matches: false,
   }));
-  expect(buildHarnessReport(successfulHits, caughtDrift).decision).toBe("SHIP");
+  const cleanReport = buildHarnessReport(successfulHits, caughtDrift);
+  expect(cleanReport.metrics.money_escape).toBe(0);
+  expect(cleanReport.metrics.drift_catch_rate).toBe(1);
+  expect(cleanReport.decision).toBe("SHIP");
 
   const escaped = caughtDrift.map((trial, index) =>
     index === 0 ? { ...trial, guard_action: "missed" as const } : trial,
@@ -322,8 +497,8 @@ it("ships only when speed, correctness, and money safety all clear", () => {
   );
   const fallbackPassed = buildHarnessReport(successfulHits, safeFallback);
   expect(fallbackPassed.metrics.money_escape).toBe(0);
-  expect(fallbackPassed.metrics.drift_catch_rate).toBe(1);
-  expect(fallbackPassed.decision).toBe("SHIP");
+  expect(fallbackPassed.metrics.drift_catch_rate).toBe(0.9);
+  expect(fallbackPassed.decision).toBe("NO-SHIP");
 
   const novelFalseHit: TaskObservation = {
     ...successfulHits[0]!,
@@ -348,5 +523,20 @@ it("ships only when speed, correctness, and money safety all clear", () => {
   expect(incompleteVetoed.decision).toBe("NO-SHIP");
   expect(
     incompleteVetoed.reasons.some((reason) => reason.startsWith("incomplete replay invariant")),
+  ).toBe(true);
+
+  const captureVetoed = buildHarnessReport(successfulHits, caughtDrift, {
+    evaluation: {
+      cold_baseline_by_bucket: {
+        repeat: { turns: 12, tokens: 6000, wall_clock_ms: 12000 },
+        novel: { turns: 0, tokens: 0, wall_clock_ms: 0 },
+      },
+      capture_failures: ["repeat-0: checkout artifact unavailable"],
+      repeat_outcomes: [],
+    },
+  });
+  expect(captureVetoed.decision).toBe("NO-SHIP");
+  expect(
+    captureVetoed.reasons.some((reason) => reason.startsWith("capture artifact invariant")),
   ).toBe(true);
 });

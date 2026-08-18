@@ -35,9 +35,10 @@ Inside `elements`:
 2. ~30% of the `elements` block is serialized `null`/`""`/`false`.
 3. `container` is 100% redundant with `path` (`path` = `<container> > <kind>:<label>`).
 4. The planner normally drives off `text` (read state) + the element inventory
-   (pick `ref`). If a visible clickable control has no inventory row,
-   `operate_act` has a click-only live `text=…`/`css=…` fallback. The `screen`
-   region-tree and `accessibility` flat-tree are not needed to choose an action.
+   (pick `ref`). If a visible clickable or typeable control has no inventory
+   row, `operate_act` has a live `text=…`/`css=…` fallback for `click`,
+   `js_click`, `type`, and `type_secret`. The `screen` region-tree and
+   `accessibility` flat-tree are not needed to choose an action.
    `occluded_by`/`topmost`/`href` ARE load-bearing — keep them (per-element).
 
 ## The one knob — `detail`
@@ -66,7 +67,8 @@ When `detail` is `compact` (the default), `observeSession`:
 - **Build compact element records**: omit empty fields; preserve `checked` for
   both true and false checkable states, emit `topmost` only when `false` (the
   informative case), and emit `occluded_by` only when set. Keep `ref`, `label`,
-  `tag`, `role`, `type`, `href`, and `testId`.
+  `tag`, `role`, `type`, `href`, and `testId`; child-frame rows also keep their
+  load-bearing `frame_origin`.
 - **Drop `path` and `container` from the wire payload.** `container` is redundant
   with `path`; the verbose `path` remains in the complete persisted snapshot for
   re-expansion and targeted searches.
@@ -108,9 +110,16 @@ Compact observations minimize repeated context without making the stream lossy:
 - **Stable refs.** Refs are `@e:<identity>_<ordinal>`. For a normal control the
   `<identity>` is its generation-independent `stableElementId`, so an unchanged
   element keeps resolving across observes. The identity includes the element
-  selector, so same-label siblings with distinct stable selectors get distinct
-  refs; after one is removed, its old ref resolves to `null` instead of
-  retargeting its sibling.
+  selector plus its frame origin and nested-frame path, so same-label siblings
+  with distinct stable selectors get distinct refs and identical selectors in
+  different documents cannot collide. After one is removed, its old ref resolves
+  to `null` instead of retargeting its sibling or another frame. Public
+  `operate_act` calls translate that miss into `target_stale`, carrying the last
+  completed observation generation, `reobserve_required: true`, best-effort
+  semantic-label-keyed replacement candidates, and
+  `retry_policy: "do_not_retry_old_ref"`. The candidates are hints rather than a
+  ref-identity guarantee: the caller re-observes and chooses from the current
+  inventory before retrying.
 - **Volatile positional groups (issue #399).** The dangerous recycling case is
   closed for group-size changes: sibling controls distinguishable *only* by a
   positional `:nth-child`/`:nth-of-type`/`>> nth=` selector can shift onto a
@@ -125,10 +134,11 @@ Compact observations minimize repeated context without making the stream lossy:
   (or a full resync) and resolves to `null` — never to a surviving sibling.
   Because the identity is derived from composition (not an observe counter), this
   also holds within a turn: the act path re-extracts, so a group-size change
-  between observe and act changes the fingerprint and forces a re-observe rather
-  than mis-targeting the shifted sibling. A static group's refs stay stable across
-  observes (no wasted churn), and a filled field or toggled checkbox — mutable
-  state is excluded from `stableElementId` — keeps its ref.
+  between observe and act changes the fingerprint and returns the same
+  `target_stale` repair rather than mis-targeting the shifted sibling. A static
+  group's refs stay stable across observes (no wasted churn), and a filled field
+  or toggled checkbox — mutable state is excluded from `stableElementId` — keeps
+  its ref.
   These groups are rare, so the corpus token-weighted aggregate saving is
   unchanged (~66%). Bounded residual: a size-preserving shuffle of TRULY
   indistinguishable members (delete-one-and-insert-one, or a pure reorder, where
@@ -181,9 +191,11 @@ keep full fidelity.
   NAME on every element (`"ref":`, `"label":`, `"tag":`, …). The compact wire now
   carries the element set as `el_table`: a tab-delimited table whose first line is
   a header naming the columns present in this emit (a subset of
-  `ref,label,tag,role,type,value_len,checked,href,testId,topmost,occluded_by`,
+  `ref,label,tag,role,type,value_len,checked,href,testId,topmost,occluded_by,frame_origin`,
   always leading `ref,label,tag`), then one tab-joined row per element in header
-  order. An empty cell means the field is absent; `value_len` is numeric,
+  order. `frame_origin` is present only for child-frame controls; known captcha
+  challenge frames are omitted from this ordinary inventory. An empty cell means
+  the field is absent; `value_len` is numeric,
   `checked`/`topmost` are `true`/`false`. Tab, newline, carriage-return and
   backslash inside a cell are backslash-escaped (`\t \n \r \\`) — measured
   escaping overhead on the corpus is negligible (<0.1% of labels carry any of
@@ -230,9 +242,13 @@ not gated because its standalone whole-payload marginal is negligible. The
 lossless-resync invariant reconstructs the full element set by parsing the
 columnar `el_table` delta stream.
 
-`apps/mcp/src/bot/__tests__/locator-fallback.test.ts` owns the ref-less click
-fallback gates: visible clickable matching, ambiguity refusal, overlay behavior,
-shadow roots, disabled controls, bounded candidate scans, and handle disposal.
+`apps/mcp/src/bot/__tests__/locator-fallback.test.ts` owns the real-browser
+ref-less click gates: visible affordance matching, ambiguity refusal, overlay
+behavior, shadow roots, disabled controls, bounded candidate scans, and handle
+disposal. `operate-session-flow.test.ts` owns locator typing and the action-time
+frame guards. `browser-frame-support.test.ts` owns ordinary same-/cross-origin
+frame extraction, origin tagging, frame-scoped clicking, captcha-frame
+exclusion, and the no-frame negative control.
 
 ## Non-goals / explicitly avoided
 

@@ -57,10 +57,11 @@ captcha handling, and extraction.
 
 A short-lived handoff from an active operate session to the user's phone. The
 phone can add and bind a card when needed. The anonymous approval shell displays
-the exact server-recorded purchase details before one payment-context passkey
-authorization. The API relays the signed mandate and operator-sealed card through
-an account-scoped, short-TTL database record and mutates approval state only after
-operator verification. The security contract is owned by
+the exact server-recorded purchase details for an amount-bound approval. One
+payment-context passkey authorization signs that approval. The API relays the
+signed mandate and operator-sealed card through an account-scoped, short-TTL
+database record and mutates approval state only after operator verification. The
+security contract is owned by
 [`SECURITY.md`](../SECURITY.md#client-encrypted-card-data).
 
 **Sealed slot**
@@ -121,7 +122,8 @@ The important boundaries are:
 - The agent can see credential metadata, field names, masked values, and vault
   references.
 - The agent cannot read plaintext values back from the vault.
-- Browser automation can type sealed slot values into allowed login hosts.
+- Browser automation obeys the sealed-slot target-origin boundary defined in
+  [`SECURITY.md`](../SECURITY.md#trust-boundaries).
 - Egress grants can inject secrets into provider calls only for allowed hosts
   and configured auth shapes.
 - Audit logs record operations and metadata, not secret values.
@@ -159,32 +161,95 @@ and transferred secrets are not returned to the agent.
 ## Payment Flow
 
 ```text
-agent starts operate_pay in the active checkout
-  -> agent supplies a non-empty item and reason; operator reads merchant, origin,
-     and total
-  -> PayPal Smart Button or hosted-field frames hand checkout to the user before
-     saved-card resolution or approval creation
+cart and checkout observations expose a best-effort checkout_state overlay with one next action
+  -> operate_act kind=cart_add reserves product+variant identity and an
+     idempotency key, post-verifies the exact line, and suppresses duplicate
+     retry clicks
+  -> checkout_state is informational only; it is never a charge input
+  -> observed card controls direct the agent to operate_pay, while model-supplied
+     PAN-shaped entry remains refused; operate_pay establishes the approval amount
+     without exposing the vaulted card to the model
+agent starts operate_pay in the addressed checkout session
+  -> operate_pay accepts that session_id; omission is compatible only when the
+     MCP process has exactly one session and never selects a newest session
+  -> agent supplies a non-empty item and reason
+  -> a single-page checkout prefers merchant, origin, and payable total from the
+     live page; when the total is unreadable, caller-supplied amount_cents and
+     currency become the approval amount and an omitted merchant falls back to
+     the checkout hostname
+  -> every session observation best-effort captures the most recent real checkout
+     total, replacing the prior value after a successful read and preserving it
+     when a later page has no total; the value remains scoped to its page origin
+  -> split fill_card first reads the live card-entry total; when none is readable,
+     caller-supplied amount_cents and currency take precedence, otherwise it may
+     use that same session's captured total after re-checking the current origin.
+     Subtotal and recommendation-price qualification follows the payment contract
+     in [SECURITY.md](../SECURITY.md)
+  -> the actual visible PAN field's frame controls the unsupported-wallet gate:
+     PayPal/Braintree hosted card fields hand initial/fill calls to the user, while
+     a separate PayPal express button does not block fillable Shopify PCI fields
   -> an explicit card is used; otherwise one saved card is selected automatically,
      no saved cards starts add-card, and multiple cards require a user choice
   -> operator creates an ephemeral key; API creates a short-lived approval relay
      and attaches the requesting MCP host's initialize clientInfo.name
   -> if the approval has no card, the user adds one and the API binds that saved
      card to the still-pending approval
-  -> the anonymous approval shell displays merchant, checkout origin, amount and
-     currency, item, reason, and requesting agent from the short-lived server record
-  -> the user reviews those values and one passkey ceremony signs their canonical
-     purchase payload, unlocks the card, and seals it to the ephemeral operator
+  -> the anonymous approval shell displays merchant, checkout origin, item, reason,
+     requesting agent, amount, and currency from the short-lived server record
+  -> the user reviews that intent and one passkey ceremony signs the canonical
+     payload, unlocks the card, and seals it to the ephemeral operator
   -> the API stages that opaque candidate in an account-scoped Postgres relay with
      a 15-second TTL so another API worker can deliver it to the waiting operator
-  -> the operator verifies the final JWS and opens the card, then confirms the exact
+  -> payment status and bounded-wait calls resolve the same session once at tool
+     entry and return its session_id in their result and every follow-up hint
+  -> the operator verifies the final JWS, opens the card, and confirms the exact
      candidate fingerprint; successful confirmation clears the JWS and ciphertext
-  -> add-card also re-reads every signed checkout field and refuses if the merchant,
-     origin, amount, or currency changed
-  -> operator opens the card and fills checkout
-  -> when 3-D Secure is required, the API nudges a linked Telegram chat and
-     the operator waits for success or failure when waiting is enabled
-  -> timeout, or a disabled wait, hands the unresolved challenge to the user
+  -> single-page add-card attempts to re-read every signed checkout field; a
+     successful read must still match, while an unreadable total reuses the
+     original mandate-bound checkout
+  -> split fill_card requires the current origin to match its amount-bound mandate
+     and fills without submitting; only the main frame,
+     same-registrable-domain HTTPS frames, and curated HTTPS payment-provider frames
+     can receive card data
+  -> PAN, expiry, and CVV are required; cardholder name and other billing fields
+     are filled best-effort, so a missing name field does not abort the payment
+  -> the raw card is zeroed; sealed, observation-masked page fields remain, while
+     session state retains only approval/mandate and card-reference metadata
+  -> the caller verifies the live final total against the approved amount itself
+     and places the order through operate_act. For click/js_click, the session's
+     fill-time approval snapshot permits at most one dispatch to a control matching
+     the shared pay/place-order label heuristic; a repeat is refused and requires a
+     fresh approval in a fresh session. Non-charge-labeled clicks, key presses, and
+     oauth_click remain ungated. Card VALUES stay masked in observations throughout
+     regardless of who submits (the money-fence guarantee lives in the session's
+     payment-field seal, not in who clicks)
+  -> a dispatched recognized place-order click best-effort records one metadata-only
+     `vault.payment_executed` event with `payment_place_order_attempted` status,
+     bound to the approval, optional mandate, approved amount/currency, merchant,
+     and opaque card reference. It records an attempt, never a verified charge outcome
+  -> split confirm makes no browser or provider call: it reads no total, verifies
+     no amount, and submits nothing (it never charges), so it reports the approved
+     merchant/amount/currency back and releases the pending-fill lease into a
+     sealed state — masking stays active since the fields were never actually
+     cleared, and the session then refuses further payment operations for its
+     lifetime; there is no same-session refill, only operate_finish + a fresh
+     session recovers a stuck or declined payment
+  -> the addressed session owns and serializes payment entry and confirmation;
+     another session cannot observe or resume that approval (the contract lives
+     in SECURITY.md)
+  -> only the single-page (phase="single") flow still submits and enters the
+     bounded authentication/outcome wait below; the API sends a challenge-specific
+     Telegram nudge for detected 3-D Secure or
+     cautious bank-app guidance when authentication may be out of band
+  -> the browser completes authentication natively while the operator polls only for
+     a new merchant terminal route with a substantive order or receipt identity;
+     captcha-hosted frames are excluded from challenge and failure-text classification
+  -> a visible decline is payment_declined; timeout, or a disabled wait, hands
+     the unresolved outcome to the user instead of guessing success
   -> the post-wait metadata-only payment status is audited
+  -> operate_finish closes that session's admission gate, drains calls that already
+     entered, clears any remaining payment state, and closes without a payment-state veto;
+     payment-sensitive profiles are destroyed rather than pooled
 ```
 
 The detailed cryptographic checks and card-data boundary live in
@@ -207,11 +272,15 @@ capture -> synthesize -> sign -> publish -> verify -> active
 - Verification replays the flow before it becomes active.
 - Active skills serve future provisions faster and with less exploration.
 
-Only inventory-backed actions are promotable. A session can still complete by
-using `operate_act` with a live `text=…` or `css=…` locator when a visible
-control has no observed ref, but that off-inventory click cannot be synthesized
-into a portable skill step. Such a session is therefore skipped by
-auto-promotion and cannot be saved as an operator recipe.
+DOM-target actions are promotable into registry Skills only when they are
+main-frame and inventory-backed; modeled navigation retains its existing domain
+lock. A session can still complete by using `operate_act` with a live `text=…`
+or `css=…` locator when a visible control has no observed ref, but an
+off-inventory action cannot be synthesized into a portable step. Such a session
+is skipped by auto-promotion and cannot be saved as an operator recipe.
+Inventory-backed frame actions can be saved in an operator recipe with their
+exact frame origin and nested path, but auto-promotion rejects them until Skill
+replay has a guarded frame consumer.
 
 The same captures must produce byte-identical skills. Promotion must not depend
 on clocks, random numbers, or plaintext credentials.
@@ -221,7 +290,8 @@ on clocks, random numbers, or plaintext credentials.
 The browser layer supports several captcha classes, including visible
 reCAPTCHA, invisible reCAPTCHA, hCaptcha, and Turnstile. Solver use is gated by
 configuration and treated as a bounded fallback, not as proof that an account
-was created.
+was created. Their challenge-frame internals are excluded from the ordinary
+element inventory and remain owned by this dedicated captcha flow.
 
 The provisioning loop distinguishes:
 

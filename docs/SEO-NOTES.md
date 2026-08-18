@@ -12,7 +12,7 @@ The work includes:
 - Canonicals, unique metadata, large Open Graph/Twitter cards, structured data, sitemap coverage, and crawler rules.
 - `/llms.txt` and `/llms-full.txt`, generated from the same service, guide, and comparison data used by the HTML routes.
 - A direct, outcome-first root README that is copied byte-for-byte into the npm package during `prepack`.
-- A write-only-path hardening fix so stored `operate_extract` responses cannot return raw values, plus explicit scoped grant-token disclosure.
+- A write-only-path hardening fix so stored `operate_act { kind: "extract" }` responses cannot return raw values, plus explicit scoped grant-token disclosure.
 - A ready-to-paste awesome-mcp-servers entry in `docs/awesome-mcp-servers-entry.md`.
 
 No analytics, ownership tags, credentials, deployment settings, or production deploys were changed.

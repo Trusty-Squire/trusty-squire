@@ -79,8 +79,21 @@ export type PostVerifyStep =
   | { kind: "done"; reason: string }
   | { kind: "extract"; reason: string }
   | { kind: "login"; reason: string }
-  | { kind: "click"; selector: string; reason: string }
-  | { kind: "fill"; selector: string; value: string; reason: string }
+  | {
+      kind: "click";
+      selector: string;
+      reason: string;
+      frame_origin?: string;
+      frame_path?: string;
+    }
+  | {
+      kind: "fill";
+      selector: string;
+      value: string;
+      reason: string;
+      frame_origin?: string;
+      frame_path?: string;
+    }
   // `select` — pick an option for a dropdown (native <select> OR a
   // custom ARIA combobox: Radix, Headless UI, React Aria, cmdk).
   // When `option_text` is given, the executor matches by visible text
@@ -92,12 +105,20 @@ export type PostVerifyStep =
       selector: string;
       reason: string;
       option_text?: string;
+      frame_origin?: string;
+      frame_path?: string;
     }
   // `check` — tick a checkbox (a post-OAuth onboarding form's
   // terms-of-service / agreement box). A `click` lands on the box's
   // styled label or its TOS *link* and does not flip the input;
   // browser.check() force-ticks the underlying checkbox.
-  | { kind: "check"; selector: string; reason: string }
+  | {
+      kind: "check";
+      selector: string;
+      reason: string;
+      frame_origin?: string;
+      frame_path?: string;
+    }
   // `scroll` — scroll a ToS / agreement modal to the bottom so a
   // gated "Accept" button enables (Railway is the canonical case).
   // `selector` is OPTIONAL: the inventory only carries interactive

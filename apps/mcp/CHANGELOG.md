@@ -1,5 +1,151 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9 (2026-08-18)
+
+- fix(mcp): migrate legacy recipe verbs safely (#547)
+- release(api): deploy payment completion fix to prod (#509)
+- fix(pay): accept the operator's card_ref key on approval confirm (#476)
+- ci: retrigger checks
+- release(mcp): 1.1.8
+- release(mcp): 1.1.7 (#435)
+
+## 1.1.9-rc.29 (2026-08-16)
+
+- feat(mcp): key recipes by action path and simplify payment replay (#545)
+
+## 1.1.9-rc.28 (2026-08-16)
+
+- fix(mcp): operate_finish closes unconditionally, even mid-payment (#538)
+- fix(mcp): hand split-checkout order placement to the caller; operator no longer presses the pay button (#539)
+- fix(mcp): require a visible 3-D Secure challenge before flagging it, so a hidden 3DS-method iframe no longer fakes a challenge (#540)
+- fix(mcp): reclaim only provably-dead seed-lock holders (#541)
+- feat(mcp): audit caller-placed charges + one-approval/one-place-order guard (#542)
+
+## 1.1.9-rc.27 (2026-08-16)
+
+- fix(mcp): handle captcha and out-of-band 3DS correctly (#534)
+- fix(mcp): allow payments with ambiguous currency notation (#536)
+
+## 1.1.9-rc.25 (2026-08-15)
+
+- fix(mcp): allow checkouts with unreadable totals or missing name fields (#532)
+- fix(mcp): remove operator seed revalidation (#531)
+
+## 1.1.9-rc.24 (2026-08-15)
+
+- feat(mcp): remove payment await alias (#529)
+
+## 1.1.9-rc.23 (2026-08-15)
+
+- fix(mcp): restore native browser 3-D Secure completion (#527)
+- feat(mcp): consolidate operator tools into canonical surface (#526)
+
+## 1.1.9-rc.22 (2026-08-15)
+
+- fix(mcp): complete decoupled/out-of-band (app-push) 3DS challenges instead of only detecting and waiting on them, so orders authenticated in a mobile banking app finalize instead of leaving `payment_outcome_unknown` (#524)
+
+## 1.1.9-rc.21 (2026-08-14)
+
+- fix(mcp): preserve merchant shipping controls on single-page Shopify checkout after "Pay now" by clearing only positively-owned card/billing fields; detect in-page Shopify/DBS 3DS challenges so the 3DS wait engages; and fail closed unless a structural order-confirmation URL is reached, returning `payment_outcome_unknown` for uncertain outcomes rather than a false success (#516)
+
+## 1.1.9-rc.20 (2026-08-13)
+
+- fix(mcp): select the visible Shopify card form by its PAN field's rendered hit-test (`topmost`) so checkouts with two structurally-complete card forms, such as KobeeJapan where one is occluded, fill and complete instead of returning `payment_card_form_ambiguous` (#512)
+
+## 1.1.9-rc.19 (2026-08-13)
+
+- fix(mcp): select coherent Shopify card forms — use each PAN's rendered hit-test to choose the unique topmost group, then fill and submit only within that form, so two-form checkouts such as KobeeJapan complete without touching an occluded duplicate (#510)
+
+## 1.1.9-rc.18 (2026-08-13)
+
+- fix(release): publish skill-schema classifyPaymentCandidateBinding export so the operator starts (rc.17 was DOA)
+
+## 1.1.9-rc.17 (2026-08-13)
+
+- fix(mcp): preserve final payment approval boundaries — distinguish review from charge candidates, return a review-verified state, reject stale review-protocol clients, and fill one coherent card form so real checkouts can complete (#501)
+- feat(mcp): consolidate operator actions into discriminated `operate_act` kinds while retaining the previous tool names as delegating aliases (#500)
+- feat(mcp): consolidate operator lifecycle tools and rename recipe operations while retaining the previous tool names as delegating aliases (#502)
+
+## 1.1.9-rc.16 (2026-08-12)
+
+- fix(mcp): complete payments in late-mounting PCI frames — after approval, wait for the cross-origin card frame, fill the vaulted card, and place the order within the same approval (#498)
+
+## 1.1.9-rc.15 (2026-08-12)
+
+- fix(mcp): prevent VNC login leaks and contention hangs — teardown on every exit, fail loudly on profile contention, and use the `--protocol http2` fallback (#495)
+- fix(mcp): harden split-checkout payment handling — blocked in-page requests fail fast, merchant API subdomains are reached safely, `operate_pay` uses the payable total, and Shopify PCI hosted card fields are filled (#496)
+
+## 1.1.9-rc.14 (2026-08-12)
+
+- fix(mcp): exit the server when the stdio client disconnects, preventing an operator process leak (#491)
+- fix(mcp): re-notify payment-approval reuse and replace expired, missing, or terminal approvals with a fresh approval (#492)
+- fix(mcp): make operator OAuth login atomic and resilient when the provider closes its popup/window, with actionable errors (#493)
+
+## 1.1.9-rc.13 (2026-08-11)
+
+- fix(mcp): re-notify users when reusing a live payment approval, and replace expired, missing, or terminal approvals
+- fix(mcp): make payment approval non-blocking and persist the verified cart total (#486)
+- fix(mcp): make checkout state legible, add-to-cart idempotent, and vaulted-card selection obvious (#487)
+- fix(mcp): self-repair operator action errors with structured stale-ref recovery, atomic sequential multi-selects, and schema-repair guidance (#488)
+- fix(mcp): keep the shared stdio server process-safe on malformed operator calls and mark server unavailability retry-once (#489)
+
+## 1.1.9-rc.12 (2026-08-11)
+
+- fix(mcp): use one approval for split checkouts — a single amount-bound passkey approval sourced from the cart total releases/decrypts the card and authorizes the charge, with no separate release or charge approval (#484)
+
+## 1.1.9-rc.11 (2026-08-11)
+
+- fix(mcp): decouple card fill from amount approval — `operate_pay(phase="fill_card")` fills the vaulted card with a $0 release-only approval; the human payment approval and charge happen at `phase="confirm"` against the final total (#482)
+
+## 1.1.9-rc.10 (2026-08-10)
+
+- fix(mcp): reapprove higher split-checkout totals — fill vaulted cards against subtotal-only Rakuten card-entry pages, then require a fresh approval when the authoritative final total exceeds the approved amount; harden approval leases and bind audits to the merchant (#479)
+
+## 1.1.9-rc.9 (2026-08-10)
+
+- fix(mcp): safely resolve Japanese checkout totals (#477)
+- fix(api): accept echoed card references on payment confirmations (#475)
+
+## 1.1.9-rc.8 (2026-08-10)
+
+- fix(mcp): recognize Japanese checkout charge controls (#473)
+- feat(mcp): support secure split-checkout card payments (#472)
+
+## 1.1.9-rc.7 (2026-08-09)
+
+- fix(bot): recognize Japanese charge controls when submitting checkouts
+- fix(mcp): keep operator server alive after erroring calls (#470)
+- fix(mcp): recover checkout totals from structured data (#469)
+- fix(mcp): block manual card entry through operate_act (#468)
+
+## 1.1.9-rc.6 (2026-08-09)
+
+- fix(mcp): keep the operator server responsive after erroring calls and upload-picker timeouts
+- fix(bot): safely recognize Japanese checkout totals (#466)
+- fix(bot): recover checkout totals from strict Order/Invoice structured data
+
+## 1.1.9-rc.5 (2026-08-09)
+
+- fix(mcp): preserve non-UTF-8 labels in operator extraction (#464)
+
+## 1.1.9-rc.4 (2026-08-09)
+
+- feat(mcp): guarded frame-scoped select support — fill iframe dropdowns with a tamper-resistant frame origin sourced from browser-controlled state, hardened against sandbox-opaque frames (#462)
+
+## 1.1.9-rc.3 (2026-08-08)
+
+- feat(mcp): support guarded actions inside frames — operate_observe/operate_act now handle iframe/frame controls (#459)
+- fix(vault): identify deleted credentials in notifications (#458)
+
+## 1.1.9-rc.2 (2026-08-08)
+
+- _summarize the changes_
+
+## 1.1.9-rc.1 (2026-08-08)
+
+- fix(mcp): commit-or-stop autocomplete handling for typed checkout fields (#451)
+- feat(mcp): per-leg recipe resolution with checkout shape signatures for cross-store replay (#450)
+
 ## 1.1.8 (2026-08-07)
 
 - release(mcp): 1.1.8-rc.1
