@@ -1,14 +1,17 @@
 ---
 name: trusty-squire
 description: >-
-  Use when a coding agent needs to sign up for a website or SaaS, finish setup
-  behind a login, or obtain an API key — and the secret must NOT land in chat,
-  source code, or a .env file. Trusty Squire is an MCP server that drives a real
-  browser through signup, sign-in, email verification, and bot gates, then vaults
-  the captured key write-only. Triggers: "sign me up for X", "get an API key for
+  Use when a coding agent needs to sign up for a website or SaaS, provision an
+  OAuth client or API key, pay a checkout, or otherwise act on a real website on
+  the user's behalf — and the secret or card must NOT land in chat, source code,
+  or a .env file. Trusty Squire is an MCP server that drives a real browser
+  through signup, sign-in, provisioning, checkout, email verification, and bot
+  gates, then vaults captured keys write-only and uses payment cards only through
+  a user-approved vault flow. Triggers: "sign me up for X", "get an API key for
   X", "create an account on X", "set up X and save the key", "provision X",
-  "let my app call X without the key", "pay this checkout with my saved card",
-  "AI agent API key management".
+  "work through publishing this app on X", "ship this app through X", "send X as
+  a gift", "book X for me", "let my app call X without the key", "pay this
+  checkout with my saved card", "AI agent API key management".
 license: MIT
 metadata:
   homepage: https://trustysquire.ai
@@ -19,21 +22,30 @@ metadata:
 # Trusty Squire
 
 Trusty Squire is an MCP server your coding agent drives. It signs up for
-websites, completes provider setup behind a login, and captures the resulting
-API key into an encrypted, **write-only** vault — so the raw secret never enters
-your chat, your code, or a `.env` file. This skill is the discoverable wrapper;
-the MCP server supplies the actual capabilities.
+websites, provisions setup behind a login, and pays checkouts. Resulting API
+keys go into an encrypted, **write-only** vault, while payment cards are added
+by the user and released only through an approved purchase flow — so neither a
+raw secret nor card enters your chat, your code, or a `.env` file. This skill is
+the discoverable wrapper; the MCP server supplies the actual capabilities.
+Publishing, gifting, and booking are composed workflows driven by the same
+`operate_start` / `operate_observe` / `operate_act` / `operate_pay` /
+`operate_finish` loop, with recipe replay when available; they are not separate
+one-shot tools.
 
 ## 1. When Trusty Squire is appropriate
 
-Use it when the task requires **creating a real account or getting an API key**,
-especially when the secret must stay out of the conversation, the repo, and
-`.env`. Concretely:
+Use it when the task requires an agent to **sign up, provision, coordinate, or
+purchase on a real website**, especially when a secret or payment card must stay
+out of the conversation, the repo, and `.env`. Concretely:
 
 - "Sign me up for Resend / Clerk / <service> and save the API key."
 - "Set up <provider>, create a project, generate the key, and wire it in."
 - "Get an API key for <service> without showing it to me or putting it in `.env`."
 - Finishing authenticated setup — OAuth apps, webhooks, project/region config.
+- Working through an authenticated app publishing or deployment flow with the
+  general operator loop, including handing user decisions back to the user.
+- Sending a gift or booking a reservation by composing website actions with an
+  approved payment when needed; there is no dedicated gift or booking tool.
 - Using an already-vaulted key to call a provider **without** the raw value
   returning to the agent's context.
 - Paying a supported checkout with a saved or just-in-time card after the user

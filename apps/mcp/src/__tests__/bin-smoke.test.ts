@@ -22,7 +22,9 @@ const repoRoot = path.resolve(pkgRoot, "../..");
 const distBin = path.join(pkgRoot, "dist", "bin.js");
 const canonicalReadme = path.join(repoRoot, "README.md");
 const packageReadme = path.join(pkgRoot, "README.md");
-const tagline = "Trusty Squire signs up / in to websites for you so you don’t have to.";
+const descriptionTagline =
+  "Trusty Squire gives coding agents the ability to provision, ship, and pay — without your keys or card ever leaving the vault.";
+const readmeTagline = "Give your agents agency.";
 
 let tmpDir: string;
 
@@ -69,7 +71,7 @@ describe("package manifest", () => {
       keywords: string[];
     };
     expect(pkg.bin).toEqual({ mcp: "./dist/bin.js" });
-    expect(pkg.description).toBe(tagline);
+    expect(pkg.description).toBe(descriptionTagline);
     expect(pkg.homepage).toBe("https://trustysquire.ai");
     expect(pkg.keywords).toEqual(
       expect.arrayContaining([
@@ -87,8 +89,8 @@ describe("package manifest", () => {
     const registry = JSON.parse(await fs.readFile(path.join(pkgRoot, "server.json"), "utf8")) as {
       description: string;
     };
-    expect(rootPkg.description).toBe(tagline);
-    expect(registry.description).toBe(tagline);
+    expect(rootPkg.description).toBe(descriptionTagline);
+    expect(registry.description).toBe(descriptionTagline);
   });
 });
 
@@ -146,7 +148,7 @@ describe.skipIf(skipPack)("packed tarball", () => {
       packedReadme.equals(rootReadme),
       "packed README matches the root README byte-for-byte",
     ).toBe(true);
-    expect(packedReadme.toString("utf8")).toContain(tagline);
+    expect(packedReadme.toString("utf8")).toContain(readmeTagline);
   }, 60_000);
 });
 
