@@ -1,7 +1,8 @@
 # Trusty Squire Architecture
 
-Trusty Squire signs up and signs in to websites for developers working through
-AI coding agents. A user asks their agent to create an account, finish setup
+Give your agents agency. Trusty Squire provides MCP tools to automate auth and
+pay — your keys and card never leave the vault. Coding agents can sign up,
+provision, and purchase on the user's behalf. A user asks their agent to create an account, finish setup
 behind a login, or connect a service to an app. Trusty Squire drives the browser
 and provider APIs, stores generated credentials in a write-only vault, and lets
 code use them through scoped grants without exposing raw secret values to the
