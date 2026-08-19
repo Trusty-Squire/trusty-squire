@@ -14,60 +14,56 @@ export const metadata: Metadata = {
   alternates: { canonical: "https://trustysquire.ai/" },
 };
 
-const PILLARS = [
+const TASKS = [
   {
-    name: "Provision & Ship",
-    sub: "for builders; keys never exposed",
-    cards: [
-      {
-        prompt: "Add Google OAuth in one prompt",
-        outcome: "Working OAuth login, no dashboard tour.",
-        kills: "Kills the client-secret copy/paste into .env.",
-        status: "Proven",
-      },
-      {
-        prompt: "Add Stripe payments in one prompt",
-        outcome: "Live Checkout and webhook wiring.",
-        kills: "Kills hand-typing API keys into code.",
-        status: "Proven",
-      },
-      {
-        prompt: "Go live: deploy, custom domain, and SSL",
-        outcome: "A real URL, HTTPS, DNS done.",
-        kills: "Kills the deploy-dashboard round trip.",
-        status: "Proven",
-      },
-      {
-        prompt: "Publish to iOS + Android",
-        outcome: "App-store listings live.",
-        kills: "Kills the Apple/Google console slog — 2FA, notarization, review.",
-        status: "Vision",
-      },
-    ],
+    label: "Add Google OAuth to your app",
+    bg: "Signs into Google Cloud, creates a project, configures the OAuth consent screen, mints client credentials, and vaults the secret — the client ID drops straight into your config.",
+    blk: "The Google sign-in, and they can't safely hold the client secret.",
   },
   {
-    name: "Transact & Coordinate Privately",
-    sub: "for everyone; card + contacts never exposed",
-    cards: [
-      {
-        prompt: "Send gifts privately (Hermes)",
-        outcome: "A gift sent, no address shared.",
-        kills: "Kills texting your address or card to a friend.",
-        status: "Proven",
-      },
-      {
-        prompt: "Book it for me — dinner, flights, tickets",
-        outcome: "A confirmed reservation.",
-        kills: "Kills the phone tree / booking-site form.",
-        status: "Proven",
-      },
-      {
-        prompt: "Never share your card or address again",
-        outcome: "Any checkout completed.",
-        kills: "Kills pasting card numbers into forms.",
-        status: "Proven",
-      },
-    ],
+    label: "Publish your mobile apps to the App Store & Play Store",
+    bg: "Signs into App Store Connect and Play Console, generates and cross-signs the certificates and provisioning profiles, uploads the build, fills the listing, and submits for review.",
+    blk: "The developer-account 2FA login and the certificate signing.",
+  },
+  {
+    label: "Set up Firebase for your project",
+    bg: "Creates the Firebase project, enables Auth / Firestore / Storage, generates the service-account key, vaults it, and writes your config files.",
+    blk: "The Google login, and they can't hold the service-account private key.",
+  },
+  {
+    label: "Add Stripe payments",
+    bg: "Signs up for Stripe, clears business verification, creates API keys and webhook endpoints, vaults the secret key, and wires the publishable key into your frontend.",
+    blk: "Signup, identity/business verification, and the secret key.",
+  },
+  {
+    label: "Buy gifts for your friends and colleagues",
+    bg: "Reaches out to get their preference and delivery address directly, picks the item, checks out with your card injected server-side and one approval, and ships it.",
+    blk: "The payment, and they can't get someone's private address without you asking.",
+  },
+  {
+    label: "Automate customer email outreach",
+    bg: "Signs up for Resend, pulls your customer list from Algolia, runs the daily outreach, and handles the replies that land in your Gmail inbox.",
+    blk: "The Resend signup — and their own safety filters block automated bulk sending, so the workflow never even starts.",
+  },
+  {
+    label: "Run a paid acquisition campaign",
+    bg: "Signs up for Google Ads, verifies the business, puts a card on file, launches a search campaign against your keywords, and tunes bids daily against conversions.",
+    blk: "Ad-account identity verification, the card on file, and the daily spend decisions no headless agent can self-authorize.",
+  },
+  {
+    label: "Wire up product analytics and alerts",
+    bg: "Signs up for PostHog and Sentry, installs the keys, connects a Slack webhook, and routes error spikes and funnel drop-offs straight into your channel.",
+    blk: "The two signups, the Slack OAuth connect, and holding each project's key.",
+  },
+  {
+    label: "Onboard a teammate's tool stack",
+    bg: "Creates their GitHub, Linear, and Slack seats, pays for each, and sends the invites — so they land ready to work.",
+    blk: "The admin-console logins, per-seat billing on each tool, and SSO enrollment.",
+  },
+  {
+    label: "Book travel or a reservation",
+    bg: "Searches and selects, fills the passenger or guest details, pays behind the fence with one approval, and confirms.",
+    blk: "The payment and the account login.",
   },
 ] as const;
 
@@ -171,9 +167,9 @@ export default function Page() {
               <Shield size={54} glyph />
             </span>
             <span className="eyebrow">
-              <b>MCP</b> · agency for your agents
+              <b>MCP</b> · for coding agents
             </span>
-            <h1>Give your agents agency.</h1>
+            <h1>Empower agents with auth and payments.</h1>
             <p className="sub">
               MCP tools to automate auth and pay — your keys and card never leave the vault.
             </p>
@@ -228,38 +224,43 @@ export default function Page() {
         </div>
       </section>
 
-      {/* ---------------- PILLAR EXAMPLE GRID ---------------- */}
-      <section className="wrap pillars" aria-labelledby="pillars-prelude">
-        <p id="pillars-prelude" className="pillars-prelude">
-          Magic happens when your agents can sign up, provision, and purchase on your behalf — hard
-          tasks in one prompt.
+      {/* ---------------- PRELUDE + TASK GALLERY ---------------- */}
+      <section className="wrap">
+        <p className="prelude">
+          <span className="lo">Magic happens when your agents can</span> sign up, provision, and
+          purchase on your behalf <span className="lo">— hard tasks in one prompt.</span>
         </p>
-        {PILLARS.map((pillar) => (
-          <div className="pillar" key={pillar.name}>
-            <div className="pillar-head">
-              <h3>{pillar.name}</h3>
-              <span className="pillar-sub">{pillar.sub}</span>
-            </div>
-            <div className="caps">
-              {pillar.cards.map((card, index) => (
-                <Reveal className="cap" key={card.prompt}>
-                  <div className="cap-num">
-                    {String(index + 1).padStart(2, "0")}
-                    <span className={card.status === "Proven" ? "row-tag" : "row-tag vision"}>
-                      {card.status}
-                    </span>
-                  </div>
-                  <div className="cap-body">
-                    <h3>“{card.prompt}”</h3>
-                    <p>
-                      {card.outcome} {card.kills}
-                    </p>
-                  </div>
-                </Reveal>
-              ))}
-            </div>
+
+        <div className="gallery">
+          <div className="gallery-head">
+            Trusty Squire can— <span className="hint">(tap any task)</span>
           </div>
-        ))}
+          {TASKS.map((task) => (
+            <details className="task" key={task.label}>
+              <summary>
+                <span className="k">›</span>
+                <span className="label">{task.label}</span>
+              </summary>
+              <div className="body">
+                <div className="line bg">
+                  <span className="tag">In the background</span>
+                  {task.bg}
+                </div>
+                <div className="line blk">
+                  <span className="tag">Vanilla agents stop at</span>
+                  {task.blk}
+                </div>
+              </div>
+            </details>
+          ))}
+          <div className="gallery-tail">…and any complex task that stalls at a signup or a payment.</div>
+        </div>
+
+        <div className="fence">
+          The card is never exposed to the agent, and no charge happens without{" "}
+          <b>one human approval</b>. API keys stay vaulted — the raw secret never enters the
+          agent&rsquo;s context.
+        </div>
       </section>
 
       {/* ---------------- CTA ---------------- */}
