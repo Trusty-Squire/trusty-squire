@@ -353,76 +353,118 @@ h1 .dim {
   white-space: nowrap;
 }
 
-/* capabilities — dense, hairline-ruled, numbered. No illustrations. */
-.caps {
-  padding: var(--s-16) 0 var(--s-20);
+/* Homepage prelude — the one-line thesis between the hero and the gallery. */
+.prelude {
+  margin-top: var(--s-16);
+  font-size: clamp(19px, 2.6vw, 24px);
+  line-height: 1.4;
+  letter-spacing: -0.02em;
+  max-width: 720px;
+  overflow-wrap: anywhere;
 }
-.cap {
-  display: grid;
-  grid-template-columns: 180px 1fr;
-  gap: var(--s-8);
-  padding: var(--s-8) 0;
-  border-top: 1px solid var(--line);
-}
-.cap-num {
-  font-family: var(--mono);
-  font-size: 12.5px;
-  color: var(--accent);
-  letter-spacing: 0.04em;
-  padding-top: 5px;
-}
-.cap h3 {
-  font-size: 21px;
-  font-weight: 600;
-  letter-spacing: -0.022em;
-  line-height: 1.18;
-}
-.cap p {
-  margin-top: var(--s-2);
-  font-size: 15px;
+.prelude .lo {
   color: var(--muted);
-  line-height: 1.6;
-  max-width: 56ch;
-}
-.cap p .m {
-  font-family: var(--mono);
-  font-size: 0.9em;
-  color: var(--fg);
 }
 
-/* pillar example grid — two labeled groups, reuses the .cap row pattern */
-.pillars {
-  padding: var(--s-16) 0 var(--s-20);
+/* Task gallery — tap-to-expand, each task splits into what Trusty Squire
+   does vs. exactly where a vanilla agent stalls. */
+.gallery {
+  margin-top: var(--s-8);
 }
-.pillars-prelude {
+.gallery-head {
   font-family: var(--mono);
-  font-size: 14px;
-  color: var(--muted);
-  max-width: 56ch;
-  margin-bottom: var(--s-12);
-}
-.pillar + .pillar {
-  margin-top: var(--s-12);
-}
-.pillar-head {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
+  font-size: 13px;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
   margin-bottom: var(--s-4);
 }
-.pillar-head h3 {
-  font-size: 19px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-}
-.pillar-sub {
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--faint);
-}
-.row-tag.vision {
+.gallery-head .hint {
   color: var(--muted);
-  border-color: var(--line2);
+  text-transform: none;
+  letter-spacing: 0;
+}
+.task {
+  border: 1px solid var(--line2);
+  border-radius: var(--r-lg);
+  margin-bottom: 9px;
+  background: linear-gradient(180deg, var(--surface), transparent);
+  overflow: hidden;
+}
+.task summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  gap: var(--s-3);
+  align-items: center;
+  padding: 15px 18px;
+  font-size: clamp(16px, 2.4vw, 19px);
+  letter-spacing: -0.01em;
+}
+.task summary::-webkit-details-marker {
+  display: none;
+}
+.task summary .k {
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 15px;
+  transition: transform 0.15s;
+  flex: none;
+}
+.task[open] summary .k {
+  transform: rotate(90deg);
+}
+.task summary .label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  flex: 1;
+}
+.task .body {
+  padding: 4px 18px 16px 42px;
+  border-top: 1px solid var(--line);
+}
+.task .line {
+  padding: 10px 0;
+  font-size: 14.5px;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+.task .line .tag {
+  display: block;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+.task .bg .tag {
+  color: var(--accent);
+}
+.task .blk .tag {
+  color: var(--warn);
+}
+.task .blk {
+  border-top: 1px solid var(--line);
+}
+.gallery-tail {
+  margin-top: var(--s-4);
+  color: var(--muted);
+  font-size: 14px;
+}
+
+/* Fence strip — the payment/vault security guarantee, repeated near the
+   gallery so it lands next to the tasks that need it most. */
+.fence {
+  margin-top: var(--s-8);
+  border: 1px solid var(--line2);
+  border-radius: var(--r-lg);
+  padding: 18px 22px;
+  background: rgba(139, 137, 255, 0.08);
+  font-size: 15px;
+  color: var(--fg);
+}
+.fence b {
+  color: var(--accent);
 }
 
 /* pricing — flat hairline-ruled tiers, mono prices, one accent-marked focal
@@ -646,12 +688,8 @@ footer {
   h1 {
     font-size: clamp(2.2rem, 8vw, 3rem);
   }
-  .cap {
-    grid-template-columns: 1fr;
-    gap: var(--s-2);
-  }
-  .cap-num {
-    padding-top: 0;
+  .task .body {
+    padding-left: var(--s-4);
   }
   /* Hide only the top-level tab links on mobile (direct children). The plan
      pill stays, and items inside the account dropdown (nested, not direct
