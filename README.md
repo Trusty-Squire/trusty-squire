@@ -14,7 +14,7 @@
   <a href="https://github.com/Trusty-Squire/trusty-squire/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="license" /></a>
 </p>
 
-<p align="center"><strong>Give your agents agency.</strong></p>
+<p align="center"><strong>Empower agents with auth and payments.</strong></p>
 <p align="center">MCP tools to automate auth and pay — your keys and card never leave the vault.</p>
 
 Trusty Squire is an **MCP server that lets Claude Code, Codex, Cursor, OpenCode, Goose, and other coding agents sign up, provision, and purchase on your behalf**. It opens a real browser, works through signup, sign-in, setup, and checkout flows one step at a time, clears the bot-detection and email-verification steps that make operator tools stall, and hands the job back to a person only when one is actually required. That covers wiring up OAuth and API keys for the app you're building as much as it covers paying a checkout, sending a gift, or booking something — the same operator primitives drive all of it.

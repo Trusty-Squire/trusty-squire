@@ -24,7 +24,7 @@ const canonicalReadme = path.join(repoRoot, "README.md");
 const packageReadme = path.join(pkgRoot, "README.md");
 const descriptionTagline =
   "Trusty Squire gives coding agents the ability to provision, ship, and pay — without your keys or card ever leaving the vault.";
-const readmeTagline = "Give your agents agency.";
+const readmeTagline = "Empower agents with auth and payments.";
 
 let tmpDir: string;
 

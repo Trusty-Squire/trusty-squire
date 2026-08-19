@@ -108,7 +108,7 @@ Live GitHub metadata is intentionally unchanged until the content PR is reviewed
 
 Proposed repository description:
 
-> Give your agents agency. MCP tools to automate auth and pay — sign up, provision, and purchase while your keys and card stay in the vault.
+> Empower agents with auth and payments. MCP tools to automate auth and pay — sign up, provision, and purchase while your keys and card stay in the vault.
 
 Proposed topics:
 

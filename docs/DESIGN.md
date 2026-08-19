@@ -10,7 +10,7 @@
 - **Surfaces:** marketing landing (`/`), public getting-started (`/start`), auth (`/login`), the app (`/vault`, `/vault/new`, `/agents`). `/install` is the token-gated OAuth-binding wizard the CLI opens (centered auth-card), distinct from `/start`.
 
 ## Memorable Thing
-**"Give your agents agency — calm, fast, exact."**
+**"Empower agents with auth and payments — calm, fast, exact."**
 What someone remembers is the quiet precision: hard website work gets finished while keys and cards stay private. Every decision serves this.
 
 ## Aesthetic Direction

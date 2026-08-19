@@ -9,7 +9,7 @@ const packageRoot = fileURLToPath(new URL("../../", import.meta.url));
 const repoRoot = path.resolve(packageRoot, "../..");
 const script = path.join(packageRoot, "scripts", "package-readme.mjs");
 const canonicalReadme = path.join(repoRoot, "README.md");
-const tagline = "Give your agents agency.";
+const tagline = "Empower agents with auth and payments.";
 
 let tmpDir: string;
 let source: string;

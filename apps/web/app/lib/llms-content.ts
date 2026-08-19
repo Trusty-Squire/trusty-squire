@@ -17,7 +17,7 @@ export function buildLlmsTxt(): string {
 
   return `# Trusty Squire
 
-> Give your agents agency.
+> Empower agents with auth and payments.
 
 Trusty Squire is an MCP server that gives Claude Code, Codex, Cursor, OpenCode, Goose, and other coding agents the ability to provision, ship, and pay on your behalf. It signs up for and configures real websites, wires up OAuth, Stripe, and deploys, and can complete purchases and coordinate on your behalf — your keys and card never leave the vault.
 
