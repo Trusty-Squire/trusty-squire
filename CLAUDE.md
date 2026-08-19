@@ -375,19 +375,17 @@ CHANGELOG seed + branch + PR to the right channel):
    so RC bumps may still be pushed straight to it.
 3. Merge it. **For a stable cut (PR → `main`), use "Create a merge commit" —
    NOT squash.** `tools/release-mcp.mjs` puts this reminder in the PR body
-   too. Squashing severs `main`'s ancestry from `staging`, so the *next*
-   stable cut false-conflicts on files that are actually identical (this is
-   what forced the manual `-X ours` reconciliation on `1.1.10`) and can stall
-   or skip PR-triggered CI on the release PR itself (GitHub's mergeability
-   check gets stuck on a diverged, conflicting diff — confirmed via
-   check-suites: zero runs on the two pre-conflict-resolution pushes to
-   `release-1.1.10`, one clean run immediately after merging `main` back in).
-   A regular merge commit is also the convention this repo used for `main`-
-   targeted PRs before `1.1.9`/`1.1.10` slipped to squash — prerelease PRs
-   into `staging` can still squash freely; only the `main`-targeted stable
-   cut needs the real merge. The release workflow publishes to npm + creates
-   the GitHub release automatically. Confirm with `gh run watch` / `npm view
-   @trusty-squire/mcp dist-tags`.
+   too. Squashing severs `main`'s ancestry from `staging`; this forced the
+   manual `-X ours` reconciliation on `1.1.10` and left its conflicted PR with
+   zero attached CI runs across two pushes. A regular merge commit is also the
+   convention this repo used for `main`-targeted PRs before `1.1.9`/`1.1.10`.
+   After the stable package and GitHub release are verified, `release.yml`
+   automatically records the new `main` commit as a parent of `staging` with
+   `tools/sync-release-ancestry.mjs`. That ancestry-only merge preserves
+   staging's prerelease tree while preventing version/changelog conflicts on
+   the following cut. Prerelease PRs into `staging` can still squash freely.
+   Confirm the publish with `gh run watch` / `npm view @trusty-squire/mcp
+   dist-tags`.
 
 **Manual publish = EMERGENCY FALLBACK ONLY** (CI down, registry outage —
 needs the operator's Automation token, which a normal release never touches):

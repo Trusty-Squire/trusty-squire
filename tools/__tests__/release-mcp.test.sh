@@ -36,15 +36,14 @@ git -C "$CLONE_DIR" config user.name "Test"
 
 mkdir -p "$CLONE_DIR/apps/mcp" "$CLONE_DIR/apps/registry" "$CLONE_DIR/packages/skill-schema" "$CLONE_DIR/packages/recipe-schema"
 
-# apps/mcp pins skill-schema to an EXACT prerelease workspace version — the
-# reproduction of the stale-pin bug. recipe-schema already uses workspace:*
-# and must be left alone.
+# apps/mcp pins both promoted schemas to EXACT prerelease workspace versions —
+# reproducing the stale-pin bug for every package in the stable strip-list.
 cat >"$CLONE_DIR/apps/mcp/package.json" <<'EOF'
 {
   "name": "@trusty-squire/mcp",
   "version": "1.2.3-rc.1",
   "dependencies": {
-    "@trusty-squire/recipe-schema": "workspace:*",
+    "@trusty-squire/recipe-schema": "workspace:0.7.0-rc.5",
     "@trusty-squire/skill-schema": "workspace:0.4.0-rc.2"
   }
 }
@@ -88,7 +87,7 @@ importers:
   apps/mcp:
     dependencies:
       '@trusty-squire/recipe-schema':
-        specifier: workspace:*
+        specifier: workspace:0.7.0-rc.5
         version: link:../../packages/recipe-schema
       '@trusty-squire/skill-schema':
         specifier: workspace:0.4.0-rc.2
@@ -104,6 +103,7 @@ git -C "$CLONE_DIR" add -A
 git -C "$CLONE_DIR" commit --quiet -m "fixture"
 git -C "$CLONE_DIR" branch -m staging
 git -C "$CLONE_DIR" push --quiet -u origin staging
+git -C "$CLONE_DIR" push --quiet origin HEAD:main
 
 set +e
 OUTPUT=$(cd "$CLONE_DIR" && PATH="$MOCK_BIN:$PATH" node "$ROOT_DIR/tools/release-mcp.mjs" 1.2.3 2>&1)
@@ -140,7 +140,7 @@ fi
 
 MCP_RECIPE_PIN=$(read_json "$CLONE_DIR/apps/mcp/package.json" "dependencies['@trusty-squire/recipe-schema']")
 if [[ "$MCP_RECIPE_PIN" != "workspace:*" ]]; then
-  echo "Expected apps/mcp's already-workspace:* recipe-schema pin left untouched, got $MCP_RECIPE_PIN"
+  echo "Expected apps/mcp's recipe-schema pin repinned to workspace:*, got $MCP_RECIPE_PIN"
   exit 1
 fi
 
@@ -156,9 +156,15 @@ if grep -q "specifier: workspace:0.4.0-rc.2" "$CLONE_DIR/pnpm-lock.yaml"; then
   exit 1
 fi
 
+if grep -q "specifier: workspace:0.7.0-rc.5" "$CLONE_DIR/pnpm-lock.yaml"; then
+  echo "Expected pnpm-lock.yaml recipe-schema specifier refreshed, stale pin remains"
+  cat "$CLONE_DIR/pnpm-lock.yaml"
+  exit 1
+fi
+
 LOCK_SKILL_SPECIFIERS=$(grep -c "specifier: workspace:\*" "$CLONE_DIR/pnpm-lock.yaml")
 if [[ "$LOCK_SKILL_SPECIFIERS" != "3" ]]; then
-  echo "Expected 3 workspace:* specifiers in pnpm-lock.yaml (1 pre-existing + 2 repinned), got $LOCK_SKILL_SPECIFIERS"
+  echo "Expected 3 workspace:* specifiers in pnpm-lock.yaml (all repinned), got $LOCK_SKILL_SPECIFIERS"
   cat "$CLONE_DIR/pnpm-lock.yaml"
   exit 1
 fi
@@ -178,4 +184,48 @@ if [[ ! -f "$STATE_FILE" ]] || ! grep -q -- "--base main" "$STATE_FILE"; then
   exit 1
 fi
 
-echo "release-mcp stable-cut dependent-pin repin: OK"
+# Complete the stable promotion with the required merge commit, then make one
+# more staging change and cut the following stable release. The second release
+# PR must merge cleanly too; preserving ancestry on main is insufficient if the
+# release-only commit is never recorded back on staging.
+git -C "$CLONE_DIR" checkout --quiet -B main origin/main
+git -C "$CLONE_DIR" merge --quiet --no-ff release-1.2.3 -m "release 1.2.3"
+git -C "$CLONE_DIR" push --quiet origin main
+
+STAGING_TREE_BEFORE=$(git -C "$CLONE_DIR" rev-parse origin/staging^{tree})
+STABLE_COMMIT=$(git -C "$CLONE_DIR" rev-parse main)
+(cd "$CLONE_DIR" && node "$ROOT_DIR/tools/sync-release-ancestry.mjs" "$STABLE_COMMIT")
+git -C "$CLONE_DIR" fetch --quiet origin staging
+STAGING_TREE_AFTER=$(git -C "$CLONE_DIR" rev-parse origin/staging^{tree})
+if [[ "$STAGING_TREE_AFTER" != "$STAGING_TREE_BEFORE" ]]; then
+  echo "Expected ancestry sync to leave staging's prerelease tree unchanged"
+  exit 1
+fi
+if ! git -C "$CLONE_DIR" merge-base --is-ancestor "$STABLE_COMMIT" origin/staging; then
+  echo "Expected ancestry sync to record the stable promotion on staging"
+  exit 1
+fi
+
+git -C "$CLONE_DIR" checkout --quiet -B staging origin/staging
+echo "next change" >"$CLONE_DIR/next-change.txt"
+git -C "$CLONE_DIR" add next-change.txt
+git -C "$CLONE_DIR" commit --quiet -m "next staging change"
+git -C "$CLONE_DIR" push --quiet origin staging
+
+set +e
+NEXT_OUTPUT=$(cd "$CLONE_DIR" && PATH="$MOCK_BIN:$PATH" node "$ROOT_DIR/tools/release-mcp.mjs" 1.2.4 2>&1)
+NEXT_STATUS=$?
+set -e
+if [[ $NEXT_STATUS -ne 0 ]]; then
+  echo "Expected the following stable cut to succeed"
+  printf '%s\n' "$NEXT_OUTPUT"
+  exit 1
+fi
+
+if ! git -C "$CLONE_DIR" merge-tree --write-tree main release-1.2.4 >/dev/null; then
+  echo "Expected the following stable release PR to merge cleanly into main"
+  git -C "$CLONE_DIR" merge-tree --write-tree main release-1.2.4 || true
+  exit 1
+fi
+
+echo "release-mcp stable-cut repin and next-release mergeability: OK"

@@ -188,11 +188,11 @@ const ghEnv = { ...process.env };
 delete ghEnv.GH_TOKEN; // a stale GH_TOKEN env breaks the local gh auth
 const mergeReminder = isPrerelease
   ? ""
-  : `\n\n**Merge with "Create a merge commit" — NOT squash.** A squash merge severs ` +
-    `\`main\`'s ancestry from \`staging\`, so the *next* stable cut false-conflicts on files ` +
-    `that are actually identical and can also delay/skip PR-triggered CI on this PR (GitHub's ` +
-    `mergeability check can stall on a diverged, conflicting diff). Regular merge commits are the ` +
-    `established convention for PRs into \`main\` in this repo's history — see CLAUDE.md's release SOP.`;
+  : `\n\n**Merge with "Create a merge commit" — NOT squash.** This preserves the promoted ` +
+    `\`staging\` history on \`main\`, matching this repo's established convention. After the ` +
+    `verified publish, \`release.yml\` records the stable commit back in \`staging\`'s ancestry ` +
+    `without changing its prerelease files, keeping the next release PR conflict-free. See ` +
+    `CLAUDE.md's release SOP.`;
 const prBody =
   `Bumps \`@trusty-squire/mcp\` \`${prev}\` → \`${version}\`.\n\n` +
   `Merging to \`${target}\` publishes the npm \`${channel}\` tag via \`release.yml\`.\n\n` +
