@@ -10,7 +10,7 @@ Trusty Squire is for people who delegate work to agents. Builders use it to prov
 
 ## Product Purpose
 
-Give your agents agency.
+Empower agents with auth and payments.
 
 Trusty Squire provides MCP tools that let agents provision, ship, transact, and coordinate on a user's behalf while keys and cards remain in the vault. Its two product pillars are:
 
