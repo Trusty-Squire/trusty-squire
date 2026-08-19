@@ -36,15 +36,14 @@ git -C "$CLONE_DIR" config user.name "Test"
 
 mkdir -p "$CLONE_DIR/apps/mcp" "$CLONE_DIR/apps/registry" "$CLONE_DIR/packages/skill-schema" "$CLONE_DIR/packages/recipe-schema"
 
-# apps/mcp pins skill-schema to an EXACT prerelease workspace version — the
-# reproduction of the stale-pin bug. recipe-schema already uses workspace:*
-# and must be left alone.
+# apps/mcp pins both schemas to EXACT prerelease workspace versions — the
+# reproduction of the stale-pin bug.
 cat >"$CLONE_DIR/apps/mcp/package.json" <<'EOF'
 {
   "name": "@trusty-squire/mcp",
   "version": "1.2.3-rc.1",
   "dependencies": {
-    "@trusty-squire/recipe-schema": "workspace:*",
+    "@trusty-squire/recipe-schema": "workspace:0.7.0-rc.5",
     "@trusty-squire/skill-schema": "workspace:0.4.0-rc.2"
   }
 }
@@ -88,7 +87,7 @@ importers:
   apps/mcp:
     dependencies:
       '@trusty-squire/recipe-schema':
-        specifier: workspace:*
+        specifier: workspace:0.7.0-rc.5
         version: link:../../packages/recipe-schema
       '@trusty-squire/skill-schema':
         specifier: workspace:0.4.0-rc.2
@@ -140,7 +139,7 @@ fi
 
 MCP_RECIPE_PIN=$(read_json "$CLONE_DIR/apps/mcp/package.json" "dependencies['@trusty-squire/recipe-schema']")
 if [[ "$MCP_RECIPE_PIN" != "workspace:*" ]]; then
-  echo "Expected apps/mcp's already-workspace:* recipe-schema pin left untouched, got $MCP_RECIPE_PIN"
+  echo "Expected apps/mcp's recipe-schema pin repinned to workspace:*, got $MCP_RECIPE_PIN"
   exit 1
 fi
 
@@ -151,14 +150,20 @@ if [[ "$REGISTRY_SKILL_PIN" != "workspace:*" ]]; then
 fi
 
 if grep -q "specifier: workspace:0.4.0-rc.2" "$CLONE_DIR/pnpm-lock.yaml"; then
-  echo "Expected pnpm-lock.yaml specifiers refreshed, stale pin remains"
+  echo "Expected pnpm-lock.yaml skill-schema specifiers refreshed, stale pin remains"
+  cat "$CLONE_DIR/pnpm-lock.yaml"
+  exit 1
+fi
+
+if grep -q "specifier: workspace:0.7.0-rc.5" "$CLONE_DIR/pnpm-lock.yaml"; then
+  echo "Expected pnpm-lock.yaml recipe-schema specifier refreshed, stale pin remains"
   cat "$CLONE_DIR/pnpm-lock.yaml"
   exit 1
 fi
 
 LOCK_SKILL_SPECIFIERS=$(grep -c "specifier: workspace:\*" "$CLONE_DIR/pnpm-lock.yaml")
 if [[ "$LOCK_SKILL_SPECIFIERS" != "3" ]]; then
-  echo "Expected 3 workspace:* specifiers in pnpm-lock.yaml (1 pre-existing + 2 repinned), got $LOCK_SKILL_SPECIFIERS"
+  echo "Expected 3 repinned workspace:* specifiers in pnpm-lock.yaml, got $LOCK_SKILL_SPECIFIERS"
   cat "$CLONE_DIR/pnpm-lock.yaml"
   exit 1
 fi
