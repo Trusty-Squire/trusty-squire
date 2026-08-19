@@ -15,7 +15,7 @@ What someone remembers is the quiet precision: hard website work gets finished w
 
 ## Aesthetic Direction
 - **Lane:** Linear-leaning polished dark, industrial-utilitarian. Brutal simplicity + efficiency.
-- **Decoration:** minimal. One indigo accent. A single soft radial glow behind the login mark, the vault header, and the marketing-landing hero *only* — everywhere else flat. The landing glow is **static** (no drift/loop animation); the rest of the landing (product surface, pillar grid, CTA) is flat.
+- **Decoration:** minimal. One indigo accent. A single soft radial glow behind the login mark, the vault header, and the marketing-landing hero *only* — everywhere else flat. The landing glow is **static** (no drift/loop animation); the rest of the landing (product surface, expandable task gallery, standalone fence strip, CTA) is flat.
 - **Mono-forward:** anything machine (API keys, hostnames, references, counts, timestamps) renders in mono. Sans is for chrome and labels only. This is the identity.
 - **Anti-slop (never):** purple gradients, centered card in a void, rounded consumer bubbles, Inter as the UI font, 3-column icon grids, decorative blobs, generic repeated glyphs.
 
