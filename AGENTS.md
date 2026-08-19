@@ -397,6 +397,12 @@ Unlike `ci.yml` (which builds every `packages/**` dist generically via `pnpm -r 
 
 **The rule:** any PR that changes `packages/recipe-schema/src/**` or `packages/skill-schema/src/**` MUST bump that package's `version` in the same PR (prerelease shape on `staging`, matching the branch-shape check the release workflow itself enforces — see gotcha #5). Verify a bump actually shipped the change with `npm view @trusty-squire/<pkg> versions --json` and `npm pack --dry-run` / grepping `dist/index.js` for the new export, not just by reading the source.
 
+### 9. `tools/release-mcp.mjs` now fixes stale workspace dep pins on stable cuts — and merge PRs to `main` with a merge commit, not squash
+
+A stable cut strips the `-rc` suffix off `packages/skill-schema` and `packages/recipe-schema` (gotcha #5's stable-branch guard), but until this was fixed, any dependent `package.json` (`apps/mcp`, `apps/registry`, ...) that pinned an EXACT prerelease workspace version (`workspace:0.1.6-rc.1`, as opposed to a self-resolving `workspace:*`) kept pointing at a version that no longer existed. `pnpm install --frozen-lockfile` (what CI runs) then rejected the pin. This blocked every stable release (1.1.9, 1.1.10) and had to be hand-patched. `tools/release-mcp.mjs` now repins any such dependent to `workspace:*` and mirrors the change into `pnpm-lock.yaml`'s per-importer `specifier:` lines automatically — see `tools/__tests__/release-mcp.test.sh`.
+
+Separately: `1.1.9`/`1.1.10` squash-merged their release PRs into `main`, which severs `main`'s ancestry from `staging` and made the *next* release PR false-conflict on files that were actually identical (forced a manual `-X ours` reconciliation on `1.1.10`) — and, per GitHub's check-suites API, PR-triggered CI attached ZERO times to that conflicted PR across two pushes, only firing after a `main`→branch merge commit resolved the conflict. The fix (and full evidence) is documented in `CLAUDE.md`'s "npm distribution" § release SOP step 3 — merge cuts into `main` with **"Create a merge commit," never squash**; `release-mcp.mjs` puts the same reminder in the stable-cut PR body.
+
 ## Final note
 
 You are reading this file because a prior agent burned four version numbers, confused users, and forced a human to intervene. The agent was not malicious. It was not lazy. It was pattern-matching on its own prose instead of on tool output.
