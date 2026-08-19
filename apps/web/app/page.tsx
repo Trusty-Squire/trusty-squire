@@ -253,7 +253,9 @@ export default function Page() {
               </div>
             </details>
           ))}
-          <div className="gallery-tail">…and any complex task that stalls at a signup or a payment.</div>
+          <div className="gallery-tail">
+            …and any complex task that stalls at a signup or a payment.
+          </div>
         </div>
 
         <div className="fence">
