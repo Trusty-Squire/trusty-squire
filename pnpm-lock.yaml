@@ -115,7 +115,7 @@ importers:
         specifier: workspace:*
         version: link:../../packages/recipe-schema
       '@trusty-squire/skill-schema':
-        specifier: workspace:0.1.6-rc.1
+        specifier: workspace:0.1.6
         version: link:../../packages/skill-schema
       better-sqlite3:
         specifier: 12.8.0
@@ -2569,7 +2569,7 @@ packages:
       std-env: 3.10.0
       strip-literal: 2.1.1
       test-exclude: 6.0.0
-      vitest: 1.6.1(@types/node@22.19.19)
+      vitest: 1.6.1(@types/node@20.19.40)(happy-dom@20.11.1)
     transitivePeerDependencies:
       - supports-color
     dev: true
