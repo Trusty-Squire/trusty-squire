@@ -530,15 +530,6 @@ jobs:
             $PRERELEASE_FLAG \
             --target "$GITHUB_SHA"
 
-      # The stable release commit changes versions/changelog only on main. A
-      # merge commit preserves staging ancestry in main, but the reverse is
-      # also required or the next cut edits those same lines from an old merge
-      # base and conflicts. Record main as a staging parent while retaining
-      # staging's byte-identical prerelease tree (`git merge -s ours` semantics).
-      - name: Record stable promotion ancestry on staging
-        if: needs.verify.outputs.is_prerelease == 'false'
-        run: node tools/sync-release-ancestry.mjs "$GITHUB_SHA"
-
       - name: Summary
         run: |
           {
