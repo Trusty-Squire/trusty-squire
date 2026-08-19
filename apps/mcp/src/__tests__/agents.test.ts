@@ -219,7 +219,7 @@ describe("goose YAML writer", () => {
     expect(parsed.extensions.squire.name).toBe("squire");
     expect(parsed.extensions.squire.type).toBe("stdio");
     expect(parsed.extensions.squire.description).toBe(
-      "Trusty Squire signs up / in to websites for you so you don’t have to.",
+      "Trusty Squire gives coding agents the ability to provision, ship, and pay — without your keys or card ever leaving the vault.",
     );
   });
 

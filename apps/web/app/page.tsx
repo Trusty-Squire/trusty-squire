@@ -14,30 +14,56 @@ export const metadata: Metadata = {
   alternates: { canonical: "https://trustysquire.ai/" },
 };
 
-const EXAMPLES = [
+const TASKS = [
   {
-    href: "/services/braintrust",
-    prompt: "Sign up for Braintrust and save its API key outside agent context.",
+    label: "Add Google OAuth to your app",
+    bg: "Signs into Google Cloud, creates a project, configures the OAuth consent screen, mints client credentials, and vaults the secret — the client ID drops straight into your config.",
+    blk: "The Google sign-in, and they can't safely hold the client secret.",
   },
   {
-    href: "/services/cerebras",
-    prompt: "Set up Cerebras inference without putting its API key in this project.",
+    label: "Publish your mobile apps to the App Store & Play Store",
+    bg: "Signs into App Store Connect and Play Console, generates and cross-signs the certificates and provisioning profiles, uploads the build, fills the listing, and submits for review.",
+    blk: "The developer-account 2FA login and the certificate signing.",
   },
   {
-    href: "/services/clerk",
-    prompt: "Sign up for Clerk, create an app, and save the secret key.",
+    label: "Set up Firebase for your project",
+    bg: "Creates the Firebase project, enables Auth / Firestore / Storage, generates the service-account key, vaults it, and writes your config files.",
+    blk: "The Google login, and they can't hold the service-account private key.",
   },
   {
-    href: "/services/deepinfra",
-    prompt: "Create a DeepInfra account and wire the vaulted token into my backend.",
+    label: "Add Stripe payments",
+    bg: "Signs up for Stripe, clears business verification, creates API keys and webhook endpoints, vaults the secret key, and wires the publishable key into your frontend.",
+    blk: "Signup, identity/business verification, and the secret key.",
   },
   {
-    href: "/services/zilliz",
-    prompt: "Sign up for Zilliz Cloud and keep its API key out of .env.",
+    label: "Buy gifts for your friends and colleagues",
+    bg: "Reaches out to get their preference and delivery address directly, picks the item, checks out with your card injected server-side and one approval, and ships it.",
+    blk: "The payment, and they can't get someone's private address without you asking.",
   },
   {
-    href: "/use-cases/api-keys-without-env",
-    prompt: "That app token leaked. Revoke its access now.",
+    label: "Automate customer email outreach",
+    bg: "Signs up for Resend, pulls your customer list from Algolia, runs the daily outreach, and handles the replies that land in your Gmail inbox.",
+    blk: "The Resend signup — and their own safety filters block automated bulk sending, so the workflow never even starts.",
+  },
+  {
+    label: "Run a paid acquisition campaign",
+    bg: "Signs up for Google Ads, verifies the business, puts a card on file, launches a search campaign against your keywords, and tunes bids daily against conversions.",
+    blk: "Ad-account identity verification, the card on file, and the daily spend decisions no headless agent can self-authorize.",
+  },
+  {
+    label: "Wire up product analytics and alerts",
+    bg: "Signs up for PostHog and Sentry, installs the keys, connects a Slack webhook, and routes error spikes and funnel drop-offs straight into your channel.",
+    blk: "The two signups, the Slack OAuth connect, and holding each project's key.",
+  },
+  {
+    label: "Onboard a teammate's tool stack",
+    bg: "Creates their GitHub, Linear, and Slack seats, pays for each, and sends the invites — so they land ready to work.",
+    blk: "The admin-console logins, per-seat billing on each tool, and SSO enrollment.",
+  },
+  {
+    label: "Book travel or a reservation",
+    bg: "Searches and selects, fills the passenger or guest details, pays behind the fence with one approval, and confirms.",
+    blk: "The payment and the account login.",
   },
 ] as const;
 
@@ -58,7 +84,7 @@ const HOME_JSON_LD = {
       url: "https://trustysquire.ai/",
       name: "Trusty Squire",
       description:
-        "Trusty Squire signs up and signs in to websites for developers using coding agents.",
+        "MCP tools that let coding agents provision, ship, and pay on your behalf — keys and card never leave the vault.",
       publisher: { "@id": "https://trustysquire.ai/#organization" },
     },
   ],
@@ -78,18 +104,18 @@ function ProductStill() {
       <div className="panel-body">
         <div className="ln">
           <span className="g">$</span>
-          <span className="usr">sign me up for Clerk and wire it into this app</span>
+          <span className="usr">add Google OAuth in one prompt</span>
         </div>
         <div className="ln">
           <span className="g"> </span>
           <span className="sq">squire</span>
-          <span> opening Clerk · email signup, secret key…</span>
+          <span> opening Google Cloud Console · OAuth client, secret…</span>
         </div>
         <div className="ln">
           <span className="g"> </span>
           <span className="ok">✓</span>
-          <span> key sealed → vault&nbsp;</span>
-          <span className="key">cred_clerk_••••••</span>
+          <span> secret sealed → vault&nbsp;</span>
+          <span className="key">cred_oauth_••••••</span>
         </div>
         <div className="ln">
           <span className="g"> </span>
@@ -141,23 +167,12 @@ export default function Page() {
               <Shield size={54} glyph />
             </span>
             <span className="eyebrow">
-              <b>MCP</b> · built for agentic coding
+              <b>MCP</b> · for coding agents
             </span>
-            <h1>Trusty Squire signs up / in to websites for you so you don’t have to.</h1>
+            <h1>Empower agents with auth and payments.</h1>
             <p className="sub">
-              Browser operators often stop at signup walls and bot detection. Trusty Squire opens
-              the real website, completes signup or sign-in, finishes setup, and saves generated
-              credentials without putting them in chat, code, or <code>.env</code>.
+              MCP tools to automate auth and pay — your keys and card never leave the vault.
             </p>
-            <ol className="hero-asks">
-              {EXAMPLES.map((example, index) => (
-                <li key={example.prompt}>
-                  <Link href={example.href}>
-                    <span>{String(index + 1).padStart(2, "0")}</span>“{example.prompt}”
-                  </Link>
-                </li>
-              ))}
-            </ol>
             <div className="cta">
               <CopyChip />
               <a className="docs" href={DOCS_URL}>
@@ -189,64 +204,71 @@ export default function Page() {
           <h2 id="what-is-trusty-squire">What is Trusty Squire?</h2>
           <p>
             Trusty Squire is an MCP server for coding agents. Claude Code, Codex, Cursor, OpenCode,
-            or Goose plans the job; Trusty Squire operates the website and keeps the generated
-            secret on the safe side of the boundary.
+            or Goose plans the job; Trusty Squire operates the website, wires up the integration, or
+            completes the purchase — keeping the generated secret or card on the safe side of the
+            boundary.
           </p>
           <h3>How does it work?</h3>
           <ol>
-            <li>Your agent names the website and the finished outcome.</li>
-            <li>Trusty Squire drives the real signup, sign-in, or setup flow.</li>
+            <li>Your agent names the outcome — an account, an integration, or a purchase.</li>
+            <li>Trusty Squire drives the real signup, setup, or checkout flow.</li>
             <li>
-              The credential is encrypted in a write-only vault and injected server-side when used.
+              The credential or card is encrypted in a write-only vault and injected server-side
+              when used.
             </li>
           </ol>
           <p className="home-limit">
-            If a site requires a phone, hard CAPTCHA, payment, or a decision only you should make,
-            the run stops and tells you instead of guessing.
+            If a site requires a phone, hard CAPTCHA, or a decision only you should make, the run
+            stops and tells you instead of guessing.
           </p>
         </div>
       </section>
 
-      {/* ---------------- CAPABILITIES ---------------- */}
-      <section className="wrap caps">
-        <Reveal className="cap">
-          <div className="cap-num">01 / provision</div>
-          <div className="cap-body">
-            <h3>Your agent handles signups</h3>
-            <p>
-              Ask for a service. Your squire creates the account, works through available
-              verification, and stores the generated API key. No fifteen-tab signup detour, right
-              inside Claude Code, Codex, OpenCode, Goose, and Cursor.
-            </p>
+      {/* ---------------- PRELUDE + TASK GALLERY ---------------- */}
+      <section className="wrap">
+        <p className="prelude">
+          <span className="lo">Magic happens when your agents can</span> sign up, provision, and
+          purchase on your behalf <span className="lo">— hard tasks in one prompt.</span>
+        </p>
+
+        <div className="gallery">
+          <div className="gallery-head">
+            Trusty Squire can— <span className="hint">(tap any task)</span>
           </div>
-        </Reveal>
-        <Reveal className="cap">
-          <div className="cap-num">02 / vault</div>
-          <div className="cap-body">
-            <h3>Use keys without exposing them</h3>
-            <p>
-              Stop scattering keys across <span className="m">.env</span> files. Keys go into the
-              vault; a proxy injects each value into the provider request server-side without
-              returning it to the agent or consuming app.
-            </p>
+          {TASKS.map((task) => (
+            <details className="task" key={task.label}>
+              <summary>
+                <span className="k">›</span>
+                <span className="label">{task.label}</span>
+              </summary>
+              <div className="body">
+                <div className="line bg">
+                  <span className="tag">In the background</span>
+                  {task.bg}
+                </div>
+                <div className="line blk">
+                  <span className="tag">Vanilla agents stop at</span>
+                  {task.blk}
+                </div>
+              </div>
+            </details>
+          ))}
+          <div className="gallery-tail">
+            …and any complex task that stalls at a signup or a payment.
           </div>
-        </Reveal>
-        <Reveal className="cap">
-          <div className="cap-num">03 / operate</div>
-          <div className="cap-body">
-            <h3>Finish setup behind a login</h3>
-            <p>
-              Wire up OAuth across consoles, configure webhooks, and stand up projects. Your squire
-              does the authenticated click-work while the secret stays out of chat.
-            </p>
-          </div>
-        </Reveal>
+        </div>
+
+        <div className="fence">
+          The card is never exposed to the agent, and no charge happens without{" "}
+          <b>one human approval</b>. API keys stay vaulted — the raw secret never enters the
+          agent&rsquo;s context.
+        </div>
       </section>
 
       {/* ---------------- CTA ---------------- */}
       <section className="endcta">
         <Reveal className="wrap">
-          <h2>Install the squire. Get back to building.</h2>
+          <h2>Install the squire. Let it handle the rest.</h2>
           <p>One command. Plugs into your agent of choice. Free to start.</p>
           <div className="cta">
             <CopyChip />

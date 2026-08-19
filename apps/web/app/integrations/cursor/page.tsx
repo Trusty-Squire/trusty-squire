@@ -24,18 +24,16 @@ export default function CursorIntegrationPage() {
       installCommand="npx @trusty-squire/mcp connect --target=cursor"
       examples={[
         {
-          prompt: "Sign me up for Clerk and save the API key.",
-          result:
-            "Keep working in Cursor while Trusty Squire completes the website flow and stores the key.",
+          prompt: "Add Stripe payments in one prompt.",
+          result: "Live Checkout and webhook wiring instead of hand-typing API keys into code.",
         },
         {
-          prompt: "Configure Braintrust and Cerebras for this app.",
-          result: "Finish project setup in both dashboards from one development task.",
+          prompt: "Add Google OAuth in one prompt.",
+          result: "Working OAuth login, no dashboard tour, no client-secret copy/paste into .env.",
         },
         {
-          prompt: "Give this deployed app revocable API access.",
-          result:
-            "Use a scoped Trusty Squire grant instead of copying the provider credential into the app.",
+          prompt: "Send gifts privately (Hermes).",
+          result: "A gift sent, no address shared — no texting your address or card to a friend.",
         },
       ]}
       steps={[

@@ -25,7 +25,7 @@ const FAQS: readonly FaqItem[] = [
   {
     question: "Can OpenCode automate every website signup?",
     answer:
-      "No. Trusty Squire stops when a site requires a phone, hard CAPTCHA, payment, or a decision that belongs to a person instead of guessing or claiming success.",
+      "No. Trusty Squire stops when a site requires a phone, hard CAPTCHA, or a decision that belongs to a person instead of guessing or claiming success. Every charge requires exactly one human approval before payment, then the run can continue.",
   },
 ];
 
@@ -51,19 +51,17 @@ export default function OpenCodeIntegrationPage() {
         installCommand="npx @trusty-squire/mcp connect --target=opencode"
         examples={[
           {
-            prompt: "Use Trusty Squire to sign up for Resend and wire the API key into my app.",
+            prompt: "Add Google OAuth in one prompt.",
             result:
-              "OpenCode keeps the application goal in view while Trusty Squire completes the supported website flow and saves the generated key.",
+              "Working OAuth login, no dashboard tour, no client-secret copy/paste into .env.",
           },
           {
-            prompt: "Set up Clerk without putting its secret key in this chat or .env.",
-            result:
-              "The provider credential is captured into the encrypted vault instead of being returned as model-visible plaintext.",
+            prompt: "Add Stripe payments in one prompt.",
+            result: "Live Checkout and webhook wiring instead of hand-typing API keys into code.",
           },
           {
-            prompt: "Sign in to Sentry and configure the webhook this project needs.",
-            result:
-              "OpenCode can plan authenticated setup work while Trusty Squire handles the real browser session.",
+            prompt: "Never share your card or address again.",
+            result: "Any checkout completed without pasting card numbers into a form.",
           },
         ]}
         steps={[

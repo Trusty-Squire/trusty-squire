@@ -137,8 +137,8 @@ export function getServiceFaqs(service: PublishedServicePage): readonly ServiceF
   const evidence = service.published.signupEvidence.join(" ");
   const signupAnswer =
     service.published.signupMode === "email"
-      ? `Yes, for the reviewed email flow. ${evidence} A hard CAPTCHA, payment, phone requirement, or human-only decision still stops the run for you.`
-      : `For a new account, the reviewed skill uses ${provider ?? "federated"} sign-in as the provider's signup path; for an existing identity, the same path signs in instead. ${evidence} A hard CAPTCHA, payment, phone requirement, or human-only decision still stops the run for you.`;
+      ? `Yes, for the reviewed email flow. ${evidence} A hard CAPTCHA, phone requirement, or human-only decision still stops the run for you. A payment requires exactly one human approval, then the run can continue.`
+      : `For a new account, the reviewed skill uses ${provider ?? "federated"} sign-in as the provider's signup path; for an existing identity, the same path signs in instead. ${evidence} A hard CAPTCHA, phone requirement, or human-only decision still stops the run for you. A payment requires exactly one human approval, then the run can continue.`;
 
   return [
     {

@@ -14,27 +14,28 @@
   <a href="https://github.com/Trusty-Squire/trusty-squire/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="license" /></a>
 </p>
 
-<p align="center"><strong>Trusty Squire signs up / in to websites for you so you don’t have to.</strong></p>
+<p align="center"><strong>Empower agents with auth and payments.</strong></p>
+<p align="center">MCP tools to automate auth and pay — your keys and card never leave the vault.</p>
 
-Trusty Squire is an **MCP server that lets Claude Code, Codex, Cursor, OpenCode, Goose, and other coding agents create accounts on real websites and retrieve the API keys automatically** — then saves each key in an encrypted, write-only vault instead of your chat, your code, or your `.env`. The raw provider secret never needs to enter the agent's context, so it can't be pasted into a commit or leaked in a log.
+Trusty Squire is an **MCP server that lets Claude Code, Codex, Cursor, OpenCode, Goose, and other coding agents sign up, provision, and purchase on your behalf**. It opens a real browser, works through signup, sign-in, setup, and checkout flows one step at a time, clears the bot-detection and email-verification steps that make operator tools stall, and hands the job back to a person only when one is actually required. That covers wiring up OAuth and API keys for the app you're building as much as it covers paying a checkout, sending a gift, or booking something — the same operator primitives drive all of it.
 
-It is not a secrets manager for keys you already have, and not a browser-automation framework you script per site. Point your agent at a service — “set up Clerk and wire in the key” — and Trusty Squire opens a real browser, works through signup or sign-in one step at a time, clears the bot-detection and email-verification steps that make operator tools stall, and captures the generated key. When a real person is required for phone verification, a hard CAPTCHA, 3-D Secure, an unsupported payment, or another decision, it stops and says so rather than pretending the signup completed.
-
-**Built to be handed the keys.** Provider secrets are write-only: the agent's credential tools return references and authenticated results, never stored plaintext. Backend access is a host-scoped, rate-limited, independently revocable grant, so a leaked token is killed without rotating the provider key — and you connect Google or GitHub yourself in a real browser, so the agent never types your password. Full [threat model below](#security-and-threat-model).
+Provider secrets and payment cards are write-only: the agent's credential tools return references and authenticated results, never stored plaintext. The raw secret never needs to enter the agent's context, so it can't be pasted into a commit, leaked in a log, or read back out over chat. Backend access is a host-scoped, rate-limited, independently revocable grant, so a leaked token is killed without rotating the provider key — and you connect Google or GitHub yourself in a real browser, so the agent never types your password. Full [threat model below](#security-and-threat-model).
 
 ## One prompt
 
 ```text
-Use Trusty Squire to create a Clerk account for this app, save the generated secret key, allow api.clerk.com for server-side requests, and wire it in without putting the raw key in chat, code, or .env.
+Add Google OAuth to this app in one prompt: create the OAuth client, save the client secret, and wire it in without putting the raw key in chat, code, or .env.
 ```
 
 Your coding agent plans the job. Trusty Squire operates the website, stores the generated key, and can issue your backend a scoped grant. The backend calls the provider through Trusty Squire, which injects the provider key on the server side.
 
 Other useful asks:
 
+- “Set up Stripe payments for this app and keep the API key out of this conversation.”
 - “Create a Render API key for deployment automation and keep it out of this conversation.”
-- “Set up OpenRouter without returning its API key to this conversation.”
 - “Pay this checkout with my saved work card and ask me to approve it on my phone.”
+- “Send a gift to my friend without sharing their address with me.”
+- “Book this dinner reservation for me.”
 - “That app grant leaked. Revoke it without rotating the provider key.”
 
 For supported card checkouts, save a card in the Vault from a passkey-capable
@@ -172,15 +173,18 @@ remote CDP, macOS, and Windows operator sessions are not supported in this migra
 
 ## What happens
 
-1. Your coding agent names the website and the account, setup, or credential it needs.
+1. Your coding agent names the website and the outcome it needs: an account,
+   authenticated setup, app publishing, a purchase, a gift, or a booking.
 2. Trusty Squire opens an isolated browser profile and works through the service flow one step at a time. It can use the Google identity you explicitly connected without opening the canonical login profile during the task.
-3. When the site reveals an API key or client secret, Trusty Squire captures it into the vault without returning the raw value through its credential tools.
-4. The agent can make an authenticated request through Trusty Squire or create a host-scoped, rate-limited app grant.
+3. If the flow produces an API key or client secret, Trusty Squire captures it
+   into the vault without returning the raw value through its credential tools.
+4. The agent can make an authenticated request, create a host-scoped app grant,
+   or use a saved card for a supported checkout after you approve the purchase.
 5. Eligible successful flows can become signed registry skills, so later runs can replay verified steps instead of rediscovering every click.
 
-If a site requires phone verification, a hard CAPTCHA, an unsupported payment,
-3-D Secure, or another human decision, the run stops and tells you. It does not
-guess or pretend the signup completed.
+If a site requires phone verification, a hard CAPTCHA, an unresolved 3-D Secure
+challenge, an unsupported payment method, or another human decision, the run
+hands control back and tells you. It does not guess or pretend the task completed.
 
 ## Supported services
 
