@@ -47,7 +47,9 @@ const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).trim();
 // prerelease the PR diff is just the bump, for a stable cut it's the staging
 // delta being promoted to main.
 if (git("status", "--porcelain").length > 0) {
-  console.error("✗ working tree is not clean. Commit or stash first — a release PR should contain only the bump.");
+  console.error(
+    "✗ working tree is not clean. Commit or stash first — a release PR should contain only the bump.",
+  );
   process.exit(1);
 }
 
@@ -87,7 +89,10 @@ writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
 const promotedWorkspacePkgs = [];
 if (!isPrerelease) {
   const promoted = []; // { name, oldVersion } — drives the repin pass below
-  for (const wsPath of ["packages/skill-schema/package.json", "packages/recipe-schema/package.json"]) {
+  for (const wsPath of [
+    "packages/skill-schema/package.json",
+    "packages/recipe-schema/package.json",
+  ]) {
     const wsPkg = JSON.parse(readFileSync(wsPath, "utf8"));
     if (wsPkg.version.includes("-")) {
       const oldVersion = wsPkg.version;
@@ -108,14 +113,24 @@ if (!isPrerelease) {
   //     them, so this class of staleness can't recur.
   const lockRewrites = []; // { name, oldSpecifier, newSpecifier } — mirrored into pnpm-lock.yaml below
   if (promoted.length > 0) {
-    const allPkgJsonPaths = git("ls-files", "apps/*/package.json", "packages/*/package.json", "tools/*/package.json")
+    const allPkgJsonPaths = git(
+      "ls-files",
+      "apps/*/package.json",
+      "packages/*/package.json",
+      "tools/*/package.json",
+    )
       .split("\n")
       .filter(Boolean);
     for (const depPath of allPkgJsonPaths) {
       if (promotedWorkspacePkgs.includes(depPath)) continue; // already rewritten above
       const depPkg = JSON.parse(readFileSync(depPath, "utf8"));
       let changed = false;
-      for (const depField of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
+      for (const depField of [
+        "dependencies",
+        "devDependencies",
+        "peerDependencies",
+        "optionalDependencies",
+      ]) {
         const deps = depPkg[depField];
         if (deps === undefined) continue;
         for (const { name, oldVersion } of promoted) {
@@ -146,7 +161,10 @@ if (!isPrerelease) {
     let lockChanged = false;
     const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\']/g, "\\$&");
     for (const { name, oldSpecifier, newSpecifier } of lockRewrites) {
-      const pattern = new RegExp(`('${escapeRe(name)}':\\n\\s*specifier: )${escapeRe(oldSpecifier)}\\n`, "g");
+      const pattern = new RegExp(
+        `('${escapeRe(name)}':\\n\\s*specifier: )${escapeRe(oldSpecifier)}\\n`,
+        "g",
+      );
       const next = lock.replace(pattern, `$1${newSpecifier}\n`);
       if (next !== lock) {
         lock = next;
@@ -166,7 +184,11 @@ let bullets = "- _summarize the changes_\n";
 try {
   const lastTag = git("describe", "--tags", "--abbrev=0");
   const log = git("log", `${lastTag}..HEAD`, "--no-merges", "--pretty=%s");
-  if (log.length > 0) bullets = `${log.split("\n").map((s) => `- ${s}`).join("\n")}\n`;
+  if (log.length > 0)
+    bullets = `${log
+      .split("\n")
+      .map((s) => `- ${s}`)
+      .join("\n")}\n`;
 } catch {
   /* no tags yet — keep the placeholder */
 }
@@ -200,13 +222,28 @@ const prBody =
 try {
   const prUrl = execFileSync(
     "gh",
-    ["pr", "create", "--base", target, "--head", branch, "--title", `release(mcp): ${version}`, "--body", prBody],
+    [
+      "pr",
+      "create",
+      "--base",
+      target,
+      "--head",
+      branch,
+      "--title",
+      `release(mcp): ${version}`,
+      "--body",
+      prBody,
+    ],
     { encoding: "utf8", env: ghEnv },
   ).trim();
   console.log(`\n✓ ${prev} → ${version}`);
   console.log(`✓ PR: ${prUrl}`);
-  console.log(`\nNext: tighten apps/mcp/CHANGELOG.md, wait for CI green, merge → npm publishes ${channel}.`);
+  console.log(
+    `\nNext: tighten apps/mcp/CHANGELOG.md, wait for CI green, merge → npm publishes ${channel}.`,
+  );
 } catch {
   console.log(`\n✓ pushed ${branch}. Open the PR manually:`);
-  console.log(`  gh pr create --base ${target} --head ${branch} --title "release(mcp): ${version}"`);
+  console.log(
+    `  gh pr create --base ${target} --head ${branch} --title "release(mcp): ${version}"`,
+  );
 }

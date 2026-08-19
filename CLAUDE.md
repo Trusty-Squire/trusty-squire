@@ -373,21 +373,15 @@ CHANGELOG seed + branch + PR to the right channel):
    (`secret-scan` + `typecheck` + `test`) before it can merge (0 approvals
    required, so a solo maintainer is never blocked). `staging` is unprotected,
    so RC bumps may still be pushed straight to it.
-3. Merge it. **For a stable cut (PR → `main`), use "Create a merge commit" —
-   NOT squash.** `tools/release-mcp.mjs` puts this reminder in the PR body
-   too. Squashing severs `main`'s ancestry from `staging`, so the *next*
-   stable cut false-conflicts on files that are actually identical (this is
-   what forced the manual `-X ours` reconciliation on `1.1.10`) and can stall
-   or skip PR-triggered CI on the release PR itself (GitHub's mergeability
-   check gets stuck on a diverged, conflicting diff — confirmed via
-   check-suites: zero runs on the two pre-conflict-resolution pushes to
-   `release-1.1.10`, one clean run immediately after merging `main` back in).
-   A regular merge commit is also the convention this repo used for `main`-
-   targeted PRs before `1.1.9`/`1.1.10` slipped to squash — prerelease PRs
-   into `staging` can still squash freely; only the `main`-targeted stable
-   cut needs the real merge. The release workflow publishes to npm + creates
-   the GitHub release automatically. Confirm with `gh run watch` / `npm view
-   @trusty-squire/mcp dist-tags`.
+3. Merge it. **For a stable cut (PR → `main`), use "Create a merge commit," never
+   squash.** Preserving `staging` ancestry prevents false conflicts on the next
+   stable cut and lets GitHub evaluate the release PR for CI normally.
+   `tools/release-mcp.mjs` repeats this rule in the PR body. Merge commits were
+   the established convention before the `1.1.9`/`1.1.10` regression (PRs
+   #442, #382, and #378); prerelease PRs into `staging` may still squash.
+   The release workflow then publishes to npm and creates the GitHub release.
+   Run `scripts/verify-install.sh @trusty-squire/mcp <version>` before claiming
+   the new package is available.
 
 **Manual publish = EMERGENCY FALLBACK ONLY** (CI down, registry outage —
 needs the operator's Automation token, which a normal release never touches):

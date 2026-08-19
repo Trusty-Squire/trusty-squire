@@ -38,18 +38,7 @@ path and a regression there is invisible to CI.
 
 ## Publish
 
-See `CLAUDE.md` → "npm distribution" for the authoritative steps. In
-short, from the repo root:
-
-```bash
-node -e "require('fs').rmSync('apps/mcp/dist',{recursive:true,force:true})"
-pnpm -F @trusty-squire/mcp build
-cd apps/mcp && pnpm pack
-printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_AUTOMATION_TOKEN" > /tmp/np
-npm publish apps/mcp/trusty-squire-mcp-<ver>.tgz --access public --userconfig /tmp/np
-rm -f /tmp/np
-```
-
-The published tarball must include `dist/` **and** `assets/` (the
-branded `vnc.html` / `interstitial.html` — `package.json` `files`).
-Confirm with `tar tzf trusty-squire-mcp-<ver>.tgz | grep assets/login`.
+[`CLAUDE.md`](../../CLAUDE.md#npm-distribution-the-install-path) owns the
+release SOP. Normal releases use `pnpm release:mcp <version>` and publish through
+CI; follow its emergency fallback only when CI cannot publish. Verify the actual
+registry tarball with `scripts/verify-install.sh` as required by `AGENTS.md`.
