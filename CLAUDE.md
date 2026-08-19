@@ -373,9 +373,15 @@ CHANGELOG seed + branch + PR to the right channel):
    (`secret-scan` + `typecheck` + `test`) before it can merge (0 approvals
    required, so a solo maintainer is never blocked). `staging` is unprotected,
    so RC bumps may still be pushed straight to it.
-3. Merge it. The release workflow publishes to npm + creates the GitHub
-   release automatically. Confirm with `gh run watch` / `npm view
-   @trusty-squire/mcp dist-tags`.
+3. Merge it. **For a stable cut (PR → `main`), use "Create a merge commit," never
+   squash.** Preserving `staging` ancestry prevents false conflicts on the next
+   stable cut and lets GitHub evaluate the release PR for CI normally.
+   `tools/release-mcp.mjs` repeats this rule in the PR body. Merge commits were
+   the established convention before the `1.1.9`/`1.1.10` regression (PRs
+   #442, #382, and #378); prerelease PRs into `staging` may still squash.
+   The release workflow then publishes to npm and creates the GitHub release.
+   Run `scripts/verify-install.sh @trusty-squire/mcp <version>` before claiming
+   the new package is available.
 
 **Manual publish = EMERGENCY FALLBACK ONLY** (CI down, registry outage —
 needs the operator's Automation token, which a normal release never touches):
