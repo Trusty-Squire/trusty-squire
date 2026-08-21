@@ -33,8 +33,10 @@ connect / Google login
   -> atomically publish seed/current and delete non-current generations
 
 operate_start
-  -> reserve either active slot, or wait with the bounded retry while both are claimed
-  -> under the seed lock, claim a current warm profile or clone seed/current
+  -> under the seed lock, reclaim stale metadata and reserve either active slot
+  -> claim a current warm profile or clone seed/current while still holding the lock
+  -> after releasing the lock, physically delete any privately tombstoned old profiles
+  -> wait with the bounded retry while both active slots are claimed
   -> launch Chrome on the claimed worker profile
   -> bind the worker's process birth identity and exact user-data directory
   -> validate identity through that worker
@@ -101,10 +103,17 @@ A failed login or uncertain close leaves the current generation unchanged.
 
 Under the seed lock, acquisition:
 
-1. scavenges only ownership states it can prove stale;
+1. scavenges only ownership states it can prove stale, atomically moving reclaimable leases into
+   private tombstones;
 2. reserves the first free active slot with a private owner token;
 3. claims the closed warm profile when it belongs to `seed/current` and is within its bounds; or
 4. copies the current immutable seed into a new worker profile.
+
+Recursive deletion of a tombstoned Chrome profile happens only after the seed lock is released.
+Profile directories can contain large caches, history, and IndexedDB state, so physical deletion is
+not part of serialized pool bookkeeping and cannot block an unrelated start from acquiring the
+lock. A failed deferred deletion leaves its private tombstone in place for a later acquisition to
+retry; the lease cannot become claimable again in the meantime.
 
 Capacity remains fixed at two active leases per namespace. A third start in that namespace retries
 acquisition for at most 30 seconds, including time spent behind seed publication on the shared seed

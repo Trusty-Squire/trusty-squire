@@ -2,6 +2,10 @@
 
 ## 1.1.10 (2026-08-19)
 
+- **Concurrent operator starts no longer wait behind expired-profile deletion.** Reclamation now
+  moves stale lease bookkeeping into a private tombstone under the shared seed lock, releases the
+  lock, and only then deletes the potentially large Chrome profile directory. One session can stay
+  parked for payment approval while another starts without that cleanup starving it.
 - feat(web): relaunch homepage with interactive task gallery (#553)
 - chore: swap hero tagline to 'Empower agents with auth and payments' across README, web assets, and docs (#552)
 - feat(web): expand positioning to provisioning and payments (#551)

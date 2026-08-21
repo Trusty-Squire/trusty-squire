@@ -35,7 +35,7 @@ const rmSyncObserver = vi.hoisted(() => ({
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs")>();
+  const actual = await importOriginal<Record<string, unknown> & { rmSync: typeof rmSync }>();
   return {
     ...actual,
     rmSync: (path: unknown, options?: unknown) => {
