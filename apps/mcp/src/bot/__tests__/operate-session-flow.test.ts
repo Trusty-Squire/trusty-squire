@@ -3995,6 +3995,57 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     await finishProvisionSession(second.session_id);
   });
 
+  it("starts a second session while the first sits parked on a decoupled payment wait", async () => {
+    // Regression for a real user hitting "start deadline exceeded while
+    // waiting to acquire the shared seed lock" on @trusty-squire/mcp
+    // 1.1.9-rc.27: one agent held an operator session mid-payment (parked on
+    // a decoupled 3-D Secure approval wait) and a second agent's operate_start
+    // starved behind it. The seed lock is only held for the brief scavenge +
+    // clone steps inside acquireOperatorProfile, never for a session's
+    // lifetime, so a second start must succeed while the first is still open
+    // and awaiting approval.
+    const first = await startProvisionSession({ serviceUrl: "https://shop.example.com/first" });
+    const firstSession = paymentSession(first.session_id);
+    const parkedClaim = claimActivePaymentForOperatePay(undefined, firstSession);
+    if (parkedClaim.kind !== "lease") throw new Error("expected first payment lease");
+    completeActivePaymentLeaseWithPendingApproval(
+      parkedClaim.lease,
+      {
+        approval_id: "appr_parked_3ds",
+        approval_url: "https://web.test/vault/pay/appr_parked_3ds",
+        nonce: "nonce_parked_3ds",
+        agent: "agent_parked_3ds",
+        checkout: {
+          merchant: "First shop",
+          checkout_origin: "https://shop.example.com",
+          amount_cents: 100,
+          currency: "USD",
+        },
+        jit: false,
+        boundCardRef: "card_parked_3ds",
+        deadline: Date.now() + 60_000,
+        rejectedCandidates: [],
+        keypair: { publicKey: "public-parked", privateKey: "private-parked" },
+        item: "Widget",
+        reason: "Parked purchase",
+        cardRef: "card_parked_3ds",
+      },
+      firstSession,
+    );
+    expect(getActivePendingApproval(firstSession)).not.toBeNull();
+
+    const second = await startProvisionSession({ serviceUrl: "https://app.example.com/second" });
+
+    expect(h.startCalls).toBe(2);
+    expect(h.profileDirs).toHaveLength(2);
+    expect(h.profileDirs[0]).not.toBe(h.profileDirs[1]);
+    // The first session's parked approval survives the second session's start.
+    expect(getActivePendingApproval(firstSession)).not.toBeNull();
+
+    await finishProvisionSession(second.session_id);
+    await finishProvisionSession(first.session_id);
+  });
+
   it("never lets one session's approval authorize another session's charge", async () => {
     const [first, second] = await Promise.all([
       startProvisionSession({ serviceUrl: "https://shop.example.com/first" }),
