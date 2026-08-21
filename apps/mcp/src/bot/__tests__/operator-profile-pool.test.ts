@@ -121,22 +121,31 @@ afterEach(() => {
 });
 
 describe("operator profile pool migration stage", () => {
-  // Regression for the 2026-08 dropped-login-cookie bug: the allowlist must
-  // carry every cookie Google's session actually depends on, or a published
-  // seed silently loses login state even though canPublishOperatorProfileSeed
-  // reports success. __Host-1PLSID/__Host-3PLSID and SMSV were missing.
-  it("carries the full Google login cookie set, including the __Host-*LSID pair", () => {
-    for (const name of [
-      "SID",
-      "__Secure-1PSID",
-      "__Secure-3PSID",
-      "__Host-GAPS",
-      "__Host-1PLSID",
-      "__Host-3PLSID",
-      "SMSV",
-    ]) {
-      expect(OPERATOR_SEED_GOOGLE_COOKIE_NAMES).toContain(name);
-    }
+  it("publishes the Google host-bound login cookies into the seed database", async () => {
+    const { root, source } = fixture();
+    writeCookies(source, [
+      { host: ".google.com", name: "__Host-1PLSID", value: "host-1plsid" },
+      { host: "accounts.google.com", name: "__Host-3PLSID", value: "host-3plsid" },
+      { host: "google.com", name: "SMSV", value: "smsv" },
+      { host: ".google.com", name: "not-allowlisted", value: "excluded" },
+    ]);
+
+    const generation = await publishOperatorProfileSeed(source, {
+      rootDir: root,
+      proof: verifiedLoginProof,
+    });
+    const seed = join(operatorProfilePoolTest.paths(root).generations, generation, "user-data");
+    const db = new Database(join(seed, "Default", "Cookies"), { readonly: true });
+    const rows = db
+      .prepare("SELECT host_key, name, value FROM cookies ORDER BY name")
+      .all() as Array<{ host_key: string; name: string; value: string }>;
+    db.close();
+
+    expect(rows).toEqual([
+      { host_key: "google.com", name: "SMSV", value: "smsv" },
+      { host_key: ".google.com", name: "__Host-1PLSID", value: "host-1plsid" },
+      { host_key: "accounts.google.com", name: "__Host-3PLSID", value: "host-3plsid" },
+    ]);
   });
 
   it("shares publication and active capacity across source-profile aliases", async () => {

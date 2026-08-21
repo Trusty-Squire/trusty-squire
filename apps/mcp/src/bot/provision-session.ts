@@ -2564,8 +2564,9 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
   let workerEmail: string | null;
   const acquired = await acquireWarmBrowser(opts, id);
   browser = acquired.controller;
-  // Probe the claimed/cloned worker. The canonical login-authoring profile and
-  // immutable seed are never opened by Chrome during an operator start.
+  // Probe the selected browser: ordinary sessions use a claimed/cloned worker,
+  // while requireLiveIdentity uses the canonical login-authoring profile directly.
+  // The immutable seed is never opened by Chrome during an operator start.
   liveProviders = await ensureProvisionPrimaryProviderSession(browser);
   workerEmail =
     typeof browser.detectGoogleAccountEmail === "function"
