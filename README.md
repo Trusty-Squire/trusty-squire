@@ -175,7 +175,7 @@ remote CDP, macOS, and Windows operator sessions are not supported in this migra
 
 1. Your coding agent names the website and the outcome it needs: an account,
    authenticated setup, app publishing, a purchase, a gift, or a booking.
-2. Trusty Squire opens an isolated browser profile and works through the service flow one step at a time. It can use the Google identity you explicitly connected without opening the canonical login profile during the task.
+2. Trusty Squire works through the service flow one step at a time. Ordinary tasks open an isolated browser profile; tasks that must act as your connected Google identity use the signed-in profile directly and run one at a time.
 3. If the flow produces an API key or client secret, Trusty Squire captures it
    into the vault without returning the raw value through its credential tools.
 4. The agent can make an authenticated request, create a host-scoped app grant,
@@ -287,6 +287,10 @@ DOM-diagnostics pair is excluded from that surface; set
   domain of a host trusted at session start. Calls outside the session scope fail
   promptly instead of hanging; page-load resources continue normally, and a
   mid-session `allow_host` does not seed sibling-domain widening.
+  For a task gated by the user's connected Google account, pass
+  `require_live_identity: true` to `operate_start`. The start fails closed with
+  a connect handoff if that Google session is unavailable; otherwise it uses the
+  signed-in profile directly, with one such session active at a time.
   When DOM churn invalidates an `@e:` ref, `operate_act` returns `target_stale`
   with the last observation generation, `reobserve_required: true`, best-effort
   label-keyed `replacement_candidates`, and

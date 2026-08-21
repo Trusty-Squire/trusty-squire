@@ -1607,6 +1607,7 @@ export interface BrowserControllerOptions {
   // profile so an OAuth signup reuses the Google session google-login.ts
   // established. Defaults to CHROME_PROFILE_DIR.
   profileDir?: string;
+  profileOperationLease?: ProfileOperationLease;
   // Per-launch egress override. When set, this run routes through this proxy
   // instead of the env-global UNIVERSAL_BOT_PROXY_URL — so a fleet of verify
   // identities can each egress from a distinct residential IP in ONE process
@@ -2822,6 +2823,7 @@ export class BrowserController {
   constructor(opts: BrowserControllerOptions = {}) {
     this.humanize = opts.humanize ?? true;
     this.profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
+    this.profileOperationLease = opts.profileOperationLease ?? null;
     this.proxyOverride =
       opts.proxyUrl !== undefined && opts.proxyUrl.trim().length > 0 ? opts.proxyUrl.trim() : null;
   }
@@ -3107,7 +3109,9 @@ export class BrowserController {
 
   private async startOnce(): Promise<void> {
     const remoteMode = (process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0;
-    const lease = remoteMode ? null : await acquireFreeProfileOperationGuard(this.profileDir);
+    const lease =
+      this.profileOperationLease ??
+      (remoteMode ? null : await acquireFreeProfileOperationGuard(this.profileDir));
     this.profileOperationLease = lease;
     try {
       await this.startWithProfileGuard();

@@ -74,6 +74,9 @@ const h = vi.hoisted(() => ({
   leaseDestroyCalls: 0,
   leaseRetainCalls: 0,
   leaseRetainDestroyRequired: [] as boolean[],
+  directIdentityAcquireCalls: 0,
+  directIdentityReleaseCalls: 0,
+  directIdentityProfileDir: "/tmp/trusty-squire-unit-canonical-profile",
   currentUrl: "",
   elements: [] as unknown[],
   extractInteractiveElementsCalls: 0,
@@ -757,6 +760,41 @@ vi.mock("../operator-profile-pool.js", () => {
   };
 });
 
+// The Google-identity path (require_live_identity) never touches the
+// isolated clone pool above — it acquires the canonical profile directly.
+// A distinct mock (and its own call counters) keeps that boundary visible in
+// tests: a requireLiveIdentity session must NOT bump h.leaseAcquireCalls.
+vi.mock("../operator-direct-identity.js", () => {
+  class OperatorDirectIdentityAcquisitionInterruptedError extends Error {
+    readonly reason: "timeout" | "cancelled";
+    constructor(reason: "timeout" | "cancelled") {
+      super(`operator direct-identity acquisition ${reason}`);
+      this.reason = reason;
+    }
+  }
+  return {
+    OperatorDirectIdentityAcquisitionInterruptedError,
+    acquireDirectIdentityProfile: async (opts: { profileDir?: string } = {}) => {
+      h.directIdentityAcquireCalls += 1;
+      const profileDir = opts.profileDir ?? h.directIdentityProfileDir;
+      let finished = false;
+      const finish = (): void => {
+        if (finished) return;
+        finished = true;
+        h.directIdentityReleaseCalls += 1;
+      };
+      return {
+        profileDir,
+        takeProfileOperationLease: () => ({ release: () => undefined }),
+        bindWorker: () => undefined,
+        returnWarm: async () => finish(),
+        destroy: async () => finish(),
+        retain: async () => finish(),
+      };
+    },
+  };
+});
+
 import { chmodSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -928,6 +966,9 @@ beforeEach(() => {
   h.leaseDestroyCalls = 0;
   h.leaseRetainCalls = 0;
   h.leaseRetainDestroyRequired = [];
+  h.directIdentityAcquireCalls = 0;
+  h.directIdentityReleaseCalls = 0;
+  h.directIdentityProfileDir = "/tmp/trusty-squire-unit-canonical-profile";
   h.currentUrl = "";
   h.elements = [];
   h.extractInteractiveElementsCalls = 0;
@@ -3702,7 +3743,7 @@ describe("operate_extract — vault-store response", () => {
 });
 
 describe("operate session — Change 5 precondition gate", () => {
-  it("fails closed after probing the isolated worker when no live Google session exists", async () => {
+  it("fails closed after probing the canonical profile when no live Google session exists", async () => {
     h.providers = []; // no live session
     h.oauthStatus = "failed"; // and we cannot establish one
     const obs = await startProvisionSession({
@@ -3711,9 +3752,29 @@ describe("operate session — Change 5 precondition gate", () => {
     });
     expect(obs.needs_user).toBeDefined();
     expect(obs.needs_user?.wall).toBe("google_session");
-    expect(h.startCalls).toBe(1); // the isolated worker, never the seed/canonical profile, was probed
-    expect(h.started).toBe(0); // the rejected worker was closed before returning the handoff
+    expect(h.startCalls).toBe(1); // the canonical profile itself was probed
+    expect(h.started).toBe(0); // rejected before returning the handoff
     expect(h.gotos).toHaveLength(0);
+  });
+
+  // Regression: a requireLiveIdentity session must reach Google's session via
+  // the canonical profile directly — never a per-session clone from the
+  // isolated pool, which carries the seed's cookies but not whatever Google
+  // actually keys the session on. See operator-direct-identity.ts.
+  it("drives the canonical profile directly, never the isolated clone pool", async () => {
+    h.providers = ["google"];
+    h.directIdentityProfileDir = "/tmp/trusty-squire-unit-canonical-profile-marker";
+    const obs = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      requireLiveIdentity: true,
+    });
+    expect(obs.needs_user).toBeUndefined();
+    expect(h.started).toBe(1);
+    expect(h.directIdentityAcquireCalls).toBe(1);
+    expect(h.leaseAcquireCalls).toBe(0); // the isolated pool was never touched
+    expect(h.profileDirs.at(-1)).toBe("/tmp/trusty-squire-unit-canonical-profile-marker");
+    await finishProvisionSession(obs.session_id);
+    expect(h.directIdentityReleaseCalls).toBe(1);
   });
 
   it("proceeds normally when a live Google session exists", async () => {
@@ -3724,6 +3785,13 @@ describe("operate session — Change 5 precondition gate", () => {
     });
     expect(obs.needs_user).toBeUndefined();
     expect(h.started).toBe(1);
+    await finishProvisionSession(obs.session_id);
+  });
+
+  it("leaves the isolated clone pool in charge of ordinary (non-identity) sessions", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    expect(h.leaseAcquireCalls).toBe(1);
+    expect(h.directIdentityAcquireCalls).toBe(0);
     await finishProvisionSession(obs.session_id);
   });
 });
