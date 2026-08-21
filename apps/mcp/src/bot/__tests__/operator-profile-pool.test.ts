@@ -121,6 +121,24 @@ afterEach(() => {
 });
 
 describe("operator profile pool migration stage", () => {
+  // Regression for the 2026-08 dropped-login-cookie bug: the allowlist must
+  // carry every cookie Google's session actually depends on, or a published
+  // seed silently loses login state even though canPublishOperatorProfileSeed
+  // reports success. __Host-1PLSID/__Host-3PLSID and SMSV were missing.
+  it("carries the full Google login cookie set, including the __Host-*LSID pair", () => {
+    for (const name of [
+      "SID",
+      "__Secure-1PSID",
+      "__Secure-3PSID",
+      "__Host-GAPS",
+      "__Host-1PLSID",
+      "__Host-3PLSID",
+      "SMSV",
+    ]) {
+      expect(OPERATOR_SEED_GOOGLE_COOKIE_NAMES).toContain(name);
+    }
+  });
+
   it("shares publication and active capacity across source-profile aliases", async () => {
     const { source } = fixture();
     const alias = `${source}-alias`;

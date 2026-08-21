@@ -46,6 +46,11 @@ import {
   OperatorProfileAcquisitionInterruptedError,
   type OperatorProfileLease,
 } from "./operator-profile-pool.js";
+import {
+  acquireDirectIdentityProfile,
+  OperatorDirectIdentityAcquisitionInterruptedError,
+  type DirectIdentityProfileLease,
+} from "./operator-direct-identity.js";
 import { loginSessionGuidance } from "./skill-hint.js";
 import {
   type OperatorRecipe,
@@ -618,9 +623,15 @@ function merchantSiblingSeedHosts(session: Session): string[] {
 
 const sessions = new Map<string, Session>();
 
+// Either lease kind — the isolated per-session profile-pool clone, or the
+// direct exclusive lease on the canonical Google-authenticated profile
+// (operator-direct-identity.ts) — drives the same warm-browser lifecycle
+// below identically; only acquireWarmBrowser cares which one it holds.
+type OperatorLease = OperatorProfileLease | DirectIdentityProfileLease;
+
 interface WarmBrowser {
   controller: BrowserController;
-  lease: OperatorProfileLease;
+  lease: OperatorLease;
 }
 
 interface AcquiredBrowser {
@@ -630,7 +641,7 @@ interface AcquiredBrowser {
 
 interface StartingBrowser {
   controller: BrowserController;
-  lease: OperatorProfileLease;
+  lease: OperatorLease;
   launch: Promise<void>;
   cancelRequested: boolean;
 }
@@ -741,12 +752,69 @@ async function acquireOperatorProfileBounded(
   }
 }
 
+// The Google-authenticated counterpart of acquireOperatorProfileBounded — see
+// operator-direct-identity.ts. Registers the same CapacityWaiter shape so
+// closeAllProvisionSessions cancels an in-flight acquisition uniformly,
+// but the underlying resource is the single canonical profile, not a
+// two-slot pool: acquireDirectIdentityProfile already polls/blocks
+// internally, so there is no outer capacity-retry loop to drive here.
+async function acquireDirectIdentityProfileBounded(
+  opts: StartOptions,
+  generation: number,
+): Promise<DirectIdentityProfileLease> {
+  const waiter: CapacityWaiter = {
+    generation,
+    cancelRequested: false,
+    abortController: new AbortController(),
+    wake: () => undefined,
+    settled: Promise.resolve(),
+    resolveSettled: () => undefined,
+  };
+  let resolveSettled = (): void => undefined;
+  waiter.settled = new Promise<void>((resolve) => {
+    resolveSettled = resolve;
+  });
+  waiter.resolveSettled = () => resolveSettled();
+  capacityWaiters.add(waiter);
+  try {
+    if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
+      throw new Error("operate_start cancelled: operator server is shutting down");
+    }
+    try {
+      return await acquireDirectIdentityProfile({
+        ...(opts.profileDir !== undefined ? { profileDir: opts.profileDir } : {}),
+        deadline: Date.now() + START_CAPACITY_WAIT_MS,
+        signal: waiter.abortController.signal,
+      });
+    } catch (error) {
+      if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
+        throw new Error("operate_start cancelled: operator server is shutting down");
+      }
+      if (error instanceof OperatorDirectIdentityAcquisitionInterruptedError) {
+        throw error.reason === "cancelled"
+          ? new Error("operate_start cancelled: operator server is shutting down")
+          : new Error(
+              "operate_start capacity reached: the Google-identity operator profile is in " +
+                "use by another session; finish it and retry",
+            );
+      }
+      throw error;
+    }
+  } finally {
+    capacityWaiters.delete(waiter);
+    waiter.resolveSettled();
+  }
+}
+
 async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promise<AcquiredBrowser> {
   if ((process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0) {
     throw new Error("operate_start does not support remote CDP with isolated profile leases");
   }
   const generation = shutdownGeneration;
-  const lease = await acquireOperatorProfileBounded(opts, sessionId, generation);
+  const lease: OperatorLease =
+    opts.requireLiveIdentity === true
+      ? await acquireDirectIdentityProfileBounded(opts, generation)
+      : await acquireOperatorProfileBounded(opts, sessionId, generation);
   if (generation !== shutdownGeneration) {
     await lease.destroy();
     throw new Error("operate_start cancelled: operator server is shutting down");
@@ -806,7 +874,7 @@ async function releaseWarmBrowserPage(
 
 async function closeLeasedBrowser(
   browser: BrowserController,
-  lease: OperatorProfileLease,
+  lease: OperatorLease,
   reusable: boolean,
 ): Promise<void> {
   const closeState = await browser.close().catch(() => "unknown" as const);
