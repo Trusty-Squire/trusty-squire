@@ -26,6 +26,25 @@ import {
 } from "../operator-profile-pool.js";
 import { profilePathIdentity } from "../profile.js";
 
+// Lets one test observe exactly when the real (non-mocked) rmSync runs
+// against a specific path, without disturbing every other test's fs calls.
+// Must be created via vi.hoisted: vi.mock's factory is hoisted above these
+// imports, so a plain module-scope `let` would not be initialized yet.
+const rmSyncObserver = vi.hoisted(() => ({
+  hook: null as ((path: unknown) => void) | null,
+}));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown> & { rmSync: typeof rmSync }>();
+  return {
+    ...actual,
+    rmSync: (path: unknown, options?: unknown) => {
+      rmSyncObserver.hook?.(path);
+      return (actual.rmSync as (p: unknown, o?: unknown) => void)(path, options);
+    },
+  };
+});
+
 function deadPid(): number {
   const result = spawnSync(process.execPath, ["-e", ""]);
   if (result.pid === undefined) throw new Error("could not spawn a throwaway process");
@@ -425,6 +444,54 @@ describe("operator profile pool migration stage", () => {
     expect(readdirSync(p.activeClaims)).toEqual([]);
   });
 
+  it("retains an active tombstone and preserves capacity after deferred removal fails", async () => {
+    const { root, source } = fixture();
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+    const abandoned = await acquireOperatorProfile("abandoned-session", {
+      rootDir: root,
+      sourceProfileDir: source,
+    });
+    abandoned.bindWorker({
+      host: hostname(),
+      pid: deadPid(),
+      start_time: "dead-worker",
+      user_data_dir: profilePathIdentity(abandoned.profileDir),
+    });
+    const p = operatorProfilePoolTest.paths(root);
+    const ownerPath = join(p.active, "slot-0", "owner.json");
+    const owner = JSON.parse(readFileSync(ownerPath, "utf8")) as Record<string, unknown>;
+    writeFileSync(ownerPath, `${JSON.stringify({ ...owner, start_time: "dead-owner" })}\n`);
+
+    const abandonedProfileRoot = dirname(abandoned.profileDir);
+    let failRemoval = true;
+    rmSyncObserver.hook = (path) => {
+      if (path === abandonedProfileRoot && failRemoval) {
+        failRemoval = false;
+        throw new Error("injected removal failure");
+      }
+    };
+
+    try {
+      const replacement = await acquireOperatorProfile("replacement-session", {
+        rootDir: root,
+        sourceProfileDir: source,
+      });
+      expect(existsSync(abandoned.profileDir)).toBe(true);
+      expect(readdirSync(p.tombstones)).toHaveLength(1);
+
+      const concurrent = await acquireOperatorProfile("concurrent-session", {
+        rootDir: root,
+        sourceProfileDir: source,
+      });
+      expect(existsSync(abandoned.profileDir)).toBe(false);
+      expect(readdirSync(p.tombstones)).toEqual([]);
+      await concurrent.destroy();
+      await replacement.destroy();
+    } finally {
+      rmSyncObserver.hook = null;
+    }
+  });
+
   it("restores an ambiguous quarantined lease to its original second slot", async () => {
     const { root, source } = fixture();
     await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
@@ -590,6 +657,97 @@ describe("operator profile pool migration stage", () => {
     expect(second.profileDir).not.toBe(staleProfile);
     expect(cookieValues(second.profileDir)).toEqual(["replacement"]);
     await second.destroy();
+  });
+
+  it("physically deletes an expired warm profile only after releasing the shared seed lock", async () => {
+    // Regression for a real user hitting "start deadline exceeded while
+    // waiting to acquire the shared seed lock" on 1.1.9-rc.27. The trigger
+    // isn't a dead-owner lock (that reclaim path is covered above and
+    // already works) — it's that scavengeWarm used to call removeProfile
+    // (a recursive rmSync of a real, potentially large per-session Chrome
+    // profile: cache, history, IndexedDB accumulated over real browsing)
+    // from INSIDE the withSeedLock critical section. Any concurrent
+    // operate_start on the same host then queues behind that unrelated,
+    // disk-bound cleanup for however long it takes, which can exceed the
+    // 30s deadline on a loaded box. The seed lock only needs to protect the
+    // atomic bookkeeping (renames/symlinks), not the physical delete of an
+    // already-privately-quarantined directory nothing else can reach.
+    const { root, source } = fixture();
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+    const first = await acquireOperatorProfile("session-a", {
+      rootDir: root,
+      sourceProfileDir: source,
+    });
+    const staleProfileDir = first.profileDir;
+    await first.returnWarm("closed");
+    writeCookies(source, [{ host: ".google.com", name: "SID", value: "replacement" }]);
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+
+    const p = operatorProfilePoolTest.paths(root);
+    const lockHeldDuringRemoval: boolean[] = [];
+    const staleProfileRoot = dirname(staleProfileDir);
+    rmSyncObserver.hook = (path) => {
+      if (path === staleProfileRoot) {
+        lockHeldDuringRemoval.push(existsSync(p.seedLock));
+      }
+    };
+
+    try {
+      const second = await acquireOperatorProfile("session-b", {
+        rootDir: root,
+        sourceProfileDir: source,
+      });
+      try {
+        expect(lockHeldDuringRemoval).toEqual([false]);
+        expect(existsSync(staleProfileDir)).toBe(false);
+      } finally {
+        await second.destroy();
+      }
+    } finally {
+      rmSyncObserver.hook = null;
+    }
+  });
+
+  it("retains an expired warm tombstone and retries after deferred removal fails", async () => {
+    const { root, source } = fixture();
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+    const first = await acquireOperatorProfile("session-a", {
+      rootDir: root,
+      sourceProfileDir: source,
+    });
+    const staleProfileDir = first.profileDir;
+    await first.returnWarm("closed");
+    writeCookies(source, [{ host: ".google.com", name: "SID", value: "replacement" }]);
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+
+    const staleProfileRoot = dirname(staleProfileDir);
+    let failRemoval = true;
+    rmSyncObserver.hook = (path) => {
+      if (path === staleProfileRoot && failRemoval) {
+        failRemoval = false;
+        throw new Error("injected removal failure");
+      }
+    };
+
+    try {
+      const second = await acquireOperatorProfile("session-b", {
+        rootDir: root,
+        sourceProfileDir: source,
+      });
+      expect(existsSync(staleProfileDir)).toBe(true);
+      expect(readdirSync(operatorProfilePoolTest.paths(root).tombstones)).toHaveLength(1);
+
+      const third = await acquireOperatorProfile("session-c", {
+        rootDir: root,
+        sourceProfileDir: source,
+      });
+      expect(existsSync(staleProfileDir)).toBe(false);
+      expect(readdirSync(operatorProfilePoolTest.paths(root).tombstones)).toEqual([]);
+      await third.destroy();
+      await second.destroy();
+    } finally {
+      rmSyncObserver.hook = null;
+    }
   });
 
   it("isolates default namespaces for distinct source profiles", async () => {
