@@ -60,9 +60,10 @@ const verifiedLoginProof = {
 function writeCookies(
   source: string,
   rows: Array<{ host: string; name: string; value: string }>,
+  relativePath = join("Default", "Cookies"),
 ): void {
-  const path = join(source, "Default", "Cookies");
-  mkdirSync(join(source, "Default"), { recursive: true });
+  const path = join(source, relativePath);
+  mkdirSync(dirname(path), { recursive: true });
   rmSync(path, { force: true });
   const db = new Database(path);
   db.exec(
@@ -638,6 +639,53 @@ describe("operator profile pool migration stage", () => {
     });
     expect(second.profileId).toBe(profileId);
     expect(second.profileDir).toBe(first.profileDir);
+    await second.destroy();
+  });
+
+  it("strips legacy cookie stores from cold clones and warm profiles", async () => {
+    const { root, source } = fixture();
+    const generation = await publishOperatorProfileSeed(source, {
+      rootDir: root,
+      proof: verifiedLoginProof,
+    });
+    const p = operatorProfilePoolTest.paths(root);
+    const legacySeed = join(p.generations, generation, "user-data");
+    const networkCookies = join("Default", "Network", "Cookies");
+    writeCookies(legacySeed, [{ host: ".google.com", name: "SID", value: "legacy-seed" }]);
+    writeCookies(
+      legacySeed,
+      [{ host: "accounts.google.com", name: "SSID", value: "legacy-network-seed" }],
+      networkCookies,
+    );
+    writeFileSync(join(legacySeed, `${networkCookies}-wal`), "legacy-sidecar");
+
+    const first = await acquireOperatorProfile("upgraded-cold-clone", {
+      rootDir: root,
+      sourceProfileDir: source,
+    });
+    expect(first.seedGeneration).toBe(generation);
+    expect(existsSync(join(first.profileDir, "Default", "Cookies"))).toBe(false);
+    expect(existsSync(join(first.profileDir, networkCookies))).toBe(false);
+    expect(existsSync(join(first.profileDir, `${networkCookies}-wal`))).toBe(false);
+
+    writeCookies(first.profileDir, [
+      { host: ".google.com", name: "SID", value: "warm-profile-cookie" },
+    ]);
+    writeCookies(
+      first.profileDir,
+      [{ host: "accounts.google.com", name: "SSID", value: "warm-network-cookie" }],
+      networkCookies,
+    );
+    const profileId = first.profileId;
+    await first.returnWarm("closed");
+
+    const second = await acquireOperatorProfile("upgraded-warm-reuse", {
+      rootDir: root,
+      sourceProfileDir: source,
+    });
+    expect(second.profileId).toBe(profileId);
+    expect(existsSync(join(second.profileDir, "Default", "Cookies"))).toBe(false);
+    expect(existsSync(join(second.profileDir, networkCookies))).toBe(false);
     await second.destroy();
   });
 

@@ -54,6 +54,8 @@ const IDENTITY_SEED_FILES = [
   "logged-in-providers.json",
   "provider-emails.json",
 ] as const;
+const POOLED_COOKIE_STORES = ["Default/Cookies", "Default/Network/Cookies"] as const;
+const SQLITE_SIDECAR_SUFFIXES = ["", "-journal", "-shm", "-wal"] as const;
 export const GOOGLE_LOGIN_COOKIE_MARKERS = ["__Secure-1PSID", "SAPISID", "SID"] as const;
 
 interface ProcessIdentity {
@@ -288,6 +290,14 @@ function stripTransientProfileState(root: string): void {
     }
   };
   if (existsSync(root)) walk(root);
+}
+
+function stripPooledProfileCookies(root: string): void {
+  for (const relative of POOLED_COOKIE_STORES) {
+    for (const suffix of SQLITE_SIDECAR_SUFFIXES) {
+      rmSync(join(root, `${relative}${suffix}`), { force: true });
+    }
+  }
 }
 
 function copyIdentitySeedFile(sourceRoot: string, destinationRoot: string, relative: string): void {
@@ -919,6 +929,7 @@ export async function acquireOperatorProfile(
           if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
         }
         if (descriptor !== null) {
+          stripPooledProfileCookies(profileDir(p, descriptor.profile_id));
           const activeDescriptor = { ...descriptor };
           delete activeDescriptor.returned_at;
           delete activeDescriptor.worker;
@@ -942,6 +953,7 @@ export async function acquireOperatorProfile(
           });
           stripTransientProfileState(userDataDir);
         }
+        stripPooledProfileCookies(userDataDir);
         ensurePrivateDir(claimDir);
         const coldDescriptor: ProfileLeaseDescriptor = {
           version: 1,
