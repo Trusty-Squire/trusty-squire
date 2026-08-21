@@ -18,7 +18,6 @@ import {
 } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
-import Database from "better-sqlite3";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
   CHROME_PROFILE_DIR,
@@ -55,32 +54,7 @@ const IDENTITY_SEED_FILES = [
   "logged-in-providers.json",
   "provider-emails.json",
 ] as const;
-const IDENTITY_COOKIE_FILES = ["Default/Cookies", "Default/Network/Cookies"] as const;
 export const GOOGLE_LOGIN_COOKIE_MARKERS = ["__Secure-1PSID", "SAPISID", "SID"] as const;
-export const OPERATOR_SEED_GOOGLE_COOKIE_NAMES = [
-  "SID",
-  "HSID",
-  "SSID",
-  "APISID",
-  "SAPISID",
-  "LSID",
-  "OSID",
-  "__Secure-1PSID",
-  "__Secure-3PSID",
-  "__Secure-1PAPISID",
-  "__Secure-3PAPISID",
-  "SIDCC",
-  "__Secure-1PSIDCC",
-  "__Secure-3PSIDCC",
-  "__Secure-1PSIDTS",
-  "__Secure-3PSIDTS",
-  "AEC",
-  "ACCOUNT_CHOOSER",
-  "__Host-GAPS",
-  "__Host-1PLSID",
-  "__Host-3PLSID",
-  "SMSV",
-] as const;
 
 interface ProcessIdentity {
   pid: number;
@@ -329,105 +303,14 @@ function copyIdentitySeedFile(sourceRoot: string, destinationRoot: string, relat
   chmodSync(destination, 0o600);
 }
 
-interface SqliteSchemaRow {
-  type: "table" | "index";
-  name: string;
-  tbl_name: string;
-  sql: string;
-}
-
-interface SqliteColumnRow {
-  name: string;
-}
-
-function quoteSqliteIdentifier(value: string): string {
-  return `"${value.replaceAll('"', '""')}"`;
-}
-
-function copyTableRows(
-  source: Database.Database,
-  destination: Database.Database,
-  table: "meta" | "cookies",
-  where = "",
-  bindings: readonly string[] = [],
-): void {
-  const columns = source.pragma(`table_info(${table})`) as SqliteColumnRow[];
-  if (columns.length === 0) return;
-  const identifiers = columns.map((column) => quoteSqliteIdentifier(column.name));
-  const rows = source
-    .prepare(`SELECT ${identifiers.join(", ")} FROM ${quoteSqliteIdentifier(table)}${where}`)
-    .all(...bindings) as Record<string, unknown>[];
-  const insert = destination.prepare(
-    `INSERT INTO ${quoteSqliteIdentifier(table)} (${identifiers.join(", ")}) VALUES (${columns
-      .map(() => "?")
-      .join(", ")})`,
-  );
-  destination.transaction((selected: Record<string, unknown>[]) => {
-    for (const row of selected) insert.run(...columns.map((column) => row[column.name]));
-  })(rows);
-}
-
-function copyIdentityCookies(sourcePath: string, destinationPath: string): void {
-  if (!existsSync(sourcePath)) return;
-  let source: Database.Database | null = null;
-  let destination: Database.Database | null = null;
-  try {
-    source = new Database(sourcePath, { readonly: true, fileMustExist: true });
-    source.defaultSafeIntegers(true);
-    const schema = source
-      .prepare(
-        "SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE sql IS NOT NULL AND ((type = 'table' AND name IN ('meta', 'cookies')) OR (type = 'index' AND tbl_name = 'cookies')) ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END, name",
-      )
-      .all() as SqliteSchemaRow[];
-    const cookieTable = schema.find((row) => row.type === "table" && row.name === "cookies");
-    if (cookieTable === undefined) throw new Error("Chrome cookie store has no cookies table");
-    const cookieColumns = source.pragma("table_info(cookies)") as SqliteColumnRow[];
-    if (!cookieColumns.some((column) => column.name === "host_key")) {
-      throw new Error("Chrome cookie store has no host_key column");
-    }
-    if (!cookieColumns.some((column) => column.name === "name")) {
-      throw new Error("Chrome cookie store has no name column");
-    }
-
-    ensurePrivateDir(dirname(destinationPath));
-    destination = new Database(destinationPath);
-    destination.defaultSafeIntegers(true);
-    for (const row of schema.filter((entry) => entry.type === "table")) {
-      destination.exec(row.sql);
-    }
-    if (schema.some((row) => row.type === "table" && row.name === "meta")) {
-      copyTableRows(source, destination, "meta");
-    }
-    const names = [...OPERATOR_SEED_GOOGLE_COOKIE_NAMES];
-    copyTableRows(
-      source,
-      destination,
-      "cookies",
-      ` WHERE (lower(host_key) = ? OR lower(host_key) LIKE ?) AND name IN (${names
-        .map(() => "?")
-        .join(", ")})`,
-      ["google.com", "%.google.com", ...names],
-    );
-    for (const row of schema.filter((entry) => entry.type === "index")) {
-      destination.exec(row.sql);
-    }
-    const userVersion = Number(source.pragma("user_version", { simple: true }));
-    if (Number.isSafeInteger(userVersion) && userVersion >= 0) {
-      destination.pragma(`user_version = ${userVersion}`);
-    }
-    destination.close();
-    destination = null;
-    source.close();
-    source = null;
-    chmodSync(destinationPath, 0o600);
-  } catch (err) {
-    destination?.close();
-    source?.close();
-    rmSync(destinationPath, { force: true });
-    throw err;
-  }
-}
-
+// Pooled clones must never carry Google's session cookies: a clone presents
+// already-rotated-away cookie values (Google rotates them on the live
+// profile as it's used), and Google's server treats that as credential
+// replay and invalidates the whole session family — killing the user's real
+// Google session for a casual pooled run. Google identity now only flows
+// through the direct, unshared profile (operator-direct-identity.ts, gated
+// by operate_start's require_live_identity); the seed and its clones carry
+// no cookies at all.
 function copyIdentitySeed(sourceProfileDir: string, destination: string): void {
   if (!lstatSync(sourceProfileDir).isDirectory()) {
     throw new Error(`operator login source is not a directory: ${sourceProfileDir}`);
@@ -435,9 +318,6 @@ function copyIdentitySeed(sourceProfileDir: string, destination: string): void {
   ensurePrivateDir(destination);
   for (const relative of IDENTITY_SEED_FILES) {
     copyIdentitySeedFile(sourceProfileDir, destination, relative);
-  }
-  for (const relative of IDENTITY_COOKIE_FILES) {
-    copyIdentityCookies(join(sourceProfileDir, relative), join(destination, relative));
   }
 }
 

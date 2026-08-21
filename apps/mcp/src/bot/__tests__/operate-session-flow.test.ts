@@ -702,7 +702,6 @@ vi.mock("../operator-profile-pool.js", () => {
     }
   }
   return {
-    OPERATOR_SEED_GOOGLE_COOKIE_NAMES: ["__Secure-1PSID", "SAPISID", "SID"],
     OperatorProfileAcquisitionInterruptedError,
     acquireOperatorProfile: async (
       _sessionId: string,
