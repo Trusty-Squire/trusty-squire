@@ -700,11 +700,21 @@ function quarantineOwnedActiveSlot(
   return tombstone;
 }
 
+// removeProfile deletes a real, potentially large per-session Chrome profile
+// (cache/history/IndexedDB accumulated over real browsing) — a disk-bound
+// rmSync that can be genuinely slow. onRemovable, when supplied, lets the
+// caller defer that physical delete until after the seed lock (which this
+// function normally runs under, via scavengeQuarantinedActive /
+// scavengeActiveSlots) has been released, so an unrelated concurrent
+// operate_start never queues behind someone else's cleanup. The bookkeeping
+// that actually needs the lock — vacating the tombstone so nothing re-scans
+// it — still happens synchronously either way.
 function reapQuarantinedActive(
   p: PoolPaths,
   tombstone: string,
   workerState: typeof profileProcessIdentityState = profileProcessIdentityState,
   signalWorker: typeof signalProfileProcess = signalProfileProcess,
+  onRemovable?: (lease: ProfileLeaseDescriptor) => void,
 ): void {
   const owner = readJson<ActiveOwner>(join(tombstone, "owner.json"));
   if (owner !== null && (owner.host !== hostname() || processState(owner) !== "stale")) {
@@ -734,7 +744,8 @@ function reapQuarantinedActive(
     if (!signalWorker(worker, dir, "SIGKILL")) return;
     return;
   }
-  removeProfile(p, lease);
+  if (onRemovable) onRemovable(lease);
+  else removeProfile(p, lease);
   removeSlotContainer(p, tombstone);
 }
 
@@ -764,14 +775,19 @@ function scavengeQuarantinedActive(
   p: PoolPaths,
   workerState: typeof profileProcessIdentityState = profileProcessIdentityState,
   signalWorker: typeof signalProfileProcess = signalProfileProcess,
+  onRemovable?: (lease: ProfileLeaseDescriptor) => void,
 ): void {
   for (const entry of readdirSync(p.tombstones)) {
     if (!/^active-\d+-/.test(entry)) continue;
-    reapQuarantinedActive(p, join(p.tombstones, entry), workerState, signalWorker);
+    reapQuarantinedActive(p, join(p.tombstones, entry), workerState, signalWorker, onRemovable);
   }
 }
 
-function scavengeActiveSlots(p: PoolPaths, now: number): void {
+function scavengeActiveSlots(
+  p: PoolPaths,
+  now: number,
+  onRemovable?: (lease: ProfileLeaseDescriptor) => void,
+): void {
   for (let index = 0; index < ACTIVE_SLOT_COUNT; index += 1) {
     const slot = join(p.active, `slot-${index}`);
     if (!existsSync(slot)) continue;
@@ -784,11 +800,20 @@ function scavengeActiveSlots(p: PoolPaths, now: number): void {
     // The public slot is only a candidate until this rename wins. No process is
     // inspected again, signalled, or deleted while the lease remains claimable.
     const tombstone = quarantine(p, slot, `active-${index}`);
-    if (tombstone !== null) reapQuarantinedActive(p, tombstone);
+    if (tombstone !== null) reapQuarantinedActive(p, tombstone, undefined, undefined, onRemovable);
   }
 }
 
-function scavengeWarm(p: PoolPaths, generation: string, now: number): void {
+// onRemovable defers the physical delete of an expired warm profile's real
+// (potentially large) directory to after the caller releases the seed lock —
+// see reapQuarantinedActive's comment for why. The tombstone directory itself
+// is always small (just the lease descriptor) and stays synchronous.
+function scavengeWarm(
+  p: PoolPaths,
+  generation: string,
+  now: number,
+  onRemovable?: (lease: ProfileLeaseDescriptor) => void,
+): void {
   const warm = join(p.warm, "slot-0");
   if (!existsSync(warm)) return;
   const lease = readLease(warm);
@@ -804,7 +829,10 @@ function scavengeWarm(p: PoolPaths, generation: string, now: number): void {
   const tombstone = quarantine(p, warm, "warm");
   if (tombstone === null) return;
   const quarantinedLease = readLease(tombstone);
-  if (quarantinedLease !== null) removeProfile(p, quarantinedLease);
+  if (quarantinedLease !== null) {
+    if (onRemovable) onRemovable(quarantinedLease);
+    else removeProfile(p, quarantinedLease);
+  }
   rmSync(tombstone, { recursive: true, force: true });
 }
 
@@ -931,11 +959,18 @@ export async function acquireOperatorProfile(
   initializePool(p);
   scavengeDestroyRequired(p);
 
+  // Collected by scavengeQuarantinedActive/scavengeActiveSlots instead of
+  // physically removed inline, so the (potentially slow, disk-bound) removal
+  // of a real per-session profile directory happens after the seed lock
+  // below is released, never while it's held.
+  const reclaimedFromReservation: ProfileLeaseDescriptor[] = [];
   const reservation = await withSeedLock(
     p,
     () => {
-      scavengeQuarantinedActive(p);
-      scavengeActiveSlots(p, now());
+      scavengeQuarantinedActive(p, undefined, undefined, (lease) =>
+        reclaimedFromReservation.push(lease),
+      );
+      scavengeActiveSlots(p, now(), (lease) => reclaimedFromReservation.push(lease));
       for (let index = 0; index < ACTIVE_SLOT_COUNT; index += 1) {
         const claimed = reserveActiveSlot(p, index, sessionId);
         if (claimed !== null) return claimed;
@@ -944,6 +979,7 @@ export async function acquireOperatorProfile(
     },
     opts,
   );
+  for (const lease of reclaimedFromReservation) removeProfile(p, lease);
   if (reservation === null) {
     throw new Error(
       "operate_start capacity reached: 2 operator sessions are active; finish one and retry",
@@ -953,13 +989,18 @@ export async function acquireOperatorProfile(
 
   const claimDir = join(slotDir, "claim");
   let allocatedProfileId: string | null = null;
+  // Same deferred-removal reasoning as reclaimedFromReservation above, for
+  // the expired-warm-profile case surfaced while cloning/reusing.
+  const reclaimedFromWarm: ProfileLeaseDescriptor[] = [];
   try {
     assertProfileAcquisitionActive(opts);
     const acquiredDescriptor = await withSeedLock(
       p,
       () => {
         const generation = currentGeneration(p);
-        scavengeWarm(p, generation ?? UNPUBLISHED_SEED_GENERATION, now());
+        scavengeWarm(p, generation ?? UNPUBLISHED_SEED_GENERATION, now(), (lease) =>
+          reclaimedFromWarm.push(lease),
+        );
         const warm = join(p.warm, "slot-0");
         let descriptor: ProfileLeaseDescriptor | null = null;
         try {
@@ -1023,6 +1064,8 @@ export async function acquireOperatorProfile(
       if (descriptorWasSafe) removeSlotContainer(p, tombstone);
     }
     throw err;
+  } finally {
+    for (const lease of reclaimedFromWarm) removeProfile(p, lease);
   }
 }
 
