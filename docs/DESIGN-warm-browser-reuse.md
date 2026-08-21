@@ -9,10 +9,10 @@ owned by [`SECURITY.md`](../SECURITY.md).
 
 Ordinary `operate_start` sessions lease an isolated Chrome profile. The canonical profile used by
 `connect` and `login` is their authoring source only: a successful Google login can publish a
-filtered, immutable seed generation, and a worker profile is cloned from that seed or reclaimed
+cookie-free, immutable seed generation, and a worker profile is cloned from that seed or reclaimed
 from one closed warm-profile slot. A session with `requireLiveIdentity` instead opens the canonical
-profile directly, because a Google session accepted by the Google consoles does not survive a
-filesystem clone.
+profile directly, because replaying a filesystem clone of Google's rotating session cookies can
+invalidate the user's live Google session.
 
 Stage 3 retains the session-addressed payment and drain-before-finish gates while widening the
 fixed pool for concurrent execution:
@@ -85,9 +85,9 @@ tombstones/
 ```
 
 Seed generations are immutable after publication. A generation contains only Chrome's `Local
-State`, provider/email markers, and selected Google identity cookies copied into a new SQLite cookie
-store. Transient locks and caches are excluded. Pool ownership and lease metadata contain opaque
-IDs, private tokens, timestamps, reuse counters, and process identity only.
+State` and the provider/email marker files; it contains no cookie store. Transient locks and caches
+are excluded. Pool ownership and lease metadata contain opaque IDs, private tokens, timestamps,
+reuse counters, and process identity only.
 
 Card data, payment approvals, mandates, sealed fields, and other payment material are never copied
 into the seed or written to pool metadata.
@@ -125,6 +125,10 @@ Under the seed lock, acquisition:
 2. reserves the first free active slot with a private owner token;
 3. claims the closed warm profile when it belongs to `seed/current` and is within its bounds; or
 4. copies the current immutable seed into a new worker profile.
+
+Before either a reclaimed warm profile or a new clone is leased, acquisition removes Chrome's
+legacy `Default/Cookies` and `Default/Network/Cookies` stores and their SQLite sidecars. This keeps
+profiles created by earlier releases from replaying session cookies after an upgrade.
 
 Recursive deletion of a tombstoned Chrome profile happens only after the seed lock is released.
 Profile directories can contain large caches, history, and IndexedDB state, so physical deletion is

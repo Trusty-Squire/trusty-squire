@@ -21,7 +21,6 @@ import {
   acquireOperatorProfile,
   canPublishOperatorProfileSeed,
   operatorProfilePoolTest,
-  OPERATOR_SEED_GOOGLE_COOKIE_NAMES,
   publishOperatorProfileSeed,
 } from "../operator-profile-pool.js";
 import { profilePathIdentity } from "../profile.js";
@@ -61,9 +60,10 @@ const verifiedLoginProof = {
 function writeCookies(
   source: string,
   rows: Array<{ host: string; name: string; value: string }>,
+  relativePath = join("Default", "Cookies"),
 ): void {
-  const path = join(source, "Default", "Cookies");
-  mkdirSync(join(source, "Default"), { recursive: true });
+  const path = join(source, relativePath);
+  mkdirSync(dirname(path), { recursive: true });
   rmSync(path, { force: true });
   const db = new Database(path);
   db.exec(
@@ -75,16 +75,6 @@ function writeCookies(
   db.close();
 }
 
-function cookieValues(profileDir: string): string[] {
-  const db = new Database(join(profileDir, "Default", "Cookies"), { readonly: true });
-  const values = db
-    .prepare("SELECT value FROM cookies ORDER BY value")
-    .all()
-    .map((row) => (row as { value: string }).value);
-  db.close();
-  return values;
-}
-
 function fixture(): { root: string; source: string } {
   const base = mkdtempSync(join(tmpdir(), "operator-profile-pool-test-"));
   roots.push(base);
@@ -93,11 +83,6 @@ function fixture(): { root: string; source: string } {
   mkdirSync(join(source, "Default", "Cache"), { recursive: true });
   writeCookies(source, [
     { host: ".google.com", name: "SID", value: "identity-cookie" },
-    ...OPERATOR_SEED_GOOGLE_COOKIE_NAMES.filter((name) => name !== "SID").map((name) => ({
-      host: ".google.com",
-      name,
-      value: `identity-${name}`,
-    })),
     { host: ".google.com", name: "payment_approval", value: "google-payment-cookie" },
     { host: "checkout.example.com", name: "approval", value: "payment-approval-cookie" },
   ]);
@@ -121,13 +106,13 @@ afterEach(() => {
 });
 
 describe("operator profile pool migration stage", () => {
-  it("publishes the Google host-bound login cookies into the seed database", async () => {
+  it("never publishes Google session cookies into the seed database", async () => {
     const { root, source } = fixture();
     writeCookies(source, [
       { host: ".google.com", name: "__Host-1PLSID", value: "host-1plsid" },
       { host: "accounts.google.com", name: "__Host-3PLSID", value: "host-3plsid" },
       { host: "google.com", name: "SMSV", value: "smsv" },
-      { host: ".google.com", name: "not-allowlisted", value: "excluded" },
+      { host: ".google.com", name: "SID", value: "identity-cookie" },
     ]);
 
     const generation = await publishOperatorProfileSeed(source, {
@@ -135,17 +120,8 @@ describe("operator profile pool migration stage", () => {
       proof: verifiedLoginProof,
     });
     const seed = join(operatorProfilePoolTest.paths(root).generations, generation, "user-data");
-    const db = new Database(join(seed, "Default", "Cookies"), { readonly: true });
-    const rows = db
-      .prepare("SELECT host_key, name, value FROM cookies ORDER BY name")
-      .all() as Array<{ host_key: string; name: string; value: string }>;
-    db.close();
-
-    expect(rows).toEqual([
-      { host_key: "google.com", name: "SMSV", value: "smsv" },
-      { host_key: ".google.com", name: "__Host-1PLSID", value: "host-1plsid" },
-      { host_key: "accounts.google.com", name: "__Host-3PLSID", value: "host-3plsid" },
-    ]);
+    expect(existsSync(join(seed, "Default", "Cookies"))).toBe(false);
+    expect(existsSync(join(seed, "Default", "Network", "Cookies"))).toBe(false);
   });
 
   it("shares publication and active capacity across source-profile aliases", async () => {
@@ -341,14 +317,7 @@ describe("operator profile pool migration stage", () => {
     });
     const p = operatorProfilePoolTest.paths(root);
     const firstSeed = join(p.generations, first, "user-data");
-    expect(cookieValues(firstSeed)).toEqual(
-      OPERATOR_SEED_GOOGLE_COOKIE_NAMES.map((name) =>
-        name === "SID" ? "identity-cookie" : `identity-${name}`,
-      ).sort(),
-    );
-    const cookieBytes = readFileSync(join(firstSeed, "Default", "Cookies"));
-    expect(cookieBytes.includes(Buffer.from("google-payment-cookie"))).toBe(false);
-    expect(cookieBytes.includes(Buffer.from("payment-approval-cookie"))).toBe(false);
+    expect(existsSync(join(firstSeed, "Default", "Cookies"))).toBe(false);
     expect(readFileSync(join(firstSeed, "Local State"), "utf8")).toBe("identity-key-state");
     expect(readFileSync(join(firstSeed, "provider-emails.json"), "utf8")).toContain(
       "worker@example.com",
@@ -398,11 +367,7 @@ describe("operator profile pool migration stage", () => {
       acquireOperatorProfile("session-b", { rootDir: root, sourceProfileDir: source }),
     ]);
     expect(first.profileDir).not.toBe(source);
-    expect(cookieValues(first.profileDir)).toEqual(
-      OPERATOR_SEED_GOOGLE_COOKIE_NAMES.map((name) =>
-        name === "SID" ? "identity-cookie" : `identity-${name}`,
-      ).sort(),
-    );
+    expect(existsSync(join(first.profileDir, "Default", "Cookies"))).toBe(false);
     expect(existsSync(join(first.profileDir, "Default", "Web Data"))).toBe(false);
     expect(second.profileDir).not.toBe(first.profileDir);
     await expect(
@@ -665,6 +630,53 @@ describe("operator profile pool migration stage", () => {
     await second.destroy();
   });
 
+  it("strips legacy cookie stores from cold clones and warm profiles", async () => {
+    const { root, source } = fixture();
+    const generation = await publishOperatorProfileSeed(source, {
+      rootDir: root,
+      proof: verifiedLoginProof,
+    });
+    const p = operatorProfilePoolTest.paths(root);
+    const legacySeed = join(p.generations, generation, "user-data");
+    const networkCookies = join("Default", "Network", "Cookies");
+    writeCookies(legacySeed, [{ host: ".google.com", name: "SID", value: "legacy-seed" }]);
+    writeCookies(
+      legacySeed,
+      [{ host: "accounts.google.com", name: "SSID", value: "legacy-network-seed" }],
+      networkCookies,
+    );
+    writeFileSync(join(legacySeed, `${networkCookies}-wal`), "legacy-sidecar");
+
+    const first = await acquireOperatorProfile("upgraded-cold-clone", {
+      rootDir: root,
+      sourceProfileDir: source,
+    });
+    expect(first.seedGeneration).toBe(generation);
+    expect(existsSync(join(first.profileDir, "Default", "Cookies"))).toBe(false);
+    expect(existsSync(join(first.profileDir, networkCookies))).toBe(false);
+    expect(existsSync(join(first.profileDir, `${networkCookies}-wal`))).toBe(false);
+
+    writeCookies(first.profileDir, [
+      { host: ".google.com", name: "SID", value: "warm-profile-cookie" },
+    ]);
+    writeCookies(
+      first.profileDir,
+      [{ host: "accounts.google.com", name: "SSID", value: "warm-network-cookie" }],
+      networkCookies,
+    );
+    const profileId = first.profileId;
+    await first.returnWarm("closed");
+
+    const second = await acquireOperatorProfile("upgraded-warm-reuse", {
+      rootDir: root,
+      sourceProfileDir: source,
+    });
+    expect(second.profileId).toBe(profileId);
+    expect(existsSync(join(second.profileDir, "Default", "Cookies"))).toBe(false);
+    expect(existsSync(join(second.profileDir, networkCookies))).toBe(false);
+    await second.destroy();
+  });
+
   it("invalidates a warm profile when login publishes a new seed generation", async () => {
     const { root, source } = fixture();
     await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
@@ -673,16 +685,20 @@ describe("operator profile pool migration stage", () => {
       sourceProfileDir: source,
     });
     const staleProfile = first.profileDir;
+    const staleGeneration = first.seedGeneration;
     await first.returnWarm("closed");
-    writeCookies(source, [{ host: ".google.com", name: "SID", value: "replacement" }]);
-    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+    const newGeneration = await publishOperatorProfileSeed(source, {
+      rootDir: root,
+      proof: verifiedLoginProof,
+    });
 
     const second = await acquireOperatorProfile("session-b", {
       rootDir: root,
       sourceProfileDir: source,
     });
     expect(second.profileDir).not.toBe(staleProfile);
-    expect(cookieValues(second.profileDir)).toEqual(["replacement"]);
+    expect(newGeneration).not.toBe(staleGeneration);
+    expect(second.seedGeneration).toBe(newGeneration);
     await second.destroy();
   });
 

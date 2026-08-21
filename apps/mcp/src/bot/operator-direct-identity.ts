@@ -2,15 +2,17 @@
 //
 // The operator profile pool (operator-profile-pool.ts) clones the seeded
 // login into a fresh per-session profile so concurrent sessions stay
-// isolated. That clone carries the seed's cookies, but Google's session for
-// accounts.google.com / myaccount.google.com / the Google consoles resists
-// filesystem cloning even when the cookie rows are byte-identical to the
-// live profile's — a fresh Chrome instance on a copy of the directory still
-// hits the password wall. Whatever the exact binding mechanism (Google
-// rotates short-lived session tokens, and possibly keys them to material
-// that never lands in the copied Cookies DB), copying files further is not
-// the fix: the only browser instance proven to hold Google's trust is the
-// one that actually completed the interactive login.
+// isolated — but that clone carries NO Google session cookies (the pool
+// strips them at seed publication and acquisition). Before that stripping,
+// a clone presented already-rotated-away cookie values (Google rotates its
+// session cookies on the live profile as it's used), and Google's server
+// treated stale cookie replay as a credential-compromise signal and
+// invalidated the whole session family — killing the user's real Google
+// session the moment a pooled clone touched Google, even though the cookie
+// rows were byte-identical to the live profile's at seed time. Copying the
+// cookies is not fixable by copying more files or copying them more often:
+// the only browser instance proven to hold Google's trust is the one that
+// actually completed the interactive login.
 //
 // A caller that must act AS the signed-in user (operate_start
 // require_live_identity=true — Firebase/GCP consoles, myaccount.google.com,
