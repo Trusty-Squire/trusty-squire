@@ -126,22 +126,6 @@ silent failures.
     operator-recipe replay. The user-facing contract lives in README's MCP-tool
     reference; `frameTargetAllowed`/`assertSecretFrameTargetAllowed` in
     `provision-session.ts` own the action-time security boundary.
-  - **Google-identity sessions bypass the profile pool (operator-direct-identity.ts,
-    2026-08).** The per-session profile pool (`operator-profile-pool.ts`) clones
-    the seeded login into a fresh directory per session — but Google's session for
-    accounts.google.com / the Google consoles resists filesystem cloning even when
-    the cookie rows are byte-identical to the live profile's; a fresh Chrome
-    instance on a copy still hits the password wall. `operate_start
-    require_live_identity: true` (the "act AS the user" gate, `googleSessionGate`)
-    now routes around the pool entirely: `acquireDirectIdentityProfile` launches
-    directly against the canonical `CHROME_PROFILE_DIR`, serialized to one
-    concurrent Google-identity session via `profile.ts`'s existing
-    `acquireFreeProfileOperationGuard`/SingletonLock machinery (the same mutual
-    exclusion `mcp login` and the pre-pool bot used). Non-identity sessions are
-    unaffected — they still use the isolated two-slot clone pool. Separately,
-    `OPERATOR_SEED_GOOGLE_COOKIE_NAMES` was missing `__Host-1PLSID`/
-    `__Host-3PLSID`/`SMSV` (real bug, fixed, but not sufficient alone — hence the
-    routing change above).
 - **Single-tier install flow.** `npx @trusty-squire/mcp connect` does
   three things in one command:
   1. Issues a machine token (bot-internal credential for the operator

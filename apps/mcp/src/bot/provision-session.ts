@@ -655,10 +655,10 @@ interface CapacityWaiter {
   resolveSettled: () => void;
 }
 
-// The pool is authoritative for cross-process capacity; these maps only retain
-// the local controller/lease pairing needed for lifecycle cleanup.  In
-// particular, they deliberately do not impose a process-global single-session
-// gate: each entry owns an isolated profile lease.
+// The pool and canonical-profile guard are authoritative for their respective
+// cross-process capacity. These maps only retain the local controller/lease
+// pairing needed for lifecycle cleanup; they deliberately do not impose a
+// process-global single-session gate.
 const leasedBrowsers = new Map<BrowserController, WarmBrowser>();
 const startingBrowsers = new Set<StartingBrowser>();
 const capacityWaiters = new Set<CapacityWaiter>();
@@ -2490,8 +2490,9 @@ function widenAllowedHostsFromCurrentUrl(session: Session): void {
 
 export interface StartOptions {
   serviceUrl: string;
-  // Persistent Chrome profile (the user's seeded session). Defaults to the
-  // controller's CHROME_PROFILE_DIR.
+  // Canonical Chrome profile: the pool's seed source for ordinary sessions and
+  // the directly opened profile for requireLiveIdentity. Defaults to
+  // CHROME_PROFILE_DIR.
   profileDir?: string;
   proxyUrl?: string;
   // Extra hosts to widen domain-scope (e.g. a known custom IdP/mail host).
