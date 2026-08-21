@@ -785,6 +785,7 @@ vi.mock("../operator-direct-identity.js", () => {
       };
       return {
         profileDir,
+        takeProfileOperationLease: () => ({ release: () => undefined }),
         bindWorker: () => undefined,
         returnWarm: async () => finish(),
         destroy: async () => finish(),

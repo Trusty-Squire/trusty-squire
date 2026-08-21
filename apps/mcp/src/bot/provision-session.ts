@@ -821,6 +821,9 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
   }
   const controller = new BrowserController({
     profileDir: lease.profileDir,
+    ...("takeProfileOperationLease" in lease
+      ? { profileOperationLease: lease.takeProfileOperationLease() }
+      : {}),
     ...(opts.proxyUrl !== undefined ? { proxyUrl: opts.proxyUrl } : {}),
   });
   const pending: StartingBrowser = {

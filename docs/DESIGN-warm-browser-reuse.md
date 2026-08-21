@@ -98,8 +98,12 @@ A failed login or uncertain close leaves the current generation unchanged.
 
 ## 4. Acquisition and reuse
 
-`acquireWarmBrowser` remains the runtime seam, but it now always obtains an
-`OperatorProfileLease` before constructing `BrowserController`.
+`acquireWarmBrowser` remains the runtime seam. Ordinary sessions obtain an
+`OperatorProfileLease` for an isolated pool worker before constructing `BrowserController`.
+Sessions started with `requireLiveIdentity` instead obtain a `DirectIdentityProfileLease` for the
+canonical `CHROME_PROFILE_DIR`, because Google's authenticated session does not survive a profile
+clone. The direct lease transfers its pre-acquired profile-operation guard to `BrowserController`,
+which owns that guard until browser shutdown; the lease must not acquire or release a second guard.
 
 Under the seed lock, acquisition:
 
@@ -115,14 +119,18 @@ not part of serialized pool bookkeeping and cannot block an unrelated start from
 lock. A failed deferred deletion leaves its private tombstone in place for a later acquisition to
 retry; the lease cannot become claimable again in the meantime.
 
-Capacity remains fixed at two active leases per namespace. A third start in that namespace retries
-acquisition for at most 30 seconds, including time spent behind seed publication on the shared seed
-lock, and launches only after one of those leases is released. Teardown cancels registered capacity
-waiters and each start rechecks the shutdown generation after acquisition before launch.
+Pool capacity remains fixed at two active leases per namespace. A third ordinary start in that
+namespace retries acquisition for at most 30 seconds, including time spent behind seed publication
+on the shared seed lock, and launches only after one of those leases is released. Direct-identity
+capacity is one canonical-profile session across processes; a second `requireLiveIdentity` start
+waits up to the same bound for the current browser lifecycle to release its guard. Teardown cancels
+registered capacity waiters and each start rechecks the shutdown generation after acquisition
+before launch.
 
-Before the first seed exists, acquisition creates an empty worker profile; a caller that requires a
-live identity then fails closed at the existing Google-session gate. Identity and email checks run
-against the claimed worker profile, never the canonical profile or seed.
+Before the first seed exists, ordinary acquisition creates an empty worker profile. Identity and
+email checks for ordinary sessions run against that claimed worker profile. A
+`requireLiveIdentity` session bypasses the pool, checks the canonical profile directly, and fails
+closed at the existing Google-session gate when no live Google session exists.
 A warm profile is eligible for at most six hours idle, 50 reuses, or 24 hours of age. Bounds and
 current-generation invalidation are enforced deterministically on the next serialized pool
 operation; there is no background timer or daemon. Publishing a new seed therefore invalidates the

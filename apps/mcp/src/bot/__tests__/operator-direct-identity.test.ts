@@ -11,6 +11,7 @@ import {
   acquireDirectIdentityProfile,
   OperatorDirectIdentityAcquisitionInterruptedError,
 } from "../operator-direct-identity.js";
+import { BrowserController } from "../browser.js";
 
 const dirs: string[] = [];
 
@@ -35,6 +36,28 @@ describe("acquireDirectIdentityProfile", () => {
     } finally {
       await lease.destroy();
     }
+  });
+
+  it("hands the acquired guard to BrowserController for its complete lifecycle", async () => {
+    const { profileDir, lockRoot } = fixture();
+    const directLease = await acquireDirectIdentityProfile({ profileDir, lockRoot });
+    const controller = new BrowserController({
+      humanize: false,
+      profileDir,
+      profileOperationLease: directLease.takeProfileOperationLease(),
+    });
+    Object.assign(controller, { startWithProfileGuard: async () => undefined });
+    try {
+      await expect(controller.start()).resolves.toBeUndefined();
+      await expect(
+        acquireDirectIdentityProfile({ profileDir, lockRoot, deadline: Date.now() }),
+      ).rejects.toBeInstanceOf(OperatorDirectIdentityAcquisitionInterruptedError);
+    } finally {
+      await controller.close();
+      await directLease.destroy();
+    }
+    const next = await acquireDirectIdentityProfile({ profileDir, lockRoot });
+    await next.destroy();
   });
 
   it("serializes concurrent acquisitions: a second attempt fails fast without a deadline wait", async () => {

@@ -57,10 +57,19 @@ export class DirectIdentityProfileLease {
   private finished = false;
 
   constructor(
-    private readonly guard: ProfileOperationLease,
+    private guard: ProfileOperationLease | null,
     profileDir: string,
   ) {
     this.profileDir = profileDir;
+  }
+
+  takeProfileOperationLease(): ProfileOperationLease {
+    if (this.finished || this.guard === null) {
+      throw new Error("direct identity profile guard is no longer available");
+    }
+    const guard = this.guard;
+    this.guard = null;
+    return guard;
   }
 
   // Chrome's own SingletonLock (read by profile.ts's wait/reclaim helpers) is
@@ -73,7 +82,8 @@ export class DirectIdentityProfileLease {
   private finish(): void {
     if (this.finished) return;
     this.finished = true;
-    this.guard.release();
+    this.guard?.release();
+    this.guard = null;
   }
 
   async returnWarm(_closeState: ProfileCloseState): Promise<void> {
