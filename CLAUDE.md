@@ -649,6 +649,9 @@ extension state on launch and won't reload mid-session.
 | `TRUSTY_SQUIRE_ACCOUNT_ID` | (from session) | Operator account ID (auto-promote attribution on provisions). End-user installs read this from session.json. |
 | `TRUSTY_SQUIRE_API_BASE` | `https://trusty-squire-api.fly.dev` | API base URL |
 | `TRUSTY_SQUIRE_SESSION_FILE` | — | `1`/`true`/`yes` forces the durable file session backend (`~/.config/trusty-squire/session.json`) over the OS keychain. Set it **globally** (so `connect` and the spawned server agree) on headless boxes where the keychain is present-but-ephemeral (gnome-keyring "session" collection) — otherwise the session isn't persisted and `connect` re-opens the install/noVNC page every run. |
+| `TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_MS` | `14400000` (4h) | `mcp server`'s idle self-exit bound when it holds **no** open provision session. Backstop for a host that abandons a child process on reconnect without closing its stdio or signaling it (`server.ts`'s `transport.onclose`/EOF/SIGTERM path then never fires) — a live box accumulated 33 such zombie processes over days. |
+| `TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_WITH_SESSION_MS` | `43200000` (12h) | Same backstop, but the bound used while a provision session is still open. Wider than the no-session bound on purpose: `operator-profile-pool.ts`'s active-slot reclaim only ever frees a slot once its *owning process* is dead, so an abandoned-but-open session's Chrome can only be freed by this server exiting — crossing the bound tears the session's browser down via the same `closeAllProvisionSessions` path a clean disconnect already uses. |
+| `TRUSTY_SQUIRE_SERVER_IDLE_CHECK_INTERVAL_MS` | `1800000` (30m) | Poll interval for the two idle bounds above. |
 
 ### Housekeeper — extracted to its own repo
 

@@ -17,7 +17,11 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { ApiClient } from "./api-client.js";
 import { setSelfManagedChromeTerminationSignalExitEnabled } from "./bot/browser.js";
 import { cancelActiveLoginBrowsers } from "./bot/google-login.js";
-import { closeAllProvisionSessions, withProvisionSessionCall } from "./bot/provision-session.js";
+import {
+  activeSessionCount,
+  closeAllProvisionSessions,
+  withProvisionSessionCall,
+} from "./bot/provision-session.js";
 import { buildToolRegistry, findTool } from "./tools/index.js";
 import { openSessionStorage } from "./session.js";
 import { VERSION } from "./version.js";
@@ -26,6 +30,67 @@ const SERVER_NAME = "trusty-squire";
 
 const DEFAULT_REGISTRY_BASE =
   process.env.ADAPTER_REGISTRY_URL ?? "https://registry.trustysquire.ai";
+
+// Idle self-exit backstop. transport.onclose / stdin EOF / SIGTERM already
+// exit the process on a well-behaved disconnect (see requestShutdown below).
+// This covers what a live box surfaced instead: a host agent spawns a *new*
+// server on reconnect without ever closing the old child's stdio or signaling
+// it — the old process just sits sleeping on an open pipe forever. No signal
+// from a host like that will ever arrive, so this is a time bound, not an
+// event.
+//
+// It also has to cover a server that still holds an open provision session:
+// the operator-profile-pool ACTIVE-slot reclaim (operator-profile-pool.ts,
+// scavengeActiveSlots) only ever reclaims a slot once its *owning process* is
+// provably dead — a live-but-abandoned zombie server is, by that design, a
+// "genuine concurrent run" the pool must never touch. So a background
+// pool-level reaper cannot free an active session's Chrome on its own; only
+// the owning server exiting (which runs closeAllProvisionSessions, which
+// calls browser.close() on the leased Chrome — already timeout-capped down
+// to a SIGKILL reap, see browser.ts's closeWithProfileGuard) can. Hence two
+// bounds: a short one when idle with no session (routine), and a longer one
+// when a session is still open — wide enough that no real in-flight flow
+// (operate_pay no longer blocks a call for approval; verification polling is
+// bounded in the minutes) should ever cross it, so crossing it is a reliable
+// abandoned-session signal, not a false kill of live work.
+const DEFAULT_IDLE_TIMEOUT_MS = 4 * 60 * 60 * 1_000; // 4h, no open session
+const DEFAULT_IDLE_TIMEOUT_WITH_SESSION_MS = 12 * 60 * 60 * 1_000; // 12h, session open
+const DEFAULT_IDLE_CHECK_INTERVAL_MS = 30 * 60 * 1_000; // 30m
+
+function envMs(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function idleTimeoutMs(): number {
+  return envMs("TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_MS", DEFAULT_IDLE_TIMEOUT_MS);
+}
+
+function idleTimeoutWithSessionMs(): number {
+  return envMs(
+    "TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_WITH_SESSION_MS",
+    DEFAULT_IDLE_TIMEOUT_WITH_SESSION_MS,
+  );
+}
+
+function idleCheckIntervalMs(): number {
+  return envMs("TRUSTY_SQUIRE_SERVER_IDLE_CHECK_INTERVAL_MS", DEFAULT_IDLE_CHECK_INTERVAL_MS);
+}
+
+// Exported for unit testing; kept pure so the branches (recent activity,
+// no-session idle, session-open idle) don't need a live process/interval.
+export function shouldIdleExit(
+  now: number,
+  lastActivityAt: number,
+  sessionCount: number,
+  timeoutMs: number,
+  timeoutWithSessionMs: number,
+): boolean {
+  const threshold = sessionCount === 0 ? timeoutMs : timeoutWithSessionMs;
+  return now - lastActivityAt >= threshold;
+}
 
 // Injected into the model's system prompt every turn (≤2KB). Teaches
 // the routing between store / use / request so the agent reaches for
@@ -219,9 +284,10 @@ export async function runServer(): Promise<void> {
   // A stdio client can disappear without sending a signal (for example when
   // its parent agent exits). Chrome keeps Node's event loop alive in that
   // case, so close every active provisioning browser and explicitly exit.
-  // Keep the single promise so EOF, transport closure, and a signal racing
-  // together cannot run teardown twice.
+  // Keep the single promise so EOF, transport closure, a signal, and the
+  // idle backstop below racing together cannot run teardown twice.
   let shutdown: Promise<void> | undefined;
+  let idleTimer: NodeJS.Timeout | undefined;
   const requestShutdown = (): void => {
     if (shutdown !== undefined) return;
 
@@ -230,6 +296,7 @@ export async function runServer(): Promise<void> {
       process.stdin.removeListener("close", requestShutdown);
       process.removeListener("SIGTERM", requestShutdown);
       process.removeListener("SIGINT", requestShutdown);
+      if (idleTimer !== undefined) clearInterval(idleTimer);
 
       try {
         // The OAuth-bootstrap login Chrome (google-login) is tracked apart
@@ -264,5 +331,37 @@ export async function runServer(): Promise<void> {
   process.stdin.once("close", requestShutdown);
   process.once("SIGTERM", requestShutdown);
   process.once("SIGINT", requestShutdown);
+
+  // Protocol.connect chains transport.onmessage the same way it chains
+  // onclose (see the comment above), so this sees every inbound message —
+  // requests, notifications, pings — not just tool calls, without having to
+  // reach into buildServer's request handlers.
+  let lastActivityAt = Date.now();
+  transport.onmessage = () => {
+    lastActivityAt = Date.now();
+  };
+
+  idleTimer = setInterval(() => {
+    if (shutdown !== undefined) return;
+    const sessionCount = activeSessionCount();
+    if (
+      !shouldIdleExit(
+        Date.now(),
+        lastActivityAt,
+        sessionCount,
+        idleTimeoutMs(),
+        idleTimeoutWithSessionMs(),
+      )
+    ) {
+      return;
+    }
+    process.stderr.write(
+      `[trusty-squire] server idle with ${sessionCount} open session(s) and no client ` +
+        `activity past the bound; exiting (this tears down any open session's browser)\n`,
+    );
+    requestShutdown();
+  }, idleCheckIntervalMs());
+  idleTimer.unref();
+
   await server.connect(transport);
 }
