@@ -75,18 +75,6 @@ function writeCookies(
   db.close();
 }
 
-function cookieValues(profileDir: string): string[] {
-  const path = join(profileDir, "Default", "Cookies");
-  if (!existsSync(path)) return [];
-  const db = new Database(path, { readonly: true });
-  const values = db
-    .prepare("SELECT value FROM cookies ORDER BY value")
-    .all()
-    .map((row) => (row as { value: string }).value);
-  db.close();
-  return values;
-}
-
 function fixture(): { root: string; source: string } {
   const base = mkdtempSync(join(tmpdir(), "operator-profile-pool-test-"));
   roots.push(base);
