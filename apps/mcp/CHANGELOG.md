@@ -1,5 +1,21 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.11 (2026-08-21)
+
+- fix(mcp): reuse connected Google session for identity tasks (#557)
+- fix(mcp): prevent profile cleanup from blocking concurrent sessions (#556)
+- fix(mcp): repin workspace dependencies during stable releases (#555)
+- feat(web): relaunch homepage with interactive task gallery (#553)
+- chore: swap hero tagline to 'Empower agents with auth and payments' across README, web assets, and docs (#552)
+- feat(web): expand positioning to provisioning and payments (#551)
+- feat(mcp): expand auth and payment positioning (#550)
+- fix(mcp): migrate legacy recipe verbs safely (#547)
+- release(api): deploy payment completion fix to prod (#509)
+- fix(pay): accept the operator's card_ref key on approval confirm (#476)
+- ci: retrigger checks
+- release(mcp): 1.1.8
+- release(mcp): 1.1.7 (#435)
+
 ## 1.1.10 (2026-08-19)
 
 - **Concurrent operator starts no longer wait behind expired-profile deletion.** Reclamation now
