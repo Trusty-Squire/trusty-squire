@@ -74,6 +74,9 @@ const h = vi.hoisted(() => ({
   leaseDestroyCalls: 0,
   leaseRetainCalls: 0,
   leaseRetainDestroyRequired: [] as boolean[],
+  directIdentityAcquireCalls: 0,
+  directIdentityReleaseCalls: 0,
+  directIdentityProfileDir: "/tmp/trusty-squire-unit-canonical-profile",
   currentUrl: "",
   elements: [] as unknown[],
   extractInteractiveElementsCalls: 0,
@@ -757,6 +760,41 @@ vi.mock("../operator-profile-pool.js", () => {
   };
 });
 
+// The Google-identity path (require_live_identity) never touches the
+// isolated clone pool above — it acquires the canonical profile directly.
+// A distinct mock (and its own call counters) keeps that boundary visible in
+// tests: a requireLiveIdentity session must NOT bump h.leaseAcquireCalls.
+vi.mock("../operator-direct-identity.js", () => {
+  class OperatorDirectIdentityAcquisitionInterruptedError extends Error {
+    readonly reason: "timeout" | "cancelled";
+    constructor(reason: "timeout" | "cancelled") {
+      super(`operator direct-identity acquisition ${reason}`);
+      this.reason = reason;
+    }
+  }
+  return {
+    OperatorDirectIdentityAcquisitionInterruptedError,
+    acquireDirectIdentityProfile: async (opts: { profileDir?: string } = {}) => {
+      h.directIdentityAcquireCalls += 1;
+      const profileDir = opts.profileDir ?? h.directIdentityProfileDir;
+      let finished = false;
+      const finish = (): void => {
+        if (finished) return;
+        finished = true;
+        h.directIdentityReleaseCalls += 1;
+      };
+      return {
+        profileDir,
+        takeProfileOperationLease: () => ({ release: () => undefined }),
+        bindWorker: () => undefined,
+        returnWarm: async () => finish(),
+        destroy: async () => finish(),
+        retain: async () => finish(),
+      };
+    },
+  };
+});
+
 import { chmodSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -928,6 +966,9 @@ beforeEach(() => {
   h.leaseDestroyCalls = 0;
   h.leaseRetainCalls = 0;
   h.leaseRetainDestroyRequired = [];
+  h.directIdentityAcquireCalls = 0;
+  h.directIdentityReleaseCalls = 0;
+  h.directIdentityProfileDir = "/tmp/trusty-squire-unit-canonical-profile";
   h.currentUrl = "";
   h.elements = [];
   h.extractInteractiveElementsCalls = 0;
@@ -3702,7 +3743,7 @@ describe("operate_extract — vault-store response", () => {
 });
 
 describe("operate session — Change 5 precondition gate", () => {
-  it("fails closed after probing the isolated worker when no live Google session exists", async () => {
+  it("fails closed after probing the canonical profile when no live Google session exists", async () => {
     h.providers = []; // no live session
     h.oauthStatus = "failed"; // and we cannot establish one
     const obs = await startProvisionSession({
@@ -3711,9 +3752,29 @@ describe("operate session — Change 5 precondition gate", () => {
     });
     expect(obs.needs_user).toBeDefined();
     expect(obs.needs_user?.wall).toBe("google_session");
-    expect(h.startCalls).toBe(1); // the isolated worker, never the seed/canonical profile, was probed
-    expect(h.started).toBe(0); // the rejected worker was closed before returning the handoff
+    expect(h.startCalls).toBe(1); // the canonical profile itself was probed
+    expect(h.started).toBe(0); // rejected before returning the handoff
     expect(h.gotos).toHaveLength(0);
+  });
+
+  // Regression: a requireLiveIdentity session must reach Google's session via
+  // the canonical profile directly — never a per-session clone from the
+  // isolated pool, which carries the seed's cookies but not whatever Google
+  // actually keys the session on. See operator-direct-identity.ts.
+  it("drives the canonical profile directly, never the isolated clone pool", async () => {
+    h.providers = ["google"];
+    h.directIdentityProfileDir = "/tmp/trusty-squire-unit-canonical-profile-marker";
+    const obs = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      requireLiveIdentity: true,
+    });
+    expect(obs.needs_user).toBeUndefined();
+    expect(h.started).toBe(1);
+    expect(h.directIdentityAcquireCalls).toBe(1);
+    expect(h.leaseAcquireCalls).toBe(0); // the isolated pool was never touched
+    expect(h.profileDirs.at(-1)).toBe("/tmp/trusty-squire-unit-canonical-profile-marker");
+    await finishProvisionSession(obs.session_id);
+    expect(h.directIdentityReleaseCalls).toBe(1);
   });
 
   it("proceeds normally when a live Google session exists", async () => {
@@ -3724,6 +3785,13 @@ describe("operate session — Change 5 precondition gate", () => {
     });
     expect(obs.needs_user).toBeUndefined();
     expect(h.started).toBe(1);
+    await finishProvisionSession(obs.session_id);
+  });
+
+  it("leaves the isolated clone pool in charge of ordinary (non-identity) sessions", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    expect(h.leaseAcquireCalls).toBe(1);
+    expect(h.directIdentityAcquireCalls).toBe(0);
     await finishProvisionSession(obs.session_id);
   });
 });
@@ -3993,6 +4061,57 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     expect(h.profileDirs[0]).not.toBe(h.profileDirs[1]);
     await finishProvisionSession(first.session_id);
     await finishProvisionSession(second.session_id);
+  });
+
+  it("starts a second session while the first sits parked on a decoupled payment wait", async () => {
+    // Regression for a real user hitting "start deadline exceeded while
+    // waiting to acquire the shared seed lock" on @trusty-squire/mcp
+    // 1.1.9-rc.27: one agent held an operator session mid-payment (parked on
+    // a decoupled 3-D Secure approval wait) and a second agent's operate_start
+    // starved behind it. The seed lock is only held for the brief scavenge +
+    // clone steps inside acquireOperatorProfile, never for a session's
+    // lifetime, so a second start must succeed while the first is still open
+    // and awaiting approval.
+    const first = await startProvisionSession({ serviceUrl: "https://shop.example.com/first" });
+    const firstSession = paymentSession(first.session_id);
+    const parkedClaim = claimActivePaymentForOperatePay(undefined, firstSession);
+    if (parkedClaim.kind !== "lease") throw new Error("expected first payment lease");
+    completeActivePaymentLeaseWithPendingApproval(
+      parkedClaim.lease,
+      {
+        approval_id: "appr_parked_3ds",
+        approval_url: "https://web.test/vault/pay/appr_parked_3ds",
+        nonce: "nonce_parked_3ds",
+        agent: "agent_parked_3ds",
+        checkout: {
+          merchant: "First shop",
+          checkout_origin: "https://shop.example.com",
+          amount_cents: 100,
+          currency: "USD",
+        },
+        jit: false,
+        boundCardRef: "card_parked_3ds",
+        deadline: Date.now() + 60_000,
+        rejectedCandidates: [],
+        keypair: { publicKey: "public-parked", privateKey: "private-parked" },
+        item: "Widget",
+        reason: "Parked purchase",
+        cardRef: "card_parked_3ds",
+      },
+      firstSession,
+    );
+    expect(getActivePendingApproval(firstSession)).not.toBeNull();
+
+    const second = await startProvisionSession({ serviceUrl: "https://app.example.com/second" });
+
+    expect(h.startCalls).toBe(2);
+    expect(h.profileDirs).toHaveLength(2);
+    expect(h.profileDirs[0]).not.toBe(h.profileDirs[1]);
+    // The first session's parked approval survives the second session's start.
+    expect(getActivePendingApproval(firstSession)).not.toBeNull();
+
+    await finishProvisionSession(second.session_id);
+    await finishProvisionSession(first.session_id);
   });
 
   it("never lets one session's approval authorize another session's charge", async () => {
