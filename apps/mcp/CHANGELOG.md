@@ -1,5 +1,11 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.11 (2026-08-21)
+
+- fix(mcp): reuse connected Google session for identity tasks (#557)
+- fix(mcp): prevent profile cleanup from blocking concurrent sessions (#556)
+- fix(mcp): repin workspace dependencies during stable releases (#555)
+
 ## 1.1.10 (2026-08-19)
 
 - **Concurrent operator starts no longer wait behind expired-profile deletion.** Reclamation now
