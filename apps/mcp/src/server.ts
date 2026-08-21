@@ -53,9 +53,9 @@ const DEFAULT_REGISTRY_BASE =
 // (operate_pay no longer blocks a call for approval; verification polling is
 // bounded in the minutes) should ever cross it, so crossing it is a reliable
 // abandoned-session signal, not a false kill of live work.
-const DEFAULT_IDLE_TIMEOUT_MS = 4 * 60 * 60 * 1_000; // 4h, no open session
+const DEFAULT_IDLE_TIMEOUT_MS = 20 * 60 * 1_000; // 20m, no open session
 const DEFAULT_IDLE_TIMEOUT_WITH_SESSION_MS = 12 * 60 * 60 * 1_000; // 12h, session open
-const DEFAULT_IDLE_CHECK_INTERVAL_MS = 30 * 60 * 1_000; // 30m
+const DEFAULT_IDLE_CHECK_INTERVAL_MS = 5 * 60 * 1_000; // 5m — must stay well under the 20m bound above
 
 function envMs(name: string, fallback: number): number {
   const raw = process.env[name];
