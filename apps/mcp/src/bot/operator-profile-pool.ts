@@ -77,6 +77,9 @@ export const OPERATOR_SEED_GOOGLE_COOKIE_NAMES = [
   "AEC",
   "ACCOUNT_CHOOSER",
   "__Host-GAPS",
+  "__Host-1PLSID",
+  "__Host-3PLSID",
+  "SMSV",
 ] as const;
 
 interface ProcessIdentity {

@@ -1,15 +1,18 @@
-# DESIGN — isolated operator profile pool
+# DESIGN — operator profile lifecycle
 
-Status: migration stage 3 implemented (2026-08-14). This document owns the operator profile-pool,
-session lifecycle, and login-seed lifecycle. Payment authorization and secret-handling contracts
-remain owned by [`SECURITY.md`](../SECURITY.md).
+Status: migration stage 3 implemented (2026-08-14), with direct Google-identity sessions added
+(2026-08). This document owns the operator profile pool, direct-identity profile lifecycle, session
+lifecycle, and login-seed lifecycle. Payment authorization and secret-handling contracts remain
+owned by [`SECURITY.md`](../SECURITY.md).
 
 ## 1. Stage boundary
 
-Each `operate_start` now leases an isolated Chrome profile. The canonical profile used by
-`connect` and `login` is an authoring source only: operator Chrome never opens it. A successful
-Google login can publish a filtered, immutable seed generation, and a new worker profile is cloned
-from that seed or reclaimed from one closed warm-profile slot.
+Ordinary `operate_start` sessions lease an isolated Chrome profile. The canonical profile used by
+`connect` and `login` is their authoring source only: a successful Google login can publish a
+filtered, immutable seed generation, and a worker profile is cloned from that seed or reclaimed
+from one closed warm-profile slot. A session with `requireLiveIdentity` instead opens the canonical
+profile directly, because a Google session accepted by the Google consoles does not survive a
+filesystem clone.
 
 Stage 3 retains the session-addressed payment and drain-before-finish gates while widening the
 fixed pool for concurrent execution:
@@ -19,9 +22,14 @@ fixed pool for concurrent execution:
 - one closed warm-profile slot;
 - one page within the leased worker profile.
 
-A third `operate_start` in the same namespace waits at the provision seam for up to 30 seconds,
-retrying the fixed slots without creating another profile or browser. Shutdown cancels starts
-waiting for capacity before it releases active slots.
+Direct Google-identity sessions do not consume those slots. They are serialized separately to one
+active session across processes by the canonical profile-operation guard and Chrome's
+`SingletonLock`.
+
+A third ordinary `operate_start` in the same namespace waits at the provision seam for up to 30
+seconds, retrying the fixed slots without creating another profile or browser. A second direct
+Google-identity start waits up to the same bound for the canonical profile. Shutdown cancels starts
+waiting for either kind of capacity before it releases active resources.
 
 There is no warm Chrome process between sessions. `operate_finish` closes Chrome before its profile
 can enter the warm slot.
@@ -32,7 +40,7 @@ connect / Google login
   -> copy only the identity seed under the seed lock
   -> atomically publish seed/current and delete non-current generations
 
-operate_start
+ordinary operate_start
   -> under the seed lock, reclaim stale metadata and reserve either active slot
   -> claim a current warm profile or clone seed/current while still holding the lock
   -> after releasing the lock, physically delete any privately tombstoned old profiles
@@ -41,12 +49,17 @@ operate_start
   -> bind the worker's process birth identity and exact user-data directory
   -> validate identity through that worker
 
+operate_start with requireLiveIdentity
+  -> acquire the canonical profile-operation guard
+  -> launch Chrome directly on the profile that completed the interactive login
+  -> validate the live Google identity through that profile
+
 operate_finish
   -> stop admitting calls to this session and drain calls that already entered
   -> classify the remaining payment fence state for profile disposition
   -> clear the session's active payment and payment-field seal
-  -> reset the page only for a reusable profile, then close Chrome with proof
-  -> return a safe profile to the one warm slot; destroy or quarantine a payment-sensitive one
+  -> reset only an isolated reusable profile, then close Chrome with proof
+  -> return a safe isolated profile to the warm slot, or release the direct-profile guard
 ```
 
 ## 2. Filesystem model
@@ -98,8 +111,12 @@ A failed login or uncertain close leaves the current generation unchanged.
 
 ## 4. Acquisition and reuse
 
-`acquireWarmBrowser` remains the runtime seam, but it now always obtains an
-`OperatorProfileLease` before constructing `BrowserController`.
+`acquireWarmBrowser` remains the runtime seam. Ordinary sessions obtain an
+`OperatorProfileLease` for an isolated pool worker before constructing `BrowserController`.
+Sessions started with `requireLiveIdentity` instead obtain a `DirectIdentityProfileLease` for the
+canonical `CHROME_PROFILE_DIR`, because Google's authenticated session does not survive a profile
+clone. The direct lease transfers its pre-acquired profile-operation guard to `BrowserController`,
+which owns that guard until browser shutdown; the lease must not acquire or release a second guard.
 
 Under the seed lock, acquisition:
 
@@ -115,14 +132,18 @@ not part of serialized pool bookkeeping and cannot block an unrelated start from
 lock. A failed deferred deletion leaves its private tombstone in place for a later acquisition to
 retry; the lease cannot become claimable again in the meantime.
 
-Capacity remains fixed at two active leases per namespace. A third start in that namespace retries
-acquisition for at most 30 seconds, including time spent behind seed publication on the shared seed
-lock, and launches only after one of those leases is released. Teardown cancels registered capacity
-waiters and each start rechecks the shutdown generation after acquisition before launch.
+Pool capacity remains fixed at two active leases per namespace. A third ordinary start in that
+namespace retries acquisition for at most 30 seconds, including time spent behind seed publication
+on the shared seed lock, and launches only after one of those leases is released. Direct-identity
+capacity is one canonical-profile session across processes; a second `requireLiveIdentity` start
+waits up to the same bound for the current browser lifecycle to release its guard. Teardown cancels
+registered capacity waiters and each start rechecks the shutdown generation after acquisition
+before launch.
 
-Before the first seed exists, acquisition creates an empty worker profile; a caller that requires a
-live identity then fails closed at the existing Google-session gate. Identity and email checks run
-against the claimed worker profile, never the canonical profile or seed.
+Before the first seed exists, ordinary acquisition creates an empty worker profile. Identity and
+email checks for ordinary sessions run against that claimed worker profile. A
+`requireLiveIdentity` session bypasses the pool, checks the canonical profile directly, and fails
+closed at the existing Google-session gate when no live Google session exists.
 
 A warm profile is eligible for at most six hours idle, 50 reuses, or 24 hours of age. Bounds and
 current-generation invalidation are enforced deterministically on the next serialized pool
@@ -165,9 +186,11 @@ acquisition fails before launch.
 
 ## 6. Finish and the money fence
 
-A profile may return to the closed warm slot only after the page reset succeeds, Chrome closure is
-proven, its seed generation is still current, and the session has no payment-sensitive state.
-Failure to prove closure quarantines the lease instead of pooling or deleting it.
+An isolated worker profile may return to the closed warm slot only after the page reset succeeds,
+Chrome closure is proven, its seed generation is still current, and the session has no
+payment-sensitive state. Failure to prove closure quarantines the lease instead of pooling or
+deleting it. A direct-identity session never pools or deletes the canonical profile; browser
+teardown releases its exclusive profile-operation guard.
 
 `operate_finish` first marks the addressed session closing. New calls for that session are rejected,
 calls that already acquired the session drain, and outcome preparation runs behind the same closed
@@ -204,6 +227,7 @@ fixed two-session pool and is not required for isolated local controllers.
 | Contract                                           | Owner                                                             |
 | -------------------------------------------------- | ----------------------------------------------------------------- |
 | Pool layout, seed lock, leases, warm slot, GC      | `apps/mcp/src/bot/operator-profile-pool.ts`                       |
+| Direct Google-identity lease                       | `apps/mcp/src/bot/operator-direct-identity.ts`                    |
 | Process birth and profile-path identity            | `apps/mcp/src/bot/profile.ts`                                     |
 | Local Chrome lifecycle and closure proof           | `apps/mcp/src/bot/browser.ts`                                     |
 | Login lifecycle and seed-publication provenance     | `apps/mcp/src/bot/google-login.ts`                               |
