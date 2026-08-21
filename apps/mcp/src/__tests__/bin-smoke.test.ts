@@ -194,6 +194,41 @@ describe("launched through a bin symlink", () => {
     await expect(exited).resolves.toEqual({ code: 0, signal: null });
   }, 30_000);
 
+  it("self-exits after the idle window when a host abandons it without closing stdio or signaling it", async () => {
+    // Reproduces the live-box leak: a host reconnects to a fresh server
+    // without ever closing the old child's stdin or sending it a signal, so
+    // neither transport.onclose nor the EOF/SIGTERM listeners above ever
+    // fire. Nothing here closes stdin or sends a signal — the idle backstop
+    // must exit on its own once TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_MS elapses
+    // with zero active provision sessions.
+    const link = await linkTo("mcp-server-idle-link.js");
+    const child = spawn(process.execPath, [link, "server"], {
+      env: {
+        ...process.env,
+        HOME: tmpDir,
+        XDG_CONFIG_HOME: path.join(tmpDir, "server-idle-config"),
+        TRUSTY_SQUIRE_SESSION_FILE: "1",
+        TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_MS: "200",
+        TRUSTY_SQUIRE_SERVER_IDLE_CHECK_INTERVAL_MS: "50",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    await mcpRequest(child, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "idle-smoke", version: "1" },
+      },
+    });
+
+    const exited = waitForExit(child);
+    // No stdin.end(), no kill() — only the idle timer may end this process.
+    await expect(exited).resolves.toEqual({ code: 0, signal: null });
+  }, 30_000);
+
   it("stdio survives every malformed action shape captured in the operator incident", async () => {
     const link = await linkTo("mcp-server-malformed-actions.js");
     const home = path.join(tmpDir, "malformed-actions-home");
