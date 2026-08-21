@@ -444,6 +444,54 @@ describe("operator profile pool migration stage", () => {
     expect(readdirSync(p.activeClaims)).toEqual([]);
   });
 
+  it("retains an active tombstone and preserves capacity after deferred removal fails", async () => {
+    const { root, source } = fixture();
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+    const abandoned = await acquireOperatorProfile("abandoned-session", {
+      rootDir: root,
+      sourceProfileDir: source,
+    });
+    abandoned.bindWorker({
+      host: hostname(),
+      pid: deadPid(),
+      start_time: "dead-worker",
+      user_data_dir: profilePathIdentity(abandoned.profileDir),
+    });
+    const p = operatorProfilePoolTest.paths(root);
+    const ownerPath = join(p.active, "slot-0", "owner.json");
+    const owner = JSON.parse(readFileSync(ownerPath, "utf8")) as Record<string, unknown>;
+    writeFileSync(ownerPath, `${JSON.stringify({ ...owner, start_time: "dead-owner" })}\n`);
+
+    const abandonedProfileRoot = dirname(abandoned.profileDir);
+    let failRemoval = true;
+    rmSyncObserver.hook = (path) => {
+      if (path === abandonedProfileRoot && failRemoval) {
+        failRemoval = false;
+        throw new Error("injected removal failure");
+      }
+    };
+
+    try {
+      const replacement = await acquireOperatorProfile("replacement-session", {
+        rootDir: root,
+        sourceProfileDir: source,
+      });
+      expect(existsSync(abandoned.profileDir)).toBe(true);
+      expect(readdirSync(p.tombstones)).toHaveLength(1);
+
+      const concurrent = await acquireOperatorProfile("concurrent-session", {
+        rootDir: root,
+        sourceProfileDir: source,
+      });
+      expect(existsSync(abandoned.profileDir)).toBe(false);
+      expect(readdirSync(p.tombstones)).toEqual([]);
+      await concurrent.destroy();
+      await replacement.destroy();
+    } finally {
+      rmSyncObserver.hook = null;
+    }
+  });
+
   it("restores an ambiguous quarantined lease to its original second slot", async () => {
     const { root, source } = fixture();
     await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
@@ -655,6 +703,48 @@ describe("operator profile pool migration stage", () => {
       } finally {
         await second.destroy();
       }
+    } finally {
+      rmSyncObserver.hook = null;
+    }
+  });
+
+  it("retains an expired warm tombstone and retries after deferred removal fails", async () => {
+    const { root, source } = fixture();
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+    const first = await acquireOperatorProfile("session-a", {
+      rootDir: root,
+      sourceProfileDir: source,
+    });
+    const staleProfileDir = first.profileDir;
+    await first.returnWarm("closed");
+    writeCookies(source, [{ host: ".google.com", name: "SID", value: "replacement" }]);
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+
+    const staleProfileRoot = dirname(staleProfileDir);
+    let failRemoval = true;
+    rmSyncObserver.hook = (path) => {
+      if (path === staleProfileRoot && failRemoval) {
+        failRemoval = false;
+        throw new Error("injected removal failure");
+      }
+    };
+
+    try {
+      const second = await acquireOperatorProfile("session-b", {
+        rootDir: root,
+        sourceProfileDir: source,
+      });
+      expect(existsSync(staleProfileDir)).toBe(true);
+      expect(readdirSync(operatorProfilePoolTest.paths(root).tombstones)).toHaveLength(1);
+
+      const third = await acquireOperatorProfile("session-c", {
+        rootDir: root,
+        sourceProfileDir: source,
+      });
+      expect(existsSync(staleProfileDir)).toBe(false);
+      expect(readdirSync(operatorProfilePoolTest.paths(root).tombstones)).toEqual([]);
+      await third.destroy();
+      await second.destroy();
     } finally {
       rmSyncObserver.hook = null;
     }
