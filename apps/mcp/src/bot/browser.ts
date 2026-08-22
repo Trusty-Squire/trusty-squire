@@ -597,8 +597,32 @@ function checkoutUrlOrderIdentities(
 // use neither convention — matched here as plain attribute selectors so they
 // stay valid for both frame.locator() and the native element.matches() calls
 // inside the card-group completeness check.
-const CHECKOUT_PAN_FIELD_SELECTORS =
-  'input[autocomplete~="cc-number"],input[name*="cardnumber" i],input[id*="card-number" i],input[id*="cardnumber" i],input[name*="card_no" i],input[name*="cardno" i],input[name*="card-no" i],input[id*="card_no" i],input[id*="cardno" i],input[id*="card-no" i],input[name*="card_number" i],input[id*="card_number" i],input[name*="creditno" i],input[name*="credit_no" i],input[name*="credit-no" i],input[id*="creditno" i],input[id*="credit_no" i],input[id*="credit-no" i],input[data-ts-jp-card-field="pan"]';
+const CHECKOUT_NON_PAN_IDENTITY_EXCLUSION =
+  ':not([name*="gift" i]):not([id*="gift" i]):not([name*="loyalty" i]):not([id*="loyalty" i]):not([name*="point" i]):not([id*="point" i]):not([name*="prepaid" i]):not([id*="prepaid" i]):not([name*="member" i]):not([id*="member" i])';
+
+const CHECKOUT_PAN_FIELD_SELECTORS = [
+  'input[autocomplete~="cc-number"]',
+  'input[name*="cardnumber" i]',
+  'input[id*="card-number" i]',
+  'input[id*="cardnumber" i]',
+  'input[name*="card_no" i]',
+  'input[name*="cardno" i]',
+  'input[name*="card-no" i]',
+  'input[id*="card_no" i]',
+  'input[id*="cardno" i]',
+  'input[id*="card-no" i]',
+  'input[name*="card_number" i]',
+  'input[id*="card_number" i]',
+  'input[name*="creditno" i]',
+  'input[name*="credit_no" i]',
+  'input[name*="credit-no" i]',
+  'input[id*="creditno" i]',
+  'input[id*="credit_no" i]',
+  'input[id*="credit-no" i]',
+  'input[data-ts-jp-card-field="pan"]',
+]
+  .map((selector) => `${selector}${CHECKOUT_NON_PAN_IDENTITY_EXCLUSION}`)
+  .join(",");
 
 const CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS =
   '[autocomplete~="cc-exp-month"],[name*="exp_month" i],[name*="expmonth" i],[name*="exp" i][name*="month" i],[id*="exp" i][id*="month" i],select[name*="credit" i][name*="month" i],select[name*="limit" i][name*="month" i],select[id*="limit" i][id*="month" i],select[data-ts-jp-card-exp="month"]';
