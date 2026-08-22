@@ -3731,6 +3731,151 @@ describe("split-checkout card fill (real browser)", () => {
       }
     },
   );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses a JP card-number label associated with four visible PAN segments",
+    async () => {
+      const pageUrl = "https://shop.example.test/segmented-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form>
+            <dl>
+              <dt>カード番号</dt>
+              <dd>
+                <input type="text" id="f_1"><input type="text" id="f_2">
+                <input type="text" id="f_3"><input type="text" id="f_4">
+              </dd>
+            </dl>
+            <dl><dt>カード名義</dt><dd><input type="text" id="f_5"></dd></dl>
+            <dl>
+              <dt>有効期限</dt>
+              <dd>
+                <select id="f_6"><option value="">月を指定</option><option value="12">12</option></select>
+                <select id="f_7"><option value="">年を指定</option><option value="30">2030</option></select>
+              </dd>
+            </dl>
+            <dl><dt>セキュリティコード</dt><dd><input type="text" id="f_8"></dd></dl>
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+          "payment_field_not_found:pan",
+        );
+        await expect(
+          page.locator("input").evaluateAll((inputs) =>
+            inputs.map((input) => (input as HTMLInputElement).value),
+          ),
+        ).resolves.toEqual(["", "", "", "", "", ""]);
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses ambiguous same-form JP PAN substring candidates before filling",
+    async () => {
+      const pageUrl = "https://shop.example.test/ambiguous-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form>
+            <input type="text" name="GIFT_CARD_NO" id="gift-card">
+            <input type="text" name="CREDIT_NO" id="credit-card">
+            <input type="text" name="CREDIT_NAME" id="holder">
+            <select name="CREDIT_LIMIT_MONTH"><option value="">月を指定</option><option value="12">12</option></select>
+            <select name="CREDIT_LIMIT_YEAR"><option value="">年を指定</option><option value="30">2030</option></select>
+            <input type="text" name="SECURITY_CD" id="cvv">
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+          "payment_card_form_ambiguous",
+        );
+        expect(await page.locator("#gift-card").inputValue()).toBe("");
+        expect(await page.locator("#credit-card").inputValue()).toBe("");
+        expect(await page.locator("#holder").inputValue()).toBe("");
+        expect(await page.locator("#cvv").inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "resolves label-for and wrapped-label JP expiry pairs and cleans replaced selects",
+    async () => {
+      const expiryOptions = `
+        <option value="">月を指定</option><option value="12">December</option>`;
+      const yearOptions = `
+        <option value="">年を指定</option><option value="30">Two thousand thirty</option>`;
+      const cases = [
+        {
+          name: "label-for",
+          expiry: `
+            <label for="expiry-month">有効期限</label>
+            <select id="expiry-month">${expiryOptions}</select>
+            <select id="expiry-year">${yearOptions}</select>`,
+        },
+        {
+          name: "wrapped-label",
+          expiry: `
+            <label>有効期限
+              <select id="expiry-month">${expiryOptions}</select>
+              <select id="expiry-year">${yearOptions}</select>
+            </label>`,
+        },
+      ];
+
+      for (const testCase of cases) {
+        const pageUrl = `https://shop.example.test/${testCase.name}.html`;
+        const { page, browser } = await servePages({
+          [pageUrl]: `
+            <meta charset="utf-8">
+            <form>
+              <input autocomplete="cc-number">
+              <input autocomplete="cc-name">
+              ${testCase.expiry}
+              <input autocomplete="cc-csc">
+            </form>`,
+        });
+        try {
+          await page.goto(pageUrl);
+          const controller = new BrowserController({ humanize: false });
+          (controller as unknown as { page: Page }).page = page;
+
+          await controller.fillCheckoutCardFields(CARD);
+          expect(await page.locator("#expiry-month").inputValue()).toBe("12");
+          expect(await page.locator("#expiry-year").inputValue()).toBe("30");
+
+          await page.locator("select").evaluateAll((selects) => {
+            for (const original of selects) {
+              const replacement = original.cloneNode(true) as HTMLSelectElement;
+              replacement.removeAttribute("data-ts-sealed-payment");
+              replacement.value = (original as HTMLSelectElement).value;
+              original.replaceWith(replacement);
+            }
+          });
+          await controller.clearCheckoutCardFields();
+
+          expect(await page.locator("#expiry-month").inputValue()).toBe("");
+          expect(await page.locator("#expiry-year").inputValue()).toBe("");
+        } finally {
+          await browser.close();
+        }
+      }
+    },
+  );
 });
 describe("3DS detection vs captcha frames", () => {
   async function detectInRealPage(

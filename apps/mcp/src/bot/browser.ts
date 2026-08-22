@@ -600,11 +600,31 @@ function checkoutUrlOrderIdentities(
 const CHECKOUT_PAN_FIELD_SELECTORS =
   'input[autocomplete~="cc-number"],input[name*="cardnumber" i],input[id*="card-number" i],input[id*="cardnumber" i],input[name*="card_no" i],input[name*="cardno" i],input[name*="card-no" i],input[id*="card_no" i],input[id*="cardno" i],input[id*="card-no" i],input[name*="card_number" i],input[id*="card_number" i],input[name*="creditno" i],input[name*="credit_no" i],input[name*="credit-no" i],input[id*="creditno" i],input[id*="credit_no" i],input[id*="credit-no" i],input[data-ts-jp-card-field="pan"]';
 
+const CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS =
+  '[autocomplete~="cc-exp-month"],[name*="exp_month" i],[name*="expmonth" i],[name*="exp" i][name*="month" i],[id*="exp" i][id*="month" i],select[name*="credit" i][name*="month" i],select[name*="limit" i][name*="month" i],select[id*="limit" i][id*="month" i],select[data-ts-jp-card-exp="month"]';
+
+const CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS =
+  '[autocomplete~="cc-exp-year"],[name*="exp_year" i],[name*="expyear" i],[name*="exp" i][name*="year" i],[id*="exp" i][id*="year" i],select[name*="credit" i][name*="year" i],select[name*="limit" i][name*="year" i],select[id*="limit" i][id*="year" i],select[data-ts-jp-card-exp="year"]';
+
+const CHECKOUT_COMBINED_EXPIRY_FIELD_SELECTORS =
+  'input[autocomplete~="cc-exp"],input[name*="expir" i]:not([name*="month" i]):not([name*="year" i]),input[name="exp" i],input[name*="exp-date" i],input[id*="expir" i]:not([id*="month" i]):not([id*="year" i]),input[id="exp" i],input[id*="exp-date" i],input[placeholder="MM/YY" i],input[placeholder="MM / YY" i],input[aria-label="MM/YY" i],input[aria-label="MM / YY" i],label:has-text("MM/YY") input,label:has-text("MM / YY") input';
+
+const CHECKOUT_COMBINED_EXPIRY_GROUP_SELECTORS =
+  'input[autocomplete~="cc-exp"],input[name*="expir" i]:not([name*="month" i]):not([name*="year" i]),input[name="exp" i],input[name*="exp-date" i],input[id*="expir" i]:not([id*="month" i]):not([id*="year" i]),input[id="exp" i],input[id*="exp-date" i],input[placeholder="MM/YY" i],input[placeholder="MM / YY" i],input[aria-label="MM/YY" i],input[aria-label="MM / YY" i]';
+
+const CHECKOUT_CVV_FIELD_SELECTORS =
+  'input[autocomplete~="cc-csc"],input[name*="cvv" i],input[name*="cvc" i],input[name*="security-code" i],input[id*="cvv" i],input[id*="cvc" i],input[name*="security_cd" i],input[name*="securitycd" i],input[name*="sec_code" i],input[name*="seccode" i],input[id*="security_cd" i],input[data-ts-jp-card-field="cvv"]';
+
+const CHECKOUT_CARD_NAME_FIELD_SELECTORS =
+  'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i],input[name*="card_name" i],input[name*="credit_name" i],input[id*="card_name" i],input[id*="credit_name" i],input[data-ts-jp-card-field="name"]';
+
 const CHECKOUT_CARD_VALUE_FIELD_SELECTORS = [
   CHECKOUT_PAN_FIELD_SELECTORS,
-  'input[autocomplete~="cc-exp"],input[autocomplete~="cc-exp-month"],input[autocomplete~="cc-exp-year"],input[name*="expir" i],input[name="exp" i],input[name*="exp_month" i],input[name*="expmonth" i],input[name*="exp_year" i],input[name*="expyear" i],input[id*="expir" i],input[id="exp" i],input[id*="exp-date" i],input[id*="exp" i][id*="month" i],input[id*="exp" i][id*="year" i],input[placeholder="MM/YY" i],input[placeholder="MM / YY" i],input[aria-label="MM/YY" i],input[aria-label="MM / YY" i]',
-  'input[autocomplete~="cc-csc"],input[name*="cvv" i],input[name*="cvc" i],input[name*="security-code" i],input[id*="cvv" i],input[id*="cvc" i],input[name*="security_cd" i],input[name*="securitycd" i],input[name*="sec_code" i],input[name*="seccode" i],input[id*="security_cd" i],input[data-ts-jp-card-field="cvv"]',
-  'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i],input[name*="card_name" i],input[name*="credit_name" i],input[id*="card_name" i],input[id*="credit_name" i],input[data-ts-jp-card-field="name"]',
+  CHECKOUT_COMBINED_EXPIRY_GROUP_SELECTORS,
+  CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS,
+  CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS,
+  CHECKOUT_CVV_FIELD_SELECTORS,
+  CHECKOUT_CARD_NAME_FIELD_SELECTORS,
 ].join(",");
 
 // Charge-verb button labels — the click that may move money. Used by
@@ -8404,29 +8424,62 @@ export class BrowserController {
         frame
           .evaluate(
             (labels) => {
-              const isTextInput = (el: Element | null): el is HTMLInputElement =>
-                el instanceof HTMLInputElement &&
-                (el.type === "text" || el.type === "tel");
-              const findAssociatedInput = (host: Element): HTMLInputElement | null => {
+              document
+                .querySelectorAll('[data-ts-jp-card-field],[data-ts-jp-card-exp]')
+                .forEach((element) => {
+                  element.removeAttribute("data-ts-jp-card-field");
+                  element.removeAttribute("data-ts-jp-card-exp");
+                });
+              const isVisible = (element: HTMLElement): boolean => {
+                if (element.matches(":disabled") || element.getClientRects().length === 0) {
+                  return false;
+                }
+                let current: Element | null = element;
+                while (current !== null) {
+                  const style = getComputedStyle(current);
+                  if (
+                    style.display === "none" ||
+                    style.visibility === "hidden" ||
+                    style.visibility === "collapse" ||
+                    Number.parseFloat(style.opacity) <= 0
+                  ) {
+                    return false;
+                  }
+                  current = current.parentElement;
+                }
+                return true;
+              };
+              const isTextInput = (element: Element): element is HTMLInputElement =>
+                element instanceof HTMLInputElement &&
+                (element.type === "text" || element.type === "tel") &&
+                isVisible(element);
+              const associatedElements = (host: Element, selector: string): Element[] => {
+                const associated = new Set<Element>();
                 if (host instanceof HTMLLabelElement && host.htmlFor.length > 0) {
                   const byId = document.getElementById(host.htmlFor);
-                  if (isTextInput(byId)) return byId;
+                  if (byId?.matches(selector)) associated.add(byId);
                 }
-                const nested = host.querySelector("input");
-                if (isTextInput(nested)) return nested;
+                host.querySelectorAll(selector).forEach((element) => associated.add(element));
                 const sibling = host.nextElementSibling;
                 if (sibling !== null) {
-                  const inSibling = sibling.querySelector("input");
-                  if (isTextInput(inSibling)) return inSibling;
+                  if (sibling.matches(selector)) associated.add(sibling);
+                  sibling.querySelectorAll(selector).forEach((element) => associated.add(element));
+                  if (selector === "select" && sibling instanceof HTMLSelectElement) {
+                    let adjacent = sibling.nextElementSibling;
+                    while (adjacent instanceof HTMLSelectElement) {
+                      associated.add(adjacent);
+                      adjacent = adjacent.nextElementSibling;
+                    }
+                  }
                 }
-                return null;
+                return [...associated];
               };
               const stampField = (host: Element, fieldLabels: string[], attrValue: string): void => {
                 const text = (host.textContent ?? "").trim();
                 if (!fieldLabels.some((label) => text.includes(label))) return;
-                const input = findAssociatedInput(host);
-                if (input !== null && !input.hasAttribute("data-ts-jp-card-field")) {
-                  input.setAttribute("data-ts-jp-card-field", attrValue);
+                const inputs = associatedElements(host, "input").filter(isTextInput);
+                if (inputs.length === 1) {
+                  inputs[0].setAttribute("data-ts-jp-card-field", attrValue);
                 }
               };
               document
@@ -8437,13 +8490,24 @@ export class BrowserController {
                   stampField(host, labels.cvv, "cvv");
                   const text = (host.textContent ?? "").trim();
                   if (!labels.expiry.some((label) => text.includes(label))) return;
-                  const container = host.nextElementSibling ?? host.parentElement;
-                  container?.querySelectorAll("select").forEach((select) => {
-                    if (select.hasAttribute("data-ts-jp-card-exp")) return;
-                    const firstOption = select.options[0]?.textContent ?? "";
-                    if (firstOption.includes("月")) select.setAttribute("data-ts-jp-card-exp", "month");
-                    else if (firstOption.includes("年")) select.setAttribute("data-ts-jp-card-exp", "year");
-                  });
+                  const selects = associatedElements(host, "select").filter(
+                    (element): element is HTMLSelectElement =>
+                      element instanceof HTMLSelectElement && isVisible(element),
+                  );
+                  const monthSelects = selects.filter((select) =>
+                    (select.options[0]?.textContent ?? "").includes("月"),
+                  );
+                  const yearSelects = selects.filter((select) =>
+                    (select.options[0]?.textContent ?? "").includes("年"),
+                  );
+                  if (
+                    monthSelects.length === 1 &&
+                    yearSelects.length === 1 &&
+                    monthSelects[0] !== yearSelects[0]
+                  ) {
+                    monthSelects[0].setAttribute("data-ts-jp-card-exp", "month");
+                    yearSelects[0].setAttribute("data-ts-jp-card-exp", "year");
+                  }
                 });
             },
             { pan: panLabels, name: nameLabels, cvv: cvvLabels, expiry: expiryLabels },
@@ -8465,23 +8529,6 @@ export class BrowserController {
     assertFrameEgress?: (frame: Frame, resolvedOrigin?: string) => void,
   ): Promise<CheckoutCardGroupScope | undefined> {
     const filled = new Set<string>();
-    // JP EC platforms commonly render expiry as two native <select>s rather
-    // than a combined MM/YY text input (see stampJapaneseCardLabelFields).
-    // "credit"+"month"/"year" catches EbisuMart's CREDIT_LIMIT_MONTH/YEAR
-    // convention; the data-ts-jp-card-exp attribute is the label-text fallback
-    // for platforms whose select names carry no month/year hint at all.
-    const expiryMonthSelectors =
-      '[autocomplete~="cc-exp-month"],[name*="exp_month" i],[name*="expmonth" i],[name*="exp" i][name*="month" i],[id*="exp" i][id*="month" i],select[name*="credit" i][name*="month" i],select[name*="limit" i][name*="month" i],select[id*="limit" i][id*="month" i],select[data-ts-jp-card-exp="month"]';
-    const expiryYearSelectors =
-      '[autocomplete~="cc-exp-year"],[name*="exp_year" i],[name*="expyear" i],[name*="exp" i][name*="year" i],[id*="exp" i][id*="year" i],select[name*="credit" i][name*="year" i],select[name*="limit" i][name*="year" i],select[id*="limit" i][id*="year" i],select[data-ts-jp-card-exp="year"]';
-    const combinedExpirySelectors =
-      'input[autocomplete~="cc-exp"],input[name*="expir" i]:not([name*="month" i]):not([name*="year" i]),input[name="exp" i],input[name*="exp-date" i],input[id*="expir" i]:not([id*="month" i]):not([id*="year" i]),input[id="exp" i],input[id*="exp-date" i],input[placeholder="MM/YY" i],input[placeholder="MM / YY" i],input[aria-label="MM/YY" i],input[aria-label="MM / YY" i],label:has-text("MM/YY") input,label:has-text("MM / YY") input';
-    const combinedExpiryGroupSelectors =
-      'input[autocomplete~="cc-exp"],input[name*="expir" i]:not([name*="month" i]):not([name*="year" i]),input[name="exp" i],input[name*="exp-date" i],input[id*="expir" i]:not([id*="month" i]):not([id*="year" i]),input[id="exp" i],input[id*="exp-date" i],input[placeholder="MM/YY" i],input[placeholder="MM / YY" i],input[aria-label="MM/YY" i],input[aria-label="MM / YY" i]';
-    const cvvSelectors =
-      'input[autocomplete~="cc-csc"],input[name*="cvv" i],input[name*="cvc" i],input[name*="security-code" i],input[id*="cvv" i],input[id*="cvc" i],input[name*="security_cd" i],input[name*="securitycd" i],input[name*="sec_code" i],input[name*="seccode" i],input[id*="security_cd" i],input[data-ts-jp-card-field="cvv"]';
-    const nameSelectors =
-      'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i],input[name*="card_name" i],input[name*="credit_name" i],input[id*="card_name" i],input[id*="credit_name" i],input[data-ts-jp-card-field="name"]';
 
     type CardGroup = CheckoutCardGroupRoot & { panTopmost: boolean };
     const groups = new Map<string, CardGroup>();
@@ -8500,19 +8547,6 @@ export class BrowserController {
               element.removeAttribute("data-ts-payment-billing-context");
               element.removeAttribute("data-ts-payment-billing-owner");
               element.removeAttribute("data-ts-payment-frame-owner");
-            }
-          })
-          .catch(() => undefined),
-      ),
-    );
-    await Promise.all(
-      frames.map((frame) =>
-        frame
-          .locator('[data-ts-jp-card-field],[data-ts-jp-card-exp]')
-          .evaluateAll((elements) => {
-            for (const element of elements) {
-              element.removeAttribute("data-ts-jp-card-field");
-              element.removeAttribute("data-ts-jp-card-exp");
             }
           })
           .catch(() => undefined),
@@ -8556,10 +8590,10 @@ export class BrowserController {
                 root instanceof HTMLFormElement
                   ? Array.from(root.elements)
                   : Array.from(root.querySelectorAll("input,select,textarea,button"));
-              const has = (root: Element, selector: string): boolean =>
-                ownedControls(root).some(
+              const count = (root: Element, selector: string): number =>
+                ownedControls(root).filter(
                   (element) => element.matches(selector) && isFillable(element),
-                );
+                ).length;
               // Match the operator observation's actual rendered hit-test, rather
               // than trusting structural visibility. Shopify can mount two complete
               // PCI forms at once while one is covered by the other.
@@ -8580,13 +8614,15 @@ export class BrowserController {
               const form = input instanceof HTMLInputElement ? input.form : input.closest("form");
               let root: Element | null = form ?? input.parentElement;
               while (root !== null && root !== document.body && root !== document.documentElement) {
-                const hasCombinedExpiry = has(root, selectors.combinedExpiry);
-                const hasSplitExpiry =
-                  has(root, selectors.expiryMonth) && has(root, selectors.expiryYear);
+                const combinedExpiryCount = count(root, selectors.combinedExpiry);
+                const expiryMonthCount = count(root, selectors.expiryMonth);
+                const expiryYearCount = count(root, selectors.expiryYear);
+                const hasCombinedExpiry = combinedExpiryCount === 1;
+                const hasSplitExpiry = expiryMonthCount === 1 && expiryYearCount === 1;
                 const complete =
-                  has(root, selectors.pan) &&
-                  has(root, selectors.cvv) &&
-                  has(root, selectors.name) &&
+                  count(root, selectors.pan) === 1 &&
+                  count(root, selectors.cvv) === 1 &&
+                  count(root, selectors.name) === 1 &&
                   (hasCombinedExpiry || hasSplitExpiry);
                 if (complete) {
                   const existing = root.getAttribute("data-ts-payment-card-group");
@@ -8609,11 +8645,11 @@ export class BrowserController {
             {
               token: proposedToken,
               pan: CHECKOUT_PAN_FIELD_SELECTORS,
-              cvv: cvvSelectors,
-              name: nameSelectors,
-              combinedExpiry: combinedExpiryGroupSelectors,
-              expiryMonth: expiryMonthSelectors,
-              expiryYear: expiryYearSelectors,
+              cvv: CHECKOUT_CVV_FIELD_SELECTORS,
+              name: CHECKOUT_CARD_NAME_FIELD_SELECTORS,
+              combinedExpiry: CHECKOUT_COMBINED_EXPIRY_GROUP_SELECTORS,
+              expiryMonth: CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS,
+              expiryYear: CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS,
             },
           )
           .catch(() => null);
@@ -8950,11 +8986,11 @@ export class BrowserController {
             groupToken: cardGroup.token,
             selectors: {
               pan: CHECKOUT_PAN_FIELD_SELECTORS,
-              cvv: cvvSelectors,
-              name: nameSelectors,
-              combinedExpiry: combinedExpiryGroupSelectors,
-              expiryMonth: expiryMonthSelectors,
-              expiryYear: expiryYearSelectors,
+              cvv: CHECKOUT_CVV_FIELD_SELECTORS,
+              name: CHECKOUT_CARD_NAME_FIELD_SELECTORS,
+              combinedExpiry: CHECKOUT_COMBINED_EXPIRY_GROUP_SELECTORS,
+              expiryMonth: CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS,
+              expiryYear: CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS,
             },
           },
         )
@@ -8993,6 +9029,47 @@ export class BrowserController {
       }
     }
 
+    const cardFieldCandidates = (selectors: string): Array<{ frame: Frame; matches: Locator }> =>
+      cardGroup !== undefined
+        ? [
+            {
+              frame: cardGroup.frame,
+              matches: cardGroup.frame
+                .locator(selectors)
+                .and(
+                  cardGroup.frame.locator(
+                    `[data-ts-payment-card-control-group="${cardGroup.token}"]`,
+                  ),
+                ),
+            },
+          ]
+        : frames.map((frame) => ({ frame, matches: frame.locator(selectors) }));
+    const countFillableCardFields = async (selectors: string): Promise<number> => {
+      let fillable = 0;
+      for (const { matches } of cardFieldCandidates(selectors)) {
+        const count = Math.min(await matches.count().catch(() => 0), 10);
+        for (let index = 0; index < count; index += 1) {
+          const candidate = matches.nth(index);
+          if (!(await candidate.isVisible().catch(() => false))) continue;
+          if (await candidate.isEnabled().catch(() => false)) fillable += 1;
+        }
+      }
+      return fillable;
+    };
+    const requireExactlyOneCardField = async (
+      field: string,
+      selectors: string,
+    ): Promise<void> => {
+      const count = await countFillableCardFields(selectors);
+      if (count > 1) throw new Error("payment_card_form_ambiguous");
+      if (count === 0) throw new Error(`payment_field_not_found:${field}`);
+    };
+    const refuseAmbiguousCardField = async (selectors: string): Promise<void> => {
+      if ((await countFillableCardFields(selectors)) > 1) {
+        throw new Error("payment_card_form_ambiguous");
+      }
+    };
+
     const fillFirst = async (
       field: string,
       value: string | undefined,
@@ -9002,28 +9079,21 @@ export class BrowserController {
       withinBillingContext = false,
     ): Promise<boolean> => {
       if (value === undefined || value.length === 0) return false;
-      const candidates: Array<{ frame: Frame; matches: Locator }> =
-        withinCardGroup && cardGroup !== undefined
-          ? [
-              {
-                frame: cardGroup.frame,
-                matches: cardGroup.frame
-                  .locator(selectors)
-                  .and(
-                    cardGroup.frame.locator(
-                      `[data-ts-payment-card-control-group="${cardGroup.token}"]`,
-                    ),
-                  ),
-              },
-            ]
-          : withinBillingContext
-            ? billingRoots.map(({ frame, token }) => ({
-                frame,
-                matches: frame
-                  .locator(selectors)
-                  .and(frame.locator(`[data-ts-payment-billing-owner="${token}"]`)),
-              }))
-            : frames.map((frame) => ({ frame, matches: frame.locator(selectors) }));
+      const candidates: Array<{ frame: Frame; matches: Locator }> = withinCardGroup
+        ? cardFieldCandidates(selectors)
+        : withinBillingContext
+          ? billingRoots.map(({ frame, token }) => ({
+              frame,
+              matches: frame
+                .locator(selectors)
+                .and(frame.locator(`[data-ts-payment-billing-owner="${token}"]`)),
+            }))
+          : frames.map((frame) => ({ frame, matches: frame.locator(selectors) }));
+      if (withinCardGroup) {
+        const fillableCount = await countFillableCardFields(selectors);
+        if (fillableCount > 1) throw new Error("payment_card_form_ambiguous");
+        if (fillableCount === 0) return false;
+      }
       for (const { frame, matches } of candidates) {
         const count = Math.min(await matches.count().catch(() => 0), 10);
         for (let i = 0; i < count; i += 1) {
@@ -9160,39 +9230,40 @@ export class BrowserController {
       }
       return false;
     };
-    const hasFillable = async (selectors: string, withinCardGroup = false): Promise<boolean> => {
-      const candidateFrames =
-        withinCardGroup && cardGroup !== undefined ? [cardGroup.frame] : frames;
-      for (const frame of candidateFrames) {
-        const matches =
-          withinCardGroup && cardGroup !== undefined
-            ? frame
-                .locator(selectors)
-                .and(frame.locator(`[data-ts-payment-card-control-group="${cardGroup.token}"]`))
-            : frame.locator(selectors);
-        const count = Math.min(await matches.count().catch(() => 0), 10);
-        for (let i = 0; i < count; i += 1) {
-          const input = matches.nth(i);
-          if (!(await input.isVisible().catch(() => false))) continue;
-          if (await input.isEnabled().catch(() => false)) return true;
-        }
-      }
-      return false;
-    };
-
+    await requireExactlyOneCardField("pan", CHECKOUT_PAN_FIELD_SELECTORS);
+    await refuseAmbiguousCardField(CHECKOUT_CVV_FIELD_SELECTORS);
+    await refuseAmbiguousCardField(CHECKOUT_CARD_NAME_FIELD_SELECTORS);
+    const combinedExpiryCount = await countFillableCardFields(
+      CHECKOUT_COMBINED_EXPIRY_FIELD_SELECTORS,
+    );
+    const expiryMonthCount = await countFillableCardFields(
+      CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS,
+    );
+    const expiryYearCount = await countFillableCardFields(CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS);
+    if (combinedExpiryCount > 1 || expiryMonthCount > 1 || expiryYearCount > 1) {
+      throw new Error("payment_card_form_ambiguous");
+    }
+    const hasCombinedExpiry = combinedExpiryCount === 1;
+    const hasSplitExpiry = expiryMonthCount === 1 && expiryYearCount === 1;
+    if (!hasCombinedExpiry && !hasSplitExpiry) {
+      throw new Error("payment_field_not_found:expiry");
+    }
     await fillFirst("pan", card.pan, CHECKOUT_PAN_FIELD_SELECTORS, false, true);
-    const hasSplitExpiry =
-      (await hasFillable(expiryMonthSelectors, true)) &&
-      (await hasFillable(expiryYearSelectors, true));
     if (hasSplitExpiry) {
       await fillFirst(
         "exp_month",
         card.exp_month.padStart(2, "0"),
-        expiryMonthSelectors,
+        CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS,
         false,
         true,
       );
-      await fillFirst("exp_year", card.exp_year, expiryYearSelectors, false, true);
+      await fillFirst(
+        "exp_year",
+        card.exp_year,
+        CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS,
+        false,
+        true,
+      );
     } else {
       // A combined expiry field's formatter owns the slash. Send only the four
       // digits as real key events so numeric-only fields accept them and the
@@ -9200,7 +9271,7 @@ export class BrowserController {
       const combined = await fillFirst(
         "expiry",
         `${card.exp_month.padStart(2, "0")}${card.exp_year.slice(-2)}`,
-        combinedExpirySelectors,
+        CHECKOUT_COMBINED_EXPIRY_FIELD_SELECTORS,
         true,
         true,
       );
@@ -9208,16 +9279,22 @@ export class BrowserController {
         await fillFirst(
           "exp_month",
           card.exp_month.padStart(2, "0"),
-          expiryMonthSelectors,
+          CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS,
           false,
           true,
         );
-        await fillFirst("exp_year", card.exp_year, expiryYearSelectors, false, true);
+        await fillFirst(
+          "exp_year",
+          card.exp_year,
+          CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS,
+          false,
+          true,
+        );
       }
     }
     const fields: Array<[string, string | undefined, string, string?]> = [
-      ["cvv", card.cvv, cvvSelectors],
-      ["name", card.name, nameSelectors],
+      ["cvv", card.cvv, CHECKOUT_CVV_FIELD_SELECTORS],
+      ["name", card.name, CHECKOUT_CARD_NAME_FIELD_SELECTORS],
       [
         "line1",
         card.billing.line1,
@@ -9690,12 +9767,26 @@ export class BrowserController {
 
   private async clearCheckoutCardFieldsInFrames(frames: readonly Frame[]): Promise<void> {
     if (!this.page) return;
+    await this.stampJapaneseCardLabelFields(frames);
     for (const frame of frames) {
       const fields = frame.locator(CHECKOUT_CARD_VALUE_FIELD_SELECTORS);
       const count = Math.min(await fields.count().catch(() => 0), 40);
       for (let i = 0; i < count; i += 1) {
         const field = fields.nth(i);
-        await field.fill("").catch(() => undefined);
+        const tag = await field.evaluate((element) => element.tagName.toLowerCase()).catch(() => "");
+        if (tag === "select") {
+          await field
+            .evaluate((element) => {
+              if (!(element instanceof HTMLSelectElement)) return;
+              element.value = "";
+              if (element.value !== "") element.selectedIndex = -1;
+              element.dispatchEvent(new Event("input", { bubbles: true }));
+              element.dispatchEvent(new Event("change", { bubbles: true }));
+            })
+            .catch(() => undefined);
+        } else {
+          await field.fill("").catch(() => undefined);
+        }
         await field
           .evaluate((element) => element.removeAttribute("data-ts-sealed-payment"))
           .catch(() => undefined);
@@ -9703,13 +9794,16 @@ export class BrowserController {
     }
     await this.clearSealedPaymentFieldsInFrames(frames);
     await this.page.waitForTimeout(0).catch(() => undefined);
+    await this.stampJapaneseCardLabelFields(frames);
     for (const frame of frames) {
       const uncleared = await frame
         .locator(CHECKOUT_CARD_VALUE_FIELD_SELECTORS)
         .evaluateAll((elements) =>
           elements.some(
             (element) =>
-              (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) &&
+              (element instanceof HTMLInputElement ||
+                element instanceof HTMLTextAreaElement ||
+                element instanceof HTMLSelectElement) &&
               element.value.length > 0,
           ),
         )
