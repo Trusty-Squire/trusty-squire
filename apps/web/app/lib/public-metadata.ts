@@ -5,7 +5,7 @@ const SOCIAL_IMAGE = {
   url: "/opengraph-image",
   width: 1200,
   height: 630,
-  alt: "Trusty Squire completing a website signup and sealing the generated API key",
+  alt: "Trusty Squire signing up for a website and keeping the generated secret out of chat, code, and .env",
 };
 
 interface PublicMetadataOptions {
