@@ -1,6 +1,7 @@
 import { ImageResponse } from "next/og";
 
-export const alt = "Trusty Squire completing a website signup and sealing the generated API key";
+export const alt =
+  "Trusty Squire signing up for a website and keeping the generated secret out of chat, code, and .env";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
@@ -41,11 +42,11 @@ export default function OpenGraphImage() {
       <div style={{ display: "flex", gap: 46, alignItems: "flex-end" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 24, width: 620 }}>
           <div style={{ fontSize: 58, lineHeight: 1.04, letterSpacing: "-0.045em" }}>
-            Let your coding agent get the account and keep the key safe.
+            Trusty Squire signs up and signs in to websites for you.
           </div>
           <div style={{ color: "#9a9aa4", fontSize: 23, lineHeight: 1.45 }}>
-            Signup, setup, and write-only credential storage for Claude Code, Codex, Cursor,
-            OpenCode, and Goose.
+            Gets past signup walls and bot detection, and keeps the generated secret out of chat,
+            code, and .env.
           </div>
         </div>
 
