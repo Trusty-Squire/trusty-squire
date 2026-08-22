@@ -4328,14 +4328,16 @@ export class BrowserController {
   // across the intervening await.
   private async withModalInertNeutralized<T>(
     selector: string,
-    fn: () => Promise<T>,
+    fn: (modalActive: boolean) => Promise<T>,
   ): Promise<T> {
     if (!this.page) throw new Error("Browser not started");
     const marker = "data-ts-inert-neutralized";
-    await this.page
+    const anchorMarker = "data-ts-inert-region-anchor";
+    const modalActive = await this.page
       .$eval(
         selector,
-        (el, marker) => {
+        (el, markers) => {
+          const { marker, anchorMarker } = markers;
           const composedParent = (node: Node): Element | null => {
             const parent = node.parentNode;
             if (parent === null) return null;
@@ -4354,7 +4356,9 @@ export class BrowserController {
             }
             return null;
           };
-          if (nearestModalRegion(el) === null) return;
+          const region = nearestModalRegion(el);
+          if (region === null) return false;
+          region.setAttribute(anchorMarker, "1");
           let cur: Element | null = el;
           while (cur !== null) {
             if (cur.hasAttribute("inert")) {
@@ -4363,36 +4367,56 @@ export class BrowserController {
             }
             cur = composedParent(cur);
           }
+          return true;
         },
-        marker,
+        { marker, anchorMarker },
       )
-      .catch(() => undefined);
+      .catch(() => false);
     try {
-      return await fn();
+      return await fn(modalActive);
     } finally {
       await this.page
-        .evaluate((marker) => {
-          const restoreMarked = (root: Document | ShadowRoot): void => {
-            root.querySelectorAll(`[${marker}]`).forEach((el) => {
-              el.removeAttribute(marker);
-              el.setAttribute("inert", "");
-            });
+        .evaluate((markers) => {
+          const { marker, anchorMarker } = markers;
+          const visitComposed = (
+            root: Document | ShadowRoot,
+            selector: string,
+            visit: (el: Element) => void,
+          ): void => {
+            root.querySelectorAll(selector).forEach(visit);
             root.querySelectorAll("*").forEach((el) => {
-              if (el.shadowRoot !== null) restoreMarked(el.shadowRoot);
+              if (el.shadowRoot !== null) visitComposed(el.shadowRoot, selector, visit);
             });
           };
-          restoreMarked(document);
-        }, marker)
+          const isDialogElement = (element: Element): boolean =>
+            element.getAttribute("role") === "dialog" ||
+            element.tagName.toLowerCase() === "dialog" ||
+            element.getAttribute("aria-modal") === "true";
+          let shouldRestore = true;
+          let foundAnchor = false;
+          visitComposed(document, `[${anchorMarker}]`, (anchor) => {
+            foundAnchor = true;
+            if (!anchor.isConnected || !isDialogElement(anchor)) shouldRestore = false;
+            anchor.removeAttribute(anchorMarker);
+          });
+          if (!foundAnchor) shouldRestore = false;
+          visitComposed(document, `[${marker}]`, (el) => {
+            el.removeAttribute(marker);
+            if (shouldRestore) el.setAttribute("inert", "");
+          });
+        }, { marker, anchorMarker })
         .catch(() => undefined);
     }
   }
 
   async click(selector: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
-    await this.withModalInertNeutralized(selector, () => this.clickInner(selector));
+    await this.withModalInertNeutralized(selector, (modalActive) =>
+      this.clickInner(selector, modalActive),
+    );
   }
 
-  private async clickInner(selector: string): Promise<void> {
+  private async clickInner(selector: string, modalActive: boolean): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     // Radio/checkbox inputs — especially the visually-hidden kind behind a
     // styled label (kinde's `kui-util-hide-visually` SDK-picker radios) — don't
@@ -4454,7 +4478,12 @@ export class BrowserController {
       if (optRole !== "") {
         const role = optRole as "option" | "menuitem" | "menuitemradio";
         if (optName.length > 0) {
-          const byName = this.page.getByRole(role, { name: optName, exact: false }).first();
+          const byName = modalActive
+            ? this.page
+                .locator('[data-ts-inert-region-anchor]')
+                .getByRole(role, { name: optName, exact: false })
+                .first()
+            : this.page.getByRole(role, { name: optName, exact: false }).first();
           if ((await byName.count().catch(() => 0)) > 0) {
             await byName.click({ timeout: 8000 });
             return;
@@ -12180,8 +12209,10 @@ export class BrowserController {
     fn: () => Promise<T>,
   ): Promise<T> {
     const marker = "data-ts-inert-neutralized";
+    const anchorMarker = "data-ts-inert-region-anchor";
     await handle
-      .evaluate((el, marker) => {
+      .evaluate((el, markers) => {
+        const { marker, anchorMarker } = markers;
         const composedParent = (node: Node): Element | null => {
           const parent = node.parentNode;
           if (parent === null) return null;
@@ -12200,7 +12231,9 @@ export class BrowserController {
           }
           return null;
         };
-        if (nearestModalRegion(el) === null) return;
+        const region = nearestModalRegion(el);
+        if (region === null) return;
+        region.setAttribute(anchorMarker, "1");
         let cur: Element | null = el;
         while (cur !== null) {
           if (cur.hasAttribute("inert")) {
@@ -12209,24 +12242,41 @@ export class BrowserController {
           }
           cur = composedParent(cur);
         }
-      }, marker)
+      }, { marker, anchorMarker })
       .catch(() => undefined);
     try {
       return await fn();
     } finally {
       await frame
-        .evaluate((marker) => {
-          const restoreMarked = (root: Document | ShadowRoot): void => {
-            root.querySelectorAll(`[${marker}]`).forEach((el) => {
-              el.removeAttribute(marker);
-              el.setAttribute("inert", "");
-            });
+        .evaluate((markers) => {
+          const { marker, anchorMarker } = markers;
+          const visitComposed = (
+            root: Document | ShadowRoot,
+            selector: string,
+            visit: (el: Element) => void,
+          ): void => {
+            root.querySelectorAll(selector).forEach(visit);
             root.querySelectorAll("*").forEach((el) => {
-              if (el.shadowRoot !== null) restoreMarked(el.shadowRoot);
+              if (el.shadowRoot !== null) visitComposed(el.shadowRoot, selector, visit);
             });
           };
-          restoreMarked(document);
-        }, marker)
+          const isDialogElement = (element: Element): boolean =>
+            element.getAttribute("role") === "dialog" ||
+            element.tagName.toLowerCase() === "dialog" ||
+            element.getAttribute("aria-modal") === "true";
+          let shouldRestore = true;
+          let foundAnchor = false;
+          visitComposed(document, `[${anchorMarker}]`, (anchor) => {
+            foundAnchor = true;
+            if (!anchor.isConnected || !isDialogElement(anchor)) shouldRestore = false;
+            anchor.removeAttribute(anchorMarker);
+          });
+          if (!foundAnchor) shouldRestore = false;
+          visitComposed(document, `[${marker}]`, (el) => {
+            el.removeAttribute(marker);
+            if (shouldRestore) el.setAttribute("inert", "");
+          });
+        }, { marker, anchorMarker })
         .catch(() => undefined);
     }
   }

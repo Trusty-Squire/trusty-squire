@@ -1583,12 +1583,17 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
   });
 
   it("persist FAILURE → full uncollapsed response, no snapshot_file, delta baseline NOT advanced", async () => {
-    h.elements = casetifyPage();
+    h.elements = casetifyPage().map((element) =>
+      element.container === "dialog:signin-promo"
+        ? { ...element, inDialog: true, topmost: true }
+        : element,
+    );
     h.visibleText = "Shop the tech collection.";
     // obs1: persist SUCCEEDS, establishes the delta baseline.
     const start = await startProvisionSession({ serviceUrl: URL });
     const sid = start.session_id;
     expect(typeof start.snapshot_file).toBe("string");
+    expect(start.modal_active).toBe(true);
     const snapshotFile = start.snapshot_file as string;
     const collapsedCount = start.chrome_links_collapsed ?? 0;
     expect(collapsedCount).toBeGreaterThan(0); // obs1 collapsed some chrome links
@@ -1605,6 +1610,7 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     expect(obs2.delta).toBe(false); // NOT a delta (no recovery file)
     expect(obs2.snapshot_file).toBeUndefined();
     expect(obs2.chrome_links_collapsed).toBeUndefined(); // uncollapsed
+    expect(obs2.modal_active).toBe(true);
     expect(rows(obs2).length).toBe(h.elements.length); // EVERY element inline
     expect(obs2.unchanged).toBeUndefined();
     expect(existsSync(snapshotFile)).toBe(false);

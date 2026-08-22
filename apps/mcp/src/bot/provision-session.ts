@@ -4291,6 +4291,7 @@ async function observeSession(
             delta: false,
             elements_total: elements.length,
             ...(textTruncated ? { text_truncated: true } : {}),
+            ...(built.observation.modal_active === true ? { modal_active: true } : {}),
           },
           checkoutState,
           currentCartMutation,

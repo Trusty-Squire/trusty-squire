@@ -74,6 +74,7 @@ function nonPortaledDialogFixture(): string {
         <input type="checkbox" id="tos" />
         <label for="tos">I agree</label>
         <button id="confirm-btn" onclick="document.title='CONFIRM_CLICKED'">Confirm transfer</button>
+        <button id="close-confirm-btn" onclick="document.title='CLOSE_CONFIRM_CLICKED';closeDialog()">Confirm and close</button>
         <button id="cancel-btn">Cancel</button>
       </div>
     </div>
@@ -85,6 +86,19 @@ function nonPortaledDialogFixture(): string {
       document.querySelector('.backdrop').remove();
     }
   </script>
+</body></html>`)}`;
+}
+
+function duplicateOptionDialogFixture(): string {
+  return `data:text/html,${encodeURIComponent(`
+<!doctype html><html><body style="margin:0;padding:0">
+  <div id="app-wrapper" inert aria-hidden="true">
+    <div role="option" id="bg-option" style="position:fixed;top:20px;left:20px;padding:12px" onclick="document.title='BG_OPTION_CLICKED'">Continue</div>
+    <div role="dialog" aria-modal="true" style="position:fixed;top:120px;left:100px;width:400px;background:white;padding:20px">
+      <h2>Choose action</h2>
+      <div role="option" id="dialog-option" style="padding:12px" onclick="document.title='DIALOG_OPTION_CLICKED'">Continue</div>
+    </div>
+  </div>
 </body></html>`)}`;
 }
 
@@ -189,7 +203,10 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
 
       // No leftover marker attributes from the neutralize/restore machinery.
       const markerLeaked = await page.evaluate(
-        () => document.querySelectorAll("[data-ts-inert-neutralized]").length > 0,
+        () =>
+          document.querySelectorAll(
+            "[data-ts-inert-neutralized],[data-ts-inert-region-anchor]",
+          ).length > 0,
       );
       expect(markerLeaked).toBe(false);
     } finally {
@@ -239,6 +256,46 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
     }
   }, 30000);
 
+  it("preserves the app's background unlock when the clicked dialog closes", async () => {
+    const { ctrl, page } = await pageFor(nonPortaledDialogFixture());
+    try {
+      const before = await ctrl.extractInteractiveElements();
+      const closeConfirm = before.find((e) => e.id === "close-confirm-btn");
+      expect(closeConfirm).toBeDefined();
+
+      await ctrl.click(closeConfirm!.selector);
+      expect(await page.title()).toBe("CLOSE_CONFIRM_CLICKED");
+      expect(
+        await page.evaluate(
+          () => document.getElementById("app-wrapper")?.hasAttribute("inert") === true,
+        ),
+      ).toBe(false);
+
+      const after = await ctrl.extractInteractiveElements();
+      const bg = after.find((e) => e.id === "bg-btn");
+      expect(bg?.topmost).toBe(true);
+      await ctrl.click(bg!.selector);
+      expect(await page.title()).toBe("BG_CLICKED");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("scopes same-named role re-resolution to the dialog", async () => {
+    const { ctrl, page } = await pageFor(duplicateOptionDialogFixture());
+    try {
+      const els = await ctrl.extractInteractiveElements();
+      const dialogOption = els.find((e) => e.id === "dialog-option");
+      expect(dialogOption).toBeDefined();
+      expect(dialogOption?.topmost).toBe(true);
+
+      await ctrl.click(dialogOption!.selector);
+      expect(await page.title()).toBe("DIALOG_OPTION_CLICKED");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
   it("finds a dialog beyond an intervening form", async () => {
     const { ctrl, page } = await pageFor(formWrappedDialogFixture());
     try {
@@ -280,8 +337,12 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
               innerInert:
                 root?.getElementById("shadow-inert-wrapper")?.hasAttribute("inert") === true,
               markerLeaked:
-                root?.querySelector("[data-ts-inert-neutralized]") !== null ||
-                document.querySelector("[data-ts-inert-neutralized]") !== null,
+                root?.querySelector(
+                  "[data-ts-inert-neutralized],[data-ts-inert-region-anchor]",
+                ) !== null ||
+                document.querySelector(
+                  "[data-ts-inert-neutralized],[data-ts-inert-region-anchor]",
+                ) !== null,
             };
           },
         ),
