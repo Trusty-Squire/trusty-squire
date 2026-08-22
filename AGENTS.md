@@ -397,6 +397,12 @@ Unlike `ci.yml` (which builds every `packages/**` dist generically via `pnpm -r 
 
 **The rule:** any PR that changes `packages/recipe-schema/src/**` or `packages/skill-schema/src/**` MUST bump that package's `version` in the same PR (prerelease shape on `staging`, matching the branch-shape check the release workflow itself enforces — see gotcha #5). Verify a bump actually shipped the change with `npm view @trusty-squire/<pkg> versions --json` and `npm pack --dry-run` / grepping `dist/index.js` for the new export, not just by reading the source.
 
+### 9. `Locator.selectOption({ value })` doesn't fail fast on a value-format mismatch — it eats the full 30s actionability timeout
+
+Playwright's `selectOption({ value })` (and `{ label }`) treats "no `<option>` with that value" as an actionability precondition it retries, not an immediate error — an already-visible, already-enabled `<select>` with simply the wrong value/label still hangs for the **default 30s** before rejecting. This bit `apps/mcp/src/bot/browser.ts`'s checkout card-fill (`fillCheckoutCardIntoFrames`'s `fillFirst`), which tries `selectOption({ value })` then falls back to `selectOption({ label })` for `<select>`-based expiry fields — e.g. a JP EbisuMart-platform expiry-year `<select>` with 2-digit `<option value="26">2026</option>` values: filling a 4-digit `exp_year` misses on `{ value }` and only succeeds on the `{ label }` fallback, so every such fill silently cost 30s until this was caught by a Hibiya Kadan checkout repro (no test in this repo had exercised a real `<select>`-based expiry field before).
+
+**The rule:** any `selectOption()` call written on the expectation that a miss falls through to another attempt (a value→label fallback, a try/catch retry, etc.) MUST pass an explicit short `{ timeout }` (3000ms in the existing fixes) — never rely on the default. This applies to any future `<select>` fill code in this file (address/country dropdowns included), not just card expiry.
+
 ## Final note
 
 You are reading this file because a prior agent burned four version numbers, confused users, and forced a human to intervene. The agent was not malicious. It was not lazy. It was pattern-matching on its own prose instead of on tool output.

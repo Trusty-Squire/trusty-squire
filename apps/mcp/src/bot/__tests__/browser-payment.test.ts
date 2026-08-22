@@ -3595,6 +3595,142 @@ describe("split-checkout card fill (real browser)", () => {
       }
     },
   );
+
+  it.skipIf(!chromiumAvailable)(
+    "fills a Hibiya-Kadan-shaped EbisuMart checkout (CREDIT_NO/CREDIT_NAME/SECURITY_CD + select expiry) without touching an unrelated month/year select",
+    async () => {
+      const pageUrl = "https://shop.example.test/cart_seisan.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <title>ご注文の入力</title>
+          <form id="seisanForm" action="https://shop.example.test/submit">
+            <div>
+              <dt>カード名義</dt>
+              <dd><input type="text" name="CREDIT_NAME" id="CREDIT_NAME"></dd>
+            </div>
+            <div>
+              <dt>カード番号</dt>
+              <dd><input type="text" name="CREDIT_NO" id="CREDIT_NO" placeholder="0123456789012345"></dd>
+            </div>
+            <div>
+              <dt>お支払い回数</dt>
+              <dd><select name="CREDIT_COUNT"><option value="1">一括払い</option></select></dd>
+            </div>
+            <div>
+              <dt>有効期限</dt>
+              <dd>
+                <select name="CREDIT_LIMIT_MONTH" id="CREDIT_LIMIT_MONTH">
+                  <option value="" selected>月を指定</option>
+                  <option value="01">1</option><option value="02">2</option><option value="03">3</option>
+                  <option value="04">4</option><option value="05">5</option><option value="06">6</option>
+                  <option value="07">7</option><option value="08">8</option><option value="09">9</option>
+                  <option value="10">10</option><option value="11">11</option><option value="12">12</option>
+                </select>
+                <select name="CREDIT_LIMIT_YEAR" id="CREDIT_LIMIT_YEAR">
+                  <option value="" selected>年を指定</option>
+                  <option value="26">2026</option><option value="27">2027</option><option value="28">2028</option>
+                  <option value="29">2029</option><option value="30">2030</option><option value="31">2031</option>
+                </select>
+              </dd>
+            </div>
+            <div>
+              <dt>セキュリティコード</dt>
+              <dd><input type="text" name="SECURITY_CD" id="SECURITY_CD"></dd>
+            </div>
+            <!-- unrelated month/year select + a hidden lookalike name the broadened
+                 selectors must NOT match, guarding against a wrong-field fill. -->
+            <div>
+              <dt>お届け希望日</dt>
+              <dd>
+                <select name="SEND_HOPE_DATE_MONTH" id="SEND_HOPE_DATE_MONTH"><option value="" selected>--</option><option value="9">9</option></select>
+                <select name="SEND_HOPE_DATE_YEAR" id="SEND_HOPE_DATE_YEAR"><option value="" selected>--</option><option value="2026">2026</option></select>
+              </dd>
+            </div>
+            <input type="hidden" name="MASKED_TOKEN_CREDIT_NO" value="">
+            <button type="submit">ご注文を確定する</button>
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        // A 4-digit exp_year exercises the select's value="26"-miss /
+        // label="2026"-hit fallback already built into fillFirst's select branch.
+        await controller.fillCheckoutCardFields({ ...CARD, exp_year: "2030" });
+
+        expect(await page.locator("#CREDIT_NO").inputValue()).toBe(CARD.pan);
+        expect(await page.locator("#CREDIT_NAME").inputValue()).toBe(CARD.name);
+        expect(await page.locator("#SECURITY_CD").inputValue()).toBe(CARD.cvv);
+        expect(await page.locator("#CREDIT_LIMIT_MONTH").inputValue()).toBe("12");
+        expect(await page.locator("#CREDIT_LIMIT_YEAR").inputValue()).toBe("30");
+        expect(await page.locator("#SEND_HOPE_DATE_MONTH").inputValue()).toBe("");
+        expect(await page.locator("#SEND_HOPE_DATE_YEAR").inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "fills a JP checkout via the dt/dd label-text fallback when field names carry no card hint at all",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <title>ご注文の入力</title>
+          <form id="checkoutForm" action="https://shop.example.test/submit">
+            <dl>
+              <dt><span class="title">カード番号</span></dt>
+              <dd class="table-content"><div class="input-wrapper"><input type="text" name="f_1" id="f_1"></div></dd>
+            </dl>
+            <dl>
+              <dt><span class="title">カード名義</span></dt>
+              <dd class="table-content"><input type="text" name="f_2" id="f_2"></dd>
+            </dl>
+            <dl>
+              <dt><span class="title">有効期限</span></dt>
+              <dd class="table-content">
+                <select name="f_3" id="f_3">
+                  <option value="" selected>月を指定</option>
+                  <option value="01">1</option><option value="02">2</option><option value="03">3</option>
+                  <option value="04">4</option><option value="05">5</option><option value="06">6</option>
+                  <option value="07">7</option><option value="08">8</option><option value="09">9</option>
+                  <option value="10">10</option><option value="11">11</option><option value="12">12</option>
+                </select>
+                <select name="f_4" id="f_4">
+                  <option value="" selected>年を指定</option>
+                  <option value="26">2026</option><option value="27">2027</option><option value="28">2028</option>
+                  <option value="29">2029</option><option value="30">2030</option><option value="31">2031</option>
+                </select>
+              </dd>
+            </dl>
+            <dl>
+              <dt><span class="title">セキュリティコード</span></dt>
+              <dd class="table-content"><input type="text" name="f_5" id="f_5"></dd>
+            </dl>
+            <button type="submit">確定する</button>
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillCheckoutCardFields(CARD);
+
+        expect(await page.locator("#f_1").inputValue()).toBe(CARD.pan);
+        expect(await page.locator("#f_2").inputValue()).toBe(CARD.name);
+        expect(await page.locator("#f_5").inputValue()).toBe(CARD.cvv);
+        expect(await page.locator("#f_3").inputValue()).toBe(CARD.exp_month.padStart(2, "0"));
+        expect(await page.locator("#f_4").inputValue()).toBe(CARD.exp_year);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
 });
 describe("3DS detection vs captcha frames", () => {
   async function detectInRealPage(

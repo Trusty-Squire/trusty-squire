@@ -588,14 +588,23 @@ function checkoutUrlOrderIdentities(
   }
 }
 
+// JP-convention name/id substrings alongside the Western autocomplete/name
+// patterns. EbisuMart — a widely-deployed Japanese EC platform (the Hibiya
+// Kadan checkout runs on it) — names its card fields CREDIT_NO / CREDIT_NAME /
+// SECURITY_CD / CREDIT_LIMIT_MONTH / CREDIT_LIMIT_YEAR, none of which contain
+// "cardnumber"/"cvv"/"exp". The data-ts-jp-card-* attribute selectors are a
+// label-text-based fallback (see stampJapaneseCardLabelFields) for sites that
+// use neither convention — matched here as plain attribute selectors so they
+// stay valid for both frame.locator() and the native element.matches() calls
+// inside the card-group completeness check.
 const CHECKOUT_PAN_FIELD_SELECTORS =
-  'input[autocomplete~="cc-number"],input[name*="cardnumber" i],input[id*="card-number" i],input[id*="cardnumber" i]';
+  'input[autocomplete~="cc-number"],input[name*="cardnumber" i],input[id*="card-number" i],input[id*="cardnumber" i],input[name*="card_no" i],input[name*="cardno" i],input[name*="card-no" i],input[id*="card_no" i],input[id*="cardno" i],input[id*="card-no" i],input[name*="card_number" i],input[id*="card_number" i],input[name*="creditno" i],input[name*="credit_no" i],input[name*="credit-no" i],input[id*="creditno" i],input[id*="credit_no" i],input[id*="credit-no" i],input[data-ts-jp-card-field="pan"]';
 
 const CHECKOUT_CARD_VALUE_FIELD_SELECTORS = [
   CHECKOUT_PAN_FIELD_SELECTORS,
   'input[autocomplete~="cc-exp"],input[autocomplete~="cc-exp-month"],input[autocomplete~="cc-exp-year"],input[name*="expir" i],input[name="exp" i],input[name*="exp_month" i],input[name*="expmonth" i],input[name*="exp_year" i],input[name*="expyear" i],input[id*="expir" i],input[id="exp" i],input[id*="exp-date" i],input[id*="exp" i][id*="month" i],input[id*="exp" i][id*="year" i],input[placeholder="MM/YY" i],input[placeholder="MM / YY" i],input[aria-label="MM/YY" i],input[aria-label="MM / YY" i]',
-  'input[autocomplete~="cc-csc"],input[name*="cvv" i],input[name*="cvc" i],input[name*="security-code" i],input[id*="cvv" i],input[id*="cvc" i]',
-  'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i]',
+  'input[autocomplete~="cc-csc"],input[name*="cvv" i],input[name*="cvc" i],input[name*="security-code" i],input[id*="cvv" i],input[id*="cvc" i],input[name*="security_cd" i],input[name*="securitycd" i],input[name*="sec_code" i],input[name*="seccode" i],input[id*="security_cd" i],input[data-ts-jp-card-field="cvv"]',
+  'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i],input[name*="card_name" i],input[name*="credit_name" i],input[id*="card_name" i],input[id*="credit_name" i],input[data-ts-jp-card-field="name"]',
 ].join(",");
 
 // Charge-verb button labels — the click that may move money. Used by
@@ -8362,10 +8371,86 @@ export class BrowserController {
     if (!this.page) return;
     const deadline = Date.now() + timeoutMs;
     while (true) {
+      // A JP form whose PAN carries no name/id hint (see
+      // stampJapaneseCardLabelFields) is only visible to
+      // CHECKOUT_PAN_FIELD_SELECTORS once stamped — without this,
+      // panFieldFrame() below can never match and every call here burns its
+      // full timeoutMs even though the field was on the page from the start.
+      await this.stampJapaneseCardLabelFields(this.page.frames());
       if ((await this.panFieldFrame()) !== null) return;
       if (Date.now() >= deadline) return;
       await this.page.waitForTimeout(200).catch(() => undefined);
     }
+  }
+
+  // Label-text fallback for JP checkout forms whose card fields carry neither
+  // Western autocomplete/name conventions nor a recognized JP platform
+  // convention (e.g. EbisuMart's CREDIT_NO/CREDIT_NAME/SECURITY_CD, matched
+  // directly by name/id substring in CHECKOUT_PAN_FIELD_SELECTORS et al.).
+  // Scans dt/th/label/"table-label" elements for カード番号 / カード名義 /
+  // セキュリティコード and stamps the associated single text input with
+  // data-ts-jp-card-field; 有効期限 stamps its month/year <select>s via their
+  // own first ("月を指定"/"年を指定") option text, since the label spans both
+  // selects rather than identifying one. Conservative on purpose: a hidden,
+  // non-text, or unassociated control is left unstamped rather than guessed —
+  // a wrong-field card fill is worse than a fill_field_not_found refusal.
+  private async stampJapaneseCardLabelFields(frames: readonly Frame[]): Promise<void> {
+    const panLabels = ["カード番号"];
+    const nameLabels = ["カード名義"];
+    const cvvLabels = ["セキュリティコード", "セキュリティーコード"];
+    const expiryLabels = ["有効期限"];
+    await Promise.all(
+      frames.map((frame) =>
+        frame
+          .evaluate(
+            (labels) => {
+              const isTextInput = (el: Element | null): el is HTMLInputElement =>
+                el instanceof HTMLInputElement &&
+                (el.type === "text" || el.type === "tel");
+              const findAssociatedInput = (host: Element): HTMLInputElement | null => {
+                if (host instanceof HTMLLabelElement && host.htmlFor.length > 0) {
+                  const byId = document.getElementById(host.htmlFor);
+                  if (isTextInput(byId)) return byId;
+                }
+                const nested = host.querySelector("input");
+                if (isTextInput(nested)) return nested;
+                const sibling = host.nextElementSibling;
+                if (sibling !== null) {
+                  const inSibling = sibling.querySelector("input");
+                  if (isTextInput(inSibling)) return inSibling;
+                }
+                return null;
+              };
+              const stampField = (host: Element, fieldLabels: string[], attrValue: string): void => {
+                const text = (host.textContent ?? "").trim();
+                if (!fieldLabels.some((label) => text.includes(label))) return;
+                const input = findAssociatedInput(host);
+                if (input !== null && !input.hasAttribute("data-ts-jp-card-field")) {
+                  input.setAttribute("data-ts-jp-card-field", attrValue);
+                }
+              };
+              document
+                .querySelectorAll("dt, th, label, .table-label, .form-label")
+                .forEach((host) => {
+                  stampField(host, labels.pan, "pan");
+                  stampField(host, labels.name, "name");
+                  stampField(host, labels.cvv, "cvv");
+                  const text = (host.textContent ?? "").trim();
+                  if (!labels.expiry.some((label) => text.includes(label))) return;
+                  const container = host.nextElementSibling ?? host.parentElement;
+                  container?.querySelectorAll("select").forEach((select) => {
+                    if (select.hasAttribute("data-ts-jp-card-exp")) return;
+                    const firstOption = select.options[0]?.textContent ?? "";
+                    if (firstOption.includes("月")) select.setAttribute("data-ts-jp-card-exp", "month");
+                    else if (firstOption.includes("年")) select.setAttribute("data-ts-jp-card-exp", "year");
+                  });
+                });
+            },
+            { pan: panLabels, name: nameLabels, cvv: cvvLabels, expiry: expiryLabels },
+          )
+          .catch(() => undefined),
+      ),
+    );
   }
 
   // Common autocomplete/name selectors. No PSP-specific adapters. `frames` is
@@ -8380,18 +8465,23 @@ export class BrowserController {
     assertFrameEgress?: (frame: Frame, resolvedOrigin?: string) => void,
   ): Promise<CheckoutCardGroupScope | undefined> {
     const filled = new Set<string>();
+    // JP EC platforms commonly render expiry as two native <select>s rather
+    // than a combined MM/YY text input (see stampJapaneseCardLabelFields).
+    // "credit"+"month"/"year" catches EbisuMart's CREDIT_LIMIT_MONTH/YEAR
+    // convention; the data-ts-jp-card-exp attribute is the label-text fallback
+    // for platforms whose select names carry no month/year hint at all.
     const expiryMonthSelectors =
-      '[autocomplete~="cc-exp-month"],[name*="exp_month" i],[name*="expmonth" i],[name*="exp" i][name*="month" i],[id*="exp" i][id*="month" i]';
+      '[autocomplete~="cc-exp-month"],[name*="exp_month" i],[name*="expmonth" i],[name*="exp" i][name*="month" i],[id*="exp" i][id*="month" i],select[name*="credit" i][name*="month" i],select[name*="limit" i][name*="month" i],select[id*="limit" i][id*="month" i],select[data-ts-jp-card-exp="month"]';
     const expiryYearSelectors =
-      '[autocomplete~="cc-exp-year"],[name*="exp_year" i],[name*="expyear" i],[name*="exp" i][name*="year" i],[id*="exp" i][id*="year" i]';
+      '[autocomplete~="cc-exp-year"],[name*="exp_year" i],[name*="expyear" i],[name*="exp" i][name*="year" i],[id*="exp" i][id*="year" i],select[name*="credit" i][name*="year" i],select[name*="limit" i][name*="year" i],select[id*="limit" i][id*="year" i],select[data-ts-jp-card-exp="year"]';
     const combinedExpirySelectors =
       'input[autocomplete~="cc-exp"],input[name*="expir" i]:not([name*="month" i]):not([name*="year" i]),input[name="exp" i],input[name*="exp-date" i],input[id*="expir" i]:not([id*="month" i]):not([id*="year" i]),input[id="exp" i],input[id*="exp-date" i],input[placeholder="MM/YY" i],input[placeholder="MM / YY" i],input[aria-label="MM/YY" i],input[aria-label="MM / YY" i],label:has-text("MM/YY") input,label:has-text("MM / YY") input';
     const combinedExpiryGroupSelectors =
       'input[autocomplete~="cc-exp"],input[name*="expir" i]:not([name*="month" i]):not([name*="year" i]),input[name="exp" i],input[name*="exp-date" i],input[id*="expir" i]:not([id*="month" i]):not([id*="year" i]),input[id="exp" i],input[id*="exp-date" i],input[placeholder="MM/YY" i],input[placeholder="MM / YY" i],input[aria-label="MM/YY" i],input[aria-label="MM / YY" i]';
     const cvvSelectors =
-      'input[autocomplete~="cc-csc"],input[name*="cvv" i],input[name*="cvc" i],input[name*="security-code" i],input[id*="cvv" i],input[id*="cvc" i]';
+      'input[autocomplete~="cc-csc"],input[name*="cvv" i],input[name*="cvc" i],input[name*="security-code" i],input[id*="cvv" i],input[id*="cvc" i],input[name*="security_cd" i],input[name*="securitycd" i],input[name*="sec_code" i],input[name*="seccode" i],input[id*="security_cd" i],input[data-ts-jp-card-field="cvv"]';
     const nameSelectors =
-      'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i]';
+      'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i],input[name*="card_name" i],input[name*="credit_name" i],input[id*="card_name" i],input[id*="credit_name" i],input[data-ts-jp-card-field="name"]';
 
     type CardGroup = CheckoutCardGroupRoot & { panTopmost: boolean };
     const groups = new Map<string, CardGroup>();
@@ -8415,6 +8505,20 @@ export class BrowserController {
           .catch(() => undefined),
       ),
     );
+    await Promise.all(
+      frames.map((frame) =>
+        frame
+          .locator('[data-ts-jp-card-field],[data-ts-jp-card-exp]')
+          .evaluateAll((elements) => {
+            for (const element of elements) {
+              element.removeAttribute("data-ts-jp-card-field");
+              element.removeAttribute("data-ts-jp-card-exp");
+            }
+          })
+          .catch(() => undefined),
+      ),
+    );
+    await this.stampJapaneseCardLabelFields(frames);
     for (const [frameIndex, frame] of frames.entries()) {
       const pans = frame.locator(CHECKOUT_PAN_FIELD_SELECTORS);
       const count = Math.min(await pans.count().catch(() => 0), 10);
@@ -8970,8 +9074,15 @@ export class BrowserController {
             let { handle } = resolved;
             try {
               if (resolved.tag === "select") {
+                // A value-format mismatch (e.g. a 4-digit exp_year against a
+                // 2-digit <option value>, common on JP expiry selects — see
+                // stampJapaneseCardLabelFields) is not a transient
+                // actionability gap, so it must not eat Playwright's default
+                // 30s actionability wait before falling back to the label
+                // match. The element's visibility/enabled state was already
+                // confirmed by resolveHandle() above.
                 let selected = await handle
-                  .selectOption({ value })
+                  .selectOption({ value }, { timeout: 3000 })
                   .then((values) => values.length > 0)
                   .catch(() => {
                     assertFrameEgress(frame);
@@ -8983,7 +9094,7 @@ export class BrowserController {
                   if (fallback === null) continue;
                   handle = fallback.handle;
                   selected = await handle
-                    .selectOption({ label: value })
+                    .selectOption({ label: value }, { timeout: 3000 })
                     .then((values) => values.length > 0)
                     .catch(() => {
                       assertFrameEgress(frame);
@@ -9023,13 +9134,17 @@ export class BrowserController {
           const tag = await input.evaluate((el) => el.tagName.toLowerCase()).catch(() => "");
           await input.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
           if (tag === "select") {
+            // See the matching comment in the assertFrameEgress branch above:
+            // an explicit short timeout keeps a value-format mismatch from
+            // eating Playwright's default 30s actionability wait before the
+            // label fallback runs.
             const selected =
               (await input
-                .selectOption({ value })
+                .selectOption({ value }, { timeout: 3000 })
                 .then(() => true)
                 .catch(() => false)) ||
               (await input
-                .selectOption({ label: value })
+                .selectOption({ label: value }, { timeout: 3000 })
                 .then(() => true)
                 .catch(() => false));
             if (!selected) continue;
