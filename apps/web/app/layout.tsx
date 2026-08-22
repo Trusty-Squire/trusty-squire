@@ -21,11 +21,11 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: {
-    default: "Trusty Squire: AI agents that sign up and sign in to websites",
+    default: "Trusty Squire: empower agents with auth and payments",
     template: "%s | Trusty Squire",
   },
   description:
-    "Trusty Squire is an MCP server that lets Claude Code, Codex, Cursor, OpenCode, and other coding agents sign up for websites and save API keys outside chat, code, and .env.",
+    "Trusty Squire empowers coding agents with auth and payments — MCP tools to sign up, sign in, and pay, keeping your keys and card in a write-only vault.",
   metadataBase: new URL("https://trustysquire.ai"),
   applicationName: "Trusty Squire",
   keywords: [
@@ -41,9 +41,9 @@ export const metadata: Metadata = {
     "API keys without .env",
   ],
   openGraph: {
-    title: "Trusty Squire: AI agents that sign up and sign in to websites",
+    title: "Trusty Squire: empower agents with auth and payments",
     description:
-      "An MCP server that gets coding agents through website signup and stores generated credentials outside chat, code, and .env.",
+      "Trusty Squire empowers coding agents with auth and payments — MCP tools to sign up, sign in, and pay, keeping your keys and card in a write-only vault.",
     url: "https://trustysquire.ai/",
     siteName: "Trusty Squire",
     type: "website",
@@ -52,15 +52,15 @@ export const metadata: Metadata = {
         url: "/opengraph-image",
         width: 1200,
         height: 630,
-        alt: "Trusty Squire completing a website signup and sealing the generated API key",
+        alt: "Trusty Squire empowering an agent with auth and payments, keys and card kept in a write-only vault",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "Trusty Squire: AI agents that sign up and sign in to websites",
+    title: "Trusty Squire: empower agents with auth and payments",
     description:
-      "An MCP server that gets coding agents through website signup and stores generated credentials outside chat, code, and .env.",
+      "Trusty Squire empowers coding agents with auth and payments — MCP tools to sign up, sign in, and pay, keeping your keys and card in a write-only vault.",
     images: ["/opengraph-image"],
   },
   icons: {
