@@ -4378,32 +4378,31 @@ export class BrowserController {
       await this.page
         .evaluate((markers) => {
           const { marker, anchorMarker } = markers;
-          const visitComposed = (
-            root: Document | ShadowRoot,
-            selector: string,
-            visit: (el: Element) => void,
-          ): void => {
-            root.querySelectorAll(selector).forEach(visit);
-            root.querySelectorAll("*").forEach((el) => {
-              if (el.shadowRoot !== null) visitComposed(el.shadowRoot, selector, visit);
-            });
-          };
           const isDialogElement = (element: Element): boolean =>
             element.getAttribute("role") === "dialog" ||
             element.tagName.toLowerCase() === "dialog" ||
             element.getAttribute("aria-modal") === "true";
-          let shouldRestore = true;
-          let foundAnchor = false;
-          visitComposed(document, `[${anchorMarker}]`, (anchor) => {
-            foundAnchor = true;
-            if (!anchor.isConnected || !isDialogElement(anchor)) shouldRestore = false;
-            anchor.removeAttribute(anchorMarker);
-          });
-          if (!foundAnchor) shouldRestore = false;
-          visitComposed(document, `[${marker}]`, (el) => {
-            el.removeAttribute(marker);
-            if (shouldRestore) el.setAttribute("inert", "");
-          });
+          const subtreeHasDialog = (root: Element | ShadowRoot): boolean => {
+            if (root instanceof Element && isDialogElement(root)) return true;
+            for (const el of Array.from(root.querySelectorAll("*"))) {
+              if (isDialogElement(el)) return true;
+              if (el.shadowRoot !== null && subtreeHasDialog(el.shadowRoot)) return true;
+            }
+            return false;
+          };
+          const cleanupAndRestore = (root: Document | ShadowRoot): void => {
+            root
+              .querySelectorAll(`[${anchorMarker}]`)
+              .forEach((el) => el.removeAttribute(anchorMarker));
+            root.querySelectorAll(`[${marker}]`).forEach((el) => {
+              el.removeAttribute(marker);
+              if (subtreeHasDialog(el)) el.setAttribute("inert", "");
+            });
+            root.querySelectorAll("*").forEach((el) => {
+              if (el.shadowRoot !== null) cleanupAndRestore(el.shadowRoot);
+            });
+          };
+          cleanupAndRestore(document);
         }, { marker, anchorMarker })
         .catch(() => undefined);
     }
@@ -12250,32 +12249,31 @@ export class BrowserController {
       await frame
         .evaluate((markers) => {
           const { marker, anchorMarker } = markers;
-          const visitComposed = (
-            root: Document | ShadowRoot,
-            selector: string,
-            visit: (el: Element) => void,
-          ): void => {
-            root.querySelectorAll(selector).forEach(visit);
-            root.querySelectorAll("*").forEach((el) => {
-              if (el.shadowRoot !== null) visitComposed(el.shadowRoot, selector, visit);
-            });
-          };
           const isDialogElement = (element: Element): boolean =>
             element.getAttribute("role") === "dialog" ||
             element.tagName.toLowerCase() === "dialog" ||
             element.getAttribute("aria-modal") === "true";
-          let shouldRestore = true;
-          let foundAnchor = false;
-          visitComposed(document, `[${anchorMarker}]`, (anchor) => {
-            foundAnchor = true;
-            if (!anchor.isConnected || !isDialogElement(anchor)) shouldRestore = false;
-            anchor.removeAttribute(anchorMarker);
-          });
-          if (!foundAnchor) shouldRestore = false;
-          visitComposed(document, `[${marker}]`, (el) => {
-            el.removeAttribute(marker);
-            if (shouldRestore) el.setAttribute("inert", "");
-          });
+          const subtreeHasDialog = (root: Element | ShadowRoot): boolean => {
+            if (root instanceof Element && isDialogElement(root)) return true;
+            for (const el of Array.from(root.querySelectorAll("*"))) {
+              if (isDialogElement(el)) return true;
+              if (el.shadowRoot !== null && subtreeHasDialog(el.shadowRoot)) return true;
+            }
+            return false;
+          };
+          const cleanupAndRestore = (root: Document | ShadowRoot): void => {
+            root
+              .querySelectorAll(`[${anchorMarker}]`)
+              .forEach((el) => el.removeAttribute(anchorMarker));
+            root.querySelectorAll(`[${marker}]`).forEach((el) => {
+              el.removeAttribute(marker);
+              if (subtreeHasDialog(el)) el.setAttribute("inert", "");
+            });
+            root.querySelectorAll("*").forEach((el) => {
+              if (el.shadowRoot !== null) cleanupAndRestore(el.shadowRoot);
+            });
+          };
+          cleanupAndRestore(document);
         }, { marker, anchorMarker })
         .catch(() => undefined);
     }

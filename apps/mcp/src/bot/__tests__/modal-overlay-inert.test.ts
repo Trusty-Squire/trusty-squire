@@ -75,6 +75,7 @@ function nonPortaledDialogFixture(): string {
         <label for="tos">I agree</label>
         <button id="confirm-btn" onclick="document.title='CONFIRM_CLICKED'">Confirm transfer</button>
         <button id="close-confirm-btn" onclick="document.title='CLOSE_CONFIRM_CLICKED';closeDialog()">Confirm and close</button>
+        <button id="next-btn" onclick="advanceDialog()">Next</button>
         <button id="cancel-btn">Cancel</button>
       </div>
     </div>
@@ -84,6 +85,23 @@ function nonPortaledDialogFixture(): string {
       document.getElementById('app-wrapper').removeAttribute('inert');
       document.getElementById('app-wrapper').removeAttribute('aria-hidden');
       document.querySelector('.backdrop').remove();
+    }
+    function advanceDialog() {
+      const current = document.querySelector('[role="dialog"]');
+      const next = document.createElement('div');
+      next.setAttribute('role', 'dialog');
+      next.setAttribute('aria-modal', 'true');
+      next.setAttribute('style', current.getAttribute('style'));
+      const heading = document.createElement('h2');
+      heading.textContent = 'Transfer details';
+      const button = document.createElement('button');
+      button.id = 'step-two-btn';
+      button.textContent = 'Finish';
+      button.addEventListener('click', () => {
+        document.title = 'STEP_TWO_CLICKED';
+      });
+      next.append(heading, button);
+      current.replaceWith(next);
     }
   </script>
 </body></html>`)}`;
@@ -276,6 +294,32 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
       expect(bg?.topmost).toBe(true);
       await ctrl.click(bg!.selector);
       expect(await page.title()).toBe("BG_CLICKED");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("preserves background protection when a wizard replaces its dialog node", async () => {
+    const { ctrl, page } = await pageFor(nonPortaledDialogFixture());
+    try {
+      const before = await ctrl.extractInteractiveElements();
+      const next = before.find((e) => e.id === "next-btn");
+      expect(next).toBeDefined();
+
+      await ctrl.click(next!.selector);
+      expect(
+        await page.evaluate(
+          () => document.getElementById("app-wrapper")?.hasAttribute("inert") === true,
+        ),
+      ).toBe(true);
+
+      const after = await ctrl.extractInteractiveElements();
+      const stepTwo = after.find((e) => e.id === "step-two-btn");
+      expect(stepTwo).toBeDefined();
+      expect(stepTwo?.topmost).toBe(true);
+
+      await ctrl.click(stepTwo!.selector);
+      expect(await page.title()).toBe("STEP_TWO_CLICKED");
     } finally {
       await page.close();
     }
