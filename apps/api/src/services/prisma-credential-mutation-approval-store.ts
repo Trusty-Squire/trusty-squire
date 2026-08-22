@@ -102,15 +102,15 @@ export class PrismaCredentialMutationApprovalStore implements CredentialMutation
           await markFailed(tx, record.id, "credential_not_found", now);
           return "credential_not_found";
         }
+        if (!sameMetadata(editableMetadata(credential), record.before)) {
+          await markFailed(tx, record.id, "credential_metadata_changed", now);
+          return "metadata_changed";
+        }
+        const currentMetadata = objectMetadata(credential.metadata);
 
         if (record.operation === "edit") {
           if (record.after === null)
             throw new Error("credential edit approval missing after state");
-          if (!sameMetadata(editableMetadata(credential), record.before)) {
-            await markFailed(tx, record.id, "credential_metadata_changed", now);
-            return "metadata_changed";
-          }
-          const currentMetadata = objectMetadata(credential.metadata);
           const updated = await tx.credential.updateMany({
             where: {
               reference: record.credentialReference,
@@ -136,12 +136,15 @@ export class PrismaCredentialMutationApprovalStore implements CredentialMutation
               reference: record.credentialReference,
               account_id: record.accountId,
               deleted_at: null,
+              label: credential.label,
+              allowed_hosts: { equals: credential.allowed_hosts },
+              metadata: { equals: currentMetadata },
             },
             data: { deleted_at: now },
           });
           if (deleted.count === 0) {
-            await markFailed(tx, record.id, "credential_not_found", now);
-            return "credential_not_found";
+            await markFailed(tx, record.id, "credential_metadata_changed", now);
+            return "metadata_changed";
           }
         }
 

@@ -347,6 +347,27 @@ describe("vouch-gated credential mutations", () => {
     ]);
   });
 
+  it("refuses a signed delete after an approved metadata edit", async () => {
+    const reference = await storeCredential();
+    const deleteCreated = await createMutation({ operation: "delete", reference });
+    const deleteId = (deleteCreated.json() as { approval_id: string }).approval_id;
+    const editCreated = await createMutation({
+      operation: "edit",
+      reference,
+      changes: { allowed_hosts: { mode: "replace", hosts: ["edited.example.test"] } },
+    });
+    const editId = (editCreated.json() as { approval_id: string }).approval_id;
+
+    expect((await approveMutation(editId)).statusCode).toBe(200);
+    const staleDelete = await approveMutation(deleteId);
+
+    expect(staleDelete.statusCode).toBe(409);
+    expect(staleDelete.json()).toEqual({ error: "credential_metadata_changed" });
+    expect((await deps.credentialStore.findActive(reference))?.allowed_hosts).toEqual([
+      "edited.example.test",
+    ]);
+  });
+
   it("rechecks approval expiry after mandate verification", async () => {
     const reference = await storeCredential();
     const created = await createMutation({ operation: "delete", reference });
@@ -430,7 +451,7 @@ describe("vouch-gated credential mutations", () => {
     expect((await deps.credentialMutationApprovalStore.getById(secondId))?.agent).toBe("claude");
   });
 
-  it("requires the signed chokepoint for web metadata edits", async () => {
+  it("requires the signed chokepoint and attributes web metadata edits to the user", async () => {
     const reference = await storeCredential();
     const credential = (await deps.credentialStore.findActive(reference))!;
     const { record, jwt } = issueSession({
@@ -478,6 +499,11 @@ describe("vouch-gated credential mutations", () => {
     expect((await deps.credentialStore.findActive(reference))?.allowed_hosts).toEqual([
       "xn--mnich-kva.example",
     ]);
+    const audits = await deps.vaultAuditStore.list(credential.account_id, {
+      type: VAULT_AUDIT_TYPES.metadataEdited,
+      reference,
+    });
+    expect(audits.find((event) => event.payload.approval_id === id)?.payload.requester).toBe("user");
   });
 
   it("leaves approval and metadata pending when the atomic audit write fails", async () => {

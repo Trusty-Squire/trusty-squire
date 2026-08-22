@@ -130,13 +130,13 @@ export class InMemoryCredentialMutationApprovalStore implements CredentialMutati
         markFailed(record, "credential_not_found", now);
         return "credential_not_found";
       }
+      if (!sameMetadata(editableMetadata(credential), record.before)) {
+        markFailed(record, "credential_metadata_changed", now);
+        return "metadata_changed";
+      }
       const event = mutationAuditEvent(record);
       if (record.operation === "edit") {
         if (record.after === null) throw new Error("credential edit approval missing after state");
-        if (!sameMetadata(editableMetadata(credential), record.before)) {
-          markFailed(record, "credential_metadata_changed", now);
-          return "metadata_changed";
-        }
         const nextMetadata = metadataAfterEdit(credential.metadata, record.after);
         const updated = await this.credentials.updateMetadata(
           credential.reference,
@@ -261,7 +261,7 @@ export function mutationAuditEvent(record: CredentialMutationApprovalRecord): Va
       record.operation === "edit" ? VAULT_AUDIT_TYPES.metadataEdited : VAULT_AUDIT_TYPES.deleted,
     payload: {
       reference: record.credentialReference,
-      requester: "agent",
+      requester: record.agent.startsWith("web-session:") ? "user" : "agent",
       ...(record.credentialService !== null ? { service: record.credentialService } : {}),
       label: record.operation === "edit" ? record.after!.label : record.credentialLabel,
       approval_id: record.id,
