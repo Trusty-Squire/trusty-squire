@@ -47,8 +47,10 @@ describe.skipIf(!runDatabaseTests)("active credential slot index rollout", () =>
 
   it("retries concurrent rollout conflicts and rejects concurrent writers", async () => {
     const old = credential("legacy_old", "shared", new Date("2026-01-01T00:00:00Z"));
-    const recent = credential("legacy_recent", "shared", new Date("2026-02-01T00:00:00Z"));
+    const middle = credential("legacy_middle", "shared", new Date("2026-02-01T00:00:00Z"));
+    const recent = credential("legacy_recent", "shared", new Date("2026-03-01T00:00:00Z"));
     await store.insert(old);
+    await store.insert(middle);
     await store.insert(recent);
 
     await prisma!.$executeRawUnsafe(`
@@ -67,8 +69,7 @@ describe.skipIf(!runDatabaseTests)("active credential slot index rollout", () =>
       FOR EACH ROW EXECUTE FUNCTION fail_collapse_audit()
     `);
     await expect(
-      store.collapseDuplicate(
-        old.reference,
+      store.collapseDuplicateSlot(
         old.account_id,
         "OpenAI",
         old.label,
@@ -76,20 +77,33 @@ describe.skipIf(!runDatabaseTests)("active credential slot index rollout", () =>
       ),
     ).rejects.toThrow(/synthetic collapse audit failure/);
     expect((await store.listByAccount("acct_slot")).map((row) => row.reference).sort()).toEqual(
-      [old.reference, recent.reference].sort(),
+      [old.reference, middle.reference, recent.reference].sort(),
     );
     await prisma!.$executeRawUnsafe(`DROP TRIGGER fail_collapse_audit ON "VaultAuditEvent"`);
     await prisma!.$executeRawUnsafe(`DROP FUNCTION fail_collapse_audit()`);
 
-    const originalCollapse = store.collapseDuplicate.bind(store);
+    const originalCollapse = store.collapseDuplicateSlot.bind(store);
+    const collapseAttempts: Array<{
+      survivor: string;
+      collapsed: string[];
+    } | null> = [];
+    let movedSurvivor = false;
     let injected = false;
-    store.collapseDuplicate = async (...args) => {
-      const collapsedInto = await originalCollapse(...args);
-      if (collapsedInto !== null && !injected) {
+    store.collapseDuplicateSlot = async (...args) => {
+      if (!movedSurvivor) {
+        movedSurvivor = true;
+        await prisma!.credential.updateMany({
+          where: { reference: recent.reference, deleted_at: null },
+          data: { label: "moved" },
+        });
+      }
+      const result = await originalCollapse(...args);
+      collapseAttempts.push(result);
+      if (result !== null && !injected) {
         injected = true;
         await store.insert(credential("legacy_raced", "shared", new Date("2026-02-15T00:00:00Z")));
       }
-      return collapsedInto;
+      return result;
     };
     const rollout = await rolloutActiveCredentialSlotIndex(
       prisma!,
@@ -98,8 +112,13 @@ describe.skipIf(!runDatabaseTests)("active credential slot index rollout", () =>
     );
     expect(rollout.index).toBe("created");
     expect(injected).toBe(true);
+    expect(collapseAttempts[0]).toEqual({
+      survivor: middle.reference,
+      collapsed: [old.reference],
+    });
     await expect(ensureActiveCredentialSlotIndex(prisma!)).resolves.toBe("already_present");
     expect((await store.listByAccount("acct_slot")).map((row) => row.reference)).toEqual([
+      recent.reference,
       "vault://acct_slot/subscription/legacy_raced",
     ]);
 

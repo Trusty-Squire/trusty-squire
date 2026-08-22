@@ -137,13 +137,12 @@ export class PrismaCredentialStore implements CredentialStore {
     });
   }
 
-  async collapseDuplicate(
-    reference: string,
+  async collapseDuplicateSlot(
     accountId: string,
     service: string,
     label: string,
     deletedAt: Date,
-  ): Promise<string | null> {
+  ): Promise<{ survivor: string; collapsed: string[] } | null> {
     return await this.prisma.$transaction(async (tx) => {
       const slot = await tx.$queryRaw<Array<{ reference: string; service: string }>>`
         SELECT "reference", "metadata"->>'service' AS service
@@ -156,37 +155,41 @@ export class PrismaCredentialStore implements CredentialStore {
         ORDER BY "created_at" DESC, "reference" DESC
         FOR UPDATE
       `;
-      if (!slot.some((candidate) => candidate.reference === reference)) return null;
-      const survivor = slot.find((candidate) => candidate.reference !== reference);
-      if (survivor === undefined) return null;
+      const [survivor, ...collapsed] = slot;
+      if (survivor === undefined || collapsed.length === 0) return null;
+      const collapsedReferences = collapsed.map((candidate) => candidate.reference);
 
       const deleted = await tx.credential.updateMany({
         where: {
-          reference,
+          reference: { in: collapsedReferences },
           account_id: accountId,
           deleted_at: null,
           label,
         },
         data: { deleted_at: deletedAt },
       });
-      if (deleted.count !== 1) return null;
+      if (deleted.count !== collapsedReferences.length) {
+        throw new Error("credential duplicate slot changed while locked");
+      }
 
-      await tx.vaultAuditEvent.create({
-        data: {
-          id: ulid(),
-          account_id: accountId,
-          type: VAULT_AUDIT_TYPES.collapsed,
-          payload: {
-            reference,
-            collapsed_into: survivor.reference,
-            requester: "system",
-            service: survivor.service,
-            label,
+      for (const candidate of collapsed) {
+        await tx.vaultAuditEvent.create({
+          data: {
+            id: ulid(),
+            account_id: accountId,
+            type: VAULT_AUDIT_TYPES.collapsed,
+            payload: {
+              reference: candidate.reference,
+              collapsed_into: survivor.reference,
+              requester: "system",
+              service: survivor.service,
+              label,
+            },
+            emitted_at: deletedAt,
           },
-          emitted_at: deletedAt,
-        },
-      });
-      return survivor.reference;
+        });
+      }
+      return { survivor: survivor.reference, collapsed: collapsedReferences };
     });
   }
 

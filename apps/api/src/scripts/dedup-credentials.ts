@@ -192,17 +192,13 @@ export async function runDedup(
   if (apply) {
     const deletedAt = now();
     for (const g of allGroups) {
-      for (const ref of g.collapsed) {
-        const collapsedInto = await store.collapseDuplicate(
-          ref,
-          g.account_id,
-          g.service,
-          g.label,
-          deletedAt,
-        );
-        if (collapsedInto === null) continue;
-        rowsCollapsed += 1;
-      }
+      const collapsed = await store.collapseDuplicateSlot(
+        g.account_id,
+        g.service,
+        g.label,
+        deletedAt,
+      );
+      rowsCollapsed += collapsed?.collapsed.length ?? 0;
     }
     console.warn(
       `[dedup][applied] soft_deleted=${rowsCollapsed} ` + `audit_events=${rowsCollapsed}`,

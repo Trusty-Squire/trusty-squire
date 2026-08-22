@@ -96,4 +96,58 @@ describe("PrismaCredentialStore", () => {
       ),
     ).resolves.toBe("conflict");
   });
+
+  it("keeps the current newest slot row after the planned survivor moves", async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const audits: Array<Record<string, unknown>> = [];
+    const tx = {
+      async $queryRaw() {
+        return [
+          { reference: "vault://acct/sub/middle", service: "OpenAI" },
+          { reference: "vault://acct/sub/old", service: "OpenAI" },
+        ];
+      },
+      credential: {
+        async updateMany(args: Record<string, unknown>) {
+          updates.push(args);
+          return { count: 1 };
+        },
+      },
+      vaultAuditEvent: {
+        async create(args: { data: Record<string, unknown> }) {
+          audits.push(args.data);
+          return args.data;
+        },
+      },
+    } as unknown as ApiPrismaClient;
+    const prisma = {
+      async $transaction<T>(fn: (transaction: ApiPrismaClient) => Promise<T>): Promise<T> {
+        return await fn(tx);
+      },
+    } as unknown as ApiPrismaClient;
+    const store = new PrismaCredentialStore(prisma);
+
+    await expect(
+      store.collapseDuplicateSlot(
+        "acct",
+        "OpenAI",
+        "shared",
+        new Date("2026-08-22T12:00:00.000Z"),
+      ),
+    ).resolves.toEqual({
+      survivor: "vault://acct/sub/middle",
+      collapsed: ["vault://acct/sub/old"],
+    });
+    expect(updates).toMatchObject([
+      { where: { reference: { in: ["vault://acct/sub/old"] } } },
+    ]);
+    expect(audits).toMatchObject([
+      {
+        payload: {
+          reference: "vault://acct/sub/old",
+          collapsed_into: "vault://acct/sub/middle",
+        },
+      },
+    ]);
+  });
 });
