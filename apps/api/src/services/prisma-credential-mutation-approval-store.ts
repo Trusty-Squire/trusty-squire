@@ -25,6 +25,7 @@ export class PrismaCredentialMutationApprovalStore implements CredentialMutation
         after_metadata: input.after,
         nonce: input.nonce,
         agent: input.agent,
+        requester_kind: input.requesterKind,
         intent_hash: input.intentHash,
         status: "pending",
         expires_at: input.expiresAt,
@@ -72,7 +73,7 @@ export class PrismaCredentialMutationApprovalStore implements CredentialMutation
         const locked = await tx.$queryRaw<CredentialMutationApprovalRow[]>`
           SELECT id, account_id, operation, credential_reference, credential_service,
                  credential_label, before_metadata, after_metadata, nonce, agent,
-                 intent_hash, status, failure_code, mandate_id, created_at,
+                 requester_kind, intent_hash, status, failure_code, mandate_id, created_at,
                  expires_at, executed_at
           FROM credential_mutation_approvals
           WHERE id = ${id}
@@ -183,6 +184,7 @@ interface CredentialMutationApprovalRow {
   after_metadata: unknown;
   nonce: string;
   agent: string;
+  requester_kind: string;
   intent_hash: string;
   status: string;
   failure_code: string | null;
@@ -308,6 +310,7 @@ function toRecord(row: {
   after_metadata: unknown;
   nonce: string;
   agent: string;
+  requester_kind: string;
   intent_hash: string;
   status: string;
   failure_code: string | null;
@@ -322,6 +325,9 @@ function toRecord(row: {
   if (row.status !== "pending" && row.status !== "approved" && row.status !== "failed") {
     throw new Error("invalid credential mutation approval status");
   }
+  if (row.requester_kind !== "web" && row.requester_kind !== "agent") {
+    throw new Error("invalid credential mutation requester kind");
+  }
   return {
     id: row.id,
     accountId: row.account_id,
@@ -333,6 +339,7 @@ function toRecord(row: {
     after: row.after_metadata === null ? null : metadata(row.after_metadata),
     nonce: row.nonce,
     agent: row.agent,
+    requesterKind: row.requester_kind,
     intentHash: row.intent_hash,
     status: row.status,
     failureCode: row.failure_code,

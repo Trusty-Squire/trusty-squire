@@ -27,6 +27,7 @@ describe("vouch-gated credential mutations", () => {
   let deps: ApiDeps;
   let nowMs: number;
   let agentToken: string;
+  let accountId: string;
   let signingKey: SigningKey;
   let vouchVerifier: VouchMandateVerifier;
 
@@ -47,6 +48,7 @@ describe("vouch-gated credential mutations", () => {
     );
     server = await buildServer({ deps, vouchVerifier });
     const account = await deps.accountStore.createAccount("mutator@example.test", "Mutator");
+    accountId = account.id;
     const session = issueAgentSession({
       account_id: account.id,
       agent_identity: "codex",
@@ -59,6 +61,7 @@ describe("vouch-gated credential mutations", () => {
 
   afterEach(async () => {
     vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
     await server.close();
   });
 
@@ -130,6 +133,21 @@ describe("vouch-gated credential mutations", () => {
       url: `/v1/vault/mutation-approvals/${id}/approve`,
       payload: { jws },
     });
+  }
+
+  async function captureTelegramMessages(): Promise<string[]> {
+    const messages: string[] = [];
+    await deps.accountStore.setTelegramChatId(accountId, "123456789");
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "synthetic-telegram-token");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body)) as { text: string };
+        messages.push(body.text);
+        return Response.json({ ok: true });
+      }),
+    );
+    return messages;
   }
 
   it("requires a valid signed vouch and changes only allowed_hosts metadata", async () => {
@@ -312,6 +330,47 @@ describe("vouch-gated credential mutations", () => {
     expect(await deps.credentialStore.findActive(reference)).toBeNull();
   });
 
+  it("sends delete approval metadata and an explicit deleted after-state to Telegram", async () => {
+    const reference = await storeCredential("Resend");
+    const messages = await captureTelegramMessages();
+
+    const created = await createMutation({ operation: "delete", reference });
+
+    expect(created.statusCode).toBe(201);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("approve credential deletion");
+    expect(messages[0]).toContain("Before: name=default");
+    expect(messages[0]).toContain("allowed_hosts=[api.resend.com]");
+    expect(messages[0]).toContain("After: deleted");
+    expect(messages[0]).toContain(
+      `/vault/mutate/${(created.json() as { approval_id: string }).approval_id}`,
+    );
+  });
+
+  it("summarizes large metadata within Telegram's limit and preserves the approval link", async () => {
+    const reference = await storeCredential();
+    const messages = await captureTelegramMessages();
+    const hosts = Array.from(
+      { length: 50 },
+      (_, index) =>
+        `${"a".repeat(50)}.${"b".repeat(50)}.${"c".repeat(50)}.host-${index}.example.test`,
+    );
+
+    const created = await createMutation({
+      operation: "edit",
+      reference,
+      changes: { allowed_hosts: { mode: "replace", hosts } },
+    });
+
+    expect(created.statusCode).toBe(201);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]!.length).toBeLessThanOrEqual(4096);
+    expect(messages[0]).toContain("more)");
+    expect(messages[0]).toContain(
+      `Review exact details: https://trustysquire.ai/vault/mutate/${(created.json() as { approval_id: string }).approval_id}`,
+    );
+  });
+
   it("fails closed after expiry and when signed metadata drifts before execution", async () => {
     const reference = await storeCredential();
     const expiredCreated = await createMutation({ operation: "delete", reference });
@@ -451,6 +510,42 @@ describe("vouch-gated credential mutations", () => {
     expect((await deps.credentialMutationApprovalStore.getById(secondId))?.agent).toBe("claude");
   });
 
+  it("does not classify an agent with a web-session identity as a human", async () => {
+    const reference = await storeCredential();
+    const collisionSession = issueAgentSession({
+      account_id: accountId,
+      agent_identity: "web-session:collision",
+      agent_version: "test",
+      now: new Date(nowMs),
+    });
+    await deps.agentSessionStore.insert(collisionSession.record);
+    const created = await server.inject({
+      method: "POST",
+      url: "/v1/vault/mutation-approvals",
+      headers: { authorization: `Bearer ${collisionSession.raw_token}` },
+      payload: {
+        operation: "edit",
+        reference,
+        changes: { allowed_hosts: { mode: "add", hosts: ["collision.example.test"] } },
+      },
+    });
+    const id = (created.json() as { approval_id: string }).approval_id;
+
+    expect(created.statusCode).toBe(201);
+    expect(await deps.credentialMutationApprovalStore.getById(id)).toMatchObject({
+      agent: "web-session:collision",
+      requesterKind: "agent",
+    });
+    expect((await approveMutation(id)).statusCode).toBe(200);
+    const audits = await deps.vaultAuditStore.list(accountId, {
+      type: VAULT_AUDIT_TYPES.metadataEdited,
+      reference,
+    });
+    expect(audits.find((event) => event.payload.approval_id === id)?.payload.requester).toBe(
+      "agent",
+    );
+  });
+
   it("requires the signed chokepoint and attributes web metadata edits to the user", async () => {
     const reference = await storeCredential();
     const credential = (await deps.credentialStore.findActive(reference))!;
@@ -491,6 +586,7 @@ describe("vouch-gated credential mutations", () => {
     expect((await deps.credentialMutationApprovalStore.getById(id))?.agent).toBe(
       `web-session:${record.id}`,
     );
+    expect((await deps.credentialMutationApprovalStore.getById(id))?.requesterKind).toBe("web");
     expect((await deps.credentialStore.findActive(reference))?.allowed_hosts).toEqual([
       "api.openai.com",
     ]);

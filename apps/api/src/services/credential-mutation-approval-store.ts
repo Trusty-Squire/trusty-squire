@@ -9,6 +9,7 @@ import type { CredentialMutationMetadata } from "./credential-metadata.js";
 
 export type CredentialMutationOperation = "edit" | "delete";
 export type CredentialMutationApprovalStatus = "pending" | "approved" | "failed";
+export type CredentialMutationRequesterKind = "web" | "agent";
 
 export interface CredentialMutationApprovalInput {
   operation: CredentialMutationOperation;
@@ -19,6 +20,7 @@ export interface CredentialMutationApprovalInput {
   after: CredentialMutationMetadata | null;
   nonce: string;
   agent: string;
+  requesterKind: CredentialMutationRequesterKind;
   intentHash: string;
   expiresAt: Date;
 }
@@ -261,7 +263,7 @@ export function mutationAuditEvent(record: CredentialMutationApprovalRecord): Va
       record.operation === "edit" ? VAULT_AUDIT_TYPES.metadataEdited : VAULT_AUDIT_TYPES.deleted,
     payload: {
       reference: record.credentialReference,
-      requester: record.agent.startsWith("web-session:") ? "user" : "agent",
+      requester: record.requesterKind === "web" ? "user" : "agent",
       ...(record.credentialService !== null ? { service: record.credentialService } : {}),
       label: record.operation === "edit" ? record.after!.label : record.credentialLabel,
       approval_id: record.id,

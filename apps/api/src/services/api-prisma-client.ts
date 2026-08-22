@@ -183,6 +183,7 @@ interface CredentialMutationApprovalRow {
   after_metadata: unknown;
   nonce: string;
   agent: string;
+  requester_kind: string;
   intent_hash: string;
   status: string;
   failure_code: string | null;

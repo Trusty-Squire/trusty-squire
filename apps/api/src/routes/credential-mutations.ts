@@ -81,6 +81,9 @@ const deleteBody = z
 
 const createBody = z.union([editBody, deleteBody]);
 const approveBody = z.object({ jws: z.string().min(1).max(8192) }).strict();
+const TELEGRAM_TEXT_LIMIT = 4096;
+const TELEGRAM_METADATA_LIST_LIMIT = 600;
+
 function webBaseUrl(): string {
   return (
     process.env.PWA_BASE_URL ?? process.env.TRUSTY_SQUIRE_WEB_BASE ?? "https://trustysquire.ai"
@@ -90,6 +93,7 @@ function webBaseUrl(): string {
 export function credentialMutationPayload(record: CredentialMutationApprovalRecord): unknown {
   return {
     agent: record.agent,
+    requester_kind: record.requesterKind,
     approval_id: record.id,
     credential: {
       label: record.credentialLabel,
@@ -133,26 +137,51 @@ function describeMetadata(
 ): string {
   return (
     `${prefix} name=${metadata.label}; ` +
-    `allowed_hosts=[${metadata.allowed_hosts.join(", ")}]; ` +
-    `login_hosts=[${metadata.login_hosts.join(", ")}]; ` +
+    `allowed_hosts=[${summarizeMetadataList(metadata.allowed_hosts)}]; ` +
+    `login_hosts=[${summarizeMetadataList(metadata.login_hosts)}]; ` +
     `auth_strategy=${metadata.auth_strategy ?? "none"}`
   );
+}
+
+function summarizeMetadataList(values: readonly string[]): string {
+  const shown: string[] = [];
+  let length = 0;
+  for (const value of values) {
+    const added = value.length + (shown.length === 0 ? 0 : 2);
+    if (length + added > TELEGRAM_METADATA_LIST_LIMIT) break;
+    shown.push(value);
+    length += added;
+  }
+  const omitted = values.length - shown.length;
+  return `${shown.join(", ")}${omitted > 0 ? `${shown.length > 0 ? ", " : ""}… (+${omitted} more)` : ""}`;
+}
+
+function withTelegramReviewLink(body: string, link: string): string {
+  const suffix = `\nReview exact details: ${link}`;
+  if (body.length + suffix.length <= TELEGRAM_TEXT_LIMIT) return `${body}${suffix}`;
+  const marker = "\n… metadata summary truncated";
+  const available = Math.max(0, TELEGRAM_TEXT_LIMIT - suffix.length - marker.length);
+  return `${body.slice(0, available)}${marker}${suffix}`;
 }
 
 function telegramPrompt(record: CredentialMutationApprovalRecord): string {
   const credential = `${record.credentialService ?? "credential"}/${record.credentialLabel}`;
   const link = `${webBaseUrl().replace(/\/+$/, "")}/vault/mutate/${record.id}`;
   if (record.operation === "delete") {
-    return (
+    return withTelegramReviewLink(
       `Trusty Squire — approve credential deletion\n` +
-      `${credential}\n${record.credentialReference}\n${link}`
+        `${credential}\n${record.credentialReference}\n` +
+        `${describeMetadata("Before:", record.before)}\n` +
+        `After: deleted`,
+      link,
     );
   }
-  return (
+  return withTelegramReviewLink(
     `Trusty Squire — approve credential metadata edit\n` +
-    `${credential}\n${record.credentialReference}\n` +
-    `${describeMetadata("Before:", record.before)}\n` +
-    `${describeMetadata("After:", record.after!)}\n${link}`
+      `${credential}\n${record.credentialReference}\n` +
+      `${describeMetadata("Before:", record.before)}\n` +
+      `${describeMetadata("After:", record.after!)}`,
+    link,
   );
 }
 
@@ -214,6 +243,7 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
 
       const credential = resolution.credential;
       const agent = authenticatedRequester(auth);
+      const requesterKind = auth.kind;
       const before = editableMetadata(credential);
       let after = null;
       if (parsed.data.operation === "edit") {
@@ -234,6 +264,7 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
       }
       const intentHash = hashVouchPayload({
         agent,
+        requester_kind: requesterKind,
         after,
         before,
         credential_reference: credential.reference,
@@ -260,6 +291,7 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
         after,
         nonce: randomBytes(16).toString("base64url"),
         agent,
+        requesterKind,
         intentHash,
         expiresAt: new Date(now.getTime() + 10 * 60 * 1000),
       });
