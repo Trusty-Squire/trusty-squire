@@ -1,7 +1,7 @@
 import { ImageResponse } from "next/og";
 
 export const alt =
-  "Trusty Squire signing up for a website and keeping the generated secret out of chat, code, and .env";
+  "Trusty Squire empowering an agent with auth and payments, keys and card kept in a write-only vault";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
@@ -42,11 +42,10 @@ export default function OpenGraphImage() {
       <div style={{ display: "flex", gap: 46, alignItems: "flex-end" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 24, width: 620 }}>
           <div style={{ fontSize: 58, lineHeight: 1.04, letterSpacing: "-0.045em" }}>
-            Trusty Squire signs up and signs in to websites for you.
+            Empower agents with auth and payments.
           </div>
           <div style={{ color: "#9a9aa4", fontSize: 23, lineHeight: 1.45 }}>
-            Gets past signup walls and bot detection, and keeps the generated secret out of chat,
-            code, and .env.
+            MCP tools to automate auth and pay — your keys and card never leave the vault.
           </div>
         </div>
 
