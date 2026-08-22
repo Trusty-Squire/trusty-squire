@@ -594,14 +594,14 @@ function checkoutUrlOrderIdentities(
 // label conventions are normalized to data-ts-jp-card-field by
 // stampJapaneseCardLabelFields so this selector stays valid for both
 // frame.locator() and native element.matches() calls.
-const CHECKOUT_NON_PAN_IDENTITY_EXCLUSION =
+const CHECKOUT_NON_CARD_IDENTITY_EXCLUSION =
   ':not([name*="gift" i]):not([id*="gift" i]):not([name*="loyalty" i]):not([id*="loyalty" i]):not([name*="point" i]):not([id*="point" i]):not([name*="prepaid" i]):not([id*="prepaid" i]):not([name*="member" i]):not([id*="member" i])';
 
 const CHECKOUT_PAN_FIELD_SELECTORS = [
   'input[autocomplete~="cc-number"]',
   'input[data-ts-jp-card-field="pan"]',
 ]
-  .map((selector) => `${selector}${CHECKOUT_NON_PAN_IDENTITY_EXCLUSION}`)
+  .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
   .join(",");
 
 const CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS =
@@ -616,11 +616,36 @@ const CHECKOUT_COMBINED_EXPIRY_FIELD_SELECTORS =
 const CHECKOUT_COMBINED_EXPIRY_GROUP_SELECTORS =
   'input[autocomplete~="cc-exp"],input[name*="expir" i]:not([name*="month" i]):not([name*="year" i]),input[name="exp" i],input[name*="exp-date" i],input[id*="expir" i]:not([id*="month" i]):not([id*="year" i]),input[id="exp" i],input[id*="exp-date" i],input[placeholder="MM/YY" i],input[placeholder="MM / YY" i],input[aria-label="MM/YY" i],input[aria-label="MM / YY" i]';
 
-const CHECKOUT_CVV_FIELD_SELECTORS =
-  'input[autocomplete~="cc-csc"],input[name*="cvv" i],input[name*="cvc" i],input[name*="security-code" i],input[id*="cvv" i],input[id*="cvc" i],input[name*="security_cd" i],input[name*="securitycd" i],input[name*="sec_code" i],input[name*="seccode" i],input[id*="security_cd" i],input[data-ts-jp-card-field="cvv"]';
+const CHECKOUT_CVV_FIELD_SELECTORS = [
+  'input[autocomplete~="cc-csc"]',
+  'input[name*="cvv" i]',
+  'input[name*="cvc" i]',
+  'input[name*="security-code" i]',
+  'input[id*="cvv" i]',
+  'input[id*="cvc" i]',
+  'input[name*="security_cd" i]',
+  'input[name*="securitycd" i]',
+  'input[name*="sec_code" i]',
+  'input[name*="seccode" i]',
+  'input[id*="security_cd" i]',
+  'input[data-ts-jp-card-field="cvv"]',
+]
+  .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
+  .join(",");
 
-const CHECKOUT_CARD_NAME_FIELD_SELECTORS =
-  'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i],input[name*="card_name" i],input[name*="credit_name" i],input[id*="card_name" i],input[id*="credit_name" i],input[data-ts-jp-card-field="name"]';
+const CHECKOUT_CARD_NAME_FIELD_SELECTORS = [
+  'input[autocomplete~="cc-name"]',
+  'input[name*="cardholder" i]',
+  'input[name*="card-name" i]',
+  'input[id*="cardholder" i]',
+  'input[name*="card_name" i]',
+  'input[name*="credit_name" i]',
+  'input[id*="card_name" i]',
+  'input[id*="credit_name" i]',
+  'input[data-ts-jp-card-field="name"]',
+]
+  .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
+  .join(",");
 
 const CHECKOUT_CARD_VALUE_FIELD_SELECTORS = [
   CHECKOUT_PAN_FIELD_SELECTORS,
@@ -8417,30 +8442,33 @@ export class BrowserController {
   // non-text, or unassociated control is left unstamped rather than guessed —
   // a wrong-field card fill is worse than a fill_field_not_found refusal.
   private async stampJapaneseCardLabelFields(frames: readonly Frame[]): Promise<void> {
-    const excludedPanIdentities = ["gift", "loyalty", "point", "prepaid", "member"];
+    const excludedCardIdentities = ["gift", "loyalty", "point", "prepaid", "member"];
     const panLabels = ["カード番号"];
-    const excludedPanLabels = [
-      "ギフトカード番号",
-      "ポイントカード番号",
-      "プリペイドカード番号",
-      "会員カード番号",
-      "メンバーカード番号",
-      "ロイヤルティカード番号",
-      "ロイヤリティカード番号",
+    const excludedCardLabels = [
+      "ギフト",
+      "ポイント",
+      "プリペイド",
+      "会員",
+      "メンバー",
+      "ロイヤルティ",
+      "ロイヤリティ",
     ];
     const nameLabels = ["カード名義"];
     const cvvLabels = ["セキュリティコード", "セキュリティーコード"];
     const expiryLabels = ["有効期限"];
     await Promise.all(
-      frames.map((frame) =>
+      frames.map((frame, frameIndex) =>
         frame
           .evaluate(
             (labels) => {
               document
-                .querySelectorAll('[data-ts-jp-card-field],[data-ts-jp-card-exp]')
+                .querySelectorAll(
+                  '[data-ts-jp-card-field],[data-ts-jp-card-exp],[data-ts-jp-card-exp-group]',
+                )
                 .forEach((element) => {
                   element.removeAttribute("data-ts-jp-card-field");
                   element.removeAttribute("data-ts-jp-card-exp");
+                  element.removeAttribute("data-ts-jp-card-exp-group");
                 });
               const isVisible = (element: HTMLElement): boolean => {
                 if (element.matches(":disabled") || element.getClientRects().length === 0) {
@@ -8488,7 +8516,7 @@ export class BrowserController {
                 const identities = [element.getAttribute("name") ?? "", element.id];
                 const excluded = identities.some((identity) => {
                   const lower = identity.toLowerCase();
-                  return labels.excludedPanIdentities.some((token) => lower.includes(token));
+                  return labels.excludedCardIdentities.some((token) => lower.includes(token));
                 });
                 if (!excluded && identities.some(isPanIdentity)) {
                   element.setAttribute("data-ts-jp-card-field", "pan");
@@ -8529,12 +8557,13 @@ export class BrowserController {
                   inputs[0].setAttribute("data-ts-jp-card-field", attrValue);
                 }
               };
+              let expiryGroupSequence = 0;
               document
                 .querySelectorAll("dt, th, label, .table-label, .form-label")
                 .forEach((host) => {
-                  stampField(host, labels.pan, "pan", labels.excludedPan);
-                  stampField(host, labels.name, "name");
-                  stampField(host, labels.cvv, "cvv");
+                  stampField(host, labels.pan, "pan", labels.excludedCard);
+                  stampField(host, labels.name, "name", labels.excludedCard);
+                  stampField(host, labels.cvv, "cvv", labels.excludedCard);
                   const text = (host.textContent ?? "").trim();
                   if (!labels.expiry.some((label) => text.includes(label))) return;
                   const selects = associatedElements(host, "select").filter(
@@ -8552,15 +8581,19 @@ export class BrowserController {
                     yearSelects.length === 1 &&
                     monthSelects[0] !== yearSelects[0]
                   ) {
+                    const group = `ts-jp-exp-${labels.frameIndex}-${expiryGroupSequence++}`;
                     monthSelects[0].setAttribute("data-ts-jp-card-exp", "month");
                     yearSelects[0].setAttribute("data-ts-jp-card-exp", "year");
+                    monthSelects[0].setAttribute("data-ts-jp-card-exp-group", group);
+                    yearSelects[0].setAttribute("data-ts-jp-card-exp-group", group);
                   }
                 });
             },
             {
-              excludedPanIdentities,
+              frameIndex,
+              excludedCardIdentities,
               pan: panLabels,
-              excludedPan: excludedPanLabels,
+              excludedCard: excludedCardLabels,
               name: nameLabels,
               cvv: cvvLabels,
               expiry: expiryLabels,
@@ -9098,17 +9131,22 @@ export class BrowserController {
             },
           ]
         : frames.map((frame) => ({ frame, matches: frame.locator(selectors) }));
-    const countFillableCardFields = async (selectors: string): Promise<number> => {
-      let fillable = 0;
-      for (const { matches } of cardFieldCandidates(selectors)) {
+    const fillableCardFields = async (
+      selectors: string,
+    ): Promise<Array<{ frame: Frame; field: Locator }>> => {
+      const fillable: Array<{ frame: Frame; field: Locator }> = [];
+      for (const { frame, matches } of cardFieldCandidates(selectors)) {
         const count = await matches.count().catch(() => 0);
         for (let index = 0; index < count; index += 1) {
-          const candidate = matches.nth(index);
-          if (!(await candidate.isVisible().catch(() => false))) continue;
-          if (await candidate.isEnabled().catch(() => false)) fillable += 1;
+          const field = matches.nth(index);
+          if (!(await field.isVisible().catch(() => false))) continue;
+          if (await field.isEnabled().catch(() => false)) fillable.push({ frame, field });
         }
       }
       return fillable;
+    };
+    const countFillableCardFields = async (selectors: string): Promise<number> => {
+      return (await fillableCardFields(selectors)).length;
     };
     const requireExactlyOneCardField = async (
       field: string,
@@ -9122,6 +9160,57 @@ export class BrowserController {
       if ((await countFillableCardFields(selectors)) > 1) {
         throw new Error("payment_card_form_ambiguous");
       }
+    };
+    const splitExpiryFieldsShareGroup = async (): Promise<boolean> => {
+      const months = await fillableCardFields(CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS);
+      const years = await fillableCardFields(CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS);
+      if (months.length !== 1 || years.length !== 1) return false;
+      const month = months[0];
+      const year = years[0];
+      if (month.frame === year.frame) {
+        const yearHandle = await year.field.elementHandle().catch(() => null);
+        if (yearHandle === null) return false;
+        const related = await month.field
+          .evaluate((monthElement, yearElement) => {
+            if (monthElement === yearElement) return false;
+            const monthControl = monthElement as HTMLInputElement | HTMLSelectElement;
+            const yearControl = yearElement as HTMLInputElement | HTMLSelectElement;
+            const monthForm = monthControl.form ?? monthElement.closest("form");
+            const yearForm = yearControl.form ?? yearElement.closest("form");
+            return monthForm === null || yearForm === null || monthForm === yearForm;
+          }, yearHandle)
+          .catch(() => false);
+        await yearHandle.dispose().catch(() => undefined);
+        if (!related) return false;
+      }
+      const signatures = async (field: Locator): Promise<string[]> =>
+        await field
+          .evaluate((element) => {
+            const result = new Set<string>();
+            const stamped = element.getAttribute("data-ts-jp-card-exp-group");
+            if (stamped !== null && stamped.length > 0) result.add(stamped);
+            for (const value of [
+              element.getAttribute("autocomplete") ?? "",
+              element.getAttribute("name") ?? "",
+              element.id,
+            ]) {
+              const tokens = value
+                .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+                .toLowerCase()
+                .split(/[^a-z0-9]+/)
+                .filter((token) => token.length > 0);
+              if (!tokens.includes("month") && !tokens.includes("year")) continue;
+              const group = tokens
+                .filter((token) => token !== "month" && token !== "year")
+                .join("-");
+              if (group.length > 0) result.add(group);
+            }
+            return [...result];
+          })
+          .catch(() => []);
+      const monthSignatures = await signatures(month.field);
+      const yearSignatures = new Set(await signatures(year.field));
+      return monthSignatures.some((signature) => yearSignatures.has(signature));
     };
 
     const fillFirst = async (
@@ -9299,6 +9388,12 @@ export class BrowserController {
     }
     const hasCombinedExpiry = combinedExpiryCount === 1;
     const hasSplitExpiry = expiryMonthCount === 1 && expiryYearCount === 1;
+    if (hasCombinedExpiry && hasSplitExpiry) {
+      throw new Error("payment_card_form_ambiguous");
+    }
+    if (hasSplitExpiry && !(await splitExpiryFieldsShareGroup())) {
+      throw new Error("payment_card_form_ambiguous");
+    }
     if (!hasCombinedExpiry && !hasSplitExpiry) {
       throw new Error("payment_field_not_found:expiry");
     }

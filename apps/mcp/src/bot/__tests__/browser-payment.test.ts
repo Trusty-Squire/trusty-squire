@@ -3733,6 +3733,135 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "excludes non-card CVV identities and JP labels",
+    async () => {
+      const cases = [
+        {
+          name: "gift-cvv-identity",
+          cvv: '<input type="text" name="GIFT_SECURITY_CD" id="false-cvv">',
+        },
+        {
+          name: "gift-cvv-label",
+          cvv: '<dl><dt>ギフトセキュリティコード</dt><dd><input type="text" id="field-z"></dd></dl>',
+        },
+      ];
+      for (const testCase of cases) {
+        const pageUrl = `https://shop.example.test/${testCase.name}.html`;
+        const { page, browser } = await servePages({
+          [pageUrl]: `
+            <meta charset="utf-8">
+            <form>
+              <input type="text" autocomplete="cc-number" id="pan">
+              <input type="text" autocomplete="cc-name" id="holder">
+              <input type="text" autocomplete="cc-exp" id="expiry">
+              ${testCase.cvv}
+            </form>`,
+        });
+        try {
+          await page.goto(pageUrl);
+          const controller = new BrowserController({ humanize: false });
+          (controller as unknown as { page: Page }).page = page;
+
+          await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+            "payment_field_not_found:cvv",
+          );
+          await expect(
+            page.locator("input").evaluateAll((inputs) =>
+              inputs.map((input) => (input as HTMLInputElement).value),
+            ),
+          ).resolves.toEqual(["", "", "", ""]);
+        } finally {
+          await browser.close();
+        }
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "leaves non-card holder identity and label candidates untouched",
+    async () => {
+      const pageUrl = "https://shop.example.test/gift-holder-fields.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form>
+            <input type="text" autocomplete="cc-number" id="pan">
+            <input type="text" autocomplete="cc-exp" id="expiry">
+            <input type="text" autocomplete="cc-csc" id="cvv">
+            <input type="text" name="GIFT_CREDIT_NAME" id="gift-holder">
+            <dl><dt>ギフトカード名義</dt><dd><input type="text" id="field-holder"></dd></dl>
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillCheckoutCardFields(CARD);
+        expect(await page.locator("#gift-holder").inputValue()).toBe("");
+        expect(await page.locator("#field-holder").inputValue()).toBe("");
+        expect(await page.locator("#pan").inputValue()).toBe(CARD.pan);
+        expect(await page.locator("#cvv").inputValue()).toBe(CARD.cvv);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses ambiguous and unrelated expiry topologies before filling",
+    async () => {
+      const cases = [
+        {
+          name: "combined-and-split",
+          expiry: `
+            <input type="text" autocomplete="cc-exp" id="card-expiry">
+            <select name="membership_exp_month"><option value=""></option><option value="12">12</option></select>
+            <select name="membership_exp_year"><option value=""></option><option value="30">30</option></select>`,
+        },
+        {
+          name: "same-split-control",
+          expiry: '<input type="text" name="exp_month_exp_year" id="shared-expiry">',
+        },
+        {
+          name: "different-split-groups",
+          expiry: `
+            <input type="text" name="membership_exp_month" id="membership-month">
+            <input type="text" name="card_exp_year" id="card-year">`,
+        },
+      ];
+      for (const testCase of cases) {
+        const pageUrl = `https://shop.example.test/${testCase.name}.html`;
+        const { page, browser } = await servePages({
+          [pageUrl]: `
+            <meta charset="utf-8">
+            <form>
+              <input type="text" autocomplete="cc-number" id="pan">
+              <input type="text" autocomplete="cc-name" id="holder">
+              ${testCase.expiry}
+              <input type="text" autocomplete="cc-csc" id="cvv">
+            </form>`,
+        });
+        try {
+          await page.goto(pageUrl);
+          const controller = new BrowserController({ humanize: false });
+          (controller as unknown as { page: Page }).page = page;
+
+          await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+            "payment_card_form_ambiguous",
+          );
+          const values = await page.locator("input,select").evaluateAll((controls) =>
+            controls.map((control) => (control as HTMLInputElement | HTMLSelectElement).value),
+          );
+          expect(values.every((value) => value === "")).toBe(true);
+        } finally {
+          await browser.close();
+        }
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "refuses a JP card-number label associated with four visible PAN segments",
     async () => {
       const pageUrl = "https://shop.example.test/segmented-checkout.html";
@@ -4067,6 +4196,7 @@ describe("split-checkout card fill (real browser)", () => {
               const replacement = original.cloneNode(true) as HTMLSelectElement;
               replacement.removeAttribute("data-ts-sealed-payment");
               replacement.removeAttribute("data-ts-jp-card-exp");
+              replacement.removeAttribute("data-ts-jp-card-exp-group");
               replacement.removeAttribute("data-ts-jp-card-field");
               replacement.value = (original as HTMLSelectElement).value;
               original.replaceWith(replacement);
