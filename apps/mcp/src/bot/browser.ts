@@ -4309,7 +4309,67 @@ export class BrowserController {
     await chooser.setFiles(filePath);
   }
 
+  // Ancestors marked `inert` for a "hide the background while a modal is
+  // open" trick are meant to sit OUTSIDE a truly-portaled dialog (Angular
+  // CDK/Material's overlay container is a sibling of the app root, and only
+  // the app root gets marked inert — unaffected by this). A dialog that
+  // isn't portaled to <body> — it only escapes its container VISUALLY via
+  // position:fixed — remains a structural DESCENDANT of the inert ancestor,
+  // and Chromium's real hit-testing (which Playwright's actionability check
+  // relies on) skips an inert subtree entirely: a normal click() on such a
+  // control hangs waiting for actionability that never arrives (see the
+  // matching neutralizeInertForHitTest in extractElementsFromContext, which
+  // covers el_table's topmost/occludedBy reporting for the same case).
+  // Scoped tight — only neutralized when the target itself resolves inside a
+  // detected dialog/modal region — so a genuine background control outside
+  // any modal keeps its inert protection (money-fence boundary untouched).
+  // Ancestors are tagged with a marker attribute (not held as live handles)
+  // so the restore step re-finds exactly what THIS call neutralized even
+  // across the intervening await.
+  private async withModalInertNeutralized<T>(
+    selector: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    if (!this.page) throw new Error("Browser not started");
+    const marker = "data-ts-inert-neutralized";
+    await this.page
+      .$eval(
+        selector,
+        (el, marker) => {
+          const region = el.closest('[role="dialog"],dialog,[aria-modal="true"]');
+          if (region === null) return;
+          let cur: Element | null = el;
+          while (cur !== null) {
+            if (cur.hasAttribute("inert")) {
+              cur.removeAttribute("inert");
+              cur.setAttribute(marker, "1");
+            }
+            cur = cur.parentElement;
+          }
+        },
+        marker,
+      )
+      .catch(() => undefined);
+    try {
+      return await fn();
+    } finally {
+      await this.page
+        .evaluate((marker) => {
+          document.querySelectorAll(`[${marker}]`).forEach((el) => {
+            el.removeAttribute(marker);
+            el.setAttribute("inert", "");
+          });
+        }, marker)
+        .catch(() => undefined);
+    }
+  }
+
   async click(selector: string): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    await this.withModalInertNeutralized(selector, () => this.clickInner(selector));
+  }
+
+  private async clickInner(selector: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     // Radio/checkbox inputs — especially the visually-hidden kind behind a
     // styled label (kinde's `kui-util-hide-visually` SDK-picker radios) — don't
@@ -11542,40 +11602,82 @@ export class BrowserController {
         return tag;
       };
 
+      const isModalRegion = (region: Element | null): boolean =>
+        region !== null &&
+        (region.getAttribute("role") === "dialog" ||
+          region.tagName.toLowerCase() === "dialog" ||
+          region.getAttribute("aria-modal") === "true");
+
+      // `inert`, used to hide the background while a modal is open, is meant
+      // to sit on a SIBLING of a truly-portaled dialog (Angular CDK/Material
+      // append the overlay container as a sibling of the app root and mark
+      // only the app root inert — that structure is unaffected by this).
+      // Some dialogs are never portaled to <body> at all: they merely escape
+      // their container VISUALLY via position:fixed while remaining a
+      // structural DESCENDANT of whatever ancestor got marked inert for the
+      // background-hiding trick. `inert` (unlike display/visibility/opacity)
+      // makes Chromium's native hit-testing skip the entire subtree, so
+      // document.elementFromPoint never resolves to the escaped dialog or
+      // anything inside it — every one of its controls reports
+      // topmost:false/occludedBy even though it is the genuinely visible,
+      // user-clickable control (and a real click on it hangs the same way —
+      // see withModalInertNeutralized in browser.ts). Scoped tight: only
+      // ancestors of an element that is ITSELF inside a detected dialog/modal
+      // region are neutralized, so a real background control outside any
+      // modal keeps its inert protection (money-fence boundary untouched).
+      const neutralizeInertForHitTest = (el: Element): Element[] => {
+        if (!isModalRegion(regionFor(el))) return [];
+        const neutralized: Element[] = [];
+        let cur: Element | null = el;
+        while (cur !== null) {
+          if (cur.hasAttribute("inert")) {
+            cur.removeAttribute("inert");
+            neutralized.push(cur);
+          }
+          cur = cur.parentElement;
+        }
+        return neutralized;
+      };
+
       const topmostStatus = (el: Element): { topmost: boolean; occludedBy: string | null } => {
         const r = el.getBoundingClientRect();
         if (r.width < 1 || r.height < 1) return { topmost: false, occludedBy: null };
         const x = Math.min(window.innerWidth - 1, Math.max(0, r.left + r.width / 2));
         const y = Math.min(window.innerHeight - 1, Math.max(0, r.top + r.height / 2));
-        let top = document.elementFromPoint(x, y);
-        if (top === null) return { topmost: false, occludedBy: null };
-        // document.elementFromPoint returns the shadow HOST, not the control
-        // nested in its open shadow root — so a shadow-DOM CTA (Casetify's
-        // Add-to-Cart web component) hit-tested against its own host would be
-        // reported occludedBy that host and topmost:false, and the host agent
-        // would skip a button nothing actually covers. Re-hit-test inside each
-        // open shadow root at the same point to reach the deepest composed
-        // element, matching what the user's pointer would strike. Closed roots
-        // yield a null shadowRoot and the descent stops — same as the DOM.
-        while (top.shadowRoot !== null) {
-          const deeper = top.shadowRoot.elementFromPoint(x, y);
-          if (deeper === null || deeper === top) break;
-          top = deeper;
-        }
-        if (top === el || el.contains(top)) return { topmost: true, occludedBy: null };
-        let owner: Node | null = top;
-        while (owner !== null) {
-          if (owner === el) return { topmost: true, occludedBy: null };
-          const assignedSlot: HTMLSlotElement | null =
-            owner instanceof Element || owner instanceof Text ? owner.assignedSlot : null;
-          if (assignedSlot !== null) {
-            owner = assignedSlot;
-            continue;
+        const neutralized = neutralizeInertForHitTest(el);
+        try {
+          let top = document.elementFromPoint(x, y);
+          if (top === null) return { topmost: false, occludedBy: null };
+          // document.elementFromPoint returns the shadow HOST, not the control
+          // nested in its open shadow root — so a shadow-DOM CTA (Casetify's
+          // Add-to-Cart web component) hit-tested against its own host would be
+          // reported occludedBy that host and topmost:false, and the host agent
+          // would skip a button nothing actually covers. Re-hit-test inside each
+          // open shadow root at the same point to reach the deepest composed
+          // element, matching what the user's pointer would strike. Closed roots
+          // yield a null shadowRoot and the descent stops — same as the DOM.
+          while (top.shadowRoot !== null) {
+            const deeper = top.shadowRoot.elementFromPoint(x, y);
+            if (deeper === null || deeper === top) break;
+            top = deeper;
           }
-          const parent: ParentNode | null = owner.parentNode;
-          owner = parent instanceof ShadowRoot ? parent.host : parent;
+          if (top === el || el.contains(top)) return { topmost: true, occludedBy: null };
+          let owner: Node | null = top;
+          while (owner !== null) {
+            if (owner === el) return { topmost: true, occludedBy: null };
+            const assignedSlot: HTMLSlotElement | null =
+              owner instanceof Element || owner instanceof Text ? owner.assignedSlot : null;
+            if (assignedSlot !== null) {
+              owner = assignedSlot;
+              continue;
+            }
+            const parent: ParentNode | null = owner.parentNode;
+            owner = parent instanceof ShadowRoot ? parent.host : parent;
+          }
+          return { topmost: false, occludedBy: regionName(regionFor(top)) ?? elementKind(top) };
+        } finally {
+          for (const a of neutralized) a.setAttribute("inert", "");
         }
-        return { topmost: false, occludedBy: regionName(regionFor(top)) ?? elementKind(top) };
       };
 
       // N1 onboarding-wizard cards (2026-06-08). Chakra/React card pickers
