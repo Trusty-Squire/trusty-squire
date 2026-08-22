@@ -3855,6 +3855,87 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "refuses a compound gift-card label beside a segmented JP PAN",
+    async () => {
+      const pageUrl = "https://shop.example.test/gift-label-and-segmented-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form>
+            <dl><dt>ギフトカード番号</dt><dd><input type="text" id="opaque-token"></dd></dl>
+            <dl>
+              <dt>カード番号</dt>
+              <dd>
+                <input type="text" id="pan-1"><input type="text" id="pan-2">
+                <input type="text" id="pan-3"><input type="text" id="pan-4">
+              </dd>
+            </dl>
+            <input type="text" name="CREDIT_NAME" id="holder">
+            <select name="CREDIT_LIMIT_MONTH"><option value="">月を指定</option><option value="12">12</option></select>
+            <select name="CREDIT_LIMIT_YEAR"><option value="">年を指定</option><option value="30">2030</option></select>
+            <input type="text" name="SECURITY_CD" id="cvv">
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+          "payment_field_not_found:pan",
+        );
+        await expect(
+          page.locator("input").evaluateAll((inputs) =>
+            inputs.map((input) => (input as HTMLInputElement).value),
+          ),
+        ).resolves.toEqual(["", "", "", "", "", "", ""]);
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "counts visible PAN candidates beyond the first ten before filling",
+    async () => {
+      const pageUrl = "https://shop.example.test/long-ambiguous-checkout.html";
+      const hiddenPans = Array.from(
+        { length: 9 },
+        (_, index) => `<input type="text" name="CARD_NO_HIDDEN_${index}" hidden>`,
+      ).join("");
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form>
+            ${hiddenPans}
+            <input type="text" name="CREDIT_NO" id="credit-card">
+            <input type="text" name="BACKUP_CARD_NO" id="backup-card">
+            <input type="text" name="CREDIT_NAME" id="holder">
+            <select name="CREDIT_LIMIT_MONTH"><option value="">月を指定</option><option value="12">12</option></select>
+            <select name="CREDIT_LIMIT_YEAR"><option value="">年を指定</option><option value="30">2030</option></select>
+            <input type="text" name="SECURITY_CD" id="cvv">
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_card_form_ambiguous",
+        );
+        expect(await page.locator("#credit-card").inputValue()).toBe("");
+        expect(await page.locator("#backup-card").inputValue()).toBe("");
+        expect(await page.locator("#holder").inputValue()).toBe("");
+        expect(await page.locator("#cvv").inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "resolves label-for and wrapped-label JP expiry pairs and cleans replaced selects",
     async () => {
       const expiryOptions = `

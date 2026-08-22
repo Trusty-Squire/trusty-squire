@@ -8440,6 +8440,15 @@ export class BrowserController {
   // a wrong-field card fill is worse than a fill_field_not_found refusal.
   private async stampJapaneseCardLabelFields(frames: readonly Frame[]): Promise<void> {
     const panLabels = ["カード番号"];
+    const excludedPanLabels = [
+      "ギフトカード番号",
+      "ポイントカード番号",
+      "プリペイドカード番号",
+      "会員カード番号",
+      "メンバーカード番号",
+      "ロイヤルティカード番号",
+      "ロイヤリティカード番号",
+    ];
     const nameLabels = ["カード名義"];
     const cvvLabels = ["セキュリティコード", "セキュリティーコード"];
     const expiryLabels = ["有効期限"];
@@ -8498,9 +8507,15 @@ export class BrowserController {
                 }
                 return [...associated];
               };
-              const stampField = (host: Element, fieldLabels: string[], attrValue: string): void => {
+              const stampField = (
+                host: Element,
+                fieldLabels: string[],
+                attrValue: string,
+                excludedLabels: string[] = [],
+              ): void => {
                 const text = (host.textContent ?? "").trim();
                 if (!fieldLabels.some((label) => text.includes(label))) return;
+                if (excludedLabels.some((label) => text.includes(label))) return;
                 const inputs = associatedElements(host, "input").filter(isTextInput);
                 if (inputs.length === 1) {
                   inputs[0].setAttribute("data-ts-jp-card-field", attrValue);
@@ -8509,7 +8524,7 @@ export class BrowserController {
               document
                 .querySelectorAll("dt, th, label, .table-label, .form-label")
                 .forEach((host) => {
-                  stampField(host, labels.pan, "pan");
+                  stampField(host, labels.pan, "pan", labels.excludedPan);
                   stampField(host, labels.name, "name");
                   stampField(host, labels.cvv, "cvv");
                   const text = (host.textContent ?? "").trim();
@@ -8534,7 +8549,13 @@ export class BrowserController {
                   }
                 });
             },
-            { pan: panLabels, name: nameLabels, cvv: cvvLabels, expiry: expiryLabels },
+            {
+              pan: panLabels,
+              excludedPan: excludedPanLabels,
+              name: nameLabels,
+              cvv: cvvLabels,
+              expiry: expiryLabels,
+            },
           )
           .catch(() => undefined),
       ),
@@ -9071,7 +9092,7 @@ export class BrowserController {
     const countFillableCardFields = async (selectors: string): Promise<number> => {
       let fillable = 0;
       for (const { matches } of cardFieldCandidates(selectors)) {
-        const count = Math.min(await matches.count().catch(() => 0), 10);
+        const count = await matches.count().catch(() => 0);
         for (let index = 0; index < count; index += 1) {
           const candidate = matches.nth(index);
           if (!(await candidate.isVisible().catch(() => false))) continue;
