@@ -4149,6 +4149,125 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "refuses legacy expiry and CVV sibling candidates on JP-only card forms",
+    async () => {
+      const cases = [
+        {
+          name: "legacy-expiry-siblings",
+          controls: `
+            <select name="order_exp_month" id="false-month">
+              <option value=""></option><option value="12">12</option>
+            </select>
+            <select name="order_exp_year" id="false-year">
+              <option value=""></option><option value="30">30</option>
+            </select>
+            <input name="SECURITY_CD" id="cvv">`,
+          expectedError: "payment_field_not_found:expiry",
+        },
+        {
+          name: "legacy-cvv-sibling",
+          controls: `
+            <select name="CREDIT_LIMIT_MONTH" id="month">
+              <option value=""></option><option value="12">12</option>
+            </select>
+            <select name="CREDIT_LIMIT_YEAR" id="year">
+              <option value=""></option><option value="30">2030</option>
+            </select>
+            <input name="CVC_NOTE" id="false-cvv">`,
+          expectedError: "payment_field_not_found:cvv",
+        },
+      ];
+      for (const testCase of cases) {
+        const pageUrl = `https://shop.example.test/${testCase.name}.html`;
+        const { page, browser } = await servePages({
+          [pageUrl]: `
+            <form>
+              <input name="CREDIT_NO" id="pan">
+              <input name="CREDIT_NAME" id="holder">
+              ${testCase.controls}
+            </form>
+            <script>
+              for (const id of ["false-month", "false-year"]) {
+                const field = document.getElementById(id);
+                if (field) field.addEventListener("change", (event) => {
+                  if (event.target.value) document.body.dataset.falseExpiryTouched = "true";
+                });
+              }
+              const falseCvv = document.getElementById("false-cvv");
+              if (falseCvv) falseCvv.addEventListener("input", (event) => {
+                if (event.target.value) document.body.dataset.falseCvvTouched = "true";
+              });
+            </script>`,
+        });
+        try {
+          await page.goto(pageUrl);
+          const controller = new BrowserController({ humanize: false });
+          (controller as unknown as { page: Page }).page = page;
+
+          await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+            testCase.expectedError,
+          );
+          expect(await page.locator("body").getAttribute("data-false-expiry-touched")).toBeNull();
+          expect(await page.locator("body").getAttribute("data-false-cvv-touched")).toBeNull();
+          const values = await page.locator("input,select").evaluateAll((controls) =>
+            controls.map((control) => (control as HTMLInputElement | HTMLSelectElement).value),
+          );
+          expect(values.every((value) => value === "")).toBe(true);
+        } finally {
+          await browser.close();
+        }
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "rejects a trailing-token PAN identity beside segmented card inputs",
+    async () => {
+      const pageUrl = "https://shop.example.test/card-no-note-and-segmented.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form>
+            <input name="CARD_NO_NOTE" id="false-pan">
+            <dl>
+              <dt>カード番号</dt>
+              <dd>
+                <input id="pan-1"><input id="pan-2">
+                <input id="pan-3"><input id="pan-4">
+              </dd>
+            </dl>
+            <input name="CREDIT_NAME" id="holder">
+            <select name="CREDIT_LIMIT_MONTH"><option value=""></option><option value="12">12</option></select>
+            <select name="CREDIT_LIMIT_YEAR"><option value=""></option><option value="30">2030</option></select>
+            <input name="SECURITY_CD" id="cvv">
+          </form>
+          <script>
+            document.getElementById("false-pan").addEventListener("input", (event) => {
+              if (event.target.value) document.body.dataset.falsePanValue = event.target.value;
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+          "payment_field_not_found:pan",
+        );
+        expect(await page.locator("body").getAttribute("data-false-pan-value")).toBeNull();
+        const values = await page.locator("input").evaluateAll((inputs) =>
+          inputs.map((input) => (input as HTMLInputElement).value),
+        );
+        expect(values.every((value) => value === "")).toBe(true);
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "refuses a JP card-number label associated with four visible PAN segments",
     async () => {
       const pageUrl = "https://shop.example.test/segmented-checkout.html";

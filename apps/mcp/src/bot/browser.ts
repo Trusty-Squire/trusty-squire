@@ -611,12 +611,8 @@ const CHECKOUT_PAN_FIELD_SELECTORS = [
   `input[data-ts-jp-card-field="pan"]${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
 ].join(",");
 
-const CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS = [
+const CHECKOUT_CONSERVATIVE_EXPIRY_MONTH_FIELD_SELECTORS = [
   '[autocomplete~="cc-exp-month"]',
-  '[name*="exp_month" i]',
-  '[name*="expmonth" i]',
-  '[name*="exp" i][name*="month" i]',
-  '[id*="exp" i][id*="month" i]',
   'select[name*="credit" i][name*="month" i]',
   'select[name*="limit" i][name*="month" i]',
   'select[id*="limit" i][id*="month" i]',
@@ -625,12 +621,18 @@ const CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS = [
   .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
   .join(",");
 
-const CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS = [
+const CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS = [
+  CHECKOUT_CONSERVATIVE_EXPIRY_MONTH_FIELD_SELECTORS,
+  ...[
+    '[name*="exp_month" i]',
+    '[name*="expmonth" i]',
+    '[name*="exp" i][name*="month" i]',
+    '[id*="exp" i][id*="month" i]',
+  ].map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`),
+].join(",");
+
+const CHECKOUT_CONSERVATIVE_EXPIRY_YEAR_FIELD_SELECTORS = [
   '[autocomplete~="cc-exp-year"]',
-  '[name*="exp_year" i]',
-  '[name*="expyear" i]',
-  '[name*="exp" i][name*="year" i]',
-  '[id*="exp" i][id*="year" i]',
   'select[name*="credit" i][name*="year" i]',
   'select[name*="limit" i][name*="year" i]',
   'select[id*="limit" i][id*="year" i]',
@@ -638,6 +640,16 @@ const CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS = [
 ]
   .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
   .join(",");
+
+const CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS = [
+  CHECKOUT_CONSERVATIVE_EXPIRY_YEAR_FIELD_SELECTORS,
+  ...[
+    '[name*="exp_year" i]',
+    '[name*="expyear" i]',
+    '[name*="exp" i][name*="year" i]',
+    '[id*="exp" i][id*="year" i]',
+  ].map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`),
+].join(",");
 
 const CHECKOUT_CONSERVATIVE_COMBINED_EXPIRY_INPUT_SELECTORS = [
   'input[autocomplete~="cc-exp"]',
@@ -677,17 +689,23 @@ const CHECKOUT_COMBINED_EXPIRY_FIELD_SELECTORS = [
 const CHECKOUT_COMBINED_EXPIRY_GROUP_SELECTORS =
   CHECKOUT_COMBINED_EXPIRY_INPUT_SELECTORS.join(",");
 
-const CHECKOUT_CVV_FIELD_SELECTORS = [
+const CHECKOUT_CONSERVATIVE_CVV_FIELD_SELECTORS = [
   'input[autocomplete~="cc-csc"]',
-  'input[name*="cvv" i]',
-  'input[name*="cvc" i]',
-  'input[name*="security-code" i]',
-  'input[id*="cvv" i]',
-  'input[id*="cvc" i]',
   'input[data-ts-jp-card-field="cvv"]',
 ]
   .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
   .join(",");
+
+const CHECKOUT_CVV_FIELD_SELECTORS = [
+  CHECKOUT_CONSERVATIVE_CVV_FIELD_SELECTORS,
+  ...[
+    'input[name*="cvv" i]',
+    'input[name*="cvc" i]',
+    'input[name*="security-code" i]',
+    'input[id*="cvv" i]',
+    'input[id*="cvc" i]',
+  ].map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`),
+].join(",");
 
 const CHECKOUT_CARD_NAME_FIELD_SELECTORS = [
   'input[autocomplete~="cc-name"]',
@@ -8554,15 +8572,16 @@ export class BrowserController {
                   .filter((token) => token.length > 0);
               const isPanIdentity = (value: string): boolean => {
                 const tokens = identityTokens(value);
-                return tokens.some(
-                  (token, index) =>
-                    token === "cardno" ||
-                    token === "cardnumber" ||
-                    token === "creditno" ||
-                    (token === "card" &&
-                      (tokens[index + 1] === "no" || tokens[index + 1] === "number")) ||
-                    (token === "credit" && tokens[index + 1] === "no"),
-                );
+                const approvedPrefixes = new Set(["payment", "checkout", "primary", "backup"]);
+                while (approvedPrefixes.has(tokens[0] ?? "")) tokens.shift();
+                return [
+                  "card-no",
+                  "card-number",
+                  "cardno",
+                  "cardnumber",
+                  "credit-no",
+                  "creditno",
+                ].includes(tokens.join("-"));
               };
               const isCvvIdentity = (value: string): boolean =>
                 ["security-cd", "securitycd", "sec-code", "seccode"].includes(
@@ -9249,9 +9268,12 @@ export class BrowserController {
         throw new Error("payment_card_form_ambiguous");
       }
     };
-    const splitExpiryFieldsShareGroup = async (): Promise<boolean> => {
-      const months = await fillableCardFields(CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS);
-      const years = await fillableCardFields(CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS);
+    const splitExpiryFieldsShareGroup = async (
+      monthSelectors: string,
+      yearSelectors: string,
+    ): Promise<boolean> => {
+      const months = await fillableCardFields(monthSelectors);
+      const years = await fillableCardFields(yearSelectors);
       if (months.length !== 1 || years.length !== 1) return false;
       const month = months[0];
       const year = years[0];
@@ -9473,17 +9495,26 @@ export class BrowserController {
       return false;
     };
     await requireExactlyOneCardField("pan", CHECKOUT_PAN_FIELD_SELECTORS);
-    await refuseAmbiguousCardField(CHECKOUT_CVV_FIELD_SELECTORS);
+    const usesLegacyPanSelectors =
+      (await countFillableCardFields(CHECKOUT_LEGACY_PAN_FIELD_SELECTORS)) === 1;
+    const cvvSelectors = usesLegacyPanSelectors
+      ? CHECKOUT_CVV_FIELD_SELECTORS
+      : CHECKOUT_CONSERVATIVE_CVV_FIELD_SELECTORS;
+    const expiryMonthSelectors = usesLegacyPanSelectors
+      ? CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS
+      : CHECKOUT_CONSERVATIVE_EXPIRY_MONTH_FIELD_SELECTORS;
+    const expiryYearSelectors = usesLegacyPanSelectors
+      ? CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS
+      : CHECKOUT_CONSERVATIVE_EXPIRY_YEAR_FIELD_SELECTORS;
+    await refuseAmbiguousCardField(cvvSelectors);
     await refuseAmbiguousCardField(CHECKOUT_CARD_NAME_FIELD_SELECTORS);
     const combinedExpirySelectors =
-      (await countFillableCardFields(CHECKOUT_LEGACY_PAN_FIELD_SELECTORS)) === 1
+      usesLegacyPanSelectors
         ? CHECKOUT_COMBINED_EXPIRY_FIELD_SELECTORS
         : CHECKOUT_CONSERVATIVE_COMBINED_EXPIRY_FIELD_SELECTORS;
     const combinedExpiryCount = await countFillableCardFields(combinedExpirySelectors);
-    const expiryMonthCount = await countFillableCardFields(
-      CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS,
-    );
-    const expiryYearCount = await countFillableCardFields(CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS);
+    const expiryMonthCount = await countFillableCardFields(expiryMonthSelectors);
+    const expiryYearCount = await countFillableCardFields(expiryYearSelectors);
     if (combinedExpiryCount > 1 || expiryMonthCount > 1 || expiryYearCount > 1) {
       throw new Error("payment_card_form_ambiguous");
     }
@@ -9492,7 +9523,10 @@ export class BrowserController {
     if (hasCombinedExpiry && hasSplitExpiry) {
       throw new Error("payment_card_form_ambiguous");
     }
-    if (hasSplitExpiry && !(await splitExpiryFieldsShareGroup())) {
+    if (
+      hasSplitExpiry &&
+      !(await splitExpiryFieldsShareGroup(expiryMonthSelectors, expiryYearSelectors))
+    ) {
       throw new Error("payment_card_form_ambiguous");
     }
     if (!hasCombinedExpiry && !hasSplitExpiry) {
@@ -9503,14 +9537,14 @@ export class BrowserController {
       await fillFirst(
         "exp_month",
         card.exp_month.padStart(2, "0"),
-        CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS,
+        expiryMonthSelectors,
         false,
         true,
       );
       await fillFirst(
         "exp_year",
         card.exp_year,
-        CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS,
+        expiryYearSelectors,
         false,
         true,
       );
@@ -9529,21 +9563,21 @@ export class BrowserController {
         await fillFirst(
           "exp_month",
           card.exp_month.padStart(2, "0"),
-          CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS,
+          expiryMonthSelectors,
           false,
           true,
         );
         await fillFirst(
           "exp_year",
           card.exp_year,
-          CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS,
+          expiryYearSelectors,
           false,
           true,
         );
       }
     }
     const fields: Array<[string, string | undefined, string, string?]> = [
-      ["cvv", card.cvv, CHECKOUT_CVV_FIELD_SELECTORS],
+      ["cvv", card.cvv, cvvSelectors],
       ["name", card.name, CHECKOUT_CARD_NAME_FIELD_SELECTORS],
       [
         "line1",
