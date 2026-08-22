@@ -112,9 +112,12 @@ Routing rules for THIS server's vault tools:
   or \${SECRET.<field>} (multi-field) placeholders. The server injects
   the secret and returns only the upstream response; you never see the
   value. The target host must be on the credential's allowed_hosts.
-- Rotating a key = call store_credential again with the new value (it
-  overwrites). You cannot rotate or delete credentials directly — delete
-  is done by the user in the web vault.
+- User wants to change allowed_hosts/login_hosts/name without changing the
+  secret → call edit_credential. User wants a saved credential removed → call
+  delete_credential. Both return a Telegram/passkey approval link first; resume
+  with the returned approval_id only after the user signs the exact mutation.
+- Rotating a secret value = call store_credential again with the new value (it
+  overwrites). edit_credential cannot read or change secret fields.
 - There is NO way to extract a raw secret value to you — by design. If a
   user wants the plaintext (e.g. for a .env file), they read it from the
   Trusty Squire web vault themselves.`;

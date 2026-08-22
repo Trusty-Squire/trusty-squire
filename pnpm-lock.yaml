@@ -53,6 +53,9 @@ importers:
       bullmq:
         specifier: ^5.21.1
         version: 5.76.6
+      canonicalize:
+        specifier: ^2.0.0
+        version: 2.1.0
       fastify:
         specifier: ^4.28.0
         version: 4.29.1

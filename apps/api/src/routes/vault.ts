@@ -11,9 +11,10 @@
 //   POST   /v1/vault/credentials/:id/fields     → web: add a field
 //
 // store is an upsert keyed (account, service, label) — re-storing a
-// service overwrites it (that IS rotation). Agents cannot rotate or
-// delete: rotation = re-store; delete is human-only here. The raw value
-// is never returned to an agent; reveal is web-session only.
+// service overwrites it (that IS rotation). These direct mutation routes
+// remain web-only; agent metadata edits and deletes enter through the
+// signed credential-mutation approval route. The raw value is never
+// returned to an agent; reveal is web-session only.
 
 import { z } from "zod";
 import { ulid } from "ulid";

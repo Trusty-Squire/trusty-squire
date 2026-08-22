@@ -86,6 +86,22 @@ export interface CredentialStore {
   // Rename an entry — updates the (non-secret) label only. Leaves the
   // encrypted payload + allowed_hosts untouched.
   setLabel(reference: string, label: string): Promise<void>;
+  // Atomically replace only the explicitly supplied non-secret metadata.
+  // The encrypted envelope and field names are intentionally absent from
+  // this surface so an agent metadata edit cannot become a secret mutation.
+  updateMetadata(
+    reference: string,
+    expected: {
+      label: string;
+      allowed_hosts: string[];
+      metadata: Record<string, unknown>;
+    },
+    input: {
+      label?: string;
+      allowed_hosts?: string[];
+      metadata?: Record<string, unknown>;
+    },
+  ): Promise<boolean>;
   // Hard-delete every credential row (active + soft-deleted) for the
   // account — the irreversible offboarding purge. Returns rows removed.
   purgeAccount(accountId: string): Promise<number>;
@@ -153,6 +169,7 @@ export const VAULT_AUDIT_TYPES = {
   // Entry label changed (web rename). Non-secret metadata edit — distinct
   // from `rotated` (which re-encrypts the payload).
   renamed: "vault.credential_renamed",
+  metadataEdited: "vault.credential_metadata_edited",
   // A new field added to an existing entry's encrypted blob (web). The
   // payload is re-encrypted to merge the field; distinct from `rotated`
   // (full replace) so an additive edit is queryable on its own.

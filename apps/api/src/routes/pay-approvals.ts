@@ -9,6 +9,13 @@ import { z } from "zod";
 import type { ApiDeps } from "../services/deps.js";
 import { formatCurrencyAmount } from "../services/money.js";
 import { sendTelegramMessage } from "../services/telegram.js";
+import {
+  PAYMENT_VOUCH_CONTEXT,
+  VouchMandateVerificationError,
+  createVouchMandateVerifier,
+  hashVouchPayload,
+  type VouchMandateVerifier,
+} from "../services/vouch-mandate.js";
 
 // Web base for the approval link sent to Telegram. Reuses PWA_BASE_URL
 // (the same override server.ts's defaultPwaBaseUrl() reads) if set, else
@@ -95,10 +102,7 @@ function approvalPayloadHash(record: ApprovalRecord): Buffer | null {
   if (record.cardRef === null) return null;
   const recipientHash = recipientPubkeyHash(record.operatorPubkey);
   if (recipientHash === null) return null;
-  // JSON Canonicalization Scheme orders these flat keys lexicographically.
-  // All values are strings or an integer, so JSON.stringify over this explicit
-  // order is byte-identical to the web SDK and the operator's canonicalize().
-  const canonical = JSON.stringify({
+  return hashVouchPayload({
     agent: record.agent,
     amount_cents: record.amountCents,
     approval_id: record.id,
@@ -111,20 +115,18 @@ function approvalPayloadHash(record: ApprovalRecord): Buffer | null {
     reason: record.reason,
     recipient_pubkey_hash: recipientHash,
   });
-  return createHash("sha256").update(canonical, "utf8").digest();
 }
 
 function reviewPayloadHash(record: ApprovalRecord, payloadHash: Buffer): Buffer | null {
   if (record.cardRef === null) return null;
   const recipientHash = recipientPubkeyHash(record.operatorPubkey);
   if (recipientHash === null) return null;
-  const canonical = JSON.stringify({
+  return hashVouchPayload({
     approval_id: record.id,
     approval_payload_sha256: payloadHash.toString("base64url"),
     card_ref: record.cardRef,
     recipient_pubkey_hash: recipientHash,
   });
-  return createHash("sha256").update(canonical, "utf8").digest();
 }
 
 function candidateHash(hash: Buffer | null): PaymentCandidateHash | null {
@@ -161,12 +163,15 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
   requireWeb: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
   requireAgent: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
   requireAny: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
+  vouchVerifier?: VouchMandateVerifier;
 }> = async (fastify, opts) => {
   type Submission = z.infer<typeof approveBody>;
   const submissionWaitMs = 15_000;
   const relayPollIntervalMs = 1_000;
   const sleep = async (ms: number): Promise<void> =>
     await new Promise((resolve) => setTimeout(resolve, ms));
+  const verifyVouch = opts.vouchVerifier ?? createVouchMandateVerifier();
+  const vouchflowAudience = process.env.VOUCHFLOW_CUSTOMER_ID?.trim() ?? "";
 
   const submissionFingerprint = (submission: Submission): string =>
     createHash("sha256")
@@ -522,6 +527,27 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
           "submit the final approval again.",
       });
     }
+    const payloadHash = approvalPayloadHash(record);
+    if (payloadHash === null) {
+      reply.code(409).send({ error: "payment_approval_binding_invalid" });
+      return;
+    }
+    try {
+      await verifyVouch({
+        jws: parsed.data.jws,
+        expectedPayloadHash: payloadHash,
+        expectedContext: PAYMENT_VOUCH_CONTEXT,
+        expectedAudience: vouchflowAudience,
+      });
+    } catch (error) {
+      const code =
+        error instanceof VouchMandateVerificationError ? error.code : "mandate_verification_failed";
+      candidateLifecycle(record, "approval", "signature_rejected");
+      reply.code(code === "vouchflow_expected_audience_unset" ? 503 : 403).send({
+        error: code,
+      });
+      return;
+    }
     const submittedAt = opts.deps.now?.() ?? new Date();
     const fingerprint = submissionFingerprint(parsed.data);
     const submitted = await opts.deps.pendingPaymentApprovalStore.submitCandidate(
@@ -606,6 +632,29 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         candidateLifecycle(record, "review", "verified_final_required");
         event("review_confirm_matched", record, fingerprint, "ok");
         return reply.code(200).send({ status: "verified" });
+      }
+      const payloadHash = approvalPayloadHash(record);
+      if (payloadHash === null) {
+        reply.code(409).send({ error: "payment_approval_binding_invalid" });
+        return;
+      }
+      try {
+        await verifyVouch({
+          jws: parsed.data.jws,
+          expectedPayloadHash: payloadHash,
+          expectedContext: PAYMENT_VOUCH_CONTEXT,
+          expectedAudience: vouchflowAudience,
+        });
+      } catch (error) {
+        const code =
+          error instanceof VouchMandateVerificationError
+            ? error.code
+            : "mandate_verification_failed";
+        candidateLifecycle(record, "approval", "confirmation_signature_rejected");
+        reply.code(code === "vouchflow_expected_audience_unset" ? 503 : 403).send({
+          error: code,
+        });
+        return;
       }
       const confirmed = await opts.deps.pendingPaymentApprovalStore.confirmCandidateForAccount(
         req.params.id,

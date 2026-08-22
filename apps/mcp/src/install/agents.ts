@@ -192,8 +192,9 @@ const claudeCode: AgentDefinition = {
 // Claude Code matches permission rules on `mcp__<mcpServers-key>__<tool>`,
 // and our server is registered under the "squire" key (SERVER_KEY).
 // Pre-allow the safe, high-frequency credential tools so the agent isn't
-// prompted on every call. The destructive/exposing paths
-// (request_credential / rotate / delete) stay on default-confirm.
+// prompted on every call. Vouch-gated metadata edit/delete stay on
+// default-confirm as a second local safety signal in addition to their
+// required phone approval.
 const CLAUDE_PERMISSION_ALLOW = [
   `mcp__${SERVER_KEY}__use_credential`,
   `mcp__${SERVER_KEY}__list_credentials`,

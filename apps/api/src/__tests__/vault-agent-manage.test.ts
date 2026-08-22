@@ -1,6 +1,6 @@
-// Agent vault writes: store is an upsert (create, then overwrite the
-// same service+label). Agents have no rotate/delete (those routes are
-// gone — rotation = re-store; delete is web-only).
+// Agent direct vault writes: store is an upsert (create, then overwrite
+// the same service+label). Direct rotate/delete routes stay web-only;
+// approved agent metadata edits/deletes use the separate vouch flow.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
@@ -9,7 +9,6 @@ import { buildInMemoryDeps, type ApiDeps } from "../services/deps.js";
 import { buildServer } from "../server.js";
 
 const SESSION_SECRET = "dev-test-secret-do-not-use-anywhere-else";
-const CUSTOMER_ID = "ts-test";
 
 interface Harness {
   server: FastifyInstance;
@@ -17,7 +16,7 @@ interface Harness {
 }
 
 async function setup(): Promise<Harness> {
-  const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET});
+  const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET });
   const server = await buildServer({ deps });
   return { server, deps };
 }
@@ -52,7 +51,13 @@ describe("agent store (upsert)", () => {
       payload: { service: "OpenAI", value: "sk-x", type: "api_key" },
     });
     expect(res.statusCode).toBe(201);
-    const body = res.json() as { service: string; label: string; field_names: string[]; allowed_hosts: string[]; updated: boolean };
+    const body = res.json() as {
+      service: string;
+      label: string;
+      field_names: string[];
+      allowed_hosts: string[];
+      updated: boolean;
+    };
     expect(body.service).toBe("OpenAI");
     expect(body.label).toBe("default");
     expect(body.field_names).toEqual(["value"]);

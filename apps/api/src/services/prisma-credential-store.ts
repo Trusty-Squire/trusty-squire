@@ -212,6 +212,36 @@ export class PrismaCredentialStore implements CredentialStore {
     });
   }
 
+  async updateMetadata(
+    reference: string,
+    expected: {
+      label: string;
+      allowed_hosts: string[];
+      metadata: Record<string, unknown>;
+    },
+    input: {
+      label?: string;
+      allowed_hosts?: string[];
+      metadata?: Record<string, unknown>;
+    },
+  ): Promise<boolean> {
+    const result = await this.prisma.credential.updateMany({
+      where: {
+        reference,
+        deleted_at: null,
+        label: expected.label,
+        allowed_hosts: { equals: expected.allowed_hosts },
+        metadata: { equals: expected.metadata },
+      },
+      data: {
+        ...(input.label !== undefined ? { label: input.label } : {}),
+        ...(input.allowed_hosts !== undefined ? { allowed_hosts: input.allowed_hosts } : {}),
+        ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+      },
+    });
+    return result.count > 0;
+  }
+
   async findByIdForAccountIncludingDeleted(
     id: string,
     accountId: string,

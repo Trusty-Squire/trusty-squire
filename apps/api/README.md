@@ -27,6 +27,10 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `POST` | `/v1/vault/use` | agent | Retrieve a vault credential for allowed egress |
 | `POST` | `/v1/vault/browser-fill` | agent | Seal login/password fields for allowed browser sign-in hosts |
 | `GET` | `/v1/vault/credentials` | web/agent | List vault credentials |
+| `POST` | `/v1/vault/mutation-approvals` | agent | Create a vouch-gated credential metadata edit or delete approval |
+| `GET` | `/v1/vault/mutation-approvals/:id` | agent | Read the account-owned mutation approval status |
+| `GET` | `/v1/vault/mutation-approvals/:id/ceremony` | none | Show the capability-bound mutation intent for phone approval |
+| `POST` | `/v1/vault/mutation-approvals/:id/approve` | none | Verify the passkey-signed mandate and atomically claim/execute the mutation |
 | `GET` | `/v1/vault/audit` | web/agent | List the account's secret-free Activity trail with keyset pagination and optional `type`/`reference` filters |
 | `POST` | `/v1/vault/e2e` | web | Store an opaque, client-encrypted card blob |
 | `GET` | `/v1/vault/e2e` | web/agent | List client-encrypted card metadata without blobs |
@@ -113,6 +117,16 @@ already staged by a legacy deployment remain compatibility-only: their
 successful confirmation clears the staged bytes but leaves the approval pending,
 so a review seal is never final approval.
 Wrong-account, changed, undelivered, or expired candidates fail closed.
+
+Credential mutation approvals reuse the same JWKS-backed Vouchflow mandate
+verifier as payment approvals, but use the distinct
+`vault_credential_mutation` context. Their canonical signed payload binds the
+operation (`credential.edit` or `credential.delete`), exact vault reference,
+requesting agent, nonce, and complete editable before/after metadata. The API
+executes only after signature verification and an atomic approval claim. A
+pending edit also compares the live metadata with the signed `before` snapshot;
+drift refuses the write. Approval rows, Telegram prompts, and responses contain
+only labels and host allowlists—never ciphertext or secret field values.
 
 ## Auth model
 

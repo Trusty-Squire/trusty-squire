@@ -11,17 +11,13 @@
 // The secret is NEVER returned to an agent. `use_credential` injects
 // fields server-side via ${SECRET} / ${SECRET.<field>} and returns only
 // the upstream response; the proxy hard-enforces the host allowlist.
-// Human-only paths (web): reveal, delete, allowlist edits, field edits.
+// Reveal and secret-field edits remain human-only web paths. Non-secret
+// metadata edits and deletes may also be called server-side after the API
+// has verified an operation-bound Vouchflow mandate.
 
 import { Buffer } from "node:buffer";
 import { ulid } from "ulid";
-import {
-  aadForDek,
-  aadForValue,
-  decryptAesGcm,
-  encryptAesGcm,
-  generateKey,
-} from "./encryption.js";
+import { aadForDek, aadForValue, decryptAesGcm, encryptAesGcm, generateKey } from "./encryption.js";
 import type { KMSClient } from "./kms-client.js";
 import { deriveAllowedHosts } from "./service-hosts.js";
 
@@ -104,6 +100,12 @@ export interface RotateResult {
   rotated_at: string;
 }
 
+export interface VaultEditableMetadata {
+  label: string;
+  allowed_hosts: string[];
+  login_hosts: string[];
+}
+
 // Envelope health probe result. `healthy` means the full
 // KMS→KEK→DEK→ciphertext chain decrypted cleanly — it does NOT mean the
 // upstream service still accepts the key (that needs a per-service live
@@ -177,10 +179,7 @@ export interface VaultClient {
     purpose: string,
     deviceAssertion: DeviceAssertion,
   ): Promise<Record<string, string>>;
-  retrieveForRuntime(
-    reference: string,
-    purpose: string,
-  ): Promise<Record<string, string>>;
+  retrieveForRuntime(reference: string, purpose: string): Promise<Record<string, string>>;
   retrieveForAgentBrowserFill(
     reference: string,
     accountId: string,
@@ -211,6 +210,12 @@ export class CredentialNotFoundError extends Error {
     this.name = "CredentialNotFoundError";
   }
 }
+export class CredentialMetadataChangedError extends Error {
+  constructor(reference: string) {
+    super(`credential metadata changed while approval was pending: ${reference}`);
+    this.name = "CredentialMetadataChangedError";
+  }
+}
 // addField refused: the entry already has a field with this name. Adding
 // is additive — changing an existing field's value is the rotate path.
 // API maps to 409.
@@ -230,7 +235,9 @@ export class RestoreConflictError extends Error {
     public readonly service: string,
     public readonly label: string,
   ) {
-    super(`cannot restore ${reference}: an active credential for ${service}/${label} already exists`);
+    super(
+      `cannot restore ${reference}: an active credential for ${service}/${label} already exists`,
+    );
     this.name = "RestoreConflictError";
   }
 }
@@ -285,7 +292,9 @@ export class CredentialVault implements VaultClient {
         field_names: fieldNames,
         rotatedAt: now,
         ...(input.type !== undefined ? { type: input.type ?? null } : {}),
-        ...(input.env_var_suggestion !== undefined ? { env_var_suggestion: input.env_var_suggestion ?? null } : {}),
+        ...(input.env_var_suggestion !== undefined
+          ? { env_var_suggestion: input.env_var_suggestion ?? null }
+          : {}),
         metadata,
       });
       // Backfill an EMPTY allowlist on re-store, but never clobber a
@@ -391,11 +400,7 @@ export class CredentialVault implements VaultClient {
   // Web-only: rename an entry. Changes the (non-secret) label only —
   // the encrypted payload, field names, and allowed_hosts are untouched.
   // Account-scoped.
-  async rename(
-    reference: string,
-    accountId: string,
-    label: string,
-  ): Promise<{ label: string }> {
+  async rename(reference: string, accountId: string, label: string): Promise<{ label: string }> {
     const trimmed = label.trim();
     if (trimmed.length === 0) {
       throw new Error("label must not be empty");
@@ -475,10 +480,7 @@ export class CredentialVault implements VaultClient {
     });
   }
 
-  async retrieveForRuntime(
-    reference: string,
-    purpose: string,
-  ): Promise<Record<string, string>> {
+  async retrieveForRuntime(reference: string, purpose: string): Promise<Record<string, string>> {
     return this.retrieveInternal({
       reference,
       purpose,
@@ -531,7 +533,72 @@ export class CredentialVault implements VaultClient {
     return fields;
   }
 
-  async delete(reference: string, accountId: string): Promise<void> {
+  async editMetadata(
+    reference: string,
+    accountId: string,
+    expected: VaultEditableMetadata,
+    replacement: VaultEditableMetadata,
+    requester: VaultRequester = "user",
+  ): Promise<VaultEditableMetadata> {
+    const existing = await this.deps.store.findActive(reference);
+    if (existing === null || existing.account_id !== accountId) {
+      throw new CredentialNotFoundError(reference);
+    }
+    const loginHosts = metadataStringArray(existing.metadata.login_hosts);
+    if (
+      existing.label !== expected.label ||
+      !sameStringArray(existing.allowed_hosts, expected.allowed_hosts) ||
+      !sameStringArray(loginHosts, expected.login_hosts)
+    ) {
+      throw new CredentialMetadataChangedError(reference);
+    }
+    const service = typeof existing.metadata.service === "string" ? existing.metadata.service : "";
+    if (service.length > 0 && replacement.label !== existing.label) {
+      const live = await this.deps.store.findActiveByServiceLabel(
+        accountId,
+        service,
+        replacement.label,
+      );
+      if (live !== null && live.reference !== reference) {
+        throw new RestoreConflictError(reference, service, replacement.label);
+      }
+    }
+    const updated = await this.deps.store.updateMetadata(
+      reference,
+      {
+        label: existing.label,
+        allowed_hosts: existing.allowed_hosts,
+        metadata: existing.metadata,
+      },
+      {
+        label: replacement.label,
+        allowed_hosts: replacement.allowed_hosts,
+        metadata: {
+          ...existing.metadata,
+          login_hosts: replacement.login_hosts,
+          ...(replacement.login_hosts.length > 0 ? { auth_strategy: "username_password" } : {}),
+        },
+      },
+    );
+    if (!updated) throw new CredentialMetadataChangedError(reference);
+    await this.recordAudit(accountId, VAULT_AUDIT_TYPES.metadataEdited, {
+      reference,
+      requester,
+      ...(service.length > 0 ? { service } : {}),
+      label: replacement.label,
+    });
+    return {
+      label: replacement.label,
+      allowed_hosts: [...replacement.allowed_hosts],
+      login_hosts: [...replacement.login_hosts],
+    };
+  }
+
+  async delete(
+    reference: string,
+    accountId: string,
+    requester: VaultRequester = "user",
+  ): Promise<void> {
     const existing = await this.deps.store.findActive(reference);
     if (existing === null || existing.account_id !== accountId) {
       throw new CredentialNotFoundError(reference);
@@ -539,8 +606,10 @@ export class CredentialVault implements VaultClient {
     await this.deps.store.softDelete(reference, this.now());
     await this.recordAudit(accountId, VAULT_AUDIT_TYPES.deleted, {
       reference,
-      requester: "user",
-      ...(typeof existing.metadata.service === "string" ? { service: existing.metadata.service } : {}),
+      requester,
+      ...(typeof existing.metadata.service === "string"
+        ? { service: existing.metadata.service }
+        : {}),
       label: existing.label,
     });
   }
@@ -635,17 +704,19 @@ export class CredentialVault implements VaultClient {
     const targetHost = safeHost(http.url);
     if (targetHost === null || !record.allowed_hosts.includes(targetHost)) {
       await this.recordProxyAudit(accountId, VAULT_AUDIT_TYPES.proxyRejected, {
-          reference,
-          requester: "agent",
-          ...(targetHost !== null ? { target_host: targetHost } : {}),
-        });
+        reference,
+        requester: "agent",
+        ...(targetHost !== null ? { target_host: targetHost } : {}),
+      });
       throw new AllowlistViolationError(reference, targetHost);
     }
     const fields = await this.decryptFields(record);
     const startedAt = this.now().getTime();
     try {
       const response = await executor({ accountId, http, fields });
-      await this.runProxyAuditSideEffect(() => this.deps.store.markRetrieved(reference, this.now()));
+      await this.runProxyAuditSideEffect(() =>
+        this.deps.store.markRetrieved(reference, this.now()),
+      );
       await this.recordProxyAudit(accountId, VAULT_AUDIT_TYPES.proxyExecuted, {
         reference,
         requester: "agent",
@@ -705,7 +776,9 @@ export class CredentialVault implements VaultClient {
   // credential row AND the entire audit trail for the account. Nothing
   // is recoverable after this — the soft-delete + retention path is the
   // forgiving one; this is the right-to-be-forgotten hard one.
-  async purgeAccount(accountId: string): Promise<{ credentials_purged: number; audit_purged: number }> {
+  async purgeAccount(
+    accountId: string,
+  ): Promise<{ credentials_purged: number; audit_purged: number }> {
     const credentials_purged = await this.deps.store.purgeAccount(accountId);
     const audit_purged = await this.deps.audit.purgeAccount(accountId);
     return { credentials_purged, audit_purged };
@@ -762,14 +835,20 @@ export class CredentialVault implements VaultClient {
 
     if (record !== null) {
       await this.enforceRetrievalRateLimit(accountId, {
-        reference, purpose, requester, signing_device_id: signingDeviceId,
+        reference,
+        purpose,
+        requester,
+        signing_device_id: signingDeviceId,
       });
     }
     if (assertion !== null) {
       const ageMs = this.now().getTime() - Date.parse(assertion.signed_at);
       if (Number.isNaN(ageMs) || ageMs > ASSERTION_MAX_AGE_MS || ageMs < 0) {
         await this.recordAudit(accountId, VAULT_AUDIT_TYPES.retrieved, {
-          reference, purpose, requester, signing_device_id: signingDeviceId,
+          reference,
+          purpose,
+          requester,
+          signing_device_id: signingDeviceId,
           outcome: "stale_assertion",
         });
         throw new StaleAssertionError(
@@ -779,7 +858,10 @@ export class CredentialVault implements VaultClient {
     }
     if (record === null) {
       await this.recordAudit(accountId, VAULT_AUDIT_TYPES.retrieved, {
-        reference, purpose, requester, signing_device_id: signingDeviceId,
+        reference,
+        purpose,
+        requester,
+        signing_device_id: signingDeviceId,
         outcome: "missing_credential",
       });
       throw new CredentialNotFoundError(reference);
@@ -788,7 +870,10 @@ export class CredentialVault implements VaultClient {
     const fields = await this.decryptFields(record);
     await this.deps.store.markRetrieved(reference, this.now());
     await this.recordAudit(record.account_id, VAULT_AUDIT_TYPES.retrieved, {
-      reference, purpose, requester, signing_device_id: signingDeviceId,
+      reference,
+      purpose,
+      requester,
+      signing_device_id: signingDeviceId,
       outcome: "success",
     });
     return fields;
@@ -801,7 +886,10 @@ export class CredentialVault implements VaultClient {
   // stops a new decrypt path from silently bypassing the ceiling.
   private async enforceRetrievalRateLimit(
     accountId: string,
-    auditOnLimit: Pick<VaultAuditPayload, "reference" | "purpose" | "requester" | "signing_device_id">,
+    auditOnLimit: Pick<
+      VaultAuditPayload,
+      "reference" | "purpose" | "requester" | "signing_device_id"
+    >,
   ): Promise<void> {
     const since = new Date(this.now().getTime() - RATE_LIMIT_WINDOW_MS);
     const count = await this.deps.audit.countRecentRetrievals(accountId, since);
@@ -844,6 +932,16 @@ export class CredentialVault implements VaultClient {
       // layer; this package intentionally stays logger-free.
     }
   }
+}
+
+function metadataStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 // Decrypted-plaintext → field map, tolerant of the pre-v2 format.

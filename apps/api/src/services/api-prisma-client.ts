@@ -172,6 +172,26 @@ interface PendingPaymentApprovalRow {
   expires_at: Date;
 }
 
+interface CredentialMutationApprovalRow {
+  id: string;
+  account_id: string;
+  operation: string;
+  credential_reference: string;
+  credential_service: string | null;
+  credential_label: string;
+  before_metadata: unknown;
+  after_metadata: unknown;
+  nonce: string;
+  agent: string;
+  intent_hash: string;
+  status: string;
+  failure_code: string | null;
+  mandate_id: string | null;
+  created_at: Date;
+  expires_at: Date;
+  executed_at: Date | null;
+}
+
 interface EgressGrantRow {
   id: string;
   account_id: string;
@@ -360,6 +380,18 @@ export interface ApiPrismaClient {
       where: Record<string, unknown>;
       select?: Record<string, boolean>;
     }): Promise<PendingPaymentApprovalRow | null>;
+    updateMany(args: {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }): Promise<{ count: number }>;
+    deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
+  };
+  credentialMutationApproval: {
+    create(args: { data: Record<string, unknown>; select: { id: true } }): Promise<{ id: string }>;
+    findFirst(args: {
+      where: Record<string, unknown>;
+      orderBy?: Record<string, unknown>;
+    }): Promise<CredentialMutationApprovalRow | null>;
     updateMany(args: {
       where: Record<string, unknown>;
       data: Record<string, unknown>;

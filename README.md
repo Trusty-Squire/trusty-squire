@@ -252,7 +252,7 @@ for the system and data flows.
 
 ## MCP tools
 
-The default MCP registry exposes 16 tools. The essential operator surface
+The default MCP registry exposes 18 tools. The essential operator surface
 is `operate_start`, `operate_observe`, `operate_act`, `operate_pay`,
 `operate_payment_status`, `operate_finish`, `operate_recipe_run`, and
 `operate_recipe_save` — every former standalone workflow/lifecycle/login tool
@@ -262,7 +262,7 @@ via `operate_payment_status(wait_seconds)`.
 The maintainer-only `list_extract_failures` → `get_extract_failure`
 DOM-diagnostics pair is excluded from that surface; set
 `TRUSTY_SQUIRE_DIAGNOSTICS=1` in the MCP server environment to opt into the
-18-tool diagnostics profile.
+20-tool diagnostics profile.
 
 - Rejected tool calls return a JSON `error` envelope with a stable `code` and
   message. Malformed and unknown calls fail only that request; they do not stop
@@ -375,6 +375,12 @@ DOM-diagnostics pair is excluded from that surface; set
   `error.guidance` repair fields as `operate_act`, including a safe resolution
   when `card_ref` and `card_label` conflict.
 - `list_credentials` and `use_credential` find saved credentials and make authenticated API calls without returning raw values.
+- `edit_credential` changes only an existing credential's non-secret name,
+  `allowed_hosts`, or `login_hosts`; `delete_credential` soft-deletes one. Each
+  first returns a Telegram/passkey approval link bound to the operation, exact
+  credential reference, and edit before→after. Resume with only the returned
+  `approval_id`. Neither tool can read or alter the secret value; use
+  `store_credential` to rotate a secret.
 - `grant_app_access` and `revoke_app_access` create and remove scoped backend access.
 - `audit_log` reports credential activity without exposing credential values.
 

@@ -50,7 +50,7 @@ describe("payment approval relay", () => {
       sessionSecret: SESSION_SECRET,
       now: () => new Date(nowMs),
     });
-    server = await buildServer({ deps });
+    server = await buildServer({ deps, vouchVerifier: async () => ({}) });
     const account = await deps.accountStore.createAccount("payer@example.test", "Payer");
     const other = await deps.accountStore.createAccount("other@example.test", "Other");
     agentToken = await makeAgentToken(deps, account.id, new Date(nowMs));

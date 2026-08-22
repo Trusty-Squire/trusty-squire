@@ -70,6 +70,7 @@ live under the DEK/KEK and are untouched by a master-key rotation.
 | Method + path | Auth | Purpose |
 |---|---|---|
 | `GET /v1/vault/credentials` | web+agent | Metadata list. Now also `age_days`, `last_changed_at`, `rotated_at`, and a `stale` flag (rotation nudge). |
+| `POST /v1/vault/mutation-approvals` | agent | Begin a Telegram/passkey-vouched metadata edit or soft delete. The signed payload binds operation, target reference, and exact before/after metadata. |
 | `POST /v1/vault/credentials/:id/health` | web | Envelope integrity probe — confirms the row still decrypts under the current keyring. No secret returned, no retrieval counted. `healthy:false` ≠ HTTP error. |
 | `POST /v1/vault/credentials/:id/restore` | web | Undelete a soft-deleted credential. `409` if a live `(service,label)` twin holds the slot. |
 | `POST /v1/vault/credentials/revoke-all` | web | Kill-switch: soft-delete every active credential. Requires `{ confirm: true }`. Recoverable via restore until retention sweeps. |
@@ -123,6 +124,7 @@ The hourly in-process retention cron (`retention-cron.ts`) sweeps:
 | **Vault audit events → delete** | **365d** | **`VAULT_AUDIT_RETENTION_DAYS`** |
 | **Payment audit events → delete** | **365d** | **`VAULT_AUDIT_RETENTION_DAYS`** |
 | Expired payment approvals → delete | After `expires_at` | none |
+| Expired credential-mutation approvals → delete | After `expires_at` | none |
 
 Vault and payment audit events share the one-year window — long enough for a
 post-hoc investigation, bounded so the tables do not grow without limit.

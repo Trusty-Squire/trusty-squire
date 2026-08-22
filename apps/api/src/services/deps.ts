@@ -69,6 +69,11 @@ import {
 } from "./in-memory-payment-approval-store.js";
 import { PrismaPendingPaymentApprovalStore } from "./prisma-payment-approval-store.js";
 import {
+  InMemoryCredentialMutationApprovalStore,
+  type CredentialMutationApprovalStore,
+} from "./credential-mutation-approval-store.js";
+import { PrismaCredentialMutationApprovalStore } from "./prisma-credential-mutation-approval-store.js";
+import {
   InMemoryTelegramLinkTokenStore,
   type TelegramLinkTokenStore,
 } from "./in-memory-telegram-link-token-store.js";
@@ -95,6 +100,7 @@ export interface ApiDeps {
   e2eCredentialStore: E2ECredentialStore;
   paymentAuditStore: PaymentAuditStore;
   pendingPaymentApprovalStore: PendingPaymentApprovalStore;
+  credentialMutationApprovalStore: CredentialMutationApprovalStore;
   telegramLinkTokenStore: TelegramLinkTokenStore;
   egressGrantStore: EgressGrantStore;
   machineTokenStore: MachineTokenStore;
@@ -273,15 +279,20 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
   );
   let e2eCredentialStore: E2ECredentialStore;
   let pendingPaymentApprovalStore: PendingPaymentApprovalStore;
+  let credentialMutationApprovalStore: CredentialMutationApprovalStore;
   if (authPrisma !== null) {
     e2eCredentialStore = new PrismaE2ECredentialStore(authPrisma);
     pendingPaymentApprovalStore = new PrismaPendingPaymentApprovalStore(authPrisma);
+    credentialMutationApprovalStore = new PrismaCredentialMutationApprovalStore(authPrisma);
   } else {
     const inMemoryE2ECredentialStore = new InMemoryE2ECredentialStore(opts.now);
     e2eCredentialStore = inMemoryE2ECredentialStore;
     pendingPaymentApprovalStore = new InMemoryPendingPaymentApprovalStore(
       inMemoryE2ECredentialStore,
       opts.now,
+    );
+    credentialMutationApprovalStore = new InMemoryCredentialMutationApprovalStore(
+      opts.now ?? (() => new Date()),
     );
   }
   const paymentAuditStore: PaymentAuditStore =
@@ -390,6 +401,7 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     e2eCredentialStore,
     paymentAuditStore,
     pendingPaymentApprovalStore,
+    credentialMutationApprovalStore,
     telegramLinkTokenStore,
     egressGrantStore,
     machineTokenStore,

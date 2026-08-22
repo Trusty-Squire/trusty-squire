@@ -101,10 +101,7 @@ export class InMemoryCredentialStore implements CredentialStore {
       .map((r) => clone(r));
   }
 
-  async findByIdForAccount(
-    id: string,
-    accountId: string,
-  ): Promise<CredentialRecord | null> {
+  async findByIdForAccount(id: string, accountId: string): Promise<CredentialRecord | null> {
     const r = [...this.byReference.values()].find(
       (c) => c.id === id && c.account_id === accountId && c.deleted_at === null,
     );
@@ -115,9 +112,7 @@ export class InMemoryCredentialStore implements CredentialStore {
     id: string,
     accountId: string,
   ): Promise<CredentialRecord | null> {
-    const r = [...this.byReference.values()].find(
-      (c) => c.id === id && c.account_id === accountId,
-    );
+    const r = [...this.byReference.values()].find((c) => c.id === id && c.account_id === accountId);
     return r === undefined ? null : clone(r);
   }
 
@@ -149,6 +144,35 @@ export class InMemoryCredentialStore implements CredentialStore {
     const r = this.byReference.get(reference);
     if (r === undefined) return;
     r.label = label;
+  }
+
+  async updateMetadata(
+    reference: string,
+    expected: {
+      label: string;
+      allowed_hosts: string[];
+      metadata: Record<string, unknown>;
+    },
+    input: {
+      label?: string;
+      allowed_hosts?: string[];
+      metadata?: Record<string, unknown>;
+    },
+  ): Promise<boolean> {
+    const r = this.byReference.get(reference);
+    if (
+      r === undefined ||
+      r.deleted_at !== null ||
+      r.label !== expected.label ||
+      !sameArray(r.allowed_hosts, expected.allowed_hosts) ||
+      JSON.stringify(r.metadata) !== JSON.stringify(expected.metadata)
+    ) {
+      return false;
+    }
+    if (input.label !== undefined) r.label = input.label;
+    if (input.allowed_hosts !== undefined) r.allowed_hosts = [...input.allowed_hosts];
+    if (input.metadata !== undefined) r.metadata = { ...input.metadata };
+    return true;
   }
 
   async purgeAccount(accountId: string): Promise<number> {
@@ -242,6 +266,10 @@ export class InMemoryVaultAuditStore implements VaultAuditStore {
 
 function clonePayload(p: VaultAuditPayload): VaultAuditPayload {
   return { ...p };
+}
+
+function sameArray(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function clone<T extends CredentialRecord>(r: T): T {
