@@ -135,6 +135,37 @@ export class PrismaCredentialStore implements CredentialStore {
     });
   }
 
+  async softDeleteIfDuplicate(
+    reference: string,
+    accountId: string,
+    service: string,
+    label: string,
+    deletedAt: Date,
+  ): Promise<boolean> {
+    const rows = await this.prisma.$queryRaw<Array<{ reference: string }>>`
+      UPDATE "Credential" AS target
+      SET "deleted_at" = ${deletedAt}
+      WHERE target."reference" = ${reference}
+        AND target."account_id" = ${accountId}
+        AND target."deleted_at" IS NULL
+        AND target."label" = ${label}
+        AND jsonb_typeof(target."metadata"->'service') = 'string'
+        AND lower(target."metadata"->>'service') = lower(${service})
+        AND EXISTS (
+          SELECT 1
+          FROM "Credential" AS duplicate
+          WHERE duplicate."reference" <> target."reference"
+            AND duplicate."account_id" = target."account_id"
+            AND duplicate."deleted_at" IS NULL
+            AND duplicate."label" = target."label"
+            AND jsonb_typeof(duplicate."metadata"->'service') = 'string'
+            AND lower(duplicate."metadata"->>'service') = lower(target."metadata"->>'service')
+        )
+      RETURNING target."reference"
+    `;
+    return rows.length === 1;
+  }
+
   async replaceSecret(
     reference: string,
     payload: {
@@ -198,40 +229,6 @@ export class PrismaCredentialStore implements CredentialStore {
       where: { id, account_id: accountId, deleted_at: null },
     });
     return row === null ? null : this.toRecord(row);
-  }
-
-  async setAllowedHosts(reference: string, hosts: string[]): Promise<void> {
-    await this.prisma.credential.updateMany({
-      where: { reference },
-      data: { allowed_hosts: hosts },
-    });
-  }
-
-  async setLoginHosts(reference: string, hosts: string[]): Promise<void> {
-    // login_hosts lives in the metadata JSON, so read-modify-write to preserve
-    // the rest of it. Stamp auth_strategy so a plain entry becomes a login cred.
-    const row = await this.prisma.credential.findFirst({ where: { reference } });
-    if (row === null) return;
-    const current =
-      row.metadata !== null && typeof row.metadata === "object"
-        ? (row.metadata as Record<string, unknown>)
-        : {};
-    await this.prisma.credential.updateMany({
-      where: { reference },
-      data: { metadata: { ...current, login_hosts: hosts, auth_strategy: "username_password" } },
-    });
-  }
-
-  async setLabel(reference: string, label: string): Promise<void> {
-    try {
-      await this.prisma.credential.updateMany({
-        where: { reference },
-        data: { label },
-      });
-    } catch (error) {
-      if (isPrismaUniqueConstraintError(error)) throw new CredentialSlotConflictError();
-      throw error;
-    }
   }
 
   async updateMetadata(

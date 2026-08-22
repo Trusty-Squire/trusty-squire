@@ -293,7 +293,7 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   });
   await fastify.register(registerCredentialMutationRoutes, {
     deps,
-    requireAgent: auth.requireAgent,
+    requireAny: auth.requireAny,
     ...(opts.vouchVerifier !== undefined ? { vouchVerifier: opts.vouchVerifier } : {}),
   });
   await fastify.register(registerTelegramRoute, {

@@ -410,7 +410,7 @@ export const registerEgressRoutes: FastifyPluginAsync<{
       if (cred !== null && cred.account_id !== grant.account_id) {
         cred = null;
       }
-      if (cred === null || cred.allowed_hosts.length === 0) {
+      if (cred === null) {
         reply.code(404).send({ error: "credential_unavailable" });
         return;
       }

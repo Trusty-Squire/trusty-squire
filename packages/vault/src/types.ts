@@ -55,6 +55,13 @@ export interface CredentialStore {
   ): Promise<CredentialRecord | null>;
   markRetrieved(reference: string, retrievedAt: Date): Promise<void>;
   softDelete(reference: string, deletedAt: Date): Promise<void>;
+  softDeleteIfDuplicate(
+    reference: string,
+    accountId: string,
+    service: string,
+    label: string,
+    deletedAt: Date,
+  ): Promise<boolean>;
   // Overwrite the encrypted payload (the upsert / web-edit path). The
   // envelope is replaced wholesale (fresh kek/dek) along with the
   // field-name list; allowed_hosts + label are left untouched.
@@ -81,16 +88,6 @@ export interface CredentialStore {
   findByReferenceIncludingDeleted(reference: string): Promise<CredentialRecord | null>;
   // Clear deleted_at, bringing a soft-deleted credential back to active.
   restore(reference: string): Promise<void>;
-  setAllowedHosts(reference: string, hosts: string[]): Promise<void>;
-  // Set the sign-in hosts of a username/password (browser-fill) credential —
-  // metadata.login_hosts. Also stamps metadata.auth_strategy =
-  // "username_password", so setting sign-in hosts on a plain multi-field entry
-  // converts it into a proper login credential. Distinct from setAllowedHosts:
-  // login_hosts gate browser-fill sealing, allowed_hosts gate the proxy.
-  setLoginHosts(reference: string, hosts: string[]): Promise<void>;
-  // Rename an entry — updates the (non-secret) label only. Leaves the
-  // encrypted payload + allowed_hosts untouched.
-  setLabel(reference: string, label: string): Promise<void>;
   // Atomically replace only the explicitly supplied non-secret metadata.
   // The encrypted envelope and field names are intentionally absent from
   // this surface so an agent metadata edit cannot become a secret mutation.

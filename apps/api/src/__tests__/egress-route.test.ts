@@ -397,7 +397,7 @@ describe("Egress Grants — /v1/egress", () => {
     expect(seen).toHaveLength(1);
   });
 
-  it("uses an allowed-host edit immediately despite a warm credential cache", async () => {
+  it("uses an allowed-host edit immediately after caching an empty allowlist", async () => {
     const account = await h.deps.accountStore.createAccount("allowlist-edit@example.test", "A");
     const cookie = await webCookie(h.deps, account.id);
     const token = await agentToken(h.deps, account.id);
@@ -411,9 +411,31 @@ describe("Egress Grants — /v1/egress", () => {
         payload: {},
       });
 
-    expect((await call()).statusCode).toBe(200);
-    expect(seen.at(-1)?.url).toBe("https://api.openai.com/v1/chat/completions");
-    await h.deps.credentialStore.setAllowedHosts(reference, ["api.changed.example"]);
+    const current = (await h.deps.credentialStore.findActive(reference))!;
+    await h.deps.credentialStore.updateMetadata(
+      reference,
+      {
+        label: current.label,
+        allowed_hosts: current.allowed_hosts,
+        metadata: current.metadata,
+      },
+      { allowed_hosts: [] },
+    );
+
+    await h.server.close();
+    h.server = await buildServer({ deps: h.deps, proxyExecutor: fakeExecutor() });
+    expect((await call()).statusCode).toBe(404);
+
+    const empty = (await h.deps.credentialStore.findActive(reference))!;
+    await h.deps.credentialStore.updateMetadata(
+      reference,
+      {
+        label: empty.label,
+        allowed_hosts: empty.allowed_hosts,
+        metadata: empty.metadata,
+      },
+      { allowed_hosts: ["api.changed.example"] },
+    );
 
     expect((await call()).statusCode).toBe(200);
     expect(seen.at(-1)?.url).toBe("https://api.changed.example/v1/chat/completions");

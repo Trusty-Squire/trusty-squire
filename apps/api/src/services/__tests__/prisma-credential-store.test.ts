@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { CredentialSlotConflictError } from "@trusty-squire/vault";
 import type { ApiPrismaClient } from "../api-prisma-client.js";
 import { PrismaCredentialStore } from "../prisma-credential-store.js";
 
@@ -89,9 +88,6 @@ describe("PrismaCredentialStore", () => {
     } as unknown as ApiPrismaClient;
     const store = new PrismaCredentialStore(prisma);
 
-    await expect(store.setLabel("vault://acct/cred", "shared")).rejects.toBeInstanceOf(
-      CredentialSlotConflictError,
-    );
     await expect(
       store.updateMetadata(
         "vault://acct/cred",

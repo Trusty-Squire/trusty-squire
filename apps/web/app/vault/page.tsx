@@ -9,11 +9,14 @@ import { CardIcon } from "../components/CardIcon";
 import { Modal } from "../components/Modal";
 import { CredentialFields, type FieldsResult } from "../components/CredentialFields";
 import { parseHostList } from "../lib/hosts";
+import { getPairingState } from "../lib/pairing";
+import { getVouchflow } from "../lib/vouchflow";
 import { type CardMeta, isLegacyCard } from "../lib/wallet";
 import { ApiError, apiDelete, apiGet, apiPatch, apiPost, timeAgo } from "../lib/api";
 
 interface Cred {
   id: string;
+  reference: string;
   service: string | null;
   // Per-entry name within a service ("default" unless renamed). Lets the
   // user distinguish multiple entries under one service.
@@ -859,22 +862,39 @@ function EditModal({
     setBusy(true);
     setError(null);
     try {
-      // 1. Label.
       const nextLabel = label.trim() === "" ? "default" : label.trim();
-      if (nextLabel !== cred.label) {
-        await apiPatch(`/v1/vault/credentials/${cred.id}/label`, { label: nextLabel });
-      }
-      // 2. Hosts — sign-in hosts (login_hosts) for a login, allowed hosts for a
-      //    key. Same textarea, different field + endpoint by credential kind.
       const hosts = parseHostList(hostsText);
       const prevHosts = isLogin ? cred.login_hosts : cred.allowed_hosts;
       const hostsChanged =
         hosts.length !== prevHosts.length || hosts.some((h, i) => h !== prevHosts[i]);
+      const changes: Record<string, unknown> = {};
+      if (nextLabel !== cred.label) changes.label = nextLabel;
       if (hostsChanged) {
-        const path = isLogin ? "login-hosts" : "allowed-hosts";
-        await apiPatch(`/v1/vault/credentials/${cred.id}/${path}`, { hosts });
+        changes[isLogin ? "login_hosts" : "allowed_hosts"] = { mode: "replace", hosts };
       }
-      // 3. Fields — only if they actually changed (avoid a needless rotate).
+      if (Object.keys(changes).length > 0) {
+        const pairing = await getPairingState();
+        if (!pairing.enrolled) {
+          throw new Error("Set up a passkey before changing credential metadata.");
+        }
+        const approval = await apiPost<{ approval_id: string }>("/v1/vault/mutation-approvals", {
+          operation: "edit",
+          reference: cred.reference,
+          changes,
+        });
+        const ceremony = await apiGet<{ payload: unknown }>(
+          `/v1/vault/mutation-approvals/${encodeURIComponent(approval.approval_id)}/ceremony`,
+        );
+        const signed = await getVouchflow().signPayload({
+          context: "vault_credential_mutation",
+          payload: ceremony.payload,
+          minConfidence: "low",
+        });
+        await apiPost(
+          `/v1/vault/mutation-approvals/${encodeURIComponent(approval.approval_id)}/approve`,
+          { jws: signed.assertion },
+        );
+      }
       if (origMap === null || !sameMap(map, origMap)) {
         await apiPatch(`/v1/vault/credentials/${cred.id}`, { fields: map });
       }

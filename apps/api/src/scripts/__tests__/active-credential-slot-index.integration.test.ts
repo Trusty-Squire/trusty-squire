@@ -8,7 +8,10 @@ import { ulid } from "ulid";
 import { getApiPrismaClient, type ApiPrismaClient } from "../../services/api-prisma-client.js";
 import { PrismaCredentialStore } from "../../services/prisma-credential-store.js";
 import { PrismaVaultAuditStore } from "../../services/prisma-vault-audit-store.js";
-import { ensureActiveCredentialSlotIndex, runDedup } from "../dedup-credentials.js";
+import {
+  ensureActiveCredentialSlotIndex,
+  rolloutActiveCredentialSlotIndex,
+} from "../dedup-credentials.js";
 
 const databaseUrl = process.env.CREDENTIAL_SLOT_TEST_DATABASE_URL;
 const runDatabaseTests = databaseUrl !== undefined && databaseUrl.length > 0;
@@ -43,23 +46,33 @@ describe.skipIf(!runDatabaseTests)("active credential slot index rollout", () =>
     await prisma?.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
   });
 
-  it("deduplicates legacy rows, creates online, and rejects concurrent writers", async () => {
+  it("retries concurrent rollout conflicts and rejects concurrent writers", async () => {
     const old = credential("legacy_old", "shared", new Date("2026-01-01T00:00:00Z"));
     const recent = credential("legacy_recent", "shared", new Date("2026-02-01T00:00:00Z"));
     await store.insert(old);
     await store.insert(recent);
 
-    const dedup = await runDedup(
+    const originalDelete = store.softDeleteIfDuplicate.bind(store);
+    let injected = false;
+    store.softDeleteIfDuplicate = async (...args) => {
+      const deleted = await originalDelete(...args);
+      if (deleted && !injected) {
+        injected = true;
+        await store.insert(credential("legacy_raced", "shared", new Date("2026-02-15T00:00:00Z")));
+      }
+      return deleted;
+    };
+    const rollout = await rolloutActiveCredentialSlotIndex(
+      prisma!,
       store,
       new PrismaVaultAuditStore(prisma!),
-      true,
       () => new Date("2026-03-01T00:00:00Z"),
     );
-    expect(dedup.rowsCollapsed).toBe(1);
-    await expect(ensureActiveCredentialSlotIndex(prisma!)).resolves.toBe("created");
+    expect(rollout.index).toBe("created");
+    expect(injected).toBe(true);
     await expect(ensureActiveCredentialSlotIndex(prisma!)).resolves.toBe("already_present");
     expect((await store.listByAccount("acct_slot")).map((row) => row.reference)).toEqual([
-      recent.reference,
+      "vault://acct_slot/subscription/legacy_raced",
     ]);
 
     const attempts = await Promise.allSettled([

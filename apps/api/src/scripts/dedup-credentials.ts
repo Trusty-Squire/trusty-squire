@@ -190,12 +190,21 @@ export async function runDedup(
   }
 
   const totals = printReport(allGroups, apply);
+  let rowsCollapsed = 0;
 
   if (apply) {
     const deletedAt = now();
     for (const g of allGroups) {
       for (const ref of g.collapsed) {
-        await store.softDelete(ref, deletedAt);
+        const deleted = await store.softDeleteIfDuplicate(
+          ref,
+          g.account_id,
+          g.service,
+          g.label,
+          deletedAt,
+        );
+        if (!deleted) continue;
+        rowsCollapsed += 1;
         await audit.record({
           account_id: g.account_id,
           type: VAULT_AUDIT_TYPES.collapsed,
@@ -210,14 +219,17 @@ export async function runDedup(
       }
     }
     console.warn(
-      `[dedup][applied] soft_deleted=${totals.rowsCollapsed} ` +
-        `audit_events=${totals.rowsCollapsed}`,
+      `[dedup][applied] soft_deleted=${rowsCollapsed} ` + `audit_events=${rowsCollapsed}`,
     );
   } else {
     console.warn("[dedup][dry-run] no changes written. Re-run with --apply to collapse.");
   }
 
-  return { ...totals, accountsScanned: accountIds.length };
+  return {
+    ...totals,
+    rowsCollapsed: apply ? rowsCollapsed : totals.rowsCollapsed,
+    accountsScanned: accountIds.length,
+  };
 }
 
 export async function ensureActiveCredentialSlotIndex(
@@ -230,17 +242,52 @@ export async function ensureActiveCredentialSlotIndex(
       `DROP INDEX CONCURRENTLY IF EXISTS "${ACTIVE_CREDENTIAL_SLOT_INDEX}"`,
     );
   }
-  await prisma.$executeRawUnsafe(
-    `CREATE UNIQUE INDEX CONCURRENTLY "${ACTIVE_CREDENTIAL_SLOT_INDEX}" ` +
-      `ON "Credential" ("account_id", lower("metadata"->>'service'), "label") ` +
-      `WHERE "deleted_at" IS NULL AND jsonb_typeof("metadata"->'service') = 'string' ` +
-      `AND ("metadata"->>'service') <> ''`,
-  );
+  try {
+    await prisma.$executeRawUnsafe(
+      `CREATE UNIQUE INDEX CONCURRENTLY "${ACTIVE_CREDENTIAL_SLOT_INDEX}" ` +
+        `ON "Credential" ("account_id", lower("metadata"->>'service'), "label") ` +
+        `WHERE "deleted_at" IS NULL AND jsonb_typeof("metadata"->'service') = 'string' ` +
+        `AND ("metadata"->>'service') <> ''`,
+    );
+  } catch (error) {
+    const failed = await activeCredentialSlotIndexState(prisma);
+    if (failed !== null && (!failed.indisvalid || !failed.indisready)) {
+      await prisma.$executeRawUnsafe(
+        `DROP INDEX CONCURRENTLY IF EXISTS "${ACTIVE_CREDENTIAL_SLOT_INDEX}"`,
+      );
+    }
+    throw error;
+  }
   const created = await activeCredentialSlotIndexState(prisma);
   if (!created?.indisvalid || !created.indisready || !created.indisunique) {
     throw new Error("active credential slot index was not created successfully");
   }
   return "created";
+}
+
+export async function rolloutActiveCredentialSlotIndex(
+  prisma: ReturnType<typeof getApiPrismaClient>,
+  store: PrismaCredentialStore,
+  audit: PrismaVaultAuditStore,
+  now: () => Date = () => new Date(),
+): Promise<{ dedup: RunResult; index: "created" | "already_present" }> {
+  let lastConflict: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const dedup = await runDedup(store, audit, true, now);
+    try {
+      return { dedup, index: await ensureActiveCredentialSlotIndex(prisma) };
+    } catch (error) {
+      if (!isUniqueIndexBuildConflict(error)) throw error;
+      lastConflict = error;
+    }
+  }
+  throw lastConflict;
+}
+
+function isUniqueIndexBuildConflict(error: unknown): boolean {
+  if (error === null || typeof error !== "object") return false;
+  const candidate = error as { code?: unknown; meta?: { code?: unknown } };
+  return candidate.code === "23505" || candidate.meta?.code === "23505";
 }
 
 async function activeCredentialSlotIndexState(
@@ -277,8 +324,9 @@ export async function main(argv: string[]): Promise<void> {
   const prisma = getApiPrismaClient(databaseUrl);
   const store = new PrismaCredentialStore(prisma);
   const audit = new PrismaVaultAuditStore(prisma);
-  const result = await runDedup(store, audit, apply);
-  const indexResult = ensureIndex ? await ensureActiveCredentialSlotIndex(prisma) : null;
+  const rollout = ensureIndex ? await rolloutActiveCredentialSlotIndex(prisma, store, audit) : null;
+  const result = rollout?.dedup ?? (await runDedup(store, audit, apply));
+  const indexResult = rollout?.index ?? null;
   console.warn(
     `[dedup] done. accounts_scanned=${result.accountsScanned} ` +
       `groups_affected=${result.groupsAffected} rows_collapsed=${result.rowsCollapsed}` +

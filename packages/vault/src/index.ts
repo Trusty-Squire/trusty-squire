@@ -17,8 +17,8 @@ export { CredentialSlotConflictError } from "./types.js";
 export {
   CredentialVault,
   coerceFieldMap,
+  normalizeCredentialHosts,
   CredentialNotFoundError,
-  CredentialMetadataChangedError,
   FieldExistsError,
   StaleAssertionError,
   VaultRateLimitError,
@@ -29,7 +29,6 @@ export {
   type VaultEntry,
   type VaultStoreInput,
   type RotateResult,
-  type VaultEditableMetadata,
   type VaultHealthResult,
   type VaultAccountExport,
   type VaultCredentialExport,

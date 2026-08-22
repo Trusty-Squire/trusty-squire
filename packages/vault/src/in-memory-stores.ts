@@ -71,6 +71,38 @@ export class InMemoryCredentialStore implements CredentialStore {
     r.deleted_at = deletedAt;
   }
 
+  async softDeleteIfDuplicate(
+    reference: string,
+    accountId: string,
+    service: string,
+    label: string,
+    deletedAt: Date,
+  ): Promise<boolean> {
+    const target = this.byReference.get(reference);
+    if (
+      target === undefined ||
+      target.account_id !== accountId ||
+      target.deleted_at !== null ||
+      target.label !== label ||
+      typeof target.metadata.service !== "string" ||
+      target.metadata.service.toLowerCase() !== service.toLowerCase()
+    ) {
+      return false;
+    }
+    const duplicate = [...this.byReference.values()].some(
+      (candidate) =>
+        candidate.reference !== reference &&
+        candidate.account_id === accountId &&
+        candidate.deleted_at === null &&
+        candidate.label === label &&
+        typeof candidate.metadata.service === "string" &&
+        candidate.metadata.service.toLowerCase() === service.toLowerCase(),
+    );
+    if (!duplicate) return false;
+    target.deleted_at = deletedAt;
+    return true;
+  }
+
   async replaceSecret(
     reference: string,
     payload: {
@@ -131,28 +163,6 @@ export class InMemoryCredentialStore implements CredentialStore {
       throw new CredentialSlotConflictError();
     }
     r.deleted_at = null;
-  }
-
-  async setAllowedHosts(reference: string, hosts: string[]): Promise<void> {
-    const r = this.byReference.get(reference);
-    if (r === undefined) return;
-    r.allowed_hosts = [...hosts];
-  }
-
-  async setLoginHosts(reference: string, hosts: string[]): Promise<void> {
-    const r = this.byReference.get(reference);
-    if (r === undefined) return;
-    // login_hosts + auth_strategy live in metadata; merge, don't clobber.
-    r.metadata = { ...r.metadata, login_hosts: [...hosts], auth_strategy: "username_password" };
-  }
-
-  async setLabel(reference: string, label: string): Promise<void> {
-    const r = this.byReference.get(reference);
-    if (r === undefined) return;
-    if (hasSlotConflict(this.byReference.values(), { ...r, label })) {
-      throw new CredentialSlotConflictError();
-    }
-    r.label = label;
   }
 
   async updateMetadata(

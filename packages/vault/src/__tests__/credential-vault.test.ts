@@ -11,6 +11,7 @@ import {
   StaleAssertionError,
   VaultRateLimitError,
   mergeAllowedHosts,
+  normalizeCredentialHosts,
   normalizeObservedHost,
   type DeviceAssertion,
   type ProxyResponse,
@@ -91,6 +92,15 @@ describe("allowed-host derivation helpers", () => {
     expect(mergeAllowedHosts("totally-unknown-saas")).toEqual([]);
     // dedupes when observed equals the table value.
     expect(mergeAllowedHosts("openai", ["api.openai.com"])).toEqual(["api.openai.com"]);
+  });
+
+  it("normalizes stored and edited allowlists with the same semantics", () => {
+    expect(
+      normalizeCredentialHosts(
+        ["https://münich.example/path", "not a url at all", "XN--MNICH-KVA.EXAMPLE"],
+        "allowed",
+      ),
+    ).toEqual(["xn--mnich-kva.example"]);
   });
 });
 
@@ -196,10 +206,33 @@ describe("upsert (store overwrites by service+label)", () => {
     expect(fields).toEqual({ value: "sk_new" });
   });
 
+  it("concurrent first stores converge on the database-owned slot", async () => {
+    const { vault, store } = makeVault();
+    const results = await Promise.all([
+      vault.store(storeInput({ fields: { value: "sk_first" } })),
+      vault.store(storeInput({ fields: { value: "sk_second" } })),
+    ]);
+    expect(new Set(results.map((result) => result.reference)).size).toBe(1);
+    expect(results.filter((result) => result.updated)).toHaveLength(1);
+    expect(await store.listByAccount(ACCOUNT)).toHaveLength(1);
+    expect(await vault.retrieve(results[0]!.reference, "user:read", assertion())).toMatchObject({
+      value: expect.stringMatching(/^sk_(first|second)$/),
+    });
+  });
+
   it("overwrite preserves allowed_hosts the user edited", async () => {
     const { vault, store } = makeVault();
     const a = await vault.store(storeInput());
-    await store.setAllowedHosts(a.reference, ["custom.example.com"]);
+    const current = (await store.findActive(a.reference))!;
+    await store.updateMetadata(
+      a.reference,
+      {
+        label: current.label,
+        allowed_hosts: current.allowed_hosts,
+        metadata: current.metadata,
+      },
+      { allowed_hosts: ["custom.example.com"] },
+    );
     const b = await vault.store(storeInput({ fields: { value: "sk_new" } }));
     expect(b.allowed_hosts).toEqual(["custom.example.com"]);
   });
@@ -248,13 +281,22 @@ describe("upsert (store overwrites by service+label)", () => {
     });
   });
 
-  it("rename refuses to collide with another active service label", async () => {
-    const { vault } = makeVault();
+  it("metadata update refuses to collide with another active service label", async () => {
+    const { vault, store } = makeVault();
     const def = await vault.store(storeInput({ fields: { value: "sk_default" } }));
     const prod = await vault.store(storeInput({ label: "prod", fields: { value: "sk_prod" } }));
-    await expect(vault.rename(prod.reference, ACCOUNT, def.label)).rejects.toThrow(
-      RestoreConflictError,
-    );
+    const current = (await store.findActive(prod.reference))!;
+    await expect(
+      store.updateMetadata(
+        prod.reference,
+        {
+          label: current.label,
+          allowed_hosts: current.allowed_hosts,
+          metadata: current.metadata,
+        },
+        { label: def.label },
+      ),
+    ).resolves.toBe("conflict");
   });
 
   it("keeps one active service-label slot across concurrent rename and restore", async () => {
@@ -267,10 +309,20 @@ describe("upsert (store overwrites by service+label)", () => {
     );
     await vault.delete(shared.reference, ACCOUNT);
 
-    const results = await Promise.allSettled([
-      vault.rename(first.reference, ACCOUNT, "shared"),
-      vault.restore(shared.reference, ACCOUNT),
-    ]);
+    const current = (await store.findActive(first.reference))!;
+    const rename = async (): Promise<void> => {
+      const result = await store.updateMetadata(
+        first.reference,
+        {
+          label: current.label,
+          allowed_hosts: current.allowed_hosts,
+          metadata: current.metadata,
+        },
+        { label: "shared" },
+      );
+      if (result !== "updated") throw new RestoreConflictError(first.reference, "Stripe", "shared");
+    };
+    const results = await Promise.allSettled([rename(), vault.restore(shared.reference, ACCOUNT)]);
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
     expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
     expect(

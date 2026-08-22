@@ -34,6 +34,59 @@ export function normalizeObservedHost(raw: string): string | null {
   }
 }
 
+const TWO_LABEL_PUBLIC_SUFFIXES: ReadonlySet<string> = new Set([
+  "co.uk",
+  "org.uk",
+  "gov.uk",
+  "ac.uk",
+  "com.au",
+  "net.au",
+  "org.au",
+  "co.jp",
+  "co.nz",
+  "co.in",
+  "com.br",
+  "co.za",
+  "com.cn",
+  "github.io",
+  "web.app",
+  "firebaseapp.com",
+  "pages.dev",
+  "workers.dev",
+  "vercel.app",
+  "netlify.app",
+  "herokuapp.com",
+]);
+
+function validLoginHost(host: string): boolean {
+  if (host.includes("..") || host.startsWith(".") || host.endsWith(".")) return false;
+  if (host.includes("xn--") || /^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return false;
+  const labels = host.split(".");
+  return (
+    labels.length >= 2 &&
+    labels.every((label) => label.length > 0 && label.length <= 63) &&
+    !TWO_LABEL_PUBLIC_SUFFIXES.has(host)
+  );
+}
+
+export function normalizeCredentialHosts(
+  rawHosts: readonly string[],
+  kind: "allowed" | "login",
+): string[] | null {
+  const hosts: string[] = [];
+  for (const raw of rawHosts) {
+    const wildcard = kind === "login" && raw.trim().startsWith("*.");
+    const normalized = normalizeObservedHost(wildcard ? raw.trim().slice(2) : raw);
+    if (normalized === null || (kind === "login" && !validLoginHost(normalized))) {
+      if (kind === "login") return null;
+      continue;
+    }
+    const host = wildcard ? `*.${normalized}` : normalized;
+    if (!hosts.includes(host)) hosts.push(host);
+  }
+  return hosts;
+}
+
 // The allowlist for a freshly-stored credential: hosts observed during the
 // capture, unioned with the static service-name table, deduped in order.
 // Observed hosts come first (they're the ground truth for THIS credential);
@@ -47,7 +100,7 @@ export function mergeAllowedHosts(service: string, observed?: string[]): string[
       out.push(h);
     }
   };
-  for (const raw of observed ?? []) add(normalizeObservedHost(raw));
+  for (const host of normalizeCredentialHosts(observed ?? [], "allowed") ?? []) add(host);
   for (const h of deriveAllowedHosts(service)) add(h);
   return out;
 }
@@ -98,12 +151,6 @@ export interface VaultEntry {
 
 export interface RotateResult {
   rotated_at: string;
-}
-
-export interface VaultEditableMetadata {
-  label: string;
-  allowed_hosts: string[];
-  login_hosts: string[];
 }
 
 // Envelope health probe result. `healthy` means the full
@@ -208,12 +255,6 @@ export class CredentialNotFoundError extends Error {
   constructor(reference: string) {
     super(`credential not found or deleted: ${reference}`);
     this.name = "CredentialNotFoundError";
-  }
-}
-export class CredentialMetadataChangedError extends Error {
-  constructor(reference: string) {
-    super(`credential metadata changed while approval was pending: ${reference}`);
-    this.name = "CredentialMetadataChangedError";
   }
 }
 // addField refused: the entry already has a field with this name. Adding
@@ -336,7 +377,37 @@ export class CredentialVault implements VaultClient {
       await this.deps.store.insert(record);
     } catch (error) {
       if (error instanceof CredentialSlotConflictError) {
-        throw new RestoreConflictError(reference, input.service, label);
+        const winner = await this.deps.store.findActiveByServiceLabel(
+          input.account_id,
+          input.service,
+          label,
+        );
+        if (winner === null) throw new RestoreConflictError(reference, input.service, label);
+        const winnerEnv = await this.encryptFields(
+          winner.reference,
+          input.account_id,
+          input.fields,
+        );
+        await this.deps.store.replaceSecret(winner.reference, {
+          ...winnerEnv,
+          field_names: fieldNames,
+          rotatedAt: now,
+        });
+        await this.recordAudit(input.account_id, VAULT_AUDIT_TYPES.rotated, {
+          reference: winner.reference,
+          requester: "user",
+          service: input.service,
+          label,
+        });
+        return {
+          reference: winner.reference,
+          service: input.service,
+          label,
+          field_names: fieldNames,
+          allowed_hosts: winner.allowed_hosts,
+          created_at: winner.created_at.toISOString(),
+          updated: true,
+        };
       }
       throw error;
     }
@@ -384,41 +455,6 @@ export class CredentialVault implements VaultClient {
       requester: "user",
     });
     return { rotated_at: now.toISOString() };
-  }
-
-  // Web-only: rename an entry. Changes the (non-secret) label only —
-  // the encrypted payload, field names, and allowed_hosts are untouched.
-  // Account-scoped.
-  async rename(reference: string, accountId: string, label: string): Promise<{ label: string }> {
-    const trimmed = label.trim();
-    if (trimmed.length === 0) {
-      throw new Error("label must not be empty");
-    }
-    const existing = await this.deps.store.findActive(reference);
-    if (existing === null || existing.account_id !== accountId) {
-      throw new CredentialNotFoundError(reference);
-    }
-    const service = typeof existing.metadata.service === "string" ? existing.metadata.service : "";
-    if (service.length > 0 && trimmed !== existing.label) {
-      const live = await this.deps.store.findActiveByServiceLabel(accountId, service, trimmed);
-      if (live !== null && live.reference !== reference) {
-        throw new RestoreConflictError(reference, service, trimmed);
-      }
-    }
-    try {
-      await this.deps.store.setLabel(reference, trimmed);
-    } catch (error) {
-      if (error instanceof CredentialSlotConflictError) {
-        throw new RestoreConflictError(reference, service, trimmed);
-      }
-      throw error;
-    }
-    await this.recordAudit(accountId, VAULT_AUDIT_TYPES.renamed, {
-      reference,
-      requester: "user",
-      label: trimmed,
-    });
-    return { label: trimmed };
   }
 
   // Web-only: add a single field to an existing entry WITHOUT the caller
@@ -529,69 +565,6 @@ export class CredentialVault implements VaultClient {
     return fields;
   }
 
-  async editMetadata(
-    reference: string,
-    accountId: string,
-    expected: VaultEditableMetadata,
-    replacement: VaultEditableMetadata,
-    requester: VaultRequester = "user",
-  ): Promise<VaultEditableMetadata> {
-    const existing = await this.deps.store.findActive(reference);
-    if (existing === null || existing.account_id !== accountId) {
-      throw new CredentialNotFoundError(reference);
-    }
-    const loginHosts = metadataStringArray(existing.metadata.login_hosts);
-    const matchesExpected =
-      existing.label === expected.label &&
-      sameStringArray(existing.allowed_hosts, expected.allowed_hosts) &&
-      sameStringArray(loginHosts, expected.login_hosts);
-    if (!matchesExpected) {
-      throw new CredentialMetadataChangedError(reference);
-    }
-    const service = typeof existing.metadata.service === "string" ? existing.metadata.service : "";
-    if (service.length > 0 && replacement.label !== existing.label) {
-      const live = await this.deps.store.findActiveByServiceLabel(
-        accountId,
-        service,
-        replacement.label,
-      );
-      if (live !== null && live.reference !== reference) {
-        throw new RestoreConflictError(reference, service, replacement.label);
-      }
-    }
-    const updated = await this.deps.store.updateMetadata(
-      reference,
-      {
-        label: existing.label,
-        allowed_hosts: existing.allowed_hosts,
-        metadata: existing.metadata,
-      },
-      {
-        label: replacement.label,
-        allowed_hosts: replacement.allowed_hosts,
-        metadata: {
-          ...existing.metadata,
-          login_hosts: replacement.login_hosts,
-        },
-      },
-    );
-    if (updated === "conflict") {
-      throw new RestoreConflictError(reference, service, replacement.label);
-    }
-    if (updated === "changed") throw new CredentialMetadataChangedError(reference);
-    await this.recordAudit(accountId, VAULT_AUDIT_TYPES.metadataEdited, {
-      reference,
-      requester,
-      ...(service.length > 0 ? { service } : {}),
-      label: replacement.label,
-    });
-    return {
-      label: replacement.label,
-      allowed_hosts: [...replacement.allowed_hosts],
-      login_hosts: [...replacement.login_hosts],
-    };
-  }
-
   async delete(
     reference: string,
     accountId: string,
@@ -651,12 +624,6 @@ export class CredentialVault implements VaultClient {
     }
     if (rec.deleted_at === null) return; // already active — no-op
     const service = typeof rec.metadata.service === "string" ? rec.metadata.service : "";
-    if (service.length > 0) {
-      const live = await this.deps.store.findActiveByServiceLabel(accountId, service, rec.label);
-      if (live !== null) {
-        throw new RestoreConflictError(reference, service, rec.label);
-      }
-    }
     try {
       await this.deps.store.restore(reference);
     } catch (error) {
@@ -943,16 +910,6 @@ export class CredentialVault implements VaultClient {
       // layer; this package intentionally stays logger-free.
     }
   }
-}
-
-function metadataStringArray(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string")
-    : [];
-}
-
-function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 // Decrypted-plaintext → field map, tolerant of the pre-v2 format.

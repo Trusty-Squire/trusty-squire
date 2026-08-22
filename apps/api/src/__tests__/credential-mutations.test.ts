@@ -4,6 +4,7 @@ import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { InMemoryVaultAuditStore, VAULT_AUDIT_TYPES } from "@trusty-squire/vault";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { issueAgentSession } from "../auth/agent.js";
+import { issueSession, SESSION_COOKIE_NAME, signSessionJwt } from "../auth/session.js";
 import { credentialMutationPayload } from "../routes/credential-mutations.js";
 import { buildInMemoryDeps, type ApiDeps } from "../services/deps.js";
 import { InMemoryCredentialMutationApprovalStore } from "../services/credential-mutation-approval-store.js";
@@ -328,7 +329,16 @@ describe("vouch-gated credential mutations", () => {
       changes: { allowed_hosts: { mode: "add", hosts: ["new.example.test"] } },
     });
     const editId = (editCreated.json() as { approval_id: string }).approval_id;
-    await deps.credentialStore.setAllowedHosts(reference, ["drift.example.test"]);
+    const current = (await deps.credentialStore.findActive(reference))!;
+    await deps.credentialStore.updateMetadata(
+      reference,
+      {
+        label: current.label,
+        allowed_hosts: current.allowed_hosts,
+        metadata: current.metadata,
+      },
+      { allowed_hosts: ["drift.example.test"] },
+    );
     const drifted = await approveMutation(editId);
     expect(drifted.statusCode).toBe(409);
     expect(drifted.json()).toEqual({ error: "credential_metadata_changed" });
@@ -386,8 +396,58 @@ describe("vouch-gated credential mutations", () => {
     const firstId = (first.json() as { approval_id: string }).approval_id;
     const secondId = (second.json() as { approval_id: string }).approval_id;
     expect(secondId).not.toBe(firstId);
-    expect((await deps.credentialMutationApprovalStore.getById(firstId))?.agent).toBe("Codex");
-    expect((await deps.credentialMutationApprovalStore.getById(secondId))?.agent).toBe("Claude");
+    expect((await deps.credentialMutationApprovalStore.getById(firstId))?.agent).toBe("codex");
+    expect((await deps.credentialMutationApprovalStore.getById(secondId))?.agent).toBe("claude");
+  });
+
+  it("requires the signed chokepoint for web metadata edits", async () => {
+    const reference = await storeCredential();
+    const credential = (await deps.credentialStore.findActive(reference))!;
+    const { record, jwt } = issueSession({
+      account_id: credential.account_id,
+      ip: null,
+      user_agent: null,
+      now: new Date(nowMs),
+    });
+    await deps.sessionStore.insert(record);
+    const cookie = `${SESSION_COOKIE_NAME}=${signSessionJwt(jwt, SESSION_SECRET)}`;
+
+    const ungated = await server.inject({
+      method: "PATCH",
+      url: `/v1/vault/credentials/${credential.id}/allowed-hosts`,
+      headers: { cookie },
+      payload: { hosts: ["unsigned.example.test"] },
+    });
+    expect(ungated.statusCode).toBe(404);
+    expect((await deps.credentialStore.findActive(reference))?.allowed_hosts).toEqual([
+      "api.openai.com",
+    ]);
+
+    const created = await server.inject({
+      method: "POST",
+      url: "/v1/vault/mutation-approvals",
+      headers: { cookie, "x-squire-agent-identity": "forged-agent" },
+      payload: {
+        operation: "edit",
+        reference,
+        changes: {
+          allowed_hosts: { mode: "replace", hosts: ["https://münich.example/path"] },
+        },
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const id = (created.json() as { approval_id: string }).approval_id;
+    expect((await deps.credentialMutationApprovalStore.getById(id))?.agent).toBe(
+      `web-session:${record.id}`,
+    );
+    expect((await deps.credentialStore.findActive(reference))?.allowed_hosts).toEqual([
+      "api.openai.com",
+    ]);
+
+    expect((await approveMutation(id)).statusCode).toBe(200);
+    expect((await deps.credentialStore.findActive(reference))?.allowed_hosts).toEqual([
+      "xn--mnich-kva.example",
+    ]);
   });
 
   it("leaves approval and metadata pending when the atomic audit write fails", async () => {

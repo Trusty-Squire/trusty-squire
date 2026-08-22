@@ -21,7 +21,7 @@ interface Harness {
 }
 
 async function setup(): Promise<Harness> {
-  const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET});
+  const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET });
   const server = await buildServer({ deps });
   return { server, deps };
 }
@@ -62,7 +62,7 @@ async function createCred(
   return creds.find((c) => c.reference === reference)!;
 }
 
-describe("PATCH /v1/vault/credentials/:id/label (rename)", () => {
+describe("retired direct credential label route", () => {
   let h: Harness;
   beforeEach(async () => {
     h = await setup();
@@ -71,7 +71,7 @@ describe("PATCH /v1/vault/credentials/:id/label (rename)", () => {
     await h.server.close();
   });
 
-  it("renames the entry; the list reflects the new label", async () => {
+  it("cannot rename without a signed approval", async () => {
     const account = await h.deps.accountStore.createAccount("u@example.test", "U");
     const cookie = await makeWebSession(h.deps, account.id);
     const { id, label } = await createCred(h, cookie, { value: "sk-x" });
@@ -83,18 +83,17 @@ describe("PATCH /v1/vault/credentials/:id/label (rename)", () => {
       headers: { cookie, "content-type": "application/json" },
       payload: { label: "prod" },
     });
-    expect(res.statusCode).toBe(200);
-    expect((res.json() as { label: string }).label).toBe("prod");
+    expect(res.statusCode).toBe(404);
 
     const list = await h.server.inject({
       method: "GET",
       url: "/v1/vault/credentials",
       headers: { cookie },
     });
-    const found = (list.json() as { credentials: Array<{ id: string; label: string }> }).credentials.find(
-      (c) => c.id === id,
-    );
-    expect(found?.label).toBe("prod");
+    const found = (
+      list.json() as { credentials: Array<{ id: string; label: string }> }
+    ).credentials.find((c) => c.id === id);
+    expect(found?.label).toBe("default");
   });
 
   it("rejects an empty label with 400", async () => {
@@ -107,7 +106,7 @@ describe("PATCH /v1/vault/credentials/:id/label (rename)", () => {
       headers: { cookie, "content-type": "application/json" },
       payload: { label: "" },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(404);
   });
 
   it("cannot rename another account's entry (404)", async () => {
@@ -150,9 +149,11 @@ describe("POST /v1/vault/credentials/:id/fields (add field)", () => {
       payload: { name: "region", value: "us-east-1" },
     });
     expect(res.statusCode).toBe(200);
-    expect((res.json() as { field_names: string[] }).field_names.sort()).toEqual(
-      ["access_key_id", "region", "secret_access_key"],
-    );
+    expect((res.json() as { field_names: string[] }).field_names.sort()).toEqual([
+      "access_key_id",
+      "region",
+      "secret_access_key",
+    ]);
 
     const reveal = await h.server.inject({
       method: "POST",

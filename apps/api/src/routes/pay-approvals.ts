@@ -16,6 +16,7 @@ import {
   hashVouchPayload,
   type VouchMandateVerifier,
 } from "../services/vouch-mandate.js";
+import { authenticatedRequester } from "../services/requesting-agent.js";
 
 // Web base for the approval link sent to Telegram. Reuses PWA_BASE_URL
 // (the same override server.ts's defaultPwaBaseUrl() reads) if set, else
@@ -47,8 +48,6 @@ const createBody = z.object({
   item: z.string().trim().min(1).max(500),
   reason: z.string().trim().min(1).max(500),
 });
-
-const requesterName = z.string().trim().min(1).max(256);
 
 const approveBody = z
   .object({
@@ -273,8 +272,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     const ttlMs = parsed.data.card_ref == null ? 18 * 60 * 1000 : 10 * 60 * 1000;
     const expiresAt = new Date(now.getTime() + ttlMs);
     const nonce = randomBytes(16).toString("base64url");
-    const requester = requesterName.safeParse(req.headers["x-squire-agent-identity"]);
-    const agent = requester.success ? requester.data : (auth.agent_identity ?? "unknown-agent");
+    const agent = authenticatedRequester(auth);
     const id = await opts.deps.pendingPaymentApprovalStore.create(auth.account_id, {
       merchant: parsed.data.merchant,
       checkoutOrigin: parsed.data.checkout_origin,

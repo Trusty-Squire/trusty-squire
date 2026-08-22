@@ -96,10 +96,36 @@ function fakeStore(records: DedupCandidate[]): {
   const accountIds = [...new Set(records.map((r) => r.account_id))];
   const store = {
     listAllAccountIds: async () => accountIds,
-    listByAccount: async (accountId: string) =>
-      records.filter((r) => r.account_id === accountId),
-    softDelete: async (reference: string, deletedAt: Date) => {
+    listByAccount: async (accountId: string) => records.filter((r) => r.account_id === accountId),
+    softDeleteIfDuplicate: async (
+      reference: string,
+      accountId: string,
+      service: string,
+      label: string,
+      deletedAt: Date,
+    ) => {
+      const target = records.find((record) => record.reference === reference);
+      const duplicate = records.some(
+        (record) =>
+          record.reference !== reference &&
+          record.account_id === accountId &&
+          record.label === label &&
+          typeof record.metadata.service === "string" &&
+          record.metadata.service.toLowerCase() === service.toLowerCase() &&
+          !softDeletes.some((entry) => entry.reference === record.reference),
+      );
+      if (
+        target === undefined ||
+        target.account_id !== accountId ||
+        target.label !== label ||
+        typeof target.metadata.service !== "string" ||
+        target.metadata.service.toLowerCase() !== service.toLowerCase() ||
+        !duplicate
+      ) {
+        return false;
+      }
       softDeletes.push({ reference, deletedAt });
+      return true;
     },
     // runDedup only calls the three methods above; the rest of the
     // PrismaCredentialStore surface is never reached on this path.
@@ -109,9 +135,19 @@ function fakeStore(records: DedupCandidate[]): {
 
 function fakeAudit(): {
   audit: AuditLike;
-  events: { account_id: string; type: string; reference: string; collapsed_into: string | undefined }[];
+  events: {
+    account_id: string;
+    type: string;
+    reference: string;
+    collapsed_into: string | undefined;
+  }[];
 } {
-  const events: { account_id: string; type: string; reference: string; collapsed_into: string | undefined }[] = [];
+  const events: {
+    account_id: string;
+    type: string;
+    reference: string;
+    collapsed_into: string | undefined;
+  }[] = [];
   const audit = {
     record: async (event: {
       account_id: string;
@@ -166,6 +202,29 @@ describe("runDedup", () => {
     }
     // The survivor is never touched.
     expect(softDeletes.map((s) => s.reference)).not.toContain("cred_new");
+    vi.restoreAllMocks();
+  });
+
+  it("does not delete a row that left the duplicate slot after planning", async () => {
+    const moving = records.map((record) => ({ ...record, metadata: { ...record.metadata } }));
+    const { store, softDeletes } = fakeStore(moving);
+    const originalList = store.listByAccount.bind(store);
+    store.listByAccount = async (accountId: string) => {
+      const snapshot = (await originalList(accountId)).map((record) => ({
+        ...record,
+        metadata: { ...record.metadata },
+      }));
+      moving.find((record) => record.reference === "cred_old")!.label = "moved";
+      return snapshot;
+    };
+    const { audit, events } = fakeAudit();
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const result = await runDedup(store, audit, true);
+
+    expect(result.rowsCollapsed).toBe(1);
+    expect(softDeletes.map((entry) => entry.reference)).toEqual(["cred_mid"]);
+    expect(events.map((event) => event.reference)).toEqual(["cred_mid"]);
     vi.restoreAllMocks();
   });
 });

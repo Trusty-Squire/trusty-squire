@@ -13,6 +13,7 @@ import {
 } from "../services/credential-mutation-approval-store.js";
 import { sendTelegramMessage } from "../services/telegram.js";
 import { notifyVaultAuditAfterCommit } from "../services/vault-notify.js";
+import { authenticatedRequester } from "../services/requesting-agent.js";
 import {
   CREDENTIAL_MUTATION_VOUCH_CONTEXT,
   VouchMandateVerificationError,
@@ -79,8 +80,6 @@ const deleteBody = z
 
 const createBody = z.union([editBody, deleteBody]);
 const approveBody = z.object({ jws: z.string().min(1).max(8192) }).strict();
-const requesterName = z.string().trim().min(1).max(256);
-
 function webBaseUrl(): string {
   return (
     process.env.PWA_BASE_URL ?? process.env.TRUSTY_SQUIRE_WEB_BASE ?? "https://trustysquire.ai"
@@ -184,7 +183,7 @@ function sendResolutionFailure(
 
 export const registerCredentialMutationRoutes: FastifyPluginAsync<{
   deps: ApiDeps;
-  requireAgent: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
+  requireAny: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
   vouchVerifier?: VouchMandateVerifier;
 }> = async (fastify, opts) => {
   const verifyVouch = opts.vouchVerifier ?? createVouchMandateVerifier();
@@ -192,10 +191,9 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
 
   fastify.post(
     "/v1/vault/mutation-approvals",
-    { preHandler: opts.requireAgent },
+    { preHandler: opts.requireAny },
     async (req, reply) => {
       const auth = req.auth!;
-      if (auth.kind !== "agent") return;
       const parsed = createBody.safeParse(req.body);
       if (!parsed.success) {
         reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
@@ -214,8 +212,7 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
       if (resolution.kind !== "found") return;
 
       const credential = resolution.credential;
-      const requester = requesterName.safeParse(req.headers["x-squire-agent-identity"]);
-      const agent = requester.success ? requester.data : (auth.agent_identity ?? "unknown-agent");
+      const agent = authenticatedRequester(auth);
       const before = editableMetadata(credential);
       let after = null;
       if (parsed.data.operation === "edit") {
@@ -233,19 +230,6 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
           return;
         }
         after = applied;
-        const service =
-          typeof credential.metadata.service === "string" ? credential.metadata.service : "";
-        if (service.length > 0 && after.label !== before.label) {
-          const conflict = await opts.deps.credentialStore.findActiveByServiceLabel(
-            auth.account_id,
-            service,
-            after.label,
-          );
-          if (conflict !== null && conflict.reference !== credential.reference) {
-            reply.code(409).send({ error: "credential_name_conflict" });
-            return;
-          }
-        }
       }
       const intentHash = hashVouchPayload({
         agent,
@@ -287,10 +271,9 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
 
   fastify.get<{ Params: { id: string } }>(
     "/v1/vault/mutation-approvals/:id",
-    { preHandler: opts.requireAgent },
+    { preHandler: opts.requireAny },
     async (req, reply) => {
       const auth = req.auth!;
-      if (auth.kind !== "agent") return;
       const record = await opts.deps.credentialMutationApprovalStore.getByIdForAccount(
         req.params.id,
         auth.account_id,
