@@ -1,5 +1,10 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.13-rc.2 (2026-08-22)
+
+- fix(mcp): detect JP/EbisuMart checkout card fields for operate_pay fill (#565)
+- fix(mcp): keep inert-nested modal controls operable (#564)
+
 ## 1.1.13-rc.1 (2026-08-21)
 
 - fix(mcp): strip Google cookies from pooled profiles (#562)
