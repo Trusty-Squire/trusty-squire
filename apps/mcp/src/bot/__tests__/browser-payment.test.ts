@@ -3571,6 +3571,96 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "preserves a terminal submit failure when card cleanup also fails",
+    async () => {
+      const pageUrl = "https://shop.example.test/terminal-primary-error";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-exp">
+            <input autocomplete="cc-csc">
+            <input autocomplete="cc-name">
+          </form>
+          <div id="preview"></div>
+          <script>
+            document.querySelector('[autocomplete="cc-number"]').addEventListener("input", (event) => {
+              if (event.target.value !== "") {
+                document.querySelector("#preview").textContent = "Card " + event.target.value;
+              }
+            });
+          </script>`,
+      });
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_submit_not_found",
+        );
+        expect(consoleError).toHaveBeenCalledWith(
+          "[payment-cleanup] payment_fields_not_cleared",
+        );
+        expect(await page.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
+        expect(await page.locator("#preview").innerText()).toContain(CARD.pan);
+      } finally {
+        consoleError.mockRestore();
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "preserves a confirmed payment outcome when card cleanup also fails",
+    async () => {
+      const pageUrl = "https://shop.example.test/terminal-confirmed-cleanup-failure";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-exp">
+            <input autocomplete="cc-csc">
+            <input autocomplete="cc-name">
+            <button type="button" id="pay-now">Pay now</button>
+          </form>
+          <div id="preview"></div>
+          <script>
+            document.querySelector('[autocomplete="cc-number"]').addEventListener("input", (event) => {
+              if (event.target.value !== "") {
+                document.querySelector("#preview").textContent = "Card " + event.target.value;
+              }
+            });
+            document.querySelector("#pay-now").addEventListener("click", () => {
+              history.pushState({}, "", "/receipt/ORD-12345");
+              document.body.insertAdjacentHTML("beforeend", "<p>Order confirmed</p>");
+            });
+          </script>`,
+      });
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).resolves.toEqual({
+          three_ds_required: false,
+          order_confirmed: true,
+        });
+        expect(consoleError).toHaveBeenCalledWith(
+          "[payment-cleanup] payment_fields_not_cleared",
+        );
+        expect(await page.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
+        expect(await page.locator("#preview").innerText()).toContain(CARD.pan);
+      } finally {
+        consoleError.mockRestore();
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "keeps cleanup sealed when card data survives in interactive metadata",
     async () => {
       const pageUrl = "https://shop.example.test/checkout/payment";
@@ -3842,6 +3932,7 @@ describe("split-checkout card fill (real browser)", () => {
             <input type="text" autocomplete="cc-exp" id="expiry">
             <input type="text" autocomplete="cc-csc" id="cvv">
             <input type="text" name="GIFT_CREDIT_NAME" id="gift-holder">
+            <input type="text" name="CARD_NAME_NOTE" id="holder-note">
             <dl><dt>ギフトカード名義</dt><dd><input type="text" id="field-holder"></dd></dl>
           </form>`,
       });
@@ -3852,11 +3943,65 @@ describe("split-checkout card fill (real browser)", () => {
 
         await controller.fillCheckoutCardFields(CARD);
         expect(await page.locator("#gift-holder").inputValue()).toBe("");
+        expect(await page.locator("#holder-note").inputValue()).toBe("");
         expect(await page.locator("#field-holder").inputValue()).toBe("");
         expect(await page.locator("#pan").inputValue()).toBe(CARD.pan);
         expect(await page.locator("#cvv").inputValue()).toBe(CARD.cvv);
       } finally {
         await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "preserves legacy Western combined and split expiry detection",
+    async () => {
+      const cases = [
+        {
+          name: "combined",
+          expiry: '<input name="payment_expiration" id="expiry">',
+          expected: async (page: Page) => {
+            expect(await page.locator("#expiry").inputValue()).toBe("1230");
+          },
+        },
+        {
+          name: "split",
+          expiry: `
+            <select name="payment_exp_month" id="month">
+              <option value=""></option><option value="12">December</option>
+            </select>
+            <select name="payment_exp_year" id="year">
+              <option value=""></option><option value="30">2030</option>
+            </select>`,
+          expected: async (page: Page) => {
+            expect(await page.locator("#month").inputValue()).toBe("12");
+            expect(await page.locator("#year").inputValue()).toBe("30");
+          },
+        },
+      ];
+      for (const testCase of cases) {
+        const pageUrl = `https://shop.example.test/legacy-western-${testCase.name}.html`;
+        const { page, browser } = await servePages({
+          [pageUrl]: `
+            <form>
+              <input autocomplete="cc-number" id="pan">
+              <input autocomplete="cc-name" id="holder">
+              ${testCase.expiry}
+              <input autocomplete="cc-csc" id="cvv">
+            </form>`,
+        });
+        try {
+          await page.goto(pageUrl);
+          const controller = new BrowserController({ humanize: false });
+          (controller as unknown as { page: Page }).page = page;
+
+          await controller.fillCheckoutCardFields(CARD);
+          await testCase.expected(page);
+          expect(await page.locator("#pan").inputValue()).toBe(CARD.pan);
+          expect(await page.locator("#cvv").inputValue()).toBe(CARD.cvv);
+        } finally {
+          await browser.close();
+        }
       }
     },
   );
@@ -3948,12 +4093,14 @@ describe("split-checkout card fill (real browser)", () => {
       const cases = [
         {
           name: "membership-expiry",
+          jpIdentity: false,
           expiry: `
             <select name="membership_exp_month"><option value=""></option><option value="12">12</option></select>
             <select name="membership_exp_year"><option value=""></option><option value="30">30</option></select>`,
         },
         {
           name: "gift-card-expiry-label",
+          jpIdentity: false,
           expiry: `
             <dl>
               <dt>ギフトカード有効期限</dt>
@@ -3965,6 +4112,7 @@ describe("split-checkout card fill (real browser)", () => {
         },
         {
           name: "order-expiration-note",
+          jpIdentity: true,
           expiry: '<input type="text" name="order_expiration_note" id="false-expiry">',
         },
       ];
@@ -3974,10 +4122,10 @@ describe("split-checkout card fill (real browser)", () => {
           [pageUrl]: `
             <meta charset="utf-8">
             <form>
-              <input type="text" autocomplete="cc-number" id="pan">
-              <input type="text" autocomplete="cc-name" id="holder">
+              <input type="text" ${testCase.jpIdentity ? 'name="CREDIT_NO"' : 'autocomplete="cc-number"'} id="pan">
+              <input type="text" ${testCase.jpIdentity ? 'name="CREDIT_NAME"' : 'autocomplete="cc-name"'} id="holder">
               ${testCase.expiry}
-              <input type="text" autocomplete="cc-csc" id="cvv">
+              <input type="text" ${testCase.jpIdentity ? 'name="SECURITY_CD"' : 'autocomplete="cc-csc"'} id="cvv">
             </form>`,
         });
         try {

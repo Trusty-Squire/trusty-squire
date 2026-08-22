@@ -597,15 +597,19 @@ function checkoutUrlOrderIdentities(
 const CHECKOUT_NON_CARD_IDENTITY_EXCLUSION =
   ':not([name*="gift" i]):not([id*="gift" i]):not([name*="loyalty" i]):not([id*="loyalty" i]):not([name*="point" i]):not([id*="point" i]):not([name*="prepaid" i]):not([id*="prepaid" i]):not([name*="member" i]):not([id*="member" i])';
 
-const CHECKOUT_PAN_FIELD_SELECTORS = [
+const CHECKOUT_LEGACY_PAN_FIELD_SELECTORS = [
   'input[autocomplete~="cc-number"]',
   'input[name*="cardnumber" i]',
   'input[id*="card-number" i]',
   'input[id*="cardnumber" i]',
-  'input[data-ts-jp-card-field="pan"]',
 ]
   .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
   .join(",");
+
+const CHECKOUT_PAN_FIELD_SELECTORS = [
+  CHECKOUT_LEGACY_PAN_FIELD_SELECTORS,
+  `input[data-ts-jp-card-field="pan"]${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
+].join(",");
 
 const CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS = [
   '[autocomplete~="cc-exp-month"]',
@@ -635,7 +639,7 @@ const CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS = [
   .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
   .join(",");
 
-const CHECKOUT_COMBINED_EXPIRY_INPUT_SELECTORS = [
+const CHECKOUT_CONSERVATIVE_COMBINED_EXPIRY_INPUT_SELECTORS = [
   'input[autocomplete~="cc-exp"]',
   'input[name="exp" i]',
   'input[id="exp" i]',
@@ -645,6 +649,24 @@ const CHECKOUT_COMBINED_EXPIRY_INPUT_SELECTORS = [
   'input[aria-label="MM / YY" i]',
   'input[data-ts-card-expiry="combined"]',
 ].map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`);
+
+const CHECKOUT_COMBINED_EXPIRY_INPUT_SELECTORS = [
+  ...CHECKOUT_CONSERVATIVE_COMBINED_EXPIRY_INPUT_SELECTORS,
+  'input[name*="expir" i]:not([name*="month" i]):not([name*="year" i])',
+  'input[name*="exp-date" i]',
+  'input[id*="expir" i]:not([id*="month" i]):not([id*="year" i])',
+  'input[id*="exp-date" i]',
+].map((selector) =>
+  selector.includes(CHECKOUT_NON_CARD_IDENTITY_EXCLUSION)
+    ? selector
+    : `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
+);
+
+const CHECKOUT_CONSERVATIVE_COMBINED_EXPIRY_FIELD_SELECTORS = [
+  ...CHECKOUT_CONSERVATIVE_COMBINED_EXPIRY_INPUT_SELECTORS,
+  `label:has-text("MM/YY") input${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
+  `label:has-text("MM / YY") input${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
+].join(",");
 
 const CHECKOUT_COMBINED_EXPIRY_FIELD_SELECTORS = [
   ...CHECKOUT_COMBINED_EXPIRY_INPUT_SELECTORS,
@@ -672,10 +694,6 @@ const CHECKOUT_CARD_NAME_FIELD_SELECTORS = [
   'input[name*="cardholder" i]',
   'input[name*="card-name" i]',
   'input[id*="cardholder" i]',
-  'input[name*="card_name" i]',
-  'input[name*="credit_name" i]',
-  'input[id*="card_name" i]',
-  'input[id*="credit_name" i]',
   'input[data-ts-jp-card-field="name"]',
 ]
   .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
@@ -8550,6 +8568,10 @@ export class BrowserController {
                 ["security-cd", "securitycd", "sec-code", "seccode"].includes(
                   identityTokens(value).join("-"),
                 );
+              const isNameIdentity = (value: string): boolean =>
+                ["card-name", "cardname", "credit-name", "creditname"].includes(
+                  identityTokens(value).join("-"),
+                );
               const isCombinedExpiryIdentity = (value: string): boolean => {
                 const tokens = identityTokens(value);
                 const prefixes = new Set(["card", "credit", "cc"]);
@@ -8582,6 +8604,8 @@ export class BrowserController {
                   element.setAttribute("data-ts-jp-card-field", "pan");
                 if (isTextInput(element) && identities.some(isCvvIdentity))
                   element.setAttribute("data-ts-jp-card-field", "cvv");
+                if (isTextInput(element) && identities.some(isNameIdentity))
+                  element.setAttribute("data-ts-jp-card-field", "name");
                 if (identities.some(isCombinedExpiryIdentity))
                   element.setAttribute("data-ts-card-expiry", "combined");
               });
@@ -9239,9 +9263,17 @@ export class BrowserController {
             if (monthElement === yearElement) return false;
             const monthControl = monthElement as HTMLInputElement | HTMLSelectElement;
             const yearControl = yearElement as HTMLInputElement | HTMLSelectElement;
+            const monthOwner = monthElement.getAttribute("data-ts-payment-card-control-group");
+            const yearOwner = yearElement.getAttribute("data-ts-payment-card-control-group");
+            if (monthOwner !== null || yearOwner !== null) {
+              return monthOwner !== null && monthOwner === yearOwner;
+            }
+            const monthRoot = monthElement.closest("[data-ts-payment-card-group]");
+            const yearRoot = yearElement.closest("[data-ts-payment-card-group]");
+            if (monthRoot !== null || yearRoot !== null) return monthRoot === yearRoot;
             const monthForm = monthControl.form ?? monthElement.closest("form");
             const yearForm = yearControl.form ?? yearElement.closest("form");
-            return monthForm === null || yearForm === null || monthForm === yearForm;
+            return monthForm !== null && monthForm === yearForm;
           }, yearHandle)
           .catch(() => false);
         await yearHandle.dispose().catch(() => undefined);
@@ -9253,19 +9285,6 @@ export class BrowserController {
             const result = new Set<string>();
             const stamped = element.getAttribute("data-ts-jp-card-exp-group");
             if (stamped !== null && stamped.length > 0) result.add(`stamp:${stamped}`);
-            const allowedIdentityGroups = new Set([
-              "exp",
-              "expiry",
-              "expiration",
-              "cc-exp",
-              "card-exp",
-              "card-expiry",
-              "card-expiration",
-              "credit-exp",
-              "credit-expiry",
-              "credit-expiration",
-              "credit-limit",
-            ]);
             const excludedIdentityParts = ["gift", "loyalty", "point", "prepaid", "member"];
             for (const value of [
               element.getAttribute("autocomplete") ?? "",
@@ -9283,7 +9302,7 @@ export class BrowserController {
                 .replace(/(?:month|year)$/g, "")
                 .replace(/-+/g, "-")
                 .replace(/^-+|-+$/g, "");
-              if (allowedIdentityGroups.has(group)) result.add(`identity:${group}`);
+              if (group.length > 0) result.add(`identity:${group}`);
             }
             return [...result];
           })
@@ -9456,9 +9475,11 @@ export class BrowserController {
     await requireExactlyOneCardField("pan", CHECKOUT_PAN_FIELD_SELECTORS);
     await refuseAmbiguousCardField(CHECKOUT_CVV_FIELD_SELECTORS);
     await refuseAmbiguousCardField(CHECKOUT_CARD_NAME_FIELD_SELECTORS);
-    const combinedExpiryCount = await countFillableCardFields(
-      CHECKOUT_COMBINED_EXPIRY_FIELD_SELECTORS,
-    );
+    const combinedExpirySelectors =
+      (await countFillableCardFields(CHECKOUT_LEGACY_PAN_FIELD_SELECTORS)) === 1
+        ? CHECKOUT_COMBINED_EXPIRY_FIELD_SELECTORS
+        : CHECKOUT_CONSERVATIVE_COMBINED_EXPIRY_FIELD_SELECTORS;
+    const combinedExpiryCount = await countFillableCardFields(combinedExpirySelectors);
     const expiryMonthCount = await countFillableCardFields(
       CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS,
     );
@@ -9500,7 +9521,7 @@ export class BrowserController {
       const combined = await fillFirst(
         "expiry",
         `${card.exp_month.padStart(2, "0")}${card.exp_year.slice(-2)}`,
-        CHECKOUT_COMBINED_EXPIRY_FIELD_SELECTORS,
+        combinedExpirySelectors,
         true,
         true,
       );
@@ -9584,6 +9605,9 @@ export class BrowserController {
   async fillAndSubmitCheckout(card: CheckoutCard): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     this.checkoutCardGroupScope = undefined;
+    let primary:
+      | { kind: "outcome"; value: CheckoutSubmitResult }
+      | { kind: "error"; value: unknown };
     try {
       await this.waitForPanField(10_000);
       // A single-page checkout's generic address controls are its shipping
@@ -9591,10 +9615,19 @@ export class BrowserController {
       // sealing a shipping field would make the payment cleanup erase the
       // merchant's selected address, country, and shipping rate after submit.
       const cardGroup = await this.fillCheckoutCardIntoFrames(this.page.frames(), card, true);
-      return await this.submitFilledCheckoutInScope(cardGroup);
-    } finally {
-      await this.clearCheckoutCardFields();
+      primary = { kind: "outcome", value: await this.submitFilledCheckoutInScope(cardGroup) };
+    } catch (error) {
+      primary = { kind: "error", value: error };
     }
+    try {
+      await this.clearCheckoutCardFields();
+    } catch (error) {
+      console.error(
+        `[payment-cleanup] ${error instanceof Error ? error.message : "payment_fields_not_cleared"}`,
+      );
+    }
+    if (primary.kind === "error") throw primary.value;
+    return primary.value;
   }
 
   // Split-checkout card entry (operate_pay phase="fill_card"): fill the
