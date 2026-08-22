@@ -170,6 +170,33 @@ function openShadowDialogFixture(): string {
 </body></html>`)}`;
 }
 
+// A native <dialog> whose close handler hides it via .close() — leaving the
+// element CONNECTED in the DOM without `open` (UA-hidden) — while unlocking
+// the background, instead of removing the dialog node entirely. The stale
+// dialog-shaped remnant must not make the restore step re-lock the
+// background the app just legitimately unlocked.
+function staleRemnantDialogFixture(): string {
+  return `data:text/html,${encodeURIComponent(`
+<!doctype html><html><body style="margin:0;padding:0">
+  <div id="remnant-wrapper" inert aria-hidden="true">
+    <button id="remnant-bg-btn" onclick="document.title='REMNANT_BG_CLICKED'">Background Button</button>
+    <dialog id="remnant-dialog" style="position:fixed;top:100px;left:100px;z-index:1001;margin:0;width:400px;padding:20px">
+      <h2>Review and transfer</h2>
+      <button id="remnant-close-btn" onclick="document.title='REMNANT_CLOSE_CLICKED';closeRemnant()">Confirm and close</button>
+    </dialog>
+  </div>
+  <script>
+    document.getElementById('remnant-dialog').show();
+    function closeRemnant() {
+      document.getElementById('remnant-dialog').close();
+      const wrapper = document.getElementById('remnant-wrapper');
+      wrapper.removeAttribute('inert');
+      wrapper.removeAttribute('aria-hidden');
+    }
+  </script>
+</body></html>`)}`;
+}
+
 describe("modal overlay blindness — non-portaled inert-ancestor dialog (real Chromium)", () => {
   beforeAll(async () => {
     browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
@@ -294,6 +321,42 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
       expect(bg?.topmost).toBe(true);
       await ctrl.click(bg!.selector);
       expect(await page.title()).toBe("BG_CLICKED");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("does not re-lock the background over a closed-but-connected <dialog> remnant", async () => {
+    const { ctrl, page } = await pageFor(staleRemnantDialogFixture());
+    try {
+      const before = await ctrl.extractInteractiveElements();
+      const closeBtn = before.find((e) => e.id === "remnant-close-btn");
+      expect(closeBtn).toBeDefined();
+
+      await ctrl.click(closeBtn!.selector);
+      expect(await page.title()).toBe("REMNANT_CLOSE_CLICKED");
+
+      // The click's handler hid the dialog via .close() (the <dialog> stays
+      // connected, just without `open`) and unlocked the background. The
+      // stale remnant must not be mistaken for a still-active modal — inert
+      // must NOT be re-added to the wrapper.
+      expect(
+        await page.evaluate(() => {
+          const dialog = document.getElementById("remnant-dialog");
+          return {
+            remnantConnected: dialog !== null && dialog.isConnected,
+            remnantOpen: dialog?.hasAttribute("open") === true,
+            wrapperInert:
+              document.getElementById("remnant-wrapper")?.hasAttribute("inert") === true,
+          };
+        }),
+      ).toEqual({ remnantConnected: true, remnantOpen: false, wrapperInert: false });
+
+      const after = await ctrl.extractInteractiveElements();
+      const bg = after.find((e) => e.id === "remnant-bg-btn");
+      expect(bg?.topmost).toBe(true);
+      await ctrl.click(bg!.selector);
+      expect(await page.title()).toBe("REMNANT_BG_CLICKED");
     } finally {
       await page.close();
     }

@@ -4382,10 +4382,25 @@ export class BrowserController {
             element.getAttribute("role") === "dialog" ||
             element.tagName.toLowerCase() === "dialog" ||
             element.getAttribute("aria-modal") === "true";
+          // Only a currently open/rendered dialog counts as still active:
+          // HTMLDialogElement.close() leaves the <dialog> connected without
+          // `open`, and frameworks keep hidden role="dialog" nodes mounted
+          // after closing — a stale remnant must not keep the background
+          // locked once the modal genuinely closed.
+          const isRenderedDialog = (element: Element): boolean => {
+            if (!isDialogElement(element)) return false;
+            if (element instanceof HTMLDialogElement) return element.open;
+            if (element.hasAttribute("hidden")) return false;
+            const style = window.getComputedStyle(element);
+            return style.display !== "none" && style.visibility !== "hidden";
+          };
           const subtreeHasDialog = (root: Element | ShadowRoot): boolean => {
-            if (root instanceof Element && isDialogElement(root)) return true;
+            if (root instanceof Element) {
+              if (isRenderedDialog(root)) return true;
+              if (root.shadowRoot !== null && subtreeHasDialog(root.shadowRoot)) return true;
+            }
             for (const el of Array.from(root.querySelectorAll("*"))) {
-              if (isDialogElement(el)) return true;
+              if (isRenderedDialog(el)) return true;
               if (el.shadowRoot !== null && subtreeHasDialog(el.shadowRoot)) return true;
             }
             return false;
@@ -12253,10 +12268,23 @@ export class BrowserController {
             element.getAttribute("role") === "dialog" ||
             element.tagName.toLowerCase() === "dialog" ||
             element.getAttribute("aria-modal") === "true";
+          // Mirrors the main-frame restore: only an open/rendered dialog
+          // keeps the background locked — a closed <dialog> or hidden
+          // role="dialog" remnant does not.
+          const isRenderedDialog = (element: Element): boolean => {
+            if (!isDialogElement(element)) return false;
+            if (element instanceof HTMLDialogElement) return element.open;
+            if (element.hasAttribute("hidden")) return false;
+            const style = window.getComputedStyle(element);
+            return style.display !== "none" && style.visibility !== "hidden";
+          };
           const subtreeHasDialog = (root: Element | ShadowRoot): boolean => {
-            if (root instanceof Element && isDialogElement(root)) return true;
+            if (root instanceof Element) {
+              if (isRenderedDialog(root)) return true;
+              if (root.shadowRoot !== null && subtreeHasDialog(root.shadowRoot)) return true;
+            }
             for (const el of Array.from(root.querySelectorAll("*"))) {
-              if (isDialogElement(el)) return true;
+              if (isRenderedDialog(el)) return true;
               if (el.shadowRoot !== null && subtreeHasDialog(el.shadowRoot)) return true;
             }
             return false;
@@ -12295,7 +12323,11 @@ export class BrowserController {
       );
     }
     try {
-      const frame = this.resolveFrame(target);
+      // Derive the frame from the already-validated handle rather than
+      // re-resolving the index-based frame path: child-frame indices can
+      // shift during the intervening async security checks, and neutralize +
+      // restore must run against the document the handle actually lives in.
+      const frame = await handle.ownerFrame();
       if (frame === null) {
         await handle.click({ timeout: 8000 });
       } else {
