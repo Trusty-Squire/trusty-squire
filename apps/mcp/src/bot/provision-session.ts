@@ -275,6 +275,11 @@ export interface Observation {
   // was capped at 4000 characters. Absent in full mode.
   elements_total?: number;
   text_truncated?: boolean;
+  // True when a dialog/modal region (role="dialog", <dialog>, aria-modal="true")
+  // currently has at least one topmost (unoccluded) element — i.e. a modal is
+  // open and interactable. Omitted (never `false`) when no modal is active, so
+  // its presence alone is the signal.
+  modal_active?: boolean;
   // Per-session observe delta (docs/DESIGN-observe-compact.md). On a DELTA emit,
   // `el_table` carries ONLY the rows whose compact form changed vs the previous
   // observation; `delta` is true and `unchanged` counts the elements that were
@@ -3799,6 +3804,13 @@ export function buildCompactObservation(args: {
   }
   const nextState: ObserveDeltaState = { url, byRef: serializedByRef, text };
 
+  // A dialog/modal region with at least one topmost (unoccluded) element is
+  // "active" — the host planner should treat it as the current interaction
+  // surface rather than the page behind it. Uses each element's dedicated
+  // dialog-membership flag, independent of container grouping, and the FULL
+  // element set so it stays accurate on every emit, delta or full.
+  const modalActive = elements.some((el) => el.inDialog === true && el.topmost !== false);
+
   const base: Observation = {
     session_id: sessionId,
     url,
@@ -3806,6 +3818,7 @@ export function buildCompactObservation(args: {
     ...(args.guidance !== undefined ? { guidance: args.guidance } : {}),
     elements_total: elements.length,
     ...(args.textTruncated === true ? { text_truncated: true } : {}),
+    ...(modalActive ? { modal_active: true } : {}),
   };
 
   // Delta path: same URL as last observe, and churn under the threshold.
@@ -4278,6 +4291,7 @@ async function observeSession(
             delta: false,
             elements_total: elements.length,
             ...(textTruncated ? { text_truncated: true } : {}),
+            ...(built.observation.modal_active === true ? { modal_active: true } : {}),
           },
           checkoutState,
           currentCartMutation,
