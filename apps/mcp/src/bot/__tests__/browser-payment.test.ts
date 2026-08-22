@@ -3524,6 +3524,53 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "semantically clears controlled split expiry after terminal fill failure",
+    async () => {
+      const pageUrl = "https://shop.example.test/terminal-controlled-expiry";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form>
+            <input autocomplete="cc-number" id="pan">
+            <select name="CREDIT_LIMIT_MONTH" id="month">
+              <option value=""></option><option value="12">December</option>
+            </select>
+            <select name="CREDIT_LIMIT_YEAR" id="year">
+              <option value=""></option><option value="30">Two thousand thirty</option>
+            </select>
+            <input autocomplete="cc-csc" id="cvv">
+            <input autocomplete="cc-name" id="holder">
+          </form>
+          <script>
+            for (const id of ["month", "year"]) {
+              const select = document.getElementById(id);
+              let stored = "";
+              select.addEventListener("change", () => { stored = select.value; });
+              new MutationObserver(() => { select.value = stored; }).observe(select, {
+                attributes: true,
+                attributeFilter: ["data-ts-sealed-payment"],
+              });
+            }
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_submit_not_found",
+        );
+        const values = await page.locator("input,select").evaluateAll((controls) =>
+          controls.map((control) => (control as HTMLInputElement | HTMLSelectElement).value),
+        );
+        expect(values.every((value) => value === "")).toBe(true);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "keeps cleanup sealed when card data survives in interactive metadata",
     async () => {
       const pageUrl = "https://shop.example.test/checkout/payment";
@@ -3742,6 +3789,10 @@ describe("split-checkout card fill (real browser)", () => {
           cvv: '<input type="text" name="GIFT_SECURITY_CD" id="false-cvv">',
         },
         {
+          name: "security-cd-note",
+          cvv: '<input type="text" name="SECURITY_CD_NOTE" id="false-field">',
+        },
+        {
           name: "gift-cvv-label",
           cvv: '<dl><dt>ギフトセキュリティコード</dt><dd><input type="text" id="field-z"></dd></dl>',
         },
@@ -3776,6 +3827,7 @@ describe("split-checkout card fill (real browser)", () => {
         }
       }
     },
+    15_000,
   );
 
   it.skipIf(!chromiumAvailable)(
@@ -3802,6 +3854,33 @@ describe("split-checkout card fill (real browser)", () => {
         expect(await page.locator("#gift-holder").inputValue()).toBe("");
         expect(await page.locator("#field-holder").inputValue()).toBe("");
         expect(await page.locator("#pan").inputValue()).toBe(CARD.pan);
+        expect(await page.locator("#cvv").inputValue()).toBe(CARD.cvv);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "preserves legacy Western number-input PAN detection",
+    async () => {
+      const pageUrl = "https://shop.example.test/legacy-number-pan.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form>
+            <input type="number" name="cardnumber" id="legacy-pan">
+            <input autocomplete="cc-name" id="holder">
+            <input autocomplete="cc-exp" id="expiry">
+            <input autocomplete="cc-csc" id="cvv">
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillCheckoutCardFields(CARD);
+        expect(await page.locator("#legacy-pan").inputValue()).toBe(CARD.pan);
         expect(await page.locator("#cvv").inputValue()).toBe(CARD.cvv);
       } finally {
         await browser.close();
@@ -3884,6 +3963,10 @@ describe("split-checkout card fill (real browser)", () => {
               </dd>
             </dl>`,
         },
+        {
+          name: "order-expiration-note",
+          expiry: '<input type="text" name="order_expiration_note" id="false-expiry">',
+        },
       ];
       for (const testCase of cases) {
         const pageUrl = `https://shop.example.test/${testCase.name}.html`;
@@ -3914,6 +3997,7 @@ describe("split-checkout card fill (real browser)", () => {
         }
       }
     },
+    15_000,
   );
 
   it.skipIf(!chromiumAvailable)(

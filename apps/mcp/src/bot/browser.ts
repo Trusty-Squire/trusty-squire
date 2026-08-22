@@ -599,6 +599,9 @@ const CHECKOUT_NON_CARD_IDENTITY_EXCLUSION =
 
 const CHECKOUT_PAN_FIELD_SELECTORS = [
   'input[autocomplete~="cc-number"]',
+  'input[name*="cardnumber" i]',
+  'input[id*="card-number" i]',
+  'input[id*="cardnumber" i]',
   'input[data-ts-jp-card-field="pan"]',
 ]
   .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
@@ -634,16 +637,13 @@ const CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS = [
 
 const CHECKOUT_COMBINED_EXPIRY_INPUT_SELECTORS = [
   'input[autocomplete~="cc-exp"]',
-  'input[name*="expir" i]:not([name*="month" i]):not([name*="year" i])',
   'input[name="exp" i]',
-  'input[name*="exp-date" i]',
-  'input[id*="expir" i]:not([id*="month" i]):not([id*="year" i])',
   'input[id="exp" i]',
-  'input[id*="exp-date" i]',
   'input[placeholder="MM/YY" i]',
   'input[placeholder="MM / YY" i]',
   'input[aria-label="MM/YY" i]',
   'input[aria-label="MM / YY" i]',
+  'input[data-ts-card-expiry="combined"]',
 ].map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`);
 
 const CHECKOUT_COMBINED_EXPIRY_FIELD_SELECTORS = [
@@ -662,11 +662,6 @@ const CHECKOUT_CVV_FIELD_SELECTORS = [
   'input[name*="security-code" i]',
   'input[id*="cvv" i]',
   'input[id*="cvc" i]',
-  'input[name*="security_cd" i]',
-  'input[name*="securitycd" i]',
-  'input[name*="sec_code" i]',
-  'input[name*="seccode" i]',
-  'input[id*="security_cd" i]',
   'input[data-ts-jp-card-field="cvv"]',
 ]
   .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
@@ -8502,12 +8497,13 @@ export class BrowserController {
             (labels) => {
               document
                 .querySelectorAll(
-                  '[data-ts-jp-card-field],[data-ts-jp-card-exp],[data-ts-jp-card-exp-group]',
+                  '[data-ts-jp-card-field],[data-ts-jp-card-exp],[data-ts-jp-card-exp-group],[data-ts-card-expiry]',
                 )
                 .forEach((element) => {
                   element.removeAttribute("data-ts-jp-card-field");
                   element.removeAttribute("data-ts-jp-card-exp");
                   element.removeAttribute("data-ts-jp-card-exp-group");
+                  element.removeAttribute("data-ts-card-expiry");
                 });
               const isVisible = (element: HTMLElement): boolean => {
                 if (element.matches(":disabled") || element.getClientRects().length === 0) {
@@ -8550,16 +8546,44 @@ export class BrowserController {
                     (token === "credit" && tokens[index + 1] === "no"),
                 );
               };
+              const isCvvIdentity = (value: string): boolean =>
+                ["security-cd", "securitycd", "sec-code", "seccode"].includes(
+                  identityTokens(value).join("-"),
+                );
+              const isCombinedExpiryIdentity = (value: string): boolean => {
+                const tokens = identityTokens(value);
+                const prefixes = new Set(["card", "credit", "cc"]);
+                if (prefixes.has(tokens[0] ?? "")) tokens.shift();
+                if (tokens.length === 1) {
+                  return [
+                    "exp",
+                    "expiry",
+                    "expiration",
+                    "expdate",
+                    "expirydate",
+                    "expirationdate",
+                  ].includes(tokens[0] ?? "");
+                }
+                return (
+                  tokens.length === 2 &&
+                  ["exp", "expiry", "expiration"].includes(tokens[0] ?? "") &&
+                  tokens[1] === "date"
+                );
+              };
               document.querySelectorAll("input[name],input[id]").forEach((element) => {
-                if (!isTextInput(element)) return;
+                if (!(element instanceof HTMLInputElement) || !isVisible(element)) return;
                 const identities = [element.getAttribute("name") ?? "", element.id];
                 const excluded = identities.some((identity) => {
                   const lower = identity.toLowerCase();
                   return labels.excludedCardIdentities.some((token) => lower.includes(token));
                 });
-                if (!excluded && identities.some(isPanIdentity)) {
+                if (excluded) return;
+                if (isTextInput(element) && identities.some(isPanIdentity))
                   element.setAttribute("data-ts-jp-card-field", "pan");
-                }
+                if (isTextInput(element) && identities.some(isCvvIdentity))
+                  element.setAttribute("data-ts-jp-card-field", "cvv");
+                if (identities.some(isCombinedExpiryIdentity))
+                  element.setAttribute("data-ts-card-expiry", "combined");
               });
               const associatedElements = (host: Element, selector: string): Element[] => {
                 const associated = new Set<Element>();
@@ -9569,7 +9593,7 @@ export class BrowserController {
       const cardGroup = await this.fillCheckoutCardIntoFrames(this.page.frames(), card, true);
       return await this.submitFilledCheckoutInScope(cardGroup);
     } finally {
-      await this.clearSealedPaymentFields();
+      await this.clearCheckoutCardFields();
     }
   }
 
