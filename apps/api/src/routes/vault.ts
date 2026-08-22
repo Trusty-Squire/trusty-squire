@@ -761,15 +761,34 @@ async function storeUpsert(
   if (notifyOnCreate && !entry.updated) {
     await notifyNewKey(opts.deps, forwarder, accountId, entry.service, entry.label);
   }
+  const persisted = entry.updated
+    ? await opts.deps.credentialStore.findActive(entry.reference)
+    : null;
+  const persistedMetadata = persisted?.metadata ?? {};
   reply.code(entry.updated ? 200 : 201).send({
     reference: entry.reference,
     service: entry.service,
     label: entry.label,
     field_names: entry.field_names,
-    type: data.type ?? "api_key",
-    auth_strategy: authStrategy ?? null,
-    signin_url: data.signin_url ?? null,
-    login_hosts: loginHosts ?? [],
+    type: persisted?.type ?? data.type ?? "api_key",
+    auth_strategy:
+      persisted !== null
+        ? typeof persistedMetadata.auth_strategy === "string"
+          ? persistedMetadata.auth_strategy
+          : null
+        : (authStrategy ?? null),
+    signin_url:
+      persisted !== null
+        ? typeof persistedMetadata.signin_url === "string"
+          ? persistedMetadata.signin_url
+          : null
+        : (data.signin_url ?? null),
+    login_hosts:
+      persisted !== null
+        ? Array.isArray(persistedMetadata.login_hosts)
+          ? persistedMetadata.login_hosts.filter((host): host is string => typeof host === "string")
+          : []
+        : (loginHosts ?? []),
     allowed_hosts: entry.allowed_hosts,
     created_at: entry.created_at,
     updated: entry.updated,

@@ -9,16 +9,25 @@ const selector = {
   name: z.string().min(1).max(60).optional(),
 };
 
-const hostEdit = z.object({
-  mode: z.enum(["add", "remove", "replace"]),
-  hosts: z.array(z.string().min(1).max(253)).max(50),
-});
+const allowedHostEdit = z
+  .object({
+    mode: z.enum(["add", "remove", "replace"]),
+    hosts: z.array(z.string().min(1).max(256)).max(50),
+  })
+  .strict();
+
+const loginHostEdit = z
+  .object({
+    mode: z.enum(["add", "remove", "replace"]),
+    hosts: z.array(z.string().min(1).max(253)).max(20),
+  })
+  .strict();
 
 const changes = z
   .object({
     label: z.string().trim().min(1).max(60).optional(),
-    allowed_hosts: hostEdit.optional(),
-    login_hosts: hostEdit.optional(),
+    allowed_hosts: allowedHostEdit.optional(),
+    login_hosts: loginHostEdit.optional(),
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, {
@@ -120,8 +129,8 @@ export const editCredentialTool: Tool<z.infer<typeof editInput>> = {
             type: "object",
             properties: {
               label: { type: "string" },
-              allowed_hosts: { $ref: "#/$defs/hostEdit" },
-              login_hosts: { $ref: "#/$defs/hostEdit" },
+              allowed_hosts: { $ref: "#/$defs/allowedHostEdit" },
+              login_hosts: { $ref: "#/$defs/loginHostEdit" },
             },
             additionalProperties: false,
           },
@@ -136,12 +145,21 @@ export const editCredentialTool: Tool<z.infer<typeof editInput>> = {
       },
     ],
     $defs: {
-      hostEdit: {
+      allowedHostEdit: {
         type: "object",
         required: ["mode", "hosts"],
         properties: {
           mode: { type: "string", enum: ["add", "remove", "replace"] },
-          hosts: { type: "array", items: { type: "string" } },
+          hosts: { type: "array", maxItems: 50, items: { type: "string", maxLength: 256 } },
+        },
+        additionalProperties: false,
+      },
+      loginHostEdit: {
+        type: "object",
+        required: ["mode", "hosts"],
+        properties: {
+          mode: { type: "string", enum: ["add", "remove", "replace"] },
+          hosts: { type: "array", maxItems: 20, items: { type: "string", maxLength: 253 } },
         },
         additionalProperties: false,
       },

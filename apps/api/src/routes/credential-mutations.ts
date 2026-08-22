@@ -27,18 +27,25 @@ const selector = {
   name: z.string().min(1).max(60).optional(),
 };
 
-const hostEdit = z
+const allowedHostEdit = z
   .object({
     mode: z.enum(["add", "remove", "replace"]),
-    hosts: z.array(z.string().min(1).max(253)).max(50),
+    hosts: z.array(z.string().min(1).max(256)).max(50),
+  })
+  .strict();
+
+const loginHostEdit = z
+  .object({
+    mode: z.enum(["add", "remove", "replace"]),
+    hosts: z.array(z.string().min(1).max(253)).max(20),
   })
   .strict();
 
 const metadataChanges = z
   .object({
     label: z.string().trim().min(1).max(60).optional(),
-    allowed_hosts: hostEdit.optional(),
-    login_hosts: hostEdit.optional(),
+    allowed_hosts: allowedHostEdit.optional(),
+    login_hosts: loginHostEdit.optional(),
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, {
@@ -127,7 +134,8 @@ function describeMetadata(
   return (
     `${prefix} name=${metadata.label}; ` +
     `allowed_hosts=[${metadata.allowed_hosts.join(", ")}]; ` +
-    `login_hosts=[${metadata.login_hosts.join(", ")}]`
+    `login_hosts=[${metadata.login_hosts.join(", ")}]; ` +
+    `auth_strategy=${metadata.auth_strategy ?? "none"}`
   );
 }
 

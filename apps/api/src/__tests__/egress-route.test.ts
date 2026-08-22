@@ -349,7 +349,7 @@ describe("Egress Grants — /v1/egress", () => {
     expect(seen).toHaveLength(0);
   });
 
-  it("serves a repeat request from the credential cache (one DB read per streaming burst, #227/#231)", async () => {
+  it("caches resolution while re-reading live authorization metadata per spend", async () => {
     const account = await h.deps.accountStore.createAccount("cache@example.test", "C");
     const cookie = await webCookie(h.deps, account.id);
     const token = await agentToken(h.deps, account.id);
@@ -371,8 +371,7 @@ describe("Egress Grants — /v1/egress", () => {
       });
       expect(res.statusCode).toBe(200);
     }
-    // Three proxied requests, one credential DB read — the rest are cache hits.
-    expect(findActiveCalls).toBe(1);
+    expect(findActiveCalls).toBe(4);
   });
 
   it("refuses a cached credential after it is soft-deleted", async () => {
@@ -398,6 +397,28 @@ describe("Egress Grants — /v1/egress", () => {
     expect(seen).toHaveLength(1);
   });
 
+  it("uses an allowed-host edit immediately despite a warm credential cache", async () => {
+    const account = await h.deps.accountStore.createAccount("allowlist-edit@example.test", "A");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    const reference = await storeCred(h, cookie, "OpenAI");
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenAI" });
+    const call = () =>
+      h.server.inject({
+        method: "POST",
+        url: `/v1/egress/${grant_id}/v1/chat/completions`,
+        headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" },
+        payload: {},
+      });
+
+    expect((await call()).statusCode).toBe(200);
+    expect(seen.at(-1)?.url).toBe("https://api.openai.com/v1/chat/completions");
+    await h.deps.credentialStore.setAllowedHosts(reference, ["api.changed.example"]);
+
+    expect((await call()).statusCode).toBe(200);
+    expect(seen.at(-1)?.url).toBe("https://api.changed.example/v1/chat/completions");
+  });
+
   it("maps a spend-time active-check outage to retryable 503", async () => {
     const account = await h.deps.accountStore.createAccount("active-check@example.test", "A");
     const cookie = await webCookie(h.deps, account.id);
@@ -412,7 +433,7 @@ describe("Egress Grants — /v1/egress", () => {
         payload: {},
       });
     expect((await call()).statusCode).toBe(200);
-    h.deps.credentialStore.isActive = async () => {
+    h.deps.credentialStore.findActive = async () => {
       throw Object.assign(new Error("connection closed"), { code: "P1017" });
     };
 
@@ -427,7 +448,7 @@ describe("Egress Grants — /v1/egress", () => {
     expect(seen).toHaveLength(1);
   });
 
-  it("coalesces concurrent cold credential-cache misses into one DB read (#227/#231 recurrence)", async () => {
+  it("coalesces concurrent cold cache misses while rechecking each spend", async () => {
     const account = await h.deps.accountStore.createAccount("stampede@example.test", "S");
     const cookie = await webCookie(h.deps, account.id);
     const token = await agentToken(h.deps, account.id);
@@ -456,7 +477,7 @@ describe("Egress Grants — /v1/egress", () => {
     );
 
     expect(responses.every((response) => response.statusCode === 200)).toBe(true);
-    expect(findActiveCalls).toBe(1);
+    expect(findActiveCalls).toBe(5);
   });
 
   it("resolves the granted credential by reference instead of listing every account credential", async () => {
@@ -484,7 +505,7 @@ describe("Egress Grants — /v1/egress", () => {
       payload: {},
     });
     expect(res.statusCode).toBe(200);
-    expect(findActiveCalls).toBe(1);
+    expect(findActiveCalls).toBe(2);
   });
 
   it("injects the secret per the credential's stored auth_shape (header, not bearer)", async () => {

@@ -238,6 +238,54 @@ describe("vouch-gated credential mutations", () => {
     ).toBe(true);
   });
 
+  it("binds the derived auth strategy to the signed login-host edit", async () => {
+    const reference = await storeCredential();
+    const created = await createMutation({
+      operation: "edit",
+      reference,
+      changes: { login_hosts: { mode: "add", hosts: ["app.example.test"] } },
+    });
+    expect(created.statusCode).toBe(201);
+    const approval = created.json() as {
+      approval_id: string;
+      before: { auth_strategy: string | null };
+      after: { auth_strategy: string | null };
+    };
+    expect(approval.before.auth_strategy).toBeNull();
+    expect(approval.after.auth_strategy).toBe("username_password");
+
+    const unsigned = await server.inject({
+      method: "POST",
+      url: `/v1/vault/mutation-approvals/${approval.approval_id}/approve`,
+      payload: {},
+    });
+    expect(unsigned.statusCode).toBe(400);
+    expect(
+      (await deps.credentialStore.findActive(reference))?.metadata.auth_strategy,
+    ).toBeUndefined();
+
+    expect((await approveMutation(approval.approval_id)).statusCode).toBe(200);
+    const current = await deps.credentialStore.findActive(reference);
+    expect(current?.metadata.auth_strategy).toBe("username_password");
+    expect(current?.metadata.login_hosts).toEqual(["app.example.test"]);
+  });
+
+  it("rejects unknown nested host-edit fields", async () => {
+    const reference = await storeCredential();
+    const response = await createMutation({
+      operation: "edit",
+      reference,
+      changes: {
+        allowed_hosts: {
+          mode: "add",
+          hosts: ["uploads.example.test"],
+          unexpected: true,
+        },
+      },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
   it("deletes only after approval and repeats the approved approval idempotently", async () => {
     const reference = await storeCredential("Resend");
     const created = await createMutation({ operation: "delete", reference });

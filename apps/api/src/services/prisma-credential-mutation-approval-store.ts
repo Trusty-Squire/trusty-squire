@@ -1,5 +1,5 @@
-import type { VaultEditableMetadata } from "@trusty-squire/vault";
 import type { ApiPrismaClient } from "./api-prisma-client.js";
+import type { CredentialMutationMetadata } from "./credential-metadata.js";
 import {
   type CredentialMutationCommitResult,
   type CredentialMutationApprovalInput,
@@ -122,13 +122,7 @@ export class PrismaCredentialMutationApprovalStore implements CredentialMutation
             data: {
               label: record.after.label,
               allowed_hosts: record.after.allowed_hosts,
-              metadata: {
-                ...currentMetadata,
-                login_hosts: record.after.login_hosts,
-                ...(record.after.login_hosts.length > 0
-                  ? { auth_strategy: "username_password" }
-                  : {}),
-              },
+              metadata: metadataAfterEdit(currentMetadata, record.after),
             },
           });
           if (updated.count === 0) {
@@ -215,12 +209,25 @@ async function markFailed(
   });
 }
 
-function editableMetadata(row: SafeCredentialRow): VaultEditableMetadata {
+function editableMetadata(row: SafeCredentialRow): CredentialMutationMetadata {
   const candidate = objectMetadata(row.metadata);
   return {
     label: row.label,
     allowed_hosts: row.allowed_hosts,
     login_hosts: metadataStringArray(candidate.login_hosts),
+    auth_strategy: typeof candidate.auth_strategy === "string" ? candidate.auth_strategy : null,
+  };
+}
+
+function metadataAfterEdit(
+  current: Record<string, unknown>,
+  after: CredentialMutationMetadata,
+): Record<string, unknown> {
+  const { auth_strategy: _authStrategy, login_hosts: _loginHosts, ...preserved } = current;
+  return {
+    ...preserved,
+    login_hosts: after.login_hosts,
+    ...(after.auth_strategy !== null ? { auth_strategy: after.auth_strategy } : {}),
   };
 }
 
@@ -234,9 +241,13 @@ function metadataStringArray(value: unknown): string[] {
     : [];
 }
 
-function sameMetadata(left: VaultEditableMetadata, right: VaultEditableMetadata): boolean {
+function sameMetadata(
+  left: CredentialMutationMetadata,
+  right: CredentialMutationMetadata,
+): boolean {
   return (
     left.label === right.label &&
+    left.auth_strategy === right.auth_strategy &&
     sameArray(left.allowed_hosts, right.allowed_hosts) &&
     sameArray(left.login_hosts, right.login_hosts)
   );
@@ -255,13 +266,18 @@ function isPrismaUniqueConstraintError(error: unknown): boolean {
   );
 }
 
-function metadata(value: unknown): VaultEditableMetadata {
+function metadata(value: unknown): CredentialMutationMetadata {
   if (value === null || typeof value !== "object") {
     throw new Error("invalid credential mutation metadata");
   }
   const candidate = value as Record<string, unknown>;
   if (
     typeof candidate.label !== "string" ||
+    !(
+      candidate.auth_strategy === undefined ||
+      candidate.auth_strategy === null ||
+      typeof candidate.auth_strategy === "string"
+    ) ||
     !Array.isArray(candidate.allowed_hosts) ||
     !Array.isArray(candidate.login_hosts) ||
     !candidate.allowed_hosts.every((host) => typeof host === "string") ||
@@ -273,6 +289,7 @@ function metadata(value: unknown): VaultEditableMetadata {
     label: candidate.label,
     allowed_hosts: candidate.allowed_hosts,
     login_hosts: candidate.login_hosts,
+    auth_strategy: typeof candidate.auth_strategy === "string" ? candidate.auth_strategy : null,
   };
 }
 

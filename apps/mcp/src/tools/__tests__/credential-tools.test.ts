@@ -181,11 +181,13 @@ const BASE_MUTATION = {
     label: "default",
     allowed_hosts: ["api.openai.com"],
     login_hosts: [],
+    auth_strategy: null,
   },
   after: {
     label: "default",
     allowed_hosts: ["api.openai.com", "uploads.openai.com"],
     login_hosts: [],
+    auth_strategy: null,
   },
   expires_at: "2026-08-22T12:10:00.000Z",
 };
@@ -238,6 +240,18 @@ describe("edit_credential", () => {
       editCredentialTool.inputSchema.safeParse({
         reference: "vault://a/b/c",
         changes: { value: "sk-secret" },
+      }).success,
+    ).toBe(false);
+    expect(
+      editCredentialTool.inputSchema.safeParse({
+        reference: "vault://a/b/c",
+        changes: {
+          allowed_hosts: {
+            mode: "add",
+            hosts: ["uploads.openai.com"],
+            unexpected: true,
+          },
+        },
       }).success,
     ).toBe(false);
   });

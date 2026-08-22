@@ -11,6 +11,7 @@ interface EditableMetadata {
   label: string;
   allowed_hosts: string[];
   login_hosts: string[];
+  auth_strategy: string | null;
 }
 
 interface MutationCeremony {
@@ -33,6 +34,7 @@ function Metadata({ value }: { value: EditableMetadata }) {
         ["Name", value.label],
         ["Allowed hosts", value.allowed_hosts.join(", ") || "—"],
         ["Login hosts", value.login_hosts.join(", ") || "—"],
+        ["Authentication", value.auth_strategy ?? "—"],
       ].map(([label, content]) => (
         <div
           key={label}

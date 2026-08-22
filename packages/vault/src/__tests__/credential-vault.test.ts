@@ -103,12 +103,11 @@ describe("store sets allowed_hosts from observed capture hosts", () => {
     expect(entry.allowed_hosts).toEqual(["api.quirkly.dev"]);
   });
 
-  it("re-storing a credential with an EMPTY allowlist backfills it from observed hosts", async () => {
+  it("re-storing cannot change an existing credential's allowlist", async () => {
     const { vault } = makeVault();
     // First store: unknown service, no observed host → empty allowlist.
     const a = await vault.store(storeInput({ service: "Quirkly", fields: { value: "sk_1" } }));
     expect(a.allowed_hosts).toEqual([]);
-    // Re-store with an observed host → backfilled (heals pre-feature creds).
     const b = await vault.store(
       storeInput({
         service: "Quirkly",
@@ -116,8 +115,8 @@ describe("store sets allowed_hosts from observed capture hosts", () => {
         observed_hosts: ["api.quirkly.dev"],
       }),
     );
-    expect(b.reference).toBe(a.reference); // same record
-    expect(b.allowed_hosts).toEqual(["api.quirkly.dev"]);
+    expect(b.reference).toBe(a.reference);
+    expect(b.allowed_hosts).toEqual([]);
   });
 });
 
@@ -205,7 +204,7 @@ describe("upsert (store overwrites by service+label)", () => {
     expect(b.allowed_hosts).toEqual(["custom.example.com"]);
   });
 
-  it("overwrite persists non-secret metadata and row fields", async () => {
+  it("overwrite rotates the secret without unsigned metadata changes", async () => {
     const { vault, store } = makeVault();
     const a = await vault.store(
       storeInput({
@@ -227,14 +226,11 @@ describe("upsert (store overwrites by service+label)", () => {
     );
     const [row] = await store.listByAccount(ACCOUNT);
     expect(row?.reference).toBe(a.reference);
-    expect(row?.type).toBe("username_password");
-    expect(row?.env_var_suggestion).toBe("EXAMPLE_LOGIN");
-    expect(row?.metadata).toMatchObject({
+    expect(row?.type).toBe("api_key");
+    expect(row?.env_var_suggestion).toBeNull();
+    expect(row?.metadata).toEqual({
       service: "OpenAI",
       auth_shape: "bearer",
-      auth_strategy: "username_password",
-      signin_url: "https://app.example.com/login",
-      login_hosts: ["app.example.com"],
     });
   });
 

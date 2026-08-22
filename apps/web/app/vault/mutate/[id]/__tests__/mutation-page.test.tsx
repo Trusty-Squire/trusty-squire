@@ -39,11 +39,17 @@ const ceremony = {
     service: "OpenAI",
     name: "prod",
   },
-  before: { label: "prod", allowed_hosts: ["api.openai.com"], login_hosts: [] },
+  before: {
+    label: "prod",
+    allowed_hosts: ["api.openai.com"],
+    login_hosts: [],
+    auth_strategy: null,
+  },
   after: {
     label: "prod",
     allowed_hosts: ["api.openai.com", "uploads.openai.com"],
     login_hosts: [],
+    auth_strategy: null,
   },
   expires_at: "2026-08-22T12:10:00.000Z",
   payload: { mutation: { operation: "credential.edit" } },

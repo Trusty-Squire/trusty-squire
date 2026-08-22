@@ -286,29 +286,11 @@ export class CredentialVault implements VaultClient {
 
     if (existing !== null) {
       const env = await this.encryptFields(existing.reference, input.account_id, input.fields);
-      const metadata = { ...existing.metadata, ...(input.metadata ?? {}), service: input.service };
       await this.deps.store.replaceSecret(existing.reference, {
         ...env,
         field_names: fieldNames,
         rotatedAt: now,
-        ...(input.type !== undefined ? { type: input.type ?? null } : {}),
-        ...(input.env_var_suggestion !== undefined
-          ? { env_var_suggestion: input.env_var_suggestion ?? null }
-          : {}),
-        metadata,
       });
-      // Backfill an EMPTY allowlist on re-store, but never clobber a
-      // non-empty one (the user may have curated it). This heals
-      // credentials stored before allowed_hosts existed (or before their
-      // service was in the table) — a re-store now lands a real allowlist.
-      let allowedHosts = existing.allowed_hosts;
-      if (allowedHosts.length === 0) {
-        const backfilled = mergeAllowedHosts(input.service, input.observed_hosts);
-        if (backfilled.length > 0) {
-          await this.deps.store.setAllowedHosts(existing.reference, backfilled);
-          allowedHosts = backfilled;
-        }
-      }
       await this.recordAudit(input.account_id, VAULT_AUDIT_TYPES.rotated, {
         reference: existing.reference,
         requester: "user",
@@ -320,7 +302,7 @@ export class CredentialVault implements VaultClient {
         service: input.service,
         label,
         field_names: fieldNames,
-        allowed_hosts: allowedHosts,
+        allowed_hosts: existing.allowed_hosts,
         created_at: existing.created_at.toISOString(),
         updated: true,
       };
@@ -590,7 +572,6 @@ export class CredentialVault implements VaultClient {
         metadata: {
           ...existing.metadata,
           login_hosts: replacement.login_hosts,
-          ...(replacement.login_hosts.length > 0 ? { auth_strategy: "username_password" } : {}),
         },
       },
     );
@@ -709,17 +690,19 @@ export class CredentialVault implements VaultClient {
   async proxyResolvedCredential(
     record: CredentialRecord,
     accountId: string,
-    http: ProxyHttpTemplate,
+    http: ProxyHttpTemplate | ((current: CredentialRecord) => ProxyHttpTemplate),
     executor: ProxyExecutor,
   ): Promise<ProxyResponse> {
-    if (
-      record.account_id !== accountId ||
-      record.deleted_at !== null ||
-      !(await this.deps.store.isActive(record.reference, accountId))
-    ) {
+    const current = await this.deps.store.findActive(record.reference);
+    if (current === null || current.account_id !== accountId) {
       throw new CredentialNotFoundError(record.reference);
     }
-    return this.proxyRecord(record, accountId, http, executor);
+    return this.proxyRecord(
+      current,
+      accountId,
+      typeof http === "function" ? http(current) : http,
+      executor,
+    );
   }
 
   private async proxyRecord(

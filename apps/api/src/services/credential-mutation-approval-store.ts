@@ -4,8 +4,8 @@ import {
   type CredentialStore,
   type VaultAuditEventInput,
   type VaultAuditStore,
-  type VaultEditableMetadata,
 } from "@trusty-squire/vault";
+import type { CredentialMutationMetadata } from "./credential-metadata.js";
 
 export type CredentialMutationOperation = "edit" | "delete";
 export type CredentialMutationApprovalStatus = "pending" | "approved" | "failed";
@@ -15,8 +15,8 @@ export interface CredentialMutationApprovalInput {
   credentialReference: string;
   credentialService: string | null;
   credentialLabel: string;
-  before: VaultEditableMetadata;
-  after: VaultEditableMetadata | null;
+  before: CredentialMutationMetadata;
+  after: CredentialMutationMetadata | null;
   nonce: string;
   agent: string;
   intentHash: string;
@@ -140,11 +140,7 @@ export class InMemoryCredentialMutationApprovalStore implements CredentialMutati
           markFailed(record, "credential_metadata_changed", now);
           return "metadata_changed";
         }
-        const nextMetadata = {
-          ...credential.metadata,
-          login_hosts: record.after.login_hosts,
-          ...(record.after.login_hosts.length > 0 ? { auth_strategy: "username_password" } : {}),
-        };
+        const nextMetadata = metadataAfterEdit(credential.metadata, record.after);
         const updated = await this.credentials.updateMetadata(
           credential.reference,
           {
@@ -217,11 +213,25 @@ function editableMetadata(record: {
   label: string;
   allowed_hosts: string[];
   metadata: Record<string, unknown>;
-}): VaultEditableMetadata {
+}): CredentialMutationMetadata {
   return {
     label: record.label,
     allowed_hosts: [...record.allowed_hosts],
     login_hosts: metadataStringArray(record.metadata.login_hosts),
+    auth_strategy:
+      typeof record.metadata.auth_strategy === "string" ? record.metadata.auth_strategy : null,
+  };
+}
+
+function metadataAfterEdit(
+  current: Record<string, unknown>,
+  after: CredentialMutationMetadata,
+): Record<string, unknown> {
+  const { auth_strategy: _authStrategy, login_hosts: _loginHosts, ...preserved } = current;
+  return {
+    ...preserved,
+    login_hosts: after.login_hosts,
+    ...(after.auth_strategy !== null ? { auth_strategy: after.auth_strategy } : {}),
   };
 }
 
@@ -231,9 +241,13 @@ function metadataStringArray(value: unknown): string[] {
     : [];
 }
 
-function sameMetadata(left: VaultEditableMetadata, right: VaultEditableMetadata): boolean {
+function sameMetadata(
+  left: CredentialMutationMetadata,
+  right: CredentialMutationMetadata,
+): boolean {
   return (
     left.label === right.label &&
+    left.auth_strategy === right.auth_strategy &&
     sameArray(left.allowed_hosts, right.allowed_hosts) &&
     sameArray(left.login_hosts, right.login_hosts)
   );
@@ -258,11 +272,12 @@ export function mutationAuditEvent(record: CredentialMutationApprovalRecord): Va
   };
 }
 
-function cloneMetadata(value: VaultEditableMetadata): VaultEditableMetadata {
+function cloneMetadata(value: CredentialMutationMetadata): CredentialMutationMetadata {
   return {
     label: value.label,
     allowed_hosts: [...value.allowed_hosts],
     login_hosts: [...value.login_hosts],
+    auth_strategy: value.auth_strategy,
   };
 }
 

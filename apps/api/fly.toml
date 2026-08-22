@@ -14,7 +14,7 @@ primary_region = "iad"
 # deploy rather than drifting silently. Uses the API's own prisma CLI
 # (apps/api owns it since the inbox package was retired).
 [deploy]
-  release_command = "/bin/sh -c '/app/apps/api/node_modules/.bin/prisma db push --schema=/app/apps/api/prisma/schema.prisma --skip-generate && /app/apps/api/node_modules/.bin/prisma db execute --schema=/app/apps/api/prisma/schema.prisma --file=/app/apps/api/prisma/active-credential-slot-index.sql'"
+  release_command = "/bin/sh -c '/app/apps/api/node_modules/.bin/prisma db push --schema=/app/apps/api/prisma/schema.prisma --skip-generate && node /app/apps/api/dist/scripts/dedup-credentials.bin.js --apply --ensure-index'"
 
 [env]
   API_PORT = "8080"

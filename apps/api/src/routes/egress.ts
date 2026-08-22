@@ -146,16 +146,7 @@ export const registerEgressRoutes: FastifyPluginAsync<{
       bodyTimeoutMs: 120_000,
     });
   const limiter = new GrantRateLimiter();
-  // Per-credential lookup cache (#227/#231). The grant lookup is already cached
-  // in the store (30s), but the credential resolve (credentialStore.findActive)
-  // ran on EVERY proxied request — a streaming LLM run fires many requests on
-  // the SAME grant/credential per second, so each was a fresh DB round-trip and
-  // the connection pool exhausted under load → P1017 → the 503 windows that
-  // burned escalation rungs. Caching the resolved credential absorbs the burst.
-  // SHORT TTL by design: proxyRecord decrypts THIS record's ciphertext, so a
-  // rotated secret would be served stale for at most the TTL — 15s keeps that
-  // window tiny while still collapsing a streaming burst to one DB read. Only
-  // positive (active) results are cached; misses fall straight through.
+  // Per-credential resolution cache (#227/#231).
   const credCache = new Map<string, { cred: CredentialRecord; expiresAt: number }>();
   // A TTL cache alone does not absorb a concurrent cold/expired-cache burst:
   // every request observes the same miss before the first DB read completes.
@@ -423,10 +414,6 @@ export const registerEgressRoutes: FastifyPluginAsync<{
         reply.code(404).send({ error: "credential_unavailable" });
         return;
       }
-      const host = cred.allowed_hosts[0]!; // v1: a grant targets the credential's primary host
-      const shape = parseAuthShape(
-        typeof cred.metadata.auth_shape === "string" ? cred.metadata.auth_shape : undefined,
-      );
       const path = req.params["*"] ?? "";
 
       // App's inbound headers (minus hop-by-hop) → auth injected per shape with a
@@ -463,20 +450,28 @@ export const registerEgressRoutes: FastifyPluginAsync<{
         Object.values(inboundHeaders).some((v) => v.includes("${SECRET}")) ||
         Object.values(inboundQuery).some((v) => v.includes("${SECRET}")) ||
         (body !== undefined && body.includes("${SECRET}"));
-      const injected = clientPlacedSecret
-        ? { headers: inboundHeaders, query: inboundQuery }
-        : applyAuthShape(shape, "${SECRET}", inboundHeaders, inboundQuery);
-
       try {
         const response = await opts.deps.vault.proxyResolvedCredential(
           cred,
           grant.account_id,
-          {
-            method: req.method,
-            url: `https://${host}/${path}`,
-            headers: injected.headers,
-            ...(Object.keys(injected.query).length > 0 ? { query: injected.query } : {}),
-            ...(body !== undefined ? { body } : {}),
+          (current) => {
+            const host = current.allowed_hosts[0];
+            if (host === undefined) throw new CredentialNotFoundError(current.reference);
+            const shape = parseAuthShape(
+              typeof current.metadata.auth_shape === "string"
+                ? current.metadata.auth_shape
+                : undefined,
+            );
+            const injected = clientPlacedSecret
+              ? { headers: inboundHeaders, query: inboundQuery }
+              : applyAuthShape(shape, "${SECRET}", inboundHeaders, inboundQuery);
+            return {
+              method: req.method,
+              url: `https://${host}/${path}`,
+              headers: injected.headers,
+              ...(Object.keys(injected.query).length > 0 ? { query: injected.query } : {}),
+              ...(body !== undefined ? { body } : {}),
+            };
           },
           (input) => executor.execute(input),
         );

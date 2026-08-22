@@ -89,6 +89,40 @@ describe("agent store (upsert)", () => {
     expect((list.json() as { credentials: unknown[] }).credentials).toHaveLength(1);
   });
 
+  it("re-store rotates the secret without changing authorization metadata", async () => {
+    const account = await h.deps.accountStore.createAccount("metadata@example.test", "M");
+    const token = await agentToken(h.deps, account.id);
+    const post = (payload: Record<string, unknown>) =>
+      h.server.inject({
+        method: "POST",
+        url: "/v1/vault/credentials",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        payload: { service: "Example", ...payload },
+      });
+    expect(
+      (
+        await post({
+          fields: { login: "ada@example.test", password: "old" },
+          type: "username_password",
+          auth_strategy: "username_password",
+          login_hosts: ["app.example.test"],
+        })
+      ).statusCode,
+    ).toBe(201);
+
+    const rotated = await post({
+      fields: { login: "ada@example.test", password: "new" },
+      type: "api_key",
+      auth_strategy: "api_key",
+    });
+    expect(rotated.statusCode).toBe(200);
+    expect(rotated.json()).toMatchObject({
+      type: "username_password",
+      auth_strategy: "username_password",
+      login_hosts: ["app.example.test"],
+    });
+  });
+
   it("stores a multi-field credential", async () => {
     const account = await h.deps.accountStore.createAccount("u@example.test", "U");
     const token = await agentToken(h.deps, account.id);

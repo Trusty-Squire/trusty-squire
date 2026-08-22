@@ -96,8 +96,18 @@ export interface CredentialMutationApproval {
   status: "pending" | "approved" | "failed" | "expired";
   operation: "edit" | "delete";
   credential: { reference: string; service: string | null; name: string };
-  before: { label: string; allowed_hosts: string[]; login_hosts: string[] };
-  after: { label: string; allowed_hosts: string[]; login_hosts: string[] } | null;
+  before: {
+    label: string;
+    allowed_hosts: string[];
+    login_hosts: string[];
+    auth_strategy: string | null;
+  };
+  after: {
+    label: string;
+    allowed_hosts: string[];
+    login_hosts: string[];
+    auth_strategy: string | null;
+  } | null;
   expires_at: string;
   error?: string;
 }
