@@ -93,7 +93,7 @@ export interface VaultCredentialSummary {
 export interface CredentialMutationApproval {
   approval_id: string;
   approval_url: string;
-  status: "pending" | "executing" | "approved" | "failed" | "expired";
+  status: "pending" | "approved" | "failed" | "expired";
   operation: "edit" | "delete";
   credential: { reference: string; service: string | null; name: string };
   before: { label: string; allowed_hosts: string[]; login_hosts: string[] };

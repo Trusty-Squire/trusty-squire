@@ -63,7 +63,7 @@ import type {
   VaultAuditType,
   VaultRequester,
 } from "./types.js";
-import { VAULT_AUDIT_TYPES } from "./types.js";
+import { CredentialSlotConflictError, VAULT_AUDIT_TYPES } from "./types.js";
 
 export const DEFAULT_LABEL = "default";
 
@@ -350,7 +350,14 @@ export class CredentialVault implements VaultClient {
       deleted_at: null,
       created_at: now,
     };
-    await this.deps.store.insert(record);
+    try {
+      await this.deps.store.insert(record);
+    } catch (error) {
+      if (error instanceof CredentialSlotConflictError) {
+        throw new RestoreConflictError(reference, input.service, label);
+      }
+      throw error;
+    }
     await this.recordAudit(input.account_id, VAULT_AUDIT_TYPES.stored, {
       reference,
       requester: "system",
@@ -416,7 +423,14 @@ export class CredentialVault implements VaultClient {
         throw new RestoreConflictError(reference, service, trimmed);
       }
     }
-    await this.deps.store.setLabel(reference, trimmed);
+    try {
+      await this.deps.store.setLabel(reference, trimmed);
+    } catch (error) {
+      if (error instanceof CredentialSlotConflictError) {
+        throw new RestoreConflictError(reference, service, trimmed);
+      }
+      throw error;
+    }
     await this.recordAudit(accountId, VAULT_AUDIT_TYPES.renamed, {
       reference,
       requester: "user",
@@ -539,7 +553,6 @@ export class CredentialVault implements VaultClient {
     expected: VaultEditableMetadata,
     replacement: VaultEditableMetadata,
     requester: VaultRequester = "user",
-    options: { allowAlreadyApplied?: boolean; approvalId?: string } = {},
   ): Promise<VaultEditableMetadata> {
     const existing = await this.deps.store.findActive(reference);
     if (existing === null || existing.account_id !== accountId) {
@@ -550,17 +563,7 @@ export class CredentialVault implements VaultClient {
       existing.label === expected.label &&
       sameStringArray(existing.allowed_hosts, expected.allowed_hosts) &&
       sameStringArray(loginHosts, expected.login_hosts);
-    const alreadyApplied =
-      existing.label === replacement.label &&
-      sameStringArray(existing.allowed_hosts, replacement.allowed_hosts) &&
-      sameStringArray(loginHosts, replacement.login_hosts);
-    if (
-      !alreadyApplied &&
-      !matchesExpected
-    ) {
-      throw new CredentialMetadataChangedError(reference);
-    }
-    if (alreadyApplied && !matchesExpected && options.allowAlreadyApplied !== true) {
+    if (!matchesExpected) {
       throw new CredentialMetadataChangedError(reference);
     }
     const service = typeof existing.metadata.service === "string" ? existing.metadata.service : "";
@@ -574,38 +577,32 @@ export class CredentialVault implements VaultClient {
         throw new RestoreConflictError(reference, service, replacement.label);
       }
     }
-    if (!alreadyApplied) {
-      const updated = await this.deps.store.updateMetadata(
-        reference,
-        {
-          label: existing.label,
-          allowed_hosts: existing.allowed_hosts,
-          metadata: existing.metadata,
+    const updated = await this.deps.store.updateMetadata(
+      reference,
+      {
+        label: existing.label,
+        allowed_hosts: existing.allowed_hosts,
+        metadata: existing.metadata,
+      },
+      {
+        label: replacement.label,
+        allowed_hosts: replacement.allowed_hosts,
+        metadata: {
+          ...existing.metadata,
+          login_hosts: replacement.login_hosts,
+          ...(replacement.login_hosts.length > 0 ? { auth_strategy: "username_password" } : {}),
         },
-        {
-          label: replacement.label,
-          allowed_hosts: replacement.allowed_hosts,
-          metadata: {
-            ...existing.metadata,
-            login_hosts: replacement.login_hosts,
-            ...(replacement.login_hosts.length > 0 ? { auth_strategy: "username_password" } : {}),
-          },
-        },
-        service.length > 0
-          ? { accountId, service, label: replacement.label }
-          : undefined,
-      );
-      if (updated === "conflict") {
-        throw new RestoreConflictError(reference, service, replacement.label);
-      }
-      if (updated === "changed") throw new CredentialMetadataChangedError(reference);
+      },
+    );
+    if (updated === "conflict") {
+      throw new RestoreConflictError(reference, service, replacement.label);
     }
+    if (updated === "changed") throw new CredentialMetadataChangedError(reference);
     await this.recordAudit(accountId, VAULT_AUDIT_TYPES.metadataEdited, {
       reference,
       requester,
       ...(service.length > 0 ? { service } : {}),
       label: replacement.label,
-      ...(options.approvalId !== undefined ? { approval_id: options.approvalId } : {}),
     });
     return {
       label: replacement.label,
@@ -618,21 +615,12 @@ export class CredentialVault implements VaultClient {
     reference: string,
     accountId: string,
     requester: VaultRequester = "user",
-    options: { allowAlreadyApplied?: boolean; approvalId?: string } = {},
   ): Promise<void> {
-    let existing = await this.deps.store.findActive(reference);
-    let alreadyApplied = false;
-    if (existing === null && options.allowAlreadyApplied === true) {
-      const deleted = await this.deps.store.findByReferenceIncludingDeleted(reference);
-      if (deleted !== null && deleted.account_id === accountId && deleted.deleted_at !== null) {
-        existing = deleted;
-        alreadyApplied = true;
-      }
-    }
+    const existing = await this.deps.store.findActive(reference);
     if (existing === null || existing.account_id !== accountId) {
       throw new CredentialNotFoundError(reference);
     }
-    if (!alreadyApplied) await this.deps.store.softDelete(reference, this.now());
+    await this.deps.store.softDelete(reference, this.now());
     await this.recordAudit(accountId, VAULT_AUDIT_TYPES.deleted, {
       reference,
       requester,
@@ -640,7 +628,6 @@ export class CredentialVault implements VaultClient {
         ? { service: existing.metadata.service }
         : {}),
       label: existing.label,
-      ...(options.approvalId !== undefined ? { approval_id: options.approvalId } : {}),
     });
   }
 
@@ -689,7 +676,14 @@ export class CredentialVault implements VaultClient {
         throw new RestoreConflictError(reference, service, rec.label);
       }
     }
-    await this.deps.store.restore(reference);
+    try {
+      await this.deps.store.restore(reference);
+    } catch (error) {
+      if (error instanceof CredentialSlotConflictError) {
+        throw new RestoreConflictError(reference, service, rec.label);
+      }
+      throw error;
+    }
     await this.recordAudit(accountId, VAULT_AUDIT_TYPES.restored, {
       reference,
       requester: "user",

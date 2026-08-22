@@ -6,7 +6,11 @@
 // rows.
 
 import type { Buffer } from "node:buffer";
-import type { CredentialRecord, CredentialStore } from "@trusty-squire/vault";
+import {
+  CredentialSlotConflictError,
+  type CredentialRecord,
+  type CredentialStore,
+} from "@trusty-squire/vault";
 import type { ApiPrismaClient } from "./api-prisma-client.js";
 
 interface CredentialRow {
@@ -35,29 +39,34 @@ export class PrismaCredentialStore implements CredentialStore {
   constructor(private readonly prisma: ApiPrismaClient) {}
 
   async insert(record: CredentialRecord): Promise<void> {
-    await this.prisma.credential.create({
-      data: {
-        id: record.id,
-        reference: record.reference,
-        account_id: record.account_id,
-        subscription_id: record.subscription_id,
-        type: record.type,
-        env_var_suggestion: record.env_var_suggestion,
-        label: record.label,
-        field_names: record.field_names,
-        allowed_hosts: record.allowed_hosts,
-        ciphertext: record.ciphertext,
-        encrypted_dek: record.encrypted_dek,
-        account_kek_blob: record.account_kek_blob,
-        algorithm: record.algorithm,
-        metadata: record.metadata,
-        rotated_at: record.rotated_at,
-        retrieval_count: record.retrieval_count,
-        last_retrieved_at: record.last_retrieved_at,
-        deleted_at: record.deleted_at,
-        created_at: record.created_at,
-      },
-    });
+    try {
+      await this.prisma.credential.create({
+        data: {
+          id: record.id,
+          reference: record.reference,
+          account_id: record.account_id,
+          subscription_id: record.subscription_id,
+          type: record.type,
+          env_var_suggestion: record.env_var_suggestion,
+          label: record.label,
+          field_names: record.field_names,
+          allowed_hosts: record.allowed_hosts,
+          ciphertext: record.ciphertext,
+          encrypted_dek: record.encrypted_dek,
+          account_kek_blob: record.account_kek_blob,
+          algorithm: record.algorithm,
+          metadata: record.metadata,
+          rotated_at: record.rotated_at,
+          retrieval_count: record.retrieval_count,
+          last_retrieved_at: record.last_retrieved_at,
+          deleted_at: record.deleted_at,
+          created_at: record.created_at,
+        },
+      });
+    } catch (error) {
+      if (isPrismaUniqueConstraintError(error)) throw new CredentialSlotConflictError();
+      throw error;
+    }
   }
 
   async findActive(reference: string): Promise<CredentialRecord | null> {
@@ -77,9 +86,18 @@ export class PrismaCredentialStore implements CredentialStore {
   }
 
   async isActive(reference: string, accountId: string): Promise<boolean> {
-    const row = await this.prisma.credential.findFirst({
-      where: { reference, account_id: accountId, deleted_at: null },
-    });
+    const lookup = () =>
+      this.prisma.credential.findFirst({
+        where: { reference, account_id: accountId, deleted_at: null },
+      });
+    let row;
+    try {
+      row = await lookup();
+    } catch (error) {
+      if (!isRetryablePrismaConnectionError(error)) throw error;
+      await disconnectPrisma(this.prisma);
+      row = await lookup();
+    }
     return row !== null;
   }
 
@@ -213,10 +231,15 @@ export class PrismaCredentialStore implements CredentialStore {
   }
 
   async setLabel(reference: string, label: string): Promise<void> {
-    await this.prisma.credential.updateMany({
-      where: { reference },
-      data: { label },
-    });
+    try {
+      await this.prisma.credential.updateMany({
+        where: { reference },
+        data: { label },
+      });
+    } catch (error) {
+      if (isPrismaUniqueConstraintError(error)) throw new CredentialSlotConflictError();
+      throw error;
+    }
   }
 
   async updateMetadata(
@@ -231,33 +254,9 @@ export class PrismaCredentialStore implements CredentialStore {
       allowed_hosts?: string[];
       metadata?: Record<string, unknown>;
     },
-    uniqueSlot?: {
-      accountId: string;
-      service: string;
-      label: string;
-    },
   ): Promise<"updated" | "changed" | "conflict"> {
-    return this.prisma.$transaction(async (tx) => {
-      if (uniqueSlot !== undefined) {
-        const slotKey = `${uniqueSlot.accountId}\u0000${uniqueSlot.service.toLowerCase()}\u0000${uniqueSlot.label}`;
-        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${slotKey}, 0))`;
-        const rows = await tx.credential.findMany({
-          where: { account_id: uniqueSlot.accountId, deleted_at: null },
-          orderBy: { created_at: "desc" },
-        });
-        const service = uniqueSlot.service.toLowerCase();
-        const conflict = rows.some((row) => {
-          const candidate = this.toRecord(row);
-          return (
-            candidate.reference !== reference &&
-            candidate.label === uniqueSlot.label &&
-            typeof candidate.metadata.service === "string" &&
-            candidate.metadata.service.toLowerCase() === service
-          );
-        });
-        if (conflict) return "conflict";
-      }
-      const result = await tx.credential.updateMany({
+    try {
+      const result = await this.prisma.credential.updateMany({
         where: {
           reference,
           deleted_at: null,
@@ -272,7 +271,10 @@ export class PrismaCredentialStore implements CredentialStore {
         },
       });
       return result.count > 0 ? "updated" : "changed";
-    });
+    } catch (error) {
+      if (isPrismaUniqueConstraintError(error)) return "conflict";
+      throw error;
+    }
   }
 
   async findByIdForAccountIncludingDeleted(
@@ -293,10 +295,15 @@ export class PrismaCredentialStore implements CredentialStore {
   // Undelete — clear deleted_at. The caller (vault) has already checked
   // ownership + that no active (service,label) twin exists.
   async restore(reference: string): Promise<void> {
-    await this.prisma.credential.updateMany({
-      where: { reference },
-      data: { deleted_at: null },
-    });
+    try {
+      await this.prisma.credential.updateMany({
+        where: { reference },
+        data: { deleted_at: null },
+      });
+    } catch (error) {
+      if (isPrismaUniqueConstraintError(error)) throw new CredentialSlotConflictError();
+      throw error;
+    }
   }
 
   // Re-wrap only the master-key envelope (account_kek_blob), for the KEK
@@ -345,6 +352,15 @@ function isRetryablePrismaConnectionError(err: unknown): boolean {
     message.includes("connection terminated") ||
     message.includes("connection pool") ||
     message.includes("can't reach database server")
+  );
+}
+
+function isPrismaUniqueConstraintError(error: unknown): boolean {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    String((error as { code?: unknown }).code ?? "") === "P2002"
   );
 }
 

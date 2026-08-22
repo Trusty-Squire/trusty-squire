@@ -398,6 +398,35 @@ describe("Egress Grants — /v1/egress", () => {
     expect(seen).toHaveLength(1);
   });
 
+  it("maps a spend-time active-check outage to retryable 503", async () => {
+    const account = await h.deps.accountStore.createAccount("active-check@example.test", "A");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    await storeCred(h, cookie, "OpenAI");
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenAI" });
+    const call = () =>
+      h.server.inject({
+        method: "POST",
+        url: `/v1/egress/${grant_id}/v1/chat/completions`,
+        headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" },
+        payload: {},
+      });
+    expect((await call()).statusCode).toBe(200);
+    h.deps.credentialStore.isActive = async () => {
+      throw Object.assign(new Error("connection closed"), { code: "P1017" });
+    };
+
+    const response = await call();
+    expect(response.statusCode).toBe(503);
+    expect(response.headers["retry-after"]).toBe("30");
+    expect(response.json()).toMatchObject({
+      error: "egress_temporarily_unavailable",
+      retryable: true,
+      scope: "proxy",
+    });
+    expect(seen).toHaveLength(1);
+  });
+
   it("coalesces concurrent cold credential-cache misses into one DB read (#227/#231 recurrence)", async () => {
     const account = await h.deps.accountStore.createAccount("stampede@example.test", "S");
     const cookie = await webCookie(h.deps, account.id);

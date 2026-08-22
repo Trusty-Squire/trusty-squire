@@ -15,7 +15,7 @@ interface EditableMetadata {
 
 interface MutationCeremony {
   approval_id: string;
-  status: "pending" | "executing" | "approved" | "failed" | "expired";
+  status: "pending" | "approved" | "failed" | "expired";
   operation: "edit" | "delete";
   credential: { reference: string; service: string | null; name: string };
   before: EditableMetadata;
@@ -142,9 +142,7 @@ export default function CredentialMutationApprovalPage() {
         ? "This credential mutation approval has expired."
         : ceremony?.status === "failed"
           ? `The vault refused this mutation${ceremony.error ? `: ${ceremony.error}` : "."}`
-          : ceremony?.status === "executing"
-            ? "The approved vault mutation is being applied."
-            : null;
+          : null;
 
   return (
     <AppShell anonymous>

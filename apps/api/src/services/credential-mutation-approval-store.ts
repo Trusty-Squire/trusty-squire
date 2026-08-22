@@ -1,13 +1,14 @@
 import { ulid } from "ulid";
-import type { VaultEditableMetadata } from "@trusty-squire/vault";
+import {
+  VAULT_AUDIT_TYPES,
+  type CredentialStore,
+  type VaultAuditEventInput,
+  type VaultAuditStore,
+  type VaultEditableMetadata,
+} from "@trusty-squire/vault";
 
 export type CredentialMutationOperation = "edit" | "delete";
-export type CredentialMutationApprovalStatus =
-  | "pending"
-  | "executing"
-  | "recoverable"
-  | "approved"
-  | "failed";
+export type CredentialMutationApprovalStatus = "pending" | "approved" | "failed";
 
 export interface CredentialMutationApprovalInput {
   operation: CredentialMutationOperation;
@@ -32,12 +33,14 @@ export interface CredentialMutationApprovalRecord extends CredentialMutationAppr
   executedAt: Date | null;
 }
 
-export type CredentialMutationClaimResult =
-  | "claimed"
-  | "reclaimed"
+export type CredentialMutationCommitResult =
+  | "approved"
   | "already_approved"
   | "expired"
-  | "not_claimable";
+  | "not_pending"
+  | "credential_not_found"
+  | "metadata_changed"
+  | "name_conflict";
 
 export interface CredentialMutationApprovalStore {
   create(accountId: string, input: CredentialMutationApprovalInput): Promise<string>;
@@ -51,16 +54,18 @@ export interface CredentialMutationApprovalStore {
     id: string,
     accountId: string,
   ): Promise<CredentialMutationApprovalRecord | null>;
-  claim(id: string, now: Date): Promise<CredentialMutationClaimResult>;
-  complete(id: string, mandateId: string | null, now: Date): Promise<void>;
-  makeRecoverable(id: string): Promise<void>;
-  fail(id: string, failureCode: string, now: Date): Promise<void>;
+  commit(id: string, mandateId: string | null, now: Date): Promise<CredentialMutationCommitResult>;
 }
 
 export class InMemoryCredentialMutationApprovalStore implements CredentialMutationApprovalStore {
   private readonly records = new Map<string, CredentialMutationApprovalRecord>();
+  private readonly committing = new Set<string>();
 
-  constructor(private readonly now: () => Date = () => new Date()) {}
+  constructor(
+    private readonly credentials: CredentialStore,
+    private readonly audit: VaultAuditStore,
+    private readonly now: () => Date = () => new Date(),
+  ) {}
 
   async create(accountId: string, input: CredentialMutationApprovalInput): Promise<string> {
     const id = ulid();
@@ -105,51 +110,152 @@ export class InMemoryCredentialMutationApprovalStore implements CredentialMutati
     return record === undefined || record.accountId !== accountId ? null : cloneRecord(record);
   }
 
-  async claim(id: string, now: Date): Promise<CredentialMutationClaimResult> {
+  async commit(
+    id: string,
+    mandateId: string | null,
+    now: Date,
+  ): Promise<CredentialMutationCommitResult> {
     const record = this.records.get(id);
-    if (record === undefined) return "not_claimable";
+    if (record === undefined || this.committing.has(id)) return "not_pending";
     if (record.status === "approved") return "already_approved";
     if (record.expiresAt <= now) return "expired";
-    if (record.status === "recoverable") {
-      record.status = "executing";
+    if (record.status !== "pending") return "not_pending";
+    this.committing.add(id);
+    try {
+      const credential = await this.credentials.findByReferenceIncludingDeleted(
+        record.credentialReference,
+      );
+      if (
+        credential === null ||
+        credential.account_id !== record.accountId ||
+        credential.deleted_at !== null
+      ) {
+        markFailed(record, "credential_not_found", now);
+        return "credential_not_found";
+      }
+      const event = mutationAuditEvent(record);
+      if (record.operation === "edit") {
+        if (record.after === null) throw new Error("credential edit approval missing after state");
+        if (!sameMetadata(editableMetadata(credential), record.before)) {
+          markFailed(record, "credential_metadata_changed", now);
+          return "metadata_changed";
+        }
+        const nextMetadata = {
+          ...credential.metadata,
+          login_hosts: record.after.login_hosts,
+          ...(record.after.login_hosts.length > 0 ? { auth_strategy: "username_password" } : {}),
+        };
+        const updated = await this.credentials.updateMetadata(
+          credential.reference,
+          {
+            label: credential.label,
+            allowed_hosts: credential.allowed_hosts,
+            metadata: credential.metadata,
+          },
+          {
+            label: record.after.label,
+            allowed_hosts: record.after.allowed_hosts,
+            metadata: nextMetadata,
+          },
+        );
+        if (updated === "conflict") {
+          markFailed(record, "credential_name_conflict", now);
+          return "name_conflict";
+        }
+        if (updated === "changed") {
+          markFailed(record, "credential_metadata_changed", now);
+          return "metadata_changed";
+        }
+        try {
+          await this.audit.record(event);
+        } catch (error) {
+          await this.credentials.updateMetadata(
+            credential.reference,
+            {
+              label: record.after.label,
+              allowed_hosts: record.after.allowed_hosts,
+              metadata: nextMetadata,
+            },
+            {
+              label: credential.label,
+              allowed_hosts: credential.allowed_hosts,
+              metadata: credential.metadata,
+            },
+          );
+          throw error;
+        }
+      } else {
+        await this.credentials.softDelete(credential.reference, now);
+        try {
+          await this.audit.record(event);
+        } catch (error) {
+          await this.credentials.restore(credential.reference);
+          throw error;
+        }
+      }
+      record.status = "approved";
+      record.mandateId = mandateId;
       record.executedAt = now;
-      return "reclaimed";
+      return "approved";
+    } finally {
+      this.committing.delete(id);
     }
-    if (
-      record.status === "executing" &&
-      record.executedAt !== null &&
-      record.executedAt.getTime() <= now.getTime() - 30_000
-    ) {
-      record.executedAt = now;
-      return "reclaimed";
-    }
-    if (record.status !== "pending") return "not_claimable";
-    record.status = "executing";
-    record.executedAt = now;
-    return "claimed";
   }
+}
 
-  async complete(id: string, mandateId: string | null, now: Date): Promise<void> {
-    const record = this.records.get(id);
-    if (record === undefined) return;
-    record.status = "approved";
-    record.mandateId = mandateId;
-    record.executedAt = now;
-  }
+function markFailed(
+  record: CredentialMutationApprovalRecord,
+  failureCode: string,
+  now: Date,
+): void {
+  record.status = "failed";
+  record.failureCode = failureCode;
+  record.executedAt = now;
+}
 
-  async makeRecoverable(id: string): Promise<void> {
-    const record = this.records.get(id);
-    if (record === undefined || record.status !== "executing") return;
-    record.status = "recoverable";
-  }
+function editableMetadata(record: {
+  label: string;
+  allowed_hosts: string[];
+  metadata: Record<string, unknown>;
+}): VaultEditableMetadata {
+  return {
+    label: record.label,
+    allowed_hosts: [...record.allowed_hosts],
+    login_hosts: metadataStringArray(record.metadata.login_hosts),
+  };
+}
 
-  async fail(id: string, failureCode: string, now: Date): Promise<void> {
-    const record = this.records.get(id);
-    if (record === undefined) return;
-    record.status = "failed";
-    record.failureCode = failureCode;
-    record.executedAt = now;
-  }
+function metadataStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function sameMetadata(left: VaultEditableMetadata, right: VaultEditableMetadata): boolean {
+  return (
+    left.label === right.label &&
+    sameArray(left.allowed_hosts, right.allowed_hosts) &&
+    sameArray(left.login_hosts, right.login_hosts)
+  );
+}
+
+function sameArray(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+export function mutationAuditEvent(record: CredentialMutationApprovalRecord): VaultAuditEventInput {
+  return {
+    account_id: record.accountId,
+    type:
+      record.operation === "edit" ? VAULT_AUDIT_TYPES.metadataEdited : VAULT_AUDIT_TYPES.deleted,
+    payload: {
+      reference: record.credentialReference,
+      requester: "agent",
+      ...(record.credentialService !== null ? { service: record.credentialService } : {}),
+      label: record.operation === "edit" ? record.after!.label : record.credentialLabel,
+      approval_id: record.id,
+    },
+  };
 }
 
 function cloneMetadata(value: VaultEditableMetadata): VaultEditableMetadata {

@@ -533,6 +533,31 @@ describe("payment approval relay", () => {
     });
   });
 
+  it("refuses confirmation when approval expires during vouch verification", async () => {
+    const created = await createApproval();
+    const submission = makeSubmission(created);
+    await relaySubmission(created.id, submission);
+    nowMs = Date.parse(created.expires_at) - 1;
+    await server.close();
+    server = await buildServer({
+      deps,
+      vouchVerifier: async () => {
+        nowMs += 2;
+        return {};
+      },
+    });
+
+    const confirm = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: submission,
+    });
+    expect(confirm.statusCode).toBe(409);
+    expect(confirm.json()).toEqual({ error: "payment_approval_candidate_changed" });
+    expect((await deps.pendingPaymentApprovalStore.getById(created.id))?.status).toBe("pending");
+  });
+
   it.each(["review", "approval"] as const)(
     "peeks at an in-flight %s candidate without consuming delivery state",
     async (binding) => {

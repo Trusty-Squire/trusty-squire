@@ -12,6 +12,7 @@ import type {
   VaultAuditRecord,
   VaultAuditStore,
 } from "./types.js";
+import { CredentialSlotConflictError } from "./types.js";
 
 const AUDIT_LIST_MAX = 200;
 
@@ -21,6 +22,9 @@ export class InMemoryCredentialStore implements CredentialStore {
   async insert(record: CredentialRecord): Promise<void> {
     if (this.byReference.has(record.reference)) {
       throw new Error(`credential already exists at ${record.reference}`);
+    }
+    if (hasSlotConflict(this.byReference.values(), record)) {
+      throw new CredentialSlotConflictError();
     }
     this.byReference.set(record.reference, clone(record));
   }
@@ -129,6 +133,9 @@ export class InMemoryCredentialStore implements CredentialStore {
   async restore(reference: string): Promise<void> {
     const r = this.byReference.get(reference);
     if (r === undefined) return;
+    if (hasSlotConflict(this.byReference.values(), { ...r, deleted_at: null })) {
+      throw new CredentialSlotConflictError();
+    }
     r.deleted_at = null;
   }
 
@@ -148,6 +155,9 @@ export class InMemoryCredentialStore implements CredentialStore {
   async setLabel(reference: string, label: string): Promise<void> {
     const r = this.byReference.get(reference);
     if (r === undefined) return;
+    if (hasSlotConflict(this.byReference.values(), { ...r, label })) {
+      throw new CredentialSlotConflictError();
+    }
     r.label = label;
   }
 
@@ -163,11 +173,6 @@ export class InMemoryCredentialStore implements CredentialStore {
       allowed_hosts?: string[];
       metadata?: Record<string, unknown>;
     },
-    uniqueSlot?: {
-      accountId: string;
-      service: string;
-      label: string;
-    },
   ): Promise<"updated" | "changed" | "conflict"> {
     const r = this.byReference.get(reference);
     if (
@@ -179,19 +184,12 @@ export class InMemoryCredentialStore implements CredentialStore {
     ) {
       return "changed";
     }
-    if (uniqueSlot !== undefined) {
-      const service = uniqueSlot.service.toLowerCase();
-      const conflict = [...this.byReference.values()].some(
-        (candidate) =>
-          candidate.reference !== reference &&
-          candidate.account_id === uniqueSlot.accountId &&
-          candidate.deleted_at === null &&
-          candidate.label === uniqueSlot.label &&
-          typeof candidate.metadata.service === "string" &&
-          candidate.metadata.service.toLowerCase() === service,
-      );
-      if (conflict) return "conflict";
-    }
+    const replacement = {
+      ...r,
+      ...(input.label !== undefined ? { label: input.label } : {}),
+      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+    };
+    if (hasSlotConflict(this.byReference.values(), replacement)) return "conflict";
     if (input.label !== undefined) r.label = input.label;
     if (input.allowed_hosts !== undefined) r.allowed_hosts = [...input.allowed_hosts];
     if (input.metadata !== undefined) r.metadata = { ...input.metadata };
@@ -208,6 +206,20 @@ export class InMemoryCredentialStore implements CredentialStore {
     }
     return removed;
   }
+}
+
+function hasSlotConflict(records: Iterable<CredentialRecord>, target: CredentialRecord): boolean {
+  if (target.deleted_at !== null || typeof target.metadata.service !== "string") return false;
+  const service = target.metadata.service.toLowerCase();
+  return [...records].some(
+    (candidate) =>
+      candidate.reference !== target.reference &&
+      candidate.account_id === target.account_id &&
+      candidate.deleted_at === null &&
+      candidate.label === target.label &&
+      typeof candidate.metadata.service === "string" &&
+      candidate.metadata.service.toLowerCase() === service,
+  );
 }
 
 export interface InMemoryAuditEvent extends VaultAuditEventInput {

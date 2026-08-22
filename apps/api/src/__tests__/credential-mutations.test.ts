@@ -1,16 +1,18 @@
 import { createHash } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import { VAULT_AUDIT_TYPES } from "@trusty-squire/vault";
+import { InMemoryVaultAuditStore, VAULT_AUDIT_TYPES } from "@trusty-squire/vault";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { issueAgentSession } from "../auth/agent.js";
 import { credentialMutationPayload } from "../routes/credential-mutations.js";
 import { buildInMemoryDeps, type ApiDeps } from "../services/deps.js";
+import { InMemoryCredentialMutationApprovalStore } from "../services/credential-mutation-approval-store.js";
 import {
   CREDENTIAL_MUTATION_VOUCH_CONTEXT,
   PAYMENT_VOUCH_CONTEXT,
   createVouchMandateVerifier,
   hashVouchPayload,
+  type VouchMandateVerifier,
 } from "../services/vouch-mandate.js";
 import { buildServer } from "../server.js";
 
@@ -25,6 +27,7 @@ describe("vouch-gated credential mutations", () => {
   let nowMs: number;
   let agentToken: string;
   let signingKey: SigningKey;
+  let vouchVerifier: VouchMandateVerifier;
 
   beforeEach(async () => {
     nowMs = Date.parse("2026-08-22T12:00:00.000Z");
@@ -37,13 +40,11 @@ describe("vouch-gated credential mutations", () => {
       sessionSecret: SESSION_SECRET,
       now: () => new Date(nowMs),
     });
-    server = await buildServer({
-      deps,
-      vouchVerifier: createVouchMandateVerifier(
-        async () => Response.json({ keys: [publicJwk] }),
-        "https://vouchflow.test",
-      ),
-    });
+    vouchVerifier = createVouchMandateVerifier(
+      async () => Response.json({ keys: [publicJwk] }),
+      "https://vouchflow.test",
+    );
+    server = await buildServer({ deps, vouchVerifier });
     const account = await deps.accountStore.createAccount("mutator@example.test", "Mutator");
     const session = issueAgentSession({
       account_id: account.id,
@@ -341,8 +342,26 @@ describe("vouch-gated credential mutations", () => {
     expect((await deps.credentialMutationApprovalStore.getById(secondId))?.agent).toBe("Claude");
   });
 
-  it("recovers an applied edit when its audit write initially fails", async () => {
+  it("leaves approval and metadata pending when the atomic audit write fails", async () => {
     const reference = await storeCredential();
+    await server.close();
+    const audit = new InMemoryVaultAuditStore(() => new Date(nowMs));
+    const originalRecord = audit.record.bind(audit);
+    let failMetadataAudit = true;
+    audit.record = async (event) => {
+      if (failMetadataAudit && event.type === VAULT_AUDIT_TYPES.metadataEdited) {
+        failMetadataAudit = false;
+        throw new Error("synthetic audit outage");
+      }
+      await originalRecord(event);
+    };
+    deps.vaultAuditStore = audit;
+    deps.credentialMutationApprovalStore = new InMemoryCredentialMutationApprovalStore(
+      deps.credentialStore,
+      audit,
+      () => new Date(nowMs),
+    );
+    server = await buildServer({ deps, vouchVerifier });
     const created = await createMutation({
       operation: "edit",
       reference,
@@ -355,26 +374,16 @@ describe("vouch-gated credential mutations", () => {
       CREDENTIAL_MUTATION_VOUCH_CONTEXT,
       "mandate_recovery",
     );
-    const originalRecord = deps.vaultAuditStore.record.bind(deps.vaultAuditStore);
-    let failMetadataAudit = true;
-    deps.vaultAuditStore.record = async (event) => {
-      if (failMetadataAudit && event.type === VAULT_AUDIT_TYPES.metadataEdited) {
-        failMetadataAudit = false;
-        throw new Error("synthetic audit outage");
-      }
-      await originalRecord(event);
-    };
-
     const first = await server.inject({
       method: "POST",
       url: `/v1/vault/mutation-approvals/${id}/approve`,
       payload: { jws },
     });
     expect(first.statusCode).toBe(500);
-    expect((await deps.credentialStore.findActive(reference))?.allowed_hosts).toContain(
+    expect((await deps.credentialStore.findActive(reference))?.allowed_hosts).not.toContain(
       "recovery.example.test",
     );
-    expect((await deps.credentialMutationApprovalStore.getById(id))?.status).toBe("recoverable");
+    expect((await deps.credentialMutationApprovalStore.getById(id))?.status).toBe("pending");
 
     const retried = await server.inject({
       method: "POST",
@@ -383,6 +392,9 @@ describe("vouch-gated credential mutations", () => {
     });
     expect(retried.statusCode).toBe(200);
     expect((await deps.credentialMutationApprovalStore.getById(id))?.status).toBe("approved");
+    expect((await deps.credentialStore.findActive(reference))?.allowed_hosts).toContain(
+      "recovery.example.test",
+    );
     const audits = await deps.vaultAuditStore.list(
       (await deps.credentialStore.findActive(reference))!.account_id,
       { type: VAULT_AUDIT_TYPES.metadataEdited, reference },

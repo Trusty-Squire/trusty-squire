@@ -80,7 +80,7 @@ function toolResult(
     };
   }
   return {
-    status: approval.status === "executing" ? "approval_processing" : "approval_pending",
+    status: "approval_pending",
     operation: expectedOperation,
     approval_id: approval.approval_id,
     approval_url: approval.approval_url,

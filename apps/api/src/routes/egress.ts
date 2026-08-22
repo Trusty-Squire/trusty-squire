@@ -482,6 +482,10 @@ export const registerEgressRoutes: FastifyPluginAsync<{
         );
         reply.code(response.status).send(response.body);
       } catch (err) {
+        if (isRetryablePrismaConnectionError(err)) {
+          sendEgressStoreUnavailable(reply);
+          return;
+        }
         if (err instanceof AllowlistViolationError) {
           reply.code(403).send({ error: "host_not_allowed", host: err.host });
           return;

@@ -1,11 +1,5 @@
 import { randomBytes } from "node:crypto";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
-import {
-  CredentialMetadataChangedError,
-  CredentialNotFoundError,
-  RestoreConflictError,
-  VAULT_AUDIT_TYPES,
-} from "@trusty-squire/vault";
 import { z } from "zod";
 import type { ApiDeps } from "../services/deps.js";
 import {
@@ -13,8 +7,12 @@ import {
   editableMetadata,
 } from "../services/credential-metadata.js";
 import { resolveCredentialForAccount } from "../services/credential-resolution.js";
-import type { CredentialMutationApprovalRecord } from "../services/credential-mutation-approval-store.js";
+import {
+  mutationAuditEvent,
+  type CredentialMutationApprovalRecord,
+} from "../services/credential-mutation-approval-store.js";
 import { sendTelegramMessage } from "../services/telegram.js";
+import { notifyVaultAuditAfterCommit } from "../services/vault-notify.js";
 import {
   CREDENTIAL_MUTATION_VOUCH_CONTEXT,
   VouchMandateVerificationError,
@@ -328,12 +326,7 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
         return;
       }
       const now = opts.deps.now?.() ?? new Date();
-      if (
-        record.status !== "pending" &&
-        record.status !== "executing" &&
-        record.status !== "recoverable" &&
-        record.status !== "approved"
-      ) {
+      if (record.status !== "pending" && record.status !== "approved") {
         reply.code(409).send({ error: "credential_mutation_approval_not_pending" });
         return;
       }
@@ -368,127 +361,38 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
         return reply.code(200).send({ status: "approved", operation: record.operation });
       }
 
-      const claimNow = opts.deps.now?.() ?? new Date();
-      const claim = await opts.deps.credentialMutationApprovalStore.claim(record.id, claimNow);
-      if (claim === "already_approved") {
+      const commitNow = opts.deps.now?.() ?? new Date();
+      const mandateId = typeof claims.mandate_id === "string" ? claims.mandate_id : null;
+      const result = await opts.deps.credentialMutationApprovalStore.commit(
+        record.id,
+        mandateId,
+        commitNow,
+      );
+      if (result === "already_approved") {
         return reply.code(200).send({ status: "approved", operation: record.operation });
       }
-      if (claim === "expired") {
+      if (result === "expired") {
         reply.code(409).send({ error: "credential_mutation_approval_expired" });
         return;
       }
-      if (claim !== "claimed") {
-        if (claim !== "reclaimed") {
-          reply.code(409).send({ error: "credential_mutation_approval_in_progress" });
-          return;
-        }
-      }
-
-      const mandateId = typeof claims.mandate_id === "string" ? claims.mandate_id : null;
-      if (
-        claim === "reclaimed" &&
-        (await mutationAlreadyApplied(opts.deps, record)) &&
-        (await mutationAuditExists(opts.deps, record))
-      ) {
-        await opts.deps.credentialMutationApprovalStore.complete(record.id, mandateId, claimNow);
-        return reply.code(200).send({ status: "approved", operation: record.operation });
-      }
-
-      try {
-        const recovery = claim === "reclaimed";
-        const auditOptions = { allowAlreadyApplied: recovery, approvalId: record.id };
-        if (record.operation === "edit") {
-          if (record.after === null)
-            throw new Error("credential edit approval missing after state");
-          await opts.deps.vault.editMetadata(
-            record.credentialReference,
-            record.accountId,
-            record.before,
-            record.after,
-            "agent",
-            auditOptions,
-          );
-        } else {
-          await opts.deps.vault.delete(
-            record.credentialReference,
-            record.accountId,
-            "agent",
-            auditOptions,
-          );
-        }
-      } catch (error) {
-        const failure = mutationFailure(error);
-        if (
-          failure.code === "credential_mutation_failed" &&
-          (await mutationAlreadyApplied(opts.deps, record))
-        ) {
-          await opts.deps.credentialMutationApprovalStore.makeRecoverable(record.id);
-        } else {
-          await opts.deps.credentialMutationApprovalStore.fail(record.id, failure.code, claimNow);
-        }
-        reply.code(failure.status).send({ error: failure.code });
+      if (result === "credential_not_found") {
+        reply.code(404).send({ error: "credential_not_found" });
         return;
       }
-
-      await opts.deps.credentialMutationApprovalStore.complete(record.id, mandateId, claimNow);
+      if (result === "metadata_changed") {
+        reply.code(409).send({ error: "credential_metadata_changed" });
+        return;
+      }
+      if (result === "name_conflict") {
+        reply.code(409).send({ error: "credential_name_conflict" });
+        return;
+      }
+      if (result !== "approved") {
+        reply.code(409).send({ error: "credential_mutation_approval_not_pending" });
+        return;
+      }
+      notifyVaultAuditAfterCommit(opts.deps.vaultAuditStore, mutationAuditEvent(record));
       return reply.code(200).send({ status: "approved", operation: record.operation });
     },
   );
 };
-
-async function mutationAlreadyApplied(
-  deps: ApiDeps,
-  record: CredentialMutationApprovalRecord,
-): Promise<boolean> {
-  if (record.operation === "delete") {
-    const credential = await deps.credentialStore.findByReferenceIncludingDeleted(
-      record.credentialReference,
-    );
-    return (
-      credential !== null &&
-      credential.account_id === record.accountId &&
-      credential.deleted_at !== null
-    );
-  }
-  if (record.after === null) return false;
-  const credential = await deps.credentialStore.findActive(record.credentialReference);
-  if (credential === null || credential.account_id !== record.accountId) return false;
-  const actual = editableMetadata(credential);
-  return (
-    actual.label === record.after.label &&
-    sameValues(actual.allowed_hosts, record.after.allowed_hosts) &&
-    sameValues(actual.login_hosts, record.after.login_hosts)
-  );
-}
-
-async function mutationAuditExists(
-  deps: ApiDeps,
-  record: CredentialMutationApprovalRecord,
-): Promise<boolean> {
-  const events = await deps.vaultAuditStore.list(record.accountId, {
-    type:
-      record.operation === "edit"
-        ? VAULT_AUDIT_TYPES.metadataEdited
-        : VAULT_AUDIT_TYPES.deleted,
-    reference: record.credentialReference,
-    limit: 200,
-  });
-  return events.some((event) => event.payload.approval_id === record.id);
-}
-
-function sameValues(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-
-function mutationFailure(error: unknown): { status: number; code: string } {
-  if (error instanceof CredentialNotFoundError) {
-    return { status: 404, code: "credential_not_found" };
-  }
-  if (error instanceof CredentialMetadataChangedError) {
-    return { status: 409, code: "credential_metadata_changed" };
-  }
-  if (error instanceof RestoreConflictError) {
-    return { status: 409, code: "credential_name_conflict" };
-  }
-  return { status: 500, code: "credential_mutation_failed" };
-}

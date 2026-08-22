@@ -5,6 +5,13 @@ import type { Buffer } from "node:buffer";
 
 export type CredentialType = string;
 
+export class CredentialSlotConflictError extends Error {
+  constructor() {
+    super("active credential service/label slot already occupied");
+    this.name = "CredentialSlotConflictError";
+  }
+}
+
 export interface CredentialRecord {
   id: string;
   reference: string;
@@ -101,11 +108,6 @@ export interface CredentialStore {
       label?: string;
       allowed_hosts?: string[];
       metadata?: Record<string, unknown>;
-    },
-    uniqueSlot?: {
-      accountId: string;
-      service: string;
-      label: string;
     },
   ): Promise<"updated" | "changed" | "conflict">;
   // Hard-delete every credential row (active + soft-deleted) for the

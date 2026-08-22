@@ -12,6 +12,7 @@ export type {
 } from "./types.js";
 
 export { VAULT_AUDIT_TYPES } from "./types.js";
+export { CredentialSlotConflictError } from "./types.js";
 
 export {
   CredentialVault,

@@ -272,8 +272,10 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
   // Telegram lifecycle notifications ride the audit write (vault-notify.ts):
   // wrapping here means every audit producer — the vault package AND the
   // card/payment/grant routes — shares one notification choke point.
+  const persistedVaultAuditStore: VaultAuditStore =
+    authPrisma !== null ? new PrismaVaultAuditStore(authPrisma) : new InMemoryVaultAuditStore();
   const vaultAuditStore: VaultAuditStore = new NotifyingVaultAuditStore(
-    authPrisma !== null ? new PrismaVaultAuditStore(authPrisma) : new InMemoryVaultAuditStore(),
+    persistedVaultAuditStore,
     accountStore,
     opts.now ?? (() => new Date()),
   );
@@ -292,6 +294,8 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
       opts.now,
     );
     credentialMutationApprovalStore = new InMemoryCredentialMutationApprovalStore(
+      credentialStore,
+      persistedVaultAuditStore,
       opts.now ?? (() => new Date()),
     );
   }

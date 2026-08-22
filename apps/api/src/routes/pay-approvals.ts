@@ -660,7 +660,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         req.params.id,
         auth.account_id,
         submissionFingerprint(parsed.data),
-        now,
+        opts.deps.now?.() ?? new Date(),
       );
       if (confirmed !== "confirmed") {
         candidateLifecycle(record, "approval", "confirmation_rejected");
