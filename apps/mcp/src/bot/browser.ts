@@ -8450,7 +8450,6 @@ export class BrowserController {
     // recognized PayPal-independent surface (checkout.pci.shopifyinc.com); a
     // PayPal EXPRESS button (an unfillable-wallet iframe, not card fields)
     // must not cause a false-positive refusal of a fillable checkout.
-    await this.stampJapaneseCardLabelFields(this.page.frames());
     const panFrame = await this.panFieldFrame();
     if (panFrame === null) return false;
     try {
@@ -8659,8 +8658,9 @@ export class BrowserController {
                 if (!fieldLabels.some((label) => text.includes(label))) return;
                 if (excludedLabels.some((label) => text.includes(label))) return;
                 const inputs = associatedElements(host, "input").filter(isTextInput);
-                if (inputs.length === 1) {
-                  inputs[0].setAttribute("data-ts-jp-card-field", attrValue);
+                const [input] = inputs;
+                if (inputs.length === 1 && input !== undefined) {
+                  input.setAttribute("data-ts-jp-card-field", attrValue);
                 }
               };
               let expiryGroupSequence = 0;
@@ -8683,16 +8683,20 @@ export class BrowserController {
                   const yearSelects = selects.filter((select) =>
                     (select.options[0]?.textContent ?? "").includes("年"),
                   );
+                  const [monthSelect] = monthSelects;
+                  const [yearSelect] = yearSelects;
                   if (
                     monthSelects.length === 1 &&
                     yearSelects.length === 1 &&
-                    monthSelects[0] !== yearSelects[0]
+                    monthSelect !== undefined &&
+                    yearSelect !== undefined &&
+                    monthSelect !== yearSelect
                   ) {
                     const group = `ts-jp-exp-${labels.frameIndex}-${expiryGroupSequence++}`;
-                    monthSelects[0].setAttribute("data-ts-jp-card-exp", "month");
-                    yearSelects[0].setAttribute("data-ts-jp-card-exp", "year");
-                    monthSelects[0].setAttribute("data-ts-jp-card-exp-group", group);
-                    yearSelects[0].setAttribute("data-ts-jp-card-exp-group", group);
+                    monthSelect.setAttribute("data-ts-jp-card-exp", "month");
+                    yearSelect.setAttribute("data-ts-jp-card-exp", "year");
+                    monthSelect.setAttribute("data-ts-jp-card-exp-group", group);
+                    yearSelect.setAttribute("data-ts-jp-card-exp-group", group);
                   }
                 });
             },
@@ -8859,6 +8863,7 @@ export class BrowserController {
     }
 
     let cardGroup: CardGroup | undefined;
+    let cardGroupResolvedByTopmostPan = false;
     if (groups.size === 1) {
       cardGroup = [...groups.values()][0];
     } else if (groups.size > 1) {
@@ -8869,6 +8874,7 @@ export class BrowserController {
       const topmost = [...groups.values()].filter((group) => group.panTopmost);
       if (topmost.length !== 1) throw new Error("payment_card_form_ambiguous");
       cardGroup = topmost[0];
+      cardGroupResolvedByTopmostPan = true;
     } else if (fillablePanCount > 1) {
       // Multiple PAN anchors with no single complete container are not safe to
       // combine. A provider topology with one PAN and separate hosted-field
@@ -9275,8 +9281,9 @@ export class BrowserController {
       const months = await fillableCardFields(monthSelectors);
       const years = await fillableCardFields(yearSelectors);
       if (months.length !== 1 || years.length !== 1) return false;
-      const month = months[0];
-      const year = years[0];
+      const [month] = months;
+      const [year] = years;
+      if (month === undefined || year === undefined) return false;
       if (month.frame === year.frame) {
         const yearHandle = await year.field.elementHandle().catch(() => null);
         if (yearHandle === null) return false;
@@ -9520,7 +9527,11 @@ export class BrowserController {
     }
     const hasCombinedExpiry = combinedExpiryCount === 1;
     const hasSplitExpiry = expiryMonthCount === 1 && expiryYearCount === 1;
-    if (hasCombinedExpiry && hasSplitExpiry) {
+    if (
+      hasCombinedExpiry &&
+      hasSplitExpiry &&
+      !(usesLegacyPanSelectors && cardGroupResolvedByTopmostPan)
+    ) {
       throw new Error("payment_card_form_ambiguous");
     }
     if (
@@ -10068,26 +10079,31 @@ export class BrowserController {
     for (const frame of frames) {
       const fields = frame.locator(CHECKOUT_CARD_VALUE_FIELD_SELECTORS);
       const count = Math.min(await fields.count().catch(() => 0), 40);
-      for (let i = 0; i < count; i += 1) {
-        const field = fields.nth(i);
-        const tag = await field.evaluate((element) => element.tagName.toLowerCase()).catch(() => "");
-        if (tag === "select") {
-          await field
-            .evaluate((element) => {
-              if (!(element instanceof HTMLSelectElement)) return;
+      // Cleanup is verified semantically below, so clear in one DOM pass.
+      // Per-field fill("") performs actionability waits and can spend 30s on
+      // the first hidden PAN candidate after an early ambiguity refusal.
+      await fields
+        .evaluateAll((elements, limit) => {
+          for (const element of elements.slice(0, limit)) {
+            if (
+              !(element instanceof HTMLInputElement) &&
+              !(element instanceof HTMLTextAreaElement) &&
+              !(element instanceof HTMLSelectElement)
+            ) {
+              continue;
+            }
+            if (element.value.length > 0 || element.hasAttribute("data-ts-sealed-payment")) {
               element.value = "";
-              if (element.value !== "") element.selectedIndex = -1;
+              if (element instanceof HTMLSelectElement && element.value !== "") {
+                element.selectedIndex = -1;
+              }
               element.dispatchEvent(new Event("input", { bubbles: true }));
               element.dispatchEvent(new Event("change", { bubbles: true }));
-            })
-            .catch(() => undefined);
-        } else {
-          await field.fill("").catch(() => undefined);
-        }
-        await field
-          .evaluate((element) => element.removeAttribute("data-ts-sealed-payment"))
-          .catch(() => undefined);
-      }
+            }
+            element.removeAttribute("data-ts-sealed-payment");
+          }
+        }, count)
+        .catch(() => undefined);
     }
     await this.clearSealedPaymentFieldsInFrames(frames);
     await this.page.waitForTimeout(0).catch(() => undefined);
