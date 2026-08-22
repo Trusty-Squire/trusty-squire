@@ -9350,20 +9350,27 @@ export class BrowserController {
       withinBillingContext = false,
     ): Promise<boolean> => {
       if (value === undefined || value.length === 0) return false;
-      const candidates: Array<{ frame: Frame; matches: Locator }> = withinCardGroup
-        ? cardFieldCandidates(selectors)
-        : withinBillingContext
-          ? billingRoots.map(({ frame, token }) => ({
-              frame,
-              matches: frame
-                .locator(selectors)
-                .and(frame.locator(`[data-ts-payment-billing-owner="${token}"]`)),
-            }))
-          : frames.map((frame) => ({ frame, matches: frame.locator(selectors) }));
+      // A card-group field is scanned ONCE via fillableCardFields — the same
+      // pass that decides the ambiguity/zero-candidate outcome below is reused
+      // for the actual fill target, rather than re-querying and re-checking
+      // visibility/enabled across every candidate a second time. On a form
+      // with many same-field-shaped decoys, a second full O(N) scan here was
+      // the dominant cost (and, pre-count-cap-fix, the source of a 30s+ hang).
+      let candidates: Array<{ frame: Frame; matches: Locator }>;
       if (withinCardGroup) {
-        const fillableCount = await countFillableCardFields(selectors);
-        if (fillableCount > 1) throw new Error("payment_card_form_ambiguous");
-        if (fillableCount === 0) return false;
+        const fillable = await fillableCardFields(selectors);
+        if (fillable.length > 1) throw new Error("payment_card_form_ambiguous");
+        if (fillable.length === 0) return false;
+        candidates = [{ frame: fillable[0]!.frame, matches: fillable[0]!.field }];
+      } else if (withinBillingContext) {
+        candidates = billingRoots.map(({ frame, token }) => ({
+          frame,
+          matches: frame
+            .locator(selectors)
+            .and(frame.locator(`[data-ts-payment-billing-owner="${token}"]`)),
+        }));
+      } else {
+        candidates = frames.map((frame) => ({ frame, matches: frame.locator(selectors) }));
       }
       for (const { frame, matches } of candidates) {
         const count = await matches.count().catch(() => 0);
