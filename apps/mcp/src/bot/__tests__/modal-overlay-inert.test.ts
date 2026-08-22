@@ -71,6 +71,7 @@ function nonPortaledDialogFixture(): string {
     <div class="backdrop" style="position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.5)">
       <div role="dialog" aria-modal="true" style="position:fixed;top:100px;left:100px;z-index:1001;width:400px;background:white;padding:20px">
         <h2>Review and transfer</h2>
+        <input type="text" id="transfer-note" />
         <input type="checkbox" id="tos" />
         <label for="tos">I agree</label>
         <button id="confirm-btn" onclick="document.title='CONFIRM_CLICKED'">Confirm transfer</button>
@@ -197,6 +198,28 @@ function staleRemnantDialogFixture(): string {
 </body></html>`)}`;
 }
 
+function ancestorHiddenDialogFixture(): string {
+  return `data:text/html,${encodeURIComponent(`
+<!doctype html><html><body style="margin:0;padding:0">
+  <div id="hidden-parent-wrapper" inert aria-hidden="true">
+    <button id="hidden-parent-bg" onclick="document.title='HIDDEN_PARENT_BG_CLICKED'">Background Button</button>
+    <div id="overlay-parent" style="position:fixed;inset:0;z-index:1000">
+      <div role="dialog" aria-modal="true" style="position:fixed;top:100px;left:100px;width:400px;background:white;padding:20px">
+        <button id="hide-parent-btn" onclick="closeByHidingParent()">Confirm and close</button>
+      </div>
+    </div>
+  </div>
+  <script>
+    function closeByHidingParent() {
+      document.getElementById('overlay-parent').style.display = 'none';
+      const wrapper = document.getElementById('hidden-parent-wrapper');
+      wrapper.removeAttribute('inert');
+      wrapper.removeAttribute('aria-hidden');
+    }
+  </script>
+</body></html>`)}`;
+}
+
 describe("modal overlay blindness — non-portaled inert-ancestor dialog (real Chromium)", () => {
   beforeAll(async () => {
     browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
@@ -279,6 +302,21 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
     }
   }, 15000);
 
+  it("types into a field inside the inert-ancestor dialog", async () => {
+    const { ctrl, page } = await pageFor(nonPortaledDialogFixture());
+    try {
+      await ctrl.type("#transfer-note", "Ready to transfer");
+      expect(await page.locator("#transfer-note").inputValue()).toBe("Ready to transfer");
+      expect(
+        await page.evaluate(
+          () => document.getElementById("app-wrapper")?.hasAttribute("inert") === true,
+        ),
+      ).toBe(true);
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
   it("dialog closed → inventory returns to normal", async () => {
     const { ctrl, page } = await pageFor(nonPortaledDialogFixture());
     try {
@@ -356,6 +394,27 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
       expect(bg?.topmost).toBe(true);
       await ctrl.click(bg!.selector);
       expect(await page.title()).toBe("REMNANT_BG_CLICKED");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("does not re-lock the background when a dialog is hidden by its parent", async () => {
+    const { ctrl, page } = await pageFor(ancestorHiddenDialogFixture());
+    try {
+      await ctrl.click("#hide-parent-btn");
+
+      expect(
+        await page.evaluate(() => ({
+          overlayDisplay: document.getElementById("overlay-parent")?.style.display,
+          dialogDisplay: getComputedStyle(document.querySelector('[role="dialog"]')!).display,
+          wrapperInert:
+            document.getElementById("hidden-parent-wrapper")?.hasAttribute("inert") === true,
+        })),
+      ).toEqual({ overlayDisplay: "none", dialogDisplay: "block", wrapperInert: false });
+
+      await ctrl.click("#hidden-parent-bg");
+      expect(await page.title()).toBe("HIDDEN_PARENT_BG_CLICKED");
     } finally {
       await page.close();
     }

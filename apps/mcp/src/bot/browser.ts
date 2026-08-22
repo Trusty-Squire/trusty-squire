@@ -4092,6 +4092,11 @@ export class BrowserController {
 
   async type(selector: string, text: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
+    await this.withModalInertNeutralized(selector, () => this.typeInner(selector, text));
+  }
+
+  private async typeInner(selector: string, text: string): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
     // Wait for element to be visible and enabled before typing.
     await this.page.waitForSelector(selector, { state: "visible", timeout: 10000 });
 
@@ -4391,6 +4396,7 @@ export class BrowserController {
             const isRenderedDialog = (element: Element): boolean => {
               if (!isDialogElement(element)) return false;
               if (element instanceof HTMLDialogElement) return element.open;
+              if (typeof element.checkVisibility === "function") return element.checkVisibility();
               if (element.hasAttribute("hidden")) return false;
               const style = window.getComputedStyle(element);
               return style.display !== "none" && style.visibility !== "hidden";
@@ -5863,6 +5869,13 @@ export class BrowserController {
   // first option — preserves the existing behavior for native
   // selects whose contents are interchangeable (country pickers).
   async selectOption(selector: string, optionMatcher?: string): Promise<string> {
+    if (!this.page) throw new Error("Browser not started");
+    return await this.withModalInertNeutralized(selector, () =>
+      this.selectOptionInner(selector, optionMatcher),
+    );
+  }
+
+  private async selectOptionInner(selector: string, optionMatcher?: string): Promise<string> {
     if (!this.page) throw new Error("Browser not started");
     await this.page.waitForSelector(selector, { state: "attached", timeout: 10000 });
     let activeSelector = selector;
@@ -12281,6 +12294,7 @@ export class BrowserController {
             const isRenderedDialog = (element: Element): boolean => {
               if (!isDialogElement(element)) return false;
               if (element instanceof HTMLDialogElement) return element.open;
+              if (typeof element.checkVisibility === "function") return element.checkVisibility();
               if (element.hasAttribute("hidden")) return false;
               const style = window.getComputedStyle(element);
               return style.display !== "none" && style.visibility !== "hidden";
