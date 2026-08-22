@@ -604,17 +604,56 @@ const CHECKOUT_PAN_FIELD_SELECTORS = [
   .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
   .join(",");
 
-const CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS =
-  '[autocomplete~="cc-exp-month"],[name*="exp_month" i],[name*="expmonth" i],[name*="exp" i][name*="month" i],[id*="exp" i][id*="month" i],select[name*="credit" i][name*="month" i],select[name*="limit" i][name*="month" i],select[id*="limit" i][id*="month" i],select[data-ts-jp-card-exp="month"]';
+const CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS = [
+  '[autocomplete~="cc-exp-month"]',
+  '[name*="exp_month" i]',
+  '[name*="expmonth" i]',
+  '[name*="exp" i][name*="month" i]',
+  '[id*="exp" i][id*="month" i]',
+  'select[name*="credit" i][name*="month" i]',
+  'select[name*="limit" i][name*="month" i]',
+  'select[id*="limit" i][id*="month" i]',
+  'select[data-ts-jp-card-exp="month"]',
+]
+  .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
+  .join(",");
 
-const CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS =
-  '[autocomplete~="cc-exp-year"],[name*="exp_year" i],[name*="expyear" i],[name*="exp" i][name*="year" i],[id*="exp" i][id*="year" i],select[name*="credit" i][name*="year" i],select[name*="limit" i][name*="year" i],select[id*="limit" i][id*="year" i],select[data-ts-jp-card-exp="year"]';
+const CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS = [
+  '[autocomplete~="cc-exp-year"]',
+  '[name*="exp_year" i]',
+  '[name*="expyear" i]',
+  '[name*="exp" i][name*="year" i]',
+  '[id*="exp" i][id*="year" i]',
+  'select[name*="credit" i][name*="year" i]',
+  'select[name*="limit" i][name*="year" i]',
+  'select[id*="limit" i][id*="year" i]',
+  'select[data-ts-jp-card-exp="year"]',
+]
+  .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
+  .join(",");
 
-const CHECKOUT_COMBINED_EXPIRY_FIELD_SELECTORS =
-  'input[autocomplete~="cc-exp"],input[name*="expir" i]:not([name*="month" i]):not([name*="year" i]),input[name="exp" i],input[name*="exp-date" i],input[id*="expir" i]:not([id*="month" i]):not([id*="year" i]),input[id="exp" i],input[id*="exp-date" i],input[placeholder="MM/YY" i],input[placeholder="MM / YY" i],input[aria-label="MM/YY" i],input[aria-label="MM / YY" i],label:has-text("MM/YY") input,label:has-text("MM / YY") input';
+const CHECKOUT_COMBINED_EXPIRY_INPUT_SELECTORS = [
+  'input[autocomplete~="cc-exp"]',
+  'input[name*="expir" i]:not([name*="month" i]):not([name*="year" i])',
+  'input[name="exp" i]',
+  'input[name*="exp-date" i]',
+  'input[id*="expir" i]:not([id*="month" i]):not([id*="year" i])',
+  'input[id="exp" i]',
+  'input[id*="exp-date" i]',
+  'input[placeholder="MM/YY" i]',
+  'input[placeholder="MM / YY" i]',
+  'input[aria-label="MM/YY" i]',
+  'input[aria-label="MM / YY" i]',
+].map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`);
+
+const CHECKOUT_COMBINED_EXPIRY_FIELD_SELECTORS = [
+  ...CHECKOUT_COMBINED_EXPIRY_INPUT_SELECTORS,
+  `label:has-text("MM/YY") input${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
+  `label:has-text("MM / YY") input${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
+].join(",");
 
 const CHECKOUT_COMBINED_EXPIRY_GROUP_SELECTORS =
-  'input[autocomplete~="cc-exp"],input[name*="expir" i]:not([name*="month" i]):not([name*="year" i]),input[name="exp" i],input[name*="exp-date" i],input[id*="expir" i]:not([id*="month" i]):not([id*="year" i]),input[id="exp" i],input[id*="exp-date" i],input[placeholder="MM/YY" i],input[placeholder="MM / YY" i],input[aria-label="MM/YY" i],input[aria-label="MM / YY" i]';
+  CHECKOUT_COMBINED_EXPIRY_INPUT_SELECTORS.join(",");
 
 const CHECKOUT_CVV_FIELD_SELECTORS = [
   'input[autocomplete~="cc-csc"]',
@@ -8566,6 +8605,7 @@ export class BrowserController {
                   stampField(host, labels.cvv, "cvv", labels.excludedCard);
                   const text = (host.textContent ?? "").trim();
                   if (!labels.expiry.some((label) => text.includes(label))) return;
+                  if (labels.excludedCard.some((label) => text.includes(label))) return;
                   const selects = associatedElements(host, "select").filter(
                     (element): element is HTMLSelectElement =>
                       element instanceof HTMLSelectElement && isVisible(element),
@@ -9188,22 +9228,38 @@ export class BrowserController {
           .evaluate((element) => {
             const result = new Set<string>();
             const stamped = element.getAttribute("data-ts-jp-card-exp-group");
-            if (stamped !== null && stamped.length > 0) result.add(stamped);
+            if (stamped !== null && stamped.length > 0) result.add(`stamp:${stamped}`);
+            const allowedIdentityGroups = new Set([
+              "exp",
+              "expiry",
+              "expiration",
+              "cc-exp",
+              "card-exp",
+              "card-expiry",
+              "card-expiration",
+              "credit-exp",
+              "credit-expiry",
+              "credit-expiration",
+              "credit-limit",
+            ]);
+            const excludedIdentityParts = ["gift", "loyalty", "point", "prepaid", "member"];
             for (const value of [
               element.getAttribute("autocomplete") ?? "",
               element.getAttribute("name") ?? "",
               element.id,
             ]) {
-              const tokens = value
+              const normalized = value
                 .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
                 .toLowerCase()
-                .split(/[^a-z0-9]+/)
-                .filter((token) => token.length > 0);
-              if (!tokens.includes("month") && !tokens.includes("year")) continue;
-              const group = tokens
-                .filter((token) => token !== "month" && token !== "year")
-                .join("-");
-              if (group.length > 0) result.add(group);
+                .replace(/[^a-z0-9]+/g, "-")
+                .replace(/^-+|-+$/g, "");
+              if (excludedIdentityParts.some((part) => normalized.includes(part))) continue;
+              const group = normalized
+                .replace(/(?:^|-)(?:month|year)(?=-|$)/g, "-")
+                .replace(/(?:month|year)$/g, "")
+                .replace(/-+/g, "-")
+                .replace(/^-+|-+$/g, "");
+              if (allowedIdentityGroups.has(group)) result.add(`identity:${group}`);
             }
             return [...result];
           })

@@ -3671,6 +3671,7 @@ describe("split-checkout card fill (real browser)", () => {
         await browser.close();
       }
     },
+    15_000,
   );
 
   it.skipIf(!chromiumAvailable)(
@@ -3816,8 +3817,8 @@ describe("split-checkout card fill (real browser)", () => {
           name: "combined-and-split",
           expiry: `
             <input type="text" autocomplete="cc-exp" id="card-expiry">
-            <select name="membership_exp_month"><option value=""></option><option value="12">12</option></select>
-            <select name="membership_exp_year"><option value=""></option><option value="30">30</option></select>`,
+            <select name="card_exp_month"><option value=""></option><option value="12">12</option></select>
+            <select name="card_exp_year"><option value=""></option><option value="30">30</option></select>`,
         },
         {
           name: "same-split-control",
@@ -3826,7 +3827,7 @@ describe("split-checkout card fill (real browser)", () => {
         {
           name: "different-split-groups",
           expiry: `
-            <input type="text" name="membership_exp_month" id="membership-month">
+            <select name="credit_limit_month" id="credit-month"><option value=""></option></select>
             <input type="text" name="card_exp_year" id="card-year">`,
         },
       ];
@@ -3849,6 +3850,60 @@ describe("split-checkout card fill (real browser)", () => {
 
           await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
             "payment_card_form_ambiguous",
+          );
+          const values = await page.locator("input,select").evaluateAll((controls) =>
+            controls.map((control) => (control as HTMLInputElement | HTMLSelectElement).value),
+          );
+          expect(values.every((value) => value === "")).toBe(true);
+        } finally {
+          await browser.close();
+        }
+      }
+    },
+    15_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses non-card expiry identities and JP labels before filling",
+    async () => {
+      const cases = [
+        {
+          name: "membership-expiry",
+          expiry: `
+            <select name="membership_exp_month"><option value=""></option><option value="12">12</option></select>
+            <select name="membership_exp_year"><option value=""></option><option value="30">30</option></select>`,
+        },
+        {
+          name: "gift-card-expiry-label",
+          expiry: `
+            <dl>
+              <dt>ギフトカード有効期限</dt>
+              <dd>
+                <select id="field-a"><option value="">月を指定</option><option value="12">12</option></select>
+                <select id="field-b"><option value="">年を指定</option><option value="30">2030</option></select>
+              </dd>
+            </dl>`,
+        },
+      ];
+      for (const testCase of cases) {
+        const pageUrl = `https://shop.example.test/${testCase.name}.html`;
+        const { page, browser } = await servePages({
+          [pageUrl]: `
+            <meta charset="utf-8">
+            <form>
+              <input type="text" autocomplete="cc-number" id="pan">
+              <input type="text" autocomplete="cc-name" id="holder">
+              ${testCase.expiry}
+              <input type="text" autocomplete="cc-csc" id="cvv">
+            </form>`,
+        });
+        try {
+          await page.goto(pageUrl);
+          const controller = new BrowserController({ humanize: false });
+          (controller as unknown as { page: Page }).page = page;
+
+          await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+            "payment_field_not_found:expiry",
           );
           const values = await page.locator("input,select").evaluateAll((controls) =>
             controls.map((control) => (control as HTMLInputElement | HTMLSelectElement).value),
@@ -4211,6 +4266,7 @@ describe("split-checkout card fill (real browser)", () => {
         }
       }
     },
+    15_000,
   );
 });
 describe("3DS detection vs captcha frames", () => {
