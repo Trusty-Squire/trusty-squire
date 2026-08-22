@@ -120,13 +120,14 @@ function openShadowDialogFixture(): string {
         super();
         const root = this.attachShadow({ mode: "open" });
         root.innerHTML =
+          '<div id="shadow-inert-wrapper" inert>' +
           '<div class="backdrop" style="position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.5)">' +
           '<div role="dialog" aria-modal="true" style="position:fixed;top:100px;left:100px;z-index:1001;width:400px;background:white;padding:20px">' +
           '<h2>Shadow review</h2>' +
           '<input type="checkbox" id="shadow-tos" />' +
           '<label for="shadow-tos">I agree</label>' +
           '<button id="shadow-confirm-btn">Confirm transfer</button>' +
-          '</div></div>';
+          '</div></div></div>';
         root.getElementById("shadow-confirm-btn").addEventListener("click", () => {
           document.title = "SHADOW_CONFIRM_CLICKED";
         });
@@ -249,6 +250,8 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
       expect(confirmBtn).toBeDefined();
       expect(tos?.topmost).toBe(true);
       expect(confirmBtn?.topmost).toBe(true);
+      expect(confirmBtn?.container).toMatch(/^form:/);
+      expect(confirmBtn?.inDialog).toBe(true);
 
       await ctrl.click(confirmBtn!.selector);
       expect(await page.title()).toBe("FORM_CONFIRM_CLICKED");
@@ -270,9 +273,19 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
       expect(await page.title()).toBe("SHADOW_CONFIRM_CLICKED");
       expect(
         await page.evaluate(
-          () => document.getElementById("app-wrapper")?.hasAttribute("inert") === true,
+          () => {
+            const root = document.querySelector("modal-shell")?.shadowRoot;
+            return {
+              outerInert: document.getElementById("app-wrapper")?.hasAttribute("inert") === true,
+              innerInert:
+                root?.getElementById("shadow-inert-wrapper")?.hasAttribute("inert") === true,
+              markerLeaked:
+                root?.querySelector("[data-ts-inert-neutralized]") !== null ||
+                document.querySelector("[data-ts-inert-neutralized]") !== null,
+            };
+          },
         ),
-      ).toBe(true);
+      ).toEqual({ outerInert: true, innerInert: true, markerLeaked: false });
     } finally {
       await page.close();
     }
@@ -372,6 +385,7 @@ describe("modal_active observation signal (pure function)", () => {
         selector: "#confirm",
         visibleText: "Confirm transfer",
         container: "dialog:review-and-transfer",
+        inDialog: true,
         topmost: true,
       }),
     ];
@@ -393,6 +407,7 @@ describe("modal_active observation signal (pure function)", () => {
         selector: "#hidden-dialog-btn",
         visibleText: "Old dialog remnant",
         container: "dialog:stale",
+        inDialog: true,
         topmost: false,
       }),
     ];
@@ -404,6 +419,25 @@ describe("modal_active observation signal (pure function)", () => {
       prev: null,
     });
     expect(built.observation.modal_active).toBeUndefined();
+  });
+
+  it("detects a form-grouped element inside a dialog", () => {
+    const built = buildCompactObservation({
+      sessionId: "s-form",
+      url: "https://example.com",
+      text: "",
+      elements: [
+        el({
+          selector: "#confirm",
+          visibleText: "Confirm transfer",
+          container: "form:transfer-form",
+          inDialog: true,
+          topmost: true,
+        }),
+      ],
+      prev: null,
+    });
+    expect(built.observation.modal_active).toBe(true);
   });
 
   it("stays accurate across a delta emit (not just the changed subset)", () => {
@@ -430,6 +464,7 @@ describe("modal_active observation signal (pure function)", () => {
         selector: "#confirm",
         visibleText: "Confirm transfer",
         container: "dialog:review-and-transfer",
+        inDialog: true,
         topmost: true,
       }),
     ];

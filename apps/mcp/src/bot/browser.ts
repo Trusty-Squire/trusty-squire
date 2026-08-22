@@ -4372,10 +4372,16 @@ export class BrowserController {
     } finally {
       await this.page
         .evaluate((marker) => {
-          document.querySelectorAll(`[${marker}]`).forEach((el) => {
-            el.removeAttribute(marker);
-            el.setAttribute("inert", "");
-          });
+          const restoreMarked = (root: Document | ShadowRoot): void => {
+            root.querySelectorAll(`[${marker}]`).forEach((el) => {
+              el.removeAttribute(marker);
+              el.setAttribute("inert", "");
+            });
+            root.querySelectorAll("*").forEach((el) => {
+              if (el.shadowRoot !== null) restoreMarked(el.shadowRoot);
+            });
+          };
+          restoreMarked(document);
         }, marker)
         .catch(() => undefined);
     }
@@ -11840,6 +11846,7 @@ export class BrowserController {
         sealed: boolean;
         screenPath: string | null;
         container: string | null;
+        inDialog: boolean;
         topmost: boolean | null;
         occludedBy: string | null;
         autocomplete: string | null;
@@ -11891,6 +11898,7 @@ export class BrowserController {
           el instanceof HTMLIFrameElement &&
           (el.getAttribute("src") ?? "").includes("accounts.google.com/gsi/button");
         const container = regionName(regionFor(el));
+        const inDialog = nearestModalRegion(el) !== null;
         const status = topmostStatus(el);
         const pathLabel = isGoogleGSIIframe
           ? "Continue with Google"
@@ -11991,6 +11999,7 @@ export class BrowserController {
             `${container ?? "body:root"} > ${elementKind(el)}:` +
             slug(pathLabel, `${elementKind(el)}-${out.length}`),
           container,
+          inDialog,
           topmost: status.topmost,
           occludedBy: status.occludedBy,
         });
@@ -12207,10 +12216,16 @@ export class BrowserController {
     } finally {
       await frame
         .evaluate((marker) => {
-          document.querySelectorAll(`[${marker}]`).forEach((el) => {
-            el.removeAttribute(marker);
-            el.setAttribute("inert", "");
-          });
+          const restoreMarked = (root: Document | ShadowRoot): void => {
+            root.querySelectorAll(`[${marker}]`).forEach((el) => {
+              el.removeAttribute(marker);
+              el.setAttribute("inert", "");
+            });
+            root.querySelectorAll("*").forEach((el) => {
+              if (el.shadowRoot !== null) restoreMarked(el.shadowRoot);
+            });
+          };
+          restoreMarked(document);
         }, marker)
         .catch(() => undefined);
     }
@@ -14315,6 +14330,8 @@ export interface InteractiveElement {
   // element is actually reachable at its center point.
   screenPath?: string | null;
   container?: string | null;
+  // Dedicated dialog-role/aria-modal ancestry via composed tree (pierces open shadows).
+  inDialog?: boolean;
   topmost?: boolean | null;
   occludedBy?: string | null;
   // T38 — card-radio cluster membership. Set on elements that are

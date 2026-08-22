@@ -3806,12 +3806,10 @@ export function buildCompactObservation(args: {
 
   // A dialog/modal region with at least one topmost (unoccluded) element is
   // "active" — the host planner should treat it as the current interaction
-  // surface rather than the page behind it. Computed from the FULL element
-  // set (not just a delta subset) so it stays accurate on every emit, delta
-  // or full.
-  const modalActive = elements.some(
-    (el) => (el.container ?? "").startsWith("dialog:") && el.topmost !== false,
-  );
+  // surface rather than the page behind it. Uses each element's dedicated
+  // dialog-membership flag, independent of container grouping, and the FULL
+  // element set so it stays accurate on every emit, delta or full.
+  const modalActive = elements.some((el) => el.inDialog === true && el.topmost !== false);
 
   const base: Observation = {
     session_id: sessionId,
