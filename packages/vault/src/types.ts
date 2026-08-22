@@ -38,6 +38,7 @@ export interface CredentialRecord {
 export interface CredentialStore {
   insert(record: CredentialRecord): Promise<void>;
   findActive(reference: string): Promise<CredentialRecord | null>;
+  isActive(reference: string, accountId: string): Promise<boolean>;
   // Upsert lookup: the active entry for (account, service, label), or
   // null. `service` is matched case-insensitively against metadata.service.
   findActiveByServiceLabel(
@@ -101,7 +102,12 @@ export interface CredentialStore {
       allowed_hosts?: string[];
       metadata?: Record<string, unknown>;
     },
-  ): Promise<boolean>;
+    uniqueSlot?: {
+      accountId: string;
+      service: string;
+      label: string;
+    },
+  ): Promise<"updated" | "changed" | "conflict">;
   // Hard-delete every credential row (active + soft-deleted) for the
   // account — the irreversible offboarding purge. Returns rows removed.
   purgeAccount(accountId: string): Promise<number>;

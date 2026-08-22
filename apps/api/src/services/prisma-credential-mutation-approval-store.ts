@@ -68,9 +68,21 @@ export class PrismaCredentialMutationApprovalStore implements CredentialMutation
   async claim(id: string, now: Date): Promise<CredentialMutationClaimResult> {
     const result = await this.prisma.credentialMutationApproval.updateMany({
       where: { id, status: "pending", expires_at: { gt: now } },
-      data: { status: "executing" },
+      data: { status: "executing", executed_at: now },
     });
     if (result.count > 0) return "claimed";
+    const recovered = await this.prisma.credentialMutationApproval.updateMany({
+      where: {
+        id,
+        expires_at: { gt: now },
+        OR: [
+          { status: "recoverable" },
+          { status: "executing", executed_at: { lte: new Date(now.getTime() - 30_000) } },
+        ],
+      },
+      data: { status: "executing", executed_at: now },
+    });
+    if (recovered.count > 0) return "reclaimed";
     const row = await this.prisma.credentialMutationApproval.findFirst({ where: { id } });
     if (row?.status === "approved") return "already_approved";
     if (row !== null && row.expires_at <= now) return "expired";
@@ -81,6 +93,13 @@ export class PrismaCredentialMutationApprovalStore implements CredentialMutation
     await this.prisma.credentialMutationApproval.updateMany({
       where: { id, status: "executing" },
       data: { status: "approved", mandate_id: mandateId, executed_at: now },
+    });
+  }
+
+  async makeRecoverable(id: string): Promise<void> {
+    await this.prisma.credentialMutationApproval.updateMany({
+      where: { id, status: "executing" },
+      data: { status: "recoverable" },
     });
   }
 
@@ -138,6 +157,7 @@ function toRecord(row: {
   if (
     row.status !== "pending" &&
     row.status !== "executing" &&
+    row.status !== "recoverable" &&
     row.status !== "approved" &&
     row.status !== "failed"
   ) {

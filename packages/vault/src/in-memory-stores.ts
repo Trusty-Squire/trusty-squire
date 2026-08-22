@@ -31,6 +31,11 @@ export class InMemoryCredentialStore implements CredentialStore {
     return clone(r);
   }
 
+  async isActive(reference: string, accountId: string): Promise<boolean> {
+    const r = this.byReference.get(reference);
+    return r !== undefined && r.account_id === accountId && r.deleted_at === null;
+  }
+
   async findActiveByServiceLabel(
     accountId: string,
     service: string,
@@ -158,7 +163,12 @@ export class InMemoryCredentialStore implements CredentialStore {
       allowed_hosts?: string[];
       metadata?: Record<string, unknown>;
     },
-  ): Promise<boolean> {
+    uniqueSlot?: {
+      accountId: string;
+      service: string;
+      label: string;
+    },
+  ): Promise<"updated" | "changed" | "conflict"> {
     const r = this.byReference.get(reference);
     if (
       r === undefined ||
@@ -167,12 +177,25 @@ export class InMemoryCredentialStore implements CredentialStore {
       !sameArray(r.allowed_hosts, expected.allowed_hosts) ||
       JSON.stringify(r.metadata) !== JSON.stringify(expected.metadata)
     ) {
-      return false;
+      return "changed";
+    }
+    if (uniqueSlot !== undefined) {
+      const service = uniqueSlot.service.toLowerCase();
+      const conflict = [...this.byReference.values()].some(
+        (candidate) =>
+          candidate.reference !== reference &&
+          candidate.account_id === uniqueSlot.accountId &&
+          candidate.deleted_at === null &&
+          candidate.label === uniqueSlot.label &&
+          typeof candidate.metadata.service === "string" &&
+          candidate.metadata.service.toLowerCase() === service,
+      );
+      if (conflict) return "conflict";
     }
     if (input.label !== undefined) r.label = input.label;
     if (input.allowed_hosts !== undefined) r.allowed_hosts = [...input.allowed_hosts];
     if (input.metadata !== undefined) r.metadata = { ...input.metadata };
-    return true;
+    return "updated";
   }
 
   async purgeAccount(accountId: string): Promise<number> {

@@ -4,6 +4,7 @@ import {
   CredentialMetadataChangedError,
   CredentialNotFoundError,
   RestoreConflictError,
+  VAULT_AUDIT_TYPES,
 } from "@trusty-squire/vault";
 import { z } from "zod";
 import type { ApiDeps } from "../services/deps.js";
@@ -207,6 +208,8 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
       if (resolution.kind !== "found") return;
 
       const credential = resolution.credential;
+      const requester = requesterName.safeParse(req.headers["x-squire-agent-identity"]);
+      const agent = requester.success ? requester.data : (auth.agent_identity ?? "unknown-agent");
       const before = editableMetadata(credential);
       let after = null;
       if (parsed.data.operation === "edit") {
@@ -239,6 +242,7 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
         }
       }
       const intentHash = hashVouchPayload({
+        agent,
         after,
         before,
         credential_reference: credential.reference,
@@ -255,8 +259,6 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
         return reply.code(200).send(approvalResponse(reusable, now));
       }
 
-      const requester = requesterName.safeParse(req.headers["x-squire-agent-identity"]);
-      const agent = requester.success ? requester.data : (auth.agent_identity ?? "unknown-agent");
       const id = await opts.deps.credentialMutationApprovalStore.create(auth.account_id, {
         operation: parsed.data.operation,
         credentialReference: credential.reference,
@@ -326,11 +328,16 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
         return;
       }
       const now = opts.deps.now?.() ?? new Date();
-      if (record.status !== "pending" && record.status !== "approved") {
+      if (
+        record.status !== "pending" &&
+        record.status !== "executing" &&
+        record.status !== "recoverable" &&
+        record.status !== "approved"
+      ) {
         reply.code(409).send({ error: "credential_mutation_approval_not_pending" });
         return;
       }
-      if (record.status === "pending" && record.expiresAt <= now) {
+      if (record.status !== "approved" && record.expiresAt <= now) {
         reply.code(409).send({ error: "credential_mutation_approval_expired" });
         return;
       }
@@ -361,7 +368,8 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
         return reply.code(200).send({ status: "approved", operation: record.operation });
       }
 
-      const claim = await opts.deps.credentialMutationApprovalStore.claim(record.id, now);
+      const claimNow = opts.deps.now?.() ?? new Date();
+      const claim = await opts.deps.credentialMutationApprovalStore.claim(record.id, claimNow);
       if (claim === "already_approved") {
         return reply.code(200).send({ status: "approved", operation: record.operation });
       }
@@ -370,11 +378,25 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
         return;
       }
       if (claim !== "claimed") {
-        reply.code(409).send({ error: "credential_mutation_approval_in_progress" });
-        return;
+        if (claim !== "reclaimed") {
+          reply.code(409).send({ error: "credential_mutation_approval_in_progress" });
+          return;
+        }
+      }
+
+      const mandateId = typeof claims.mandate_id === "string" ? claims.mandate_id : null;
+      if (
+        claim === "reclaimed" &&
+        (await mutationAlreadyApplied(opts.deps, record)) &&
+        (await mutationAuditExists(opts.deps, record))
+      ) {
+        await opts.deps.credentialMutationApprovalStore.complete(record.id, mandateId, claimNow);
+        return reply.code(200).send({ status: "approved", operation: record.operation });
       }
 
       try {
+        const recovery = claim === "reclaimed";
+        const auditOptions = { allowAlreadyApplied: recovery, approvalId: record.id };
         if (record.operation === "edit") {
           if (record.after === null)
             throw new Error("credential edit approval missing after state");
@@ -384,26 +406,79 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
             record.before,
             record.after,
             "agent",
+            auditOptions,
           );
         } else {
-          // delete() soft-deletes the row. New use/grant resolution fails
-          // immediately; a request that already received an in-memory
-          // plaintext lease may finish within that lease's existing scope.
-          await opts.deps.vault.delete(record.credentialReference, record.accountId, "agent");
+          await opts.deps.vault.delete(
+            record.credentialReference,
+            record.accountId,
+            "agent",
+            auditOptions,
+          );
         }
       } catch (error) {
         const failure = mutationFailure(error);
-        await opts.deps.credentialMutationApprovalStore.fail(record.id, failure.code, now);
+        if (
+          failure.code === "credential_mutation_failed" &&
+          (await mutationAlreadyApplied(opts.deps, record))
+        ) {
+          await opts.deps.credentialMutationApprovalStore.makeRecoverable(record.id);
+        } else {
+          await opts.deps.credentialMutationApprovalStore.fail(record.id, failure.code, claimNow);
+        }
         reply.code(failure.status).send({ error: failure.code });
         return;
       }
 
-      const mandateId = typeof claims.mandate_id === "string" ? claims.mandate_id : null;
-      await opts.deps.credentialMutationApprovalStore.complete(record.id, mandateId, now);
+      await opts.deps.credentialMutationApprovalStore.complete(record.id, mandateId, claimNow);
       return reply.code(200).send({ status: "approved", operation: record.operation });
     },
   );
 };
+
+async function mutationAlreadyApplied(
+  deps: ApiDeps,
+  record: CredentialMutationApprovalRecord,
+): Promise<boolean> {
+  if (record.operation === "delete") {
+    const credential = await deps.credentialStore.findByReferenceIncludingDeleted(
+      record.credentialReference,
+    );
+    return (
+      credential !== null &&
+      credential.account_id === record.accountId &&
+      credential.deleted_at !== null
+    );
+  }
+  if (record.after === null) return false;
+  const credential = await deps.credentialStore.findActive(record.credentialReference);
+  if (credential === null || credential.account_id !== record.accountId) return false;
+  const actual = editableMetadata(credential);
+  return (
+    actual.label === record.after.label &&
+    sameValues(actual.allowed_hosts, record.after.allowed_hosts) &&
+    sameValues(actual.login_hosts, record.after.login_hosts)
+  );
+}
+
+async function mutationAuditExists(
+  deps: ApiDeps,
+  record: CredentialMutationApprovalRecord,
+): Promise<boolean> {
+  const events = await deps.vaultAuditStore.list(record.accountId, {
+    type:
+      record.operation === "edit"
+        ? VAULT_AUDIT_TYPES.metadataEdited
+        : VAULT_AUDIT_TYPES.deleted,
+    reference: record.credentialReference,
+    limit: 200,
+  });
+  return events.some((event) => event.payload.approval_id === record.id);
+}
+
+function sameValues(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
 
 function mutationFailure(error: unknown): { status: number; code: string } {
   if (error instanceof CredentialNotFoundError) {

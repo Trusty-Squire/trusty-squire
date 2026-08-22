@@ -2,7 +2,12 @@ import { ulid } from "ulid";
 import type { VaultEditableMetadata } from "@trusty-squire/vault";
 
 export type CredentialMutationOperation = "edit" | "delete";
-export type CredentialMutationApprovalStatus = "pending" | "executing" | "approved" | "failed";
+export type CredentialMutationApprovalStatus =
+  | "pending"
+  | "executing"
+  | "recoverable"
+  | "approved"
+  | "failed";
 
 export interface CredentialMutationApprovalInput {
   operation: CredentialMutationOperation;
@@ -29,6 +34,7 @@ export interface CredentialMutationApprovalRecord extends CredentialMutationAppr
 
 export type CredentialMutationClaimResult =
   | "claimed"
+  | "reclaimed"
   | "already_approved"
   | "expired"
   | "not_claimable";
@@ -47,6 +53,7 @@ export interface CredentialMutationApprovalStore {
   ): Promise<CredentialMutationApprovalRecord | null>;
   claim(id: string, now: Date): Promise<CredentialMutationClaimResult>;
   complete(id: string, mandateId: string | null, now: Date): Promise<void>;
+  makeRecoverable(id: string): Promise<void>;
   fail(id: string, failureCode: string, now: Date): Promise<void>;
 }
 
@@ -103,8 +110,22 @@ export class InMemoryCredentialMutationApprovalStore implements CredentialMutati
     if (record === undefined) return "not_claimable";
     if (record.status === "approved") return "already_approved";
     if (record.expiresAt <= now) return "expired";
+    if (record.status === "recoverable") {
+      record.status = "executing";
+      record.executedAt = now;
+      return "reclaimed";
+    }
+    if (
+      record.status === "executing" &&
+      record.executedAt !== null &&
+      record.executedAt.getTime() <= now.getTime() - 30_000
+    ) {
+      record.executedAt = now;
+      return "reclaimed";
+    }
     if (record.status !== "pending") return "not_claimable";
     record.status = "executing";
+    record.executedAt = now;
     return "claimed";
   }
 
@@ -114,6 +135,12 @@ export class InMemoryCredentialMutationApprovalStore implements CredentialMutati
     record.status = "approved";
     record.mandateId = mandateId;
     record.executedAt = now;
+  }
+
+  async makeRecoverable(id: string): Promise<void> {
+    const record = this.records.get(id);
+    if (record === undefined || record.status !== "executing") return;
+    record.status = "recoverable";
   }
 
   async fail(id: string, failureCode: string, now: Date): Promise<void> {

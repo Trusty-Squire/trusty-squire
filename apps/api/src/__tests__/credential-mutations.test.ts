@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import { VAULT_AUDIT_TYPES } from "@trusty-squire/vault";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { issueAgentSession } from "../auth/agent.js";
 import { credentialMutationPayload } from "../routes/credential-mutations.js";
@@ -285,6 +286,152 @@ describe("vouch-gated credential mutations", () => {
     expect((await deps.credentialStore.findActive(reference))?.allowed_hosts).toEqual([
       "drift.example.test",
     ]);
+  });
+
+  it("rechecks approval expiry after mandate verification", async () => {
+    const reference = await storeCredential();
+    const created = await createMutation({ operation: "delete", reference });
+    const id = (created.json() as { approval_id: string }).approval_id;
+    await server.close();
+    server = await buildServer({
+      deps,
+      vouchVerifier: async () => {
+        nowMs += 11 * 60 * 1000;
+        return { mandate_id: "mandate_slow_verification" };
+      },
+    });
+
+    const response = await server.inject({
+      method: "POST",
+      url: `/v1/vault/mutation-approvals/${id}/approve`,
+      payload: { jws: "synthetic-valid-mandate" },
+    });
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toEqual({ error: "credential_mutation_approval_expired" });
+    expect(await deps.credentialStore.findActive(reference)).not.toBeNull();
+  });
+
+  it("does not reuse a pending approval across requesting agents", async () => {
+    const reference = await storeCredential();
+    const first = await createMutation({ operation: "delete", reference });
+    const accountId = (await deps.credentialStore.findActive(reference))!.account_id;
+    const secondSession = issueAgentSession({
+      account_id: accountId,
+      agent_identity: "claude",
+      agent_version: "test",
+      now: new Date(nowMs),
+    });
+    await deps.agentSessionStore.insert(secondSession.record);
+    const second = await server.inject({
+      method: "POST",
+      url: "/v1/vault/mutation-approvals",
+      headers: {
+        authorization: `Bearer ${secondSession.raw_token}`,
+        "x-squire-agent-identity": "Claude",
+      },
+      payload: { operation: "delete", reference },
+    });
+
+    expect(first.statusCode).toBe(201);
+    expect(second.statusCode).toBe(201);
+    const firstId = (first.json() as { approval_id: string }).approval_id;
+    const secondId = (second.json() as { approval_id: string }).approval_id;
+    expect(secondId).not.toBe(firstId);
+    expect((await deps.credentialMutationApprovalStore.getById(firstId))?.agent).toBe("Codex");
+    expect((await deps.credentialMutationApprovalStore.getById(secondId))?.agent).toBe("Claude");
+  });
+
+  it("recovers an applied edit when its audit write initially fails", async () => {
+    const reference = await storeCredential();
+    const created = await createMutation({
+      operation: "edit",
+      reference,
+      changes: { allowed_hosts: { mode: "add", hosts: ["recovery.example.test"] } },
+    });
+    const id = (created.json() as { approval_id: string }).approval_id;
+    const ceremony = await mutationCeremony(id);
+    const jws = await signHash(
+      ceremony.payload_sha256,
+      CREDENTIAL_MUTATION_VOUCH_CONTEXT,
+      "mandate_recovery",
+    );
+    const originalRecord = deps.vaultAuditStore.record.bind(deps.vaultAuditStore);
+    let failMetadataAudit = true;
+    deps.vaultAuditStore.record = async (event) => {
+      if (failMetadataAudit && event.type === VAULT_AUDIT_TYPES.metadataEdited) {
+        failMetadataAudit = false;
+        throw new Error("synthetic audit outage");
+      }
+      await originalRecord(event);
+    };
+
+    const first = await server.inject({
+      method: "POST",
+      url: `/v1/vault/mutation-approvals/${id}/approve`,
+      payload: { jws },
+    });
+    expect(first.statusCode).toBe(500);
+    expect((await deps.credentialStore.findActive(reference))?.allowed_hosts).toContain(
+      "recovery.example.test",
+    );
+    expect((await deps.credentialMutationApprovalStore.getById(id))?.status).toBe("recoverable");
+
+    const retried = await server.inject({
+      method: "POST",
+      url: `/v1/vault/mutation-approvals/${id}/approve`,
+      payload: { jws },
+    });
+    expect(retried.statusCode).toBe(200);
+    expect((await deps.credentialMutationApprovalStore.getById(id))?.status).toBe("approved");
+    const audits = await deps.vaultAuditStore.list(
+      (await deps.credentialStore.findActive(reference))!.account_id,
+      { type: VAULT_AUDIT_TYPES.metadataEdited, reference },
+    );
+    expect(audits.filter((event) => event.payload.approval_id === id)).toHaveLength(1);
+  });
+
+  it("atomically rejects concurrent renames into the same service label", async () => {
+    const firstReference = await storeCredential("Stripe", "first", "sk-first");
+    const secondReference = await storeCredential("Stripe", "second", "sk-second");
+    const first = await createMutation({
+      operation: "edit",
+      reference: firstReference,
+      changes: { label: "shared" },
+    });
+    const second = await createMutation({
+      operation: "edit",
+      reference: secondReference,
+      changes: { label: "shared" },
+    });
+    const firstId = (first.json() as { approval_id: string }).approval_id;
+    const secondId = (second.json() as { approval_id: string }).approval_id;
+    const firstCeremony = await mutationCeremony(firstId);
+    const secondCeremony = await mutationCeremony(secondId);
+    const [firstJws, secondJws] = await Promise.all([
+      signHash(firstCeremony.payload_sha256, CREDENTIAL_MUTATION_VOUCH_CONTEXT, "mandate_first"),
+      signHash(secondCeremony.payload_sha256, CREDENTIAL_MUTATION_VOUCH_CONTEXT, "mandate_second"),
+    ]);
+
+    const responses = await Promise.all([
+      server.inject({
+        method: "POST",
+        url: `/v1/vault/mutation-approvals/${firstId}/approve`,
+        payload: { jws: firstJws },
+      }),
+      server.inject({
+        method: "POST",
+        url: `/v1/vault/mutation-approvals/${secondId}/approve`,
+        payload: { jws: secondJws },
+      }),
+    ]);
+    expect(responses.map((response) => response.statusCode).sort()).toEqual([200, 409]);
+    expect(responses.find((response) => response.statusCode === 409)?.json()).toEqual({
+      error: "credential_name_conflict",
+    });
+    const accountId = (await deps.credentialStore.findByReferenceIncludingDeleted(firstReference))!
+      .account_id;
+    const active = await deps.credentialStore.listByAccount(accountId);
+    expect(active.filter((credential) => credential.label === "shared")).toHaveLength(1);
   });
 
   it("returns typed missing and ambiguous selector failures without creating an approval", async () => {

@@ -76,6 +76,13 @@ export class PrismaCredentialStore implements CredentialStore {
     return row === null ? null : this.toRecord(row);
   }
 
+  async isActive(reference: string, accountId: string): Promise<boolean> {
+    const row = await this.prisma.credential.findFirst({
+      where: { reference, account_id: accountId, deleted_at: null },
+    });
+    return row !== null;
+  }
+
   async findActiveByServiceLabel(
     accountId: string,
     service: string,
@@ -224,22 +231,48 @@ export class PrismaCredentialStore implements CredentialStore {
       allowed_hosts?: string[];
       metadata?: Record<string, unknown>;
     },
-  ): Promise<boolean> {
-    const result = await this.prisma.credential.updateMany({
-      where: {
-        reference,
-        deleted_at: null,
-        label: expected.label,
-        allowed_hosts: { equals: expected.allowed_hosts },
-        metadata: { equals: expected.metadata },
-      },
-      data: {
-        ...(input.label !== undefined ? { label: input.label } : {}),
-        ...(input.allowed_hosts !== undefined ? { allowed_hosts: input.allowed_hosts } : {}),
-        ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
-      },
+    uniqueSlot?: {
+      accountId: string;
+      service: string;
+      label: string;
+    },
+  ): Promise<"updated" | "changed" | "conflict"> {
+    return this.prisma.$transaction(async (tx) => {
+      if (uniqueSlot !== undefined) {
+        const slotKey = `${uniqueSlot.accountId}\u0000${uniqueSlot.service.toLowerCase()}\u0000${uniqueSlot.label}`;
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${slotKey}, 0))`;
+        const rows = await tx.credential.findMany({
+          where: { account_id: uniqueSlot.accountId, deleted_at: null },
+          orderBy: { created_at: "desc" },
+        });
+        const service = uniqueSlot.service.toLowerCase();
+        const conflict = rows.some((row) => {
+          const candidate = this.toRecord(row);
+          return (
+            candidate.reference !== reference &&
+            candidate.label === uniqueSlot.label &&
+            typeof candidate.metadata.service === "string" &&
+            candidate.metadata.service.toLowerCase() === service
+          );
+        });
+        if (conflict) return "conflict";
+      }
+      const result = await tx.credential.updateMany({
+        where: {
+          reference,
+          deleted_at: null,
+          label: expected.label,
+          allowed_hosts: { equals: expected.allowed_hosts },
+          metadata: { equals: expected.metadata },
+        },
+        data: {
+          ...(input.label !== undefined ? { label: input.label } : {}),
+          ...(input.allowed_hosts !== undefined ? { allowed_hosts: input.allowed_hosts } : {}),
+          ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+        },
+      });
+      return result.count > 0 ? "updated" : "changed";
     });
-    return result.count > 0;
   }
 
   async findByIdForAccountIncludingDeleted(
