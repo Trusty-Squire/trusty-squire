@@ -4396,7 +4396,8 @@ export class BrowserController {
             const isRenderedDialog = (element: Element): boolean => {
               if (!isDialogElement(element)) return false;
               if (element instanceof HTMLDialogElement) return element.open;
-              if (typeof element.checkVisibility === "function") return element.checkVisibility();
+              if (typeof element.checkVisibility === "function")
+                return element.checkVisibility({ visibilityProperty: true });
               if (element.hasAttribute("hidden")) return false;
               const style = window.getComputedStyle(element);
               return style.display !== "none" && style.visibility !== "hidden";
@@ -12294,7 +12295,8 @@ export class BrowserController {
             const isRenderedDialog = (element: Element): boolean => {
               if (!isDialogElement(element)) return false;
               if (element instanceof HTMLDialogElement) return element.open;
-              if (typeof element.checkVisibility === "function") return element.checkVisibility();
+              if (typeof element.checkVisibility === "function")
+                return element.checkVisibility({ visibilityProperty: true });
               if (element.hasAttribute("hidden")) return false;
               const style = window.getComputedStyle(element);
               return style.display !== "none" && style.visibility !== "hidden";
