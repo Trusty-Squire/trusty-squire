@@ -66,11 +66,7 @@ export class PrismaCredentialMutationApprovalStore implements CredentialMutation
     return row === null ? null : toRecord(row);
   }
 
-  async commit(
-    id: string,
-    mandateId: string | null,
-    now: Date,
-  ): Promise<CredentialMutationCommitResult> {
+  async commit(id: string, mandateId: string | null): Promise<CredentialMutationCommitResult> {
     try {
       return await this.prisma.$transaction(async (tx) => {
         const locked = await tx.$queryRaw<CredentialMutationApprovalRow[]>`
@@ -86,6 +82,11 @@ export class PrismaCredentialMutationApprovalStore implements CredentialMutation
         if (row === undefined) return "not_pending";
         const record = toRecord(row);
         if (record.status === "approved") return "already_approved";
+        const clock = await tx.$queryRaw<Array<{ now: Date }>>`
+          SELECT clock_timestamp() AS now
+        `;
+        const now = clock[0]?.now;
+        if (now === undefined) throw new Error("credential mutation transaction clock unavailable");
         if (record.expiresAt <= now) return "expired";
         if (record.status !== "pending") return "not_pending";
 

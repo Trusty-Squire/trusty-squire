@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { ApiDeps } from "../services/deps.js";
 import {
   applyCredentialMetadataChanges,
+  credentialLabelSchema,
   editableMetadata,
 } from "../services/credential-metadata.js";
 import { resolveCredentialForAccount } from "../services/credential-resolution.js";
@@ -44,7 +45,7 @@ const loginHostEdit = z
 
 const metadataChanges = z
   .object({
-    label: z.string().trim().min(1).max(60).optional(),
+    label: credentialLabelSchema.optional(),
     allowed_hosts: allowedHostEdit.optional(),
     login_hosts: loginHostEdit.optional(),
   })
@@ -352,13 +353,8 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
         return reply.code(200).send({ status: "approved", operation: record.operation });
       }
 
-      const commitNow = opts.deps.now?.() ?? new Date();
       const mandateId = typeof claims.mandate_id === "string" ? claims.mandate_id : null;
-      const result = await opts.deps.credentialMutationApprovalStore.commit(
-        record.id,
-        mandateId,
-        commitNow,
-      );
+      const result = await opts.deps.credentialMutationApprovalStore.commit(record.id, mandateId);
       if (result === "already_approved") {
         return reply.code(200).send({ status: "approved", operation: record.operation });
       }

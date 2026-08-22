@@ -1,11 +1,12 @@
 import { z } from "zod";
 import { assertApi, type Tool } from "./index.js";
 import { ALWAYS_LOAD_META } from "./always-load.js";
+import { credentialLabelSchema } from "./credential-label.js";
 
 const inputSchema = z
   .object({
     service: z.string().min(1).max(120),
-    label: z.string().min(1).max(60).optional(),
+    label: credentialLabelSchema.optional(),
     value: z.string().min(1).max(8192).optional(),
     fields: z.record(z.string().min(1).max(8192)).optional(),
     env_var_suggestion: z.string().min(1).max(120).optional(),

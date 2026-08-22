@@ -7,7 +7,6 @@ import { CredentialSlotConflictError, type CredentialRecord } from "@trusty-squi
 import { ulid } from "ulid";
 import { getApiPrismaClient, type ApiPrismaClient } from "../../services/api-prisma-client.js";
 import { PrismaCredentialStore } from "../../services/prisma-credential-store.js";
-import { PrismaVaultAuditStore } from "../../services/prisma-vault-audit-store.js";
 import {
   ensureActiveCredentialSlotIndex,
   rolloutActiveCredentialSlotIndex,
@@ -19,7 +18,7 @@ const runDatabaseTests = databaseUrl !== undefined && databaseUrl.length > 0;
 describe.skipIf(!runDatabaseTests)("active credential slot index rollout", () => {
   const root = fileURLToPath(new URL("../../../../../", import.meta.url));
   const schema = `credential_slot_${process.pid}_${Date.now()}`;
-  const scopedUrl = new URL(databaseUrl!);
+  const scopedUrl = new URL(databaseUrl ?? "postgresql://skipped.invalid/test");
   scopedUrl.searchParams.set("schema", schema);
   let prisma: ApiPrismaClient | undefined;
   let store: PrismaCredentialStore;
@@ -52,20 +51,49 @@ describe.skipIf(!runDatabaseTests)("active credential slot index rollout", () =>
     await store.insert(old);
     await store.insert(recent);
 
-    const originalDelete = store.softDeleteIfDuplicate.bind(store);
+    await prisma!.$executeRawUnsafe(`
+      CREATE FUNCTION fail_collapse_audit() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.type = 'vault.credential_collapsed' THEN
+          RAISE EXCEPTION 'synthetic collapse audit failure';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql
+    `);
+    await prisma!.$executeRawUnsafe(`
+      CREATE TRIGGER fail_collapse_audit
+      BEFORE INSERT ON "VaultAuditEvent"
+      FOR EACH ROW EXECUTE FUNCTION fail_collapse_audit()
+    `);
+    await expect(
+      store.collapseDuplicate(
+        old.reference,
+        old.account_id,
+        "OpenAI",
+        old.label,
+        new Date("2026-03-01T00:00:00Z"),
+      ),
+    ).rejects.toThrow(/synthetic collapse audit failure/);
+    expect((await store.listByAccount("acct_slot")).map((row) => row.reference).sort()).toEqual(
+      [old.reference, recent.reference].sort(),
+    );
+    await prisma!.$executeRawUnsafe(`DROP TRIGGER fail_collapse_audit ON "VaultAuditEvent"`);
+    await prisma!.$executeRawUnsafe(`DROP FUNCTION fail_collapse_audit()`);
+
+    const originalCollapse = store.collapseDuplicate.bind(store);
     let injected = false;
-    store.softDeleteIfDuplicate = async (...args) => {
-      const deleted = await originalDelete(...args);
-      if (deleted && !injected) {
+    store.collapseDuplicate = async (...args) => {
+      const collapsedInto = await originalCollapse(...args);
+      if (collapsedInto !== null && !injected) {
         injected = true;
         await store.insert(credential("legacy_raced", "shared", new Date("2026-02-15T00:00:00Z")));
       }
-      return deleted;
+      return collapsedInto;
     };
     const rollout = await rolloutActiveCredentialSlotIndex(
       prisma!,
       store,
-      new PrismaVaultAuditStore(prisma!),
       () => new Date("2026-03-01T00:00:00Z"),
     );
     expect(rollout.index).toBe("created");

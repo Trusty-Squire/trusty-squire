@@ -8,9 +8,11 @@
 import type { Buffer } from "node:buffer";
 import {
   CredentialSlotConflictError,
+  VAULT_AUDIT_TYPES,
   type CredentialRecord,
   type CredentialStore,
 } from "@trusty-squire/vault";
+import { ulid } from "ulid";
 import type { ApiPrismaClient } from "./api-prisma-client.js";
 
 interface CredentialRow {
@@ -135,35 +137,57 @@ export class PrismaCredentialStore implements CredentialStore {
     });
   }
 
-  async softDeleteIfDuplicate(
+  async collapseDuplicate(
     reference: string,
     accountId: string,
     service: string,
     label: string,
     deletedAt: Date,
-  ): Promise<boolean> {
-    const rows = await this.prisma.$queryRaw<Array<{ reference: string }>>`
-      UPDATE "Credential" AS target
-      SET "deleted_at" = ${deletedAt}
-      WHERE target."reference" = ${reference}
-        AND target."account_id" = ${accountId}
-        AND target."deleted_at" IS NULL
-        AND target."label" = ${label}
-        AND jsonb_typeof(target."metadata"->'service') = 'string'
-        AND lower(target."metadata"->>'service') = lower(${service})
-        AND EXISTS (
-          SELECT 1
-          FROM "Credential" AS duplicate
-          WHERE duplicate."reference" <> target."reference"
-            AND duplicate."account_id" = target."account_id"
-            AND duplicate."deleted_at" IS NULL
-            AND duplicate."label" = target."label"
-            AND jsonb_typeof(duplicate."metadata"->'service') = 'string'
-            AND lower(duplicate."metadata"->>'service') = lower(target."metadata"->>'service')
-        )
-      RETURNING target."reference"
-    `;
-    return rows.length === 1;
+  ): Promise<string | null> {
+    return await this.prisma.$transaction(async (tx) => {
+      const slot = await tx.$queryRaw<Array<{ reference: string; service: string }>>`
+        SELECT "reference", "metadata"->>'service' AS service
+        FROM "Credential"
+        WHERE "account_id" = ${accountId}
+          AND "deleted_at" IS NULL
+          AND "label" = ${label}
+          AND jsonb_typeof("metadata"->'service') = 'string'
+          AND lower("metadata"->>'service') = lower(${service})
+        ORDER BY "created_at" DESC, "reference" DESC
+        FOR UPDATE
+      `;
+      if (!slot.some((candidate) => candidate.reference === reference)) return null;
+      const survivor = slot.find((candidate) => candidate.reference !== reference);
+      if (survivor === undefined) return null;
+
+      const deleted = await tx.credential.updateMany({
+        where: {
+          reference,
+          account_id: accountId,
+          deleted_at: null,
+          label,
+        },
+        data: { deleted_at: deletedAt },
+      });
+      if (deleted.count !== 1) return null;
+
+      await tx.vaultAuditEvent.create({
+        data: {
+          id: ulid(),
+          account_id: accountId,
+          type: VAULT_AUDIT_TYPES.collapsed,
+          payload: {
+            reference,
+            collapsed_into: survivor.reference,
+            requester: "system",
+            service: survivor.service,
+            label,
+          },
+          emitted_at: deletedAt,
+        },
+      });
+      return survivor.reference;
+    });
   }
 
   async replaceSecret(

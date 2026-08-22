@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { CredentialMutationApproval } from "../api-client.js";
 import { ALWAYS_LOAD_META } from "./always-load.js";
 import { assertApi, type Tool } from "./index.js";
+import { credentialLabelSchema } from "./credential-label.js";
 
 const selector = {
   reference: z.string().min(1).max(400).optional(),
@@ -25,7 +26,7 @@ const loginHostEdit = z
 
 const changes = z
   .object({
-    label: z.string().trim().min(1).max(60).optional(),
+    label: credentialLabelSchema.optional(),
     allowed_hosts: allowedHostEdit.optional(),
     login_hosts: loginHostEdit.optional(),
   })

@@ -70,7 +70,7 @@ live under the DEK/KEK and are untouched by a master-key rotation.
 | Method + path | Auth | Purpose |
 |---|---|---|
 | `GET /v1/vault/credentials` | web+agent | Metadata list. Now also `age_days`, `last_changed_at`, `rotated_at`, and a `stale` flag (rotation nudge). |
-| `POST /v1/vault/mutation-approvals` | agent | Begin a Telegram/passkey-vouched metadata edit or soft delete. The signed payload binds operation, target reference, and exact before/after metadata. |
+| `POST /v1/vault/mutation-approvals` | web+agent | Begin a Telegram/passkey-vouched metadata edit or soft delete. The signed payload binds operation, target reference, requesting agent, nonce, and exact before/after metadata. |
 | `POST /v1/vault/credentials/:id/health` | web | Envelope integrity probe — confirms the row still decrypts under the current keyring. No secret returned, no retrieval counted. `healthy:false` ≠ HTTP error. |
 | `POST /v1/vault/credentials/:id/restore` | web | Undelete a soft-deleted credential. `409` if a live `(service,label)` twin holds the slot. |
 | `POST /v1/vault/credentials/revoke-all` | web | Kill-switch: soft-delete every active credential. Requires `{ confirm: true }`. Recoverable via restore until retention sweeps. |
@@ -83,6 +83,14 @@ the second is right-to-be-forgotten.
 
 The complete vault, payment-audit, and short-lived approval route/auth
 reference is owned by [`apps/api/README.md`](../apps/api/README.md#endpoints).
+
+The web and agent flows share the same server-side mutation chokepoint. The web
+ceremony signs the displayed capability but never writes credential metadata
+directly. After signature verification, one short database transaction locks
+the pending approval, checks expiry using the database clock, verifies the
+signed before-state, applies the metadata edit or soft delete, records the audit
+event, and marks the approval terminal. A transaction failure leaves the
+approval pending and the credential unchanged.
 
 **Rate limiting:** every decrypt path — agent retrieve, runtime
 retrieve, AND web `reveal` — counts against one per-account ceiling

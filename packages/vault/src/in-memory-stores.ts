@@ -71,38 +71,6 @@ export class InMemoryCredentialStore implements CredentialStore {
     r.deleted_at = deletedAt;
   }
 
-  async softDeleteIfDuplicate(
-    reference: string,
-    accountId: string,
-    service: string,
-    label: string,
-    deletedAt: Date,
-  ): Promise<boolean> {
-    const target = this.byReference.get(reference);
-    if (
-      target === undefined ||
-      target.account_id !== accountId ||
-      target.deleted_at !== null ||
-      target.label !== label ||
-      typeof target.metadata.service !== "string" ||
-      target.metadata.service.toLowerCase() !== service.toLowerCase()
-    ) {
-      return false;
-    }
-    const duplicate = [...this.byReference.values()].some(
-      (candidate) =>
-        candidate.reference !== reference &&
-        candidate.account_id === accountId &&
-        candidate.deleted_at === null &&
-        candidate.label === label &&
-        typeof candidate.metadata.service === "string" &&
-        candidate.metadata.service.toLowerCase() === service.toLowerCase(),
-    );
-    if (!duplicate) return false;
-    target.deleted_at = deletedAt;
-    return true;
-  }
-
   async replaceSecret(
     reference: string,
     payload: {

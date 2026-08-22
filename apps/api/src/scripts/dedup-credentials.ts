@@ -26,10 +26,8 @@
 
 import process from "node:process";
 import type { CredentialRecord } from "@trusty-squire/vault";
-import { VAULT_AUDIT_TYPES } from "@trusty-squire/vault";
 import { getApiPrismaClient } from "../services/api-prisma-client.js";
 import { PrismaCredentialStore } from "../services/prisma-credential-store.js";
-import { PrismaVaultAuditStore } from "../services/prisma-vault-audit-store.js";
 
 // ── Pure decision logic (no DB I/O — unit-tested in isolation) ──────────
 
@@ -177,7 +175,6 @@ interface IndexState {
 // events. The now() clock is injectable so a future test could pin it.
 export async function runDedup(
   store: PrismaCredentialStore,
-  audit: PrismaVaultAuditStore,
   apply: boolean,
   now: () => Date = () => new Date(),
 ): Promise<RunResult> {
@@ -196,26 +193,15 @@ export async function runDedup(
     const deletedAt = now();
     for (const g of allGroups) {
       for (const ref of g.collapsed) {
-        const deleted = await store.softDeleteIfDuplicate(
+        const collapsedInto = await store.collapseDuplicate(
           ref,
           g.account_id,
           g.service,
           g.label,
           deletedAt,
         );
-        if (!deleted) continue;
+        if (collapsedInto === null) continue;
         rowsCollapsed += 1;
-        await audit.record({
-          account_id: g.account_id,
-          type: VAULT_AUDIT_TYPES.collapsed,
-          payload: {
-            reference: ref,
-            collapsed_into: g.kept,
-            requester: "system",
-            service: g.service_display,
-            label: g.label,
-          },
-        });
       }
     }
     console.warn(
@@ -268,12 +254,11 @@ export async function ensureActiveCredentialSlotIndex(
 export async function rolloutActiveCredentialSlotIndex(
   prisma: ReturnType<typeof getApiPrismaClient>,
   store: PrismaCredentialStore,
-  audit: PrismaVaultAuditStore,
   now: () => Date = () => new Date(),
 ): Promise<{ dedup: RunResult; index: "created" | "already_present" }> {
   let lastConflict: unknown;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const dedup = await runDedup(store, audit, true, now);
+    const dedup = await runDedup(store, true, now);
     try {
       return { dedup, index: await ensureActiveCredentialSlotIndex(prisma) };
     } catch (error) {
@@ -323,9 +308,8 @@ export async function main(argv: string[]): Promise<void> {
   }
   const prisma = getApiPrismaClient(databaseUrl);
   const store = new PrismaCredentialStore(prisma);
-  const audit = new PrismaVaultAuditStore(prisma);
-  const rollout = ensureIndex ? await rolloutActiveCredentialSlotIndex(prisma, store, audit) : null;
-  const result = rollout?.dedup ?? (await runDedup(store, audit, apply));
+  const rollout = ensureIndex ? await rolloutActiveCredentialSlotIndex(prisma, store) : null;
+  const result = rollout?.dedup ?? (await runDedup(store, apply));
   const indexResult = rollout?.index ?? null;
   console.warn(
     `[dedup] done. accounts_scanned=${result.accountsScanned} ` +

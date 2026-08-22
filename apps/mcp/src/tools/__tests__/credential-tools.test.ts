@@ -116,6 +116,30 @@ describe("store_credential (upsert)", () => {
     expect(storeCredentialTool.inputSchema.safeParse({ service: "X" }).success).toBe(false);
   });
 
+  it("normalizes labels with the same semantics as edit_credential", () => {
+    const stored = storeCredentialTool.inputSchema.safeParse({
+      service: "OpenAI",
+      label: "  production  ",
+      value: "sk-x",
+    });
+    const edited = editCredentialTool.inputSchema.safeParse({
+      reference: "vault://a/b/c",
+      changes: { label: "  production  " },
+    });
+    expect(stored.success && stored.data.label).toBe("production");
+    expect(edited.success && edited.data.changes.label).toBe("production");
+    expect(
+      storeCredentialTool.inputSchema.safeParse({ service: "OpenAI", label: "   ", value: "x" })
+        .success,
+    ).toBe(false);
+    expect(
+      editCredentialTool.inputSchema.safeParse({
+        reference: "vault://a/b/c",
+        changes: { label: "   " },
+      }).success,
+    ).toBe(false);
+  });
+
   it("throws without an active session", async () => {
     await expect(storeCredentialTool.handler({ service: "x", value: "y" }, null)).rejects.toThrow(
       /active Trusty Squire session/,

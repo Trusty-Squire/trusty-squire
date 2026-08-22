@@ -119,6 +119,12 @@ import type {
 import { CredentialSlotConflictError, VAULT_AUDIT_TYPES } from "./types.js";
 
 export const DEFAULT_LABEL = "default";
+export const MAX_CREDENTIAL_LABEL_LENGTH = 60;
+
+export function normalizeCredentialLabel(raw: string): string | null {
+  const label = raw.trim();
+  return label.length > 0 && label.length <= MAX_CREDENTIAL_LABEL_LENGTH ? label : null;
+}
 
 export interface VaultStoreInput {
   account_id: string;
@@ -313,7 +319,8 @@ export class CredentialVault implements VaultClient {
   // overwrites the field set (= rotation) on subsequent writes, keeping
   // the existing reference, allowed_hosts, and label.
   async store(input: VaultStoreInput): Promise<VaultEntry> {
-    const label = input.label ?? DEFAULT_LABEL;
+    const label = normalizeCredentialLabel(input.label ?? DEFAULT_LABEL);
+    if (label === null) throw new Error("credential label must be 1-60 characters");
     const fieldNames = Object.keys(input.fields);
     if (fieldNames.length === 0) {
       throw new Error("store requires at least one field");

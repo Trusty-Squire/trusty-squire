@@ -55,13 +55,6 @@ export interface CredentialStore {
   ): Promise<CredentialRecord | null>;
   markRetrieved(reference: string, retrievedAt: Date): Promise<void>;
   softDelete(reference: string, deletedAt: Date): Promise<void>;
-  softDeleteIfDuplicate(
-    reference: string,
-    accountId: string,
-    service: string,
-    label: string,
-    deletedAt: Date,
-  ): Promise<boolean>;
   // Overwrite the encrypted payload (the upsert / web-edit path). The
   // envelope is replaced wholesale (fresh kek/dek) along with the
   // field-name list; allowed_hosts + label are left untouched.

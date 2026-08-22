@@ -1,4 +1,21 @@
-import { normalizeCredentialHosts, type CredentialRecord } from "@trusty-squire/vault";
+import {
+  normalizeCredentialHosts,
+  normalizeCredentialLabel,
+  type CredentialRecord,
+} from "@trusty-squire/vault";
+import { z } from "zod";
+
+export const credentialLabelSchema = z.string().transform((value, context) => {
+  const label = normalizeCredentialLabel(value);
+  if (label === null) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "credential label must be 1-60 characters",
+    });
+    return z.NEVER;
+  }
+  return label;
+});
 
 export type HostListEdit = {
   mode: "add" | "remove" | "replace";
@@ -63,7 +80,7 @@ export function applyCredentialMetadataChanges(
     return { error: "login_hosts_required" };
   }
   return {
-    label: changes.label?.trim() ?? before.label,
+    label: changes.label ?? before.label,
     allowed_hosts: allowedHosts,
     login_hosts: loginHosts,
     auth_strategy: authStrategy,

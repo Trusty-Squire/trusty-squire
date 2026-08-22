@@ -370,6 +370,36 @@ describe("vouch-gated credential mutations", () => {
     expect(await deps.credentialStore.findActive(reference)).not.toBeNull();
   });
 
+  it("normalizes store and edit labels with the same semantics", async () => {
+    const reference = await storeCredential("OpenAI", "  production  ");
+    expect((await deps.credentialStore.findActive(reference))?.label).toBe("production");
+
+    const created = await createMutation({
+      operation: "edit",
+      reference,
+      changes: { label: "  primary  " },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject({ after: { label: "primary" } });
+    const id = (created.json() as { approval_id: string }).approval_id;
+    expect((await approveMutation(id)).statusCode).toBe(200);
+    expect((await deps.credentialStore.findActive(reference))?.label).toBe("primary");
+
+    const invalidStore = await server.inject({
+      method: "POST",
+      url: "/v1/vault/credentials",
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: { service: "OpenAI", label: "   ", value: "sk-invalid" },
+    });
+    expect(invalidStore.statusCode).toBe(400);
+    const invalidEdit = await createMutation({
+      operation: "edit",
+      reference,
+      changes: { label: "   " },
+    });
+    expect(invalidEdit.statusCode).toBe(400);
+  });
+
   it("does not reuse a pending approval across requesting agents", async () => {
     const reference = await storeCredential();
     const first = await createMutation({ operation: "delete", reference });

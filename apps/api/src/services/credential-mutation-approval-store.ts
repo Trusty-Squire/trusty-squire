@@ -54,7 +54,7 @@ export interface CredentialMutationApprovalStore {
     id: string,
     accountId: string,
   ): Promise<CredentialMutationApprovalRecord | null>;
-  commit(id: string, mandateId: string | null, now: Date): Promise<CredentialMutationCommitResult>;
+  commit(id: string, mandateId: string | null): Promise<CredentialMutationCommitResult>;
 }
 
 export class InMemoryCredentialMutationApprovalStore implements CredentialMutationApprovalStore {
@@ -110,18 +110,15 @@ export class InMemoryCredentialMutationApprovalStore implements CredentialMutati
     return record === undefined || record.accountId !== accountId ? null : cloneRecord(record);
   }
 
-  async commit(
-    id: string,
-    mandateId: string | null,
-    now: Date,
-  ): Promise<CredentialMutationCommitResult> {
+  async commit(id: string, mandateId: string | null): Promise<CredentialMutationCommitResult> {
     const record = this.records.get(id);
     if (record === undefined || this.committing.has(id)) return "not_pending";
     if (record.status === "approved") return "already_approved";
-    if (record.expiresAt <= now) return "expired";
     if (record.status !== "pending") return "not_pending";
     this.committing.add(id);
     try {
+      const now = this.now();
+      if (record.expiresAt <= now) return "expired";
       const credential = await this.credentials.findByReferenceIncludingDeleted(
         record.credentialReference,
       );

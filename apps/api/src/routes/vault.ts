@@ -29,6 +29,7 @@ import type { ApiDeps } from "../services/deps.js";
 import type { EmailForwarder } from "../services/email-forwarder.js";
 import { buildEmailForwarder } from "../services/webhook-forwarder.js";
 import { clearSessionCookie } from "../auth/middleware.js";
+import { credentialLabelSchema } from "../services/credential-metadata.js";
 
 const AUDIT_TYPE_VALUES = Object.values(VAULT_AUDIT_TYPES) as [VaultAuditType, ...VaultAuditType[]];
 
@@ -60,7 +61,7 @@ function faviconDomain(service: string | null, allowedHosts: string[]): string |
 const storeBody = z
   .object({
     service: z.string().min(1).max(120),
-    label: z.string().min(1).max(60).optional(),
+    label: credentialLabelSchema.optional(),
     value: z.string().min(1).max(8192).optional(),
     fields: z.record(z.string().min(1).max(8192)).optional(),
     env_var_suggestion: z.string().min(1).max(120).optional(),
