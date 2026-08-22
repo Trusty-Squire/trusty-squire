@@ -3897,12 +3897,55 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "refuses a token-prefix false singleton beside a segmented JP PAN",
+    async () => {
+      const pageUrl = "https://shop.example.test/card-note-and-segmented-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form>
+            <input type="text" name="CARD_NOTE" id="unrelated-note">
+            <dl>
+              <dt>カード番号</dt>
+              <dd>
+                <input type="text" id="pan-1"><input type="text" id="pan-2">
+                <input type="text" id="pan-3"><input type="text" id="pan-4">
+              </dd>
+            </dl>
+            <input type="text" name="CREDIT_NAME" id="holder">
+            <select name="CREDIT_LIMIT_MONTH"><option value="">月を指定</option><option value="12">12</option></select>
+            <select name="CREDIT_LIMIT_YEAR"><option value="">年を指定</option><option value="30">2030</option></select>
+            <input type="text" name="SECURITY_CD" id="cvv">
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+          "payment_field_not_found:pan",
+        );
+        await expect(
+          page.locator("input").evaluateAll((inputs) =>
+            inputs.map((input) => (input as HTMLInputElement).value),
+          ),
+        ).resolves.toEqual(["", "", "", "", "", "", ""]);
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "counts visible PAN candidates beyond the first ten before filling",
     async () => {
       const pageUrl = "https://shop.example.test/long-ambiguous-checkout.html";
       const hiddenPans = Array.from(
         { length: 9 },
-        (_, index) => `<input type="text" name="CARD_NO_HIDDEN_${index}" hidden>`,
+        (_, index) =>
+          `<input type="text" name="CARD_NO_HIDDEN_${index}" autocomplete="cc-number" hidden>`,
       ).join("");
       const { page, browser } = await servePages({
         [pageUrl]: `
@@ -3936,6 +3979,44 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "discovers complete card groups beyond the first ten PAN anchors",
+    async () => {
+      const pageUrl = "https://shop.example.test/long-multi-form-checkout.html";
+      const hiddenPans = Array.from(
+        { length: 9 },
+        () => '<input type="text" autocomplete="cc-number" hidden>',
+      ).join("");
+      const form = (prefix: string): string => `
+        <form>
+          <input type="text" autocomplete="cc-number" id="${prefix}-pan">
+          <input type="text" autocomplete="cc-name" id="${prefix}-holder">
+          <input type="text" autocomplete="cc-exp-month" id="${prefix}-month">
+          <input type="text" autocomplete="cc-exp-year" id="${prefix}-year">
+          <input type="text" autocomplete="cc-csc" id="${prefix}-cvv">
+        </form>`;
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <style>main { display: flex; gap: 24px } form { width: 280px }</style>
+          <main>${form("first")}${hiddenPans}${form("second")}</main>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_card_form_ambiguous",
+        );
+        expect(await page.locator("#first-pan").inputValue()).toBe("");
+        expect(await page.locator("#second-pan").inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "resolves label-for and wrapped-label JP expiry pairs and cleans replaced selects",
     async () => {
       const expiryOptions = `
@@ -3946,16 +4027,16 @@ describe("split-checkout card fill (real browser)", () => {
         {
           name: "label-for",
           expiry: `
-            <label for="expiry-month">有効期限</label>
-            <select id="expiry-month">${expiryOptions}</select>
-            <select id="expiry-year">${yearOptions}</select>`,
+            <label for="field-a">有効期限</label>
+            <select id="field-a">${expiryOptions}</select>
+            <select id="field-b">${yearOptions}</select>`,
         },
         {
           name: "wrapped-label",
           expiry: `
             <label>有効期限
-              <select id="expiry-month">${expiryOptions}</select>
-              <select id="expiry-year">${yearOptions}</select>
+              <select id="field-a">${expiryOptions}</select>
+              <select id="field-b">${yearOptions}</select>
             </label>`,
         },
       ];
@@ -3978,21 +4059,23 @@ describe("split-checkout card fill (real browser)", () => {
           (controller as unknown as { page: Page }).page = page;
 
           await controller.fillCheckoutCardFields(CARD);
-          expect(await page.locator("#expiry-month").inputValue()).toBe("12");
-          expect(await page.locator("#expiry-year").inputValue()).toBe("30");
+          expect(await page.locator("#field-a").inputValue()).toBe("12");
+          expect(await page.locator("#field-b").inputValue()).toBe("30");
 
           await page.locator("select").evaluateAll((selects) => {
             for (const original of selects) {
               const replacement = original.cloneNode(true) as HTMLSelectElement;
               replacement.removeAttribute("data-ts-sealed-payment");
+              replacement.removeAttribute("data-ts-jp-card-exp");
+              replacement.removeAttribute("data-ts-jp-card-field");
               replacement.value = (original as HTMLSelectElement).value;
               original.replaceWith(replacement);
             }
           });
           await controller.clearCheckoutCardFields();
 
-          expect(await page.locator("#expiry-month").inputValue()).toBe("");
-          expect(await page.locator("#expiry-year").inputValue()).toBe("");
+          expect(await page.locator("#field-a").inputValue()).toBe("");
+          expect(await page.locator("#field-b").inputValue()).toBe("");
         } finally {
           await browser.close();
         }

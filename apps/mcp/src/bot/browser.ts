@@ -588,37 +588,17 @@ function checkoutUrlOrderIdentities(
   }
 }
 
-// JP-convention name/id substrings alongside the Western autocomplete/name
-// patterns. EbisuMart — a widely-deployed Japanese EC platform (the Hibiya
-// Kadan checkout runs on it) — names its card fields CREDIT_NO / CREDIT_NAME /
-// SECURITY_CD / CREDIT_LIMIT_MONTH / CREDIT_LIMIT_YEAR, none of which contain
-// "cardnumber"/"cvv"/"exp". The data-ts-jp-card-* attribute selectors are a
-// label-text-based fallback (see stampJapaneseCardLabelFields) for sites that
-// use neither convention — matched here as plain attribute selectors so they
-// stay valid for both frame.locator() and the native element.matches() calls
-// inside the card-group completeness check.
+// EbisuMart — a widely-deployed Japanese EC platform (the Hibiya Kadan
+// checkout runs on it) — names its card fields CREDIT_NO / CREDIT_NAME /
+// SECURITY_CD / CREDIT_LIMIT_MONTH / CREDIT_LIMIT_YEAR. PAN name/id and JP
+// label conventions are normalized to data-ts-jp-card-field by
+// stampJapaneseCardLabelFields so this selector stays valid for both
+// frame.locator() and native element.matches() calls.
 const CHECKOUT_NON_PAN_IDENTITY_EXCLUSION =
   ':not([name*="gift" i]):not([id*="gift" i]):not([name*="loyalty" i]):not([id*="loyalty" i]):not([name*="point" i]):not([id*="point" i]):not([name*="prepaid" i]):not([id*="prepaid" i]):not([name*="member" i]):not([id*="member" i])';
 
 const CHECKOUT_PAN_FIELD_SELECTORS = [
   'input[autocomplete~="cc-number"]',
-  'input[name*="cardnumber" i]',
-  'input[id*="card-number" i]',
-  'input[id*="cardnumber" i]',
-  'input[name*="card_no" i]',
-  'input[name*="cardno" i]',
-  'input[name*="card-no" i]',
-  'input[id*="card_no" i]',
-  'input[id*="cardno" i]',
-  'input[id*="card-no" i]',
-  'input[name*="card_number" i]',
-  'input[id*="card_number" i]',
-  'input[name*="creditno" i]',
-  'input[name*="credit_no" i]',
-  'input[name*="credit-no" i]',
-  'input[id*="creditno" i]',
-  'input[id*="credit_no" i]',
-  'input[id*="credit-no" i]',
   'input[data-ts-jp-card-field="pan"]',
 ]
   .map((selector) => `${selector}${CHECKOUT_NON_PAN_IDENTITY_EXCLUSION}`)
@@ -8375,6 +8355,7 @@ export class BrowserController {
     // recognized PayPal-independent surface (checkout.pci.shopifyinc.com); a
     // PayPal EXPRESS button (an unfillable-wallet iframe, not card fields)
     // must not cause a false-positive refusal of a fillable checkout.
+    await this.stampJapaneseCardLabelFields(this.page.frames());
     const panFrame = await this.panFieldFrame();
     if (panFrame === null) return false;
     try {
@@ -8389,7 +8370,7 @@ export class BrowserController {
     if (!this.page) return null;
     for (const frame of this.page.frames()) {
       const locator = frame.locator(CHECKOUT_PAN_FIELD_SELECTORS);
-      const count = Math.min(await locator.count().catch(() => 0), 10);
+      const count = await locator.count().catch(() => 0);
       for (let i = 0; i < count; i += 1) {
         const input = locator.nth(i);
         if (
@@ -8427,11 +8408,8 @@ export class BrowserController {
     }
   }
 
-  // Label-text fallback for JP checkout forms whose card fields carry neither
-  // Western autocomplete/name conventions nor a recognized JP platform
-  // convention (e.g. EbisuMart's CREDIT_NO/CREDIT_NAME/SECURITY_CD, matched
-  // directly by name/id substring in CHECKOUT_PAN_FIELD_SELECTORS et al.).
-  // Scans dt/th/label/"table-label" elements for カード番号 / カード名義 /
+  // Normalizes conservative PAN name/id conventions and scans
+  // dt/th/label/"table-label" elements for カード番号 / カード名義 /
   // セキュリティコード and stamps the associated single text input with
   // data-ts-jp-card-field; 有効期限 stamps its month/year <select>s via their
   // own first ("月を指定"/"年を指定") option text, since the label spans both
@@ -8439,6 +8417,7 @@ export class BrowserController {
   // non-text, or unassociated control is left unstamped rather than guessed —
   // a wrong-field card fill is worse than a fill_field_not_found refusal.
   private async stampJapaneseCardLabelFields(frames: readonly Frame[]): Promise<void> {
+    const excludedPanIdentities = ["gift", "loyalty", "point", "prepaid", "member"];
     const panLabels = ["カード番号"];
     const excludedPanLabels = [
       "ギフトカード番号",
@@ -8486,6 +8465,35 @@ export class BrowserController {
                 element instanceof HTMLInputElement &&
                 (element.type === "text" || element.type === "tel") &&
                 isVisible(element);
+              const identityTokens = (value: string): string[] =>
+                value
+                  .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+                  .toLowerCase()
+                  .split(/[^a-z0-9]+/)
+                  .filter((token) => token.length > 0);
+              const isPanIdentity = (value: string): boolean => {
+                const tokens = identityTokens(value);
+                return tokens.some(
+                  (token, index) =>
+                    token === "cardno" ||
+                    token === "cardnumber" ||
+                    token === "creditno" ||
+                    (token === "card" &&
+                      (tokens[index + 1] === "no" || tokens[index + 1] === "number")) ||
+                    (token === "credit" && tokens[index + 1] === "no"),
+                );
+              };
+              document.querySelectorAll("input[name],input[id]").forEach((element) => {
+                if (!isTextInput(element)) return;
+                const identities = [element.getAttribute("name") ?? "", element.id];
+                const excluded = identities.some((identity) => {
+                  const lower = identity.toLowerCase();
+                  return labels.excludedPanIdentities.some((token) => lower.includes(token));
+                });
+                if (!excluded && identities.some(isPanIdentity)) {
+                  element.setAttribute("data-ts-jp-card-field", "pan");
+                }
+              });
               const associatedElements = (host: Element, selector: string): Element[] => {
                 const associated = new Set<Element>();
                 if (host instanceof HTMLLabelElement && host.htmlFor.length > 0) {
@@ -8550,6 +8558,7 @@ export class BrowserController {
                 });
             },
             {
+              excludedPanIdentities,
               pan: panLabels,
               excludedPan: excludedPanLabels,
               name: nameLabels,
@@ -8600,7 +8609,7 @@ export class BrowserController {
     await this.stampJapaneseCardLabelFields(frames);
     for (const [frameIndex, frame] of frames.entries()) {
       const pans = frame.locator(CHECKOUT_PAN_FIELD_SELECTORS);
-      const count = Math.min(await pans.count().catch(() => 0), 10);
+      const count = await pans.count().catch(() => 0);
       for (let index = 0; index < count; index += 1) {
         const pan = pans.nth(index);
         if (!(await pan.isVisible().catch(() => false))) continue;
@@ -9140,7 +9149,7 @@ export class BrowserController {
         if (fillableCount === 0) return false;
       }
       for (const { frame, matches } of candidates) {
-        const count = Math.min(await matches.count().catch(() => 0), 10);
+        const count = await matches.count().catch(() => 0);
         for (let i = 0; i < count; i += 1) {
           const input = matches.nth(i);
           if (!(await input.isVisible().catch(() => false))) continue;
@@ -9490,6 +9499,7 @@ export class BrowserController {
   // carry one (if any) so the refusal is diagnosable without filling it.
   private async excludedPanFrameOrigin(allowed: ReadonlySet<Frame>): Promise<string | null> {
     if (!this.page) return null;
+    await this.stampJapaneseCardLabelFields(this.page.frames());
     for (const frame of this.page.frames()) {
       if (allowed.has(frame)) continue;
       const count = await frame
