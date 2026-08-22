@@ -4376,49 +4376,52 @@ export class BrowserController {
       return await fn(modalActive);
     } finally {
       await this.page
-        .evaluate((markers) => {
-          const { marker, anchorMarker } = markers;
-          const isDialogElement = (element: Element): boolean =>
-            element.getAttribute("role") === "dialog" ||
-            element.tagName.toLowerCase() === "dialog" ||
-            element.getAttribute("aria-modal") === "true";
-          // Only a currently open/rendered dialog counts as still active:
-          // HTMLDialogElement.close() leaves the <dialog> connected without
-          // `open`, and frameworks keep hidden role="dialog" nodes mounted
-          // after closing — a stale remnant must not keep the background
-          // locked once the modal genuinely closed.
-          const isRenderedDialog = (element: Element): boolean => {
-            if (!isDialogElement(element)) return false;
-            if (element instanceof HTMLDialogElement) return element.open;
-            if (element.hasAttribute("hidden")) return false;
-            const style = window.getComputedStyle(element);
-            return style.display !== "none" && style.visibility !== "hidden";
-          };
-          const subtreeHasDialog = (root: Element | ShadowRoot): boolean => {
-            if (root instanceof Element) {
-              if (isRenderedDialog(root)) return true;
-              if (root.shadowRoot !== null && subtreeHasDialog(root.shadowRoot)) return true;
-            }
-            for (const el of Array.from(root.querySelectorAll("*"))) {
-              if (isRenderedDialog(el)) return true;
-              if (el.shadowRoot !== null && subtreeHasDialog(el.shadowRoot)) return true;
-            }
-            return false;
-          };
-          const cleanupAndRestore = (root: Document | ShadowRoot): void => {
-            root
-              .querySelectorAll(`[${anchorMarker}]`)
-              .forEach((el) => el.removeAttribute(anchorMarker));
-            root.querySelectorAll(`[${marker}]`).forEach((el) => {
-              el.removeAttribute(marker);
-              if (subtreeHasDialog(el)) el.setAttribute("inert", "");
-            });
-            root.querySelectorAll("*").forEach((el) => {
-              if (el.shadowRoot !== null) cleanupAndRestore(el.shadowRoot);
-            });
-          };
-          cleanupAndRestore(document);
-        }, { marker, anchorMarker })
+        .evaluate(
+          (markers) => {
+            const { marker, anchorMarker } = markers;
+            const isDialogElement = (element: Element): boolean =>
+              element.getAttribute("role") === "dialog" ||
+              element.tagName.toLowerCase() === "dialog" ||
+              element.getAttribute("aria-modal") === "true";
+            // Only a currently open/rendered dialog counts as still active:
+            // HTMLDialogElement.close() leaves the <dialog> connected without
+            // `open`, and frameworks keep hidden role="dialog" nodes mounted
+            // after closing — a stale remnant must not keep the background
+            // locked once the modal genuinely closed.
+            const isRenderedDialog = (element: Element): boolean => {
+              if (!isDialogElement(element)) return false;
+              if (element instanceof HTMLDialogElement) return element.open;
+              if (element.hasAttribute("hidden")) return false;
+              const style = window.getComputedStyle(element);
+              return style.display !== "none" && style.visibility !== "hidden";
+            };
+            const subtreeHasDialog = (root: Element | ShadowRoot): boolean => {
+              if (root instanceof Element) {
+                if (isRenderedDialog(root)) return true;
+                if (root.shadowRoot !== null && subtreeHasDialog(root.shadowRoot)) return true;
+              }
+              for (const el of Array.from(root.querySelectorAll("*"))) {
+                if (isRenderedDialog(el)) return true;
+                if (el.shadowRoot !== null && subtreeHasDialog(el.shadowRoot)) return true;
+              }
+              return false;
+            };
+            const cleanupAndRestore = (root: Document | ShadowRoot): void => {
+              root
+                .querySelectorAll(`[${anchorMarker}]`)
+                .forEach((el) => el.removeAttribute(anchorMarker));
+              root.querySelectorAll(`[${marker}]`).forEach((el) => {
+                el.removeAttribute(marker);
+                if (subtreeHasDialog(el)) el.setAttribute("inert", "");
+              });
+              root.querySelectorAll("*").forEach((el) => {
+                if (el.shadowRoot !== null) cleanupAndRestore(el.shadowRoot);
+              });
+            };
+            cleanupAndRestore(document);
+          },
+          { marker, anchorMarker },
+        )
         .catch(() => undefined);
     }
   }
@@ -4494,7 +4497,7 @@ export class BrowserController {
         if (optName.length > 0) {
           const byName = modalActive
             ? this.page
-                .locator('[data-ts-inert-region-anchor]')
+                .locator("[data-ts-inert-region-anchor]")
                 .getByRole(role, { name: optName, exact: false })
                 .first()
             : this.page.getByRole(role, { name: optName, exact: false }).first();
@@ -12225,84 +12228,90 @@ export class BrowserController {
     const marker = "data-ts-inert-neutralized";
     const anchorMarker = "data-ts-inert-region-anchor";
     await handle
-      .evaluate((el, markers) => {
-        const { marker, anchorMarker } = markers;
-        const composedParent = (node: Node): Element | null => {
-          const parent = node.parentNode;
-          if (parent === null) return null;
-          if (parent instanceof ShadowRoot) return parent.host;
-          return parent instanceof Element ? parent : null;
-        };
-        const isDialogElement = (element: Element): boolean =>
-          element.getAttribute("role") === "dialog" ||
-          element.tagName.toLowerCase() === "dialog" ||
-          element.getAttribute("aria-modal") === "true";
-        const nearestModalRegion = (element: Element): Element | null => {
-          let cur: Element | null = element;
+      .evaluate(
+        (el, markers) => {
+          const { marker, anchorMarker } = markers;
+          const composedParent = (node: Node): Element | null => {
+            const parent = node.parentNode;
+            if (parent === null) return null;
+            if (parent instanceof ShadowRoot) return parent.host;
+            return parent instanceof Element ? parent : null;
+          };
+          const isDialogElement = (element: Element): boolean =>
+            element.getAttribute("role") === "dialog" ||
+            element.tagName.toLowerCase() === "dialog" ||
+            element.getAttribute("aria-modal") === "true";
+          const nearestModalRegion = (element: Element): Element | null => {
+            let cur: Element | null = element;
+            while (cur !== null) {
+              if (isDialogElement(cur)) return cur;
+              cur = composedParent(cur);
+            }
+            return null;
+          };
+          const region = nearestModalRegion(el);
+          if (region === null) return;
+          region.setAttribute(anchorMarker, "1");
+          let cur: Element | null = el;
           while (cur !== null) {
-            if (isDialogElement(cur)) return cur;
+            if (cur.hasAttribute("inert")) {
+              cur.removeAttribute("inert");
+              cur.setAttribute(marker, "1");
+            }
             cur = composedParent(cur);
           }
-          return null;
-        };
-        const region = nearestModalRegion(el);
-        if (region === null) return;
-        region.setAttribute(anchorMarker, "1");
-        let cur: Element | null = el;
-        while (cur !== null) {
-          if (cur.hasAttribute("inert")) {
-            cur.removeAttribute("inert");
-            cur.setAttribute(marker, "1");
-          }
-          cur = composedParent(cur);
-        }
-      }, { marker, anchorMarker })
+        },
+        { marker, anchorMarker },
+      )
       .catch(() => undefined);
     try {
       return await fn();
     } finally {
       await frame
-        .evaluate((markers) => {
-          const { marker, anchorMarker } = markers;
-          const isDialogElement = (element: Element): boolean =>
-            element.getAttribute("role") === "dialog" ||
-            element.tagName.toLowerCase() === "dialog" ||
-            element.getAttribute("aria-modal") === "true";
-          // Mirrors the main-frame restore: only an open/rendered dialog
-          // keeps the background locked — a closed <dialog> or hidden
-          // role="dialog" remnant does not.
-          const isRenderedDialog = (element: Element): boolean => {
-            if (!isDialogElement(element)) return false;
-            if (element instanceof HTMLDialogElement) return element.open;
-            if (element.hasAttribute("hidden")) return false;
-            const style = window.getComputedStyle(element);
-            return style.display !== "none" && style.visibility !== "hidden";
-          };
-          const subtreeHasDialog = (root: Element | ShadowRoot): boolean => {
-            if (root instanceof Element) {
-              if (isRenderedDialog(root)) return true;
-              if (root.shadowRoot !== null && subtreeHasDialog(root.shadowRoot)) return true;
-            }
-            for (const el of Array.from(root.querySelectorAll("*"))) {
-              if (isRenderedDialog(el)) return true;
-              if (el.shadowRoot !== null && subtreeHasDialog(el.shadowRoot)) return true;
-            }
-            return false;
-          };
-          const cleanupAndRestore = (root: Document | ShadowRoot): void => {
-            root
-              .querySelectorAll(`[${anchorMarker}]`)
-              .forEach((el) => el.removeAttribute(anchorMarker));
-            root.querySelectorAll(`[${marker}]`).forEach((el) => {
-              el.removeAttribute(marker);
-              if (subtreeHasDialog(el)) el.setAttribute("inert", "");
-            });
-            root.querySelectorAll("*").forEach((el) => {
-              if (el.shadowRoot !== null) cleanupAndRestore(el.shadowRoot);
-            });
-          };
-          cleanupAndRestore(document);
-        }, { marker, anchorMarker })
+        .evaluate(
+          (markers) => {
+            const { marker, anchorMarker } = markers;
+            const isDialogElement = (element: Element): boolean =>
+              element.getAttribute("role") === "dialog" ||
+              element.tagName.toLowerCase() === "dialog" ||
+              element.getAttribute("aria-modal") === "true";
+            // Mirrors the main-frame restore: only an open/rendered dialog
+            // keeps the background locked — a closed <dialog> or hidden
+            // role="dialog" remnant does not.
+            const isRenderedDialog = (element: Element): boolean => {
+              if (!isDialogElement(element)) return false;
+              if (element instanceof HTMLDialogElement) return element.open;
+              if (element.hasAttribute("hidden")) return false;
+              const style = window.getComputedStyle(element);
+              return style.display !== "none" && style.visibility !== "hidden";
+            };
+            const subtreeHasDialog = (root: Element | ShadowRoot): boolean => {
+              if (root instanceof Element) {
+                if (isRenderedDialog(root)) return true;
+                if (root.shadowRoot !== null && subtreeHasDialog(root.shadowRoot)) return true;
+              }
+              for (const el of Array.from(root.querySelectorAll("*"))) {
+                if (isRenderedDialog(el)) return true;
+                if (el.shadowRoot !== null && subtreeHasDialog(el.shadowRoot)) return true;
+              }
+              return false;
+            };
+            const cleanupAndRestore = (root: Document | ShadowRoot): void => {
+              root
+                .querySelectorAll(`[${anchorMarker}]`)
+                .forEach((el) => el.removeAttribute(anchorMarker));
+              root.querySelectorAll(`[${marker}]`).forEach((el) => {
+                el.removeAttribute(marker);
+                if (subtreeHasDialog(el)) el.setAttribute("inert", "");
+              });
+              root.querySelectorAll("*").forEach((el) => {
+                if (el.shadowRoot !== null) cleanupAndRestore(el.shadowRoot);
+              });
+            };
+            cleanupAndRestore(document);
+          },
+          { marker, anchorMarker },
+        )
         .catch(() => undefined);
     }
   }

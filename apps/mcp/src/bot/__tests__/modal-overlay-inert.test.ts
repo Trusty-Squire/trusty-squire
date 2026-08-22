@@ -249,9 +249,8 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
       // No leftover marker attributes from the neutralize/restore machinery.
       const markerLeaked = await page.evaluate(
         () =>
-          document.querySelectorAll(
-            "[data-ts-inert-neutralized],[data-ts-inert-region-anchor]",
-          ).length > 0,
+          document.querySelectorAll("[data-ts-inert-neutralized],[data-ts-inert-region-anchor]")
+            .length > 0,
       );
       expect(markerLeaked).toBe(false);
     } finally {
@@ -436,23 +435,20 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
       await ctrl.click(confirmBtn!.selector);
       expect(await page.title()).toBe("SHADOW_CONFIRM_CLICKED");
       expect(
-        await page.evaluate(
-          () => {
-            const root = document.querySelector("modal-shell")?.shadowRoot;
-            return {
-              outerInert: document.getElementById("app-wrapper")?.hasAttribute("inert") === true,
-              innerInert:
-                root?.getElementById("shadow-inert-wrapper")?.hasAttribute("inert") === true,
-              markerLeaked:
-                root?.querySelector(
-                  "[data-ts-inert-neutralized],[data-ts-inert-region-anchor]",
-                ) !== null ||
-                document.querySelector(
-                  "[data-ts-inert-neutralized],[data-ts-inert-region-anchor]",
-                ) !== null,
-            };
-          },
-        ),
+        await page.evaluate(() => {
+          const root = document.querySelector("modal-shell")?.shadowRoot;
+          return {
+            outerInert: document.getElementById("app-wrapper")?.hasAttribute("inert") === true,
+            innerInert:
+              root?.getElementById("shadow-inert-wrapper")?.hasAttribute("inert") === true,
+            markerLeaked:
+              root?.querySelector("[data-ts-inert-neutralized],[data-ts-inert-region-anchor]") !==
+                null ||
+              document.querySelector(
+                "[data-ts-inert-neutralized],[data-ts-inert-region-anchor]",
+              ) !== null,
+          };
+        }),
       ).toEqual({ outerInert: true, innerInert: true, markerLeaked: false });
     } finally {
       await page.close();
@@ -613,7 +609,13 @@ describe("modal_active observation signal (pure function)", () => {
     // churn (1/5 = 20%) under OBSERVE_CHURN_FULL_THRESHOLD (60%) and the
     // second observe genuinely takes the delta path, not a full resync.
     const first: InteractiveElement[] = [0, 1, 2, 3, 4].map((i) =>
-      el({ index: i, selector: `#a${i}`, visibleText: `Home ${i}`, container: null, topmost: true }),
+      el({
+        index: i,
+        selector: `#a${i}`,
+        visibleText: `Home ${i}`,
+        container: null,
+        topmost: true,
+      }),
     );
     const firstBuilt = buildCompactObservation({
       sessionId: "s3",

@@ -77,7 +77,11 @@ When `detail` is `compact` (the default), `observeSession`:
   in compact they become `value_len` of the placeholder.)
 - **Metadata** so omission is explicit, never silent:
   `elements_total` (the complete current count, including delta/collapsed
-  omissions) and `text_truncated` (the 4000-char text cap tripped).
+  omissions), `text_truncated` (the 4000-char text cap tripped), and
+  `modal_active:true` when a dialog/modal region (`role="dialog"`, `<dialog>`, or
+  `aria-modal="true"`) has at least one topmost element. `modal_active` is omitted
+  when no modal is interactable and is computed from the complete element set,
+  so it remains accurate on delta emits.
 
 **Full mode remains the byte-equivalent escape hatch:** it returns every element
 and field plus `screen` and `accessibility`, with no delta markers, link collapse,
@@ -249,6 +253,13 @@ disposal. `operate-session-flow.test.ts` owns locator typing and the action-time
 frame guards. `browser-frame-support.test.ts` owns ordinary same-/cross-origin
 frame extraction, origin tagging, frame-scoped clicking, captcha-frame
 exclusion, and the no-frame negative control.
+
+`apps/mcp/src/bot/__tests__/modal-overlay-inert.test.ts` owns the real-browser
+inert-ancestor modal gates: dialog controls remain topmost and clickable while
+background controls remain protected; inert state and temporary markers are
+restored across close, replacement, open-shadow, and child-frame paths; true
+sibling portals remain unaffected; and `modal_active` stays correct on full and
+delta emits.
 
 ## Non-goals / explicitly avoided
 
