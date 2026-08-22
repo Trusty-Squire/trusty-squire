@@ -88,6 +88,55 @@ function nonPortaledDialogFixture(): string {
 </body></html>`)}`;
 }
 
+function formWrappedDialogFixture(): string {
+  return `data:text/html,${encodeURIComponent(`
+<!doctype html><html><body style="margin:0;padding:0">
+  <div id="app-wrapper" inert aria-hidden="true">
+    <button id="bg-btn">Background Button</button>
+    <div class="backdrop" style="position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.5)">
+      <div role="dialog" aria-modal="true" style="position:fixed;top:100px;left:100px;z-index:1001;width:400px;background:white;padding:20px">
+        <h2>Review and transfer</h2>
+        <form>
+          <input type="checkbox" id="form-tos" />
+          <label for="form-tos">I agree</label>
+          <button type="button" id="form-confirm-btn" onclick="document.title='FORM_CONFIRM_CLICKED'">Confirm transfer</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</body></html>`)}`;
+}
+
+function openShadowDialogFixture(): string {
+  return `data:text/html,${encodeURIComponent(`
+<!doctype html><html><body style="margin:0;padding:0">
+  <div id="app-wrapper" inert aria-hidden="true">
+    <button id="bg-btn">Background Button</button>
+    <modal-shell></modal-shell>
+  </div>
+  <script>
+    class ModalShell extends HTMLElement {
+      constructor() {
+        super();
+        const root = this.attachShadow({ mode: "open" });
+        root.innerHTML =
+          '<div class="backdrop" style="position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.5)">' +
+          '<div role="dialog" aria-modal="true" style="position:fixed;top:100px;left:100px;z-index:1001;width:400px;background:white;padding:20px">' +
+          '<h2>Shadow review</h2>' +
+          '<input type="checkbox" id="shadow-tos" />' +
+          '<label for="shadow-tos">I agree</label>' +
+          '<button id="shadow-confirm-btn">Confirm transfer</button>' +
+          '</div></div>';
+        root.getElementById("shadow-confirm-btn").addEventListener("click", () => {
+          document.title = "SHADOW_CONFIRM_CLICKED";
+        });
+      }
+    }
+    customElements.define("modal-shell", ModalShell);
+  </script>
+</body></html>`)}`;
+}
+
 describe("modal overlay blindness — non-portaled inert-ancestor dialog (real Chromium)", () => {
   beforeAll(async () => {
     browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
@@ -184,6 +233,46 @@ describe("modal overlay blindness — non-portaled inert-ancestor dialog (real C
       expect(bg).toBeDefined();
       // The background is a normal, unhidden control again post-close.
       expect(bg?.topmost).toBe(true);
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("finds a dialog beyond an intervening form", async () => {
+    const { ctrl, page } = await pageFor(formWrappedDialogFixture());
+    try {
+      const els = await ctrl.extractInteractiveElements();
+      const tos = els.find((e) => e.id === "form-tos");
+      const confirmBtn = els.find((e) => e.id === "form-confirm-btn");
+
+      expect(tos).toBeDefined();
+      expect(confirmBtn).toBeDefined();
+      expect(tos?.topmost).toBe(true);
+      expect(confirmBtn?.topmost).toBe(true);
+
+      await ctrl.click(confirmBtn!.selector);
+      expect(await page.title()).toBe("FORM_CONFIRM_CLICKED");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("pierces an open shadow root to neutralize an outer inert ancestor", async () => {
+    const { ctrl, page } = await pageFor(openShadowDialogFixture());
+    try {
+      const els = await ctrl.extractInteractiveElements();
+      const confirmBtn = els.find((e) => e.id === "shadow-confirm-btn");
+
+      expect(confirmBtn).toBeDefined();
+      expect(confirmBtn?.topmost).toBe(true);
+
+      await ctrl.click(confirmBtn!.selector);
+      expect(await page.title()).toBe("SHADOW_CONFIRM_CLICKED");
+      expect(
+        await page.evaluate(
+          () => document.getElementById("app-wrapper")?.hasAttribute("inert") === true,
+        ),
+      ).toBe(true);
     } finally {
       await page.close();
     }

@@ -4336,15 +4336,32 @@ export class BrowserController {
       .$eval(
         selector,
         (el, marker) => {
-          const region = el.closest('[role="dialog"],dialog,[aria-modal="true"]');
-          if (region === null) return;
+          const composedParent = (node: Node): Element | null => {
+            const parent = node.parentNode;
+            if (parent === null) return null;
+            if (parent instanceof ShadowRoot) return parent.host;
+            return parent instanceof Element ? parent : null;
+          };
+          const isDialogElement = (element: Element): boolean =>
+            element.getAttribute("role") === "dialog" ||
+            element.tagName.toLowerCase() === "dialog" ||
+            element.getAttribute("aria-modal") === "true";
+          const nearestModalRegion = (element: Element): Element | null => {
+            let cur: Element | null = element;
+            while (cur !== null) {
+              if (isDialogElement(cur)) return cur;
+              cur = composedParent(cur);
+            }
+            return null;
+          };
+          if (nearestModalRegion(el) === null) return;
           let cur: Element | null = el;
           while (cur !== null) {
             if (cur.hasAttribute("inert")) {
               cur.removeAttribute("inert");
               cur.setAttribute(marker, "1");
             }
-            cur = cur.parentElement;
+            cur = composedParent(cur);
           }
         },
         marker,
@@ -11602,11 +11619,26 @@ export class BrowserController {
         return tag;
       };
 
-      const isModalRegion = (region: Element | null): boolean =>
-        region !== null &&
-        (region.getAttribute("role") === "dialog" ||
-          region.tagName.toLowerCase() === "dialog" ||
-          region.getAttribute("aria-modal") === "true");
+      const composedParent = (node: Node): Element | null => {
+        const parent = node.parentNode;
+        if (parent === null) return null;
+        if (parent instanceof ShadowRoot) return parent.host;
+        return parent instanceof Element ? parent : null;
+      };
+
+      const isDialogElement = (el: Element): boolean =>
+        el.getAttribute("role") === "dialog" ||
+        el.tagName.toLowerCase() === "dialog" ||
+        el.getAttribute("aria-modal") === "true";
+
+      const nearestModalRegion = (el: Element): Element | null => {
+        let cur: Element | null = el;
+        while (cur !== null) {
+          if (isDialogElement(cur)) return cur;
+          cur = composedParent(cur);
+        }
+        return null;
+      };
 
       // `inert`, used to hide the background while a modal is open, is meant
       // to sit on a SIBLING of a truly-portaled dialog (Angular CDK/Material
@@ -11622,11 +11654,13 @@ export class BrowserController {
       // topmost:false/occludedBy even though it is the genuinely visible,
       // user-clickable control (and a real click on it hangs the same way —
       // see withModalInertNeutralized in browser.ts). Scoped tight: only
-      // ancestors of an element that is ITSELF inside a detected dialog/modal
-      // region are neutralized, so a real background control outside any
-      // modal keeps its inert protection (money-fence boundary untouched).
+      // ancestors of an element found by a dedicated nearest-DIALOG search are
+      // neutralized. The composed-tree walk pierces open shadow-root boundaries;
+      // closed roots remain unreachable like the rest of the extractor. A real
+      // background control outside any modal keeps its inert protection
+      // (money-fence boundary untouched).
       const neutralizeInertForHitTest = (el: Element): Element[] => {
-        if (!isModalRegion(regionFor(el))) return [];
+        if (nearestModalRegion(el) === null) return [];
         const neutralized: Element[] = [];
         let cur: Element | null = el;
         while (cur !== null) {
@@ -11634,7 +11668,7 @@ export class BrowserController {
             cur.removeAttribute("inert");
             neutralized.push(cur);
           }
-          cur = cur.parentElement;
+          cur = composedParent(cur);
         }
         return neutralized;
       };
@@ -12131,6 +12165,57 @@ export class BrowserController {
     return target.frameOrigin;
   }
 
+  private async withModalInertNeutralizedInFrame<T>(
+    frame: Frame,
+    handle: ElementHandle<Element>,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const marker = "data-ts-inert-neutralized";
+    await handle
+      .evaluate((el, marker) => {
+        const composedParent = (node: Node): Element | null => {
+          const parent = node.parentNode;
+          if (parent === null) return null;
+          if (parent instanceof ShadowRoot) return parent.host;
+          return parent instanceof Element ? parent : null;
+        };
+        const isDialogElement = (element: Element): boolean =>
+          element.getAttribute("role") === "dialog" ||
+          element.tagName.toLowerCase() === "dialog" ||
+          element.getAttribute("aria-modal") === "true";
+        const nearestModalRegion = (element: Element): Element | null => {
+          let cur: Element | null = element;
+          while (cur !== null) {
+            if (isDialogElement(cur)) return cur;
+            cur = composedParent(cur);
+          }
+          return null;
+        };
+        if (nearestModalRegion(el) === null) return;
+        let cur: Element | null = el;
+        while (cur !== null) {
+          if (cur.hasAttribute("inert")) {
+            cur.removeAttribute("inert");
+            cur.setAttribute(marker, "1");
+          }
+          cur = composedParent(cur);
+        }
+      }, marker)
+      .catch(() => undefined);
+    try {
+      return await fn();
+    } finally {
+      await frame
+        .evaluate((marker) => {
+          document.querySelectorAll(`[${marker}]`).forEach((el) => {
+            el.removeAttribute(marker);
+            el.setAttribute("inert", "");
+          });
+        }, marker)
+        .catch(() => undefined);
+    }
+  }
+
   // Frame-scoped click. Deliberately simpler than click() above (no radio/
   // checkbox/aria-toggle special-casing) — it's the escape hatch for a
   // control that lives inside an <iframe>, mirroring how resolvePageTarget is
@@ -12147,7 +12232,14 @@ export class BrowserController {
       );
     }
     try {
-      await handle.click({ timeout: 8000 });
+      const frame = this.resolveFrame(target);
+      if (frame === null) {
+        await handle.click({ timeout: 8000 });
+      } else {
+        await this.withModalInertNeutralizedInFrame(frame, handle, () =>
+          handle.click({ timeout: 8000 }),
+        );
+      }
     } finally {
       await handle.dispose().catch(() => undefined);
     }
