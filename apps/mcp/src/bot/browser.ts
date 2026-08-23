@@ -8655,7 +8655,7 @@ export class BrowserController {
   private async stampJapaneseCardLabelFields(frames: readonly Frame[]): Promise<void> {
     await Promise.all(
       frames.map(async (frame, frameIndex) => {
-        const documentElement = await frame.$<HTMLElement>("html").catch(() => null);
+        const documentElement = await frame.$("html").catch(() => null);
         if (documentElement === null) return;
         try {
           await this.stampJapaneseCardLabelFieldsInDocument(documentElement, frameIndex);
@@ -9819,7 +9819,7 @@ export class BrowserController {
         this.page.frames().map(async (frame) => ({
           frame,
           url: frame.url(),
-          documentElement: await frame.$<HTMLElement>("html").catch(() => null),
+          documentElement: await frame.$("html").catch(() => null),
         })),
       );
       const fillFrames = fillFrameSnapshot.map(({ frame }) => frame);
