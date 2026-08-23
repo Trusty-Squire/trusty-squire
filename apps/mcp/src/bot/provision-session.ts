@@ -577,7 +577,7 @@ export interface Session {
   // this is resumable bookkeeping for operate_payment_status,
   // mirroring the "awaiting_approval" gap it closes for the pre-charge wait.
   // Set by setActivePendingThreeDs, read by getActivePendingThreeDs, cleared
-  // by clearActivePendingThreeDs once resolved or its deadline passes.
+  // by clearActivePendingThreeDsIfCurrent once resolved or its deadline passes.
   pendingThreeDs: PendingThreeDsWait | null;
   // Snapshot of the single approval a filled card belongs to, captured at
   // fill time (setActivePendingCardFill / completeActivePaymentLeaseWithPendingFill)
@@ -2907,10 +2907,14 @@ export function setActivePendingThreeDs(
   (selectedSession ?? activeProvisionSession()).pendingThreeDs = state;
 }
 
-// Cleared once operate_payment_status observes a terminal outcome (or the
-// resumable deadline passes) so a stale entry never lingers.
-export function clearActivePendingThreeDs(selectedSession?: Session): void {
-  (selectedSession ?? activeProvisionSession()).pendingThreeDs = null;
+export function clearActivePendingThreeDsIfCurrent(
+  state: PendingThreeDsWait,
+  selectedSession?: Session,
+): boolean {
+  const session = selectedSession ?? activeProvisionSession();
+  if (session.pendingThreeDs !== state) return false;
+  session.pendingThreeDs = null;
+  return true;
 }
 
 export interface ActivePaymentLease {

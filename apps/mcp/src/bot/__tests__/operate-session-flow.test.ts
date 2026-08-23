@@ -6411,6 +6411,57 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
     await finishProvisionSession(started.session_id);
   });
 
+  it("does not let a stale status call clear newer pending 3DS state", async () => {
+    const finishAuditPayment = vi.fn().mockResolvedValue({ id: "audit_finish" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: { auditPayment: finishAuditPayment } as unknown as ApiClient,
+    });
+    const oldState = buildThreeDsState(Date.now() - 1);
+    setActivePendingThreeDs(oldState);
+    h.waitForThreeDsResult = "timeout";
+
+    let signalFirstAuditStarted: (() => void) | undefined;
+    const firstAuditStarted = new Promise<void>((resolve) => {
+      signalFirstAuditStarted = resolve;
+    });
+    let releaseFirstAudit: (() => void) | undefined;
+    const firstAuditGate = new Promise<void>((resolve) => {
+      releaseFirstAudit = resolve;
+    });
+    const firstAuditPayment = vi.fn(async () => {
+      signalFirstAuditStarted?.();
+      await firstAuditGate;
+      return { id: "audit_first" };
+    });
+    const firstStatus = operatePaymentStatusTool.handler(
+      {},
+      { auditPayment: firstAuditPayment } as unknown as ApiClient,
+    );
+    await firstAuditStarted;
+
+    const secondAuditPayment = vi.fn().mockResolvedValue({ id: "audit_second" });
+    await operatePaymentStatusTool.handler(
+      {},
+      { auditPayment: secondAuditPayment } as unknown as ApiClient,
+    );
+    expect(getActivePendingThreeDs()).toBeNull();
+
+    const newerState = {
+      ...buildThreeDsState(),
+      approval_id: "appr_newer_3ds",
+      approval_url: "https://web.test/vault/pay/appr_newer_3ds",
+    };
+    setActivePendingThreeDs(newerState);
+    releaseFirstAudit?.();
+    await firstStatus;
+
+    expect(getActivePendingThreeDs()).toBe(newerState);
+    expect(firstAuditPayment).toHaveBeenCalledTimes(1);
+    expect(secondAuditPayment).toHaveBeenCalledTimes(1);
+    await finishProvisionSession(started.session_id);
+  });
+
   it("refuses a new operate_pay lease while a prior 3DS outcome is unresolved", async () => {
     const auditPayment = vi.fn().mockResolvedValue({ id: "audit_finish" });
     await startProvisionSession({

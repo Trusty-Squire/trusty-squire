@@ -4,7 +4,7 @@ import {
   activeProvisionBrowserForPayment,
   claimActivePaymentForOperatePay,
   clearActivePendingCardFill,
-  clearActivePendingThreeDs,
+  clearActivePendingThreeDsIfCurrent,
   completeActivePaymentLeaseWithPendingApproval,
   completeActivePaymentLeaseWithPendingFill,
   getActivePendingApproval,
@@ -603,7 +603,7 @@ async function threeDsStatusResult(
       auditRecorded = false;
     }
   }
-  clearActivePendingThreeDs(session);
+  clearActivePendingThreeDsIfCurrent(state, session);
   return {
     status: finalStatus,
     audit_recorded: auditRecorded,

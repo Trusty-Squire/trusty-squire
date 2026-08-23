@@ -5027,6 +5027,49 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "refuses a saved-card selection nested in open shadow roots",
+    async () => {
+      const pageUrl = "https://shop.example.test/shadow-saved-card-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <saved-card-source id="saved-source"></saved-card-source>
+          <form id="checkout">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay</button>
+          </form>
+          <script>
+            const outer = document.querySelector("#saved-source").attachShadow({ mode: "open" });
+            outer.innerHTML = '<saved-card-choice id="saved-choice"></saved-card-choice>';
+            const inner = outer.querySelector("#saved-choice").attachShadow({ mode: "open" });
+            inner.innerHTML =
+              '<input id="saved-card" type="radio" checked>' +
+              '<label for="saved-card">Saved card •••• 9012</label>';
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_card_selection_ambiguous",
+        );
+        expect(await page.evaluate(() => document.body.dataset.submitted)).toBeUndefined();
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "refuses submission when saved-card inspection cannot complete",
     async () => {
       const pageUrl = "https://shop.example.test/detached-card-inspection.html";
