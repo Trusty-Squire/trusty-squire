@@ -36,6 +36,7 @@ import type {
   CartCheckoutObservation,
   PendingApprovalWait,
   PendingCardFill,
+  PendingThreeDsWait,
 } from "./pay-operator.js";
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import type { ApiClient } from "../api-client.js";
@@ -568,6 +569,15 @@ export interface Session {
     | { status: "sealed" }
     | null;
   paymentFieldSealActive: boolean;
+  // A completed operate_pay single-page submit whose post-submit 3DS wait
+  // exhausted its budget with no terminal signal. Deliberately NOT part of
+  // activePayment: the card is already released and the charge already
+  // submitted, so there is no lease to hold and no re-authorization risk —
+  // this is read-only resumable bookkeeping for operate_payment_status,
+  // mirroring the "awaiting_approval" gap it closes for the pre-charge wait.
+  // Set by setActivePendingThreeDs, read by getActivePendingThreeDs, cleared
+  // by clearActivePendingThreeDs once resolved or its deadline passes.
+  pendingThreeDs: PendingThreeDsWait | null;
   // Snapshot of the single approval a filled card belongs to, captured at
   // fill time (setActivePendingCardFill / completeActivePaymentLeaseWithPendingFill)
   // so the place-order guard below still has what it needs after activePayment
@@ -2619,6 +2629,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     replayState: null,
     activePayment: null,
     paymentFieldSealActive: false,
+    pendingThreeDs: null,
     placeOrderApproval: null,
     placeOrderAttempted: false,
     lastCartCheckout: null,
@@ -2723,6 +2734,7 @@ export async function startHarnessProvisionSession(
     replayState: null,
     activePayment: null,
     paymentFieldSealActive: false,
+    pendingThreeDs: null,
     placeOrderApproval: null,
     placeOrderAttempted: false,
     lastCartCheckout: null,
@@ -2883,6 +2895,31 @@ export function getActivePendingApproval(selectedSession?: Session): PendingAppr
   return state?.status === "awaiting_approval" ? state.state : null;
 }
 
+// Read-only: an already-submitted charge whose post-submit 3DS wait
+// exhausted its budget with no terminal signal, if any. Backs
+// operate_payment_status alongside getActivePendingApproval — the two are
+// mutually exclusive (a session either awaits a mandate tap or watches an
+// already-submitted charge's 3DS outcome, never both).
+export function getActivePendingThreeDs(selectedSession?: Session): PendingThreeDsWait | null {
+  return (selectedSession ?? activeProvisionSession()).pendingThreeDs;
+}
+
+// Set once, right after a single-page operate_pay submit's own wait budget
+// runs out with the challenge still genuinely unresolved (never a re-fill,
+// never a re-release of the card).
+export function setActivePendingThreeDs(
+  state: PendingThreeDsWait,
+  selectedSession?: Session,
+): void {
+  (selectedSession ?? activeProvisionSession()).pendingThreeDs = state;
+}
+
+// Cleared once operate_payment_status observes a terminal outcome (or the
+// resumable deadline passes) so a stale entry never lingers.
+export function clearActivePendingThreeDs(selectedSession?: Session): void {
+  (selectedSession ?? activeProvisionSession()).pendingThreeDs = null;
+}
+
 export interface ActivePaymentLease {
   phase: "fill_card" | "single";
 }
@@ -2929,6 +2966,12 @@ export function claimActivePaymentForOperatePay(
   const lease: ActivePaymentLease = { phase: phase === "fill_card" ? "fill_card" : "single" };
   session.activePayment = { status: "operating", lease };
   if (lease.phase === "fill_card") session.paymentFieldSealActive = true;
+  // A fresh attempt supersedes any still-pending 3DS bookkeeping from an
+  // earlier submit in this session — operate_pay never resumes a post-submit
+  // 3DS wait (only operate_payment_status does), so carrying it forward
+  // would leave operate_payment_status reporting on a checkout this new
+  // attempt has already moved past.
+  session.pendingThreeDs = null;
   return resumeApproval !== undefined
     ? { kind: "lease", lease, resumeApproval }
     : { kind: "lease", lease };
@@ -7534,7 +7577,11 @@ export interface PreparedFinishResult<T> {
 }
 
 function profileRequiresDestroy(session: Session): boolean {
-  return session.activePayment !== null || session.paymentFieldSealActive;
+  return (
+    session.activePayment !== null ||
+    session.paymentFieldSealActive ||
+    session.pendingThreeDs !== null
+  );
 }
 
 async function closeFinishingProvisionSession(session: Session): Promise<FinishResult> {
@@ -7544,6 +7591,7 @@ async function closeFinishingProvisionSession(session: Session): Promise<FinishR
   const destroyProfile = profileRequiresDestroy(session);
   session.activePayment = null;
   session.paymentFieldSealActive = false;
+  session.pendingThreeDs = null;
   sessions.delete(sessionId);
   await releaseWarmBrowserPage(session.browser, !destroyProfile);
   return { session_id: sessionId, url, closed: true };

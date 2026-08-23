@@ -801,7 +801,7 @@ import { createHash, generateKeyPairSync } from "node:crypto";
 import canonicalize from "canonicalize";
 import { exportJWK, SignJWT } from "jose";
 import { sealToRecipient } from "../payment-hpke.js";
-import { operatePayTool } from "../../tools/operate-pay.js";
+import { operatePayTool, operatePaymentStatusTool } from "../../tools/operate-pay.js";
 import { ApiClient } from "../../api-client.js";
 import type { formSelectMany } from "../provision-session.js";
 import {
@@ -838,6 +838,8 @@ import {
   clearActivePendingCardFill,
   recipeTargetFor,
   captureObserved,
+  getActivePendingThreeDs,
+  setActivePendingThreeDs,
 } from "../provision-session.js";
 import {
   isRecipeDomainLocked,
@@ -6220,6 +6222,129 @@ describe("operate_pay tool completion — resumes the SAME approval [P0]", () =>
       second.status,
     );
     expect(env.immediateApprovalReads).toEqual([false, true]);
+  });
+});
+
+// Regression coverage for the decoupled/out-of-band 3DS completion gap
+// (companion to pay-operator.test.ts's "a timed-out 3DS wait persists
+// resumable state" unit test): operate_payment_status must actually consume
+// that resumable state — re-checking the SAME live browser rather than
+// leaving it to rot once set.
+describe("operate_payment_status — resumable post-submit 3DS wait", () => {
+  const CHECKOUT = {
+    merchant: "Hibiya Kadan",
+    checkout_origin: "https://hibiyakadan.example.test",
+    amount_cents: 8_800,
+    currency: "JPY",
+  };
+  const threeDsState = {
+    approval_id: "appr_3ds",
+    approval_url: "https://web.test/vault/pay/appr_3ds",
+    checkout: CHECKOUT,
+    last4: "9192",
+    mandate_id: "mandate_3ds",
+    deadline: Date.now() + 60_000,
+  };
+
+  function buildStatusEnv(): { api: ApiClient; auditBodies: Array<Record<string, unknown>> } {
+    const auditBodies: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/v1/vault/payments/audit") && init?.method === "POST") {
+        auditBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        return Response.json({ id: "audit_3ds" }, { status: 201 });
+      }
+      return Response.json({ error: "not_found" }, { status: 404 });
+    }) as typeof fetch;
+    const api = new ApiClient({
+      apiBaseUrl: "https://api.test",
+      registryBaseUrl: "https://registry.test",
+      agentSessionToken: "synthetic-session-token",
+      fetch: fetchMock,
+    });
+    return { api, auditBodies };
+  }
+
+  it("keeps checking the same live browser and clears state once the OOB challenge resolves", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({ serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html" });
+    setActivePendingThreeDs(threeDsState);
+    expect(getActivePendingThreeDs()).toEqual(threeDsState);
+
+    h.waitForThreeDsResult = "timeout";
+    const pending = (await operatePaymentStatusTool.handler({}, env.api)) as Record<string, unknown>;
+    expect(pending).toMatchObject({
+      status: "payment_3ds_pending",
+      next: { tool: "operate_payment_status", wait_seconds: 15 },
+    });
+    expect(getActivePendingThreeDs()).not.toBeNull();
+    expect(env.auditBodies).toHaveLength(0);
+
+    // The cardholder approves the OOB push between polls; a LATER
+    // operate_payment_status call must observe it via the SAME session's
+    // browser without operate_pay ever being called again.
+    h.waitForThreeDsResult = "succeeded";
+    const resolved = (await operatePaymentStatusTool.handler({}, env.api)) as Record<
+      string,
+      unknown
+    >;
+    expect(resolved).toMatchObject({
+      status: "payment_submitted",
+      audit_recorded: true,
+      merchant: CHECKOUT.merchant,
+      amount_cents: CHECKOUT.amount_cents,
+      currency: CHECKOUT.currency,
+    });
+    expect(getActivePendingThreeDs()).toBeNull();
+    expect(env.auditBodies).toEqual([
+      expect.objectContaining({
+        last4: "9192",
+        status: "payment_submitted",
+        approvalId: "appr_3ds",
+        mandateId: "mandate_3ds",
+      }),
+    ]);
+  });
+
+  it("records a declined outcome and clears state when the OOB challenge fails", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({ serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html" });
+    setActivePendingThreeDs(threeDsState);
+
+    h.waitForThreeDsResult = "failed";
+    const result = (await operatePaymentStatusTool.handler({}, env.api)) as Record<string, unknown>;
+
+    expect(result).toMatchObject({ status: "payment_declined", audit_recorded: true });
+    expect(getActivePendingThreeDs()).toBeNull();
+    expect(env.auditBodies).toEqual([expect.objectContaining({ status: "payment_declined" })]);
+  });
+
+  it("hands back an accurate unresolved status once the resumable deadline passes — never fabricates success", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({ serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html" });
+    setActivePendingThreeDs({ ...threeDsState, deadline: Date.now() - 1 });
+
+    h.waitForThreeDsResult = "timeout";
+    const result = (await operatePaymentStatusTool.handler({}, env.api)) as Record<string, unknown>;
+
+    expect(result).toMatchObject({
+      status: "payment_3ds_unresolved",
+      audit_recorded: true,
+      needs_user: { wall: "3ds", resume: "checkout" },
+    });
+    expect(getActivePendingThreeDs()).toBeNull();
+    expect(env.auditBodies).toEqual([
+      expect.objectContaining({ status: "payment_3ds_unresolved" }),
+    ]);
+  });
+
+  it("reports no_pending_payment once nothing is outstanding", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({ serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html" });
+
+    const result = (await operatePaymentStatusTool.handler({}, env.api)) as Record<string, unknown>;
+
+    expect(result).toMatchObject({ status: "no_pending_payment" });
   });
 });
 

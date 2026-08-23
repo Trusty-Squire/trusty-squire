@@ -67,6 +67,26 @@ export interface PendingCardFill {
   mandate_id?: string;
 }
 
+// Post-submit 3-D Secure resumability: the card was already released and the
+// charge already submitted — this is NEVER a new authorization, just a
+// pointer to an already-in-flight one. A decoupled/out-of-band (app-push)
+// challenge's real-world completion time (the cardholder noticing, unlocking
+// their phone, opening the banking app, approving) routinely exceeds a
+// single bounded waitForThreeDsResolution call. Without this, operate_pay
+// returning still-pending after its own wait budget left NOTHING watching
+// the SAME live browser for the outcome — the mandate/approval flow has
+// operate_payment_status for exactly this shape of gap; the post-submit 3DS
+// wait did not, until now. `deadline` bounds how long Trusty Squire will
+// keep re-checking before handing back an accurate unresolved status.
+export interface PendingThreeDsWait {
+  approval_id: string;
+  approval_url: string;
+  checkout: CheckoutSummary;
+  last4: string;
+  mandate_id?: string;
+  deadline: number;
+}
+
 export interface CartCheckoutObservation {
   checkout: CheckoutSummary;
   url: string;
@@ -141,6 +161,11 @@ interface PayDependencies {
   // [P0] Fired when a call ends still-pending (poll budget exhausted, human
   // hasn't responded yet) so the session layer can persist resumable state.
   onApprovalPending: (state: PendingApprovalWait) => void;
+  // Fired when the submit-time waitForThreeDsResolution wait exhausts its
+  // budget with NO terminal signal (genuinely still pending, not declined,
+  // not confirmed) so the session layer can persist resumable state for
+  // operate_payment_status to keep checking the SAME live browser.
+  onThreeDsPending: (state: PendingThreeDsWait) => void;
 }
 
 const cardSchema = z.object({
@@ -413,6 +438,14 @@ function cardRequiredResult(
   };
 }
 
+// Total additional time (beyond this call's own bounded wait) that a
+// resumed, still-pending decoupled/out-of-band 3DS challenge stays
+// checkable via operate_payment_status before handing back an accurate
+// unresolved status. Generous — a real cardholder needs to notice, unlock
+// their phone, open the banking app, and approve — but bounded, matching
+// the rest of this file's "wait, but never forever" posture.
+const THREE_DS_RESUME_WINDOW_MS = 20 * 60 * 1000;
+
 // The cardholder approves 3-D Secure via an app-push in their bank app while
 // the browser's checkout JavaScript owns the native challenge handshake. Fires
 // the Telegram nudge WITHOUT awaiting it (a slow/unresolved Telegram call must
@@ -576,6 +609,7 @@ function defaultDependencies(): PayDependencies {
     onCardFillCleanupFailed: () => undefined,
     onSubmitStarted: () => undefined,
     onApprovalPending: () => undefined,
+    onThreeDsPending: () => undefined,
   };
 }
 
@@ -1331,11 +1365,19 @@ export async function executeOperatePay(
     }
 
     let getThreeDsTelegramSent: () => boolean | undefined = () => undefined;
+    // True only when a real wait ran AND it ended with no terminal signal
+    // (not "failed" — a firm decline is terminal — and not skipped by
+    // three_ds_wait_seconds:0). This is the ONLY case resumability applies:
+    // the challenge may still be genuinely in flight (e.g. a decoupled/
+    // out-of-band app-push the cardholder hasn't approved yet, or approved
+    // just as this call's bounded wait ran out).
+    let threeDsTimedOut = false;
     if (!submitResult.order_confirmed && threeDsWaitMs > 0) {
       getThreeDsTelegramSent = trackThreeDsNotification(
         api.notifyThreeDs(approvalId, threeDsNotificationMode(submitResult)),
       );
       const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
+      threeDsTimedOut = resolution === "timeout";
       paymentStatus = statusAfterThreeDsResolution(paymentStatus, resolution);
     }
 
@@ -1351,6 +1393,22 @@ export async function executeOperatePay(
       auditRecorded = false;
     }
     if (paymentStatus === "payment_3ds_required" || paymentStatus === "payment_outcome_unknown") {
+      // The card is already released and the charge already submitted —
+      // resuming here never re-authorizes anything, it only keeps checking
+      // the SAME live browser for an outcome this call's bounded wait didn't
+      // live to see. Never offered when the wait was skipped outright
+      // (three_ds_wait_seconds:0): that is an explicit caller choice to hand
+      // back immediately, not a still-in-flight challenge.
+      if (threeDsTimedOut) {
+        deps.onThreeDsPending({
+          approval_id: approvalId,
+          approval_url: approvalUrl,
+          checkout,
+          last4,
+          ...(mandateId !== undefined ? { mandate_id: mandateId } : {}),
+          deadline: deps.now() + THREE_DS_RESUME_WINDOW_MS,
+        });
+      }
       return {
         status: paymentStatus,
         audit_recorded: auditRecorded,
@@ -1364,6 +1422,18 @@ export async function executeOperatePay(
           resume: "checkout",
           ...(submitResult.challenge_url !== undefined ? { url: submitResult.challenge_url } : {}),
         },
+        ...(threeDsTimedOut
+          ? {
+              next: {
+                tool: "operate_payment_status",
+                wait_seconds: 15,
+                hint:
+                  "The 3-D Secure challenge had not resolved when this call's wait ended. Call " +
+                  "operate_payment_status to keep checking the same submitted charge — this does " +
+                  "not re-release the card or create a new approval.",
+              },
+            }
+          : {}),
       };
     }
     if (paymentStatus === "payment_declined") {

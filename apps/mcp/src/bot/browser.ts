@@ -9953,6 +9953,49 @@ export class BrowserController {
     return null;
   }
 
+  // Money-fence guard: a repeat-customer checkout (EbisuMart and similar JP
+  // platforms commonly do this) can render our freshly-filled "new card"
+  // fields alongside an ALREADY-SELECTED stored/saved card from a prior
+  // purchase. Filling the new-card fields never unchecks that other
+  // selection, so the checkout can submit the OTHER card while Trusty Squire
+  // faithfully filled and audited the one the mandate actually authorized —
+  // the released+audited card is correct, but a different card is what the
+  // merchant charges. Detects a CHECKED radio, within the same form as the
+  // filled card group, whose own visible text shows a masked PAN or an
+  // explicit saved-card marker — the signal that it represents a stored
+  // card, not just an alternate payment TYPE (e.g. PayPal vs. card) we
+  // aren't trying to use. Scoped to radios only (never <select>, which would
+  // also match our own expiry-month/year controls when the group root
+  // resolves to the whole <form> — every form control, ours included, gets
+  // stamped as part of the group in that case, so containment can't be used
+  // to exclude "our own" fields; a checked radio is never one of them.
+  private async detectCompetingSavedCardSelection(
+    cardGroup: CheckoutCardGroupScope,
+  ): Promise<boolean> {
+    return await cardGroup.selected.root
+      .evaluate((root) => {
+        const savedCardPattern =
+          /(?:••+|\*{2,}|●+|×{2,}|x{4,})[\s-]*\d{2,4}\b|\bending\s+in\s+\d{4}\b|\bcard\s+on\s+file\b|\bsaved\s+card\b|登録済みのカード|前回(?:利用|使用)したカード|保存されたカード/iu;
+        const form = root.closest("form") ?? root.parentElement;
+        if (form === null) return false;
+        const candidates = Array.from(form.querySelectorAll('input[type="radio"]:checked'));
+        for (const candidate of candidates) {
+          const container =
+            candidate.closest("label") ??
+            candidate.closest("[role='radio'],li,div") ??
+            candidate.parentElement;
+          const text = [candidate.getAttribute("aria-label"), container?.textContent]
+            .filter((value): value is string => typeof value === "string")
+            .join(" ")
+            .replace(/\s+/g, " ")
+            .trim();
+          if (text.length > 0 && savedCardPattern.test(text)) return true;
+        }
+        return false;
+      })
+      .catch(() => false);
+  }
+
   // The charge: find and click the pay/place-order control, then poll for a
   // terminal merchant order route or a 3-D Secure challenge. Callers gate this
   // on a verified visible total.
@@ -9964,6 +10007,9 @@ export class BrowserController {
     cardGroup?: CheckoutCardGroupScope,
   ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
+    if (cardGroup !== undefined && (await this.detectCompetingSavedCardSelection(cardGroup))) {
+      throw new Error("payment_card_selection_ambiguous");
+    }
     let outcomeBaseline: CheckoutOutcomeBaseline | undefined;
     this.checkoutOutcomeBaseline = undefined;
     let submitted = false;

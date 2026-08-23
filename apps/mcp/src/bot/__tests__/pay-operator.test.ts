@@ -10,6 +10,7 @@ import {
   type PaymentBrowser,
   type PendingApprovalWait,
   type PendingCardFill,
+  type PendingThreeDsWait,
 } from "../pay-operator.js";
 import { generateOperatorKeypair, sealToRecipient } from "../payment-hpke.js";
 import { manualCardEntryBlockReason } from "../provision-session.js";
@@ -90,6 +91,7 @@ async function harness(
   const resolvedCardRefs: string[] = [];
   const confirmationBodies: Array<Record<string, unknown>> = [];
   const pendingStates: PendingApprovalWait[] = [];
+  const pendingThreeDsStates: PendingThreeDsWait[] = [];
   const nonce = "synthetic-nonce";
   const agent = "synthetic-payment-test-agent";
   let approvalPolls = 0;
@@ -300,6 +302,7 @@ async function harness(
       surfaceApprovalUrl: vi.fn(),
       onCardResolved: (cardRef) => resolvedCardRefs.push(cardRef),
       onApprovalPending: (state) => pendingStates.push(state),
+      onThreeDsPending: (state) => pendingThreeDsStates.push(state),
     },
   );
 
@@ -313,6 +316,7 @@ async function harness(
     resolvedCardRefs,
     confirmationBodies,
     pendingStates,
+    pendingThreeDsStates,
     browser,
   };
 }
@@ -819,6 +823,34 @@ describe("operate_pay", () => {
     expect(notifyBodies).toEqual([{ mode: "detected_challenge" }]);
   });
 
+  // Regression coverage for the decoupled/out-of-band 3DS completion gap: a
+  // timed-out wait (genuinely still pending — the cardholder may approve
+  // just after this call's own bounded wait ends) must leave resumable
+  // state for operate_payment_status to keep checking the SAME already-
+  // submitted charge, and must tell the host to use that tool rather than
+  // silently stranding the browser on the challenge with nothing watching.
+  it("REGRESSION: a timed-out 3DS wait persists resumable state and points to operate_payment_status", async () => {
+    const { result, pendingThreeDsStates } = await harness("happy", "customer_test", undefined, {
+      resolution: "timeout",
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_3ds_required",
+      next: {
+        tool: "operate_payment_status",
+        wait_seconds: 15,
+        hint: expect.stringContaining("not re-release"),
+      },
+    });
+    expect(pendingThreeDsStates).toHaveLength(1);
+    expect(pendingThreeDsStates[0]).toMatchObject({
+      checkout: CHECKOUT,
+      last4: "4242",
+      deadline: expect.any(Number),
+    });
+    expect(pendingThreeDsStates[0]!.deadline).toBeGreaterThan(Date.now());
+  });
+
   it("waits and hands back an app-push message without an on-page challenge", async () => {
     const { result, notifyCalls, notifyBodies, browser } = await harness(
       "happy",
@@ -864,7 +896,7 @@ describe("operate_pay", () => {
   });
 
   it("records declined when the 3DS challenge fails", async () => {
-    const { result, auditBodies, notifyCalls } = await harness(
+    const { result, auditBodies, notifyCalls, pendingThreeDsStates } = await harness(
       "happy",
       "customer_test",
       undefined,
@@ -875,6 +907,8 @@ describe("operate_pay", () => {
     expect(result).not.toHaveProperty("merchant");
     expect(notifyCalls).toHaveLength(1);
     expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_declined" })]);
+    // A firm decline is terminal, not still-pending — no resumable 3DS state.
+    expect(pendingThreeDsStates).toHaveLength(0);
   });
 
   it("records unknown when single-page submission fails after dispatch", async () => {
@@ -892,10 +926,15 @@ describe("operate_pay", () => {
   });
 
   it("hands back immediately without notifying when the 3DS wait is disabled", async () => {
-    const { result, notifyCalls, browser } = await harness("happy", "customer_test", undefined, {
-      resolution: "timeout",
-      waitSeconds: 0,
-    });
+    const { result, notifyCalls, browser, pendingThreeDsStates } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      {
+        resolution: "timeout",
+        waitSeconds: 0,
+      },
+    );
 
     expect(result).toMatchObject({
       status: "payment_3ds_required",
@@ -905,8 +944,12 @@ describe("operate_pay", () => {
         message: expect.stringContaining("bank app"),
       },
     });
+    expect(result).not.toHaveProperty("next");
     expect(notifyCalls).toHaveLength(0);
     expect(browser.waitForThreeDsResolution).not.toHaveBeenCalled();
+    // three_ds_wait_seconds:0 is an explicit "hand back now" choice, not a
+    // still-in-flight challenge — no resumable state either.
+    expect(pendingThreeDsStates).toHaveLength(0);
   });
 
   // IRON-RULE regression: the has-card path must be byte-for-byte the same

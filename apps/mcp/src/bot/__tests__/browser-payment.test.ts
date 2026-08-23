@@ -4812,6 +4812,98 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "refuses to submit when an already-selected saved card would win over the filled card",
+    async () => {
+      // EbisuMart-shaped repeat-customer checkout: a "new card" fieldset (what
+      // we fill, matching card_ref) alongside a DEFAULT-CHECKED "use my saved
+      // card" radio for a DIFFERENT stored card. Money-fence: the released and
+      // audited card must be the one that is actually charged — never click
+      // Pay while a different stored card could win.
+      const pageUrl = "https://hibiyakadan.example.test/cart_seisan.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form id="checkout">
+            <label>
+              <input type="radio" name="payment_method" value="saved" checked>
+              Card on file: Visa •••• 9012
+            </label>
+            <label>
+              <input type="radio" name="payment_method" value="new">
+              Use a different card
+            </label>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Place order</button>
+          </form>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_card_selection_ambiguous",
+        );
+        expect(await page.evaluate(() => document.body.dataset.submitted)).toBeUndefined();
+        expect(await page.locator("[autocomplete='cc-number']").inputValue()).toBe("");
+        expect(await page.locator("[autocomplete='cc-csc']").inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "still submits when the checked payment-method option is an unrelated non-card choice",
+    async () => {
+      // A "Credit Card" vs. "PayPal" method toggle is a legitimate, unrelated
+      // selection (no masked PAN, no saved-card marker) — must not false-
+      // positive the competing-saved-card refusal.
+      const pageUrl = "https://shop.example.test/method-toggle-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form id="checkout">
+            <label><input type="radio" name="payment_method" value="card" checked> Credit Card</label>
+            <label><input type="radio" name="payment_method" value="paypal"> PayPal</label>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay</button>
+          </form>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillAndSubmitCheckout(CARD);
+        expect(await page.evaluate(() => document.body.dataset.submitted)).toBe("true");
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "resolves label-for and wrapped-label JP expiry pairs and cleans replaced selects",
     async () => {
       const expiryOptions = `
