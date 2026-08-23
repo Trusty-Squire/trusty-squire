@@ -2923,6 +2923,52 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "still clears card fields after same-document order confirmation navigation",
+    async () => {
+      const pageUrl = "https://merchant-garden.test/checkout";
+      const receiptUrl = "https://merchant-garden.test/receipt/ORD-12345";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp-month">
+            <input autocomplete="cc-exp-year">
+            <input autocomplete="cc-csc">
+            <button type="button" id="place-order">Place order</button>
+          </form>
+          <script>
+            document.querySelector("#place-order").addEventListener("click", () => {
+              history.pushState({}, "", "/receipt/ORD-12345");
+              document.body.insertAdjacentHTML("beforeend", "<p>Order confirmed</p>");
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        const originalMainFrame = page.mainFrame();
+        const result = await controller.fillAndSubmitCheckout(CARD);
+
+        expect(result).toEqual({ three_ds_required: false, order_confirmed: true });
+        expect(page.mainFrame()).toBe(originalMainFrame);
+        expect(page.url()).toBe(receiptUrl);
+        expect(await page.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
+        expect(await page.locator('[autocomplete="cc-name"]').inputValue()).toBe("");
+        expect(await page.locator('[autocomplete="cc-exp-month"]').inputValue()).toBe("");
+        expect(await page.locator('[autocomplete="cc-exp-year"]').inputValue()).toBe("");
+        expect(await page.locator('[autocomplete="cc-csc"]').inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "permits a parent checkout control outside both Shopify card forms",
     async () => {
       const pageUrl = "https://store.kobeejapan.net/checkout";

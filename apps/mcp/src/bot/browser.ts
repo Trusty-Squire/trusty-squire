@@ -9842,6 +9842,7 @@ export class BrowserController {
       if (fillFrameSnapshot.length > 0) {
         for (const { frame, url, documentElement } of fillFrameSnapshot) {
           if (frame.isDetached()) continue;
+          // History URL changes stay same-origin; cross-origin ACS navigation replaces this root.
           const sameDocument =
             documentElement === null
               ? frame.url() === url
