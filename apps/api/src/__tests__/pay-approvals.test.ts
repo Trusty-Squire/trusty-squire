@@ -50,7 +50,7 @@ describe("payment approval relay", () => {
       sessionSecret: SESSION_SECRET,
       now: () => new Date(nowMs),
     });
-    server = await buildServer({ deps });
+    server = await buildServer({ deps, vouchVerifier: async () => ({}) });
     const account = await deps.accountStore.createAccount("payer@example.test", "Payer");
     const other = await deps.accountStore.createAccount("other@example.test", "Other");
     agentToken = await makeAgentToken(deps, account.id, new Date(nowMs));
@@ -232,7 +232,7 @@ describe("payment approval relay", () => {
   it("creates a pending approval and returns it", async () => {
     const created = await createApproval();
     expect(created.nonce).toMatch(/^[A-Za-z0-9_-]{22}$/);
-    expect(created.agent).toBe("Hermes");
+    expect(created.agent).toBe("synthetic-payment-test-agent");
     expect(created.expires_at).toBe("2026-07-23T12:10:00.000Z");
 
     const response = await server.inject({
@@ -253,7 +253,7 @@ describe("payment approval relay", () => {
       operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
       item: "Synthetic Book",
       reason: "Synthetic test purchase",
-      agent: "Hermes",
+      agent: "synthetic-payment-test-agent",
       jws: null,
       sealed_card: null,
       expires_at: created.expires_at,
@@ -318,7 +318,7 @@ describe("payment approval relay", () => {
     });
   });
 
-  it("stores item/reason and the MCP client requester header", async () => {
+  it("stores item/reason and ignores a forged requester header", async () => {
     const response = await server.inject({
       method: "POST",
       url: "/v1/pay/approvals",
@@ -340,7 +340,7 @@ describe("payment approval relay", () => {
     });
     expect(response.statusCode).toBe(201);
     const created = response.json() as { id: string; agent: string };
-    expect(created.agent).toBe("synthetic-shopping-agent");
+    expect(created.agent).toBe("synthetic-payment-test-agent");
 
     const get = await server.inject({
       method: "GET",
@@ -351,7 +351,7 @@ describe("payment approval relay", () => {
     expect(get.json()).toMatchObject({
       item: "Synthetic Widget",
       reason: "Restocking synthetic inventory",
-      agent: "synthetic-shopping-agent",
+      agent: "synthetic-payment-test-agent",
     });
   });
 
@@ -533,6 +533,31 @@ describe("payment approval relay", () => {
     });
   });
 
+  it("refuses confirmation when approval expires during vouch verification", async () => {
+    const created = await createApproval();
+    const submission = makeSubmission(created);
+    await relaySubmission(created.id, submission);
+    nowMs = Date.parse(created.expires_at) - 1;
+    await server.close();
+    server = await buildServer({
+      deps,
+      vouchVerifier: async () => {
+        nowMs += 2;
+        return {};
+      },
+    });
+
+    const confirm = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: submission,
+    });
+    expect(confirm.statusCode).toBe(409);
+    expect(confirm.json()).toEqual({ error: "payment_approval_candidate_changed" });
+    expect((await deps.pendingPaymentApprovalStore.getById(created.id))?.status).toBe("pending");
+  });
+
   it.each(["review", "approval"] as const)(
     "peeks at an in-flight %s candidate without consuming delivery state",
     async (binding) => {
@@ -546,7 +571,7 @@ describe("payment approval relay", () => {
               approval_payload_sha256: createHash("sha256")
                 .update(
                   JSON.stringify({
-                    agent: "Hermes",
+                    agent: "synthetic-payment-test-agent",
                     amount_cents: 2599,
                     approval_id: created.id,
                     card_ref: "card_synthetic_1",

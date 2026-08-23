@@ -1592,9 +1592,9 @@ describe("audit_log", () => {
 });
 
 describe("TOOLS registry", () => {
-  it("exposes the essential 8-operator, 16-tool default surface without maintainer diagnostics", () => {
-    // Credential read/write tools (write-only sink; rotation = re-store, delete
-    // is web-only) + grant_app_access
+  it("exposes the essential 8-operator, 18-tool default surface without maintainer diagnostics", () => {
+    // Credential read/write tools (write-only sink; rotation = re-store,
+    // metadata edit/delete = passkey-vouched) + grant_app_access
     // (egress grants: a deployed app uses a vaulted credential via the proxy).
     // The read-back get_credential tool was removed: in the sink model an
     // agent never sees a raw secret value.
@@ -1606,9 +1606,11 @@ describe("TOOLS registry", () => {
     // and operate_recipe_save (operate_use/operate_remember).
     // operate_payment_await dropped (captain's decision 2026-08-15): the last
     // remaining alias, folded into operate_payment_status(wait_seconds).
-    expect(TOOLS).toHaveLength(16);
+    expect(TOOLS).toHaveLength(18);
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
       "audit_log",
+      "delete_credential",
+      "edit_credential",
       "grant_app_access",
       "list_app_access",
       "list_credentials",
@@ -1638,14 +1640,14 @@ describe("TOOLS registry", () => {
       const tools = buildToolRegistry(
         disabled === undefined ? {} : { TRUSTY_SQUIRE_DIAGNOSTICS: disabled },
       );
-      expect(tools).toHaveLength(16);
+      expect(tools).toHaveLength(18);
       expect(tools.map((tool) => tool.name)).not.toEqual(
         expect.arrayContaining(["list_extract_failures", "get_extract_failure"]),
       );
     }
 
     const tools = buildToolRegistry({ TRUSTY_SQUIRE_DIAGNOSTICS: "1" });
-    expect(tools).toHaveLength(18);
+    expect(tools).toHaveLength(20);
     expect(tools.map((tool) => tool.name)).toEqual(
       expect.arrayContaining(["list_extract_failures", "get_extract_failure"]),
     );

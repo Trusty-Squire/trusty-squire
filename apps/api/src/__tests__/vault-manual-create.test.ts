@@ -20,7 +20,7 @@ interface Harness {
 }
 
 async function setup(): Promise<Harness> {
-  const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET});
+  const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET });
   const server = await buildServer({ deps });
   return { server, deps };
 }
@@ -125,7 +125,7 @@ describe("POST /v1/vault/credentials/manual", () => {
   });
 });
 
-describe("PATCH /v1/vault/credentials/:id/allowed-hosts", () => {
+describe("retired direct allowed-host metadata route", () => {
   let h: Harness;
   beforeEach(async () => {
     h = await setup();
@@ -147,12 +147,13 @@ describe("PATCH /v1/vault/credentials/:id/allowed-hosts", () => {
       url: "/v1/vault/credentials",
       headers: { cookie },
     });
-    const creds = (list.json() as { credentials: Array<{ id: string; reference: string }> }).credentials;
+    const creds = (list.json() as { credentials: Array<{ id: string; reference: string }> })
+      .credentials;
     const ref = (res.json() as { reference: string }).reference;
     return creds.find((c) => c.reference === ref)!.id;
   }
 
-  it("normalises and replaces the allowlist", async () => {
+  it("cannot mutate metadata without a signed approval", async () => {
     const account = await h.deps.accountStore.createAccount("u@example.test", "U");
     const cookie = await makeWebSession(h.deps, account.id);
     const id = await createCred(cookie);
@@ -162,13 +163,16 @@ describe("PATCH /v1/vault/credentials/:id/allowed-hosts", () => {
       url: `/v1/vault/credentials/${id}/allowed-hosts`,
       headers: { cookie, "content-type": "application/json" },
       // Mixed casing, a pasted URL, a port, and a duplicate.
-      payload: { hosts: ["API.Example.com", "https://hooks.example.com/path", "api.example.com:443", "api.example.com"] },
+      payload: {
+        hosts: [
+          "API.Example.com",
+          "https://hooks.example.com/path",
+          "api.example.com:443",
+          "api.example.com",
+        ],
+      },
     });
-    expect(res.statusCode).toBe(200);
-    expect((res.json() as { allowed_hosts: string[] }).allowed_hosts).toEqual([
-      "api.example.com",
-      "hooks.example.com",
-    ]);
+    expect(res.statusCode).toBe(404);
   });
 
   it("rejects a malformed host with 400 and does not mutate", async () => {
@@ -182,8 +186,7 @@ describe("PATCH /v1/vault/credentials/:id/allowed-hosts", () => {
       headers: { cookie, "content-type": "application/json" },
       payload: { hosts: ["api ok.example.com"] },
     });
-    expect(res.statusCode).toBe(400);
-    expect((res.json() as { error: string }).error).toBe("invalid_host");
+    expect(res.statusCode).toBe(404);
   });
 
   it("404s for another account's credential id", async () => {
@@ -203,7 +206,7 @@ describe("PATCH /v1/vault/credentials/:id/allowed-hosts", () => {
   });
 });
 
-describe("PATCH /v1/vault/credentials/:id/login-hosts", () => {
+describe("retired direct login-host metadata route", () => {
   let h: Harness;
   beforeEach(async () => {
     h = await setup();
@@ -227,12 +230,13 @@ describe("PATCH /v1/vault/credentials/:id/login-hosts", () => {
       url: "/v1/vault/credentials",
       headers: { cookie },
     });
-    const creds = (list.json() as { credentials: Array<{ id: string; reference: string }> }).credentials;
+    const creds = (list.json() as { credentials: Array<{ id: string; reference: string }> })
+      .credentials;
     const ref = (res.json() as { reference: string }).reference;
     return creds.find((c) => c.reference === ref)!.id;
   }
 
-  it("sets sign-in hosts and converts a plain entry into a login credential", async () => {
+  it("cannot mutate auth metadata without a signed approval", async () => {
     const account = await h.deps.accountStore.createAccount("u@example.test", "U");
     const cookie = await makeWebSession(h.deps, account.id);
     const id = await createLoginish(cookie);
@@ -243,8 +247,7 @@ describe("PATCH /v1/vault/credentials/:id/login-hosts", () => {
       headers: { cookie, "content-type": "application/json" },
       payload: { hosts: ["ClubGG.com", "https://clubgg.com/login", "clubgg.com"] },
     });
-    expect(res.statusCode).toBe(200);
-    expect((res.json() as { login_hosts: string[] }).login_hosts).toEqual(["clubgg.com"]);
+    expect(res.statusCode).toBe(404);
 
     // The list now reports it as a username/password login with those hosts.
     const list = await h.server.inject({
@@ -252,11 +255,13 @@ describe("PATCH /v1/vault/credentials/:id/login-hosts", () => {
       url: "/v1/vault/credentials",
       headers: { cookie },
     });
-    const cred = (list.json() as {
-      credentials: Array<{ id: string; auth_strategy: string | null; login_hosts: string[] }>;
-    }).credentials.find((c) => c.id === id)!;
-    expect(cred.auth_strategy).toBe("username_password");
-    expect(cred.login_hosts).toEqual(["clubgg.com"]);
+    const cred = (
+      list.json() as {
+        credentials: Array<{ id: string; auth_strategy: string | null; login_hosts: string[] }>;
+      }
+    ).credentials.find((c) => c.id === id)!;
+    expect(cred.auth_strategy).toBeNull();
+    expect(cred.login_hosts).toEqual([]);
   });
 
   it("404s for another account's credential id", async () => {

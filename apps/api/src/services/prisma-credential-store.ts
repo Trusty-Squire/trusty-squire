@@ -6,7 +6,13 @@
 // rows.
 
 import type { Buffer } from "node:buffer";
-import type { CredentialRecord, CredentialStore } from "@trusty-squire/vault";
+import {
+  CredentialSlotConflictError,
+  VAULT_AUDIT_TYPES,
+  type CredentialRecord,
+  type CredentialStore,
+} from "@trusty-squire/vault";
+import { ulid } from "ulid";
 import type { ApiPrismaClient } from "./api-prisma-client.js";
 
 interface CredentialRow {
@@ -35,29 +41,34 @@ export class PrismaCredentialStore implements CredentialStore {
   constructor(private readonly prisma: ApiPrismaClient) {}
 
   async insert(record: CredentialRecord): Promise<void> {
-    await this.prisma.credential.create({
-      data: {
-        id: record.id,
-        reference: record.reference,
-        account_id: record.account_id,
-        subscription_id: record.subscription_id,
-        type: record.type,
-        env_var_suggestion: record.env_var_suggestion,
-        label: record.label,
-        field_names: record.field_names,
-        allowed_hosts: record.allowed_hosts,
-        ciphertext: record.ciphertext,
-        encrypted_dek: record.encrypted_dek,
-        account_kek_blob: record.account_kek_blob,
-        algorithm: record.algorithm,
-        metadata: record.metadata,
-        rotated_at: record.rotated_at,
-        retrieval_count: record.retrieval_count,
-        last_retrieved_at: record.last_retrieved_at,
-        deleted_at: record.deleted_at,
-        created_at: record.created_at,
-      },
-    });
+    try {
+      await this.prisma.credential.create({
+        data: {
+          id: record.id,
+          reference: record.reference,
+          account_id: record.account_id,
+          subscription_id: record.subscription_id,
+          type: record.type,
+          env_var_suggestion: record.env_var_suggestion,
+          label: record.label,
+          field_names: record.field_names,
+          allowed_hosts: record.allowed_hosts,
+          ciphertext: record.ciphertext,
+          encrypted_dek: record.encrypted_dek,
+          account_kek_blob: record.account_kek_blob,
+          algorithm: record.algorithm,
+          metadata: record.metadata,
+          rotated_at: record.rotated_at,
+          retrieval_count: record.retrieval_count,
+          last_retrieved_at: record.last_retrieved_at,
+          deleted_at: record.deleted_at,
+          created_at: record.created_at,
+        },
+      });
+    } catch (error) {
+      if (isPrismaUniqueConstraintError(error)) throw new CredentialSlotConflictError();
+      throw error;
+    }
   }
 
   async findActive(reference: string): Promise<CredentialRecord | null> {
@@ -74,6 +85,22 @@ export class PrismaCredentialStore implements CredentialStore {
       row = await lookup();
     }
     return row === null ? null : this.toRecord(row);
+  }
+
+  async isActive(reference: string, accountId: string): Promise<boolean> {
+    const lookup = () =>
+      this.prisma.credential.findFirst({
+        where: { reference, account_id: accountId, deleted_at: null },
+      });
+    let row;
+    try {
+      row = await lookup();
+    } catch (error) {
+      if (!isRetryablePrismaConnectionError(error)) throw error;
+      await disconnectPrisma(this.prisma);
+      row = await lookup();
+    }
+    return row !== null;
   }
 
   async findActiveByServiceLabel(
@@ -110,6 +137,62 @@ export class PrismaCredentialStore implements CredentialStore {
     });
   }
 
+  async collapseDuplicateSlot(
+    accountId: string,
+    service: string,
+    label: string,
+    deletedAt: Date,
+  ): Promise<{ survivor: string; collapsed: string[] } | null> {
+    return await this.prisma.$transaction(async (tx) => {
+      const slot = await tx.$queryRaw<Array<{ reference: string; service: string }>>`
+        SELECT "reference", "metadata"->>'service' AS service
+        FROM "Credential"
+        WHERE "account_id" = ${accountId}
+          AND "deleted_at" IS NULL
+          AND "label" = ${label}
+          AND jsonb_typeof("metadata"->'service') = 'string'
+          AND lower("metadata"->>'service') = lower(${service})
+        ORDER BY "created_at" DESC, "reference" DESC
+        FOR UPDATE
+      `;
+      const [survivor, ...collapsed] = slot;
+      if (survivor === undefined || collapsed.length === 0) return null;
+      const collapsedReferences = collapsed.map((candidate) => candidate.reference);
+
+      const deleted = await tx.credential.updateMany({
+        where: {
+          reference: { in: collapsedReferences },
+          account_id: accountId,
+          deleted_at: null,
+          label,
+        },
+        data: { deleted_at: deletedAt },
+      });
+      if (deleted.count !== collapsedReferences.length) {
+        throw new Error("credential duplicate slot changed while locked");
+      }
+
+      for (const candidate of collapsed) {
+        await tx.vaultAuditEvent.create({
+          data: {
+            id: ulid(),
+            account_id: accountId,
+            type: VAULT_AUDIT_TYPES.collapsed,
+            payload: {
+              reference: candidate.reference,
+              collapsed_into: survivor.reference,
+              requester: "system",
+              service: survivor.service,
+              label,
+            },
+            emitted_at: deletedAt,
+          },
+        });
+      }
+      return { survivor: survivor.reference, collapsed: collapsedReferences };
+    });
+  }
+
   async replaceSecret(
     reference: string,
     payload: {
@@ -118,9 +201,6 @@ export class PrismaCredentialStore implements CredentialStore {
       account_kek_blob: Buffer;
       field_names: string[];
       rotatedAt: Date;
-      type?: string | null;
-      env_var_suggestion?: string | null;
-      metadata?: Record<string, unknown>;
     },
   ): Promise<void> {
     await this.prisma.credential.updateMany({
@@ -131,11 +211,6 @@ export class PrismaCredentialStore implements CredentialStore {
         account_kek_blob: payload.account_kek_blob,
         field_names: payload.field_names,
         rotated_at: payload.rotatedAt,
-        ...("type" in payload ? { type: payload.type ?? null } : {}),
-        ...("env_var_suggestion" in payload
-          ? { env_var_suggestion: payload.env_var_suggestion ?? null }
-          : {}),
-        ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
       },
     });
   }
@@ -183,33 +258,39 @@ export class PrismaCredentialStore implements CredentialStore {
     return row === null ? null : this.toRecord(row);
   }
 
-  async setAllowedHosts(reference: string, hosts: string[]): Promise<void> {
-    await this.prisma.credential.updateMany({
-      where: { reference },
-      data: { allowed_hosts: hosts },
-    });
-  }
-
-  async setLoginHosts(reference: string, hosts: string[]): Promise<void> {
-    // login_hosts lives in the metadata JSON, so read-modify-write to preserve
-    // the rest of it. Stamp auth_strategy so a plain entry becomes a login cred.
-    const row = await this.prisma.credential.findFirst({ where: { reference } });
-    if (row === null) return;
-    const current =
-      row.metadata !== null && typeof row.metadata === "object"
-        ? (row.metadata as Record<string, unknown>)
-        : {};
-    await this.prisma.credential.updateMany({
-      where: { reference },
-      data: { metadata: { ...current, login_hosts: hosts, auth_strategy: "username_password" } },
-    });
-  }
-
-  async setLabel(reference: string, label: string): Promise<void> {
-    await this.prisma.credential.updateMany({
-      where: { reference },
-      data: { label },
-    });
+  async updateMetadata(
+    reference: string,
+    expected: {
+      label: string;
+      allowed_hosts: string[];
+      metadata: Record<string, unknown>;
+    },
+    input: {
+      label?: string;
+      allowed_hosts?: string[];
+      metadata?: Record<string, unknown>;
+    },
+  ): Promise<"updated" | "changed" | "conflict"> {
+    try {
+      const result = await this.prisma.credential.updateMany({
+        where: {
+          reference,
+          deleted_at: null,
+          label: expected.label,
+          allowed_hosts: { equals: expected.allowed_hosts },
+          metadata: { equals: expected.metadata },
+        },
+        data: {
+          ...(input.label !== undefined ? { label: input.label } : {}),
+          ...(input.allowed_hosts !== undefined ? { allowed_hosts: input.allowed_hosts } : {}),
+          ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+        },
+      });
+      return result.count > 0 ? "updated" : "changed";
+    } catch (error) {
+      if (isPrismaUniqueConstraintError(error)) return "conflict";
+      throw error;
+    }
   }
 
   async findByIdForAccountIncludingDeleted(
@@ -230,10 +311,15 @@ export class PrismaCredentialStore implements CredentialStore {
   // Undelete — clear deleted_at. The caller (vault) has already checked
   // ownership + that no active (service,label) twin exists.
   async restore(reference: string): Promise<void> {
-    await this.prisma.credential.updateMany({
-      where: { reference },
-      data: { deleted_at: null },
-    });
+    try {
+      await this.prisma.credential.updateMany({
+        where: { reference },
+        data: { deleted_at: null },
+      });
+    } catch (error) {
+      if (isPrismaUniqueConstraintError(error)) throw new CredentialSlotConflictError();
+      throw error;
+    }
   }
 
   // Re-wrap only the master-key envelope (account_kek_blob), for the KEK
@@ -282,6 +368,15 @@ function isRetryablePrismaConnectionError(err: unknown): boolean {
     message.includes("connection terminated") ||
     message.includes("connection pool") ||
     message.includes("can't reach database server")
+  );
+}
+
+function isPrismaUniqueConstraintError(error: unknown): boolean {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    String((error as { code?: unknown }).code ?? "") === "P2002"
   );
 }
 

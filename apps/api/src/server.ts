@@ -24,11 +24,13 @@ import { registerVaultE2ERoute } from "./routes/vault-e2e.js";
 import { registerPayApprovalsRoute } from "./routes/pay-approvals.js";
 import { registerTelegramRoute } from "./routes/telegram.js";
 import { registerVaultAccessRoute } from "./routes/vault-access.js";
+import { registerCredentialMutationRoutes } from "./routes/credential-mutations.js";
 import { registerEgressRoutes } from "./routes/egress.js";
 import type { EgressGrantStore } from "./services/egress-grant.js";
 import type { EmailForwarder } from "./services/email-forwarder.js";
 import type { HttpProxyExecutor } from "./services/http-proxy.js";
 import type { StripeClient } from "./services/stripe-client.js";
+import type { VouchMandateVerifier } from "./services/vouch-mandate.js";
 import { registerMcpInstallRoute } from "./routes/mcp-install.js";
 import { registerMcpSessionsRoute } from "./routes/mcp-sessions.js";
 import { registerShortRoute } from "./routes/short.js";
@@ -55,6 +57,9 @@ export interface BuildServerOpts {
   // routes (no live Stripe calls, no real signature). Production leaves
   // this undefined → built from STRIPE_SECRET_KEY env (null when unset).
   stripeClient?: StripeClient;
+  // Test seam for signed approval flows. Production leaves this undefined and
+  // both payment and vault mutations use the shared JWKS-backed verifier.
+  vouchVerifier?: VouchMandateVerifier;
   // Test seam for asserting structured logs. Supplying a stream enables the
   // same redacted Pino logger production uses, at debug level.
   logStream?: Writable;
@@ -284,6 +289,12 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     requireWeb: auth.requireWeb,
     requireAgent: auth.requireAgent,
     requireAny: auth.requireAny,
+    ...(opts.vouchVerifier !== undefined ? { vouchVerifier: opts.vouchVerifier } : {}),
+  });
+  await fastify.register(registerCredentialMutationRoutes, {
+    deps,
+    requireAny: auth.requireAny,
+    ...(opts.vouchVerifier !== undefined ? { vouchVerifier: opts.vouchVerifier } : {}),
   });
   await fastify.register(registerTelegramRoute, {
     deps,

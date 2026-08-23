@@ -170,13 +170,14 @@ model Account {
   // /start deep link. null = not linked; payment-approval push is skipped.
   telegram_chat_id String? @map("telegram_chat_id")
 
-  oauth_identities     OAuthIdentity[]
-  web_sessions         WebSession[]
-  agent_sessions       AgentSession[]
-  e2e_credentials      E2ECredential[]
-  payment_audit_events PaymentAuditEvent[]
-  payment_approvals    PendingPaymentApproval[]
-  telegram_link_tokens TelegramLinkToken[]
+  oauth_identities              OAuthIdentity[]
+  web_sessions                  WebSession[]
+  agent_sessions                AgentSession[]
+  e2e_credentials               E2ECredential[]
+  payment_audit_events          PaymentAuditEvent[]
+  payment_approvals             PendingPaymentApproval[]
+  credential_mutation_approvals CredentialMutationApproval[]
+  telegram_link_tokens          TelegramLinkToken[]
 
   @@index([stripe_customer_id])
 }
@@ -333,42 +334,72 @@ model PaymentAuditEvent {
 
 // Ephemeral relay for opaque payment approval payloads.
 model PendingPaymentApproval {
-  id              String   @id @db.VarChar(26)
-  account_id      String   @db.VarChar(26)
-  merchant        String
-  checkout_origin String
-  amount_cents    Int
-  currency        String
-  nonce           String
+  id                               String    @id @db.VarChar(26)
+  account_id                       String    @db.VarChar(26)
+  merchant                         String
+  checkout_origin                  String
+  amount_cents                     Int
+  currency                         String
+  nonce                            String
   // Nullable: a JIT add-card approval is minted card-less and bound to a
   // stored card later via POST /v1/pay/approvals/:id/bind-card (write-once).
-  card_ref        String?
-  operator_pubkey String
-  item            String   @default("")
-  reason          String   @default("")
-  agent           String   @default("")
-  status          String
-  jws             String?
-  sealed_card     String?
+  card_ref                         String?
+  operator_pubkey                  String
+  item                             String    @default("")
+  reason                           String    @default("")
+  agent                            String    @default("")
+  status                           String
+  jws                              String?
+  sealed_card                      String?
   // Short-lived durable review and final relays. The card remains encrypted to
   // the operator; plaintext never reaches this record.
-  review_jws                   String?
-  review_sealed_card           String?
-  review_candidate_fingerprint String?
-  review_phase                 String?
-  review_expires_at            DateTime?
-  submission_jws               String?
-  submission_sealed_card       String?
+  review_jws                       String?
+  review_sealed_card               String?
+  review_candidate_fingerprint     String?
+  review_phase                     String?
+  review_expires_at                DateTime?
+  submission_jws                   String?
+  submission_sealed_card           String?
   submission_candidate_fingerprint String?
-  submission_phase             String?
-  submission_expires_at        DateTime?
-  created_at      DateTime @default(now())
-  expires_at      DateTime
+  submission_phase                 String?
+  submission_expires_at            DateTime?
+  created_at                       DateTime  @default(now())
+  expires_at                       DateTime
 
   account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
 
   @@index([account_id])
   @@map("pending_payment_approvals")
+}
+
+// Short-lived, passkey-signed approvals for agent-requested vault metadata
+// edits and soft deletion. Contains display metadata only; never secret fields,
+// ciphertext, or decrypted values.
+model CredentialMutationApproval {
+  id                   String    @id @db.VarChar(26)
+  account_id           String    @db.VarChar(26)
+  operation            String
+  credential_reference String
+  credential_service   String?
+  credential_label     String
+  before_metadata      Json
+  after_metadata       Json?
+  nonce                String
+  agent                String
+  requester_kind       String    @default("agent")
+  intent_hash          String
+  status               String
+  failure_code         String?
+  mandate_id           String?
+  created_at           DateTime  @default(now())
+  expires_at           DateTime
+  executed_at          DateTime?
+
+  account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
+
+  @@index([account_id, intent_hash, status])
+  @@index([expires_at])
+  @@map("credential_mutation_approvals")
 }
 
 // Telegram account-linking token. Minted by POST /v1/telegram/link,

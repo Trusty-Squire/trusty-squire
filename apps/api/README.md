@@ -27,6 +27,10 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `POST` | `/v1/vault/use` | agent | Retrieve a vault credential for allowed egress |
 | `POST` | `/v1/vault/browser-fill` | agent | Seal login/password fields for allowed browser sign-in hosts |
 | `GET` | `/v1/vault/credentials` | web/agent | List vault credentials |
+| `POST` | `/v1/vault/mutation-approvals` | web/agent | Create a vouch-gated credential metadata edit or delete approval |
+| `GET` | `/v1/vault/mutation-approvals/:id` | web/agent | Read the account-owned mutation approval status |
+| `GET` | `/v1/vault/mutation-approvals/:id/ceremony` | none | Show the capability-bound mutation intent for phone approval |
+| `POST` | `/v1/vault/mutation-approvals/:id/approve` | none | Verify the passkey-signed mandate, then atomically commit the mutation, audit, and terminal approval state |
 | `GET` | `/v1/vault/audit` | web/agent | List the account's secret-free Activity trail with keyset pagination and optional `type`/`reference` filters |
 | `POST` | `/v1/vault/e2e` | web | Store an opaque, client-encrypted card blob |
 | `GET` | `/v1/vault/e2e` | web/agent | List client-encrypted card metadata without blobs |
@@ -113,6 +117,20 @@ already staged by a legacy deployment remain compatibility-only: their
 successful confirmation clears the staged bytes but leaves the approval pending,
 so a review seal is never final approval.
 Wrong-account, changed, undelivered, or expired candidates fail closed.
+
+Credential mutation approvals reuse the same JWKS-backed Vouchflow mandate
+verifier as payment approvals, but use the distinct
+`vault_credential_mutation` context. Their canonical signed payload binds the
+operation (`credential.edit` or `credential.delete`), exact vault reference,
+requesting agent, nonce, and complete editable before/after metadata. Web and
+agent sessions may create and poll their own account's approvals; the public
+ceremony endpoint only displays and verifies the account-bound capability. After
+signature verification, one database transaction locks the pending approval,
+rechecks expiry against the database clock, compares live metadata with the
+signed `before` snapshot, applies the mutation, writes its audit event, and marks
+the approval terminal. Any failure rolls the transaction back. Approval rows,
+Telegram prompts, and responses contain only labels and host allowlists—never
+ciphertext or secret field values.
 
 ## Auth model
 

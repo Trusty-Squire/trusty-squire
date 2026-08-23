@@ -90,6 +90,28 @@ export interface VaultCredentialSummary {
   retrieval_count: number;
 }
 
+export interface CredentialMutationApproval {
+  approval_id: string;
+  approval_url: string;
+  status: "pending" | "approved" | "failed" | "expired";
+  operation: "edit" | "delete";
+  credential: { reference: string; service: string | null; name: string };
+  before: {
+    label: string;
+    allowed_hosts: string[];
+    login_hosts: string[];
+    auth_strategy: string | null;
+  };
+  after: {
+    label: string;
+    allowed_hosts: string[];
+    login_hosts: string[];
+    auth_strategy: string | null;
+  } | null;
+  expires_at: string;
+  error?: string;
+}
+
 export interface DirectoryEntry {
   service: string;
   latest_version: string;
@@ -266,11 +288,30 @@ export class ApiClient {
     return this.post("/v1/vault/credentials", input);
   }
 
+  async createCredentialMutationApproval(input: {
+    operation: "edit" | "delete";
+    reference?: string;
+    service?: string;
+    name?: string;
+    changes?: {
+      label?: string;
+      allowed_hosts?: { mode: "add" | "remove" | "replace"; hosts: string[] };
+      login_hosts?: { mode: "add" | "remove" | "replace"; hosts: string[] };
+    };
+  }): Promise<CredentialMutationApproval> {
+    return this.post("/v1/vault/mutation-approvals", input);
+  }
+
+  async getCredentialMutationApproval(id: string): Promise<CredentialMutationApproval> {
+    return this.get(`/v1/vault/mutation-approvals/${encodeURIComponent(id)}`);
+  }
+
   // ── use_credential: write-only-sink proxy ─────────────────
 
   async useCredential(input: {
     reference?: string;
     service?: string;
+    name?: string;
     http: {
       method: string;
       url: string;

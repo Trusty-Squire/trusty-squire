@@ -19,6 +19,7 @@ import { revokeAppAccessTool, listAppAccessTool } from "./revoke-app-access.js";
 import { auditLogTool } from "./audit-log.js";
 import { OPERATE_TOOLS } from "./provision-drive.js";
 import { listPaymentCardsTool, operatePayTool, operatePaymentStatusTool } from "./operate-pay.js";
+import { deleteCredentialTool, editCredentialTool } from "./credential-mutations.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
   name: string;
@@ -74,6 +75,8 @@ export function buildToolRegistry(env: NodeJS.ProcessEnv = process.env): Tool[] 
     listCredentialsTool,
     // Vault lifecycle + write-only-sink proxy (the credential surface).
     storeCredentialTool,
+    editCredentialTool,
+    deleteCredentialTool,
     useCredentialTool,
     // Egress grants: a deployed app uses a vaulted credential via the proxy.
     grantAppAccessTool,
@@ -109,6 +112,8 @@ export { z };
 export {
   listCredentialsTool,
   storeCredentialTool,
+  editCredentialTool,
+  deleteCredentialTool,
   useCredentialTool,
   grantAppAccessTool,
   listAppAccessTool,

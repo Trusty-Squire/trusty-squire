@@ -11,17 +11,13 @@
 // The secret is NEVER returned to an agent. `use_credential` injects
 // fields server-side via ${SECRET} / ${SECRET.<field>} and returns only
 // the upstream response; the proxy hard-enforces the host allowlist.
-// Human-only paths (web): reveal, delete, allowlist edits, field edits.
+// Reveal and secret-field edits remain human-only web paths. Non-secret
+// metadata edits and deletes may also be called server-side after the API
+// has verified an operation-bound Vouchflow mandate.
 
 import { Buffer } from "node:buffer";
 import { ulid } from "ulid";
-import {
-  aadForDek,
-  aadForValue,
-  decryptAesGcm,
-  encryptAesGcm,
-  generateKey,
-} from "./encryption.js";
+import { aadForDek, aadForValue, decryptAesGcm, encryptAesGcm, generateKey } from "./encryption.js";
 import type { KMSClient } from "./kms-client.js";
 import { deriveAllowedHosts } from "./service-hosts.js";
 
@@ -38,6 +34,59 @@ export function normalizeObservedHost(raw: string): string | null {
   }
 }
 
+const TWO_LABEL_PUBLIC_SUFFIXES: ReadonlySet<string> = new Set([
+  "co.uk",
+  "org.uk",
+  "gov.uk",
+  "ac.uk",
+  "com.au",
+  "net.au",
+  "org.au",
+  "co.jp",
+  "co.nz",
+  "co.in",
+  "com.br",
+  "co.za",
+  "com.cn",
+  "github.io",
+  "web.app",
+  "firebaseapp.com",
+  "pages.dev",
+  "workers.dev",
+  "vercel.app",
+  "netlify.app",
+  "herokuapp.com",
+]);
+
+function validLoginHost(host: string): boolean {
+  if (host.includes("..") || host.startsWith(".") || host.endsWith(".")) return false;
+  if (host.includes("xn--") || /^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return false;
+  const labels = host.split(".");
+  return (
+    labels.length >= 2 &&
+    labels.every((label) => label.length > 0 && label.length <= 63) &&
+    !TWO_LABEL_PUBLIC_SUFFIXES.has(host)
+  );
+}
+
+export function normalizeCredentialHosts(
+  rawHosts: readonly string[],
+  kind: "allowed" | "login",
+): string[] | null {
+  const hosts: string[] = [];
+  for (const raw of rawHosts) {
+    const wildcard = kind === "login" && raw.trim().startsWith("*.");
+    const normalized = normalizeObservedHost(wildcard ? raw.trim().slice(2) : raw);
+    if (normalized === null || (kind === "login" && !validLoginHost(normalized))) {
+      if (kind === "login") return null;
+      continue;
+    }
+    const host = wildcard ? `*.${normalized}` : normalized;
+    if (!hosts.includes(host)) hosts.push(host);
+  }
+  return hosts;
+}
+
 // The allowlist for a freshly-stored credential: hosts observed during the
 // capture, unioned with the static service-name table, deduped in order.
 // Observed hosts come first (they're the ground truth for THIS credential);
@@ -51,7 +100,7 @@ export function mergeAllowedHosts(service: string, observed?: string[]): string[
       out.push(h);
     }
   };
-  for (const raw of observed ?? []) add(normalizeObservedHost(raw));
+  for (const host of normalizeCredentialHosts(observed ?? [], "allowed") ?? []) add(host);
   for (const h of deriveAllowedHosts(service)) add(h);
   return out;
 }
@@ -67,9 +116,15 @@ import type {
   VaultAuditType,
   VaultRequester,
 } from "./types.js";
-import { VAULT_AUDIT_TYPES } from "./types.js";
+import { CredentialSlotConflictError, VAULT_AUDIT_TYPES } from "./types.js";
 
 export const DEFAULT_LABEL = "default";
+export const MAX_CREDENTIAL_LABEL_LENGTH = 60;
+
+export function normalizeCredentialLabel(raw: string): string | null {
+  const label = raw.trim();
+  return label.length > 0 && label.length <= MAX_CREDENTIAL_LABEL_LENGTH ? label : null;
+}
 
 export interface VaultStoreInput {
   account_id: string;
@@ -177,10 +232,7 @@ export interface VaultClient {
     purpose: string,
     deviceAssertion: DeviceAssertion,
   ): Promise<Record<string, string>>;
-  retrieveForRuntime(
-    reference: string,
-    purpose: string,
-  ): Promise<Record<string, string>>;
+  retrieveForRuntime(reference: string, purpose: string): Promise<Record<string, string>>;
   retrieveForAgentBrowserFill(
     reference: string,
     accountId: string,
@@ -230,7 +282,9 @@ export class RestoreConflictError extends Error {
     public readonly service: string,
     public readonly label: string,
   ) {
-    super(`cannot restore ${reference}: an active credential for ${service}/${label} already exists`);
+    super(
+      `cannot restore ${reference}: an active credential for ${service}/${label} already exists`,
+    );
     this.name = "RestoreConflictError";
   }
 }
@@ -265,7 +319,8 @@ export class CredentialVault implements VaultClient {
   // overwrites the field set (= rotation) on subsequent writes, keeping
   // the existing reference, allowed_hosts, and label.
   async store(input: VaultStoreInput): Promise<VaultEntry> {
-    const label = input.label ?? DEFAULT_LABEL;
+    const label = normalizeCredentialLabel(input.label ?? DEFAULT_LABEL);
+    if (label === null) throw new Error("credential label must be 1-60 characters");
     const fieldNames = Object.keys(input.fields);
     if (fieldNames.length === 0) {
       throw new Error("store requires at least one field");
@@ -279,27 +334,11 @@ export class CredentialVault implements VaultClient {
 
     if (existing !== null) {
       const env = await this.encryptFields(existing.reference, input.account_id, input.fields);
-      const metadata = { ...existing.metadata, ...(input.metadata ?? {}), service: input.service };
       await this.deps.store.replaceSecret(existing.reference, {
         ...env,
         field_names: fieldNames,
         rotatedAt: now,
-        ...(input.type !== undefined ? { type: input.type ?? null } : {}),
-        ...(input.env_var_suggestion !== undefined ? { env_var_suggestion: input.env_var_suggestion ?? null } : {}),
-        metadata,
       });
-      // Backfill an EMPTY allowlist on re-store, but never clobber a
-      // non-empty one (the user may have curated it). This heals
-      // credentials stored before allowed_hosts existed (or before their
-      // service was in the table) — a re-store now lands a real allowlist.
-      let allowedHosts = existing.allowed_hosts;
-      if (allowedHosts.length === 0) {
-        const backfilled = mergeAllowedHosts(input.service, input.observed_hosts);
-        if (backfilled.length > 0) {
-          await this.deps.store.setAllowedHosts(existing.reference, backfilled);
-          allowedHosts = backfilled;
-        }
-      }
       await this.recordAudit(input.account_id, VAULT_AUDIT_TYPES.rotated, {
         reference: existing.reference,
         requester: "user",
@@ -311,7 +350,7 @@ export class CredentialVault implements VaultClient {
         service: input.service,
         label,
         field_names: fieldNames,
-        allowed_hosts: allowedHosts,
+        allowed_hosts: existing.allowed_hosts,
         created_at: existing.created_at.toISOString(),
         updated: true,
       };
@@ -341,7 +380,44 @@ export class CredentialVault implements VaultClient {
       deleted_at: null,
       created_at: now,
     };
-    await this.deps.store.insert(record);
+    try {
+      await this.deps.store.insert(record);
+    } catch (error) {
+      if (error instanceof CredentialSlotConflictError) {
+        const winner = await this.deps.store.findActiveByServiceLabel(
+          input.account_id,
+          input.service,
+          label,
+        );
+        if (winner === null) throw new RestoreConflictError(reference, input.service, label);
+        const winnerEnv = await this.encryptFields(
+          winner.reference,
+          input.account_id,
+          input.fields,
+        );
+        await this.deps.store.replaceSecret(winner.reference, {
+          ...winnerEnv,
+          field_names: fieldNames,
+          rotatedAt: now,
+        });
+        await this.recordAudit(input.account_id, VAULT_AUDIT_TYPES.rotated, {
+          reference: winner.reference,
+          requester: "user",
+          service: input.service,
+          label,
+        });
+        return {
+          reference: winner.reference,
+          service: input.service,
+          label,
+          field_names: fieldNames,
+          allowed_hosts: winner.allowed_hosts,
+          created_at: winner.created_at.toISOString(),
+          updated: true,
+        };
+      }
+      throw error;
+    }
     await this.recordAudit(input.account_id, VAULT_AUDIT_TYPES.stored, {
       reference,
       requester: "system",
@@ -386,38 +462,6 @@ export class CredentialVault implements VaultClient {
       requester: "user",
     });
     return { rotated_at: now.toISOString() };
-  }
-
-  // Web-only: rename an entry. Changes the (non-secret) label only —
-  // the encrypted payload, field names, and allowed_hosts are untouched.
-  // Account-scoped.
-  async rename(
-    reference: string,
-    accountId: string,
-    label: string,
-  ): Promise<{ label: string }> {
-    const trimmed = label.trim();
-    if (trimmed.length === 0) {
-      throw new Error("label must not be empty");
-    }
-    const existing = await this.deps.store.findActive(reference);
-    if (existing === null || existing.account_id !== accountId) {
-      throw new CredentialNotFoundError(reference);
-    }
-    const service = typeof existing.metadata.service === "string" ? existing.metadata.service : "";
-    if (service.length > 0 && trimmed !== existing.label) {
-      const live = await this.deps.store.findActiveByServiceLabel(accountId, service, trimmed);
-      if (live !== null && live.reference !== reference) {
-        throw new RestoreConflictError(reference, service, trimmed);
-      }
-    }
-    await this.deps.store.setLabel(reference, trimmed);
-    await this.recordAudit(accountId, VAULT_AUDIT_TYPES.renamed, {
-      reference,
-      requester: "user",
-      label: trimmed,
-    });
-    return { label: trimmed };
   }
 
   // Web-only: add a single field to an existing entry WITHOUT the caller
@@ -475,10 +519,7 @@ export class CredentialVault implements VaultClient {
     });
   }
 
-  async retrieveForRuntime(
-    reference: string,
-    purpose: string,
-  ): Promise<Record<string, string>> {
+  async retrieveForRuntime(reference: string, purpose: string): Promise<Record<string, string>> {
     return this.retrieveInternal({
       reference,
       purpose,
@@ -531,7 +572,11 @@ export class CredentialVault implements VaultClient {
     return fields;
   }
 
-  async delete(reference: string, accountId: string): Promise<void> {
+  async delete(
+    reference: string,
+    accountId: string,
+    requester: VaultRequester = "user",
+  ): Promise<void> {
     const existing = await this.deps.store.findActive(reference);
     if (existing === null || existing.account_id !== accountId) {
       throw new CredentialNotFoundError(reference);
@@ -539,8 +584,10 @@ export class CredentialVault implements VaultClient {
     await this.deps.store.softDelete(reference, this.now());
     await this.recordAudit(accountId, VAULT_AUDIT_TYPES.deleted, {
       reference,
-      requester: "user",
-      ...(typeof existing.metadata.service === "string" ? { service: existing.metadata.service } : {}),
+      requester,
+      ...(typeof existing.metadata.service === "string"
+        ? { service: existing.metadata.service }
+        : {}),
       label: existing.label,
     });
   }
@@ -584,13 +631,14 @@ export class CredentialVault implements VaultClient {
     }
     if (rec.deleted_at === null) return; // already active — no-op
     const service = typeof rec.metadata.service === "string" ? rec.metadata.service : "";
-    if (service.length > 0) {
-      const live = await this.deps.store.findActiveByServiceLabel(accountId, service, rec.label);
-      if (live !== null) {
+    try {
+      await this.deps.store.restore(reference);
+    } catch (error) {
+      if (error instanceof CredentialSlotConflictError) {
         throw new RestoreConflictError(reference, service, rec.label);
       }
+      throw error;
     }
-    await this.deps.store.restore(reference);
     await this.recordAudit(accountId, VAULT_AUDIT_TYPES.restored, {
       reference,
       requester: "user",
@@ -616,13 +664,19 @@ export class CredentialVault implements VaultClient {
   async proxyResolvedCredential(
     record: CredentialRecord,
     accountId: string,
-    http: ProxyHttpTemplate,
+    http: ProxyHttpTemplate | ((current: CredentialRecord) => ProxyHttpTemplate),
     executor: ProxyExecutor,
   ): Promise<ProxyResponse> {
-    if (record.account_id !== accountId || record.deleted_at !== null) {
+    const current = await this.deps.store.findActive(record.reference);
+    if (current === null || current.account_id !== accountId) {
       throw new CredentialNotFoundError(record.reference);
     }
-    return this.proxyRecord(record, accountId, http, executor);
+    return this.proxyRecord(
+      current,
+      accountId,
+      typeof http === "function" ? http(current) : http,
+      executor,
+    );
   }
 
   private async proxyRecord(
@@ -635,17 +689,19 @@ export class CredentialVault implements VaultClient {
     const targetHost = safeHost(http.url);
     if (targetHost === null || !record.allowed_hosts.includes(targetHost)) {
       await this.recordProxyAudit(accountId, VAULT_AUDIT_TYPES.proxyRejected, {
-          reference,
-          requester: "agent",
-          ...(targetHost !== null ? { target_host: targetHost } : {}),
-        });
+        reference,
+        requester: "agent",
+        ...(targetHost !== null ? { target_host: targetHost } : {}),
+      });
       throw new AllowlistViolationError(reference, targetHost);
     }
     const fields = await this.decryptFields(record);
     const startedAt = this.now().getTime();
     try {
       const response = await executor({ accountId, http, fields });
-      await this.runProxyAuditSideEffect(() => this.deps.store.markRetrieved(reference, this.now()));
+      await this.runProxyAuditSideEffect(() =>
+        this.deps.store.markRetrieved(reference, this.now()),
+      );
       await this.recordProxyAudit(accountId, VAULT_AUDIT_TYPES.proxyExecuted, {
         reference,
         requester: "agent",
@@ -705,7 +761,9 @@ export class CredentialVault implements VaultClient {
   // credential row AND the entire audit trail for the account. Nothing
   // is recoverable after this — the soft-delete + retention path is the
   // forgiving one; this is the right-to-be-forgotten hard one.
-  async purgeAccount(accountId: string): Promise<{ credentials_purged: number; audit_purged: number }> {
+  async purgeAccount(
+    accountId: string,
+  ): Promise<{ credentials_purged: number; audit_purged: number }> {
     const credentials_purged = await this.deps.store.purgeAccount(accountId);
     const audit_purged = await this.deps.audit.purgeAccount(accountId);
     return { credentials_purged, audit_purged };
@@ -762,14 +820,20 @@ export class CredentialVault implements VaultClient {
 
     if (record !== null) {
       await this.enforceRetrievalRateLimit(accountId, {
-        reference, purpose, requester, signing_device_id: signingDeviceId,
+        reference,
+        purpose,
+        requester,
+        signing_device_id: signingDeviceId,
       });
     }
     if (assertion !== null) {
       const ageMs = this.now().getTime() - Date.parse(assertion.signed_at);
       if (Number.isNaN(ageMs) || ageMs > ASSERTION_MAX_AGE_MS || ageMs < 0) {
         await this.recordAudit(accountId, VAULT_AUDIT_TYPES.retrieved, {
-          reference, purpose, requester, signing_device_id: signingDeviceId,
+          reference,
+          purpose,
+          requester,
+          signing_device_id: signingDeviceId,
           outcome: "stale_assertion",
         });
         throw new StaleAssertionError(
@@ -779,7 +843,10 @@ export class CredentialVault implements VaultClient {
     }
     if (record === null) {
       await this.recordAudit(accountId, VAULT_AUDIT_TYPES.retrieved, {
-        reference, purpose, requester, signing_device_id: signingDeviceId,
+        reference,
+        purpose,
+        requester,
+        signing_device_id: signingDeviceId,
         outcome: "missing_credential",
       });
       throw new CredentialNotFoundError(reference);
@@ -788,7 +855,10 @@ export class CredentialVault implements VaultClient {
     const fields = await this.decryptFields(record);
     await this.deps.store.markRetrieved(reference, this.now());
     await this.recordAudit(record.account_id, VAULT_AUDIT_TYPES.retrieved, {
-      reference, purpose, requester, signing_device_id: signingDeviceId,
+      reference,
+      purpose,
+      requester,
+      signing_device_id: signingDeviceId,
       outcome: "success",
     });
     return fields;
@@ -801,7 +871,10 @@ export class CredentialVault implements VaultClient {
   // stops a new decrypt path from silently bypassing the ceiling.
   private async enforceRetrievalRateLimit(
     accountId: string,
-    auditOnLimit: Pick<VaultAuditPayload, "reference" | "purpose" | "requester" | "signing_device_id">,
+    auditOnLimit: Pick<
+      VaultAuditPayload,
+      "reference" | "purpose" | "requester" | "signing_device_id"
+    >,
   ): Promise<void> {
     const since = new Date(this.now().getTime() - RATE_LIMIT_WINDOW_MS);
     const count = await this.deps.audit.countRecentRetrievals(accountId, since);

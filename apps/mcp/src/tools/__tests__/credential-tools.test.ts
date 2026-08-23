@@ -1,10 +1,11 @@
-// Credential tools (write-only-sink surface): store (upsert) + use.
-// Agents have no rotate/delete — rotation = re-store; delete is web-only.
+// Credential tools (write-only-sink surface): store, vouch-gated non-secret
+// metadata edit/delete, and proxy use. Secret rotation remains re-store only.
 
 import { describe, expect, it } from "vitest";
 import type { ApiClient } from "../../api-client.js";
 import { storeCredentialTool } from "../store-credential.js";
 import { useCredentialTool } from "../use-credential.js";
+import { deleteCredentialTool, editCredentialTool } from "../credential-mutations.js";
 
 function mockApi(over: Partial<ApiClient>): ApiClient {
   return over as ApiClient;
@@ -64,10 +65,18 @@ describe("store_credential (upsert)", () => {
       },
     });
     await storeCredentialTool.handler(
-      { service: "AWS", label: "prod", fields: { access_key_id: "AKIA", secret_access_key: "shh" } },
+      {
+        service: "AWS",
+        label: "prod",
+        fields: { access_key_id: "AKIA", secret_access_key: "shh" },
+      },
       api,
     );
-    expect(seen).toMatchObject({ service: "AWS", label: "prod", fields: { access_key_id: "AKIA" } });
+    expect(seen).toMatchObject({
+      service: "AWS",
+      label: "prod",
+      fields: { access_key_id: "AKIA" },
+    });
   });
 
   it("forwards observed_hosts so captured keys do not land with an empty allowlist", async () => {
@@ -107,6 +116,30 @@ describe("store_credential (upsert)", () => {
     expect(storeCredentialTool.inputSchema.safeParse({ service: "X" }).success).toBe(false);
   });
 
+  it("normalizes labels with the same semantics as edit_credential", () => {
+    const stored = storeCredentialTool.inputSchema.safeParse({
+      service: "OpenAI",
+      label: "  production  ",
+      value: "sk-x",
+    });
+    const edited = editCredentialTool.inputSchema.safeParse({
+      reference: "vault://a/b/c",
+      changes: { label: "  production  " },
+    });
+    expect(stored.success && stored.data.label).toBe("production");
+    expect(edited.success && edited.data.changes.label).toBe("production");
+    expect(
+      storeCredentialTool.inputSchema.safeParse({ service: "OpenAI", label: "   ", value: "x" })
+        .success,
+    ).toBe(false);
+    expect(
+      editCredentialTool.inputSchema.safeParse({
+        reference: "vault://a/b/c",
+        changes: { label: "   " },
+      }).success,
+    ).toBe(false);
+  });
+
   it("throws without an active session", async () => {
     await expect(storeCredentialTool.handler({ service: "x", value: "y" }, null)).rejects.toThrow(
       /active Trusty Squire session/,
@@ -126,21 +159,30 @@ describe("use_credential", () => {
         expect(input.reference).toBe("vault://a/b/c");
         expect(input.http.headers?.["x-id"]).toBe("${SECRET.access_key_id}");
         return {
-          response: { status: 200, headers: { "content-type": "application/json" }, body: '{"ok":true}', truncated: false },
+          response: {
+            status: 200,
+            headers: { "content-type": "application/json" },
+            body: '{"ok":true}',
+            truncated: false,
+          },
         };
       },
     });
     const res = (await useCredentialTool.handler(
       {
         reference: "vault://a/b/c",
-        http: { method: "GET", url: "https://sts.amazonaws.com/", headers: { "x-id": "${SECRET.access_key_id}" } },
+        http: {
+          method: "GET",
+          url: "https://sts.amazonaws.com/",
+          headers: { "x-id": "${SECRET.access_key_id}" },
+        },
       },
       api,
     )) as { response: { status: number } };
     expect(res.response.status).toBe(200);
   });
 
-  it("schema requires reference or service", () => {
+  it("schema requires reference, service, or name", () => {
     const parsed = useCredentialTool.inputSchema.safeParse({
       http: { method: "GET", url: "https://api.openai.com/v1/models" },
     });
@@ -150,5 +192,142 @@ describe("use_credential", () => {
   it("is destructive + always-loaded", () => {
     expect(useCredentialTool.annotations).toMatchObject({ destructiveHint: true });
     expect(useCredentialTool.meta).toMatchObject({ "anthropic/alwaysLoad": true });
+  });
+});
+
+const BASE_MUTATION = {
+  approval_id: "mutation_1",
+  approval_url: "https://trustysquire.ai/vault/mutate/mutation_1",
+  status: "pending" as const,
+  operation: "edit" as const,
+  credential: { reference: "vault://a/b/c", service: "OpenAI", name: "default" },
+  before: {
+    label: "default",
+    allowed_hosts: ["api.openai.com"],
+    login_hosts: [],
+    auth_strategy: null,
+  },
+  after: {
+    label: "default",
+    allowed_hosts: ["api.openai.com", "uploads.openai.com"],
+    login_hosts: [],
+    auth_strategy: null,
+  },
+  expires_at: "2026-08-22T12:10:00.000Z",
+};
+
+describe("edit_credential", () => {
+  it("creates an exact vouch intent, then resumes only by approval_id", async () => {
+    let createdInput: unknown;
+    const api = mockApi({
+      createCredentialMutationApproval: async (input) => {
+        createdInput = input;
+        return BASE_MUTATION;
+      },
+      getCredentialMutationApproval: async (id) => ({
+        ...BASE_MUTATION,
+        approval_id: id,
+        status: "approved",
+      }),
+    });
+    const pending = await editCredentialTool.handler(
+      {
+        service: "OpenAI",
+        name: "default",
+        changes: { allowed_hosts: { mode: "add", hosts: ["uploads.openai.com"] } },
+      },
+      api,
+    );
+    expect(createdInput).toEqual({
+      operation: "edit",
+      service: "OpenAI",
+      name: "default",
+      changes: { allowed_hosts: { mode: "add", hosts: ["uploads.openai.com"] } },
+    });
+    expect(pending).toMatchObject({
+      status: "approval_pending",
+      approval_id: "mutation_1",
+      next: { tool: "edit_credential", approval_id: "mutation_1" },
+    });
+    expect(JSON.stringify(pending)).not.toContain("sk-secret");
+
+    await expect(
+      editCredentialTool.handler({ approval_id: "mutation_1" }, api),
+    ).resolves.toMatchObject({
+      status: "credential_updated",
+      approval_id: "mutation_1",
+    });
+  });
+
+  it("rejects secret/immutable edit fields in the schema", () => {
+    expect(
+      editCredentialTool.inputSchema.safeParse({
+        reference: "vault://a/b/c",
+        changes: { value: "sk-secret" },
+      }).success,
+    ).toBe(false);
+    expect(
+      editCredentialTool.inputSchema.safeParse({
+        reference: "vault://a/b/c",
+        changes: {
+          allowed_hosts: {
+            mode: "add",
+            hosts: ["uploads.openai.com"],
+            unexpected: true,
+          },
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("is destructive, idempotent, and always loaded", () => {
+    expect(editCredentialTool.annotations).toMatchObject({
+      destructiveHint: true,
+      idempotentHint: true,
+    });
+    expect(editCredentialTool.meta).toMatchObject({ "anthropic/alwaysLoad": true });
+  });
+});
+
+describe("delete_credential", () => {
+  it("returns pending before vouch and an idempotent deleted result after approval", async () => {
+    const api = mockApi({
+      createCredentialMutationApproval: async () => ({
+        ...BASE_MUTATION,
+        operation: "delete",
+        after: null,
+      }),
+      getCredentialMutationApproval: async (id) => ({
+        ...BASE_MUTATION,
+        approval_id: id,
+        operation: "delete",
+        status: "approved",
+        after: null,
+      }),
+    });
+    await expect(
+      deleteCredentialTool.handler({ reference: "vault://a/b/c" }, api),
+    ).resolves.toMatchObject({
+      status: "approval_pending",
+      operation: "delete",
+    });
+    await expect(
+      deleteCredentialTool.handler({ approval_id: "mutation_1" }, api),
+    ).resolves.toMatchObject({
+      status: "credential_deleted",
+      approval_id: "mutation_1",
+    });
+  });
+
+  it("does not accept an edit approval as delete authority", async () => {
+    const api = mockApi({ getCredentialMutationApproval: async () => BASE_MUTATION });
+    await expect(deleteCredentialTool.handler({ approval_id: "mutation_1" }, api)).resolves.toEqual(
+      {
+        status: "approval_intent_mismatch",
+        error: "approval_operation_mismatch",
+        expected_operation: "delete",
+        actual_operation: "edit",
+      },
+    );
   });
 });

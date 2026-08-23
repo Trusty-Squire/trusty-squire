@@ -13,16 +13,20 @@ const inputSchema = z
   .object({
     reference: z.string().min(1).optional(),
     service: z.string().min(1).optional(),
+    name: z.string().min(1).optional(),
     http: z.object({
       method: z.string().min(1).max(10),
       url: z.string().min(1).max(2048),
       headers: z.record(z.string()).optional(),
-      body: z.string().max(64 * 1024).optional(),
+      body: z
+        .string()
+        .max(64 * 1024)
+        .optional(),
       query: z.record(z.string()).optional(),
     }),
   })
-  .refine((b) => b.reference !== undefined || b.service !== undefined, {
-    message: "one of reference or service is required",
+  .refine((b) => b.reference !== undefined || b.service !== undefined || b.name !== undefined, {
+    message: "one of reference, service, or name is required",
   });
 
 const DESCRIPTION = `Execute an authenticated HTTP request against an external API using a
@@ -38,8 +42,8 @@ For APIs that authenticate via a query-string key (e.g. FRED's
 \`api_key\`), put the secret in \`query\` — \`query: { api_key: "\${SECRET}" }\`
 — NOT in the url (a \${SECRET} in the url is rejected; the server injects
 query params after the host check so the key never lands in a log).
-The target host must be on the credential's allowed_hosts (editable in
-the web vault) or the call is rejected.`;
+The target host must be on the credential's allowed_hosts (editable with
+edit_credential after a signed vouch, or in the web vault) or the call is rejected.`;
 
 export const useCredentialTool: Tool<z.infer<typeof inputSchema>> = {
   name: "use_credential",
@@ -51,6 +55,7 @@ export const useCredentialTool: Tool<z.infer<typeof inputSchema>> = {
     properties: {
       reference: { type: "string" },
       service: { type: "string" },
+      name: { type: "string" },
       http: {
         type: "object",
         required: ["method", "url"],
@@ -79,6 +84,7 @@ export const useCredentialTool: Tool<z.infer<typeof inputSchema>> = {
       const res = await api.useCredential({
         ...(args.reference !== undefined ? { reference: args.reference } : {}),
         ...(args.service !== undefined ? { service: args.service } : {}),
+        ...(args.name !== undefined ? { name: args.name } : {}),
         http,
       });
       return { response: res.response };
