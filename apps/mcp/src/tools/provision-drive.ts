@@ -12,6 +12,7 @@ import type { ApiClient } from "../api-client.js";
 import {
   startProvisionSession,
   observe,
+  captureScreenshot,
   act,
   cartAdd,
   formSelectMany,
@@ -372,6 +373,58 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
   },
   async handler(args) {
     return await observe(args.session_id, args.detail ?? "compact");
+  },
+};
+
+const screenshotSchema = z.object({
+  session_id: z.string().min(1),
+  // Index into the SAME frame ordering operate_observe's frame_origin
+  // implies (page.frames() order) — capture one frame in isolation instead
+  // of the whole page. Mutually exclusive with frame_url_contains; pass at
+  // most one.
+  frame_index: z.number().int().min(0).optional(),
+  // A substring of a frame's URL (e.g. "cardinalcommerce.com") — capture
+  // whichever frame matches instead of the whole page.
+  frame_url_contains: z.string().min(1).max(300).optional(),
+  // Default false (viewport only, matches what a human actually sees).
+  // Ignored when a frame is targeted (a frame capture is always that
+  // frame's own full box).
+  full_page: z.boolean().optional(),
+});
+
+export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
+  name: "operate_screenshot",
+  description:
+    "Debugging tool: capture a screenshot of what the operate session's browser actually RENDERS — " +
+    "the whole page (default: viewport; full_page:true for the whole scrollable page) or ONE specific " +
+    "frame in isolation via frame_index or frame_url_contains, so a cross-origin challenge iframe (a " +
+    "3-D Secure ACS frame, a captcha) can be captured on its own even when it won't show clearly inside " +
+    "a full-page shot. Use this when text/el_table from operate_observe isn't enough to tell what state " +
+    "a stuck page is actually in — a challenge that never advances, an unexpected layout, a captcha you " +
+    "need to SEE. Read-only: never navigates, clicks, types, submits, or steals focus; it only reads " +
+    "pixels. Money-fence: before capture, any field currently holding a card PAN/expiry/CVV/cardholder- " +
+    "name value, any password field, and any element already sealed as payment data is visually redacted " +
+    "(hidden or character-masked) — the image can never leak card data, independent of what the JSON " +
+    "observation already masks.",
+  inputSchema: screenshotSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id"],
+    properties: {
+      session_id: { type: "string" },
+      frame_index: { type: "number" },
+      frame_url_contains: { type: "string" },
+      full_page: { type: "boolean" },
+    },
+  },
+  async handler(args) {
+    return await captureScreenshot(args.session_id, {
+      ...(args.frame_index !== undefined ? { frameIndex: args.frame_index } : {}),
+      ...(args.frame_url_contains !== undefined
+        ? { frameUrlContains: args.frame_url_contains }
+        : {}),
+      ...(args.full_page !== undefined ? { fullPage: args.full_page } : {}),
+    });
   },
 };
 
@@ -2336,9 +2389,14 @@ export const operateLoginTool: Tool<z.infer<typeof loginSchema>> = {
 // The alias Tool objects above stay defined (unregistered) as the shared implementation
 // operate_act's kinds and operate_recipe_save/run delegate to, and as direct handles
 // for tests that pin down that folded behavior.
+// operate_screenshot (2026-08-23) is a deliberate, narrow addition to this cut: a
+// read-only debugging instrument (page/frame pixels, money-fence redacted) with no
+// alias/kind it could fold into — operate_act's kinds all DO something; this only
+// looks.
 export const OPERATE_TOOLS: Tool[] = [
   provisionStartTool,
   provisionObserveTool,
+  provisionScreenshotTool,
   provisionActTool,
   operateRecipeSaveTool,
   operateRecipeRunTool,

@@ -121,6 +121,20 @@ silent failures.
     primitives the host agent drives via `operate_*`.
   - DOM/screenshot observation + vault-backed credential extraction +
     operator-recipe replay (`operate_recipe_run`) the host agent composes per step.
+  - **`operate_screenshot` (2026-08-23) — a dedicated debugging capture,**
+    separate from the per-step planner screenshot baked into `operate_observe`.
+    Page (viewport or `full_page`) or ONE frame in isolation (`frame_index` /
+    `frame_url_contains` — the case it exists for: a cross-origin ACS/challenge
+    or captcha iframe a full-page shot won't show clearly). Read-only — no
+    navigation, click, type, or focus/`bringToFront`. Money-fence: redacts
+    every card-shaped/sealed field before capture (`SCREENSHOT_REDACTION_SELECTORS`
+    in `browser.ts` — the same fence `data-ts-sealed-payment` and
+    `CHECKOUT_CARD_VALUE_FIELD_SELECTORS` already cover on the JSON-observation
+    side); input/textarea get `-webkit-text-security`, anything else gets
+    `visibility:hidden`, both reverted in a `finally` so no redaction survives
+    the call. Server-side, a tool result carrying `image:{mime_type,data_base64}`
+    (this tool, or any future one) gets a real MCP `type:"image"` content
+    block (`toolResultContent` in `server.ts`), not base64 buried in JSON text.
   - **Frame/iframe support (operator-frame-support).** Ordinary child-frame
     controls now retain their frame origin through observation, action, and
     operator-recipe replay. The user-facing contract lives in README's MCP-tool
@@ -600,6 +614,53 @@ kill the server).
   when the snapshot is taken: `fillCheckoutCardFields` still writes only to
   the main frame or a frame accepted by `recognizedPaymentProviderFrame`,
   preserving split-checkout trust boundaries — `browser.ts`.
+
+### Decoupled/out-of-band 3-D Secure: the real bug was network scope, not wait duration
+
+`#570`/`#572` (2026-08-23) fixed two real defects reproduced live against
+Hibiya Kadan/EbisuMart, but a THIRD one survived them: a decoupled/OOB 3DS
+challenge could still hang indefinitely even though the cardholder approved
+in ~2 seconds — nowhere near either the original single wait or #572's
+resumable 20-minute one. **Root cause, confirmed with a local ACS fixture
+(`browser-decoupled-3ds.test.ts`, both top-level-navigation and iframe/CRes-
+auto-submit topologies): `installHostScopeGuard`'s fail-closed XHR/fetch
+guard (`requestHostInScope`, `browser.ts`) never allow-listed
+`cardinalcommerce.com`** — a host `detectThreeDsChallenge`'s own `urlPattern`
+already treats as a legitimate 3DS authority. So the ACS page's OWN
+decoupled-approval status poll got `route.abort("failed")`ed the instant the
+challenge attached, and its client-side JS could never learn the issuer had
+already approved — no redirect, no CRes auto-submit, independent of how long
+`waitForThreeDsResolution` kept watching. Fix: `THREE_DS_ACS_NETWORK_HOSTS`
+(`browser.ts`, next to `RECOGNIZED_PAYMENT_PROVIDER_FRAME_HOSTS` — kept as a
+SEPARATE list on purpose, so widening 3DS network scope never also widens
+where the raw PAN may be typed). Confirmed by temporarily disabling the fix
+against the same fixture: the hang reproduces byte-for-byte in both
+topologies. `waitForThreeDsResolution` itself needed no change — the
+detection logic was never the bug.
+
+### Positive new-card selection supersedes #572's saved-card refusal
+
+#572 refused (`payment_card_selection_ambiguous`) whenever a checked
+saved-card radio/select-option for a DIFFERENT card competed with the filled
+new-card fields — money-fence-correct (never let the wrong card win) but a
+dead end for the EbisuMart repeat-customer topology, where that competing
+radio is the checkout's OWN default state, not something the user asked for.
+`resolveCompetingSavedCardSelection` (`browser.ts`, replaces the old
+boolean-returning `detectCompetingSavedCardSelection`) now attempts positive
+resolution first: for a competing RADIO, find the sole unambiguous unchecked
+sibling in its choice group that isn't itself saved-card-shaped (preferring
+whichever candidate's container structurally owns one of the fields we
+sealed — i18n-agnostic; falls back to the sole remaining candidate only when
+exactly one exists), `.click()` it (real radio-group semantics — natively
+unchecks the saved-card radio too), then verifies BOTH that no competing
+selection remains AND that every sealed field still holds its filled value
+before letting `submitFilledCheckoutInScope` proceed. Any failure at any of
+those steps — no candidate, more than one equally-plausible candidate, the
+click didn't actually deselect the saved card, the click reset the fields —
+still refuses; a competing `<select>` OPTION is deliberately never
+auto-resolved (a synthetic `change` commit is far less trustworthy across
+frameworks than a native radio click) and still always refuses. No new tool
+surface — this lives entirely inside the existing checkout-submit path.
 
 ### Goose / local-dev MCP install
 

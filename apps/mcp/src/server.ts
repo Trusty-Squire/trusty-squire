@@ -189,9 +189,7 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
         sessionId !== undefined && !/^operate_finish(?:_task)?$/.test(tool.name)
           ? await withProvisionSessionCall(sessionId, async () => await invoke())
           : await invoke();
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      };
+      return toolResultContent(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const serverUnavailable =
@@ -212,6 +210,37 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
   });
 
   return server;
+}
+
+// A tool result carrying `image: { mime_type, data_base64 }` (operate_screenshot
+// today; any future tool could opt in the same way) gets an actual MCP image
+// content block alongside its JSON text, so the host agent can SEE it rather
+// than just read a base64 blob it has to know to decode. The image field is
+// dropped from the text block — it would otherwise duplicate the same base64
+// payload twice in the response for no reason.
+function hasImagePayload(
+  value: unknown,
+): value is Record<string, unknown> & { image: { mime_type: string; data_base64: string } } {
+  if (typeof value !== "object" || value === null) return false;
+  const image = (value as Record<string, unknown>).image;
+  if (typeof image !== "object" || image === null) return false;
+  const rec = image as Record<string, unknown>;
+  return typeof rec.mime_type === "string" && typeof rec.data_base64 === "string";
+}
+
+function toolResultContent(result: unknown) {
+  if (hasImagePayload(result)) {
+    const { image, ...meta } = result;
+    return {
+      content: [
+        { type: "text" as const, text: JSON.stringify(meta, null, 2) },
+        { type: "image" as const, data: image.data_base64, mimeType: image.mime_type },
+      ],
+    };
+  }
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+  };
 }
 
 function errorContent(code: string, message: string, guidance?: Record<string, unknown>) {

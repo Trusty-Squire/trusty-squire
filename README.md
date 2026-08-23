@@ -252,17 +252,21 @@ for the system and data flows.
 
 ## MCP tools
 
-The default MCP registry exposes 18 tools. The essential operator surface
+The default MCP registry exposes 19 tools. The essential operator surface
 is `operate_start`, `operate_observe`, `operate_act`, `operate_pay`,
 `operate_payment_status`, `operate_finish`, `operate_recipe_run`, and
 `operate_recipe_save` — every former standalone workflow/lifecycle/login tool
 name was dropped and its behavior folded into `operate_act` as a `kind` (or into
 `operate_finish`'s `outcome`); no delegating aliases remain. Poll payment status
-via `operate_payment_status(wait_seconds)`.
+via `operate_payment_status(wait_seconds)`. `operate_screenshot(session_id,
+frame_index?, frame_url_contains?, full_page?)` is a read-only debugging capture
+(page or one isolated frame, e.g. a cross-origin 3-D Secure/captcha challenge)
+returned as an actual MCP image — card-shaped and sealed fields are always
+visually redacted before the picture is taken.
 The maintainer-only `list_extract_failures` → `get_extract_failure`
 DOM-diagnostics pair is excluded from that surface; set
 `TRUSTY_SQUIRE_DIAGNOSTICS=1` in the MCP server environment to opt into the
-20-tool diagnostics profile.
+21-tool diagnostics profile.
 
 - Rejected tool calls return a JSON `error` envelope with a stable `code` and
   message. Malformed and unknown calls fail only that request; they do not stop
@@ -286,7 +290,11 @@ DOM-diagnostics pair is excluded from that surface; set
   subdomains are automatically in scope only when they share the registrable
   domain of a host trusted at session start. Calls outside the session scope fail
   promptly instead of hanging; page-load resources continue normally, and a
-  mid-session `allow_host` does not seed sibling-domain widening.
+  mid-session `allow_host` does not seed sibling-domain widening. A small set of
+  always-in-scope hosts (recognized payment-provider frames, OAuth/captcha
+  providers, and 3-D Secure ACS/directory-server hosts) is exempt from that
+  session-start-trust requirement — otherwise a checkout's own out-of-band 3DS
+  challenge could never complete its own status poll.
   For a task gated by the user's connected Google account, pass
   `require_live_identity: true` to `operate_start`. The start fails closed with
   a connect handoff if that Google session is unavailable; otherwise it uses the

@@ -2777,6 +2777,35 @@ export async function observe(
   return await observeSession(session, detail);
 }
 
+export interface ScreenshotCapture {
+  session_id: string;
+  url: string;
+  frame_url: string | null;
+  frame_count: number;
+  redacted_count: number;
+  image: { mime_type: string; data_base64: string };
+}
+
+// operate_screenshot's session-level entry point: mirrors observe()'s
+// sessionForCall resolution, then delegates the actual capture + money-fence
+// redaction to BrowserController.screenshotForOperator (browser.ts).
+export async function captureScreenshot(
+  sessionId: string,
+  opts: { frameIndex?: number; frameUrlContains?: string; fullPage?: boolean } = {},
+): Promise<ScreenshotCapture> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const captured = await session.browser.screenshotForOperator(opts);
+  return {
+    session_id: sessionId,
+    url: session.browser.currentUrl(),
+    frame_url: captured.frameUrl,
+    frame_count: captured.frameCount,
+    redacted_count: captured.redactedCount,
+    image: { mime_type: "image/jpeg", data_base64: captured.base64 },
+  };
+}
+
 // Hosts to seed credential EGRESS from when storing a key extracted in this
 // session: start + auto_widen, NEVER mid_session task scope (a wide multi-app
 // operate scope must not silently over-grant a key's egress allow-list).
