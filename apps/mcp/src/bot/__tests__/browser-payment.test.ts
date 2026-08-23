@@ -2223,12 +2223,15 @@ describe("3-D Secure resolution", () => {
 
   it.skipIf(!chromiumAvailable)("returns failed for visible decline text", async () => {
     const { browser, page, controller } = await setupChallenge();
+    const wait = vi.spyOn(page, "waitForTimeout");
     try {
       await page.locator("body").evaluate((body) => {
         body.insertAdjacentHTML("beforeend", "<p>Payment declined</p>");
       });
       await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("failed");
+      expect(wait).not.toHaveBeenCalled();
     } finally {
+      wait.mockRestore();
       await browser.close();
     }
   });
@@ -2267,7 +2270,8 @@ describe("3-D Secure resolution", () => {
             }
           ).detectThreeDsChallenge(),
         ).resolves.toEqual({ three_ds_required: false, order_confirmed: false });
-        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
+        await expect(controller.waitForThreeDsResolution(2_500)).resolves.toBe("timeout");
+        expect(wait.mock.calls.map(([timeout]) => timeout)).toEqual([1_000, 1_000, 500]);
       } finally {
         wait.mockRestore();
         now.mockRestore();
@@ -4809,6 +4813,333 @@ describe("split-checkout card fill (real browser)", () => {
         await browser.close();
       }
     },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses to submit when an already-selected saved card would win over the filled card",
+    async () => {
+      // EbisuMart-shaped repeat-customer checkout: a "new card" fieldset (what
+      // we fill, matching card_ref) alongside a DEFAULT-CHECKED "use my saved
+      // card" radio for a DIFFERENT stored card. Money-fence: the released and
+      // audited card must be the one that is actually charged — never click
+      // Pay while a different stored card could win.
+      const pageUrl = "https://hibiyakadan.example.test/cart_seisan.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form id="checkout">
+            <label>
+              <input type="radio" name="payment_method" value="saved" checked>
+              Card on file: Visa •••• 9012
+            </label>
+            <label>
+              <input type="radio" name="payment_method" value="new">
+              Use a different card
+            </label>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Place order</button>
+          </form>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_card_selection_ambiguous",
+        );
+        expect(await page.evaluate(() => document.body.dataset.submitted)).toBeUndefined();
+        expect(await page.locator("[autocomplete='cc-number']").inputValue()).toBe("");
+        expect(await page.locator("[autocomplete='cc-csc']").inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses a saved-card selection in a different frame from the filled card fields",
+    async () => {
+      const pageUrl = "https://shop.example.test/cross-frame-checkout.html";
+      const frameUrl = "https://checkout.pci.shopifyinc.com/card-fields";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <label>
+            <input type="radio" name="payment_method" value="saved" checked>
+            Saved card •••• 9012
+          </label>
+          <iframe src="${frameUrl}"></iframe>`,
+        [frameUrl]: `
+          <form id="card-form">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay now</button>
+          </form>
+          <script>
+            document.querySelector("#card-form").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_card_selection_ambiguous",
+        );
+        const frame = page.frames().find((candidate) => candidate.url() === frameUrl)!;
+        expect(await frame.locator("body").getAttribute("data-submitted")).toBeNull();
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses a saved-card radio associated to the card form from outside its subtree",
+    async () => {
+      const pageUrl = "https://shop.example.test/form-associated-radio-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form id="checkout">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay</button>
+          </form>
+          <input id="saved-card" form="checkout" type="radio" name="payment_method" value="saved" checked>
+          <label for="saved-card">Card on file ending in 9012</label>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_card_selection_ambiguous",
+        );
+        expect(await page.evaluate(() => document.body.dataset.submitted)).toBeUndefined();
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses a selected saved-card option alongside the filled card fields",
+    async () => {
+      const pageUrl = "https://shop.example.test/saved-card-select-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form id="checkout">
+            <label for="payment-source">Payment source</label>
+            <select id="payment-source">
+              <option value="saved" selected>Saved card •••• 9012</option>
+              <option value="new">New card</option>
+            </select>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay</button>
+          </form>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_card_selection_ambiguous",
+        );
+        expect(await page.evaluate(() => document.body.dataset.submitted)).toBeUndefined();
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "excludes the exact filled expiry select from saved-card option detection",
+    async () => {
+      const pageUrl = "https://shop.example.test/filled-expiry-select-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form id="checkout">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <select autocomplete="cc-exp-month"><option value="12">12</option></select>
+            <select autocomplete="cc-exp-year"><option value="30">Saved card •••• 30</option></select>
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay</button>
+          </form>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillAndSubmitCheckout(CARD);
+        expect(await page.evaluate(() => document.body.dataset.submitted)).toBe("true");
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses a saved-card selection nested in open shadow roots",
+    async () => {
+      const pageUrl = "https://shop.example.test/shadow-saved-card-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <saved-card-source id="saved-source"></saved-card-source>
+          <form id="checkout">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay</button>
+          </form>
+          <script>
+            const outer = document.querySelector("#saved-source").attachShadow({ mode: "open" });
+            outer.innerHTML = '<saved-card-choice id="saved-choice"></saved-card-choice>';
+            const inner = outer.querySelector("#saved-choice").attachShadow({ mode: "open" });
+            inner.innerHTML =
+              '<input id="saved-card" type="radio" checked>' +
+              '<label for="saved-card">Saved card •••• 9012</label>';
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_card_selection_ambiguous",
+        );
+        expect(await page.evaluate(() => document.body.dataset.submitted)).toBeUndefined();
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses submission when saved-card inspection cannot complete",
+    async () => {
+      const pageUrl = "https://shop.example.test/detached-card-inspection.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay</button>
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+        await controller.fillCheckoutCardFields(CARD);
+        const evaluate = vi.spyOn(page.mainFrame(), "evaluate");
+        evaluate.mockRejectedValueOnce(new Error("frame detached during inspection"));
+
+        await expect(controller.submitFilledCheckout()).rejects.toThrow(
+          "payment_card_selection_ambiguous",
+        );
+        evaluate.mockRestore();
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "still submits when the checked payment-method option is an unrelated non-card choice",
+    async () => {
+      // A "Credit Card" vs. "PayPal" method toggle is a legitimate, unrelated
+      // selection (no masked PAN, no saved-card marker) — must not false-
+      // positive the competing-saved-card refusal.
+      const pageUrl = "https://shop.example.test/method-toggle-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form id="checkout">
+            <label><input type="radio" name="payment_method" value="card" checked> Credit Card</label>
+            <label><input type="radio" name="payment_method" value="paypal"> PayPal</label>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay</button>
+          </form>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillAndSubmitCheckout(CARD);
+        expect(await page.evaluate(() => document.body.dataset.submitted)).toBe("true");
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
   );
 
   it.skipIf(!chromiumAvailable)(

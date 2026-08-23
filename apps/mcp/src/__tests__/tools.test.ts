@@ -1163,9 +1163,10 @@ describe("operate_payment_status [P0]", () => {
     expect(operatePaymentStatusTool.jsonInputSchema).toMatchObject({
       properties: { wait_seconds: { minimum: 0, maximum: 15 } },
     });
+    expect(operatePaymentStatusTool.annotations?.readOnlyHint).toBe(false);
   });
 
-  it("status: read-only — never opens the card or confirms a candidate", async () => {
+  it("status never opens the card or confirms a candidate", async () => {
     mockAwaitingApproval = baseState;
     const getPaymentApproval = vi.fn().mockResolvedValue({
       id: "appr_status",

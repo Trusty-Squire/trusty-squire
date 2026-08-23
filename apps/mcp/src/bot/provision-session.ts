@@ -31,11 +31,13 @@ import {
   type FrameTarget,
   type InteractiveElement,
   type PageTargetSafetySignals,
+  type ThreeDsResolution,
 } from "./browser.js";
 import type {
   CartCheckoutObservation,
   PendingApprovalWait,
   PendingCardFill,
+  PendingThreeDsWait,
 } from "./pay-operator.js";
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import type { ApiClient } from "../api-client.js";
@@ -568,6 +570,15 @@ export interface Session {
     | { status: "sealed" }
     | null;
   paymentFieldSealActive: boolean;
+  // A completed operate_pay single-page submit whose post-submit 3DS wait
+  // exhausted its budget with no terminal signal. Deliberately NOT part of
+  // activePayment: the card is already released and the charge already
+  // submitted, so there is no lease to hold and no re-authorization risk —
+  // this is resumable bookkeeping for operate_payment_status,
+  // mirroring the "awaiting_approval" gap it closes for the pre-charge wait.
+  // Set by setActivePendingThreeDs, read by getActivePendingThreeDs, cleared
+  // by clearActivePendingThreeDsIfCurrent once resolved or its deadline passes.
+  pendingThreeDs: PendingThreeDsWait | null;
   // Snapshot of the single approval a filled card belongs to, captured at
   // fill time (setActivePendingCardFill / completeActivePaymentLeaseWithPendingFill)
   // so the place-order guard below still has what it needs after activePayment
@@ -2619,6 +2630,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     replayState: null,
     activePayment: null,
     paymentFieldSealActive: false,
+    pendingThreeDs: null,
     placeOrderApproval: null,
     placeOrderAttempted: false,
     lastCartCheckout: null,
@@ -2723,6 +2735,7 @@ export async function startHarnessProvisionSession(
     replayState: null,
     activePayment: null,
     paymentFieldSealActive: false,
+    pendingThreeDs: null,
     placeOrderApproval: null,
     placeOrderAttempted: false,
     lastCartCheckout: null,
@@ -2883,6 +2896,27 @@ export function getActivePendingApproval(selectedSession?: Session): PendingAppr
   return state?.status === "awaiting_approval" ? state.state : null;
 }
 
+export function getActivePendingThreeDs(selectedSession?: Session): PendingThreeDsWait | null {
+  return (selectedSession ?? activeProvisionSession()).pendingThreeDs ?? null;
+}
+
+export function setActivePendingThreeDs(
+  state: PendingThreeDsWait,
+  selectedSession?: Session,
+): void {
+  (selectedSession ?? activeProvisionSession()).pendingThreeDs = state;
+}
+
+export function clearActivePendingThreeDsIfCurrent(
+  state: PendingThreeDsWait,
+  selectedSession?: Session,
+): boolean {
+  const session = selectedSession ?? activeProvisionSession();
+  if (session.pendingThreeDs !== state) return false;
+  session.pendingThreeDs = null;
+  return true;
+}
+
 export interface ActivePaymentLease {
   phase: "fill_card" | "single";
 }
@@ -2897,6 +2931,12 @@ export function claimActivePaymentForOperatePay(
   selectedSession?: Session,
 ): ActivePaymentClaim {
   const session = selectedSession ?? activeProvisionSession();
+  if (getActivePendingThreeDs(session) !== null) {
+    throw new Error(
+      "operate_pay refused: a prior charge has unresolved 3-D Secure state; call " +
+        "operate_payment_status first",
+    );
+  }
   const state = session.activePayment;
   if (state?.status === "operating") {
     throw new Error("operate_pay refused: another payment operation is already in progress");
@@ -4445,7 +4485,14 @@ function enforcePlaceOrderGuard(
   session: Session,
   labels: readonly (string | null | undefined)[],
 ): Session["placeOrderApproval"] {
-  if (session.placeOrderApproval === null || !isCheckoutSubmitLabeled(labels)) return null;
+  if (!isCheckoutSubmitLabeled(labels)) return null;
+  if (getActivePendingThreeDs(session) !== null) {
+    throw new Error(
+      "operate_act refused: a prior charge has unresolved 3-D Secure state; call " +
+        "operate_payment_status first",
+    );
+  }
+  if (session.placeOrderApproval === null) return null;
   if (session.placeOrderAttempted) {
     throw new Error(
       "operate_act refused: a place-order attempt already fired for this approval " +
@@ -4801,7 +4848,6 @@ export async function act(
             ...resolved.labels,
           ]);
           if (
-            session.placeOrderApproval !== null &&
             isPlaceOrderCandidate &&
             (action.kind === "click" || action.kind === "js_click")
           ) {
@@ -4853,7 +4899,7 @@ export async function act(
       bindCartIdentity(isCartAffectingAction(action, el));
       if (action.kind === "click" || action.kind === "js_click") {
         const target = frameTargetFor(el);
-        if (session.placeOrderApproval !== null && isPlaceOrderClickCandidate(el)) {
+        if (isPlaceOrderClickCandidate(el)) {
           await runClickWithPlaceOrderGuard(session, (shouldTrack) =>
             browser.clickWithDispatchTracking(
               target !== null
@@ -7534,16 +7580,48 @@ export interface PreparedFinishResult<T> {
 }
 
 function profileRequiresDestroy(session: Session): boolean {
-  return session.activePayment !== null || session.paymentFieldSealActive;
+  return (
+    session.activePayment !== null ||
+    session.paymentFieldSealActive ||
+    session.pendingThreeDs !== null
+  );
 }
 
-async function closeFinishingProvisionSession(session: Session): Promise<FinishResult> {
+function pendingThreeDsAuditStatus(resolution: ThreeDsResolution): string {
+  if (resolution === "succeeded") return "payment_submitted";
+  if (resolution === "failed") return "payment_declined";
+  return "payment_3ds_unresolved";
+}
+
+async function auditPendingThreeDsForSessionClose(session: Session): Promise<void> {
+  const pending = session.pendingThreeDs;
+  if (pending === null) return;
+  if (session.api === undefined) {
+    throw new Error(
+      "operate_finish refused: pending 3-D Secure outcome cannot be audited without an active API session",
+    );
+  }
+  const resolution = await session.browser.waitForThreeDsResolution(0);
+  await session.api.auditPayment({
+    ...pending.checkout,
+    last4: pending.last4,
+    status: pendingThreeDsAuditStatus(resolution),
+    approval_id: pending.approval_id,
+    ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
+  });
+}
+
+async function closeFinishingProvisionSession(
+  session: Session,
+  destroyProfile: boolean,
+): Promise<FinishResult> {
   const sessionId = session.id;
+  await auditPendingThreeDsForSessionClose(session);
   const url = session.browser.currentUrl();
   audit(sessionId, "finish", { url });
-  const destroyProfile = profileRequiresDestroy(session);
   session.activePayment = null;
   session.paymentFieldSealActive = false;
+  session.pendingThreeDs = null;
   sessions.delete(sessionId);
   await releaseWarmBrowserPage(session.browser, !destroyProfile);
   return { session_id: sessionId, url, closed: true };
@@ -7559,8 +7637,9 @@ export async function finishProvisionSessionWithPreparation<T>(
   session.closing = true;
   try {
     await waitForSessionCallsToDrain(session);
+    const destroyProfile = profileRequiresDestroy(session);
     const prepared = await prepare();
-    const finish = await closeFinishingProvisionSession(session);
+    const finish = await closeFinishingProvisionSession(session, destroyProfile);
     return { finish, prepared };
   } catch (error) {
     if (sessions.get(sessionId) === session) session.closing = false;
@@ -7588,10 +7667,19 @@ export async function closeAllProvisionSessions(): Promise<void> {
     await pending.launch.catch(() => undefined);
     await closeLeasedBrowser(pending.controller, pending.lease, false).catch(() => undefined);
   }
-  for (const [id, session] of [...sessions.entries()]) {
-    sessions.delete(id);
-    await releaseWarmBrowserPage(session.browser, false).catch(() => undefined);
+  const closingSessions = [...sessions.values()];
+  for (const session of closingSessions) session.closing = true;
+  let closeError: unknown;
+  for (const session of closingSessions) {
+    try {
+      await waitForSessionCallsToDrain(session);
+      await closeFinishingProvisionSession(session, true);
+    } catch (error) {
+      if (sessions.get(session.id) === session) session.closing = false;
+      if (closeError === undefined) closeError = error;
+    }
   }
+  if (closeError !== undefined) throw closeError;
   for (const slot of [...leasedBrowsers.values()]) {
     leasedBrowsers.delete(slot.controller);
     await closeLeasedBrowser(slot.controller, slot.lease, false).catch(() => undefined);

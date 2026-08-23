@@ -9953,6 +9953,91 @@ export class BrowserController {
     return null;
   }
 
+  private async detectCompetingSavedCardSelection(): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    for (const frame of this.page.frames()) {
+      let selected: boolean;
+      try {
+        selected = await frame.evaluate(() => {
+          const savedCardPattern =
+            /(?:••+|\*{2,}|●+|×{2,}|x{4,})[\s-]*\d{2,4}\b|\bending\s+in\s+\d{4}\b|\bcard\s+on\s+file\b|\bsaved\s+card\b|登録済みのカード|前回(?:利用|使用)したカード|保存されたカード/iu;
+          const roots: Array<Document | ShadowRoot> = [document];
+          for (let index = 0; index < roots.length; index += 1) {
+            const root = roots[index]!;
+            for (const element of Array.from(root.querySelectorAll("*"))) {
+              const shadowRoot = element.shadowRoot;
+              if (shadowRoot !== null) roots.push(shadowRoot);
+            }
+          }
+          const isFilledCardField = (element: Element | null): boolean =>
+            element?.getAttribute("data-ts-sealed-payment") === "1";
+          const associatedLabelText = (control: Element): string[] => {
+            const labels = new Set<HTMLLabelElement>();
+            if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement) {
+              for (const label of Array.from(control.labels ?? [])) labels.add(label);
+            }
+            const id = control.getAttribute("id");
+            if (id !== null && id.length > 0) {
+              const root = control.getRootNode();
+              if (!(root instanceof Document) && !(root instanceof ShadowRoot)) {
+                throw new Error("saved-card control has no inspectable root");
+              }
+              for (const label of Array.from(
+                root.querySelectorAll<HTMLLabelElement>("label[for]"),
+              )) {
+                if (label.htmlFor === id) labels.add(label);
+              }
+            }
+            return Array.from(labels, (label) => label.textContent ?? "");
+          };
+          for (const root of roots) {
+            const selectedRadios = Array.from(
+              root.querySelectorAll(
+                'input[type="radio"]:checked,[role="radio"][aria-checked="true"]',
+              ),
+            );
+            for (const candidate of selectedRadios) {
+              if (isFilledCardField(candidate)) continue;
+              const container =
+                candidate.closest("[role='radio'],li,div") ?? candidate.parentElement;
+              const text = [
+                candidate.getAttribute("aria-label"),
+                ...associatedLabelText(candidate),
+                container?.textContent,
+              ]
+                .filter((value): value is string => typeof value === "string")
+                .join(" ")
+                .replace(/\s+/g, " ")
+                .trim();
+              if (text.length > 0 && savedCardPattern.test(text)) return true;
+            }
+            for (const select of Array.from(root.querySelectorAll("select"))) {
+              if (isFilledCardField(select)) continue;
+              for (const option of Array.from(select.selectedOptions)) {
+                if (isFilledCardField(option)) continue;
+                const text = [
+                  option.textContent,
+                  select.getAttribute("aria-label"),
+                  ...associatedLabelText(select),
+                ]
+                  .filter((value): value is string => typeof value === "string")
+                  .join(" ")
+                  .replace(/\s+/g, " ")
+                  .trim();
+                if (text.length > 0 && savedCardPattern.test(text)) return true;
+              }
+            }
+          }
+          return false;
+        });
+      } catch {
+        throw new Error("payment_card_selection_ambiguous");
+      }
+      if (selected) return true;
+    }
+    return false;
+  }
+
   // The charge: find and click the pay/place-order control, then poll for a
   // terminal merchant order route or a 3-D Secure challenge. Callers gate this
   // on a verified visible total.
@@ -9964,6 +10049,9 @@ export class BrowserController {
     cardGroup?: CheckoutCardGroupScope,
   ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
+    if (await this.detectCompetingSavedCardSelection()) {
+      throw new Error("payment_card_selection_ambiguous");
+    }
     let outcomeBaseline: CheckoutOutcomeBaseline | undefined;
     this.checkoutOutcomeBaseline = undefined;
     let submitted = false;
@@ -10570,8 +10658,8 @@ export class BrowserController {
       this.checkoutOutcomeBaseline ?? (await this.captureCheckoutOutcomeBaseline());
     const failureText =
       /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
-    const deadline = Date.now() + timeoutMs;
-    do {
+    const deadline = Date.now() + Math.max(timeoutMs, 0);
+    while (true) {
       await this.page.bringToFront().catch(() => undefined);
       if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) return "succeeded";
       const texts = await Promise.all(
@@ -10584,9 +10672,10 @@ export class BrowserController {
           ),
       );
       if (texts.some((text) => failureText.test(text))) return "failed";
-      await this.page.waitForTimeout(1_000).catch(() => undefined);
-    } while (Date.now() <= deadline);
-    return "timeout";
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) return "timeout";
+      await this.page.waitForTimeout(Math.min(1_000, remainingMs)).catch(() => undefined);
+    }
   }
 
   // Deterministic Firebase/GCP credential extraction. Every Firebase project

@@ -4,13 +4,16 @@ import {
   activeProvisionBrowserForPayment,
   claimActivePaymentForOperatePay,
   clearActivePendingCardFill,
+  clearActivePendingThreeDsIfCurrent,
   completeActivePaymentLeaseWithPendingApproval,
   completeActivePaymentLeaseWithPendingFill,
   getActivePendingApproval,
+  getActivePendingThreeDs,
   recordActivePaymentProvenance,
   releaseActivePaymentLease,
   retainActivePaymentFieldSeal,
   restoreActivePendingCardFillAfterConfirmThrow,
+  setActivePendingThreeDs,
   withPaymentSessionCall,
   type Session,
 } from "../bot/provision-session.js";
@@ -20,7 +23,9 @@ import {
   executeOperatePayConfirm,
   type PendingApprovalWait,
   type PendingCardFill,
+  type PendingThreeDsWait,
 } from "../bot/pay-operator.js";
+import type { ThreeDsResolution } from "../bot/browser.js";
 import type { ApiClient } from "../api-client.js";
 import { assertApi, type Tool } from "./index.js";
 
@@ -124,7 +129,10 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
     "creates a phone approval link, waits for approval, " +
     "verifies the passkey-signed purchase mandate, opens the card only in this process, " +
     "fills common checkout fields, submits, and audits only the last four digits. Never " +
-    "solves 3-D Secure; waits for user completion, then returns a needs_user handoff if unresolved. " +
+    "solves 3-D Secure; waits for user completion, then returns a needs_user handoff if unresolved " +
+    "— including a decoupled/out-of-band app-push challenge that had not resolved yet, in which " +
+    "case call operate_payment_status (not operate_pay again) to keep checking the same already-" +
+    "submitted charge. " +
     "With no card_ref/card_label and no card on file, the approval link becomes a first-time " +
     "add-card ceremony and the card is bound server-side before the mandate is signed. " +
     "On approval resume, an unreadable live checkout reuses the original mandate-bound checkout; " +
@@ -342,6 +350,9 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
             onApprovalPending: (state) => {
               approvalPending = state;
             },
+            onThreeDsPending: (state) => {
+              setActivePendingThreeDs(state, session);
+            },
             ...(cartFallbackCheckout !== undefined ? { cartFallbackCheckout } : {}),
             ...(paymentClaim.resumeApproval !== undefined
               ? { resumeFrom: paymentClaim.resumeApproval }
@@ -535,21 +546,112 @@ function noPendingPaymentResult(session: Session): Record<string, unknown> {
   };
 }
 
+function threeDsResolutionStatus(
+  resolution: ThreeDsResolution,
+): "payment_submitted" | "payment_declined" | null {
+  if (resolution === "succeeded") return "payment_submitted";
+  if (resolution === "failed") return "payment_declined";
+  return null;
+}
+
+async function threeDsStatusResult(
+  api: ApiClient,
+  session: Session,
+  state: PendingThreeDsWait,
+  waitSeconds: number,
+): Promise<Record<string, unknown>> {
+  const browser = await activeProvisionBrowserForPayment(session);
+  const expiredAtEntry = Date.now() >= state.deadline;
+  const boundMs =
+    expiredAtEntry || waitSeconds <= 0
+      ? 0
+      : Math.min(Math.max(waitSeconds * 1000, 1_000), 15_000);
+  const resolution = await browser.waitForThreeDsResolution(boundMs);
+  const terminalStatus = threeDsResolutionStatus(resolution);
+  const unresolvedPastDeadline =
+    terminalStatus === null && (expiredAtEntry || Date.now() >= state.deadline);
+  if (terminalStatus === null && !unresolvedPastDeadline) {
+    return {
+      status: "payment_3ds_pending",
+      approval_url: state.approval_url,
+      merchant: state.checkout.merchant,
+      amount_cents: state.checkout.amount_cents,
+      currency: state.checkout.currency,
+      next: { tool: "operate_payment_status", session_id: session.id, wait_seconds: 15 },
+    };
+  }
+  const finalStatus = terminalStatus ?? "payment_3ds_unresolved";
+  let auditRecorded = true;
+  if (terminalStatus === null) {
+    await api.auditPayment({
+      ...state.checkout,
+      last4: state.last4,
+      status: finalStatus,
+      approval_id: state.approval_id,
+      ...(state.mandate_id !== undefined ? { mandate_id: state.mandate_id } : {}),
+    });
+  } else {
+    try {
+      await api.auditPayment({
+        ...state.checkout,
+        last4: state.last4,
+        status: finalStatus,
+        approval_id: state.approval_id,
+        ...(state.mandate_id !== undefined ? { mandate_id: state.mandate_id } : {}),
+      });
+    } catch {
+      auditRecorded = false;
+    }
+  }
+  clearActivePendingThreeDsIfCurrent(state, session);
+  return {
+    status: finalStatus,
+    audit_recorded: auditRecorded,
+    approval_url: state.approval_url,
+    merchant: state.checkout.merchant,
+    amount_cents: state.checkout.amount_cents,
+    currency: state.checkout.currency,
+    ...(terminalStatus === null
+      ? {
+          needs_user: {
+            wall: "3ds",
+            message:
+              "The 3-D Secure challenge never reached a confirmed outcome within the resumable " +
+              "window. Check the merchant account directly for whether the order was placed " +
+              "before retrying — Trusty Squire will not re-release this card without a fresh " +
+              "approval.",
+            resume: "checkout",
+          },
+        }
+      : {}),
+  };
+}
+
 // Backs operate_payment_status: an immediate peek (waitSeconds <= 0) never
 // blocks, a positive waitSeconds bound-waits (clamped to [1s, 15s] — the
-// server's wait-peek window is a fixed ~15s regardless of what's requested).
+// server's wait-peek window is a fixed ~15s regardless of what's requested,
+// and threeDsStatusResult clamps to the same shape for its own live check).
 async function paymentStatusResult(
   api: ApiClient,
   session: Session,
   waitSeconds: number,
 ): Promise<Record<string, unknown>> {
   const state = getActivePendingApproval(session);
-  if (state === null) return noPendingPaymentResult(session);
-  if (waitSeconds <= 0) {
-    return paymentResult(session, await readApprovalStatus(api, state, session.id, false));
+  if (state !== null) {
+    if (waitSeconds <= 0) {
+      return paymentResult(session, await readApprovalStatus(api, state, session.id, false));
+    }
+    const boundMs = Math.min(Math.max(waitSeconds * 1000, 1_000), 15_000);
+    return paymentResult(session, await readApprovalStatus(api, state, session.id, true, boundMs));
   }
-  const boundMs = Math.min(Math.max(waitSeconds * 1000, 1_000), 15_000);
-  return paymentResult(session, await readApprovalStatus(api, state, session.id, true, boundMs));
+  const threeDsState = getActivePendingThreeDs(session);
+  if (threeDsState !== null) {
+    return paymentResult(
+      session,
+      await threeDsStatusResult(api, session, threeDsState, waitSeconds),
+    );
+  }
+  return noPendingPaymentResult(session);
 }
 
 const paymentStatusInputSchema = z.object({
@@ -560,12 +662,19 @@ const paymentStatusInputSchema = z.object({
 export const operatePaymentStatusTool: Tool<z.infer<typeof paymentStatusInputSchema>> = {
   name: "operate_payment_status",
   description:
-    "Read-only: report the status of the addressed session's payment approval currently awaiting " +
+    "Report the status of the addressed session's payment approval currently awaiting " +
     "the human's phone tap, if any — started by an operate_pay call that returned approval_pending. " +
-    "Pass `wait_seconds` (0-15, default 0) to bound-wait for a change instead of an instant peek; " +
-    "never blocks longer than that. Never verifies a mandate or opens a card. Only " +
-    "candidate_kind=approval with ready_to_charge=true is a final authorization; a review candidate " +
-    "still requires final approval.",
+    "Also covers an already-submitted charge whose 3-D Secure challenge (including a decoupled/" +
+    'out-of-band app-push) had not resolved when a prior operate_pay call\'s own wait ended (that ' +
+    'call returns payment_3ds_required or payment_outcome_unknown with needs_user.wall="3ds" and ' +
+    "a next hint pointing here) — call this again to keep checking rather than re-calling " +
+    "operate_pay, which does not resume a post-submit 3DS wait; reports payment_3ds_pending while " +
+    "still unresolved. Never re-releases the card or creates a new approval. Pass `wait_seconds` " +
+    "(0-15, default 0) to bound-wait for a change instead of an instant peek; never blocks longer " +
+    "than that. Never verifies a mandate or opens a card. Only candidate_kind=approval with " +
+    "ready_to_charge=true is a final authorization; a review candidate still requires final " +
+    "approval. When a pending 3-D Secure outcome resolves or reaches its deadline, this records " +
+    "a terminal payment audit and clears that session's pending tracking.",
   inputSchema: paymentStatusInputSchema,
   jsonInputSchema: {
     type: "object",
@@ -584,7 +693,7 @@ export const operatePaymentStatusTool: Tool<z.infer<typeof paymentStatusInputSch
       },
     },
   },
-  annotations: { readOnlyHint: true },
+  annotations: { readOnlyHint: false },
   async handler(args, api) {
     assertApi(api);
     return await withPaymentSessionCall(args.session_id, (session) =>
