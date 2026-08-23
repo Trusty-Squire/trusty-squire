@@ -686,8 +686,7 @@ const CHECKOUT_COMBINED_EXPIRY_FIELD_SELECTORS = [
   `label:has-text("MM / YY") input${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
 ].join(",");
 
-const CHECKOUT_COMBINED_EXPIRY_GROUP_SELECTORS =
-  CHECKOUT_COMBINED_EXPIRY_INPUT_SELECTORS.join(",");
+const CHECKOUT_COMBINED_EXPIRY_GROUP_SELECTORS = CHECKOUT_COMBINED_EXPIRY_INPUT_SELECTORS.join(",");
 
 const CHECKOUT_CONSERVATIVE_CVV_FIELD_SELECTORS = [
   'input[autocomplete~="cc-csc"]',
@@ -8654,6 +8653,25 @@ export class BrowserController {
   // non-text, or unassociated control is left unstamped rather than guessed —
   // a wrong-field card fill is worse than a fill_field_not_found refusal.
   private async stampJapaneseCardLabelFields(frames: readonly Frame[]): Promise<void> {
+    await Promise.all(
+      frames.map(async (frame, frameIndex) => {
+        const documentElement = await frame.$("html").catch(() => null);
+        if (documentElement === null) return;
+        try {
+          await this.stampJapaneseCardLabelFieldsInDocument(documentElement, frameIndex);
+        } catch {
+          return;
+        } finally {
+          await documentElement.dispose().catch(() => undefined);
+        }
+      }),
+    );
+  }
+
+  private async stampJapaneseCardLabelFieldsInDocument(
+    documentElement: ElementHandle<HTMLElement>,
+    frameIndex: number,
+  ): Promise<void> {
     const excludedCardIdentities = ["gift", "loyalty", "point", "prepaid", "member"];
     const panLabels = ["カード番号"];
     const excludedCardLabels = [
@@ -8668,193 +8686,186 @@ export class BrowserController {
     const nameLabels = ["カード名義"];
     const cvvLabels = ["セキュリティコード", "セキュリティーコード"];
     const expiryLabels = ["有効期限"];
-    await Promise.all(
-      frames.map((frame, frameIndex) =>
-        frame
-          .evaluate(
-            (labels) => {
-              document
-                .querySelectorAll(
-                  '[data-ts-jp-card-field],[data-ts-jp-card-exp],[data-ts-jp-card-exp-group],[data-ts-card-expiry]',
-                )
-                .forEach((element) => {
-                  element.removeAttribute("data-ts-jp-card-field");
-                  element.removeAttribute("data-ts-jp-card-exp");
-                  element.removeAttribute("data-ts-jp-card-exp-group");
-                  element.removeAttribute("data-ts-card-expiry");
-                });
-              const isVisible = (element: HTMLElement): boolean => {
-                if (element.matches(":disabled") || element.getClientRects().length === 0) {
-                  return false;
-                }
-                let current: Element | null = element;
-                while (current !== null) {
-                  const style = getComputedStyle(current);
-                  if (
-                    style.display === "none" ||
-                    style.visibility === "hidden" ||
-                    style.visibility === "collapse" ||
-                    Number.parseFloat(style.opacity) <= 0
-                  ) {
-                    return false;
-                  }
-                  current = current.parentElement;
-                }
-                return true;
-              };
-              const isTextInput = (element: Element): element is HTMLInputElement =>
-                element instanceof HTMLInputElement &&
-                (element.type === "text" || element.type === "tel") &&
-                isVisible(element);
-              const identityTokens = (value: string): string[] =>
-                value
-                  .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-                  .toLowerCase()
-                  .split(/[^a-z0-9]+/)
-                  .filter((token) => token.length > 0);
-              const isPanIdentity = (value: string): boolean => {
-                const tokens = identityTokens(value);
-                const approvedPrefixes = new Set(["payment", "checkout", "primary", "backup"]);
-                while (approvedPrefixes.has(tokens[0] ?? "")) tokens.shift();
-                return [
-                  "card-no",
-                  "card-number",
-                  "cardno",
-                  "cardnumber",
-                  "credit-no",
-                  "creditno",
-                ].includes(tokens.join("-"));
-              };
-              const isCvvIdentity = (value: string): boolean =>
-                ["security-cd", "securitycd", "sec-code", "seccode"].includes(
-                  identityTokens(value).join("-"),
-                );
-              const isNameIdentity = (value: string): boolean =>
-                ["card-name", "cardname", "credit-name", "creditname"].includes(
-                  identityTokens(value).join("-"),
-                );
-              const isCombinedExpiryIdentity = (value: string): boolean => {
-                const tokens = identityTokens(value);
-                const prefixes = new Set(["card", "credit", "cc"]);
-                if (prefixes.has(tokens[0] ?? "")) tokens.shift();
-                if (tokens.length === 1) {
-                  return [
-                    "exp",
-                    "expiry",
-                    "expiration",
-                    "expdate",
-                    "expirydate",
-                    "expirationdate",
-                  ].includes(tokens[0] ?? "");
-                }
-                return (
-                  tokens.length === 2 &&
-                  ["exp", "expiry", "expiration"].includes(tokens[0] ?? "") &&
-                  tokens[1] === "date"
-                );
-              };
-              document.querySelectorAll("input[name],input[id]").forEach((element) => {
-                if (!(element instanceof HTMLInputElement) || !isVisible(element)) return;
-                const identities = [element.getAttribute("name") ?? "", element.id];
-                const excluded = identities.some((identity) => {
-                  const lower = identity.toLowerCase();
-                  return labels.excludedCardIdentities.some((token) => lower.includes(token));
-                });
-                if (excluded) return;
-                if (isTextInput(element) && identities.some(isPanIdentity))
-                  element.setAttribute("data-ts-jp-card-field", "pan");
-                if (isTextInput(element) && identities.some(isCvvIdentity))
-                  element.setAttribute("data-ts-jp-card-field", "cvv");
-                if (isTextInput(element) && identities.some(isNameIdentity))
-                  element.setAttribute("data-ts-jp-card-field", "name");
-                if (identities.some(isCombinedExpiryIdentity))
-                  element.setAttribute("data-ts-card-expiry", "combined");
-              });
-              const associatedElements = (host: Element, selector: string): Element[] => {
-                const associated = new Set<Element>();
-                if (host instanceof HTMLLabelElement && host.htmlFor.length > 0) {
-                  const byId = document.getElementById(host.htmlFor);
-                  if (byId?.matches(selector)) associated.add(byId);
-                }
-                host.querySelectorAll(selector).forEach((element) => associated.add(element));
-                const sibling = host.nextElementSibling;
-                if (sibling !== null) {
-                  if (sibling.matches(selector)) associated.add(sibling);
-                  sibling.querySelectorAll(selector).forEach((element) => associated.add(element));
-                  if (selector === "select" && sibling instanceof HTMLSelectElement) {
-                    let adjacent = sibling.nextElementSibling;
-                    while (adjacent instanceof HTMLSelectElement) {
-                      associated.add(adjacent);
-                      adjacent = adjacent.nextElementSibling;
-                    }
-                  }
-                }
-                return [...associated];
-              };
-              const stampField = (
-                host: Element,
-                fieldLabels: string[],
-                attrValue: string,
-                excludedLabels: string[] = [],
-              ): void => {
-                const text = (host.textContent ?? "").trim();
-                if (!fieldLabels.some((label) => text.includes(label))) return;
-                if (excludedLabels.some((label) => text.includes(label))) return;
-                const inputs = associatedElements(host, "input").filter(isTextInput);
-                const [input] = inputs;
-                if (inputs.length === 1 && input !== undefined) {
-                  input.setAttribute("data-ts-jp-card-field", attrValue);
-                }
-              };
-              let expiryGroupSequence = 0;
-              document
-                .querySelectorAll("dt, th, label, .table-label, .form-label")
-                .forEach((host) => {
-                  stampField(host, labels.pan, "pan", labels.excludedCard);
-                  stampField(host, labels.name, "name", labels.excludedCard);
-                  stampField(host, labels.cvv, "cvv", labels.excludedCard);
-                  const text = (host.textContent ?? "").trim();
-                  if (!labels.expiry.some((label) => text.includes(label))) return;
-                  if (labels.excludedCard.some((label) => text.includes(label))) return;
-                  const selects = associatedElements(host, "select").filter(
-                    (element): element is HTMLSelectElement =>
-                      element instanceof HTMLSelectElement && isVisible(element),
-                  );
-                  const monthSelects = selects.filter((select) =>
-                    (select.options[0]?.textContent ?? "").includes("月"),
-                  );
-                  const yearSelects = selects.filter((select) =>
-                    (select.options[0]?.textContent ?? "").includes("年"),
-                  );
-                  const [monthSelect] = monthSelects;
-                  const [yearSelect] = yearSelects;
-                  if (
-                    monthSelects.length === 1 &&
-                    yearSelects.length === 1 &&
-                    monthSelect !== undefined &&
-                    yearSelect !== undefined &&
-                    monthSelect !== yearSelect
-                  ) {
-                    const group = `ts-jp-exp-${labels.frameIndex}-${expiryGroupSequence++}`;
-                    monthSelect.setAttribute("data-ts-jp-card-exp", "month");
-                    yearSelect.setAttribute("data-ts-jp-card-exp", "year");
-                    monthSelect.setAttribute("data-ts-jp-card-exp-group", group);
-                    yearSelect.setAttribute("data-ts-jp-card-exp-group", group);
-                  }
-                });
-            },
-            {
-              frameIndex,
-              excludedCardIdentities,
-              pan: panLabels,
-              excludedCard: excludedCardLabels,
-              name: nameLabels,
-              cvv: cvvLabels,
-              expiry: expiryLabels,
-            },
+    await documentElement.evaluate(
+      (root, labels) => {
+        const document = root.ownerDocument;
+        document
+          .querySelectorAll(
+            "[data-ts-jp-card-field],[data-ts-jp-card-exp],[data-ts-jp-card-exp-group],[data-ts-card-expiry]",
           )
-          .catch(() => undefined),
-      ),
+          .forEach((element) => {
+            element.removeAttribute("data-ts-jp-card-field");
+            element.removeAttribute("data-ts-jp-card-exp");
+            element.removeAttribute("data-ts-jp-card-exp-group");
+            element.removeAttribute("data-ts-card-expiry");
+          });
+        const isVisible = (element: HTMLElement): boolean => {
+          if (element.matches(":disabled") || element.getClientRects().length === 0) {
+            return false;
+          }
+          let current: Element | null = element;
+          while (current !== null) {
+            const style = getComputedStyle(current);
+            if (
+              style.display === "none" ||
+              style.visibility === "hidden" ||
+              style.visibility === "collapse" ||
+              Number.parseFloat(style.opacity) <= 0
+            ) {
+              return false;
+            }
+            current = current.parentElement;
+          }
+          return true;
+        };
+        const isTextInput = (element: Element): element is HTMLInputElement =>
+          element instanceof HTMLInputElement &&
+          (element.type === "text" || element.type === "tel") &&
+          isVisible(element);
+        const identityTokens = (value: string): string[] =>
+          value
+            .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+            .toLowerCase()
+            .split(/[^a-z0-9]+/)
+            .filter((token) => token.length > 0);
+        const isPanIdentity = (value: string): boolean => {
+          const tokens = identityTokens(value);
+          const approvedPrefixes = new Set(["payment", "checkout", "primary", "backup"]);
+          while (approvedPrefixes.has(tokens[0] ?? "")) tokens.shift();
+          return [
+            "card-no",
+            "card-number",
+            "cardno",
+            "cardnumber",
+            "credit-no",
+            "creditno",
+          ].includes(tokens.join("-"));
+        };
+        const isCvvIdentity = (value: string): boolean =>
+          ["security-cd", "securitycd", "sec-code", "seccode"].includes(
+            identityTokens(value).join("-"),
+          );
+        const isNameIdentity = (value: string): boolean =>
+          ["card-name", "cardname", "credit-name", "creditname"].includes(
+            identityTokens(value).join("-"),
+          );
+        const isCombinedExpiryIdentity = (value: string): boolean => {
+          const tokens = identityTokens(value);
+          const prefixes = new Set(["card", "credit", "cc"]);
+          if (prefixes.has(tokens[0] ?? "")) tokens.shift();
+          if (tokens.length === 1) {
+            return [
+              "exp",
+              "expiry",
+              "expiration",
+              "expdate",
+              "expirydate",
+              "expirationdate",
+            ].includes(tokens[0] ?? "");
+          }
+          return (
+            tokens.length === 2 &&
+            ["exp", "expiry", "expiration"].includes(tokens[0] ?? "") &&
+            tokens[1] === "date"
+          );
+        };
+        document.querySelectorAll("input[name],input[id]").forEach((element) => {
+          if (!(element instanceof HTMLInputElement) || !isVisible(element)) return;
+          const identities = [element.getAttribute("name") ?? "", element.id];
+          const excluded = identities.some((identity) => {
+            const lower = identity.toLowerCase();
+            return labels.excludedCardIdentities.some((token) => lower.includes(token));
+          });
+          if (excluded) return;
+          if (isTextInput(element) && identities.some(isPanIdentity))
+            element.setAttribute("data-ts-jp-card-field", "pan");
+          if (isTextInput(element) && identities.some(isCvvIdentity))
+            element.setAttribute("data-ts-jp-card-field", "cvv");
+          if (isTextInput(element) && identities.some(isNameIdentity))
+            element.setAttribute("data-ts-jp-card-field", "name");
+          if (identities.some(isCombinedExpiryIdentity))
+            element.setAttribute("data-ts-card-expiry", "combined");
+        });
+        const associatedElements = (host: Element, selector: string): Element[] => {
+          const associated = new Set<Element>();
+          if (host instanceof HTMLLabelElement && host.htmlFor.length > 0) {
+            const byId = document.getElementById(host.htmlFor);
+            if (byId?.matches(selector)) associated.add(byId);
+          }
+          host.querySelectorAll(selector).forEach((element) => associated.add(element));
+          const sibling = host.nextElementSibling;
+          if (sibling !== null) {
+            if (sibling.matches(selector)) associated.add(sibling);
+            sibling.querySelectorAll(selector).forEach((element) => associated.add(element));
+            if (selector === "select" && sibling instanceof HTMLSelectElement) {
+              let adjacent = sibling.nextElementSibling;
+              while (adjacent instanceof HTMLSelectElement) {
+                associated.add(adjacent);
+                adjacent = adjacent.nextElementSibling;
+              }
+            }
+          }
+          return [...associated];
+        };
+        const stampField = (
+          host: Element,
+          fieldLabels: string[],
+          attrValue: string,
+          excludedLabels: string[] = [],
+        ): void => {
+          const text = (host.textContent ?? "").trim();
+          if (!fieldLabels.some((label) => text.includes(label))) return;
+          if (excludedLabels.some((label) => text.includes(label))) return;
+          const inputs = associatedElements(host, "input").filter(isTextInput);
+          const [input] = inputs;
+          if (inputs.length === 1 && input !== undefined) {
+            input.setAttribute("data-ts-jp-card-field", attrValue);
+          }
+        };
+        let expiryGroupSequence = 0;
+        document.querySelectorAll("dt, th, label, .table-label, .form-label").forEach((host) => {
+          stampField(host, labels.pan, "pan", labels.excludedCard);
+          stampField(host, labels.name, "name", labels.excludedCard);
+          stampField(host, labels.cvv, "cvv", labels.excludedCard);
+          const text = (host.textContent ?? "").trim();
+          if (!labels.expiry.some((label) => text.includes(label))) return;
+          if (labels.excludedCard.some((label) => text.includes(label))) return;
+          const selects = associatedElements(host, "select").filter(
+            (element): element is HTMLSelectElement =>
+              element instanceof HTMLSelectElement && isVisible(element),
+          );
+          const monthSelects = selects.filter((select) =>
+            (select.options[0]?.textContent ?? "").includes("月"),
+          );
+          const yearSelects = selects.filter((select) =>
+            (select.options[0]?.textContent ?? "").includes("年"),
+          );
+          const [monthSelect] = monthSelects;
+          const [yearSelect] = yearSelects;
+          if (
+            monthSelects.length === 1 &&
+            yearSelects.length === 1 &&
+            monthSelect !== undefined &&
+            yearSelect !== undefined &&
+            monthSelect !== yearSelect
+          ) {
+            const group = `ts-jp-exp-${labels.frameIndex}-${expiryGroupSequence++}`;
+            monthSelect.setAttribute("data-ts-jp-card-exp", "month");
+            yearSelect.setAttribute("data-ts-jp-card-exp", "year");
+            monthSelect.setAttribute("data-ts-jp-card-exp-group", group);
+            yearSelect.setAttribute("data-ts-jp-card-exp-group", group);
+          }
+        });
+      },
+      {
+        frameIndex,
+        excludedCardIdentities,
+        pan: panLabels,
+        excludedCard: excludedCardLabels,
+        name: nameLabels,
+        cvv: cvvLabels,
+        expiry: expiryLabels,
+      },
     );
   }
 
@@ -9404,10 +9415,7 @@ export class BrowserController {
     const countFillableCardFields = async (selectors: string): Promise<number> => {
       return (await fillableCardFields(selectors)).length;
     };
-    const requireExactlyOneCardField = async (
-      field: string,
-      selectors: string,
-    ): Promise<void> => {
+    const requireExactlyOneCardField = async (field: string, selectors: string): Promise<void> => {
       const count = await countFillableCardFields(selectors);
       if (count > 1) throw new Error("payment_card_form_ambiguous");
       if (count === 0) throw new Error(`payment_field_not_found:${field}`);
@@ -9665,10 +9673,9 @@ export class BrowserController {
       : CHECKOUT_CONSERVATIVE_EXPIRY_YEAR_FIELD_SELECTORS;
     await refuseAmbiguousCardField(cvvSelectors);
     await refuseAmbiguousCardField(CHECKOUT_CARD_NAME_FIELD_SELECTORS);
-    const combinedExpirySelectors =
-      usesLegacyPanSelectors
-        ? CHECKOUT_COMBINED_EXPIRY_FIELD_SELECTORS
-        : CHECKOUT_CONSERVATIVE_COMBINED_EXPIRY_FIELD_SELECTORS;
+    const combinedExpirySelectors = usesLegacyPanSelectors
+      ? CHECKOUT_COMBINED_EXPIRY_FIELD_SELECTORS
+      : CHECKOUT_CONSERVATIVE_COMBINED_EXPIRY_FIELD_SELECTORS;
     const combinedExpiryCount = await countFillableCardFields(combinedExpirySelectors);
     const expiryMonthCount = await countFillableCardFields(expiryMonthSelectors);
     const expiryYearCount = await countFillableCardFields(expiryYearSelectors);
@@ -9702,13 +9709,7 @@ export class BrowserController {
         false,
         true,
       );
-      await fillFirst(
-        "exp_year",
-        card.exp_year,
-        expiryYearSelectors,
-        false,
-        true,
-      );
+      await fillFirst("exp_year", card.exp_year, expiryYearSelectors, false, true);
     } else {
       // A combined expiry field's formatter owns the slash. Send only the four
       // digits as real key events so numeric-only fields accept them and the
@@ -9728,13 +9729,7 @@ export class BrowserController {
           false,
           true,
         );
-        await fillFirst(
-          "exp_year",
-          card.exp_year,
-          expiryYearSelectors,
-          false,
-          true,
-        );
+        await fillFirst("exp_year", card.exp_year, expiryYearSelectors, false, true);
       }
     }
     const fields: Array<[string, string | undefined, string, string?]> = [
@@ -9803,22 +9798,60 @@ export class BrowserController {
     let primary:
       | { kind: "outcome"; value: CheckoutSubmitResult }
       | { kind: "error"; value: unknown };
+    // Snapshot the frames fill actually wrote into, BEFORE submission, and
+    // reuse that exact set for cleanup below — never a fresh this.page.frames()
+    // taken after submitFilledCheckoutInScope returns. fill (a single vetted
+    // call) is trusted to write into every frame reachable at this point, but
+    // a 3-D Secure method/challenge iframe (methodurl.vcas.visa.com,
+    // *.cardinalcommerce.com, an issuer ACS) can attach or replace a snapshotted
+    // frame's document AFTER the submit click. Re-deriving cleanup targets would let the JP
+    // label-stamp scan and substring field-clear it delegates to evaluate JS
+    // in and mutate that live authentication hand-off, corrupting the
+    // in-flight device-fingerprint POST (regression: ts-operator-3ds-completion).
+    let fillFrameSnapshot: readonly {
+      frame: Frame;
+      url: string;
+      documentElement: ElementHandle<HTMLElement> | null;
+    }[] = [];
     try {
       await this.waitForPanField(10_000);
+      fillFrameSnapshot = await Promise.all(
+        this.page.frames().map(async (frame) => ({
+          frame,
+          url: frame.url(),
+          documentElement: await frame.$("html").catch(() => null),
+        })),
+      );
+      const fillFrames = fillFrameSnapshot.map(({ frame }) => frame);
       // A single-page checkout's generic address controls are its shipping
       // controls. Only an explicitly marked billing control is eligible here:
       // sealing a shipping field would make the payment cleanup erase the
       // merchant's selected address, country, and shipping rate after submit.
-      const cardGroup = await this.fillCheckoutCardIntoFrames(this.page.frames(), card, true);
+      const cardGroup = await this.fillCheckoutCardIntoFrames(fillFrames, card, true);
       primary = { kind: "outcome", value: await this.submitFilledCheckoutInScope(cardGroup) };
     } catch (error) {
       primary = { kind: "error", value: error };
     }
     try {
-      await this.clearCheckoutCardFields();
+      if (fillFrameSnapshot.length > 0) {
+        // History URL changes preserve this root handle; real ACS navigation invalidates it.
+        await this.clearCheckoutCardFieldsInDocuments(
+          fillFrameSnapshot.flatMap(({ documentElement }, frameIndex) =>
+            documentElement === null ? [] : [{ documentElement, frameIndex }],
+          ),
+        );
+      } else {
+        await this.clearCheckoutCardFieldsInFrames(this.page.frames());
+      }
     } catch (error) {
       console.error(
         `[payment-cleanup] ${error instanceof Error ? error.message : "payment_fields_not_cleared"}`,
+      );
+    } finally {
+      await Promise.all(
+        fillFrameSnapshot.map(({ documentElement }) =>
+          documentElement?.dispose().catch(() => undefined),
+        ),
       );
     }
     if (primary.kind === "error") throw primary.value;
@@ -10221,6 +10254,126 @@ export class BrowserController {
     this.checkoutCardGroupScope = undefined;
     if (!this.page) return;
     await this.clearCheckoutCardFieldsInFrames(this.page.frames());
+  }
+
+  private async clearCheckoutCardFieldsInDocuments(
+    documents: readonly {
+      documentElement: ElementHandle<HTMLElement>;
+      frameIndex: number;
+    }[],
+  ): Promise<void> {
+    if (!this.page) return;
+    await Promise.all(
+      documents.map(({ documentElement, frameIndex }) =>
+        this.stampJapaneseCardLabelFieldsInDocument(documentElement, frameIndex),
+      ),
+    );
+    for (const { documentElement } of documents) {
+      await documentElement.evaluate((root, selectors) => {
+        const document = root.ownerDocument;
+        const fields = Array.from(document.querySelectorAll(selectors)).slice(0, 40);
+        for (const element of fields) {
+          if (
+            !(element instanceof HTMLInputElement) &&
+            !(element instanceof HTMLTextAreaElement) &&
+            !(element instanceof HTMLSelectElement)
+          ) {
+            continue;
+          }
+          if (element.value.length > 0 || element.hasAttribute("data-ts-sealed-payment")) {
+            element.value = "";
+            if (element instanceof HTMLSelectElement && element.value !== "") {
+              element.selectedIndex = -1;
+            }
+            element.dispatchEvent(new Event("input", { bubbles: true }));
+            element.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+          element.removeAttribute("data-ts-sealed-payment");
+        }
+        document.querySelectorAll('[data-ts-sealed-payment="1"]').forEach((element) => {
+          if (
+            element instanceof HTMLInputElement ||
+            element instanceof HTMLTextAreaElement ||
+            element instanceof HTMLSelectElement
+          ) {
+            element.value = "";
+          }
+          element.removeAttribute("data-ts-sealed-payment");
+        });
+      }, CHECKOUT_CARD_VALUE_FIELD_SELECTORS);
+    }
+    await this.page.waitForTimeout(0).catch(() => undefined);
+    await Promise.all(
+      documents.map(({ documentElement, frameIndex }) =>
+        this.stampJapaneseCardLabelFieldsInDocument(documentElement, frameIndex),
+      ),
+    );
+    const visibleTexts: string[] = [];
+    for (const { documentElement } of documents) {
+      const result = await documentElement.evaluate((root, selectors) => {
+        const document = root.ownerDocument;
+        const uncleared = Array.from(document.querySelectorAll(selectors)).some(
+          (element) =>
+            (element instanceof HTMLInputElement ||
+              element instanceof HTMLTextAreaElement ||
+              element instanceof HTMLSelectElement) &&
+            element.value.length > 0,
+        );
+        const body = document.body;
+        if (body === null) return { uncleared, visibleText: "" };
+        const view = document.defaultView;
+        if (view === null) return { uncleared, visibleText: "" };
+        const hidden: Array<{ element: HTMLElement | SVGElement; style: string | null }> = [];
+        let visibleText = "";
+        try {
+          for (const element of Array.from(body.querySelectorAll("*"))) {
+            if (!(element instanceof HTMLElement || element instanceof SVGElement)) continue;
+            if (view.getComputedStyle(element).opacity === "0") {
+              hidden.push({ element, style: element.getAttribute("style") });
+              element.style.setProperty("display", "none", "important");
+            }
+          }
+          visibleText = body.innerText ?? "";
+        } finally {
+          for (const { element, style } of hidden) {
+            if (style === null) {
+              element.style.removeProperty("display");
+              if (element.getAttribute("style") === "") element.removeAttribute("style");
+            } else {
+              element.setAttribute("style", style);
+            }
+          }
+        }
+        return { uncleared, visibleText };
+      }, CHECKOUT_CARD_VALUE_FIELD_SELECTORS);
+      if (result.uncleared) throw new Error("payment_fields_not_cleared");
+      visibleTexts.push(result.visibleText);
+    }
+    if (visibleTexts.some((text) => containsVisiblePaymentMaterial(text))) {
+      throw new Error("payment_fields_not_cleared");
+    }
+    const interactiveElements = await this.extractInteractiveElements().catch(() => undefined);
+    if (interactiveElements === undefined) throw new Error("payment_fields_not_cleared");
+    const interactiveText = interactiveElements
+      .flatMap((element) => [
+        element.ariaLabel,
+        element.title,
+        element.value,
+        element.labelText,
+        element.visibleText,
+        element.iconLabel,
+        element.placeholder,
+        element.name,
+        element.testId,
+        element.screenPath,
+        element.container,
+        element.occludedBy,
+      ])
+      .filter((value): value is string => typeof value === "string")
+      .join("\n");
+    if (containsVisiblePaymentMaterial(interactiveText)) {
+      throw new Error("payment_fields_not_cleared");
+    }
   }
 
   private async clearCheckoutCardFieldsInFrames(frames: readonly Frame[]): Promise<void> {
