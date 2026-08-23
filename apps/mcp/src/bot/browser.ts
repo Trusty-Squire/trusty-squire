@@ -998,8 +998,28 @@ function resolveSavedCardSelectionInPage():
           ? candidates[0]
           : undefined;
     if (target === undefined) return { status: "ambiguous" };
+    const requeryScope: ParentNode =
+      radio instanceof HTMLInputElement && radio.name.length > 0 ? root : (radioGroup ?? root);
+    const requerySelector =
+      radio instanceof HTMLInputElement && radio.name.length > 0
+        ? `input[type="radio"][name="${CSS.escape(radio.name)}"]`
+        : '[role="radio"]';
     (target as HTMLElement).click();
-    target.setAttribute("data-ts-checkout-selection", "1");
+    // The click can synchronously rerender the group (framework-controlled
+    // radios), detaching the node we just clicked — marking that stale
+    // reference would leave the LIVE checked radio unmarked and force a false
+    // refusal later. Re-identify the marking target from the live tree: the
+    // group must now contain exactly one connected, checked, non-saved-shaped
+    // member; anything else is genuinely ambiguous.
+    const liveChecked = Array.from(requeryScope.querySelectorAll(requerySelector)).filter(
+      (member) => {
+        if (!member.isConnected || !isChecked(member)) return false;
+        const text = labelTextFor(member, containerFor(member));
+        return !(text.length > 0 && savedCardPattern.test(text));
+      },
+    );
+    if (liveChecked.length !== 1) return { status: "ambiguous" };
+    liveChecked[0]!.setAttribute("data-ts-checkout-selection", "1");
     clicked += 1;
   }
   return { status: "resolved", clicked };
@@ -8422,29 +8442,59 @@ export class BrowserController {
   // provision-session.ts) only covers the JSON observation, not a rendered
   // image. The mask box is painted by Playwright's own capture machinery, so
   // this path never writes a style or attribute into the live checkout DOM,
-  // and locator querying pierces open shadow roots. Fail-closed: a selector
-  // that cannot be queried, or a matched element whose geometry cannot be
-  // resolved, aborts the whole capture rather than shrinking the redaction.
+  // and locator querying pierces open shadow roots. Beyond the attribute-based
+  // selector set, every renderable input/textarea whose CURRENT value contains
+  // a Luhn-valid PAN span is masked too (containsLuhnPanSpan — the same
+  // detection the payment paths use), so a card number sitting in a field the
+  // fixed selectors don't recognize still never reaches the image. Fail-closed
+  // throughout: a selector that cannot be queried, a value that cannot be
+  // read, or a matched element whose geometry cannot be resolved (boundingBox
+  // returns null rather than throwing) aborts the whole capture rather than
+  // shrinking the redaction. The per-frame count signature lets the caller
+  // verify the redaction set stayed stable across the capture window.
   private async collectOperatorScreenshotMask(
     frames: readonly Frame[],
     extraRedactionSelectors: readonly string[],
-  ): Promise<{ mask: Locator[]; redactedCount: number }> {
+  ): Promise<{ mask: Locator[]; redactedCount: number; signature: string }> {
     const selector = [SCREENSHOT_REDACTION_SELECTORS, ...extraRedactionSelectors].join(",");
     const mask: Locator[] = [];
-    let redactedCount = 0;
+    const perFrameCounts: number[] = [];
     try {
       for (const frame of frames) {
+        let frameCount = 0;
         const matches = await frame.locator(selector).all();
         for (const match of matches) {
-          await match.boundingBox({ timeout: 5_000 });
+          if ((await match.boundingBox({ timeout: 5_000 })) === null) {
+            throw new Error("screenshot_redaction_unresolved");
+          }
           mask.push(match);
+          frameCount += 1;
         }
-        redactedCount += matches.length;
+        const valueCandidates = await frame.locator('input:not([type="hidden" i]),textarea').all();
+        for (const candidate of valueCandidates) {
+          const value = await candidate.inputValue({ timeout: 5_000 });
+          if (!containsLuhnPanSpan(value)) continue;
+          if (
+            await candidate.evaluate((el, matchSelector) => el.matches(matchSelector), selector)
+          ) {
+            continue;
+          }
+          if ((await candidate.boundingBox({ timeout: 5_000 })) === null) {
+            throw new Error("screenshot_redaction_unresolved");
+          }
+          mask.push(candidate);
+          frameCount += 1;
+        }
+        perFrameCounts.push(frameCount);
       }
     } catch {
       throw new Error("screenshot_redaction_unresolved");
     }
-    return { mask, redactedCount };
+    return {
+      mask,
+      redactedCount: perFrameCounts.reduce((sum, count) => sum + count, 0),
+      signature: perFrameCounts.join(","),
+    };
   }
 
   // operate_screenshot's implementation: a read-only capture of the page (or
@@ -8473,11 +8523,13 @@ export class BrowserController {
     if (!this.page) throw new Error("Browser not started");
     const page = this.page;
     const targetFrame = this.resolveOperatorScreenshotFrame(opts);
-    const framesToRedact =
+    const extraRedactionSelectors = opts.extraRedactionSelectors ?? [];
+    const framesForRedaction = (): Frame[] =>
       targetFrame !== null && targetFrame !== page.mainFrame() ? [targetFrame] : page.frames();
-    const { mask, redactedCount } = await this.collectOperatorScreenshotMask(
-      framesToRedact,
-      opts.extraRedactionSelectors ?? [],
+    const framesBefore = framesForRedaction();
+    const { mask, redactedCount, signature } = await this.collectOperatorScreenshotMask(
+      framesBefore,
+      extraRedactionSelectors,
     );
     // caret:"initial" skips Playwright's default caret-hiding pass, which
     // writes (and restores) caret-color on every editable element's inline
@@ -8508,6 +8560,27 @@ export class BrowserController {
       });
       base64 = buffer.toString("base64");
     }
+    // Stability guard: the mask set was fixed before a capture that can take
+    // seconds. If the page grew another matching field or frame meanwhile,
+    // the image may hold pixels no mask covered — re-run the same collection
+    // and discard the image unless the frame set and per-frame redaction
+    // signature are unchanged.
+    const framesAfter = framesForRedaction();
+    let stable =
+      framesAfter.length === framesBefore.length &&
+      framesBefore.every((frame, index) => framesAfter[index] === frame);
+    if (stable) {
+      try {
+        const recheck = await this.collectOperatorScreenshotMask(
+          framesAfter,
+          extraRedactionSelectors,
+        );
+        stable = recheck.signature === signature;
+      } catch {
+        stable = false;
+      }
+    }
+    if (!stable) throw new Error("screenshot_redaction_unstable");
     return {
       base64,
       frameUrl: targetFrame?.url() ?? null,
@@ -10687,14 +10760,16 @@ export class BrowserController {
         // enabled/ownership/label checks, dispatch-tracking install) is a real
         // window in which a page update — or the resolution click's own side
         // effects — could restore the saved-card selection or clear the filled
-        // fields. Independently re-verify the exact resolved state before the
-        // charge click is dispatched; never proceed on a stale check.
+        // fields. bringToFront runs FIRST because its focus/visibility events
+        // can themselves trigger a merchant default-selection revert; the
+        // re-verification is then the LAST thing before the charge click is
+        // dispatched — never proceed on a stale check.
+        await this.page.bringToFront().catch(() => undefined);
         if (!(await this.savedCardSelectionVerified(savedCardSelection.verification))) {
           await clearDispatchTracking();
           throw new Error("payment_card_selection_ambiguous");
         }
         try {
-          await this.page.bringToFront().catch(() => undefined);
           await candidate.click();
         } catch (error) {
           const dispatchState = await frame

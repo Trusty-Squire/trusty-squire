@@ -22,6 +22,43 @@ function isValidJpegBase64(base64: string): boolean {
   return buffer.length > 100 && buffer[0] === 0xff && buffer[1] === 0xd8;
 }
 
+// Decode the captured JPEG with the browser already at hand (Image + canvas —
+// a real decode of the produced bytes) and sample one RGBA pixel per point.
+// The canvas is never attached to the DOM.
+async function samplePixels(
+  page: Page,
+  base64: string,
+  points: ReadonlyArray<readonly [number, number]>,
+): Promise<number[][]> {
+  return await page.evaluate(
+    async ({ dataUrl, samplePoints }) => {
+      const image = new Image();
+      await new Promise<void>((resolve, reject) => {
+        image.onload = () => resolve();
+        image.onerror = () => reject(new Error("jpeg decode failed"));
+        image.src = dataUrl;
+      });
+      const canvas = document.createElement("canvas");
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const context = canvas.getContext("2d");
+      if (context === null) throw new Error("no 2d context");
+      context.drawImage(image, 0, 0);
+      return samplePoints.map((point) =>
+        Array.from(
+          context.getImageData(Math.round(point[0] ?? 0), Math.round(point[1] ?? 0), 1, 1).data,
+        ),
+      );
+    },
+    { dataUrl: `data:image/jpeg;base64,${base64}`, samplePoints: points.map((p) => [...p]) },
+  );
+}
+
+// Playwright's default mask color is #FF00FF; allow for JPEG compression drift.
+function isMaskMagenta(pixel: readonly number[]): boolean {
+  return (pixel[0] ?? 0) > 200 && (pixel[1] ?? 255) < 80 && (pixel[2] ?? 0) > 200;
+}
+
 describe("operate_screenshot money-fence redaction (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "redacts a filled card PAN/expiry/CVV/name at capture time without mutating the DOM",
@@ -43,6 +80,20 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
         expect(result.redactedCount).toBe(4);
         expect(isValidJpegBase64(result.base64)).toBe(true);
         expect(result.frameUrl).toBeNull();
+
+        // Pixel-level proof the IMAGE is redacted, not just the metadata:
+        // the PAN field's box must be the mask color, while the non-card
+        // field keeps ordinary (non-magenta) pixels.
+        const panBox = await page.locator('[autocomplete="cc-number"]').boundingBox();
+        const plainBox = await page.locator('input[type="text"]').boundingBox();
+        expect(panBox).not.toBeNull();
+        expect(plainBox).not.toBeNull();
+        const [panPixel, plainPixel] = await samplePixels(page, result.base64, [
+          [panBox!.x + panBox!.width / 2, panBox!.y + panBox!.height / 2],
+          [plainBox!.x + plainBox!.width / 2, plainBox!.y + plainBox!.height / 2],
+        ]);
+        expect(isMaskMagenta(panPixel!)).toBe(true);
+        expect(isMaskMagenta(plainPixel!)).toBe(false);
 
         // The mask is painted into the image by Playwright's capture
         // machinery — the live DOM keeps its exact pre-capture state: no
@@ -144,6 +195,56 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
         await expect(
           controller.screenshotForOperator({ extraRedactionSelectors: ["#not[a(valid"] }),
         ).rejects.toThrow("screenshot_redaction_unresolved");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "fails closed when a redaction target's geometry cannot be resolved",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        // boundingBox() returns null (does not throw) for an unrendered
+        // element — that must still abort, never capture with a mask entry
+        // whose geometry was silently skipped.
+        await page.setContent(
+          `<input autocomplete="cc-number" value="4242424242424242" style="display:none">`,
+        );
+        const controller = BrowserController.fromHarnessPage(page);
+
+        await expect(controller.screenshotForOperator()).rejects.toThrow(
+          "screenshot_redaction_unresolved",
+        );
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "masks an input whose VALUE is a Luhn-valid PAN even without card attributes",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <input id="freeform" type="text" value="4242 4242 4242 4242">
+          <input id="harmless" type="text" value="order 123456">
+        `);
+        const controller = BrowserController.fromHarnessPage(page);
+
+        const result = await controller.screenshotForOperator();
+        expect(result.redactedCount).toBe(1);
+
+        const panBox = await page.locator("#freeform").boundingBox();
+        expect(panBox).not.toBeNull();
+        const [panPixel] = await samplePixels(page, result.base64, [
+          [panBox!.x + panBox!.width / 2, panBox!.y + panBox!.height / 2],
+        ]);
+        expect(isMaskMagenta(panPixel!)).toBe(true);
       } finally {
         await browser.close();
       }

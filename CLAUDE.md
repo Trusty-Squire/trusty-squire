@@ -132,12 +132,18 @@ silent failures.
     fence `data-ts-sealed-payment` and `CHECKOUT_CARD_VALUE_FIELD_SELECTORS`
     already cover on the JSON-observation side — plus the session layer's
     sealed-field selectors from `observationSealedFieldKeys`/`isSealedFieldValue`,
-    so fields sealed via the ref-based `type_secret` path are covered too);
-    locator querying pierces open shadow roots, and the collection is
-    fail-closed — any selector that cannot be queried or element whose geometry
-    cannot be resolved aborts the capture (`screenshot_redaction_unresolved`)
-    instead of returning an under-redacted image. Server-side, a tool result
-    carrying `image:{mime_type,data_base64}`
+    so fields sealed via the ref-based `type_secret` path are covered too —
+    plus any renderable input/textarea whose CURRENT value contains a
+    Luhn-valid PAN span, via the same `containsLuhnPanSpan` detection the
+    payment paths use); locator querying pierces open shadow roots, and the
+    collection is fail-closed — any selector that cannot be queried, value
+    that cannot be read, or element whose geometry cannot be resolved
+    (`boundingBox()` returning null included) aborts the capture
+    (`screenshot_redaction_unresolved`) instead of returning an under-redacted
+    image, and after capture the same collection re-runs as a stability guard:
+    if the frame set or per-frame redaction signature changed during the
+    capture window the image is discarded (`screenshot_redaction_unstable`).
+    Server-side, a tool result carrying `image:{mime_type,data_base64}`
     (this tool, or any future one) gets a real MCP `type:"image"` content
     block (`toolResultContent` in `server.ts`), not base64 buried in JSON text.
   - **Frame/iframe support (operator-frame-support).** Ordinary child-frame
@@ -661,14 +667,19 @@ isn't itself saved-card-shaped (a candidate whose container structurally
 owns one of the fields we sealed wins only when it is UNIQUE — i18n-agnostic;
 with no owning candidate it falls back to the sole remaining candidate),
 `.click()`s it (real radio-group semantics — natively unchecks the saved-card
-radio too) and stamps it `data-ts-checkout-selection="1"`, then a global
-re-scan verifies no competing selection remains anywhere AND every sealed
-field in every frame still holds its snapshotted value. That same
-verification runs a SECOND time at the money-fence boundary in
-`submitFilledCheckoutInScope` — immediately before the charge click, after
-the async pay-button scan — additionally confirming every marked new-card
-control is still checked; a failure there clears the dispatch tracking and
-refuses. Any failure at any step — no candidate, more than one
+radio too), then re-identifies the marking target from the LIVE tree (the
+click can synchronously rerender the group, detaching the clicked node — the
+group must now contain exactly one connected, checked, non-saved-shaped
+member, which gets stamped `data-ts-checkout-selection="1"`; zero or several
+is ambiguous), then a global re-scan verifies no competing selection remains
+anywhere AND every sealed field in every frame still holds its snapshotted
+value. That same verification runs a SECOND time at the money-fence boundary
+in `submitFilledCheckoutInScope` — immediately before the charge click, after
+the async pay-button scan AND after `bringToFront()` (whose focus/visibility
+events can themselves trigger a merchant default-selection revert, so nothing
+page-state-changing sits between the re-check and the click) — additionally
+confirming every marked new-card control is still checked; a failure there
+clears the dispatch tracking and refuses. Any failure at any step — no candidate, more than one
 equally-plausible candidate, the click didn't actually deselect the saved
 card, the click reset the fields, the selection drifted before the charge
 click — still refuses with `payment_card_selection_ambiguous`; a competing
