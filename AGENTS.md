@@ -403,6 +403,12 @@ Playwright's `selectOption({ value })` (and `{ label }`) treats "no `<option>` w
 
 **The rule:** any `selectOption()` call written on the expectation that a miss falls through to another attempt (a value→label fallback, a try/catch retry, etc.) MUST pass an explicit short `{ timeout }` (3000ms in the existing fixes) — never rely on the default. This applies to any future `<select>` fill code in this file (address/country dropdowns included), not just card expiry.
 
+### 10. Post-submit checkout cleanup must never re-derive its frame list from a fresh `page.frames()` call
+
+`fillAndSubmitCheckout` (`apps/mcp/src/bot/browser.ts`) fills into every CDP-reachable frame present at fill time, then submits, then cleans up filled fields. PR #565's cleanup refactor swapped a narrow, marker-only cleanup for one that also JP-label-stamps and substring-clears card-shaped fields — but wired it to a **fresh** `this.page.frames()` call taken *after* `submitFilledCheckoutInScope` returned. On a checkout that forces 3-D Secure, a method/challenge iframe (`methodurl.vcas.visa.com`, `*.cardinalcommerce.com`, an issuer ACS) can already be attached by then, so cleanup evaluated JS in and cleared fields inside that live, cross-origin authentication frame — corrupting the in-flight device-fingerprint POST and silently failing real EbisuMart/JP 3DS checkouts (root-caused in `ts-operator-3ds-completion`; PR #565's own verification was explicitly "detection only, no submission," so this path went untested).
+
+**The rule:** cleanup must reuse the *exact* frame snapshot fill wrote into (captured once, before the submit click), never a frame list re-queried after submission — a 3DS/ACS frame only ever attaches as a result of that click, so re-querying afterward is precisely what lets automation reach it. See `fillAndSubmitCheckout`'s `fillFrames` snapshot and the regression test `"never clears fields inside an unrecognized 3-D Secure frame during post-submit cleanup"` in `browser-payment.test.ts`.
+
 ## Final note
 
 You are reading this file because a prior agent burned four version numbers, confused users, and forced a human to intervene. The agent was not malicious. It was not lazy. It was pattern-matching on its own prose instead of on tool output.

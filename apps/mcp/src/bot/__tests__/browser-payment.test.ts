@@ -2810,6 +2810,66 @@ describe("split-checkout card fill (real browser)", () => {
     },
   );
 
+  // Regression (ts-operator-3ds-completion): fillAndSubmitCheckout's post-submit
+  // cleanup used to re-derive its frame list from a fresh this.page.frames() call
+  // taken AFTER submission, so a 3-D Secure method/challenge iframe attached by
+  // the time cleanup ran got its DOM scanned and any card-shaped field cleared —
+  // corrupting the in-flight device-fingerprint hand-off to the real ACS on real
+  // EbisuMart/JP checkouts. Cleanup must reuse the exact frame snapshot fill
+  // wrote into (captured before the submit click): an unrecognized 3DS-provider
+  // frame that only attaches afterward must never be touched, even if one of
+  // its fields happens to look card-shaped.
+  it.skipIf(!chromiumAvailable)(
+    "never clears fields inside an unrecognized 3-D Secure frame during post-submit cleanup",
+    async () => {
+      const pageUrl = "https://hibiyakadan.test/cart_seisan.html";
+      const methodUrl = "https://methodurl.vcas-issuer.test/DeviceFingerprintWeb/method";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <title>Hibiya Kadan</title>
+          <form id="card-form">
+            <input name="CREDIT_NO">
+            <input name="CREDIT_NAME">
+            <input name="SECURITY_CD">
+            <select name="CREDIT_LIMIT_MONTH"><option value=""></option><option value="12">12</option></select>
+            <select name="CREDIT_LIMIT_YEAR"><option value=""></option><option value="30">30</option></select>
+          </form>
+          <button id="place-order">注文する</button>
+          <script>
+            document.querySelector("#place-order").addEventListener("click", () => {
+              const frame = document.createElement("iframe");
+              frame.src = ${JSON.stringify(methodUrl)};
+              frame.style.cssText = "display:none;width:0;height:0;border:0";
+              frame.width = "0";
+              frame.height = "0";
+              document.body.append(frame);
+              setTimeout(() => history.pushState({}, "", "/checkouts/order987/thank_you"), 300);
+            });
+          </script>`,
+        [methodUrl]: `
+          <input type="hidden" id="acs-cardnumber-token" value="untouched-fingerprint-token">
+          <p>3DS method</p>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillAndSubmitCheckout(CARD);
+
+        const acsFrame = page.frames().find((candidate) => candidate.url() === methodUrl);
+        expect(acsFrame).toBeDefined();
+        expect(await acsFrame!.locator("#acs-cardnumber-token").inputValue()).toBe(
+          "untouched-fingerprint-token",
+        );
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
   it.skipIf(!chromiumAvailable)(
     "permits a parent checkout control outside both Shopify card forms",
     async () => {

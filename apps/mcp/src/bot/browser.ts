@@ -9803,19 +9803,35 @@ export class BrowserController {
     let primary:
       | { kind: "outcome"; value: CheckoutSubmitResult }
       | { kind: "error"; value: unknown };
+    // Snapshot the frames fill actually wrote into, BEFORE submission, and
+    // reuse that exact set for cleanup below — never a fresh this.page.frames()
+    // taken after submitFilledCheckoutInScope returns. fill (a single vetted
+    // call) is trusted to write into every frame reachable at this point, but
+    // a 3-D Secure method/challenge iframe (methodurl.vcas.visa.com,
+    // *.cardinalcommerce.com, an issuer ACS) can only attach AFTER the submit
+    // click; re-deriving cleanup's frame list post-submission would let the JP
+    // label-stamp scan and substring field-clear it delegates to evaluate JS
+    // in and mutate that live authentication hand-off, corrupting the
+    // in-flight device-fingerprint POST (regression: ts-operator-3ds-completion).
+    let fillFrames: readonly Frame[] = [];
     try {
       await this.waitForPanField(10_000);
+      fillFrames = this.page.frames();
       // A single-page checkout's generic address controls are its shipping
       // controls. Only an explicitly marked billing control is eligible here:
       // sealing a shipping field would make the payment cleanup erase the
       // merchant's selected address, country, and shipping rate after submit.
-      const cardGroup = await this.fillCheckoutCardIntoFrames(this.page.frames(), card, true);
+      const cardGroup = await this.fillCheckoutCardIntoFrames(fillFrames, card, true);
       primary = { kind: "outcome", value: await this.submitFilledCheckoutInScope(cardGroup) };
     } catch (error) {
       primary = { kind: "error", value: error };
     }
     try {
-      await this.clearCheckoutCardFields();
+      const cleanupFrames =
+        fillFrames.length > 0
+          ? fillFrames.filter((frame) => !frame.isDetached())
+          : this.page.frames();
+      await this.clearCheckoutCardFieldsInFrames(cleanupFrames);
     } catch (error) {
       console.error(
         `[payment-cleanup] ${error instanceof Error ? error.message : "payment_fields_not_cleared"}`,
