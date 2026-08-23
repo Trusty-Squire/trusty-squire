@@ -2777,6 +2777,68 @@ export async function observe(
   return await observeSession(session, detail);
 }
 
+export interface ScreenshotCapture {
+  session_id: string;
+  url: string;
+  frame_url: string | null;
+  frame_count: number;
+  redacted_count: number;
+  image: { mime_type: string; data_base64: string };
+}
+
+// operate_screenshot's session-level entry point: mirrors observe()'s
+// sessionForCall resolution, then delegates the actual capture + money-fence
+// redaction to BrowserController.screenshotForOperator (browser.ts).
+export async function captureScreenshot(
+  sessionId: string,
+  opts: { frameIndex?: number; frameUrlContains?: string; fullPage?: boolean } = {},
+): Promise<ScreenshotCapture> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  // Fail-closed strictness (2026-08-23): refuse outright whenever the
+  // session has EVER sealed a secret (sealedFieldKeys is cumulative and
+  // never cleared for the session's lifetime — see type_secret's ref-based
+  // path) or currently has an active payment fill (paymentFieldSealActive).
+  // This is deliberately in place of trying to redact correctly around
+  // every edge case a live sealed/card-bearing page can produce — a field
+  // sealed in a temporarily-unavailable frame, a nested hosted iframe, a
+  // value moving between fields mid-capture, a framework rerender losing
+  // the resolution marker — the exact class of gaps an adversarial review
+  // round found in the per-element mask-based redaction path below. No
+  // capture can leak what it refuses to take. The tool stays fully usable
+  // for what it exists to debug: a 3-D Secure/challenge or captcha page
+  // holds no card data and never seals anything, so this guard never fires
+  // on the case operate_screenshot was built for.
+  if (session.sealedFieldKeys.size > 0 || session.paymentFieldSealActive) {
+    throw new Error("screenshot_unavailable_sealed_context");
+  }
+  // Fields sealed via the ref-based type_secret path exist only in session
+  // state (sealedFieldKeys) — no DOM marker — so the redaction set is derived
+  // with the SAME helpers observe()'s JSON-masking uses and handed to the
+  // browser layer as extra mask selectors. An extraction failure propagates:
+  // a capture whose sealed set cannot be established must abort, not proceed
+  // with fewer redactions. In practice this is unreachable with a non-empty
+  // result — the guard above already refused whenever sealedFieldKeys is
+  // non-empty — kept as defense-in-depth, not the primary fence.
+  const elements = await session.browser.extractInteractiveElements();
+  const sealedFieldKeys = observationSealedFieldKeys(session, elements);
+  const extraRedactionSelectors = elements
+    .filter((el) => isSealedFieldValue(el, sealedFieldKeys))
+    .map((el) => el.selector);
+  const captured = await session.browser.screenshotForOperator({
+    ...opts,
+    extraRedactionSelectors,
+  });
+  return {
+    session_id: sessionId,
+    url: session.browser.currentUrl(),
+    frame_url: captured.frameUrl,
+    frame_count: captured.frameCount,
+    redacted_count: captured.redactedCount,
+    image: { mime_type: "image/jpeg", data_base64: captured.base64 },
+  };
+}
+
 // Hosts to seed credential EGRESS from when storing a key extracted in this
 // session: start + auto_widen, NEVER mid_session task scope (a wide multi-app
 // operate scope must not silently over-grant a key's egress allow-list).
@@ -4847,10 +4909,7 @@ export async function act(
             resolved.text,
             ...resolved.labels,
           ]);
-          if (
-            isPlaceOrderCandidate &&
-            (action.kind === "click" || action.kind === "js_click")
-          ) {
+          if (isPlaceOrderCandidate && (action.kind === "click" || action.kind === "js_click")) {
             await runClickWithPlaceOrderGuard(session, (shouldTrack) =>
               browser.clickWithDispatchTracking(
                 {

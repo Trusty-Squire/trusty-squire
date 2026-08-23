@@ -4816,24 +4816,28 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "refuses to submit when an already-selected saved card would win over the filled card",
+    "positively selects the new-card radio and completes on the filled card, deselecting the competing saved card",
     async () => {
       // EbisuMart-shaped repeat-customer checkout: a "new card" fieldset (what
       // we fill, matching card_ref) alongside a DEFAULT-CHECKED "use my saved
       // card" radio for a DIFFERENT stored card. Money-fence: the released and
-      // audited card must be the one that is actually charged — never click
-      // Pay while a different stored card could win.
+      // audited card must be the one that is actually charged. The captain's
+      // decision (2026-08-23) is to actively resolve this rather than refuse:
+      // click the new-card radio (deselecting the saved one via normal
+      // radio-group semantics), verify the filled fields survived and the
+      // saved card is no longer selected, THEN submit — never guess, never
+      // silently leave the saved card able to win.
       const pageUrl = "https://hibiyakadan.example.test/cart_seisan.html";
       const { page, browser } = await servePages({
         [pageUrl]: `
           <meta charset="utf-8">
           <form id="checkout">
             <label>
-              <input type="radio" name="payment_method" value="saved" checked>
+              <input id="saved-radio" type="radio" name="payment_method" value="saved" checked>
               Card on file: Visa •••• 9012
             </label>
             <label>
-              <input type="radio" name="payment_method" value="new">
+              <input id="new-radio" type="radio" name="payment_method" value="new">
               Use a different card
             </label>
             <input autocomplete="cc-number">
@@ -4854,12 +4858,167 @@ describe("split-checkout card fill (real browser)", () => {
         const controller = new BrowserController({ humanize: false });
         (controller as unknown as { page: Page }).page = page;
 
+        await controller.fillAndSubmitCheckout(CARD);
+
+        // Submitted on the FIRST attempt (no retry/re-fill) with the radio
+        // flip already resolved — the same fill that was verified intact
+        // right before the click, per resolveCompetingSavedCardSelection's
+        // own field-value check.
+        expect(await page.evaluate(() => document.body.dataset.submitted)).toBe("true");
+        expect(await page.locator("#saved-radio").isChecked()).toBe(false);
+        expect(await page.locator("#new-radio").isChecked()).toBe(true);
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "positively selects the new-card radio when the filled card fields live in a recognized hosted-fields iframe",
+    async () => {
+      // EbisuMart-adjacent split topology: the merchant-owned saved/new-card
+      // radio group lives in the MAIN frame while the card fields it controls
+      // live in a recognized hosted-fields iframe. The sealed-field evidence
+      // that gates positive resolution is aggregated ACROSS frames, so this
+      // must resolve — refusal here would make the cross-frame repeat-customer
+      // checkout a dead end even though exactly one new-card candidate exists.
+      const pageUrl = "https://shop.example.test/cross-frame-new-card-checkout.html";
+      const frameUrl = "https://checkout.pci.shopifyinc.com/card-fields";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <label>
+            <input id="saved-radio" type="radio" name="payment_method" value="saved" checked>
+            Card on file: Visa •••• 9012
+          </label>
+          <label>
+            <input id="new-radio" type="radio" name="payment_method" value="new">
+            Use a different card
+          </label>
+          <iframe src="${frameUrl}"></iframe>`,
+        [frameUrl]: `
+          <form id="card-form">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay now</button>
+          </form>
+          <script>
+            document.querySelector("#card-form").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillAndSubmitCheckout(CARD);
+
+        const frame = page.frames().find((candidate) => candidate.url() === frameUrl)!;
+        expect(await frame.locator("body").getAttribute("data-submitted")).toBe("true");
+        expect(await page.locator("#saved-radio").isChecked()).toBe(false);
+        expect(await page.locator("#new-radio").isChecked()).toBe(true);
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "still refuses when the new-card radio's choice group has two equally-plausible non-saved candidates",
+    async () => {
+      // Genuinely unresolvable: no structural (sealed-field-owning) or
+      // sole-candidate signal picks between "Use a different card" and
+      // "Corporate card" — guessing between them risks the SAME wrong-card
+      // charge #572 fixed. Refusal must still be the last resort here.
+      const pageUrl = "https://shop.example.test/multi-candidate-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form id="checkout">
+            <label><input type="radio" name="payment_method" value="saved" checked>Card on file •••• 9012</label>
+            <label><input type="radio" name="payment_method" value="new">Use a different card</label>
+            <label><input type="radio" name="payment_method" value="corporate">Corporate card</label>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay</button>
+          </form>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
         await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
           "payment_card_selection_ambiguous",
         );
         expect(await page.evaluate(() => document.body.dataset.submitted)).toBeUndefined();
         expect(await page.locator("[autocomplete='cc-number']").inputValue()).toBe("");
-        expect(await page.locator("[autocomplete='cc-csc']").inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses (never re-fills) when selecting the new-card radio itself clears the filled fields",
+    async () => {
+      // A framework that resets the "new card" fieldset's own state when its
+      // radio is (re-)selected — verification must catch this and refuse,
+      // never attempt to re-fill (the raw card bytes are gone by this point
+      // in the call chain anyway).
+      const pageUrl = "https://shop.example.test/reset-on-toggle-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form id="checkout">
+            <label><input type="radio" name="payment_method" value="saved" checked>Card on file •••• 9012</label>
+            <label><input id="new-radio" type="radio" name="payment_method" value="new">Use a different card</label>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay</button>
+          </form>
+          <script>
+            document.querySelector("#new-radio").addEventListener("change", () => {
+              for (const el of document.querySelectorAll(
+                "[autocomplete='cc-number'],[autocomplete='cc-csc']",
+              )) {
+                el.value = "";
+              }
+            });
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_card_selection_ambiguous",
+        );
+        expect(await page.evaluate(() => document.body.dataset.submitted)).toBeUndefined();
       } finally {
         await browser.close();
       }

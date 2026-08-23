@@ -352,6 +352,31 @@ export function recognizedPaymentProviderFrame(frameUrl: string, pageUrl: string
   );
 }
 
+// 3-D Secure ACS/directory-server hosts that the host-scope guard
+// (requestHostInScope, below) must let through for XHR/fetch — NEVER for
+// card-fill (that stays RECOGNIZED_PAYMENT_PROVIDER_FRAME_HOSTS-only; keep
+// these two lists separate so widening network scope for a challenge can
+// never also widen where the raw PAN is allowed to be typed).
+//
+// Root cause (2026-08-23, Hibiya Kadan/EbisuMart live decoupled-3DS hang,
+// reproduced deterministically with a local ACS fixture — see
+// browser-decoupled-3ds.test.ts): detectThreeDsChallenge already treats a
+// cardinalcommerce.com frame as a legitimate 3DS authority (the urlPattern
+// above), but requestHostInScope did not — so the ACS page's OWN decoupled-
+// authentication status poll (a `fetch`/`XHR` to its own backend) was
+// fail-closed ABORTED by installHostScopeGuard the instant the challenge
+// attached, because cardinalcommerce.com was never a `start`-declared or
+// sibling-domain host for the checkout session. The issuer approval landed
+// out-of-band in ~2 seconds — nowhere near the wait budget — but the ACS
+// page's client-side JS could never learn about it, so it never redirected
+// or auto-submitted its CRes, and waitForThreeDsResolution correctly polled
+// forever for a navigation that could never happen. No wait-duration fix
+// (resumability, a longer budget) can repair this: the browser is stuck
+// independent of how long we watch it.
+const THREE_DS_ACS_NETWORK_HOSTS: readonly string[] = [
+  "cardinalcommerce.com", // Visa/Mastercard/etc.'s shared ACS/StepUp vendor — the one host requestHostInScope was missing that detectThreeDsChallenge's urlPattern above already names.
+];
+
 // Card fields exist on the page but only inside a frame that is NOT a
 // recognized payment-provider surface. Carries the frame origin so the
 // refusal names what was refused without ever filling it.
@@ -725,6 +750,15 @@ const CHECKOUT_CARD_VALUE_FIELD_SELECTORS = [
   CHECKOUT_CARD_NAME_FIELD_SELECTORS,
 ].join(",");
 
+// Money-fence for operate_screenshot: every element a screenshot must blank
+// before capture. Card-shaped field selectors (same set fillCheckoutCardIntoFrames
+// writes into) + `data-ts-sealed-payment` (the marker typeHandle/the payment-fill
+// path stamp on any field a secret was typed into, the same reference observe's
+// text-masking uses — see presentFieldValue) + any password input. A pixel
+// screenshot has no text-masking layer of its own, so this must catch everything
+// observe's masking catches that could actually be VISIBLE on screen.
+const SCREENSHOT_REDACTION_SELECTORS = `${CHECKOUT_CARD_VALUE_FIELD_SELECTORS},[data-ts-sealed-payment="1"],input[type="password" i]`;
+
 // Charge-verb button labels — the click that may move money. Used by
 // submitFilledCheckout to find the charge control, and by operate_act's
 // pending-card-fill guard to recognize and cap caller-placed attempts while a
@@ -746,6 +780,257 @@ export function checkoutSubmitLabel(signals: {
   textContent?: string | null;
 }): string {
   return (signals.ariaLabel || signals.inputValue || signals.textContent || "").trim();
+}
+
+// Cross-frame saved-card selection primitives (submitFilledCheckoutInScope's
+// money fence). A merchant-owned saved/new-card radio can legitimately control
+// card fields living in a DIFFERENT, recognized hosted-fields iframe, so
+// detection/verification aggregates a per-frame read-only SCAN across every
+// frame while the click-side RESOLVE runs only inside the radio's own frame
+// (an HTML radio group cannot span frames). These run in the PAGE via
+// frame.evaluate and are deliberately module-level, named, and fully
+// self-contained: Playwright serializes an evaluate callback via toString(),
+// so a reference to any outer module binding (e.g. a shared marker-name
+// constant) would be an undefined identifier at runtime inside the page — the
+// data-ts-checkout-selection marker name is therefore a literal in each
+// function.
+interface SavedCardSelectionScan {
+  competingRadioCount: number;
+  competingSelectOption: boolean;
+  sealedFieldValues: Array<string | null>;
+  markedCount: number;
+  markedUncheckedCount: number;
+}
+
+function scanSavedCardSelectionInPage(): SavedCardSelectionScan {
+  const savedCardPattern =
+    /(?:••+|\*{2,}|●+|×{2,}|x{4,})[\s-]*\d{2,4}\b|\bending\s+in\s+\d{4}\b|\bcard\s+on\s+file\b|\bsaved\s+card\b|登録済みのカード|前回(?:利用|使用)したカード|保存されたカード/iu;
+  const roots: Array<Document | ShadowRoot> = [document];
+  for (let index = 0; index < roots.length; index += 1) {
+    const root = roots[index]!;
+    for (const element of Array.from(root.querySelectorAll("*"))) {
+      const shadowRoot = element.shadowRoot;
+      if (shadowRoot !== null) roots.push(shadowRoot);
+    }
+  }
+  const isFilledCardField = (element: Element | null): boolean =>
+    element?.getAttribute("data-ts-sealed-payment") === "1";
+  const associatedLabelText = (control: Element): string[] => {
+    const labels = new Set<HTMLLabelElement>();
+    if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement) {
+      for (const label of Array.from(control.labels ?? [])) labels.add(label);
+    }
+    const id = control.getAttribute("id");
+    if (id !== null && id.length > 0) {
+      const root = control.getRootNode();
+      if (!(root instanceof Document) && !(root instanceof ShadowRoot)) {
+        throw new Error("saved-card control has no inspectable root");
+      }
+      for (const label of Array.from(root.querySelectorAll<HTMLLabelElement>("label[for]"))) {
+        if (label.htmlFor === id) labels.add(label);
+      }
+    }
+    return Array.from(labels, (label) => label.textContent ?? "");
+  };
+  const containerFor = (el: Element): Element | null =>
+    el.closest("[role='radio'],li,div") ?? el.parentElement;
+  const isChecked = (el: Element): boolean =>
+    el instanceof HTMLInputElement ? el.checked : el.getAttribute("aria-checked") === "true";
+  const labelTextFor = (el: Element, container: Element | null): string =>
+    [el.getAttribute("aria-label"), ...associatedLabelText(el), container?.textContent]
+      .filter((value): value is string => typeof value === "string")
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  let competingRadioCount = 0;
+  let competingSelectOption = false;
+  for (const root of roots) {
+    for (const candidate of Array.from(
+      root.querySelectorAll('input[type="radio"]:checked,[role="radio"][aria-checked="true"]'),
+    )) {
+      if (isFilledCardField(candidate)) continue;
+      const text = labelTextFor(candidate, containerFor(candidate));
+      if (text.length > 0 && savedCardPattern.test(text)) competingRadioCount += 1;
+    }
+    for (const select of Array.from(root.querySelectorAll("select"))) {
+      if (isFilledCardField(select)) continue;
+      for (const option of Array.from(select.selectedOptions)) {
+        if (isFilledCardField(option)) continue;
+        const text = [
+          option.textContent,
+          select.getAttribute("aria-label"),
+          ...associatedLabelText(select),
+        ]
+          .filter((value): value is string => typeof value === "string")
+          .join(" ")
+          .replace(/\s+/g, " ")
+          .trim();
+        if (text.length > 0 && savedCardPattern.test(text)) competingSelectOption = true;
+      }
+    }
+  }
+  const sealedFieldValues = roots.flatMap((root) =>
+    Array.from(root.querySelectorAll('[data-ts-sealed-payment="1"]')).map((el) =>
+      el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement ? el.value : null,
+    ),
+  );
+  let markedCount = 0;
+  let markedUncheckedCount = 0;
+  for (const root of roots) {
+    for (const marked of Array.from(root.querySelectorAll('[data-ts-checkout-selection="1"]'))) {
+      markedCount += 1;
+      if (!isChecked(marked)) markedUncheckedCount += 1;
+    }
+  }
+  return {
+    competingRadioCount,
+    competingSelectOption,
+    sealedFieldValues,
+    markedCount,
+    markedUncheckedCount,
+  };
+}
+
+function clearSavedCardSelectionMarkersInPage(): void {
+  const roots: Array<Document | ShadowRoot> = [document];
+  for (let index = 0; index < roots.length; index += 1) {
+    const root = roots[index]!;
+    for (const element of Array.from(root.querySelectorAll("*"))) {
+      const shadowRoot = element.shadowRoot;
+      if (shadowRoot !== null) roots.push(shadowRoot);
+    }
+  }
+  for (const root of roots) {
+    for (const marked of Array.from(root.querySelectorAll("[data-ts-checkout-selection]"))) {
+      marked.removeAttribute("data-ts-checkout-selection");
+    }
+  }
+}
+
+function resolveSavedCardSelectionInPage():
+  | { status: "resolved"; clicked: number }
+  | { status: "ambiguous" } {
+  const savedCardPattern =
+    /(?:••+|\*{2,}|●+|×{2,}|x{4,})[\s-]*\d{2,4}\b|\bending\s+in\s+\d{4}\b|\bcard\s+on\s+file\b|\bsaved\s+card\b|登録済みのカード|前回(?:利用|使用)したカード|保存されたカード/iu;
+  const roots: Array<Document | ShadowRoot> = [document];
+  for (let index = 0; index < roots.length; index += 1) {
+    const root = roots[index]!;
+    for (const element of Array.from(root.querySelectorAll("*"))) {
+      const shadowRoot = element.shadowRoot;
+      if (shadowRoot !== null) roots.push(shadowRoot);
+    }
+  }
+  const isFilledCardField = (element: Element | null): boolean =>
+    element?.getAttribute("data-ts-sealed-payment") === "1";
+  const associatedLabelText = (control: Element): string[] => {
+    const labels = new Set<HTMLLabelElement>();
+    if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement) {
+      for (const label of Array.from(control.labels ?? [])) labels.add(label);
+    }
+    const id = control.getAttribute("id");
+    if (id !== null && id.length > 0) {
+      const root = control.getRootNode();
+      if (!(root instanceof Document) && !(root instanceof ShadowRoot)) {
+        throw new Error("saved-card control has no inspectable root");
+      }
+      for (const label of Array.from(root.querySelectorAll<HTMLLabelElement>("label[for]"))) {
+        if (label.htmlFor === id) labels.add(label);
+      }
+    }
+    return Array.from(labels, (label) => label.textContent ?? "");
+  };
+  const containerFor = (el: Element): Element | null =>
+    el.closest("[role='radio'],li,div") ?? el.parentElement;
+  const isChecked = (el: Element): boolean =>
+    el instanceof HTMLInputElement ? el.checked : el.getAttribute("aria-checked") === "true";
+  const labelTextFor = (el: Element, container: Element | null): string =>
+    [el.getAttribute("aria-label"), ...associatedLabelText(el), container?.textContent]
+      .filter((value): value is string => typeof value === "string")
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const competingRadios: Array<{ el: Element; root: Document | ShadowRoot }> = [];
+  for (const root of roots) {
+    for (const candidate of Array.from(
+      root.querySelectorAll('input[type="radio"]:checked,[role="radio"][aria-checked="true"]'),
+    )) {
+      if (isFilledCardField(candidate)) continue;
+      const text = labelTextFor(candidate, containerFor(candidate));
+      if (text.length > 0 && savedCardPattern.test(text)) {
+        competingRadios.push({ el: candidate, root });
+      }
+    }
+  }
+  let clicked = 0;
+  for (const { el: radio, root } of competingRadios) {
+    const radioGroup = radio.closest('[role="radiogroup"]');
+    const siblings: Element[] =
+      radio instanceof HTMLInputElement && radio.name.length > 0
+        ? Array.from(
+            (radio.form ?? root).querySelectorAll(
+              `input[type="radio"][name="${CSS.escape(radio.name)}"]`,
+            ),
+          )
+        : radioGroup !== null
+          ? Array.from(radioGroup.querySelectorAll('[role="radio"]'))
+          : [];
+    const candidates = siblings.filter((sibling) => {
+      if (sibling === radio || isChecked(sibling)) return false;
+      const text = labelTextFor(sibling, containerFor(sibling));
+      return !(text.length > 0 && savedCardPattern.test(text));
+    });
+    // Prefer whichever candidate structurally OWNS one of our sealed fields
+    // (its container wraps the actual form we just filled) — an i18n-agnostic,
+    // DOM-structural signal. That preference only holds when it is UNIQUE:
+    // two or more owning candidates must never silently resolve to the first
+    // DOM-order match. With no owning candidate, fall back to the sole
+    // remaining candidate only when exactly one exists.
+    const owningCandidates = candidates.filter((sibling) => {
+      const container = containerFor(sibling) ?? sibling;
+      return container.querySelector('[data-ts-sealed-payment="1"]') !== null;
+    });
+    const target =
+      owningCandidates.length === 1
+        ? owningCandidates[0]
+        : owningCandidates.length === 0 && candidates.length === 1
+          ? candidates[0]
+          : undefined;
+    if (target === undefined) return { status: "ambiguous" };
+    const requeryScope: ParentNode =
+      radio instanceof HTMLInputElement && radio.name.length > 0 ? root : (radioGroup ?? root);
+    const requerySelector =
+      radio instanceof HTMLInputElement && radio.name.length > 0
+        ? `input[type="radio"][name="${CSS.escape(radio.name)}"]`
+        : '[role="radio"]';
+    (target as HTMLElement).click();
+    // The click can synchronously rerender the group (framework-controlled
+    // radios), detaching the node we just clicked — marking that stale
+    // reference would leave the LIVE checked radio unmarked and force a false
+    // refusal later. Re-identify the marking target from the live tree: the
+    // group must now contain exactly one connected, checked, non-saved-shaped
+    // member; anything else is genuinely ambiguous.
+    const liveChecked = Array.from(requeryScope.querySelectorAll(requerySelector)).filter(
+      (member) => {
+        if (!member.isConnected || !isChecked(member)) return false;
+        const text = labelTextFor(member, containerFor(member));
+        return !(text.length > 0 && savedCardPattern.test(text));
+      },
+    );
+    if (liveChecked.length !== 1) return { status: "ambiguous" };
+    liveChecked[0]!.setAttribute("data-ts-checkout-selection", "1");
+    clicked += 1;
+  }
+  return { status: "resolved", clicked };
+}
+
+// Carried from resolveCompetingSavedCardSelection to the charge-click boundary
+// so the exact resolved state can be independently re-verified right before
+// the pay button is clicked.
+interface SavedCardSelectionVerification {
+  sealedValuesByFrame: ReadonlyMap<Frame, ReadonlyArray<string | null>>;
+  expectedMarkedCount: number;
 }
 
 // Descriptor-level PayPal surface classifier retained for callers that need to
@@ -832,6 +1117,7 @@ export function requestHostInScope(
   if (bySuffix("gstatic.com") && /^\/recaptcha(?:\/|$)/u.test(parsedUrl.pathname)) return true;
   if (
     RECOGNIZED_PAYMENT_PROVIDER_FRAME_HOSTS.some(bySuffix) ||
+    THREE_DS_ACS_NETWORK_HOSTS.some(bySuffix) ||
     host.endsWith(".firebaseapp.com") ||
     host.endsWith(".web.app")
   ) {
@@ -8127,6 +8413,182 @@ export class BrowserController {
     return buffer.toString("base64");
   }
 
+  // Resolve a caller-supplied frame reference to a live Frame, or null for
+  // "the whole page" (no frame args given). Throws when a reference was
+  // given but nothing matches — a silent fallback to the full page would
+  // make operate_screenshot's frame targeting unreliable for exactly the
+  // case it exists for (an unpredictable ACS/challenge iframe).
+  private resolveOperatorScreenshotFrame(opts: {
+    frameIndex?: number;
+    frameUrlContains?: string;
+  }): Frame | null {
+    if (!this.page) throw new Error("Browser not started");
+    if (opts.frameIndex !== undefined) {
+      const frame = this.page.frames()[opts.frameIndex];
+      if (frame === undefined) throw new Error("screenshot_frame_not_found");
+      return frame;
+    }
+    if (opts.frameUrlContains !== undefined) {
+      const needle = opts.frameUrlContains.toLowerCase();
+      const frame = this.page.frames().find((f) => f.url().toLowerCase().includes(needle));
+      if (frame === undefined) throw new Error("screenshot_frame_not_found");
+      return frame;
+    }
+    return null;
+  }
+
+  // Resolve every card-shaped/sealed field in the captured frames to a
+  // Playwright screenshot `mask` Locator — text-masking (presentFieldValue in
+  // provision-session.ts) only covers the JSON observation, not a rendered
+  // image. The mask box is painted by Playwright's own capture machinery, so
+  // this path never writes a style or attribute into the live checkout DOM,
+  // and locator querying pierces open shadow roots. Beyond the attribute-based
+  // selector set, every renderable input/textarea whose CURRENT value contains
+  // a Luhn-valid PAN span is masked too (containsLuhnPanSpan — the same
+  // detection the payment paths use), so a card number sitting in a field the
+  // fixed selectors don't recognize still never reaches the image. Fail-closed
+  // throughout: a selector that cannot be queried, a value that cannot be
+  // read, or a matched element whose geometry cannot be resolved (boundingBox
+  // returns null rather than throwing) aborts the whole capture rather than
+  // shrinking the redaction. The per-frame count signature lets the caller
+  // verify the redaction set stayed stable across the capture window.
+  private async collectOperatorScreenshotMask(
+    frames: readonly Frame[],
+    extraRedactionSelectors: readonly string[],
+  ): Promise<{ mask: Locator[]; redactedCount: number; signature: string }> {
+    const selector = [SCREENSHOT_REDACTION_SELECTORS, ...extraRedactionSelectors].join(",");
+    const mask: Locator[] = [];
+    const perFrameCounts: number[] = [];
+    try {
+      for (const frame of frames) {
+        let frameCount = 0;
+        const matches = await frame.locator(selector).all();
+        for (const match of matches) {
+          if ((await match.boundingBox({ timeout: 5_000 })) === null) {
+            throw new Error("screenshot_redaction_unresolved");
+          }
+          mask.push(match);
+          frameCount += 1;
+        }
+        const valueCandidates = await frame.locator('input:not([type="hidden" i]),textarea').all();
+        for (const candidate of valueCandidates) {
+          const value = await candidate.inputValue({ timeout: 5_000 });
+          if (!containsLuhnPanSpan(value)) continue;
+          if (
+            await candidate.evaluate((el, matchSelector) => el.matches(matchSelector), selector)
+          ) {
+            continue;
+          }
+          if ((await candidate.boundingBox({ timeout: 5_000 })) === null) {
+            throw new Error("screenshot_redaction_unresolved");
+          }
+          mask.push(candidate);
+          frameCount += 1;
+        }
+        perFrameCounts.push(frameCount);
+      }
+    } catch {
+      throw new Error("screenshot_redaction_unresolved");
+    }
+    return {
+      mask,
+      redactedCount: perFrameCounts.reduce((sum, count) => sum + count, 0),
+      signature: perFrameCounts.join(","),
+    };
+  }
+
+  // operate_screenshot's implementation: a read-only capture of the page (or
+  // one specific frame, so a cross-origin challenge/ACS iframe can be seen on
+  // its own) with card-shaped/sealed fields redacted at capture time via
+  // Playwright's screenshot mask. Never navigates, clicks, types, or calls
+  // bringToFront/focus — a debugging read, not an action. Redaction always
+  // covers every frame that is actually part of the captured image: the whole
+  // page when capturing the page (a full-page or viewport shot composites
+  // every visible iframe), or just the target frame when capturing one frame
+  // in isolation. `extraRedactionSelectors` carries the session layer's
+  // sealed-field selectors (fields observe() masks that carry no DOM marker).
+  async screenshotForOperator(
+    opts: {
+      frameIndex?: number;
+      frameUrlContains?: string;
+      fullPage?: boolean;
+      extraRedactionSelectors?: readonly string[];
+    } = {},
+  ): Promise<{
+    base64: string;
+    frameUrl: string | null;
+    frameCount: number;
+    redactedCount: number;
+  }> {
+    if (!this.page) throw new Error("Browser not started");
+    const page = this.page;
+    const targetFrame = this.resolveOperatorScreenshotFrame(opts);
+    const extraRedactionSelectors = opts.extraRedactionSelectors ?? [];
+    const framesForRedaction = (): Frame[] =>
+      targetFrame !== null && targetFrame !== page.mainFrame() ? [targetFrame] : page.frames();
+    const framesBefore = framesForRedaction();
+    const { mask, redactedCount, signature } = await this.collectOperatorScreenshotMask(
+      framesBefore,
+      extraRedactionSelectors,
+    );
+    // caret:"initial" skips Playwright's default caret-hiding pass, which
+    // writes (and restores) caret-color on every editable element's inline
+    // style — this capture must leave element styles untouched.
+    let base64: string;
+    if (targetFrame !== null && targetFrame !== page.mainFrame()) {
+      const handle = await targetFrame.frameElement();
+      try {
+        const buffer = await handle.screenshot({
+          type: "jpeg",
+          quality: 80,
+          timeout: 10_000,
+          caret: "initial",
+          mask,
+        });
+        base64 = buffer.toString("base64");
+      } finally {
+        await handle.dispose().catch(() => undefined);
+      }
+    } else {
+      const buffer = await page.screenshot({
+        fullPage: opts.fullPage === true,
+        type: "jpeg",
+        quality: 80,
+        timeout: 10_000,
+        caret: "initial",
+        mask,
+      });
+      base64 = buffer.toString("base64");
+    }
+    // Stability guard: the mask set was fixed before a capture that can take
+    // seconds. If the page grew another matching field or frame meanwhile,
+    // the image may hold pixels no mask covered — re-run the same collection
+    // and discard the image unless the frame set and per-frame redaction
+    // signature are unchanged.
+    const framesAfter = framesForRedaction();
+    let stable =
+      framesAfter.length === framesBefore.length &&
+      framesBefore.every((frame, index) => framesAfter[index] === frame);
+    if (stable) {
+      try {
+        const recheck = await this.collectOperatorScreenshotMask(
+          framesAfter,
+          extraRedactionSelectors,
+        );
+        stable = recheck.signature === signature;
+      } catch {
+        stable = false;
+      }
+    }
+    if (!stable) throw new Error("screenshot_redaction_unstable");
+    return {
+      base64,
+      frameUrl: targetFrame?.url() ?? null,
+      frameCount: page.frames().length,
+      redactedCount,
+    };
+  }
+
   async getState(): Promise<BrowserState> {
     if (!this.page) throw new Error("Browser not started");
     // page.content() / page.title() / screenshot() all throw
@@ -9953,89 +10415,120 @@ export class BrowserController {
     return null;
   }
 
-  private async detectCompetingSavedCardSelection(): Promise<boolean> {
+  private async scanSavedCardSelectionAcrossFrames(): Promise<Map<Frame, SavedCardSelectionScan>> {
+    if (!this.page) throw new Error("Browser not started");
+    const entries = await Promise.all(
+      this.page.frames().map(async (frame) => {
+        try {
+          return [frame, await frame.evaluate(scanSavedCardSelectionInPage)] as const;
+        } catch {
+          throw new Error("payment_card_selection_ambiguous");
+        }
+      }),
+    );
+    return new Map(entries);
+  }
+
+  // Re-runs the global scan and confirms the resolved state still holds: no
+  // competing saved-card selection anywhere, every marked (clicked) new-card
+  // control is STILL checked and none has vanished (a weaker "no saved card
+  // checked" test would miss a marked radio that was unchecked with nothing
+  // re-checked), and every sealed field across every frame still holds its
+  // snapshotted non-empty value.
+  private async savedCardSelectionVerified(
+    verification: SavedCardSelectionVerification,
+  ): Promise<boolean> {
+    const scans = await this.scanSavedCardSelectionAcrossFrames();
+    let markedCount = 0;
+    for (const scan of scans.values()) {
+      if (scan.competingRadioCount > 0 || scan.competingSelectOption) return false;
+      if (scan.markedUncheckedCount > 0) return false;
+      markedCount += scan.markedCount;
+    }
+    if (markedCount !== verification.expectedMarkedCount) return false;
+    for (const [frame, before] of verification.sealedValuesByFrame) {
+      const after = scans.get(frame)?.sealedFieldValues;
+      if (after === undefined || after.length !== before.length) return false;
+      for (let index = 0; index < before.length; index += 1) {
+        const beforeValue = before[index] ?? null;
+        const afterValue = after[index] ?? null;
+        if (beforeValue === null && afterValue === null) continue;
+        if (beforeValue === null || afterValue === null) return false;
+        if (beforeValue.length === 0 || afterValue !== beforeValue) return false;
+      }
+    }
+    for (const [frame, scan] of scans) {
+      if (!verification.sealedValuesByFrame.has(frame) && scan.sealedFieldValues.length > 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // "none": no competing saved-card selection found anywhere — nothing to do.
+  // "resolved": a competing saved-card RADIO was found and positively
+  // resolved — the sole unambiguous new-card sibling in its choice group was
+  // clicked (real, event-firing radio-group semantics: clicking it natively
+  // unchecks the saved-card radio too) and marked, then a global re-scan
+  // verified no competing selection remains anywhere and every filled card
+  // field the operator sealed — in ANY frame, including a recognized
+  // hosted-fields iframe the radio's frame does not contain — still holds its
+  // value. The returned verification state lets submitFilledCheckoutInScope
+  // repeat that exact check at the charge-click boundary.
+  // "ambiguous": a competing selection exists and either it is a saved-card
+  // <select> OPTION (never auto-resolved — a select's "change" semantics
+  // vary too much across frameworks to trust a synthetic commit the way a
+  // native radio click can be trusted), or a competing radio's choice group
+  // has zero or more-than-one plausible new-card candidate, or resolving it
+  // did not actually clear the competing selection, or it cleared/reset the
+  // filled card fields. Fail-closed refusal is the ONLY outcome here — never
+  // silently re-fill (the raw card bytes are already gone by this point in
+  // the call chain) and never guess between multiple candidates.
+  private async resolveCompetingSavedCardSelection(): Promise<
+    | { outcome: "none" | "resolved"; verification: SavedCardSelectionVerification }
+    | { outcome: "ambiguous" }
+  > {
     if (!this.page) throw new Error("Browser not started");
     for (const frame of this.page.frames()) {
-      let selected: boolean;
       try {
-        selected = await frame.evaluate(() => {
-          const savedCardPattern =
-            /(?:••+|\*{2,}|●+|×{2,}|x{4,})[\s-]*\d{2,4}\b|\bending\s+in\s+\d{4}\b|\bcard\s+on\s+file\b|\bsaved\s+card\b|登録済みのカード|前回(?:利用|使用)したカード|保存されたカード/iu;
-          const roots: Array<Document | ShadowRoot> = [document];
-          for (let index = 0; index < roots.length; index += 1) {
-            const root = roots[index]!;
-            for (const element of Array.from(root.querySelectorAll("*"))) {
-              const shadowRoot = element.shadowRoot;
-              if (shadowRoot !== null) roots.push(shadowRoot);
-            }
-          }
-          const isFilledCardField = (element: Element | null): boolean =>
-            element?.getAttribute("data-ts-sealed-payment") === "1";
-          const associatedLabelText = (control: Element): string[] => {
-            const labels = new Set<HTMLLabelElement>();
-            if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement) {
-              for (const label of Array.from(control.labels ?? [])) labels.add(label);
-            }
-            const id = control.getAttribute("id");
-            if (id !== null && id.length > 0) {
-              const root = control.getRootNode();
-              if (!(root instanceof Document) && !(root instanceof ShadowRoot)) {
-                throw new Error("saved-card control has no inspectable root");
-              }
-              for (const label of Array.from(
-                root.querySelectorAll<HTMLLabelElement>("label[for]"),
-              )) {
-                if (label.htmlFor === id) labels.add(label);
-              }
-            }
-            return Array.from(labels, (label) => label.textContent ?? "");
-          };
-          for (const root of roots) {
-            const selectedRadios = Array.from(
-              root.querySelectorAll(
-                'input[type="radio"]:checked,[role="radio"][aria-checked="true"]',
-              ),
-            );
-            for (const candidate of selectedRadios) {
-              if (isFilledCardField(candidate)) continue;
-              const container =
-                candidate.closest("[role='radio'],li,div") ?? candidate.parentElement;
-              const text = [
-                candidate.getAttribute("aria-label"),
-                ...associatedLabelText(candidate),
-                container?.textContent,
-              ]
-                .filter((value): value is string => typeof value === "string")
-                .join(" ")
-                .replace(/\s+/g, " ")
-                .trim();
-              if (text.length > 0 && savedCardPattern.test(text)) return true;
-            }
-            for (const select of Array.from(root.querySelectorAll("select"))) {
-              if (isFilledCardField(select)) continue;
-              for (const option of Array.from(select.selectedOptions)) {
-                if (isFilledCardField(option)) continue;
-                const text = [
-                  option.textContent,
-                  select.getAttribute("aria-label"),
-                  ...associatedLabelText(select),
-                ]
-                  .filter((value): value is string => typeof value === "string")
-                  .join(" ")
-                  .replace(/\s+/g, " ")
-                  .trim();
-                if (text.length > 0 && savedCardPattern.test(text)) return true;
-              }
-            }
-          }
-          return false;
-        });
+        await frame.evaluate(clearSavedCardSelectionMarkersInPage);
       } catch {
         throw new Error("payment_card_selection_ambiguous");
       }
-      if (selected) return true;
     }
-    return false;
+    const initial = await this.scanSavedCardSelectionAcrossFrames();
+    const sealedValuesByFrame = new Map(
+      [...initial.entries()].map(([frame, scan]) => [frame, scan.sealedFieldValues] as const),
+    );
+    const anySelectOption = [...initial.values()].some((scan) => scan.competingSelectOption);
+    const radioFrames = [...initial.entries()]
+      .filter(([, scan]) => scan.competingRadioCount > 0)
+      .map(([frame]) => frame);
+    if (!anySelectOption && radioFrames.length === 0) {
+      return { outcome: "none", verification: { sealedValuesByFrame, expectedMarkedCount: 0 } };
+    }
+    if (anySelectOption) return { outcome: "ambiguous" };
+    if (![...sealedValuesByFrame.values()].some((values) => values.length > 0)) {
+      return { outcome: "ambiguous" };
+    }
+    let expectedMarkedCount = 0;
+    for (const frame of radioFrames) {
+      let resolved: { status: "resolved"; clicked: number } | { status: "ambiguous" };
+      try {
+        resolved = await frame.evaluate(resolveSavedCardSelectionInPage);
+      } catch {
+        throw new Error("payment_card_selection_ambiguous");
+      }
+      if (resolved.status === "ambiguous") return { outcome: "ambiguous" };
+      expectedMarkedCount += resolved.clicked;
+    }
+    if (expectedMarkedCount === 0) return { outcome: "ambiguous" };
+    const verification: SavedCardSelectionVerification = {
+      sealedValuesByFrame,
+      expectedMarkedCount,
+    };
+    if (!(await this.savedCardSelectionVerified(verification))) return { outcome: "ambiguous" };
+    return { outcome: "resolved", verification };
   }
 
   // The charge: find and click the pay/place-order control, then poll for a
@@ -10049,7 +10542,8 @@ export class BrowserController {
     cardGroup?: CheckoutCardGroupScope,
   ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
-    if (await this.detectCompetingSavedCardSelection()) {
+    const savedCardSelection = await this.resolveCompetingSavedCardSelection();
+    if (savedCardSelection.outcome === "ambiguous") {
       throw new Error("payment_card_selection_ambiguous");
     }
     let outcomeBaseline: CheckoutOutcomeBaseline | undefined;
@@ -10262,8 +10756,20 @@ export class BrowserController {
             .catch(() => undefined);
           await readDispatchOutcomeBaseline();
         };
+        // Money-fence boundary: the async pay-button scan above (visibility/
+        // enabled/ownership/label checks, dispatch-tracking install) is a real
+        // window in which a page update — or the resolution click's own side
+        // effects — could restore the saved-card selection or clear the filled
+        // fields. bringToFront runs FIRST because its focus/visibility events
+        // can themselves trigger a merchant default-selection revert; the
+        // re-verification is then the LAST thing before the charge click is
+        // dispatched — never proceed on a stale check.
+        await this.page.bringToFront().catch(() => undefined);
+        if (!(await this.savedCardSelectionVerified(savedCardSelection.verification))) {
+          await clearDispatchTracking();
+          throw new Error("payment_card_selection_ambiguous");
+        }
         try {
-          await this.page.bringToFront().catch(() => undefined);
           await candidate.click();
         } catch (error) {
           const dispatchState = await frame
