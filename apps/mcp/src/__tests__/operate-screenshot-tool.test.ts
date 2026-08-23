@@ -12,6 +12,7 @@ import type { ApiClient } from "../api-client.js";
 import type { BrowserController } from "../bot/browser.js";
 import {
   closeAllProvisionSessions,
+  paymentSession,
   startHarnessProvisionSession,
 } from "../bot/provision-session.js";
 
@@ -172,6 +173,102 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
         arguments: { session_id: started.session_id },
       });
       expect(result.isError).toBe(true);
+      expect(browser.screenshotForOperator).not.toHaveBeenCalled();
+    } finally {
+      await client.close();
+      await closeAllProvisionSessions();
+    }
+  });
+
+  // Fail-closed strictness (2026-08-23): rather than trying to redact
+  // correctly around every edge case a live sealed/card-bearing page can
+  // produce, operate_screenshot refuses outright whenever the session has
+  // ever sealed a secret or currently has an active payment fill. No
+  // capture can leak what it refuses to take.
+  it("refuses (screenshot_unavailable_sealed_context) when the session has EVER sealed a field, even if the DOM state has since moved on", async () => {
+    const url = "https://operator-screenshot.test/checkout";
+    const browser = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      recoverActivePage: vi.fn(),
+      extractInteractiveElements: vi.fn().mockResolvedValue([]),
+      extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
+      currentUrl: vi.fn().mockReturnValue(url),
+      readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
+      close: vi.fn().mockResolvedValue(undefined),
+      screenshotForOperator: vi.fn().mockResolvedValue({
+        base64: TINY_JPEG_BASE64,
+        frameUrl: null,
+        frameCount: 1,
+        redactedCount: 0,
+      }),
+    } as unknown as BrowserController;
+    const started = await startHarnessProvisionSession({ serviceUrl: url, browser });
+    const client = await connectedClient();
+
+    try {
+      // sealedFieldKeys is cumulative and never cleared for the session's
+      // lifetime (see type_secret's ref-based path) — a single historical
+      // seal is enough, independent of whatever extractInteractiveElements
+      // reports right now.
+      paymentSession(started.session_id).sealedFieldKeys.add("some-target-key");
+      const extractCallsBeforeScreenshot = (
+        browser.extractInteractiveElements as ReturnType<typeof vi.fn>
+      ).mock.calls.length;
+
+      const result = await client.callTool({
+        name: "operate_screenshot",
+        arguments: { session_id: started.session_id },
+      });
+
+      expect(result.isError).toBe(true);
+      const content = result.content as Array<{ type: string; text?: string }>;
+      const text = content.find((c) => c.type === "text")?.text ?? "";
+      expect(text).toContain("screenshot_unavailable_sealed_context");
+      expect(browser.screenshotForOperator).not.toHaveBeenCalled();
+      // The guard refuses BEFORE the screenshot-specific extraction call —
+      // no MORE extraction calls happen as a result of this tool call, on
+      // top of whatever session startup already made.
+      expect(
+        (browser.extractInteractiveElements as ReturnType<typeof vi.fn>).mock.calls.length,
+      ).toBe(extractCallsBeforeScreenshot);
+    } finally {
+      await client.close();
+      await closeAllProvisionSessions();
+    }
+  });
+
+  it("refuses (screenshot_unavailable_sealed_context) while a payment card fill is currently active", async () => {
+    const url = "https://operator-screenshot.test/checkout";
+    const browser = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      recoverActivePage: vi.fn(),
+      extractInteractiveElements: vi.fn().mockResolvedValue([]),
+      extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
+      currentUrl: vi.fn().mockReturnValue(url),
+      readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
+      close: vi.fn().mockResolvedValue(undefined),
+      screenshotForOperator: vi.fn().mockResolvedValue({
+        base64: TINY_JPEG_BASE64,
+        frameUrl: null,
+        frameCount: 1,
+        redactedCount: 0,
+      }),
+    } as unknown as BrowserController;
+    const started = await startHarnessProvisionSession({ serviceUrl: url, browser });
+    const client = await connectedClient();
+
+    try {
+      paymentSession(started.session_id).paymentFieldSealActive = true;
+
+      const result = await client.callTool({
+        name: "operate_screenshot",
+        arguments: { session_id: started.session_id },
+      });
+
+      expect(result.isError).toBe(true);
+      const content = result.content as Array<{ type: string; text?: string }>;
+      const text = content.find((c) => c.type === "text")?.text ?? "";
+      expect(text).toContain("screenshot_unavailable_sealed_context");
       expect(browser.screenshotForOperator).not.toHaveBeenCalled();
     } finally {
       await client.close();

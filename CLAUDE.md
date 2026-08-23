@@ -126,26 +126,35 @@ silent failures.
     Page (viewport or `full_page`) or ONE frame in isolation (`frame_index` /
     `frame_url_contains` — the case it exists for: a cross-origin ACS/challenge
     or captcha iframe a full-page shot won't show clearly). Read-only — no
-    navigation, click, type, focus/`bringToFront`, or DOM mutation. Money-fence:
-    every card-shaped/sealed field becomes a capture-time Playwright screenshot
-    `mask` Locator (`SCREENSHOT_REDACTION_SELECTORS` in `browser.ts` — the same
-    fence `data-ts-sealed-payment` and `CHECKOUT_CARD_VALUE_FIELD_SELECTORS`
-    already cover on the JSON-observation side — plus the session layer's
-    sealed-field selectors from `observationSealedFieldKeys`/`isSealedFieldValue`,
-    so fields sealed via the ref-based `type_secret` path are covered too —
-    plus any renderable input/textarea whose CURRENT value contains a
-    Luhn-valid PAN span, via the same `containsLuhnPanSpan` detection the
-    payment paths use); locator querying pierces open shadow roots, and the
-    collection is fail-closed — any selector that cannot be queried, value
-    that cannot be read, or element whose geometry cannot be resolved
-    (`boundingBox()` returning null included) aborts the capture
-    (`screenshot_redaction_unresolved`) instead of returning an under-redacted
-    image, and after capture the same collection re-runs as a stability guard:
-    if the frame set or per-frame redaction signature changed during the
-    capture window the image is discarded (`screenshot_redaction_unstable`).
-    Server-side, a tool result carrying `image:{mime_type,data_base64}`
-    (this tool, or any future one) gets a real MCP `type:"image"` content
-    block (`toolResultContent` in `server.ts`), not base64 buried in JSON text.
+    navigation, click, type, focus/`bringToFront`, or DOM mutation.
+    **Primary money-fence: a session-level fail-closed refusal, not per-element
+    redaction.** `captureScreenshot` (`provision-session.ts`) refuses outright
+    with `screenshot_unavailable_sealed_context` whenever the session has EVER
+    sealed a secret (`session.sealedFieldKeys` — cumulative, never cleared for
+    the session's lifetime) or currently has an active payment card fill
+    (`session.paymentFieldSealActive`) — before touching the page at all. No
+    capture can leak what it refuses to take, and the tool stays fully usable
+    for what it exists to debug: a 3-D Secure/challenge or captcha page holds
+    no card data and never seals anything, so the guard never fires on that
+    case. This landed AFTER an adversarial no-mistakes review round found
+    several edge cases in an earlier per-element mask-based redaction design
+    (a field sealed in a temporarily-unavailable frame, a nested hosted
+    iframe, a value moving between fields mid-capture, a framework rerender
+    losing a resolution marker, `extractInteractiveElements`' own inert-
+    attribute hit-testing being an indirect DOM touch) — rather than chase
+    every such edge case in the redaction path itself, the session-level
+    refusal closes all of them at once. The mask-based redaction machinery
+    (`SCREENSHOT_REDACTION_SELECTORS` + `observationSealedFieldKeys`/
+    `isSealedFieldValue` for session-sealed selectors + Luhn-valid-value
+    detection via `containsLuhnPanSpan`, collected as capture-time Playwright
+    `mask` Locators, fail-closed on any unresolvable selector/geometry, with a
+    post-capture stability re-check) still exists underneath as defense-in-
+    depth for whatever this session-level guard doesn't cover, but is no
+    longer the primary fence — see the PR that introduced this guard for the
+    specific redaction-path edge cases it was deferred in favor of. Server-
+    side, a tool result carrying `image:{mime_type,data_base64}` (this tool,
+    or any future one) gets a real MCP `type:"image"` content block
+    (`toolResultContent` in `server.ts`), not base64 buried in JSON text.
   - **Frame/iframe support (operator-frame-support).** Ordinary child-frame
     controls now retain their frame origin through observation, action, and
     operator-recipe replay. The user-facing contract lives in README's MCP-tool

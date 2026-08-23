@@ -2795,12 +2795,31 @@ export async function captureScreenshot(
 ): Promise<ScreenshotCapture> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  // Fail-closed strictness (2026-08-23): refuse outright whenever the
+  // session has EVER sealed a secret (sealedFieldKeys is cumulative and
+  // never cleared for the session's lifetime — see type_secret's ref-based
+  // path) or currently has an active payment fill (paymentFieldSealActive).
+  // This is deliberately in place of trying to redact correctly around
+  // every edge case a live sealed/card-bearing page can produce — a field
+  // sealed in a temporarily-unavailable frame, a nested hosted iframe, a
+  // value moving between fields mid-capture, a framework rerender losing
+  // the resolution marker — the exact class of gaps an adversarial review
+  // round found in the per-element mask-based redaction path below. No
+  // capture can leak what it refuses to take. The tool stays fully usable
+  // for what it exists to debug: a 3-D Secure/challenge or captcha page
+  // holds no card data and never seals anything, so this guard never fires
+  // on the case operate_screenshot was built for.
+  if (session.sealedFieldKeys.size > 0 || session.paymentFieldSealActive) {
+    throw new Error("screenshot_unavailable_sealed_context");
+  }
   // Fields sealed via the ref-based type_secret path exist only in session
   // state (sealedFieldKeys) — no DOM marker — so the redaction set is derived
   // with the SAME helpers observe()'s JSON-masking uses and handed to the
   // browser layer as extra mask selectors. An extraction failure propagates:
   // a capture whose sealed set cannot be established must abort, not proceed
-  // with fewer redactions.
+  // with fewer redactions. In practice this is unreachable with a non-empty
+  // result — the guard above already refused whenever sealedFieldKeys is
+  // non-empty — kept as defense-in-depth, not the primary fence.
   const elements = await session.browser.extractInteractiveElements();
   const sealedFieldKeys = observationSealedFieldKeys(session, elements);
   const extraRedactionSelectors = elements
