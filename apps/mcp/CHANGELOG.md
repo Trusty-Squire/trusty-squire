@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.13-rc.4 (2026-08-23)
+
+- fix(mcp): guard payment card selection and resume post-submit 3DS waits (#572)
+
 ## 1.1.13-rc.3 (2026-08-23)
 
 - fix(mcp): stop post-submit checkout cleanup from touching 3DS frames (#570)
