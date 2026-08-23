@@ -1,5 +1,11 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.13-rc.3 (2026-08-23)
+
+- fix(mcp): stop post-submit checkout cleanup from touching 3DS frames (#570)
+- feat(vault): gate credential mutations with signed vouches (#569)
+- fix(web): align social preview copy with homepage voice (#567)
+
 ## 1.1.13-rc.2 (2026-08-22)
 
 - fix(mcp): detect JP/EbisuMart checkout card fields for operate_pay fill (#565)
