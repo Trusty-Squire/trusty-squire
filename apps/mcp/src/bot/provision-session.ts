@@ -2899,9 +2899,12 @@ export function getActivePendingApproval(selectedSession?: Session): PendingAppr
 // exhausted its budget with no terminal signal, if any. Backs
 // operate_payment_status alongside getActivePendingApproval — the two are
 // mutually exclusive (a session either awaits a mandate tap or watches an
-// already-submitted charge's 3DS outcome, never both).
+// already-submitted charge's 3DS outcome, never both). `?? null` guards a
+// Session synthesized without this field (e.g. a test double built before
+// pendingThreeDs existed) — real sessions always initialize it to null, but
+// `undefined` must never be mistaken for "a pending wait is present".
 export function getActivePendingThreeDs(selectedSession?: Session): PendingThreeDsWait | null {
-  return (selectedSession ?? activeProvisionSession()).pendingThreeDs;
+  return (selectedSession ?? activeProvisionSession()).pendingThreeDs ?? null;
 }
 
 // Set once, right after a single-page operate_pay submit's own wait budget
