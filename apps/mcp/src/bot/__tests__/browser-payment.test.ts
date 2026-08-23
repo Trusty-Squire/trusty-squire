@@ -2923,6 +2923,107 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "never retargets cleanup when a filled frame navigates during cleanup",
+    async () => {
+      const pageUrl = "https://store.kobeejapan.net/checkout-cleanup-race";
+      const frameUrl = "https://checkout.pci.shopifyinc.com/card-fields-cleanup-race";
+      const challengeUrl = "https://challenge-signal.test/3ds/challenge";
+      const acsUrl = "https://issuer-stronghold.test/acs/delayed-challenge";
+      const auxiliaryFrames = Array.from(
+        { length: 8 },
+        (_, index) => `<iframe srcdoc="<p>auxiliary-${index}</p>"></iframe>`,
+      ).join("");
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <title>Kobee Japan</title>
+          ${auxiliaryFrames}
+          <iframe id="payment-frame" src="${frameUrl}"></iframe>
+          <button id="place-order">Place order</button>
+          <script>
+            window.addEventListener("message", (event) => {
+              if (event.data === "cleanup-navigation-started") {
+                document.body.dataset.cleanupNavigationStarted = "true";
+              }
+            });
+            document.querySelector("#place-order").addEventListener("click", () => {
+              document.querySelector("#payment-frame").contentWindow.postMessage(
+                "arm-cleanup-navigation",
+                "*",
+              );
+              const challenge = document.createElement("iframe");
+              challenge.src = ${JSON.stringify(challengeUrl)};
+              challenge.title = "3D Secure";
+              challenge.style.cssText = "display:block;width:320px;height:240px";
+              document.body.append(challenge);
+            });
+          </script>`,
+        [frameUrl]: `
+          <form>
+            <input id="card-number" autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp-month">
+            <input autocomplete="cc-exp-year">
+            <input autocomplete="cc-csc">
+          </form>
+          <script>
+            let cleanupNavigationArmed = false;
+            window.addEventListener("message", (event) => {
+              if (event.data === "arm-cleanup-navigation") cleanupNavigationArmed = true;
+            });
+            new MutationObserver((records) => {
+              if (
+                cleanupNavigationArmed &&
+                records.some((record) => record.attributeName === "data-ts-jp-card-field")
+              ) {
+                cleanupNavigationArmed = false;
+                parent.postMessage("cleanup-navigation-started", "*");
+                location.href = ${JSON.stringify(acsUrl)};
+              }
+            }).observe(document.querySelector("#card-number"), {
+              attributes: true,
+              attributeFilter: ["data-ts-jp-card-field"],
+            });
+          </script>`,
+        [challengeUrl]: `<p>3-D Secure challenge</p>`,
+        [acsUrl]: `
+          <title>Issuer ACS</title>
+          <input type="hidden" id="acs-cardnumber-token" value="untouched-race-token">
+          <p>Authenticate payment</p>`,
+      });
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+        const originalPaymentFrame = page.frames().find((frame) => frame.url() === frameUrl);
+        expect(originalPaymentFrame).toBeDefined();
+        const acsNavigation = page.waitForEvent("framenavigated", {
+          predicate: (frame) => frame.url() === acsUrl,
+          timeout: 10_000,
+        });
+
+        const result = await controller.fillAndSubmitCheckout(CARD);
+        const acsFrame = await acsNavigation;
+
+        expect(result.three_ds_required).toBe(true);
+        expect(acsFrame).toBe(originalPaymentFrame);
+        expect(await page.locator("body").getAttribute("data-cleanup-navigation-started")).toBe(
+          "true",
+        );
+        expect(await acsFrame.locator("#acs-cardnumber-token").inputValue()).toBe(
+          "untouched-race-token",
+        );
+        expect(consoleError).toHaveBeenCalledWith(expect.stringContaining("[payment-cleanup]"));
+      } finally {
+        consoleError.mockRestore();
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "still clears card fields after same-document order confirmation navigation",
     async () => {
       const pageUrl = "https://merchant-garden.test/checkout";
@@ -3718,9 +3819,11 @@ describe("split-checkout card fill (real browser)", () => {
         await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
           "payment_submit_not_found",
         );
-        const values = await page.locator("input,select").evaluateAll((controls) =>
-          controls.map((control) => (control as HTMLInputElement | HTMLSelectElement).value),
-        );
+        const values = await page
+          .locator("input,select")
+          .evaluateAll((controls) =>
+            controls.map((control) => (control as HTMLInputElement | HTMLSelectElement).value),
+          );
         expect(values.every((value) => value === "")).toBe(true);
       } finally {
         await browser.close();
@@ -3758,9 +3861,7 @@ describe("split-checkout card fill (real browser)", () => {
         await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
           "payment_submit_not_found",
         );
-        expect(consoleError).toHaveBeenCalledWith(
-          "[payment-cleanup] payment_fields_not_cleared",
-        );
+        expect(consoleError).toHaveBeenCalledWith("[payment-cleanup] payment_fields_not_cleared");
         expect(await page.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
         expect(await page.locator("#preview").innerText()).toContain(CARD.pan);
       } finally {
@@ -3806,9 +3907,7 @@ describe("split-checkout card fill (real browser)", () => {
           three_ds_required: false,
           order_confirmed: true,
         });
-        expect(consoleError).toHaveBeenCalledWith(
-          "[payment-cleanup] payment_fields_not_cleared",
-        );
+        expect(consoleError).toHaveBeenCalledWith("[payment-cleanup] payment_fields_not_cleared");
         expect(await page.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
         expect(await page.locator("#preview").innerText()).toContain(CARD.pan);
       } finally {
@@ -4066,9 +4165,9 @@ describe("split-checkout card fill (real browser)", () => {
             "payment_field_not_found:cvv",
           );
           await expect(
-            page.locator("input").evaluateAll((inputs) =>
-              inputs.map((input) => (input as HTMLInputElement).value),
-            ),
+            page
+              .locator("input")
+              .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
           ).resolves.toEqual(["", "", "", ""]);
         } finally {
           await browser.close();
@@ -4164,32 +4263,29 @@ describe("split-checkout card fill (real browser)", () => {
     },
   );
 
-  it.skipIf(!chromiumAvailable)(
-    "preserves legacy Western number-input PAN detection",
-    async () => {
-      const pageUrl = "https://shop.example.test/legacy-number-pan.html";
-      const { page, browser } = await servePages({
-        [pageUrl]: `
+  it.skipIf(!chromiumAvailable)("preserves legacy Western number-input PAN detection", async () => {
+    const pageUrl = "https://shop.example.test/legacy-number-pan.html";
+    const { page, browser } = await servePages({
+      [pageUrl]: `
           <form>
             <input type="number" name="cardnumber" id="legacy-pan">
             <input autocomplete="cc-name" id="holder">
             <input autocomplete="cc-exp" id="expiry">
             <input autocomplete="cc-csc" id="cvv">
           </form>`,
-      });
-      try {
-        await page.goto(pageUrl);
-        const controller = new BrowserController({ humanize: false });
-        (controller as unknown as { page: Page }).page = page;
+    });
+    try {
+      await page.goto(pageUrl);
+      const controller = new BrowserController({ humanize: false });
+      (controller as unknown as { page: Page }).page = page;
 
-        await controller.fillCheckoutCardFields(CARD);
-        expect(await page.locator("#legacy-pan").inputValue()).toBe(CARD.pan);
-        expect(await page.locator("#cvv").inputValue()).toBe(CARD.cvv);
-      } finally {
-        await browser.close();
-      }
-    },
-  );
+      await controller.fillCheckoutCardFields(CARD);
+      expect(await page.locator("#legacy-pan").inputValue()).toBe(CARD.pan);
+      expect(await page.locator("#cvv").inputValue()).toBe(CARD.cvv);
+    } finally {
+      await browser.close();
+    }
+  });
 
   it.skipIf(!chromiumAvailable)(
     "refuses ambiguous and unrelated expiry topologies before filling",
@@ -4233,9 +4329,11 @@ describe("split-checkout card fill (real browser)", () => {
           await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
             "payment_card_form_ambiguous",
           );
-          const values = await page.locator("input,select").evaluateAll((controls) =>
-            controls.map((control) => (control as HTMLInputElement | HTMLSelectElement).value),
-          );
+          const values = await page
+            .locator("input,select")
+            .evaluateAll((controls) =>
+              controls.map((control) => (control as HTMLInputElement | HTMLSelectElement).value),
+            );
           expect(values.every((value) => value === "")).toBe(true);
         } finally {
           await browser.close();
@@ -4294,9 +4392,11 @@ describe("split-checkout card fill (real browser)", () => {
           await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
             "payment_field_not_found:expiry",
           );
-          const values = await page.locator("input,select").evaluateAll((controls) =>
-            controls.map((control) => (control as HTMLInputElement | HTMLSelectElement).value),
-          );
+          const values = await page
+            .locator("input,select")
+            .evaluateAll((controls) =>
+              controls.map((control) => (control as HTMLInputElement | HTMLSelectElement).value),
+            );
           expect(values.every((value) => value === "")).toBe(true);
         } finally {
           await browser.close();
@@ -4367,9 +4467,11 @@ describe("split-checkout card fill (real browser)", () => {
           );
           expect(await page.locator("body").getAttribute("data-false-expiry-touched")).toBeNull();
           expect(await page.locator("body").getAttribute("data-false-cvv-touched")).toBeNull();
-          const values = await page.locator("input,select").evaluateAll((controls) =>
-            controls.map((control) => (control as HTMLInputElement | HTMLSelectElement).value),
-          );
+          const values = await page
+            .locator("input,select")
+            .evaluateAll((controls) =>
+              controls.map((control) => (control as HTMLInputElement | HTMLSelectElement).value),
+            );
           expect(values.every((value) => value === "")).toBe(true);
         } finally {
           await browser.close();
@@ -4414,9 +4516,9 @@ describe("split-checkout card fill (real browser)", () => {
           "payment_field_not_found:pan",
         );
         expect(await page.locator("body").getAttribute("data-false-pan-value")).toBeNull();
-        const values = await page.locator("input").evaluateAll((inputs) =>
-          inputs.map((input) => (input as HTMLInputElement).value),
-        );
+        const values = await page
+          .locator("input")
+          .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value));
         expect(values.every((value) => value === "")).toBe(true);
       } finally {
         await browser.close();
@@ -4460,9 +4562,9 @@ describe("split-checkout card fill (real browser)", () => {
           "payment_field_not_found:pan",
         );
         await expect(
-          page.locator("input").evaluateAll((inputs) =>
-            inputs.map((input) => (input as HTMLInputElement).value),
-          ),
+          page
+            .locator("input")
+            .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
         ).resolves.toEqual(["", "", "", "", "", ""]);
       } finally {
         await browser.close();
@@ -4536,9 +4638,9 @@ describe("split-checkout card fill (real browser)", () => {
           "payment_field_not_found:pan",
         );
         await expect(
-          page.locator("input").evaluateAll((inputs) =>
-            inputs.map((input) => (input as HTMLInputElement).value),
-          ),
+          page
+            .locator("input")
+            .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
         ).resolves.toEqual(["", "", "", "", "", "", ""]);
       } finally {
         await browser.close();
@@ -4578,9 +4680,9 @@ describe("split-checkout card fill (real browser)", () => {
           "payment_field_not_found:pan",
         );
         await expect(
-          page.locator("input").evaluateAll((inputs) =>
-            inputs.map((input) => (input as HTMLInputElement).value),
-          ),
+          page
+            .locator("input")
+            .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
         ).resolves.toEqual(["", "", "", "", "", "", ""]);
       } finally {
         await browser.close();
@@ -4620,9 +4722,9 @@ describe("split-checkout card fill (real browser)", () => {
           "payment_field_not_found:pan",
         );
         await expect(
-          page.locator("input").evaluateAll((inputs) =>
-            inputs.map((input) => (input as HTMLInputElement).value),
-          ),
+          page
+            .locator("input")
+            .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
         ).resolves.toEqual(["", "", "", "", "", "", ""]);
       } finally {
         await browser.close();
