@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.13-rc.5 (2026-08-23)
+
+- feat(mcp): operate_screenshot; fix decoupled-3DS network scope; positive new-card selection (#574)
+
 ## 1.1.13-rc.4 (2026-08-23)
 
 - fix(mcp): guard payment card selection and resume post-submit 3DS waits (#572)
