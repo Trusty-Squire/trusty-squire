@@ -162,6 +162,7 @@ const h = vi.hoisted(() => ({
   },
   clearSealedPaymentFieldsCalls: 0,
   waitForThreeDsResult: "timeout" as "succeeded" | "failed" | "timeout",
+  waitForThreeDsCalls: [] as number[],
 }));
 
 vi.mock("../browser.js", () => ({
@@ -610,7 +611,10 @@ vi.mock("../browser.js", () => ({
     async clearSealedPaymentFields(): Promise<void> {
       h.clearSealedPaymentFieldsCalls += 1;
     }
-    async waitForThreeDsResolution(): Promise<"succeeded" | "failed" | "timeout"> {
+    async waitForThreeDsResolution(
+      timeoutMs: number,
+    ): Promise<"succeeded" | "failed" | "timeout"> {
+      h.waitForThreeDsCalls.push(timeoutMs);
       return h.waitForThreeDsResult;
     }
     async close(): Promise<"closed" | "force_closed_unproven" | "unknown"> {
@@ -1012,6 +1016,7 @@ beforeEach(() => {
   h.fillAndSubmitResult = { three_ds_required: false, order_confirmed: true };
   h.clearSealedPaymentFieldsCalls = 0;
   h.waitForThreeDsResult = "timeout";
+  h.waitForThreeDsCalls = [];
 });
 
 const replayRecipe = (overrides: Partial<OperatorRecipe> = {}): OperatorRecipe => ({
@@ -6237,14 +6242,16 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
     amount_cents: 8_800,
     currency: "JPY",
   };
-  const threeDsState = {
-    approval_id: "appr_3ds",
-    approval_url: "https://web.test/vault/pay/appr_3ds",
-    checkout: CHECKOUT,
-    last4: "9192",
-    mandate_id: "mandate_3ds",
-    deadline: Date.now() + 60_000,
-  };
+  function buildThreeDsState(deadline = Date.now() + 60_000) {
+    return {
+      approval_id: "appr_3ds",
+      approval_url: "https://web.test/vault/pay/appr_3ds",
+      checkout: CHECKOUT,
+      last4: "9192",
+      mandate_id: "mandate_3ds",
+      deadline,
+    };
+  }
 
   function buildStatusEnv(): { api: ApiClient; auditBodies: Array<Record<string, unknown>> } {
     const auditBodies: Array<Record<string, unknown>> = [];
@@ -6268,6 +6275,7 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
   it("keeps checking the same live browser and clears state once the OOB challenge resolves", async () => {
     const env = buildStatusEnv();
     await startProvisionSession({ serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html" });
+    const threeDsState = buildThreeDsState();
     setActivePendingThreeDs(threeDsState);
     expect(getActivePendingThreeDs()).toEqual(threeDsState);
 
@@ -6309,7 +6317,7 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
   it("records a declined outcome and clears state when the OOB challenge fails", async () => {
     const env = buildStatusEnv();
     await startProvisionSession({ serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html" });
-    setActivePendingThreeDs(threeDsState);
+    setActivePendingThreeDs(buildThreeDsState());
 
     h.waitForThreeDsResult = "failed";
     const result = (await operatePaymentStatusTool.handler({}, env.api)) as Record<string, unknown>;
@@ -6322,7 +6330,7 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
   it("hands back an accurate unresolved status once the resumable deadline passes — never fabricates success", async () => {
     const env = buildStatusEnv();
     await startProvisionSession({ serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html" });
-    setActivePendingThreeDs({ ...threeDsState, deadline: Date.now() - 1 });
+    setActivePendingThreeDs(buildThreeDsState(Date.now() - 1));
 
     h.waitForThreeDsResult = "timeout";
     const result = (await operatePaymentStatusTool.handler({}, env.api)) as Record<string, unknown>;
@@ -6336,6 +6344,62 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
     expect(env.auditBodies).toEqual([
       expect.objectContaining({ status: "payment_3ds_unresolved" }),
     ]);
+    expect(h.waitForThreeDsCalls).toEqual([0]);
+  });
+
+  it("retains expired 3DS state when its required terminal audit cannot be written", async () => {
+    await startProvisionSession({ serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html" });
+    const threeDsState = buildThreeDsState(Date.now() - 1);
+    setActivePendingThreeDs(threeDsState);
+    const auditPayment = vi.fn().mockRejectedValue(new Error("audit unavailable"));
+    h.waitForThreeDsResult = "timeout";
+
+    await expect(
+      operatePaymentStatusTool.handler({}, { auditPayment } as unknown as ApiClient),
+    ).rejects.toThrow("audit unavailable");
+    expect(auditPayment).toHaveBeenCalledTimes(1);
+    expect(getActivePendingThreeDs()).toEqual(threeDsState);
+  });
+
+  it("refuses a new operate_pay lease while a prior 3DS outcome is unresolved", async () => {
+    const auditPayment = vi.fn().mockResolvedValue({ id: "audit_finish" });
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: { auditPayment } as unknown as ApiClient,
+    });
+    const threeDsState = buildThreeDsState();
+    setActivePendingThreeDs(threeDsState);
+
+    expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(
+      /call operate_payment_status first/,
+    );
+    expect(getActivePendingThreeDs()).toEqual(threeDsState);
+    await finishProvisionSession(paymentSession().id);
+  });
+
+  it("checks and audits an unresolved 3DS charge before operate_finish closes the browser", async () => {
+    const auditPayment = vi.fn().mockResolvedValue({ id: "audit_finish" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: { auditPayment } as unknown as ApiClient,
+    });
+    setActivePendingThreeDs(buildThreeDsState());
+    h.waitForThreeDsResult = "timeout";
+
+    await expect(finishProvisionSession(started.session_id)).resolves.toMatchObject({
+      session_id: started.session_id,
+      closed: true,
+    });
+    expect(h.waitForThreeDsCalls).toEqual([0]);
+    expect(auditPayment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approval_id: "appr_3ds",
+        mandate_id: "mandate_3ds",
+        last4: "9192",
+        status: "payment_3ds_unresolved",
+      }),
+    );
+    expect(h.resetCalls).toBe(0);
   });
 
   it("reports no_pending_payment once nothing is outstanding", async () => {

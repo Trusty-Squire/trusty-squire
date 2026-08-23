@@ -2223,12 +2223,15 @@ describe("3-D Secure resolution", () => {
 
   it.skipIf(!chromiumAvailable)("returns failed for visible decline text", async () => {
     const { browser, page, controller } = await setupChallenge();
+    const wait = vi.spyOn(page, "waitForTimeout");
     try {
       await page.locator("body").evaluate((body) => {
         body.insertAdjacentHTML("beforeend", "<p>Payment declined</p>");
       });
       await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("failed");
+      expect(wait).not.toHaveBeenCalled();
     } finally {
+      wait.mockRestore();
       await browser.close();
     }
   });
@@ -2267,7 +2270,8 @@ describe("3-D Secure resolution", () => {
             }
           ).detectThreeDsChallenge(),
         ).resolves.toEqual({ three_ds_required: false, order_confirmed: false });
-        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
+        await expect(controller.waitForThreeDsResolution(2_500)).resolves.toBe("timeout");
+        expect(wait.mock.calls.map(([timeout]) => timeout)).toEqual([1_000, 1_000, 500]);
       } finally {
         wait.mockRestore();
         now.mockRestore();
@@ -4856,6 +4860,124 @@ describe("split-checkout card fill (real browser)", () => {
         expect(await page.evaluate(() => document.body.dataset.submitted)).toBeUndefined();
         expect(await page.locator("[autocomplete='cc-number']").inputValue()).toBe("");
         expect(await page.locator("[autocomplete='cc-csc']").inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses a saved-card selection in a different frame from the filled card fields",
+    async () => {
+      const pageUrl = "https://shop.example.test/cross-frame-checkout.html";
+      const frameUrl = "https://checkout.pci.shopifyinc.com/card-fields";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <label>
+            <input type="radio" name="payment_method" value="saved" checked>
+            Saved card •••• 9012
+          </label>
+          <iframe src="${frameUrl}"></iframe>`,
+        [frameUrl]: `
+          <form id="card-form">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay now</button>
+          </form>
+          <script>
+            document.querySelector("#card-form").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_card_selection_ambiguous",
+        );
+        const frame = page.frames().find((candidate) => candidate.url() === frameUrl)!;
+        expect(await frame.locator("body").getAttribute("data-submitted")).toBeNull();
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses a saved-card radio associated to the card form from outside its subtree",
+    async () => {
+      const pageUrl = "https://shop.example.test/form-associated-radio-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form id="checkout">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay</button>
+          </form>
+          <label>
+            <input form="checkout" type="radio" name="payment_method" value="saved" checked>
+            Card on file ending in 9012
+          </label>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_card_selection_ambiguous",
+        );
+        expect(await page.evaluate(() => document.body.dataset.submitted)).toBeUndefined();
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses submission when saved-card inspection cannot complete",
+    async () => {
+      const pageUrl = "https://shop.example.test/detached-card-inspection.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay</button>
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+        await controller.fillCheckoutCardFields(CARD);
+        const evaluate = vi.spyOn(page.mainFrame(), "evaluate");
+        evaluate.mockRejectedValueOnce(new Error("frame detached during inspection"));
+
+        await expect(controller.submitFilledCheckout()).rejects.toThrow(
+          "payment_card_selection_ambiguous",
+        );
+        evaluate.mockRestore();
       } finally {
         await browser.close();
       }

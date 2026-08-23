@@ -31,6 +31,7 @@ import {
   type FrameTarget,
   type InteractiveElement,
   type PageTargetSafetySignals,
+  type ThreeDsResolution,
 } from "./browser.js";
 import type {
   CartCheckoutObservation,
@@ -573,7 +574,7 @@ export interface Session {
   // exhausted its budget with no terminal signal. Deliberately NOT part of
   // activePayment: the card is already released and the charge already
   // submitted, so there is no lease to hold and no re-authorization risk —
-  // this is read-only resumable bookkeeping for operate_payment_status,
+  // this is resumable bookkeeping for operate_payment_status,
   // mirroring the "awaiting_approval" gap it closes for the pre-charge wait.
   // Set by setActivePendingThreeDs, read by getActivePendingThreeDs, cleared
   // by clearActivePendingThreeDs once resolved or its deadline passes.
@@ -2895,7 +2896,7 @@ export function getActivePendingApproval(selectedSession?: Session): PendingAppr
   return state?.status === "awaiting_approval" ? state.state : null;
 }
 
-// Read-only: an already-submitted charge whose post-submit 3DS wait
+// An already-submitted charge whose post-submit 3DS wait
 // exhausted its budget with no terminal signal, if any. Backs
 // operate_payment_status alongside getActivePendingApproval — the two are
 // mutually exclusive (a session either awaits a mandate tap or watches an
@@ -2937,6 +2938,12 @@ export function claimActivePaymentForOperatePay(
   selectedSession?: Session,
 ): ActivePaymentClaim {
   const session = selectedSession ?? activeProvisionSession();
+  if (getActivePendingThreeDs(session) !== null) {
+    throw new Error(
+      "operate_pay refused: a prior charge has unresolved 3-D Secure state; call " +
+        "operate_payment_status first",
+    );
+  }
   const state = session.activePayment;
   if (state?.status === "operating") {
     throw new Error("operate_pay refused: another payment operation is already in progress");
@@ -2969,12 +2976,6 @@ export function claimActivePaymentForOperatePay(
   const lease: ActivePaymentLease = { phase: phase === "fill_card" ? "fill_card" : "single" };
   session.activePayment = { status: "operating", lease };
   if (lease.phase === "fill_card") session.paymentFieldSealActive = true;
-  // A fresh attempt supersedes any still-pending 3DS bookkeeping from an
-  // earlier submit in this session — operate_pay never resumes a post-submit
-  // 3DS wait (only operate_payment_status does), so carrying it forward
-  // would leave operate_payment_status reporting on a checkout this new
-  // attempt has already moved past.
-  session.pendingThreeDs = null;
   return resumeApproval !== undefined
     ? { kind: "lease", lease, resumeApproval }
     : { kind: "lease", lease };
@@ -7587,14 +7588,40 @@ function profileRequiresDestroy(session: Session): boolean {
   );
 }
 
-async function closeFinishingProvisionSession(session: Session): Promise<FinishResult> {
+function pendingThreeDsAuditStatus(resolution: ThreeDsResolution): string {
+  if (resolution === "succeeded") return "payment_submitted";
+  if (resolution === "failed") return "payment_declined";
+  return "payment_3ds_unresolved";
+}
+
+async function finalizePendingThreeDsForFinish(session: Session): Promise<void> {
+  const pending = session.pendingThreeDs;
+  if (pending === null) return;
+  if (session.api === undefined) {
+    throw new Error(
+      "operate_finish refused: pending 3-D Secure outcome cannot be audited without an active API session",
+    );
+  }
+  const resolution = await session.browser.waitForThreeDsResolution(0);
+  await session.api.auditPayment({
+    ...pending.checkout,
+    last4: pending.last4,
+    status: pendingThreeDsAuditStatus(resolution),
+    approval_id: pending.approval_id,
+    ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
+  });
+  session.pendingThreeDs = null;
+}
+
+async function closeFinishingProvisionSession(
+  session: Session,
+  destroyProfile: boolean,
+): Promise<FinishResult> {
   const sessionId = session.id;
   const url = session.browser.currentUrl();
   audit(sessionId, "finish", { url });
-  const destroyProfile = profileRequiresDestroy(session);
   session.activePayment = null;
   session.paymentFieldSealActive = false;
-  session.pendingThreeDs = null;
   sessions.delete(sessionId);
   await releaseWarmBrowserPage(session.browser, !destroyProfile);
   return { session_id: sessionId, url, closed: true };
@@ -7610,8 +7637,10 @@ export async function finishProvisionSessionWithPreparation<T>(
   session.closing = true;
   try {
     await waitForSessionCallsToDrain(session);
+    const destroyProfile = profileRequiresDestroy(session);
+    await finalizePendingThreeDsForFinish(session);
     const prepared = await prepare();
-    const finish = await closeFinishingProvisionSession(session);
+    const finish = await closeFinishingProvisionSession(session, destroyProfile);
     return { finish, prepared };
   } catch (error) {
     if (sessions.get(sessionId) === session) session.closing = false;

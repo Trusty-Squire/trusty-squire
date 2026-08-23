@@ -554,11 +554,6 @@ function threeDsResolutionStatus(
   return null;
 }
 
-// Backs operate_payment_status for an already-submitted charge whose 3DS
-// wait exhausted its own budget: re-checks the SAME live browser for the
-// same terminal signal waitForThreeDsResolution watches for, using the same
-// bound-wait shape as readApprovalStatus above. Never re-releases the card
-// or mints a new approval — read-only against an already-authorized charge.
 async function threeDsStatusResult(
   api: ApiClient,
   session: Session,
@@ -582,7 +577,7 @@ async function threeDsStatusResult(
   }
   const finalStatus = terminalStatus ?? "payment_3ds_unresolved";
   let auditRecorded = true;
-  try {
+  if (terminalStatus === null) {
     await api.auditPayment({
       ...state.checkout,
       last4: state.last4,
@@ -590,8 +585,18 @@ async function threeDsStatusResult(
       approval_id: state.approval_id,
       ...(state.mandate_id !== undefined ? { mandate_id: state.mandate_id } : {}),
     });
-  } catch {
-    auditRecorded = false;
+  } else {
+    try {
+      await api.auditPayment({
+        ...state.checkout,
+        last4: state.last4,
+        status: finalStatus,
+        approval_id: state.approval_id,
+        ...(state.mandate_id !== undefined ? { mandate_id: state.mandate_id } : {}),
+      });
+    } catch {
+      auditRecorded = false;
+    }
   }
   clearActivePendingThreeDs(session);
   return {
@@ -652,7 +657,7 @@ const paymentStatusInputSchema = z.object({
 export const operatePaymentStatusTool: Tool<z.infer<typeof paymentStatusInputSchema>> = {
   name: "operate_payment_status",
   description:
-    "Read-only: report the status of the addressed session's payment approval currently awaiting " +
+    "Report the status of the addressed session's payment approval currently awaiting " +
     "the human's phone tap, if any — started by an operate_pay call that returned approval_pending. " +
     "Also covers an already-submitted charge whose 3-D Secure challenge (including a decoupled/" +
     'out-of-band app-push) had not resolved when a prior operate_pay call\'s own wait ended (that ' +
@@ -663,7 +668,8 @@ export const operatePaymentStatusTool: Tool<z.infer<typeof paymentStatusInputSch
     "(0-15, default 0) to bound-wait for a change instead of an instant peek; never blocks longer " +
     "than that. Never verifies a mandate or opens a card. Only candidate_kind=approval with " +
     "ready_to_charge=true is a final authorization; a review candidate still requires final " +
-    "approval.",
+    "approval. When a pending 3-D Secure outcome resolves or reaches its deadline, this records " +
+    "a terminal payment audit and clears that session's pending tracking.",
   inputSchema: paymentStatusInputSchema,
   jsonInputSchema: {
     type: "object",
@@ -682,7 +688,7 @@ export const operatePaymentStatusTool: Tool<z.infer<typeof paymentStatusInputSch
       },
     },
   },
-  annotations: { readOnlyHint: true },
+  annotations: { readOnlyHint: false },
   async handler(args, api) {
     assertApi(api);
     return await withPaymentSessionCall(args.session_id, (session) =>
