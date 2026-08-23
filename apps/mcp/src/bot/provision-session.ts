@@ -2896,21 +2896,10 @@ export function getActivePendingApproval(selectedSession?: Session): PendingAppr
   return state?.status === "awaiting_approval" ? state.state : null;
 }
 
-// An already-submitted charge whose post-submit 3DS wait
-// exhausted its budget with no terminal signal, if any. Backs
-// operate_payment_status alongside getActivePendingApproval — the two are
-// mutually exclusive (a session either awaits a mandate tap or watches an
-// already-submitted charge's 3DS outcome, never both). `?? null` guards a
-// Session synthesized without this field (e.g. a test double built before
-// pendingThreeDs existed) — real sessions always initialize it to null, but
-// `undefined` must never be mistaken for "a pending wait is present".
 export function getActivePendingThreeDs(selectedSession?: Session): PendingThreeDsWait | null {
   return (selectedSession ?? activeProvisionSession()).pendingThreeDs ?? null;
 }
 
-// Set once, right after a single-page operate_pay submit's own wait budget
-// runs out with the challenge still genuinely unresolved (never a re-fill,
-// never a re-release of the card).
 export function setActivePendingThreeDs(
   state: PendingThreeDsWait,
   selectedSession?: Session,
@@ -4492,7 +4481,14 @@ function enforcePlaceOrderGuard(
   session: Session,
   labels: readonly (string | null | undefined)[],
 ): Session["placeOrderApproval"] {
-  if (session.placeOrderApproval === null || !isCheckoutSubmitLabeled(labels)) return null;
+  if (!isCheckoutSubmitLabeled(labels)) return null;
+  if (getActivePendingThreeDs(session) !== null) {
+    throw new Error(
+      "operate_act refused: a prior charge has unresolved 3-D Secure state; call " +
+        "operate_payment_status first",
+    );
+  }
+  if (session.placeOrderApproval === null) return null;
   if (session.placeOrderAttempted) {
     throw new Error(
       "operate_act refused: a place-order attempt already fired for this approval " +
@@ -4848,7 +4844,6 @@ export async function act(
             ...resolved.labels,
           ]);
           if (
-            session.placeOrderApproval !== null &&
             isPlaceOrderCandidate &&
             (action.kind === "click" || action.kind === "js_click")
           ) {
@@ -4900,7 +4895,7 @@ export async function act(
       bindCartIdentity(isCartAffectingAction(action, el));
       if (action.kind === "click" || action.kind === "js_click") {
         const target = frameTargetFor(el);
-        if (session.placeOrderApproval !== null && isPlaceOrderClickCandidate(el)) {
+        if (isPlaceOrderClickCandidate(el)) {
           await runClickWithPlaceOrderGuard(session, (shouldTrack) =>
             browser.clickWithDispatchTracking(
               target !== null
@@ -7594,7 +7589,7 @@ function pendingThreeDsAuditStatus(resolution: ThreeDsResolution): string {
   return "payment_3ds_unresolved";
 }
 
-async function finalizePendingThreeDsForFinish(session: Session): Promise<void> {
+async function auditPendingThreeDsForSessionClose(session: Session): Promise<void> {
   const pending = session.pendingThreeDs;
   if (pending === null) return;
   if (session.api === undefined) {
@@ -7610,7 +7605,6 @@ async function finalizePendingThreeDsForFinish(session: Session): Promise<void> 
     approval_id: pending.approval_id,
     ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
   });
-  session.pendingThreeDs = null;
 }
 
 async function closeFinishingProvisionSession(
@@ -7618,10 +7612,12 @@ async function closeFinishingProvisionSession(
   destroyProfile: boolean,
 ): Promise<FinishResult> {
   const sessionId = session.id;
+  await auditPendingThreeDsForSessionClose(session);
   const url = session.browser.currentUrl();
   audit(sessionId, "finish", { url });
   session.activePayment = null;
   session.paymentFieldSealActive = false;
+  session.pendingThreeDs = null;
   sessions.delete(sessionId);
   await releaseWarmBrowserPage(session.browser, !destroyProfile);
   return { session_id: sessionId, url, closed: true };
@@ -7638,7 +7634,6 @@ export async function finishProvisionSessionWithPreparation<T>(
   try {
     await waitForSessionCallsToDrain(session);
     const destroyProfile = profileRequiresDestroy(session);
-    await finalizePendingThreeDsForFinish(session);
     const prepared = await prepare();
     const finish = await closeFinishingProvisionSession(session, destroyProfile);
     return { finish, prepared };
@@ -7668,10 +7663,19 @@ export async function closeAllProvisionSessions(): Promise<void> {
     await pending.launch.catch(() => undefined);
     await closeLeasedBrowser(pending.controller, pending.lease, false).catch(() => undefined);
   }
-  for (const [id, session] of [...sessions.entries()]) {
-    sessions.delete(id);
-    await releaseWarmBrowserPage(session.browser, false).catch(() => undefined);
+  const closingSessions = [...sessions.values()];
+  for (const session of closingSessions) session.closing = true;
+  let closeError: unknown;
+  for (const session of closingSessions) {
+    try {
+      await waitForSessionCallsToDrain(session);
+      await closeFinishingProvisionSession(session, true);
+    } catch (error) {
+      if (sessions.get(session.id) === session) session.closing = false;
+      if (closeError === undefined) closeError = error;
+    }
   }
+  if (closeError !== undefined) throw closeError;
   for (const slot of [...leasedBrowsers.values()]) {
     leasedBrowsers.delete(slot.controller);
     await closeLeasedBrowser(slot.controller, slot.lease, false).catch(() => undefined);

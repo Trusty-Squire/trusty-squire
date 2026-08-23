@@ -1328,6 +1328,24 @@ export async function executeOperatePay(
       };
     }
 
+    const retainPendingThreeDs = (): void => {
+      deps.onThreeDsPending({
+        approval_id: approvalId,
+        approval_url: approvalUrl,
+        checkout,
+        last4,
+        ...(mandateId !== undefined ? { mandate_id: mandateId } : {}),
+        deadline: deps.now() + THREE_DS_RESUME_WINDOW_MS,
+      });
+    };
+    const pendingThreeDsNext = {
+      tool: "operate_payment_status",
+      wait_seconds: 15,
+      hint:
+        "The 3-D Secure challenge has not resolved. Call operate_payment_status to keep " +
+        "checking the same submitted charge — this does not re-release the card or create a " +
+        "new approval.",
+    };
     let paymentStatus = "payment_submitted";
     let submitResult: CheckoutSubmitResult = { three_ds_required: false, order_confirmed: false };
     try {
@@ -1348,6 +1366,7 @@ export async function executeOperatePay(
       } catch {
         audit_recorded = false;
       }
+      if (outcomeUnknown) retainPendingThreeDs();
       return {
         status: paymentStatus,
         audit_recorded,
@@ -1357,6 +1376,7 @@ export async function executeOperatePay(
             ? error.message
             : "payment_checkout_failed",
         approval_url: approvalUrl,
+        ...(outcomeUnknown ? { next: pendingThreeDsNext } : {}),
       };
     } finally {
       cardBytes?.fill(0);
@@ -1365,19 +1385,11 @@ export async function executeOperatePay(
     }
 
     let getThreeDsTelegramSent: () => boolean | undefined = () => undefined;
-    // True only when a real wait ran AND it ended with no terminal signal
-    // (not "failed" — a firm decline is terminal — and not skipped by
-    // three_ds_wait_seconds:0). This is the ONLY case resumability applies:
-    // the challenge may still be genuinely in flight (e.g. a decoupled/
-    // out-of-band app-push the cardholder hasn't approved yet, or approved
-    // just as this call's bounded wait ran out).
-    let threeDsTimedOut = false;
     if (!submitResult.order_confirmed && threeDsWaitMs > 0) {
       getThreeDsTelegramSent = trackThreeDsNotification(
         api.notifyThreeDs(approvalId, threeDsNotificationMode(submitResult)),
       );
       const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
-      threeDsTimedOut = resolution === "timeout";
       paymentStatus = statusAfterThreeDsResolution(paymentStatus, resolution);
     }
 
@@ -1393,22 +1405,7 @@ export async function executeOperatePay(
       auditRecorded = false;
     }
     if (paymentStatus === "payment_3ds_required" || paymentStatus === "payment_outcome_unknown") {
-      // The card is already released and the charge already submitted —
-      // resuming here never re-authorizes anything, it only keeps checking
-      // the SAME live browser for an outcome this call's bounded wait didn't
-      // live to see. Never offered when the wait was skipped outright
-      // (three_ds_wait_seconds:0): that is an explicit caller choice to hand
-      // back immediately, not a still-in-flight challenge.
-      if (threeDsTimedOut) {
-        deps.onThreeDsPending({
-          approval_id: approvalId,
-          approval_url: approvalUrl,
-          checkout,
-          last4,
-          ...(mandateId !== undefined ? { mandate_id: mandateId } : {}),
-          deadline: deps.now() + THREE_DS_RESUME_WINDOW_MS,
-        });
-      }
+      retainPendingThreeDs();
       return {
         status: paymentStatus,
         audit_recorded: auditRecorded,
@@ -1422,18 +1419,7 @@ export async function executeOperatePay(
           resume: "checkout",
           ...(submitResult.challenge_url !== undefined ? { url: submitResult.challenge_url } : {}),
         },
-        ...(threeDsTimedOut
-          ? {
-              next: {
-                tool: "operate_payment_status",
-                wait_seconds: 15,
-                hint:
-                  "The 3-D Secure challenge had not resolved when this call's wait ended. Call " +
-                  "operate_payment_status to keep checking the same submitted charge — this does " +
-                  "not re-release the card or create a new approval.",
-              },
-            }
-          : {}),
+        next: pendingThreeDsNext,
       };
     }
     if (paymentStatus === "payment_declined") {

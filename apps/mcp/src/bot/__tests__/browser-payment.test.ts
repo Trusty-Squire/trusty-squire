@@ -4925,10 +4925,8 @@ describe("split-checkout card fill (real browser)", () => {
             <input autocomplete="cc-csc">
             <button type="submit">Pay</button>
           </form>
-          <label>
-            <input form="checkout" type="radio" name="payment_method" value="saved" checked>
-            Card on file ending in 9012
-          </label>
+          <input id="saved-card" form="checkout" type="radio" name="payment_method" value="saved" checked>
+          <label for="saved-card">Card on file ending in 9012</label>
           <script>
             document.querySelector("#checkout").addEventListener("submit", (event) => {
               event.preventDefault();
@@ -4945,6 +4943,82 @@ describe("split-checkout card fill (real browser)", () => {
           "payment_card_selection_ambiguous",
         );
         expect(await page.evaluate(() => document.body.dataset.submitted)).toBeUndefined();
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses a selected saved-card option alongside the filled card fields",
+    async () => {
+      const pageUrl = "https://shop.example.test/saved-card-select-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form id="checkout">
+            <label for="payment-source">Payment source</label>
+            <select id="payment-source">
+              <option value="saved" selected>Saved card •••• 9012</option>
+              <option value="new">New card</option>
+            </select>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay</button>
+          </form>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_card_selection_ambiguous",
+        );
+        expect(await page.evaluate(() => document.body.dataset.submitted)).toBeUndefined();
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "excludes the exact filled expiry select from saved-card option detection",
+    async () => {
+      const pageUrl = "https://shop.example.test/filled-expiry-select-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form id="checkout">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <select autocomplete="cc-exp-month"><option value="12">12</option></select>
+            <select autocomplete="cc-exp-year"><option value="30">Saved card •••• 30</option></select>
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay</button>
+          </form>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillAndSubmitCheckout(CARD);
+        expect(await page.evaluate(() => document.body.dataset.submitted)).toBe("true");
       } finally {
         await browser.close();
       }

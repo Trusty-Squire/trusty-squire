@@ -9961,22 +9961,57 @@ export class BrowserController {
         selected = await frame.evaluate(() => {
           const savedCardPattern =
             /(?:••+|\*{2,}|●+|×{2,}|x{4,})[\s-]*\d{2,4}\b|\bending\s+in\s+\d{4}\b|\bcard\s+on\s+file\b|\bsaved\s+card\b|登録済みのカード|前回(?:利用|使用)したカード|保存されたカード/iu;
-          const candidates = Array.from(
+          const isFilledCardField = (element: Element | null): boolean =>
+            element?.getAttribute("data-ts-sealed-payment") === "1";
+          const associatedLabelText = (control: Element): string[] => {
+            const labels = new Set<HTMLLabelElement>();
+            if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement) {
+              for (const label of Array.from(control.labels ?? [])) labels.add(label);
+            }
+            const id = control.getAttribute("id");
+            if (id !== null && id.length > 0) {
+              for (const label of Array.from(
+                document.querySelectorAll<HTMLLabelElement>("label[for]"),
+              )) {
+                if (label.htmlFor === id) labels.add(label);
+              }
+            }
+            return Array.from(labels, (label) => label.textContent ?? "");
+          };
+          const selectedRadios = Array.from(
             document.querySelectorAll(
               'input[type="radio"]:checked,[role="radio"][aria-checked="true"]',
             ),
           );
-          for (const candidate of candidates) {
-            const container =
-              candidate.closest("label") ??
-              candidate.closest("[role='radio'],li,div") ??
-              candidate.parentElement;
-            const text = [candidate.getAttribute("aria-label"), container?.textContent]
+          for (const candidate of selectedRadios) {
+            if (isFilledCardField(candidate)) continue;
+            const container = candidate.closest("[role='radio'],li,div") ?? candidate.parentElement;
+            const text = [
+              candidate.getAttribute("aria-label"),
+              ...associatedLabelText(candidate),
+              container?.textContent,
+            ]
               .filter((value): value is string => typeof value === "string")
               .join(" ")
               .replace(/\s+/g, " ")
               .trim();
             if (text.length > 0 && savedCardPattern.test(text)) return true;
+          }
+          for (const select of Array.from(document.querySelectorAll("select"))) {
+            if (isFilledCardField(select)) continue;
+            for (const option of Array.from(select.selectedOptions)) {
+              if (isFilledCardField(option)) continue;
+              const text = [
+                option.textContent,
+                select.getAttribute("aria-label"),
+                ...associatedLabelText(select),
+              ]
+                .filter((value): value is string => typeof value === "string")
+                .join(" ")
+                .replace(/\s+/g, " ")
+                .trim();
+              if (text.length > 0 && savedCardPattern.test(text)) return true;
+            }
           }
           return false;
         });

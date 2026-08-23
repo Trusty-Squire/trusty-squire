@@ -911,18 +911,26 @@ describe("operate_pay", () => {
     expect(pendingThreeDsStates).toHaveLength(0);
   });
 
-  it("records unknown when single-page submission fails after dispatch", async () => {
-    const { result, auditBodies } = await harness("happy", "customer_test", undefined, undefined, {
-      fillAndSubmitCheckout: async () => {
-        throw new PaymentSubmitOutcomeUnknownError();
+  it("records and tracks unknown when single-page submission fails after dispatch", async () => {
+    const { result, auditBodies, pendingThreeDsStates } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      undefined,
+      {
+        fillAndSubmitCheckout: async () => {
+          throw new PaymentSubmitOutcomeUnknownError();
+        },
       },
-    });
+    );
 
     expect(result).toMatchObject({
       status: "payment_outcome_unknown",
       reason: "payment_submit_outcome_unknown",
+      next: { tool: "operate_payment_status", wait_seconds: 15 },
     });
     expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_outcome_unknown" })]);
+    expect(pendingThreeDsStates).toHaveLength(1);
   });
 
   it("hands back immediately without notifying when the 3DS wait is disabled", async () => {
@@ -938,18 +946,16 @@ describe("operate_pay", () => {
 
     expect(result).toMatchObject({
       status: "payment_3ds_required",
+      next: { tool: "operate_payment_status", wait_seconds: 15 },
       needs_user: {
         wall: "3ds",
         resume: "checkout",
         message: expect.stringContaining("bank app"),
       },
     });
-    expect(result).not.toHaveProperty("next");
     expect(notifyCalls).toHaveLength(0);
     expect(browser.waitForThreeDsResolution).not.toHaveBeenCalled();
-    // three_ds_wait_seconds:0 is an explicit "hand back now" choice, not a
-    // still-in-flight challenge — no resumable state either.
-    expect(pendingThreeDsStates).toHaveLength(0);
+    expect(pendingThreeDsStates).toHaveLength(1);
   });
 
   // IRON-RULE regression: the has-card path must be byte-for-byte the same

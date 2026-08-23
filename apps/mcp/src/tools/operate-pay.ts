@@ -561,10 +561,15 @@ async function threeDsStatusResult(
   waitSeconds: number,
 ): Promise<Record<string, unknown>> {
   const browser = await activeProvisionBrowserForPayment(session);
-  const boundMs = waitSeconds <= 0 ? 0 : Math.min(Math.max(waitSeconds * 1000, 1_000), 15_000);
+  const expiredAtEntry = Date.now() >= state.deadline;
+  const boundMs =
+    expiredAtEntry || waitSeconds <= 0
+      ? 0
+      : Math.min(Math.max(waitSeconds * 1000, 1_000), 15_000);
   const resolution = await browser.waitForThreeDsResolution(boundMs);
   const terminalStatus = threeDsResolutionStatus(resolution);
-  const unresolvedPastDeadline = terminalStatus === null && Date.now() >= state.deadline;
+  const unresolvedPastDeadline =
+    terminalStatus === null && (expiredAtEntry || Date.now() >= state.deadline);
   if (terminalStatus === null && !unresolvedPastDeadline) {
     return {
       status: "payment_3ds_pending",

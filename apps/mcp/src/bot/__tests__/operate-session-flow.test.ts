@@ -5407,6 +5407,45 @@ describe("pending card-fill charge guard", () => {
     expect(releaseActivePaymentLease(claim.lease)).toBe(true);
   });
 
+  it("refuses charge clicks while a prior 3DS outcome is unresolved", async () => {
+    h.elements = [
+      elem({ tag: "button", type: null, visibleText: "Place order", selector: "#place-order" }),
+      elem({ tag: "button", type: null, visibleText: "Continue to review", selector: "#next" }),
+    ];
+    h.visibleText = "Checkout";
+    const auditPayment = vi.fn().mockResolvedValue({ id: "audit_close" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+      api: { auditPayment } as unknown as ApiClient,
+    });
+    setActivePendingThreeDs({
+      approval_id: "appr_pending_charge",
+      approval_url: "https://web.test/vault/pay/appr_pending_charge",
+      checkout: pending.checkout,
+      last4: pending.last4,
+      deadline: Date.now() + 60_000,
+    });
+
+    await expect(act(started.session_id, { kind: "click", target: "Place order" })).rejects.toThrow(
+      /call operate_payment_status first/,
+    );
+    h.locatorResolve = {
+      ok: true,
+      text: "Place order",
+      labels: ["Place order"],
+      safetySignals: { billingObject: false, accountSetup: false },
+    };
+    await expect(
+      act(started.session_id, { kind: "js_click", target: "css=#place-order" }),
+    ).rejects.toThrow(/call operate_payment_status first/);
+    expect(h.clickCalls).toBe(0);
+    expect(h.locatorClickCalls).toBe(0);
+
+    await act(started.session_id, { kind: "click", target: "Continue to review" });
+    expect(h.clickCalls).toBe(1);
+    await finishProvisionSession(started.session_id);
+  });
+
   it("transitions a successful fill-card lease to pending confirmation", async () => {
     await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
     const claim = claimActivePaymentForOperatePay("fill_card");
@@ -6320,7 +6359,10 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
     setActivePendingThreeDs(buildThreeDsState());
 
     h.waitForThreeDsResult = "failed";
-    const result = (await operatePaymentStatusTool.handler({}, env.api)) as Record<string, unknown>;
+    const result = (await operatePaymentStatusTool.handler(
+      { wait_seconds: 15 },
+      env.api,
+    )) as Record<string, unknown>;
 
     expect(result).toMatchObject({ status: "payment_declined", audit_recorded: true });
     expect(getActivePendingThreeDs()).toBeNull();
@@ -6333,7 +6375,10 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
     setActivePendingThreeDs(buildThreeDsState(Date.now() - 1));
 
     h.waitForThreeDsResult = "timeout";
-    const result = (await operatePaymentStatusTool.handler({}, env.api)) as Record<string, unknown>;
+    const result = (await operatePaymentStatusTool.handler(
+      { wait_seconds: 15 },
+      env.api,
+    )) as Record<string, unknown>;
 
     expect(result).toMatchObject({
       status: "payment_3ds_unresolved",
@@ -6348,7 +6393,11 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
   });
 
   it("retains expired 3DS state when its required terminal audit cannot be written", async () => {
-    await startProvisionSession({ serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html" });
+    const closeAuditPayment = vi.fn().mockResolvedValue({ id: "audit_close" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: { auditPayment: closeAuditPayment } as unknown as ApiClient,
+    });
     const threeDsState = buildThreeDsState(Date.now() - 1);
     setActivePendingThreeDs(threeDsState);
     const auditPayment = vi.fn().mockRejectedValue(new Error("audit unavailable"));
@@ -6359,6 +6408,7 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
     ).rejects.toThrow("audit unavailable");
     expect(auditPayment).toHaveBeenCalledTimes(1);
     expect(getActivePendingThreeDs()).toEqual(threeDsState);
+    await finishProvisionSession(started.session_id);
   });
 
   it("refuses a new operate_pay lease while a prior 3DS outcome is unresolved", async () => {
@@ -6400,6 +6450,56 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
       }),
     );
     expect(h.resetCalls).toBe(0);
+  });
+
+  it("retains the pending 3DS fence when finish preparation fails", async () => {
+    const auditPayment = vi.fn().mockResolvedValue({ id: "audit_finish" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: { auditPayment } as unknown as ApiClient,
+    });
+    const threeDsState = buildThreeDsState();
+    setActivePendingThreeDs(threeDsState);
+
+    await expect(
+      finishProvisionSessionWithPreparation(started.session_id, async () => {
+        throw new Error("preparation failed");
+      }),
+    ).rejects.toThrow("preparation failed");
+    expect(getActivePendingThreeDs()).toEqual(threeDsState);
+    expect(h.waitForThreeDsCalls).toEqual([]);
+    expect(auditPayment).not.toHaveBeenCalled();
+
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("checks and audits every pending 3DS charge during bulk session shutdown", async () => {
+    const firstAudit = vi.fn().mockResolvedValue({ id: "audit_first" });
+    const secondAudit = vi.fn().mockResolvedValue({ id: "audit_second" });
+    const [first, second] = await Promise.all([
+      startProvisionSession({
+        serviceUrl: "https://hibiyakadan.example.test/first",
+        api: { auditPayment: firstAudit } as unknown as ApiClient,
+      }),
+      startProvisionSession({
+        serviceUrl: "https://hibiyakadan.example.test/second",
+        api: { auditPayment: secondAudit } as unknown as ApiClient,
+      }),
+    ]);
+    setActivePendingThreeDs(buildThreeDsState(), paymentSession(first.session_id));
+    setActivePendingThreeDs(buildThreeDsState(), paymentSession(second.session_id));
+    h.waitForThreeDsResult = "timeout";
+
+    await closeAllProvisionSessions();
+
+    expect(h.waitForThreeDsCalls).toEqual([0, 0]);
+    expect(firstAudit).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "payment_3ds_unresolved" }),
+    );
+    expect(secondAudit).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "payment_3ds_unresolved" }),
+    );
+    expect(activeSessionCount()).toBe(0);
   });
 
   it("reports no_pending_payment once nothing is outstanding", async () => {
