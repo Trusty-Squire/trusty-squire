@@ -83,19 +83,25 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
 
       expect(
         (browser.screenshotForOperator as ReturnType<typeof vi.fn>).mock.calls[0]?.[0],
-      ).toEqual({});
+      ).toEqual({ extraRedactionSelectors: [] });
     } finally {
       await client.close();
       await closeAllProvisionSessions();
     }
   });
 
-  it("passes frame_index / frame_url_contains / full_page through to the browser layer", async () => {
+  it("passes frame args and the session's sealed-field selectors through to the browser layer", async () => {
     const url = "https://operator-screenshot.test/checkout";
     const browser = {
       goto: vi.fn().mockResolvedValue(undefined),
       recoverActivePage: vi.fn(),
-      extractInteractiveElements: vi.fn().mockResolvedValue([]),
+      // One field sealed via the ref-based type_secret path (session-tracked,
+      // no DOM marker) and one ordinary field: only the sealed one's selector
+      // may reach the capture's redaction set.
+      extractInteractiveElements: vi.fn().mockResolvedValue([
+        { selector: "#otp-code", sealed: true },
+        { selector: "#promo-code", sealed: false },
+      ]),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
       currentUrl: vi.fn().mockReturnValue(url),
       readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
@@ -121,7 +127,52 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       });
       expect(
         (browser.screenshotForOperator as ReturnType<typeof vi.fn>).mock.calls[0]?.[0],
-      ).toEqual({ frameUrlContains: "cardinalcommerce.com", fullPage: true });
+      ).toEqual({
+        frameUrlContains: "cardinalcommerce.com",
+        fullPage: true,
+        extraRedactionSelectors: ["#otp-code"],
+      });
+    } finally {
+      await client.close();
+      await closeAllProvisionSessions();
+    }
+  });
+
+  it("aborts the capture when the sealed-field extraction itself fails", async () => {
+    const url = "https://operator-screenshot.test/checkout";
+    let failExtraction = false;
+    const browser = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      recoverActivePage: vi.fn(),
+      extractInteractiveElements: vi
+        .fn()
+        .mockImplementation(() =>
+          failExtraction
+            ? Promise.reject(new Error("execution context destroyed"))
+            : Promise.resolve([]),
+        ),
+      extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
+      currentUrl: vi.fn().mockReturnValue(url),
+      readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
+      close: vi.fn().mockResolvedValue(undefined),
+      screenshotForOperator: vi.fn().mockResolvedValue({
+        base64: TINY_JPEG_BASE64,
+        frameUrl: null,
+        frameCount: 1,
+        redactedCount: 0,
+      }),
+    } as unknown as BrowserController;
+    const started = await startHarnessProvisionSession({ serviceUrl: url, browser });
+    const client = await connectedClient();
+
+    try {
+      failExtraction = true;
+      const result = await client.callTool({
+        name: "operate_screenshot",
+        arguments: { session_id: started.session_id },
+      });
+      expect(result.isError).toBe(true);
+      expect(browser.screenshotForOperator).not.toHaveBeenCalled();
     } finally {
       await client.close();
       await closeAllProvisionSessions();

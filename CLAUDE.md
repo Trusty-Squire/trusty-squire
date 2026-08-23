@@ -126,13 +126,18 @@ silent failures.
     Page (viewport or `full_page`) or ONE frame in isolation (`frame_index` /
     `frame_url_contains` — the case it exists for: a cross-origin ACS/challenge
     or captcha iframe a full-page shot won't show clearly). Read-only — no
-    navigation, click, type, or focus/`bringToFront`. Money-fence: redacts
-    every card-shaped/sealed field before capture (`SCREENSHOT_REDACTION_SELECTORS`
-    in `browser.ts` — the same fence `data-ts-sealed-payment` and
-    `CHECKOUT_CARD_VALUE_FIELD_SELECTORS` already cover on the JSON-observation
-    side); input/textarea get `-webkit-text-security`, anything else gets
-    `visibility:hidden`, both reverted in a `finally` so no redaction survives
-    the call. Server-side, a tool result carrying `image:{mime_type,data_base64}`
+    navigation, click, type, focus/`bringToFront`, or DOM mutation. Money-fence:
+    every card-shaped/sealed field becomes a capture-time Playwright screenshot
+    `mask` Locator (`SCREENSHOT_REDACTION_SELECTORS` in `browser.ts` — the same
+    fence `data-ts-sealed-payment` and `CHECKOUT_CARD_VALUE_FIELD_SELECTORS`
+    already cover on the JSON-observation side — plus the session layer's
+    sealed-field selectors from `observationSealedFieldKeys`/`isSealedFieldValue`,
+    so fields sealed via the ref-based `type_secret` path are covered too);
+    locator querying pierces open shadow roots, and the collection is
+    fail-closed — any selector that cannot be queried or element whose geometry
+    cannot be resolved aborts the capture (`screenshot_redaction_unresolved`)
+    instead of returning an under-redacted image. Server-side, a tool result
+    carrying `image:{mime_type,data_base64}`
     (this tool, or any future one) gets a real MCP `type:"image"` content
     block (`toolResultContent` in `server.ts`), not base64 buried in JSON text.
   - **Frame/iframe support (operator-frame-support).** Ordinary child-frame
@@ -647,20 +652,34 @@ dead end for the EbisuMart repeat-customer topology, where that competing
 radio is the checkout's OWN default state, not something the user asked for.
 `resolveCompetingSavedCardSelection` (`browser.ts`, replaces the old
 boolean-returning `detectCompetingSavedCardSelection`) now attempts positive
-resolution first: for a competing RADIO, find the sole unambiguous unchecked
-sibling in its choice group that isn't itself saved-card-shaped (preferring
-whichever candidate's container structurally owns one of the fields we
-sealed — i18n-agnostic; falls back to the sole remaining candidate only when
-exactly one exists), `.click()` it (real radio-group semantics — natively
-unchecks the saved-card radio too), then verifies BOTH that no competing
-selection remains AND that every sealed field still holds its filled value
-before letting `submitFilledCheckoutInScope` proceed. Any failure at any of
-those steps — no candidate, more than one equally-plausible candidate, the
-click didn't actually deselect the saved card, the click reset the fields —
-still refuses; a competing `<select>` OPTION is deliberately never
-auto-resolved (a synthetic `change` commit is far less trustworthy across
-frameworks than a native radio click) and still always refuses. No new tool
-surface — this lives entirely inside the existing checkout-submit path.
+resolution first, coordinated ACROSS frames (a merchant-owned radio can
+legitimately control card fields living in a recognized hosted-fields
+iframe): a read-only scan of every frame aggregates competing selections and
+sealed-field values globally, then a per-frame resolve pass finds the sole
+unambiguous unchecked sibling in the competing radio's choice group that
+isn't itself saved-card-shaped (a candidate whose container structurally
+owns one of the fields we sealed wins only when it is UNIQUE — i18n-agnostic;
+with no owning candidate it falls back to the sole remaining candidate),
+`.click()`s it (real radio-group semantics — natively unchecks the saved-card
+radio too) and stamps it `data-ts-checkout-selection="1"`, then a global
+re-scan verifies no competing selection remains anywhere AND every sealed
+field in every frame still holds its snapshotted value. That same
+verification runs a SECOND time at the money-fence boundary in
+`submitFilledCheckoutInScope` — immediately before the charge click, after
+the async pay-button scan — additionally confirming every marked new-card
+control is still checked; a failure there clears the dispatch tracking and
+refuses. Any failure at any step — no candidate, more than one
+equally-plausible candidate, the click didn't actually deselect the saved
+card, the click reset the fields, the selection drifted before the charge
+click — still refuses with `payment_card_selection_ambiguous`; a competing
+`<select>` OPTION is deliberately never auto-resolved (a synthetic `change`
+commit is far less trustworthy across frameworks than a native radio click)
+and still always refuses. The page-context scan/resolve logic lives in
+module-level named functions (`scanSavedCardSelectionInPage` /
+`resolveSavedCardSelectionInPage`) because Playwright serializes evaluate
+callbacks via `toString()` — outer-scope bindings would be undefined in the
+page. No new tool surface — this lives entirely inside the existing
+checkout-submit path.
 
 ### Goose / local-dev MCP install
 

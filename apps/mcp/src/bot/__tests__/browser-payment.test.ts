@@ -4875,6 +4875,63 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "positively selects the new-card radio when the filled card fields live in a recognized hosted-fields iframe",
+    async () => {
+      // EbisuMart-adjacent split topology: the merchant-owned saved/new-card
+      // radio group lives in the MAIN frame while the card fields it controls
+      // live in a recognized hosted-fields iframe. The sealed-field evidence
+      // that gates positive resolution is aggregated ACROSS frames, so this
+      // must resolve — refusal here would make the cross-frame repeat-customer
+      // checkout a dead end even though exactly one new-card candidate exists.
+      const pageUrl = "https://shop.example.test/cross-frame-new-card-checkout.html";
+      const frameUrl = "https://checkout.pci.shopifyinc.com/card-fields";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <label>
+            <input id="saved-radio" type="radio" name="payment_method" value="saved" checked>
+            Card on file: Visa •••• 9012
+          </label>
+          <label>
+            <input id="new-radio" type="radio" name="payment_method" value="new">
+            Use a different card
+          </label>
+          <iframe src="${frameUrl}"></iframe>`,
+        [frameUrl]: `
+          <form id="card-form">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay now</button>
+          </form>
+          <script>
+            document.querySelector("#card-form").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillAndSubmitCheckout(CARD);
+
+        const frame = page.frames().find((candidate) => candidate.url() === frameUrl)!;
+        expect(await frame.locator("body").getAttribute("data-submitted")).toBe("true");
+        expect(await page.locator("#saved-radio").isChecked()).toBe(false);
+        expect(await page.locator("#new-radio").isChecked()).toBe(true);
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "still refuses when the new-card radio's choice group has two equally-plausible non-saved candidates",
     async () => {
       // Genuinely unresolvable: no structural (sealed-field-owning) or

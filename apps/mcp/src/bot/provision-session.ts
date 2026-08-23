@@ -2795,7 +2795,21 @@ export async function captureScreenshot(
 ): Promise<ScreenshotCapture> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const captured = await session.browser.screenshotForOperator(opts);
+  // Fields sealed via the ref-based type_secret path exist only in session
+  // state (sealedFieldKeys) — no DOM marker — so the redaction set is derived
+  // with the SAME helpers observe()'s JSON-masking uses and handed to the
+  // browser layer as extra mask selectors. An extraction failure propagates:
+  // a capture whose sealed set cannot be established must abort, not proceed
+  // with fewer redactions.
+  const elements = await session.browser.extractInteractiveElements();
+  const sealedFieldKeys = observationSealedFieldKeys(session, elements);
+  const extraRedactionSelectors = elements
+    .filter((el) => isSealedFieldValue(el, sealedFieldKeys))
+    .map((el) => el.selector);
+  const captured = await session.browser.screenshotForOperator({
+    ...opts,
+    extraRedactionSelectors,
+  });
   return {
     session_id: sessionId,
     url: session.browser.currentUrl(),
@@ -4876,10 +4890,7 @@ export async function act(
             resolved.text,
             ...resolved.labels,
           ]);
-          if (
-            isPlaceOrderCandidate &&
-            (action.kind === "click" || action.kind === "js_click")
-          ) {
+          if (isPlaceOrderCandidate && (action.kind === "click" || action.kind === "js_click")) {
             await runClickWithPlaceOrderGuard(session, (shouldTrack) =>
               browser.clickWithDispatchTracking(
                 {

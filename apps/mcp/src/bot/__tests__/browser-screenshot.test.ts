@@ -1,8 +1,9 @@
 // operate_screenshot's implementation: BrowserController.screenshotForOperator
-// (page/frame capture) plus its money-fence redaction (applyOperatorScreenshotRedaction /
-// clearOperatorScreenshotRedaction). Real-Chromium, mirroring browser-payment.test.ts's
-// harness pattern — a screenshot is inherently about actual rendering, not something
-// a mocked page can meaningfully stand in for.
+// (page/frame capture) plus its money-fence redaction — capture-time Playwright
+// mask locators (collectOperatorScreenshotMask), never a style/attribute write
+// into the live checkout DOM. Real-Chromium, mirroring browser-payment.test.ts's
+// harness pattern — a screenshot is inherently about actual rendering, not
+// something a mocked page can meaningfully stand in for.
 import { existsSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
 import { describe, expect, it } from "vitest";
@@ -23,7 +24,7 @@ function isValidJpegBase64(base64: string): boolean {
 
 describe("operate_screenshot money-fence redaction (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
-    "redacts a filled card PAN/expiry/CVV/name and restores the DOM exactly after capture",
+    "redacts a filled card PAN/expiry/CVV/name at capture time without mutating the DOM",
     async () => {
       const browser = await chromium.launch({ headless: true });
       try {
@@ -43,14 +44,16 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
         expect(isValidJpegBase64(result.base64)).toBe(true);
         expect(result.frameUrl).toBeNull();
 
-        // Fully reverted: no residual marker/style, and the ONE field that
-        // had a pre-existing inline style got it back byte-for-byte.
+        // The mask is painted into the image by Playwright's capture
+        // machinery — the live DOM keeps its exact pre-capture state: no
+        // marker attributes, and the ONE field with a pre-existing inline
+        // style still has it byte-for-byte.
         const panStyle = await page.locator('[autocomplete="cc-number"]').getAttribute("style");
         expect(panStyle).toBe("border:1px solid red");
+        const nameStyle = await page.locator('[autocomplete="cc-name"]').getAttribute("style");
+        expect(nameStyle).toBeNull();
         const redactedMarkerCount = await page.locator("[data-ts-screenshot-redacted]").count();
         expect(redactedMarkerCount).toBe(0);
-        const origStyleAttrCount = await page.locator("[data-ts-screenshot-orig-style]").count();
-        expect(origStyleAttrCount).toBe(0);
       } finally {
         await browser.close();
       }
@@ -72,11 +75,75 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
         const result = await controller.screenshotForOperator();
         expect(result.redactedCount).toBe(2);
 
-        // Cleared after capture — no residual visibility:hidden left behind.
+        // No style ever written into the page — masking is capture-side only.
         const divStyle = await page
           .locator('div[data-ts-sealed-payment="1"]')
           .getAttribute("style");
-        expect(divStyle ?? "").not.toContain("hidden");
+        expect(divStyle).toBeNull();
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)("redacts a sealed field inside an open shadow root", async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`<div id="host"></div>`);
+      await page.evaluate(() => {
+        const host = document.querySelector("#host")!;
+        const shadow = host.attachShadow({ mode: "open" });
+        const input = document.createElement("input");
+        input.setAttribute("autocomplete", "cc-number");
+        input.value = "4242424242424242";
+        shadow.append(input);
+      });
+      const controller = BrowserController.fromHarnessPage(page);
+
+      const result = await controller.screenshotForOperator();
+      expect(result.redactedCount).toBe(1);
+      expect(isValidJpegBase64(result.base64)).toBe(true);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it.skipIf(!chromiumAvailable)(
+    "includes session-supplied extra redaction selectors in the mask set",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <input id="otp-field" type="text" value="123456">
+          <input type="text" value="not sealed">
+        `);
+        const controller = BrowserController.fromHarnessPage(page);
+
+        const result = await controller.screenshotForOperator({
+          extraRedactionSelectors: ["#otp-field"],
+        });
+        expect(result.redactedCount).toBe(1);
+        expect(isValidJpegBase64(result.base64)).toBe(true);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "fails closed — an unqueryable redaction selector aborts the capture entirely",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`<input autocomplete="cc-number" value="4242424242424242">`);
+        const controller = BrowserController.fromHarnessPage(page);
+
+        await expect(
+          controller.screenshotForOperator({ extraRedactionSelectors: ["#not[a(valid"] }),
+        ).rejects.toThrow("screenshot_redaction_unresolved");
       } finally {
         await browser.close();
       }
@@ -156,13 +223,6 @@ describe("operate_screenshot frame targeting (real browser)", () => {
         expect(result.frameUrl).toBe(frameUrl);
         expect(result.redactedCount).toBe(1);
         expect(isValidJpegBase64(result.base64)).toBe(true);
-
-        // Only the targeted frame's field was ever touched.
-        const mainPagePanStyle = await page
-          .locator('[autocomplete="cc-number"]')
-          .first()
-          .getAttribute("data-ts-screenshot-redacted");
-        expect(mainPagePanStyle).toBeNull();
       } finally {
         await browser.close();
       }
