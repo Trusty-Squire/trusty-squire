@@ -9813,10 +9813,21 @@ export class BrowserController {
     // label-stamp scan and substring field-clear it delegates to evaluate JS
     // in and mutate that live authentication hand-off, corrupting the
     // in-flight device-fingerprint POST (regression: ts-operator-3ds-completion).
-    let fillFrames: readonly Frame[] = [];
+    let fillFrameSnapshot: readonly {
+      frame: Frame;
+      url: string;
+      documentElement: ElementHandle<HTMLElement> | null;
+    }[] = [];
     try {
       await this.waitForPanField(10_000);
-      fillFrames = this.page.frames();
+      fillFrameSnapshot = await Promise.all(
+        this.page.frames().map(async (frame) => ({
+          frame,
+          url: frame.url(),
+          documentElement: await frame.locator("html").elementHandle().catch(() => null),
+        })),
+      );
+      const fillFrames = fillFrameSnapshot.map(({ frame }) => frame);
       // A single-page checkout's generic address controls are its shipping
       // controls. Only an explicitly marked billing control is eligible here:
       // sealing a shipping field would make the payment cleanup erase the
@@ -9827,14 +9838,31 @@ export class BrowserController {
       primary = { kind: "error", value: error };
     }
     try {
-      const cleanupFrames =
-        fillFrames.length > 0
-          ? fillFrames.filter((frame) => !frame.isDetached())
-          : this.page.frames();
+      const cleanupFrames: Frame[] = [];
+      if (fillFrameSnapshot.length > 0) {
+        for (const { frame, url, documentElement } of fillFrameSnapshot) {
+          if (frame.isDetached()) continue;
+          const sameDocument =
+            documentElement === null
+              ? frame.url() === url
+              : await documentElement
+                  .evaluate((element) => element === document.documentElement)
+                  .catch(() => false);
+          if (sameDocument) cleanupFrames.push(frame);
+        }
+      } else {
+        cleanupFrames.push(...this.page.frames());
+      }
       await this.clearCheckoutCardFieldsInFrames(cleanupFrames);
     } catch (error) {
       console.error(
         `[payment-cleanup] ${error instanceof Error ? error.message : "payment_fields_not_cleared"}`,
+      );
+    } finally {
+      await Promise.all(
+        fillFrameSnapshot.map(({ documentElement }) =>
+          documentElement?.dispose().catch(() => undefined),
+        ),
       );
     }
     if (primary.kind === "error") throw primary.value;

@@ -2871,6 +2871,58 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "never clears fields after a filled frame navigates to a 3-D Secure document",
+    async () => {
+      const pageUrl = "https://store.kobeejapan.net/checkout";
+      const frameUrl = "https://checkout.pci.shopifyinc.com/card-fields-navigation";
+      const acsUrl = "https://issuer-stronghold.test/acs/challenge";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <title>Kobee Japan</title>
+          <iframe src="${frameUrl}"></iframe>
+          <button id="place-order">Place order</button>
+          <script>
+            document.querySelector("#place-order").addEventListener("click", () => {
+              document.querySelector("iframe").src = ${JSON.stringify(acsUrl)};
+            });
+          </script>`,
+        [frameUrl]: `
+          <form>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp-month">
+            <input autocomplete="cc-exp-year">
+            <input autocomplete="cc-csc">
+          </form>`,
+        [acsUrl]: `
+          <title>3-D Secure authentication</title>
+          <input type="hidden" id="acs-cardnumber-token" value="untouched-challenge-token">
+          <p>Authenticate payment</p>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        const originalPaymentFrame = page.frames().find((frame) => frame.url() === frameUrl);
+        expect(originalPaymentFrame).toBeDefined();
+        const result = await controller.fillAndSubmitCheckout(CARD);
+
+        expect(result.three_ds_required).toBe(true);
+        const acsFrame = page.frames().find((frame) => frame.url() === acsUrl);
+        expect(acsFrame).toBe(originalPaymentFrame);
+        expect(await acsFrame!.locator("#acs-cardnumber-token").inputValue()).toBe(
+          "untouched-challenge-token",
+        );
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "permits a parent checkout control outside both Shopify card forms",
     async () => {
       const pageUrl = "https://store.kobeejapan.net/checkout";
