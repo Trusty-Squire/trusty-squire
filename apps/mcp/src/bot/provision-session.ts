@@ -2787,9 +2787,9 @@ export interface ScreenshotCapture {
   image: { mime_type: string; data_base64: string };
 }
 
-// operate_screenshot's session-level entry point: mirrors observe()'s
-// sessionForCall resolution, then delegates the actual capture + money-fence
-// redaction to BrowserController.screenshotForOperator (browser.ts).
+// operate_screenshot's session-level entry point: refuses an active card-fill
+// lease, then delegates the capture-scoped sealed-value checks and pixel
+// redaction to BrowserController.captureOperatorScreenshot (browser.ts).
 export async function captureScreenshot(
   sessionId: string,
   opts: { frameIndex?: number; frameUrlContains?: string; fullPage?: boolean } = {},

@@ -129,21 +129,20 @@ silent failures.
     navigation, click, type, focus/`bringToFront`, or DOM mutation.
     **Primary money-fence: capture-scoped fail-closed refusal.**
     `captureScreenshot` (`provision-session.ts`) always refuses during an
-    active card fill (`session.paymentFieldSealActive`). Otherwise
-    `assertOperatorScreenshotNoSealedValues` (`browser.ts`) checks only the
-    page/frame set requested for capture and refuses with
-    `screenshot_unavailable_sealed_context` if it finds a live
-    `type_secret`/payment-sealed field, password, or Luhn-valid PAN, or cannot
+    active card fill (`session.paymentFieldSealActive` or an operating payment
+    lease). Otherwise `assertOperatorScreenshotFramesNoSealedValues`
+    (`browser.ts`) checks only the page/frame set requested for capture and
+    refuses with
+    `screenshot_unavailable_sealed_context` if it finds a live sealed,
+    password, or card-shaped value (including a Luhn-valid PAN), or cannot
     inspect an included frame. Historical `session.sealedFieldKeys` alone are
     not a refusal: that allows an isolated clean ACS/3DS challenge frame and a
-    post-navigation error page after the sealed form has gone. The mask-based
-    redaction machinery
-    (`SCREENSHOT_REDACTION_SELECTORS` + `observationSealedFieldKeys`/
-    `isSealedFieldValue` for session-sealed selectors + Luhn-valid-value
-    detection via `containsLuhnPanSpan`, collected as capture-time Playwright
-    `mask` Locators, fail-closed on any unresolvable selector/geometry, with a
-    post-capture stability re-check) remains defense in depth, so a value that
-    appears during capture is still masked. Server-
+    post-navigation error page after the sealed form has gone. The pixel-
+    redaction machinery (`SCREENSHOT_REDACTION_SELECTORS` + durable sealed-field
+    identity + Luhn-valid-value detection via `containsLuhnPanSpan`, collected
+    as capture-time rectangles, fail-closed on any unresolvable selector/
+    geometry, composited over the captured bytes with `sharp`, and guarded by a
+    post-capture stability re-check) remains defense in depth. Server-
     side, a tool result carrying `image:{mime_type,data_base64}` (this tool,
     or any future one) gets a real MCP `type:"image"` content block
     (`toolResultContent` in `server.ts`), not base64 buried in JSON text.

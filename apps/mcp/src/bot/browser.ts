@@ -752,13 +752,12 @@ const CHECKOUT_CARD_VALUE_FIELD_SELECTORS = [
   CHECKOUT_CARD_NAME_FIELD_SELECTORS,
 ].join(",");
 
-// Money-fence for operate_screenshot: every element a screenshot must blank
-// before capture. Card-shaped field selectors (same set fillCheckoutCardIntoFrames
-// writes into) + `data-ts-sealed-payment` (the marker typeHandle/the payment-fill
-// path stamp on any field a secret was typed into, the same reference observe's
-// text-masking uses — see presentFieldValue) + any password input. A pixel
-// screenshot has no text-masking layer of its own, so this must catch everything
-// observe's masking catches that could actually be VISIBLE on screen.
+// Defense-in-depth redaction set for operate_screenshot. The capture-scoped
+// guard refuses nonempty secrets before pixels are read; these selectors also
+// identify empty sensitive controls and provide rectangles that are composited
+// over the captured bytes. The set mirrors the card fields
+// fillCheckoutCardIntoFrames writes into, plus payment/type_secret markers and
+// other secret-shaped inputs.
 const SCREENSHOT_SECRET_FIELD_SELECTORS = [
   '[data-ts-sealed-payment="1"]',
   'input[type="password" i]',
@@ -795,9 +794,7 @@ function sealedElementSemanticKeys(descriptor: SealedElementDescriptor): string[
       [
         clean(descriptor.testId) ? `test:${clean(descriptor.testId)}` : "",
         clean(descriptor.id) ? `id:${clean(descriptor.id)}` : "",
-        clean(descriptor.name)
-          ? `name:${tag}:${type}:${clean(descriptor.name)}`
-          : "",
+        clean(descriptor.name) ? `name:${tag}:${type}:${clean(descriptor.name)}` : "",
         label ? `label:${landmark}:${tag}:${type}:${label}` : "",
         `position:${landmark}:${tag}:${type}:${descriptor.ordinal}`,
       ].filter((key) => key.length > 0),
@@ -8610,7 +8607,8 @@ export class BrowserController {
         labelText: labelFor(el),
         ariaLabel: el.getAttribute("aria-label"),
         placeholder: el.getAttribute("placeholder"),
-        landmark: el.closest("header,main,footer,nav,aside,article,section")?.tagName.toLowerCase() ?? null,
+        landmark:
+          el.closest("header,main,footer,nav,aside,article,section")?.tagName.toLowerCase() ?? null,
         ordinal: controls.indexOf(el),
       } satisfies SealedElementDescriptor;
     });
@@ -8660,11 +8658,11 @@ export class BrowserController {
     rectangles: Array<{ x: number; y: number; width: number; height: number }>;
     redactedCount: number;
     signature: string;
-    handles: ElementHandle<Element>[];
+    handles: ElementHandle<Node>[];
   }> {
     const selector = [SCREENSHOT_REDACTION_SELECTORS, ...extraRedactionSelectors].join(",");
     const rectangles: Array<{ x: number; y: number; width: number; height: number }> = [];
-    const handles: ElementHandle<Element>[] = [];
+    const handles: ElementHandle<Node>[] = [];
     const signatureParts: string[] = [];
     try {
       for (const [frameIndex, frame] of frames.entries()) {
@@ -9035,16 +9033,13 @@ export class BrowserController {
     }
   }
 
-  // operate_screenshot's implementation: a read-only capture of the page (or
-  // one specific frame, so a cross-origin challenge/ACS iframe can be seen on
-  // its own) with card-shaped/sealed fields redacted in the captured bytes.
-  // Never navigates, clicks, types, or calls
-  // bringToFront/focus — a debugging read, not an action. Redaction always
-  // covers every frame that is actually part of the captured image: the whole
-  // page when capturing the page (a full-page or viewport shot composites
-  // every visible iframe), or just the target frame when capturing one frame
-  // in isolation. `extraRedactionSelectors` carries the session layer's
-  // sealed-field selectors (fields observe() masks that carry no DOM marker).
+  // Low-level read-only capture used by captureOperatorScreenshot after its
+  // capture-scoped sealed-value checks, and directly by redaction tests. It
+  // never navigates, clicks, types, focuses, or mutates the DOM. Redaction
+  // covers every frame included in the image: the whole page composites its
+  // visible frames, while an isolated frame includes only that frame.
+  // `extraRedactionSelectors` is retained for callers that already resolved
+  // additional sensitive elements; production capture passes durable locators.
   async screenshotForOperator(
     opts: {
       frameIndex?: number;

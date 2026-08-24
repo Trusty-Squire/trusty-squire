@@ -337,8 +337,9 @@ vi.mock("../browser.js", () => ({
         (candidate) => candidate.selector === selector,
       );
       return sealed
-        ? [element?.screenPath, element?.testId, element?.visibleText]
-            .filter((key): key is string => typeof key === "string" && key.length > 0)
+        ? [element?.screenPath, element?.testId, element?.visibleText].filter(
+            (key): key is string => typeof key === "string" && key.length > 0,
+          )
         : [];
     }
     async markPreexistingTypeSuggestionPopups(): Promise<void> {}
@@ -493,8 +494,9 @@ vi.mock("../browser.js", () => ({
         (candidate) => candidate.selector === selector && candidate.frameUrl === target.frameUrl,
       );
       return sealed
-        ? [element?.screenPath, element?.testId, element?.visibleText]
-            .filter((key): key is string => typeof key === "string" && key.length > 0)
+        ? [element?.screenPath, element?.testId, element?.visibleText].filter(
+            (key): key is string => typeof key === "string" && key.length > 0,
+          )
         : [];
     }
     async selectInFrame(

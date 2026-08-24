@@ -1,9 +1,8 @@
-// operate_screenshot's implementation: BrowserController.screenshotForOperator
-// (page/frame capture) plus its money-fence redaction — capture-time Playwright
-// mask locators (collectOperatorScreenshotMask), never a style/attribute write
-// into the live checkout DOM. Real-Chromium, mirroring browser-payment.test.ts's
-// harness pattern — a screenshot is inherently about actual rendering, not
-// something a mocked page can meaningfully stand in for.
+// operate_screenshot's browser implementation: captureOperatorScreenshot's
+// capture-scoped refusal plus screenshotForOperator's pixel redaction. Both are
+// read-only with respect to the live checkout DOM. Real-Chromium, mirroring
+// browser-payment.test.ts's harness pattern — a screenshot is inherently about
+// actual rendering, not something a mocked page can meaningfully stand in for.
 import { existsSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
 import { describe, expect, it } from "vitest";
@@ -289,9 +288,9 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
           input.replaceWith(replacement);
         });
 
-        await expect(
-          controller.captureOperatorScreenshot({}, sealedFieldKeys),
-        ).rejects.toThrow("screenshot_unavailable_sealed_context");
+        await expect(controller.captureOperatorScreenshot({}, sealedFieldKeys)).rejects.toThrow(
+          "screenshot_unavailable_sealed_context",
+        );
       } finally {
         await browser.close();
       }
@@ -318,9 +317,9 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
           input.replaceWith(replacement);
         });
 
-        await expect(
-          controller.captureOperatorScreenshot({}, sealedFieldKeys),
-        ).rejects.toThrow("screenshot_unavailable_sealed_context");
+        await expect(controller.captureOperatorScreenshot({}, sealedFieldKeys)).rejects.toThrow(
+          "screenshot_unavailable_sealed_context",
+        );
       } finally {
         await browser.close();
       }
