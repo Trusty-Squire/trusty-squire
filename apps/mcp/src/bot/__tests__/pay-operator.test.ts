@@ -851,6 +851,40 @@ describe("operate_pay", () => {
     expect(pendingThreeDsStates[0]!.deadline).toBeGreaterThan(Date.now());
   });
 
+  it("surfaces ACS instrument evidence as a warning without blocking the 3DS handoff", async () => {
+    const { result, browser, pendingThreeDsStates } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      { resolution: "timeout" },
+      {
+        fillAndSubmitCheckout: async () => ({
+          three_ds_required: true,
+          order_confirmed: false,
+          payment_instrument_mismatch: {
+            kind: "payment_instrument_mismatch",
+            expected: { last4: "9192", issuer: "DBS" },
+            observed: { issuer: "ENBDX", source: "3ds_challenge" },
+          },
+        }),
+      },
+    );
+
+    expect(result).toMatchObject({
+      status: "payment_3ds_required",
+      warning: {
+        kind: "payment_instrument_mismatch",
+        expected: { last4: "9192", issuer: "DBS" },
+        observed: { issuer: "ENBDX" },
+      },
+      needs_user: { wall: "3ds", resume: "checkout" },
+    });
+    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
+    expect(pendingThreeDsStates).toMatchObject([
+      { payment_instrument_mismatch: { observed: { issuer: "ENBDX" } } },
+    ]);
+  });
+
   it("waits and hands back an app-push message without an on-page challenge", async () => {
     const { result, notifyCalls, notifyBodies, browser } = await harness(
       "happy",

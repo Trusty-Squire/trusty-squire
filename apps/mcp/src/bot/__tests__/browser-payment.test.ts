@@ -2205,6 +2205,61 @@ describe("3-D Secure resolution", () => {
     return { browser, page, controller };
   };
 
+  // Gateway-token override fixture: the checkout accepts newly-filled fields,
+  // but its synthetic backend deliberately chooses a stored ENBD token and
+  // renders that token's ACS. No network or charge is involved. Exercise both
+  // ways an ACS can be surfaced by real gateways.
+  const detectTokenOverride = async (topLevel: boolean, challengeCopy: string) => {
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.setContent(
+      topLevel
+        ? `<main><p>3D Secure authentication — ${challengeCopy}</p></main>`
+        : `<iframe title="3D Secure authentication" srcdoc="<p>3D Secure authentication — ${challengeCopy}</p>"></iframe>`,
+    );
+    if (!topLevel) {
+      await page.waitForFunction(
+        () => document.querySelector("iframe")?.contentDocument?.body?.innerText.length !== 0,
+      );
+    }
+    const controller = new BrowserController({ humanize: false });
+    (controller as unknown as { page: Page }).page = page;
+    try {
+      return await (
+        controller as unknown as {
+          detectThreeDsChallenge: (card: { pan: string; issuer?: string }) => Promise<CheckoutSubmitResult>;
+        }
+      ).detectThreeDsChallenge({ pan: "5555555555559192", issuer: "DBS Mastercard" });
+    } finally {
+      await browser.close();
+    }
+  };
+
+  it.skipIf(!chromiumAvailable)("warns when a top-level token-override ACS names another issuer", async () => {
+    await expect(detectTokenOverride(true, "Approve in your ENBDX app")).resolves.toMatchObject({
+      three_ds_required: true,
+      payment_instrument_mismatch: {
+        kind: "payment_instrument_mismatch",
+        expected: { last4: "9192", issuer: "DBS" },
+        observed: { issuer: "ENBDX", source: "3ds_challenge" },
+      },
+    });
+  });
+
+  it.skipIf(!chromiumAvailable)("warns when an iframe token-override ACS names another issuer", async () => {
+    await expect(detectTokenOverride(false, "Approve in your ENBDX app")).resolves.toMatchObject({
+      payment_instrument_mismatch: { observed: { issuer: "ENBDX" } },
+    });
+  });
+
+  it.skipIf(!chromiumAvailable)("does not warn when the ACS evidence matches the released card", async () => {
+    await expect(detectTokenOverride(false, "Approve in your DBS app for card ending 9192")).resolves.toMatchObject({
+      three_ds_required: true,
+    });
+    const result = await detectTokenOverride(false, "Approve in your DBS app for card ending 9192");
+    expect(result).not.toHaveProperty("payment_instrument_mismatch");
+  });
+
   it.skipIf(!chromiumAvailable)(
     "resolves succeeded from the outer page's own order route while the challenge frame stays open and unresponsive",
     async () => {

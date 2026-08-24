@@ -12,6 +12,7 @@ import type {
   CheckoutCard,
   CheckoutSubmitResult,
   CheckoutSummary,
+  PaymentInstrumentMismatch,
   ThreeDsResolution,
 } from "./browser.js";
 import {
@@ -33,6 +34,9 @@ export interface OperatePayArgs {
   item: string;
   reason: string;
   three_ds_wait_seconds?: number;
+  // User-visible vault label, used only to compare passive ACS issuer/app
+  // evidence after submission. It is never sent to a merchant or audit API.
+  card_issuer?: string;
   // "fill_card" = split-checkout card entry: a SINGLE amount-bound approval
   // (one human passkey tap) releases the vaulted card, then fills payment
   // fields WITHOUT submitting. The caller verifies the final total and
@@ -83,6 +87,7 @@ export interface PendingThreeDsWait {
   approval_url: string;
   checkout: CheckoutSummary;
   last4: string;
+  payment_instrument_mismatch?: PaymentInstrumentMismatch;
   mandate_id?: string;
   deadline: number;
 }
@@ -1334,6 +1339,9 @@ export async function executeOperatePay(
         approval_url: approvalUrl,
         checkout,
         last4,
+        ...(submitResult.payment_instrument_mismatch !== undefined
+          ? { payment_instrument_mismatch: submitResult.payment_instrument_mismatch }
+          : {}),
         ...(mandateId !== undefined ? { mandate_id: mandateId } : {}),
         deadline: deps.now() + THREE_DS_RESUME_WINDOW_MS,
       });
@@ -1349,7 +1357,9 @@ export async function executeOperatePay(
     let paymentStatus = "payment_submitted";
     let submitResult: CheckoutSubmitResult = { three_ds_required: false, order_confirmed: false };
     try {
-      submitResult = await browser.fillAndSubmitCheckout(card);
+      submitResult = await browser.fillAndSubmitCheckout(
+        args.card_issuer === undefined ? card : { ...card, issuer: args.card_issuer },
+      );
       if (submitResult.three_ds_required) paymentStatus = "payment_3ds_required";
       else if (!submitResult.order_confirmed) paymentStatus = "payment_outcome_unknown";
     } catch (error) {
@@ -1413,6 +1423,9 @@ export async function executeOperatePay(
         ...(submitResult.challenge_url !== undefined
           ? { challenge_url: submitResult.challenge_url }
           : {}),
+        ...(submitResult.payment_instrument_mismatch !== undefined
+          ? { warning: submitResult.payment_instrument_mismatch }
+          : {}),
         needs_user: {
           wall: "3ds",
           message: threeDsHandoffMessage(submitResult, getThreeDsTelegramSent()),
@@ -1433,6 +1446,9 @@ export async function executeOperatePay(
       status: paymentStatus,
       audit_recorded: auditRecorded,
       approval_url: approvalUrl,
+      ...(submitResult.payment_instrument_mismatch !== undefined
+        ? { warning: submitResult.payment_instrument_mismatch }
+        : {}),
       merchant: checkout.merchant,
       amount_cents: checkout.amount_cents,
       currency: checkout.currency,

@@ -6281,7 +6281,14 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
     amount_cents: 8_800,
     currency: "JPY",
   };
-  function buildThreeDsState(deadline = Date.now() + 60_000) {
+  function buildThreeDsState(
+    deadline = Date.now() + 60_000,
+    payment_instrument_mismatch?: {
+      kind: "payment_instrument_mismatch";
+      expected: { last4: string; issuer?: string };
+      observed: { last4?: string; issuer?: string; source: "3ds_challenge" };
+    },
+  ) {
     return {
       approval_id: "appr_3ds",
       approval_url: "https://web.test/vault/pay/appr_3ds",
@@ -6289,6 +6296,7 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
       last4: "9192",
       mandate_id: "mandate_3ds",
       deadline,
+      ...(payment_instrument_mismatch !== undefined ? { payment_instrument_mismatch } : {}),
     };
   }
 
@@ -6351,6 +6359,30 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
         mandateId: "mandate_3ds",
       }),
     ]);
+  });
+
+  it("keeps an ACS instrument-mismatch warning visible across 3DS status waits", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({ serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html" });
+    setActivePendingThreeDs(
+      buildThreeDsState(Date.now() + 60_000, {
+        kind: "payment_instrument_mismatch",
+        expected: { last4: "9192", issuer: "DBS" },
+        observed: { issuer: "ENBDX", source: "3ds_challenge" },
+      }),
+    );
+    h.waitForThreeDsResult = "timeout";
+
+    await expect(operatePaymentStatusTool.handler({}, env.api)).resolves.toMatchObject({
+      status: "payment_3ds_pending",
+      warning: {
+        kind: "payment_instrument_mismatch",
+        expected: { last4: "9192", issuer: "DBS" },
+        observed: { issuer: "ENBDX", source: "3ds_challenge" },
+      },
+    });
+    h.waitForThreeDsResult = "failed";
+    await operatePaymentStatusTool.handler({}, env.api);
   });
 
   it("records a declined outcome and clears state when the OOB challenge fails", async () => {

@@ -277,6 +277,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         //      1 card   → use it
         //      >1 cards → error listing the labels (never silently guess)
         let cardRef = args.card_ref;
+        let selectedCardLabel = args.card_label;
         let cards: Array<{ id: string; label: string; last4: string | null }>;
         if (cardRef === undefined) {
           cards = await api.listPaymentCards();
@@ -299,8 +300,10 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
               );
             }
             cardRef = matches[0]!.id;
+            selectedCardLabel = matches[0]!.label;
           } else if (cards.length === 1) {
             cardRef = cards[0]!.id;
+            selectedCardLabel = cards[0]!.label;
           } else if (cards.length > 1) {
             const labels = cards.map((card) => `"${card.label}"`).join(", ");
             throw new Error(
@@ -317,6 +320,12 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         const cardIdentity = approvalCardIdentity(
           approvalCardRef === null ? undefined : cards.find((card) => card.id === approvalCardRef),
         );
+        // An explicit ref normally avoids another vault metadata read. Best
+        // effort here enriches only the passive post-submit ACS comparison;
+        // its failure must never alter a charge path.
+        if (cardRef !== undefined && selectedCardLabel === undefined) {
+          selectedCardLabel = cards.find((candidate) => candidate.id === cardRef)?.label;
+        }
         let resolvedCardRef: string | null = null;
         let filledPending: PendingCardFill | null = null;
         // Split checkouts (Rakuten-style) show no total on the card-entry page
@@ -336,6 +345,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         const result = await executeOperatePay(
           {
             ...(cardRef !== undefined ? { card_ref: cardRef } : {}),
+            ...(selectedCardLabel !== undefined ? { card_issuer: selectedCardLabel } : {}),
             ...(args.merchant !== undefined ? { merchant: args.merchant } : {}),
             ...(args.amount_cents !== undefined ? { amount_cents: args.amount_cents } : {}),
             ...(args.currency !== undefined ? { currency: args.currency } : {}),
@@ -598,6 +608,9 @@ async function threeDsStatusResult(
       merchant: state.checkout.merchant,
       amount_cents: state.checkout.amount_cents,
       currency: state.checkout.currency,
+      ...(state.payment_instrument_mismatch !== undefined
+        ? { warning: state.payment_instrument_mismatch }
+        : {}),
       next: { tool: "operate_payment_status", session_id: session.id, wait_seconds: 15 },
     };
   }
@@ -632,6 +645,9 @@ async function threeDsStatusResult(
     merchant: state.checkout.merchant,
     amount_cents: state.checkout.amount_cents,
     currency: state.checkout.currency,
+    ...(state.payment_instrument_mismatch !== undefined
+      ? { warning: state.payment_instrument_mismatch }
+      : {}),
     ...(terminalStatus === null
       ? {
           needs_user: {

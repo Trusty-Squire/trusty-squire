@@ -225,6 +225,10 @@ export interface CheckoutCard {
   exp_year: string;
   name: string;
   cvv: string;
+  // Comparison-only user-visible vault label, never submitted to a merchant.
+  // A label such as "DBS Mastercard" lets a later ACS issuer/app signal be
+  // compared after submit.
+  issuer?: string;
   billing: {
     line1: string;
     line2?: string;
@@ -268,6 +272,14 @@ export interface CheckoutSubmitResult {
   // only after it observes a terminal merchant order route.
   order_confirmed: boolean;
   challenge_url?: string;
+  // Passive post-submit ACS evidence. This is never an approval gate.
+  payment_instrument_mismatch?: PaymentInstrumentMismatch;
+}
+
+export interface PaymentInstrumentMismatch {
+  kind: "payment_instrument_mismatch";
+  expected: { last4: string; issuer?: string };
+  observed: { last4?: string; issuer?: string; source: "3ds_challenge" };
 }
 
 export type ClickDispatchStatus = "not_dispatched" | "dispatched" | "unknown";
@@ -10290,7 +10302,10 @@ export class BrowserController {
       // sealing a shipping field would make the payment cleanup erase the
       // merchant's selected address, country, and shipping rate after submit.
       const cardGroup = await this.fillCheckoutCardIntoFrames(fillFrames, card, true);
-      primary = { kind: "outcome", value: await this.submitFilledCheckoutInScope(cardGroup) };
+      primary = {
+        kind: "outcome",
+        value: await this.submitFilledCheckoutInScope(cardGroup, card),
+      };
     } catch (error) {
       primary = { kind: "error", value: error };
     }
@@ -10540,6 +10555,7 @@ export class BrowserController {
 
   private async submitFilledCheckoutInScope(
     cardGroup?: CheckoutCardGroupScope,
+    expectedCard?: Pick<CheckoutCard, "pan" | "issuer">,
   ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     const savedCardSelection = await this.resolveCompetingSavedCardSelection();
@@ -10807,7 +10823,7 @@ export class BrowserController {
         if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) {
           return { three_ds_required: false, order_confirmed: true };
         }
-        const challenge = await this.detectThreeDsChallenge();
+        const challenge = await this.detectThreeDsChallenge(expectedCard);
         if (challenge.three_ds_required) return challenge;
         await this.page.waitForTimeout(250).catch(() => undefined);
       }
@@ -11092,13 +11108,58 @@ export class BrowserController {
     }
   }
 
-  private async detectThreeDsChallenge(): Promise<CheckoutSubmitResult> {
+  private paymentInstrumentMismatch(
+    expectedCard: Pick<CheckoutCard, "pan" | "issuer"> | undefined,
+    challengeText: string,
+  ): PaymentInstrumentMismatch | undefined {
+    if (expectedCard === undefined) return undefined;
+    const expectedLast4 = expectedCard.pan.slice(-4);
+    // ACS copy is untrusted display evidence, so normalize only for
+    // comparison and return the bounded, non-secret fragments below. Never
+    // modify the live challenge or translate its controls.
+    const observedLast4 =
+      challengeText.match(/(?:card|ending|last\s*four|\*{2,}|•{2,})[^\d]{0,20}(\d{4})\b/i)?.[1] ??
+      undefined;
+    const observedIssuer =
+      challengeText.match(/\b([A-Z][A-Z0-9]{2,})\s+(?:app|bank)\b/)?.[1] ??
+      challengeText.match(/\b(?:issuer|bank|app)\s*[:\-]\s*([A-Za-z][A-Za-z0-9 .-]{1,48})/i)?.[1]
+        ?.trim();
+    const expectedIssuer = expectedCard.issuer
+      ?.split(/\s+/)
+      .find((word) => !/^(?:card|credit|debit|visa|mastercard|amex|personal|business)$/i.test(word));
+    const normalizedExpectedIssuer = expectedIssuer?.replace(/[^a-z0-9]/gi, "").toLowerCase();
+    const normalizedObservedIssuer = observedIssuer?.replace(/[^a-z0-9]/gi, "").toLowerCase();
+    const last4Mismatch = observedLast4 !== undefined && observedLast4 !== expectedLast4;
+    const issuerMismatch =
+      normalizedExpectedIssuer !== undefined &&
+      normalizedObservedIssuer !== undefined &&
+      !normalizedObservedIssuer.includes(normalizedExpectedIssuer) &&
+      !normalizedExpectedIssuer.includes(normalizedObservedIssuer);
+    if (!last4Mismatch && !issuerMismatch) return undefined;
+    return {
+      kind: "payment_instrument_mismatch",
+      expected: {
+        last4: expectedLast4,
+        ...(expectedIssuer !== undefined ? { issuer: expectedIssuer } : {}),
+      },
+      observed: {
+        ...(observedLast4 !== undefined ? { last4: observedLast4 } : {}),
+        ...(observedIssuer !== undefined ? { issuer: observedIssuer } : {}),
+        source: "3ds_challenge",
+      },
+    };
+  }
+
+  private async detectThreeDsChallenge(
+    expectedCard?: Pick<CheckoutCard, "pan" | "issuer">,
+  ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     // Cross-processor 3DS signals only — never key on a single PSP's internal
     // state. CardinalCommerce backs the ACS/StepUp flow for many processors
     // (not just Stripe), so its host is a generic signal, not Stripe-specific.
     const urlPattern =
       /(?:https?:\/\/(?:[^/]+\.)*cardinalcommerce\.com\/(?:v\d+\/)?cruise\/stepup(?:[/?#]|$)|https?:\/\/hooks\.stripe\.com\/3d_secure|3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/3ds(?:2)?\/|\/acs\/)/i;
+    let structuralFallback: CheckoutSubmitResult | undefined;
     for (const frame of this.page.frames()) {
       // A captcha frame (fraud-check, not authentication) must never be
       // misread as a 3DS challenge — e.g. Stripe's invisible hCaptcha frame
@@ -11117,15 +11178,26 @@ export class BrowserController {
         structural ||
         /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i.test(
           text,
-        );
+      );
       if (!detected) continue;
-      return {
+      const mismatch = this.paymentInstrumentMismatch(expectedCard, text);
+      const result: CheckoutSubmitResult = {
         three_ds_required: true,
         order_confirmed: false,
         challenge_url: frame.url() || this.page.url(),
+        ...(mismatch !== undefined ? { payment_instrument_mismatch: mismatch } : {}),
       };
+      // The merchant document can structurally contain the ACS iframe while
+      // the issuer/app copy lives inside that child frame. Keep the structural
+      // match as a fallback, but keep looking so comparison evidence is not
+      // lost to frame ordering.
+      if (!urlPattern.test(frame.url()) && structural && text.trim().length === 0) {
+        structuralFallback ??= result;
+        continue;
+      }
+      return result;
     }
-    return { three_ds_required: false, order_confirmed: false };
+    return structuralFallback ?? { three_ds_required: false, order_confirmed: false };
   }
 
   private async captureCheckoutOutcomeBaseline(): Promise<CheckoutOutcomeBaseline> {
