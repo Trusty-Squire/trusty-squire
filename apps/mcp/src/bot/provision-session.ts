@@ -4740,7 +4740,8 @@ export async function act(
             assertSecretFrameTargetAllowed(session, resolved.frameTarget);
           }
           session.usedLocatorFallback = true;
-          await browser.typeHandle(resolved.handle, value, true);
+          const sealedFieldKeys = await browser.typeHandle(resolved.handle, value, true);
+          for (const key of sealedFieldKeys) session.sealedFieldKeys.add(key);
         } finally {
           await resolved.handle.dispose().catch(() => undefined);
         }

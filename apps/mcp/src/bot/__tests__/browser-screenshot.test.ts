@@ -300,6 +300,50 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "returns durable sealed identity from locator typing across a controlled rerender",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent('<label for="secret">Login code</label><input id="secret">');
+        const controller = BrowserController.fromHarnessPage(page);
+        const resolved = await controller.resolvePageTarget("css", "#secret", "type");
+        expect(resolved.ok).toBe(true);
+        if (!resolved.ok) throw new Error("locator did not resolve");
+
+        const sealedFieldKeys = await controller.typeHandle(resolved.handle, "secret-value", true);
+        await resolved.handle.dispose();
+        await page.locator("#secret").evaluate((input) => {
+          const replacement = input.cloneNode(true) as HTMLInputElement;
+          replacement.removeAttribute("data-ts-sealed-payment");
+          input.replaceWith(replacement);
+        });
+
+        await expect(
+          controller.captureOperatorScreenshot({}, sealedFieldKeys),
+        ).rejects.toThrow("screenshot_unavailable_sealed_context");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)("refuses a rendered separator-formatted PAN", async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      await page.setContent("<div>Card on file: 4242-4242 4242-4242</div>");
+      const controller = BrowserController.fromHarnessPage(page);
+
+      await expect(controller.captureOperatorScreenshot()).rejects.toThrow(
+        "screenshot_unavailable_sealed_context",
+      );
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it.skipIf(!chromiumAvailable)(
     "never passes raw screenshot bytes through merchant page APIs",
     async () => {
       const browser = await chromium.launch({ headless: true });
@@ -518,6 +562,61 @@ describe("operate_screenshot frame targeting (real browser)", () => {
         });
         expect(result.frameUrl).toBe(frameUrl);
         expect(isValidJpegBase64(result.base64)).toBe(true);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "verifies parent compositor overlays included in a targeted capture",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const pageUrl = "https://shop.example.test/checkout";
+        const frameUrl = "https://authentication.cardinalcommerce.com/challenge/overlay";
+        const page = await servePages(browser, {
+          [pageUrl]: `
+            <style>
+              iframe { border: 0; width: 320px; height: 180px }
+              #overlay { position: fixed; inset: 0; background: white; z-index: 10 }
+            </style>
+            <iframe src="${frameUrl}"></iframe><div id="overlay">4242 4242 4242 4242</div>`,
+          [frameUrl]: `<style>html,body { margin: 0; background: rgb(0, 128, 0) }</style>`,
+        });
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = BrowserController.fromHarnessPage(page);
+
+        await expect(
+          controller.captureOperatorScreenshot({ frameUrlContains: "cardinalcommerce.com" }),
+        ).rejects.toThrow("screenshot_unavailable_sealed_context");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "verifies descendant documents included by a targeted frame",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const pageUrl = "https://shop.example.test/checkout";
+        const frameUrl = "https://authentication.cardinalcommerce.com/challenge/nested";
+        const nestedUrl = "https://issuer.example.test/card";
+        const page = await servePages(browser, {
+          [pageUrl]: `<iframe src="${frameUrl}"></iframe>`,
+          [frameUrl]: `<iframe src="${nestedUrl}"></iframe>`,
+          [nestedUrl]: `<input autocomplete="cc-csc" value="123">`,
+        });
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = BrowserController.fromHarnessPage(page);
+
+        await expect(
+          controller.captureOperatorScreenshot({ frameUrlContains: "cardinalcommerce.com" }),
+        ).rejects.toThrow("screenshot_unavailable_sealed_context");
       } finally {
         await browser.close();
       }

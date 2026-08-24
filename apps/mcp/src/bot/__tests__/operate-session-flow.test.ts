@@ -150,6 +150,7 @@ const h = vi.hoisted(() => ({
     | { ok: false; reason: "none" | "ambiguous"; candidates: string[] },
   locatorClickCalls: 0,
   locatorTypeCalls: [] as Array<{ text: string; sealed: boolean }>,
+  capturedSealedFieldKeys: [] as string[][],
   locatorResolveIntents: [] as string[],
   locatorDisposeCalls: 0,
   isPayPalHostedCheckout: false,
@@ -556,8 +557,16 @@ vi.mock("../browser.js", () => ({
     async jsClickHandle(): Promise<void> {
       h.locatorClickCalls += 1;
     }
-    async typeHandle(_handle: unknown, text: string, sealed = false): Promise<void> {
+    async typeHandle(_handle: unknown, text: string, sealed = false): Promise<string[]> {
       h.locatorTypeCalls.push({ text, sealed });
+      return sealed ? [h.locatorResolve.ok ? h.locatorResolve.text : ""] : [];
+    }
+    async captureOperatorScreenshot(
+      _opts: unknown,
+      sealedFieldKeys: readonly string[],
+    ): Promise<{ base64: string; frameUrl: null; frameCount: number; redactedCount: number }> {
+      h.capturedSealedFieldKeys.push([...sealedFieldKeys]);
+      return { base64: "jpeg", frameUrl: null, frameCount: 1, redactedCount: 0 };
     }
     async uploadFile(selector: string, filePath: string): Promise<void> {
       h.uploads.push({ selector, filePath });
@@ -852,6 +861,7 @@ import {
   captureObserved,
   getActivePendingThreeDs,
   setActivePendingThreeDs,
+  captureScreenshot,
 } from "../provision-session.js";
 import {
   isRecipeDomainLocked,
@@ -1016,6 +1026,7 @@ beforeEach(() => {
   };
   h.locatorClickCalls = 0;
   h.locatorTypeCalls = [];
+  h.capturedSealedFieldKeys = [];
   h.locatorResolveIntents = [];
   h.locatorDisposeCalls = 0;
   h.isPayPalHostedCheckout = false;
@@ -3399,6 +3410,8 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     await act(obs.session_id, { kind: "type_secret", target: "text=Password", slot: "login" });
     expect(h.locatorResolveIntents).toContain("type");
     expect(h.locatorTypeCalls).toEqual([{ text: "s3cr3t", sealed: true }]);
+    await captureScreenshot(obs.session_id);
+    expect(h.capturedSealedFieldKeys).toEqual([["Password"]]);
   });
 
   it("refuses to remember a session that used a locator fallback", async () => {
