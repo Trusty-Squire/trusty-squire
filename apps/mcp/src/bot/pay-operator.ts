@@ -1375,7 +1375,8 @@ export async function executeOperatePay(
       paymentStatus = outcomeUnknown ? "payment_outcome_unknown" : "payment_checkout_failed";
       if (outcomeUnknown) {
         await browser.waitForThreeDsResolution(0).catch(() => undefined);
-        submitResult.payment_instrument_mismatch = browser.paymentInstrumentMismatch?.();
+        const mismatch = browser.paymentInstrumentMismatch?.();
+        if (mismatch !== undefined) submitResult.payment_instrument_mismatch = mismatch;
       }
       let audit_recorded = true;
       try {
@@ -1419,7 +1420,8 @@ export async function executeOperatePay(
         api.notifyThreeDs(approvalId, threeDsNotificationMode(submitResult)),
       );
       const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
-      submitResult.payment_instrument_mismatch ??= browser.paymentInstrumentMismatch?.();
+      const mismatch = browser.paymentInstrumentMismatch?.();
+      if (mismatch !== undefined) submitResult.payment_instrument_mismatch ??= mismatch;
       paymentStatus = statusAfterThreeDsResolution(paymentStatus, resolution);
     }
 

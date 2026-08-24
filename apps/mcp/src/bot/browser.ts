@@ -11142,6 +11142,7 @@ export class BrowserController {
         if (
           await frameElement
             .evaluate((element) =>
+              element instanceof Element &&
               element.matches('iframe[title*="3d secure" i],iframe[name*="3ds" i]'),
             )
             .catch(() => false)

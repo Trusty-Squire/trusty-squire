@@ -609,7 +609,8 @@ async function threeDsStatusResult(
   const boundMs =
     expiredAtEntry || waitSeconds <= 0 ? 0 : Math.min(Math.max(waitSeconds * 1000, 1_000), 15_000);
   const resolution = await browser.waitForThreeDsResolution(boundMs);
-  state.payment_instrument_mismatch ??= browser.paymentInstrumentMismatch?.();
+  const mismatch = browser.paymentInstrumentMismatch?.();
+  if (mismatch !== undefined) state.payment_instrument_mismatch ??= mismatch;
   const terminalStatus = threeDsResolutionStatus(resolution);
   const unresolvedPastDeadline =
     terminalStatus === null && (expiredAtEntry || Date.now() >= state.deadline);
