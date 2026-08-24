@@ -2801,7 +2801,9 @@ export async function captureScreenshot(
   if (session.paymentFieldSealActive) {
     throw new Error("screenshot_unavailable_sealed_context");
   }
-  const captured = await session.browser.captureOperatorScreenshot(opts);
+  const captured = await session.browser.captureOperatorScreenshot(opts, [
+    ...session.sealedFieldKeys,
+  ]);
   return {
     session_id: sessionId,
     url: session.browser.currentUrl(),

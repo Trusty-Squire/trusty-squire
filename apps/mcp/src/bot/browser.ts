@@ -23,6 +23,7 @@
 // gate).
 
 import { chromium as baseChromium } from "playwright";
+import sharp from "sharp";
 import type {
   Browser,
   BrowserContext,
@@ -8452,6 +8453,123 @@ export class BrowserController {
     return null;
   }
 
+  private async resolveOperatorScreenshotSealedLocators(
+    frames: readonly Frame[],
+    sealedFieldKeys: ReadonlySet<string>,
+  ): Promise<Map<Frame, Locator[]>> {
+    const byFrame = new Map<Frame, Locator[]>();
+    for (const frame of frames) {
+      const matches: Locator[] = [];
+      const candidates = await frame
+        .locator("input,textarea,select,[contenteditable='true']")
+        .all();
+      for (const candidate of candidates) {
+        const keys = await candidate.evaluate((el, index) => {
+          const clean = (value: string | null | undefined): string | null => {
+            const normalized = (value ?? "").replace(/\s+/g, " ").trim();
+            return normalized.length > 0 ? normalized : null;
+          };
+          const slug = (value: string | null, fallback: string): string => {
+            const normalized = (value ?? fallback)
+              .replace(/\s+/g, " ")
+              .trim()
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, "-")
+              .replace(/^-+|-+$/g, "")
+              .slice(0, 48);
+            return normalized.length > 0 ? normalized : fallback;
+          };
+          const labelFor = (target: Element): string | null => {
+            const id = target.getAttribute("id");
+            if (id !== null && id.length > 0) {
+              const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+              if (label !== null) return clean(label.textContent);
+            }
+            const labelledBy = target.getAttribute("aria-labelledby");
+            if (labelledBy !== null) {
+              const text = labelledBy
+                .split(/\s+/)
+                .map((part) => clean(document.getElementById(part)?.textContent))
+                .filter((part): part is string => part !== null)
+                .join(" ");
+              if (text.length > 0) return text;
+            }
+            const ancestorLabel = clean(target.closest("label")?.textContent);
+            if (ancestorLabel !== null) return ancestorLabel;
+            let current: Element | null = target;
+            for (let depth = 0; depth < 3 && current !== null; depth += 1) {
+              let sibling = current.previousElementSibling;
+              for (let scanned = 0; scanned < 4 && sibling !== null; scanned += 1) {
+                const nestedLabel = clean(sibling.querySelector("label")?.textContent);
+                if (nestedLabel !== null) return nestedLabel;
+                const text = clean(sibling.textContent);
+                if (text !== null && text.length <= 80 && !/[{};]/.test(text)) return text;
+                sibling = sibling.previousElementSibling;
+              }
+              current = current.parentElement;
+            }
+            return null;
+          };
+          const region = el.closest(
+            '[role="dialog"],dialog,[aria-modal="true"],nav,main,header,footer,aside,form,section,article',
+          );
+          const regionKind =
+            region?.getAttribute("role") === "dialog" ||
+            region?.tagName.toLowerCase() === "dialog" ||
+            region?.getAttribute("aria-modal") === "true"
+              ? "dialog"
+              : (region?.tagName.toLowerCase() ?? "body");
+          const regionLabel =
+            clean(region?.getAttribute("aria-label")) ??
+            clean(region?.querySelector("h1,h2,h3,[role='heading']")?.textContent) ??
+            clean(region?.textContent)?.slice(0, 60) ??
+            (region === null ? "root" : regionKind);
+          const container =
+            region === null ? "body:root" : `${regionKind}:${slug(regionLabel, regionKind)}`;
+          const tag = el.tagName.toLowerCase();
+          const kind = el.getAttribute("role") || (tag === "a" ? "link" : tag);
+          const directLabel =
+            clean(el.getAttribute("aria-label")) ??
+            clean(el.getAttribute("title")) ??
+            clean(el.getAttribute("name")) ??
+            clean(el.textContent);
+          const value =
+            el instanceof HTMLInputElement ||
+            el instanceof HTMLTextAreaElement ||
+            el instanceof HTMLSelectElement
+              ? el.value
+              : null;
+          const reference =
+            clean(el.textContent) ??
+            labelFor(el) ??
+            clean(el.getAttribute("aria-label")) ??
+            clean(el.getAttribute("placeholder")) ??
+            clean(el.getAttribute("title")) ??
+            clean(el.getAttribute("name")) ??
+            clean(value) ??
+            `${tag}#${index}`;
+          const pathLabel = labelFor(el) ?? directLabel;
+          const testId =
+            el.getAttribute("data-testid") ??
+            el.getAttribute("data-test-id") ??
+            el.getAttribute("data-test") ??
+            el.getAttribute("data-cy") ??
+            el.getAttribute("data-qa");
+          return [
+            `${container} > ${kind}:${slug(pathLabel, `${kind}-${index}`)}`,
+            testId,
+            reference.slice(0, 80),
+          ]
+            .map((key) => clean(key))
+            .filter((key): key is string => key !== null);
+        }, candidates.indexOf(candidate));
+        if (keys.some((key) => sealedFieldKeys.has(key))) matches.push(candidate);
+      }
+      byFrame.set(frame, matches);
+    }
+    return byFrame;
+  }
+
   // Resolve every card-shaped/sealed field in the captured frames to a
   // screenshot redaction rectangles — text-masking (presentFieldValue in
   // provision-session.ts) only covers the JSON observation, not a rendered
@@ -8468,51 +8586,79 @@ export class BrowserController {
   private async collectOperatorScreenshotMask(
     frames: readonly Frame[],
     extraRedactionSelectors: readonly string[],
+    sealedLocators: ReadonlyMap<Frame, readonly Locator[]> = new Map(),
   ): Promise<{
     rectangles: Array<{ x: number; y: number; width: number; height: number }>;
     redactedCount: number;
     signature: string;
+    handles: ElementHandle<Element>[];
   }> {
     const selector = [SCREENSHOT_REDACTION_SELECTORS, ...extraRedactionSelectors].join(",");
     const rectangles: Array<{ x: number; y: number; width: number; height: number }> = [];
-    const perFrameCounts: number[] = [];
+    const handles: ElementHandle<Element>[] = [];
+    const signatureParts: string[] = [];
     try {
-      for (const frame of frames) {
+      for (const [frameIndex, frame] of frames.entries()) {
         let frameCount = 0;
-        const matches = await frame.locator(selector).all();
-        for (const match of matches) {
-          const box = await match.boundingBox({ timeout: 5_000 });
-          if (box === null) {
-            throw new Error("screenshot_redaction_unresolved");
+        const frameHandles = await frame.locator(selector).elementHandles();
+        handles.push(...frameHandles);
+        for (const locator of sealedLocators.get(frame) ?? []) {
+          const handle = await locator.elementHandle({ timeout: 5_000 });
+          if (handle === null) throw new Error("screenshot_redaction_unresolved");
+          if (
+            !(await handle.evaluate((el, matchSelector) => el.matches(matchSelector), selector))
+          ) {
+            frameHandles.push(handle);
+            handles.push(handle);
+          } else {
+            await handle.dispose();
           }
-          rectangles.push(box);
-          frameCount += 1;
         }
-        const valueCandidates = await frame.locator('input:not([type="hidden" i]),textarea').all();
+        const valueCandidates = await frame
+          .locator('input:not([type="hidden" i]),textarea')
+          .elementHandles();
         for (const candidate of valueCandidates) {
           const value = await candidate.inputValue({ timeout: 5_000 });
-          if (!containsLuhnPanSpan(value)) continue;
-          if (
-            await candidate.evaluate((el, matchSelector) => el.matches(matchSelector), selector)
-          ) {
+          if (!containsLuhnPanSpan(value)) {
+            await candidate.dispose();
             continue;
           }
-          const box = await candidate.boundingBox({ timeout: 5_000 });
-          if (box === null) {
+          const duplicate = await Promise.all(
+            frameHandles.map(
+              async (existing) => await candidate.evaluate((el, other) => el === other, existing),
+            ),
+          );
+          if (duplicate.includes(true)) {
+            await candidate.dispose();
+            continue;
+          }
+          frameHandles.push(candidate);
+          handles.push(candidate);
+        }
+        for (const handle of frameHandles) {
+          if (!(await handle.evaluate((el) => el.isConnected))) {
             throw new Error("screenshot_redaction_unresolved");
           }
-          rectangles.push(box);
+          const box = await handle.boundingBox();
+          if (box !== null) rectangles.push(box);
+          signatureParts.push(
+            `${frameIndex}:${box === null ? "hidden" : [box.x, box.y, box.width, box.height].join(":")}`,
+          );
           frameCount += 1;
         }
-        perFrameCounts.push(frameCount);
+        signatureParts.push(`count:${frameIndex}:${frameCount}`);
       }
     } catch {
+      await Promise.all(
+        handles.map(async (handle) => await handle.dispose().catch(() => undefined)),
+      );
       throw new Error("screenshot_redaction_unresolved");
     }
     return {
       rectangles,
-      redactedCount: perFrameCounts.reduce((sum, count) => sum + count, 0),
-      signature: perFrameCounts.join(","),
+      redactedCount: handles.length,
+      signature: signatureParts.join("|"),
+      handles,
     };
   }
 
@@ -8522,41 +8668,27 @@ export class BrowserController {
     origin: { x: number; y: number },
     captureSize: { width: number; height: number },
   ): Promise<string> {
-    if (!this.page) throw new Error("Browser not started");
-    return await this.page.evaluate(
-      async ({ source, boxes, imageOrigin, cssSize }) => {
-        const image = new Image();
-        await new Promise<void>((resolve, reject) => {
-          image.onload = () => resolve();
-          image.onerror = () => reject(new Error("screenshot decode failed"));
-          image.src = `data:image/jpeg;base64,${source}`;
-        });
-        const canvas = document.createElement("canvas");
-        canvas.width = image.naturalWidth;
-        canvas.height = image.naturalHeight;
-        const context = canvas.getContext("2d");
-        if (context === null) throw new Error("screenshot canvas unavailable");
-        context.drawImage(image, 0, 0);
-        context.fillStyle = "#ff00ff";
-        const scaleX = image.naturalWidth / cssSize.width;
-        const scaleY = image.naturalHeight / cssSize.height;
-        for (const box of boxes) {
-          context.fillRect(
-            (box.x - imageOrigin.x) * scaleX,
-            (box.y - imageOrigin.y) * scaleY,
-            box.width * scaleX,
-            box.height * scaleY,
-          );
-        }
-        return canvas.toDataURL("image/jpeg", 0.8).slice("data:image/jpeg;base64,".length);
-      },
-      {
-        source: buffer.toString("base64"),
-        boxes: rectangles,
-        imageOrigin: origin,
-        cssSize: captureSize,
-      },
+    const metadata = await sharp(buffer).metadata();
+    if (metadata.width === undefined || metadata.height === undefined) {
+      throw new Error("screenshot_redaction_unresolved");
+    }
+    const scaleX = metadata.width / captureSize.width;
+    const scaleY = metadata.height / captureSize.height;
+    const rects = rectangles
+      .map(
+        (box) =>
+          `<rect x="${(box.x - origin.x) * scaleX}" y="${(box.y - origin.y) * scaleY}" width="${box.width * scaleX}" height="${box.height * scaleY}" fill="#ff00ff"/>`,
+      )
+      .join("");
+    const overlay = Buffer.from(
+      `<svg width="${metadata.width}" height="${metadata.height}" xmlns="http://www.w3.org/2000/svg">${rects}</svg>`,
     );
+    return (
+      await sharp(buffer)
+        .composite([{ input: overlay, blend: "over" }])
+        .jpeg({ quality: 80 })
+        .toBuffer()
+    ).toString("base64");
   }
 
   // Verify the capture set before pixels are read. This is deliberately
@@ -8568,20 +8700,30 @@ export class BrowserController {
   private async assertOperatorScreenshotFramesNoSealedValues(
     frames: readonly Frame[],
     extraRedactionSelectors: readonly string[],
+    sealedLocators: ReadonlyMap<Frame, readonly Locator[]> = new Map(),
   ): Promise<void> {
     const sealedSelector = [SCREENSHOT_REDACTION_SELECTORS, ...extraRedactionSelectors].join(",");
 
     try {
       for (const frame of frames) {
         if (frame.isDetached()) throw new Error("frame detached");
-        const sealedMatches = await frame.locator(sealedSelector).all();
+        const sealedMatches = [
+          ...(await frame.locator(sealedSelector).all()),
+          ...(sealedLocators.get(frame) ?? []),
+        ];
         for (const match of sealedMatches) {
           const hasValue = await match.evaluate((el) => {
-            if (
-              el instanceof HTMLInputElement ||
-              el instanceof HTMLTextAreaElement ||
-              el instanceof HTMLSelectElement
-            ) {
+            if (el instanceof HTMLSelectElement) {
+              const optionText = el.options[el.selectedIndex]?.textContent ?? "";
+              const normalizedOption = optionText.replace(/\s+/g, " ").trim();
+              const placeholder =
+                /^(?:select|choose)?\s*(?:a\s+)?(?:month|year|mm|yy)?\s*(?:\.\.\.|[-–—]*)$/i;
+              return (
+                el.value.trim().length > 0 ||
+                (normalizedOption.length > 0 && !placeholder.test(normalizedOption))
+              );
+            }
+            if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
               return el.value.trim().length > 0;
             }
             return (el.textContent ?? "").trim().length > 0;
@@ -8637,6 +8779,7 @@ export class BrowserController {
       frameUrlContains?: string;
       fullPage?: boolean;
     } = {},
+    sealedFieldKeys: readonly string[] = [],
   ): Promise<{
     base64: string;
     frameUrl: string | null;
@@ -8655,7 +8798,11 @@ export class BrowserController {
         if (frame.isDetached()) throw new Error("frame detached");
         documents.push(await frame.evaluateHandle(() => document));
       }
-      await this.assertOperatorScreenshotFramesNoSealedValues(frames, []);
+      const sealedLocators = await this.resolveOperatorScreenshotSealedLocators(
+        frames,
+        new Set(sealedFieldKeys),
+      );
+      await this.assertOperatorScreenshotFramesNoSealedValues(frames, [], sealedLocators);
       const documentsStillCurrent = async (): Promise<boolean> => {
         if (documents.length !== frames.length) return false;
         for (let index = 0; index < frames.length; index += 1) {
@@ -8670,7 +8817,12 @@ export class BrowserController {
       if (!(await documentsStillCurrent())) {
         throw new Error("screenshot_unavailable_sealed_context");
       }
-      const captured = await this.screenshotForOperatorResolved(opts, targetFrame, frames);
+      const captured = await this.screenshotForOperatorResolved(
+        opts,
+        targetFrame,
+        frames,
+        sealedLocators,
+      );
       if (!(await documentsStillCurrent())) {
         throw new Error("screenshot_unavailable_sealed_context");
       }
@@ -8727,6 +8879,7 @@ export class BrowserController {
     },
     targetFrame: Frame | null,
     framesBefore: readonly Frame[],
+    sealedLocators: ReadonlyMap<Frame, readonly Locator[]> = new Map(),
   ): Promise<{
     base64: string;
     frameUrl: string | null;
@@ -8738,84 +8891,136 @@ export class BrowserController {
     const extraRedactionSelectors = opts.extraRedactionSelectors ?? [];
     const framesForRedaction = (): Frame[] =>
       targetFrame !== null && targetFrame !== page.mainFrame() ? [targetFrame] : page.frames();
-    const { rectangles, redactedCount, signature } = await this.collectOperatorScreenshotMask(
+    const before = await this.collectOperatorScreenshotMask(
       framesBefore,
       extraRedactionSelectors,
+      sealedLocators,
     );
-    // caret:"initial" skips Playwright's default caret-hiding pass, which
-    // writes (and restores) caret-color on every editable element's inline
-    // style — this capture must leave element styles untouched.
-    let buffer: Buffer;
-    let origin = { x: 0, y: 0 };
-    let captureSize: { width: number; height: number };
-    if (targetFrame !== null && targetFrame !== page.mainFrame()) {
-      const handle = await targetFrame.frameElement();
+    const { rectangles, redactedCount, signature } = before;
+    let recheck: typeof before | undefined;
+    try {
+      // caret:"initial" skips Playwright's default caret-hiding pass, which
+      // writes (and restores) caret-color on every editable element's inline
+      // style — this capture must leave element styles untouched.
+      let buffer: Buffer;
+      let origin = { x: 0, y: 0 };
+      let captureSize: { width: number; height: number };
+      const cdp = await page.context().newCDPSession(page);
       try {
-        const box = await handle.boundingBox();
-        if (box === null) throw new Error("screenshot_redaction_unresolved");
-        origin = { x: box.x, y: box.y };
-        captureSize = { width: box.width, height: box.height };
-        buffer = await handle.screenshot({
-          type: "jpeg",
-          quality: 80,
-          timeout: 10_000,
-          caret: "initial",
-        });
+        if (targetFrame !== null && targetFrame !== page.mainFrame()) {
+          const handle = await targetFrame.frameElement();
+          try {
+            const box = await handle.boundingBox();
+            if (box === null) throw new Error("screenshot_redaction_unresolved");
+            const scroll = await page.evaluate(() => ({ x: window.scrollX, y: window.scrollY }));
+            origin = { x: box.x, y: box.y };
+            captureSize = { width: box.width, height: box.height };
+            const result = await cdp.send("Page.captureScreenshot", {
+              format: "jpeg",
+              quality: 80,
+              fromSurface: true,
+              captureBeyondViewport: true,
+              clip: {
+                x: box.x + scroll.x,
+                y: box.y + scroll.y,
+                width: box.width,
+                height: box.height,
+                scale: 1,
+              },
+            });
+            buffer = Buffer.from(result.data, "base64");
+          } finally {
+            await handle.dispose().catch(() => undefined);
+          }
+        } else if (opts.fullPage === true) {
+          const dimensions = await page.evaluate(() => ({
+            origin: { x: -window.scrollX, y: -window.scrollY },
+            size: {
+              width: document.documentElement.scrollWidth,
+              height: document.documentElement.scrollHeight,
+            },
+          }));
+          origin = dimensions.origin;
+          captureSize = dimensions.size;
+          const result = await cdp.send("Page.captureScreenshot", {
+            format: "jpeg",
+            quality: 80,
+            fromSurface: true,
+            captureBeyondViewport: true,
+            clip: {
+              x: 0,
+              y: 0,
+              width: dimensions.size.width,
+              height: dimensions.size.height,
+              scale: 1,
+            },
+          });
+          buffer = Buffer.from(result.data, "base64");
+        } else {
+          const viewport = page.viewportSize();
+          if (viewport === null) throw new Error("screenshot_redaction_unresolved");
+          captureSize = viewport;
+          const result = await cdp.send("Page.captureScreenshot", {
+            format: "jpeg",
+            quality: 80,
+            fromSurface: true,
+          });
+          buffer = Buffer.from(result.data, "base64");
+        }
       } finally {
-        await handle.dispose().catch(() => undefined);
+        await cdp.detach().catch(() => undefined);
       }
-    } else {
-      if (opts.fullPage === true) {
-        const dimensions = await page.evaluate(() => ({
-          origin: { x: -window.scrollX, y: -window.scrollY },
-          size: {
-            width: document.documentElement.scrollWidth,
-            height: document.documentElement.scrollHeight,
-          },
-        }));
-        origin = dimensions.origin;
-        captureSize = dimensions.size;
-      } else {
-        const viewport = page.viewportSize();
-        if (viewport === null) throw new Error("screenshot_redaction_unresolved");
-        captureSize = viewport;
+      // Stability guard: the mask set was fixed before a capture that can take
+      // seconds. If the page grew another matching field or frame meanwhile,
+      // the image may hold pixels no mask covered — re-run the same collection
+      // and discard the image unless the frame set and per-frame redaction
+      // signature are unchanged.
+      const framesAfter = framesForRedaction();
+      let stable =
+        framesAfter.length === framesBefore.length &&
+        framesBefore.every((frame, index) => framesAfter[index] === frame);
+      if (stable) {
+        try {
+          recheck = await this.collectOperatorScreenshotMask(
+            framesAfter,
+            extraRedactionSelectors,
+            sealedLocators,
+          );
+          stable =
+            recheck.signature === signature && recheck.handles.length === before.handles.length;
+          if (stable) {
+            for (let index = 0; index < before.handles.length; index += 1) {
+              if (
+                !(await recheck.handles[index]!.evaluate(
+                  (el, expected) => el === expected,
+                  before.handles[index]!,
+                ))
+              ) {
+                stable = false;
+                break;
+              }
+            }
+          }
+        } catch {
+          stable = false;
+        }
       }
-      buffer = await page.screenshot({
-        fullPage: opts.fullPage === true,
-        type: "jpeg",
-        quality: 80,
-        timeout: 10_000,
-        caret: "initial",
-      });
+      if (!stable) throw new Error("screenshot_redaction_unstable");
+      const base64 = await this.redactOperatorScreenshot(buffer, rectangles, origin, captureSize);
+      return {
+        base64,
+        frameUrl: targetFrame?.url() ?? null,
+        frameCount: page.frames().length,
+        redactedCount,
+      };
+    } finally {
+      await Promise.all([
+        ...before.handles.map(async (handle) => await handle.dispose().catch(() => undefined)),
+        ...(recheck?.handles ?? []).map(
+          async (handle) => await handle.dispose().catch(() => undefined),
+        ),
+      ]);
     }
-    const base64 = await this.redactOperatorScreenshot(buffer, rectangles, origin, captureSize);
-    // Stability guard: the mask set was fixed before a capture that can take
-    // seconds. If the page grew another matching field or frame meanwhile,
-    // the image may hold pixels no mask covered — re-run the same collection
-    // and discard the image unless the frame set and per-frame redaction
-    // signature are unchanged.
-    const framesAfter = framesForRedaction();
-    let stable =
-      framesAfter.length === framesBefore.length &&
-      framesBefore.every((frame, index) => framesAfter[index] === frame);
-    if (stable) {
-      try {
-        const recheck = await this.collectOperatorScreenshotMask(
-          framesAfter,
-          extraRedactionSelectors,
-        );
-        stable = recheck.signature === signature;
-      } catch {
-        stable = false;
-      }
-    }
-    if (!stable) throw new Error("screenshot_redaction_unstable");
-    return {
-      base64,
-      frameUrl: targetFrame?.url() ?? null,
-      frameCount: page.frames().length,
-      redactedCount,
-    };
   }
 
   async getState(): Promise<BrowserState> {

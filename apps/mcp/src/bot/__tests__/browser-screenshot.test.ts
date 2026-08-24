@@ -201,28 +201,20 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
     },
   );
 
-  it.skipIf(!chromiumAvailable)(
-    "fails closed when a redaction target's geometry cannot be resolved",
-    async () => {
-      const browser = await chromium.launch({ headless: true });
-      try {
-        const page = await browser.newPage();
-        // boundingBox() returns null (does not throw) for an unrendered
-        // element — that must still abort, never capture with a mask entry
-        // whose geometry was silently skipped.
-        await page.setContent(
-          `<input autocomplete="cc-number" value="4242424242424242" style="display:none">`,
-        );
-        const controller = BrowserController.fromHarnessPage(page);
+  it.skipIf(!chromiumAvailable)("allows a proven hidden empty secret control", async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      await page.setContent(`<input type="password" value="" style="display:none">`);
+      const controller = BrowserController.fromHarnessPage(page);
 
-        await expect(controller.screenshotForOperator()).rejects.toThrow(
-          "screenshot_redaction_unresolved",
-        );
-      } finally {
-        await browser.close();
-      }
-    },
-  );
+      await expect(controller.captureOperatorScreenshot()).resolves.toMatchObject({
+        redactedCount: 1,
+      });
+    } finally {
+      await browser.close();
+    }
+  });
 
   it.skipIf(!chromiumAvailable)(
     "masks an input whose VALUE is a Luhn-valid PAN even without card attributes",
@@ -265,6 +257,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
           '<input autocomplete="cc-exp" value="12/30">',
           '<input autocomplete="cc-csc" value="123">',
           '<select autocomplete="cc-exp-year"><option value="30" selected>2030</option></select>',
+          '<select autocomplete="cc-exp-year"><option value="" selected>2030</option></select>',
         ];
         for (const field of sensitiveFields) {
           const page = await browser.newPage();
@@ -272,6 +265,114 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
           const controller = BrowserController.fromHarnessPage(page);
           await expect(controller.captureOperatorScreenshot()).rejects.toThrow(
             "screenshot_unavailable_sealed_context",
+          );
+          await page.close();
+        }
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "preserves type_secret identity across a controlled-input rerender",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent(
+          '<input data-testid="sealed-login" data-ts-sealed-payment="1" value="secret-value">',
+        );
+        await page.locator("input").evaluate((input) => {
+          const replacement = input.cloneNode(true) as HTMLInputElement;
+          replacement.removeAttribute("data-ts-sealed-payment");
+          input.replaceWith(replacement);
+        });
+        const controller = BrowserController.fromHarnessPage(page);
+
+        await expect(controller.captureOperatorScreenshot({}, ["sealed-login"])).rejects.toThrow(
+          "screenshot_unavailable_sealed_context",
+        );
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "never passes raw screenshot bytes through merchant page APIs",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent('<input autocomplete="cc-number" value="4242424242424242">');
+        await page.evaluate(() => {
+          const state = window as Window & { screenshotApiTouches?: number };
+          state.screenshotApiTouches = 0;
+          const NativeImage = window.Image;
+          Object.defineProperty(window, "Image", {
+            configurable: true,
+            value: class extends NativeImage {
+              constructor(width?: number, height?: number) {
+                super(width, height);
+                state.screenshotApiTouches! += 1;
+              }
+            },
+          });
+          const createElement = document.createElement.bind(document);
+          document.createElement = ((tagName: string, options?: ElementCreationOptions) => {
+            if (tagName.toLowerCase() === "canvas") state.screenshotApiTouches! += 1;
+            return createElement(tagName, options);
+          }) as typeof document.createElement;
+        });
+        const controller = BrowserController.fromHarnessPage(page);
+
+        const result = await controller.screenshotForOperator();
+
+        expect(isValidJpegBase64(result.base64)).toBe(true);
+        expect(
+          await page.evaluate(
+            () => (window as Window & { screenshotApiTouches?: number }).screenshotApiTouches,
+          ),
+        ).toBe(0);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "rejects redaction geometry and element identity changes during capture",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        for (const mutation of ["move", "replace"] as const) {
+          const page = await browser.newPage();
+          await page.setContent('<input id="secret" autocomplete="cc-number" value="">');
+          const context = page.context();
+          const newCDPSession = context.newCDPSession.bind(context);
+          context.newCDPSession = async (target) => {
+            const session = await newCDPSession(target);
+            const send = session.send.bind(session);
+            session.send = async (method, params) => {
+              const result = await send(method, params);
+              if (method === "Page.captureScreenshot") {
+                await page.locator("#secret").evaluate((element, kind) => {
+                  if (kind === "move") {
+                    (element as HTMLElement).style.marginLeft = "80px";
+                  } else {
+                    element.replaceWith(element.cloneNode(true));
+                  }
+                }, mutation);
+              }
+              return result;
+            };
+            return session;
+          };
+          const controller = BrowserController.fromHarnessPage(page);
+
+          await expect(controller.screenshotForOperator()).rejects.toThrow(
+            "screenshot_redaction_unstable",
           );
           await page.close();
         }
