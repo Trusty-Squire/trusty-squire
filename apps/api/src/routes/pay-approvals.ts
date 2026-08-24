@@ -456,10 +456,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       agent: record.agent,
       expires_at: record.expiresAt.toISOString(),
       approval_payload_sha256: payloadHash?.toString("base64url") ?? null,
-      card:
-        card === null
-          ? null
-          : { blob: card.blob, label: card.label, last4: card.last4 },
+      card: card === null ? null : { blob: card.blob, label: card.label, last4: card.last4 },
     });
   });
 

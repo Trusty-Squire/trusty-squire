@@ -70,9 +70,10 @@ the holder of the short-lived approval link. That capability-link response also
 returns the exact server-recorded merchant, checkout origin, amount, currency,
 nonce, item, reason, requesting-agent label, and expiry that the user must review
 and authorize. It includes the approval ID and status, opaque card reference,
-operator public key, purchase-payload digest, and encrypted blob, but omits card
-display metadata and does not grant account navigation. List responses omit the
-blob and expose only the record ID, label,
+operator public key, purchase-payload digest, encrypted blob, and the bound card's
+non-secret label and `last4` display metadata so the holder can identify the card
+being released. It does not grant account navigation. List responses omit the blob
+and expose only the record ID, label,
 creation time, and optional plaintext card display metadata: a no-digit network
 name (`brand`) and exactly four digits (`last4`). These fields cannot carry a
 full PAN; legacy rows return `null`. Losing the enrolled passkey makes the card

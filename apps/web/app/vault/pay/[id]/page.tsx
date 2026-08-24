@@ -361,9 +361,7 @@ export default function PaymentApprovalPage() {
             </div>
           ) : (
             <CardEntry
-              onSaved={({ id: cardId, label, last4 }) =>
-                void bindCard(cardId, { label, last4 })
-              }
+              onSaved={({ id: cardId, label, last4 }) => void bindCard(cardId, { label, last4 })}
             />
           )}
         </section>

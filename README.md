@@ -72,8 +72,9 @@ precision (for example, whole yen for JPY and two decimals for USD). The anonymo
 approval page shows the merchant, checkout origin, amount and currency, item, and
 reason directly from the short-lived server record before one passkey ceremony
 authorizes those canonical payment values. You also see the requesting MCP client
-(for example, Hermes) and that a saved card will be used before clicking **Approve
-payment** to relay the operator-sealed final authorization. When the pre-submission
+(for example, Hermes) and the bound card's label plus last four digits (or its label
+alone for a legacy card) before clicking **Approve payment** to relay the
+operator-sealed final authorization. When the pre-submission
 checkout can be machine-read, the payment is refused if its merchant, origin, amount,
 or currency has changed since approval. If that resume read cannot recover a total,
 Trusty Squire reuses the original mandate-bound checkout values. Card entry requires the PAN,

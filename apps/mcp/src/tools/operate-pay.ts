@@ -315,9 +315,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
             ? (cardRef ?? null)
             : paymentClaim.resumeApproval.boundCardRef;
         const cardIdentity = approvalCardIdentity(
-          approvalCardRef === null
-            ? undefined
-            : cards.find((card) => card.id === approvalCardRef),
+          approvalCardRef === null ? undefined : cards.find((card) => card.id === approvalCardRef),
         );
         let resolvedCardRef: string | null = null;
         let filledPending: PendingCardFill | null = null;
@@ -588,9 +586,7 @@ async function threeDsStatusResult(
   const browser = await activeProvisionBrowserForPayment(session);
   const expiredAtEntry = Date.now() >= state.deadline;
   const boundMs =
-    expiredAtEntry || waitSeconds <= 0
-      ? 0
-      : Math.min(Math.max(waitSeconds * 1000, 1_000), 15_000);
+    expiredAtEntry || waitSeconds <= 0 ? 0 : Math.min(Math.max(waitSeconds * 1000, 1_000), 15_000);
   const resolution = await browser.waitForThreeDsResolution(boundMs);
   const terminalStatus = threeDsResolutionStatus(resolution);
   const unresolvedPastDeadline =
@@ -690,7 +686,7 @@ export const operatePaymentStatusTool: Tool<z.infer<typeof paymentStatusInputSch
     "Report the status of the addressed session's payment approval currently awaiting " +
     "the human's phone tap, if any — started by an operate_pay call that returned approval_pending. " +
     "Also covers an already-submitted charge whose 3-D Secure challenge (including a decoupled/" +
-    'out-of-band app-push) had not resolved when a prior operate_pay call\'s own wait ended (that ' +
+    "out-of-band app-push) had not resolved when a prior operate_pay call's own wait ended (that " +
     'call returns payment_3ds_required or payment_outcome_unknown with needs_user.wall="3ds" and ' +
     "a next hint pointing here) — call this again to keep checking rather than re-calling " +
     "operate_pay, which does not resume a post-submit 3DS wait; reports payment_3ds_pending while " +
