@@ -2349,6 +2349,7 @@ const SEALED_FIELD_PLACEHOLDER = "[sealed]";
 function isSealedFieldValue(el: InteractiveElement, sealed: ReadonlySet<string>): boolean {
   if (el.sealed === true) return true;
   if ((el.type ?? "").toLowerCase() === "password") return true;
+  if ((el.sealedIdentityKeys ?? []).some((key) => sealed.has(key))) return true;
   return elementTargetKeys(el).some((k) => sealed.has(k));
 }
 function presentFieldValue(
@@ -2798,7 +2799,7 @@ export async function captureScreenshot(
   // A live card fill is never safe to inspect, even when the caller selects a
   // child frame. Historical seals are different: sealedFieldKeys is cumulative,
   // so the browser must inspect only the frames this capture would include.
-  if (session.paymentFieldSealActive) {
+  if (session.paymentFieldSealActive || session.activePayment?.status === "operating") {
     throw new Error("screenshot_unavailable_sealed_context");
   }
   const captured = await session.browser.captureOperatorScreenshot(opts, [
@@ -4769,14 +4770,14 @@ export async function act(
       // assertSecretFrameTargetAllowed; a main-frame or same-domain-frame
       // target is unaffected.
       assertSecretFrameTargetAllowed(session, el);
-      // Remember this field so the next observation masks its DOM value — the
-      // host sealed this secret into a slot and must never read it back.
-      for (const key of elementTargetKeys(el)) session.sealedFieldKeys.add(key);
       // Type the REAL value into the page. It crosses only browser↔page; the
       // value is never returned to the host and never logged.
       const target = frameTargetFor(el);
-      if (target !== null) await browser.typeInFrame(target, el.selector, value, true);
-      else await browser.type(el.selector, value, true);
+      const sealedFieldKeys =
+        target !== null
+          ? await browser.typeInFrame(target, el.selector, value, true)
+          : await browser.type(el.selector, value, true);
+      for (const key of sealedFieldKeys) session.sealedFieldKeys.add(key);
       audit(sessionId, "type_secret", {
         slot: action.slot,
         target: action.target,

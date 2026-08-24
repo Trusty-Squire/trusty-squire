@@ -770,6 +770,41 @@ const SCREENSHOT_SECRET_FIELD_SELECTORS = [
 ].join(",");
 const SCREENSHOT_REDACTION_SELECTORS = `${CHECKOUT_CARD_VALUE_FIELD_SELECTORS},${SCREENSHOT_SECRET_FIELD_SELECTORS}`;
 
+interface SealedElementDescriptor {
+  tag: string;
+  type: string | null;
+  id: string | null;
+  name: string | null;
+  testId: string | null;
+  labelText: string | null;
+  ariaLabel: string | null;
+  placeholder: string | null;
+  landmark: string | null;
+  ordinal: number;
+}
+
+function sealedElementSemanticKeys(descriptor: SealedElementDescriptor): string[] {
+  const clean = (value: string | null | undefined): string =>
+    (value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+  const tag = clean(descriptor.tag);
+  const type = clean(descriptor.type);
+  const landmark = clean(descriptor.landmark);
+  const label = clean(descriptor.labelText ?? descriptor.ariaLabel ?? descriptor.placeholder);
+  return Array.from(
+    new Set(
+      [
+        clean(descriptor.testId) ? `test:${clean(descriptor.testId)}` : "",
+        clean(descriptor.id) ? `id:${clean(descriptor.id)}` : "",
+        clean(descriptor.name)
+          ? `name:${tag}:${type}:${clean(descriptor.name)}`
+          : "",
+        label ? `label:${landmark}:${tag}:${type}:${label}` : "",
+        `position:${landmark}:${tag}:${type}:${descriptor.ordinal}`,
+      ].filter((key) => key.length > 0),
+    ),
+  );
+}
+
 // Charge-verb button labels — the click that may move money. Used by
 // submitFilledCheckout to find the charge control, and by operate_act's
 // pending-card-fill guard to recognize and cap caller-placed attempts while a
@@ -3101,6 +3136,11 @@ export class BrowserController {
   private checkoutOutcomeBaseline: CheckoutOutcomeBaseline | undefined;
   private checkoutSubmitSequence = 0;
   private clickDispatchSequence = 0;
+  private sealedDocumentSequence = 0;
+  private readonly sealedDocuments = new Map<
+    Frame,
+    { handle: JSHandle<Document>; identity: string }
+  >();
   // The page start() configured with the controller's navigation/captcha
   // handlers. OAuth may temporarily switch `this.page` to a popup, but warm
   // reuse must always restore this original page rather than adopting a popup
@@ -4514,25 +4554,29 @@ export class BrowserController {
     }
   }
 
-  async type(selector: string, text: string, sealed = false): Promise<void> {
+  async type(selector: string, text: string, sealed = false): Promise<string[]> {
     if (!this.page) throw new Error("Browser not started");
-    await this.withModalInertNeutralized(selector, () => this.typeInner(selector, text, sealed));
+    return await this.withModalInertNeutralized(selector, () =>
+      this.typeInner(selector, text, sealed),
+    );
   }
 
-  private async typeInner(selector: string, text: string, sealed = false): Promise<void> {
+  private async typeInner(selector: string, text: string, sealed = false): Promise<string[]> {
     if (!this.page) throw new Error("Browser not started");
     // Wait for element to be visible and enabled before typing.
     await this.page.waitForSelector(selector, { state: "visible", timeout: 10000 });
+    const locator = this.page.locator(selector);
+    const sealedFieldKeys = sealed
+      ? await this.operatorScreenshotIdentityKeys(locator, this.page.mainFrame())
+      : [];
     if (sealed) {
-      await this.page
-        .locator(selector)
-        .evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
+      await locator.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
     }
 
     if (!this.humanize) {
       // Fast path for tests / non-humanized runs.
       await this.page.fill(selector, text);
-      return;
+      return sealedFieldKeys;
     }
 
     // Humanized typing:
@@ -4554,7 +4598,6 @@ export class BrowserController {
     // discarded after char 1. Switching to a single pressSequentially
     // call lets the browser's auto-advance handler move focus naturally.
     await this.humanClick(selector);
-    const locator = this.page.locator(selector);
     // Clear any prefilled value before typing. Only meaningful for
     // single-input fields; multi-input OTP forms ignore this since
     // each box is its own input.
@@ -4565,6 +4608,7 @@ export class BrowserController {
     // hook, and over-engineering it added zero observable behavior-
     // score improvement.
     await locator.pressSequentially(text, { delay: rand(40, 110) });
+    return sealedFieldKeys;
   }
 
   // Best-effort scan for the SPECIFIC unfilled required field(s) blocking a
@@ -5618,7 +5662,11 @@ export class BrowserController {
     text: string,
     sealed = false,
   ): Promise<string[]> {
-    const sealedFieldKeys = sealed ? await this.operatorScreenshotIdentityKeys(handle, 0) : [];
+    const ownerFrame = await handle.ownerFrame();
+    if (ownerFrame === null) throw new Error("locator target has no owning frame");
+    const sealedFieldKeys = sealed
+      ? await this.operatorScreenshotIdentityKeys(handle, ownerFrame)
+      : [];
     if (sealed) {
       await handle.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
     }
@@ -8501,24 +8549,30 @@ export class BrowserController {
     return { frames, strictFrames, clip };
   }
 
+  private async sealedDocumentIdentity(frame: Frame): Promise<string> {
+    const current = this.sealedDocuments.get(frame);
+    if (
+      current !== undefined &&
+      !frame.isDetached() &&
+      (await frame.evaluate((expected) => document === expected, current.handle).catch(() => false))
+    ) {
+      return current.identity;
+    }
+    await current?.handle.dispose().catch(() => undefined);
+    const handle = await frame.evaluateHandle(() => document);
+    const identity = `document-${this.sealedDocumentSequence++}`;
+    this.sealedDocuments.set(frame, { handle, identity });
+    return identity;
+  }
+
   private async operatorScreenshotIdentityKeys(
     target: Locator | ElementHandle<Element>,
-    index: number,
+    frame: Frame,
   ): Promise<string[]> {
-    return await (target as unknown as ElementHandle<Element>).evaluate((el, candidateIndex) => {
+    const descriptor = await (target as unknown as ElementHandle<Element>).evaluate((el) => {
       const clean = (value: string | null | undefined): string | null => {
         const normalized = (value ?? "").replace(/\s+/g, " ").trim();
         return normalized.length > 0 ? normalized : null;
-      };
-      const slug = (value: string | null, fallback: string): string => {
-        const normalized = (value ?? fallback)
-          .replace(/\s+/g, " ")
-          .trim()
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, "-")
-          .replace(/^-+|-+$/g, "")
-          .slice(0, 48);
-        return normalized.length > 0 ? normalized : fallback;
       };
       const labelFor = (element: Element): string | null => {
         const id = element.getAttribute("id");
@@ -8535,75 +8589,33 @@ export class BrowserController {
             .join(" ");
           if (text.length > 0) return text;
         }
-        const ancestorLabel = clean(element.closest("label")?.textContent);
-        if (ancestorLabel !== null) return ancestorLabel;
-        let current: Element | null = element;
-        for (let depth = 0; depth < 3 && current !== null; depth += 1) {
-          let sibling = current.previousElementSibling;
-          for (let scanned = 0; scanned < 4 && sibling !== null; scanned += 1) {
-            const nestedLabel = clean(sibling.querySelector("label")?.textContent);
-            if (nestedLabel !== null) return nestedLabel;
-            const text = clean(sibling.textContent);
-            if (text !== null && text.length <= 80 && !/[{};]/.test(text)) return text;
-            sibling = sibling.previousElementSibling;
-          }
-          current = current.parentElement;
-        }
-        return null;
+        return clean(element.closest("label")?.textContent);
       };
-      const region = el.closest(
-        '[role="dialog"],dialog,[aria-modal="true"],nav,main,header,footer,aside,form,section,article',
+      const controls = Array.from(
+        (el.getRootNode() as Document | ShadowRoot).querySelectorAll(
+          "input,textarea,select,[contenteditable='true']",
+        ),
       );
-      const regionKind =
-        region?.getAttribute("role") === "dialog" ||
-        region?.tagName.toLowerCase() === "dialog" ||
-        region?.getAttribute("aria-modal") === "true"
-          ? "dialog"
-          : (region?.tagName.toLowerCase() ?? "body");
-      const regionLabel =
-        clean(region?.getAttribute("aria-label")) ??
-        clean(region?.querySelector("h1,h2,h3,[role='heading']")?.textContent) ??
-        clean(region?.textContent)?.slice(0, 60) ??
-        (region === null ? "root" : regionKind);
-      const container =
-        region === null ? "body:root" : `${regionKind}:${slug(regionLabel, regionKind)}`;
-      const tag = el.tagName.toLowerCase();
-      const kind = el.getAttribute("role") || (tag === "a" ? "link" : tag);
-      const directLabel =
-        clean(el.getAttribute("aria-label")) ??
-        clean(el.getAttribute("title")) ??
-        clean(el.getAttribute("name")) ??
-        clean(el.textContent);
-      const value =
-        el instanceof HTMLInputElement ||
-        el instanceof HTMLTextAreaElement ||
-        el instanceof HTMLSelectElement
-          ? el.value
-          : null;
-      const reference =
-        clean(el.textContent) ??
-        labelFor(el) ??
-        clean(el.getAttribute("aria-label")) ??
-        clean(el.getAttribute("placeholder")) ??
-        clean(el.getAttribute("title")) ??
-        clean(el.getAttribute("name")) ??
-        clean(value) ??
-        `${tag}#${candidateIndex}`;
-      const pathLabel = labelFor(el) ?? directLabel;
-      const testId =
-        el.getAttribute("data-testid") ??
-        el.getAttribute("data-test-id") ??
-        el.getAttribute("data-test") ??
-        el.getAttribute("data-cy") ??
-        el.getAttribute("data-qa");
-      return [
-        `${container} > ${kind}:${slug(pathLabel, `${kind}-${candidateIndex}`)}`,
-        testId,
-        reference.slice(0, 80),
-      ]
-        .map((key) => clean(key))
-        .filter((key): key is string => key !== null);
-    }, index);
+      return {
+        tag: el.tagName.toLowerCase(),
+        type: el.getAttribute("type"),
+        id: el.getAttribute("id"),
+        name: el.getAttribute("name"),
+        testId:
+          el.getAttribute("data-testid") ??
+          el.getAttribute("data-test-id") ??
+          el.getAttribute("data-test") ??
+          el.getAttribute("data-cy") ??
+          el.getAttribute("data-qa"),
+        labelText: labelFor(el),
+        ariaLabel: el.getAttribute("aria-label"),
+        placeholder: el.getAttribute("placeholder"),
+        landmark: el.closest("header,main,footer,nav,aside,article,section")?.tagName.toLowerCase() ?? null,
+        ordinal: controls.indexOf(el),
+      } satisfies SealedElementDescriptor;
+    });
+    const documentIdentity = await this.sealedDocumentIdentity(frame);
+    return sealedElementSemanticKeys(descriptor).map((key) => `${documentIdentity}:${key}`);
   }
 
   private async resolveOperatorScreenshotSealedLocators(
@@ -8617,10 +8629,7 @@ export class BrowserController {
         .locator("input,textarea,select,[contenteditable='true']")
         .all();
       for (const candidate of candidates) {
-        const keys = await this.operatorScreenshotIdentityKeys(
-          candidate,
-          candidates.indexOf(candidate),
-        );
+        const keys = await this.operatorScreenshotIdentityKeys(candidate, frame);
         if (keys.some((key) => sealedFieldKeys.has(key))) matches.push(candidate);
       }
       byFrame.set(frame, matches);
@@ -8947,13 +8956,61 @@ export class BrowserController {
       if (!(await documentsStillCurrent())) {
         throw new Error("screenshot_unavailable_sealed_context");
       }
-      const captured = await this.screenshotForOperatorResolved(
-        opts,
-        targetFrame,
-        frames,
-        sealedLocators,
-        scope,
-      );
+      let captured:
+        | {
+            base64: string;
+            frameUrl: string | null;
+            frameCount: number;
+            redactedCount: number;
+          }
+        | undefined;
+      let attemptScope = scope;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (attempt > 0) {
+          attemptScope = await this.operatorScreenshotCaptureScope(targetFrame);
+          if (
+            attemptScope.frames.length !== frames.length ||
+            !frames.every((frame, index) => attemptScope.frames[index] === frame)
+          ) {
+            throw new Error("screenshot_unavailable_sealed_context");
+          }
+        }
+        try {
+          captured = await this.screenshotForOperatorResolved(
+            opts,
+            targetFrame,
+            frames,
+            sealedLocators,
+            attemptScope,
+            async () => {
+              if (!(await documentsStillCurrent())) {
+                throw new Error("screenshot_unavailable_sealed_context");
+              }
+              await this.assertOperatorScreenshotFramesNoSealedValues(
+                frames,
+                [],
+                sealedLocators,
+                attemptScope.clip,
+                attemptScope.strictFrames,
+              );
+              if (!(await documentsStillCurrent())) {
+                throw new Error("screenshot_unavailable_sealed_context");
+              }
+            },
+          );
+          break;
+        } catch (error) {
+          if (
+            attempt === 0 &&
+            error instanceof Error &&
+            error.message === "screenshot_redaction_unstable"
+          ) {
+            continue;
+          }
+          throw error;
+        }
+      }
+      if (captured === undefined) throw new Error("screenshot_unavailable_sealed_context");
       if (!(await documentsStillCurrent())) {
         throw new Error("screenshot_unavailable_sealed_context");
       }
@@ -8961,8 +9018,8 @@ export class BrowserController {
         frames,
         [],
         sealedLocators,
-        scope.clip,
-        scope.strictFrames,
+        attemptScope.clip,
+        attemptScope.strictFrames,
       );
       return captured;
     } catch (error) {
@@ -9026,6 +9083,7 @@ export class BrowserController {
       strictFrames: ReadonlySet<Frame>;
       clip: { x: number; y: number; width: number; height: number } | null;
     } = { frames: [...framesBefore], strictFrames: new Set(framesBefore), clip: null },
+    beforeCapture?: () => Promise<void>,
   ): Promise<{
     base64: string;
     frameUrl: string | null;
@@ -9070,6 +9128,7 @@ export class BrowserController {
             const scroll = await page.evaluate(() => ({ x: window.scrollX, y: window.scrollY }));
             origin = { x: box.x, y: box.y };
             captureSize = { width: box.width, height: box.height };
+            await beforeCapture?.();
             const result = await cdp.send("Page.captureScreenshot", {
               format: "jpeg",
               quality: 80,
@@ -9097,6 +9156,7 @@ export class BrowserController {
           }));
           origin = dimensions.origin;
           captureSize = dimensions.size;
+          await beforeCapture?.();
           const result = await cdp.send("Page.captureScreenshot", {
             format: "jpeg",
             quality: 80,
@@ -9115,6 +9175,7 @@ export class BrowserController {
           const viewport = page.viewportSize();
           if (viewport === null) throw new Error("screenshot_redaction_unresolved");
           captureSize = viewport;
+          await beforeCapture?.();
           const result = await cdp.send("Page.captureScreenshot", {
             format: "jpeg",
             quality: 80,
@@ -13774,6 +13835,7 @@ export class BrowserController {
         selectedOptionText: string | null;
         interactedThisRun: boolean;
         sealed: boolean;
+        sealedOrdinal: number;
         screenPath: string | null;
         container: string | null;
         inDialog: boolean;
@@ -13925,6 +13987,11 @@ export class BrowserController {
               : null,
           interactedThisRun: el.getAttribute("data-ts-touched") === "1",
           sealed: el.getAttribute("data-ts-sealed-payment") === "1",
+          sealedOrdinal: Array.from(
+            (el.getRootNode() as Document | ShadowRoot).querySelectorAll(
+              "input,textarea,select,[contenteditable='true']",
+            ),
+          ).indexOf(el),
           screenPath:
             `${container ?? "body:root"} > ${elementKind(el)}:` +
             slug(pathLabel, `${elementKind(el)}-${out.length}`),
@@ -14258,23 +14325,29 @@ export class BrowserController {
     selector: string,
     text: string,
     sealed = false,
-  ): Promise<void> {
+  ): Promise<string[]> {
     const handle = await this.resolveFrameElement(target, selector);
     if (handle === null) {
       throw new Error(`type: the target's frame is no longer present (${this.frameLabel(target)})`);
     }
     try {
       await handle.waitForElementState("visible", { timeout: 10000 });
+      const frame = await handle.ownerFrame();
+      if (frame === null) throw new Error("type target has no owning frame");
+      const sealedFieldKeys = sealed
+        ? await this.operatorScreenshotIdentityKeys(handle, frame)
+        : [];
       if (sealed) {
         await handle.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
       }
       if (!this.humanize) {
         await handle.fill(text);
-        return;
+        return sealedFieldKeys;
       }
       await handle.click({ timeout: 8000 }).catch(() => undefined);
       await handle.fill("").catch(() => undefined);
       await handle.type(text, { delay: rand(40, 110) });
+      return sealedFieldKeys;
     } finally {
       await handle.dispose().catch(() => undefined);
     }
@@ -14362,8 +14435,21 @@ export class BrowserController {
     const page = this.page;
     const mainRaw = await this.extractElementsFromContext(page);
     const mainGroups = assignCardRadioGroups(mainRaw.clusterMeta);
+    const mainDocumentIdentity = await this.sealedDocumentIdentity(page.mainFrame());
     const mainElements = mainRaw.out.map((e, i) => ({
       ...e,
+      sealedIdentityKeys: sealedElementSemanticKeys({
+        tag: e.tag,
+        type: e.type,
+        id: e.id,
+        name: e.name,
+        testId: e.testId,
+        labelText: e.labelText,
+        ariaLabel: e.ariaLabel,
+        placeholder: e.placeholder,
+        landmark: e.landmark,
+        ordinal: e.sealedOrdinal,
+      }).map((key) => `${mainDocumentIdentity}:${key}`),
       cardRadioGroup: mainGroups[i] ?? null,
       frameOrigin: null,
       frameUrl: null,
@@ -14394,10 +14480,23 @@ export class BrowserController {
         const raw = await this.extractElementsFromContext(frame);
         const security = await this.frameSecurity(frame);
         const frameOrigin = security.origin;
+        const frameDocumentIdentity = await this.sealedDocumentIdentity(frame);
         const groups = assignCardRadioGroups(raw.clusterMeta);
         for (const [i, e] of raw.out.entries()) {
           framedElements.push({
             ...e,
+            sealedIdentityKeys: sealedElementSemanticKeys({
+              tag: e.tag,
+              type: e.type,
+              id: e.id,
+              name: e.name,
+              testId: e.testId,
+              labelText: e.labelText,
+              ariaLabel: e.ariaLabel,
+              placeholder: e.placeholder,
+              landmark: e.landmark,
+              ordinal: e.sealedOrdinal,
+            }).map((key) => `${frameDocumentIdentity}:${key}`),
             cardRadioGroup: groups[i] ?? null,
             frameOrigin,
             frameUrl,
@@ -16241,6 +16340,8 @@ export interface InteractiveElement {
   inViewport: boolean;
   inConsentWidget: boolean;
   sealed?: boolean;
+  sealedIdentityKeys?: string[];
+  sealedOrdinal?: number;
   // T13 follow-up — OAuth-affordance signals. `href` is the link
   // target (an OAuth <a> points at e.g. /identity/login/google/);
   // `iconLabel` folds in a descendant <img alt> / <svg><title> /

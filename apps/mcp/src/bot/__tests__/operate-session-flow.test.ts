@@ -328,11 +328,18 @@ vi.mock("../browser.js", () => ({
     async scrollViewport(direction: string): Promise<void> {
       h.scrolls.push(direction);
     }
-    async type(selector: string, text: string, sealed = false): Promise<void> {
+    async type(selector: string, text: string, sealed = false): Promise<string[]> {
       h.typed.push({ selector, text, ...(sealed ? { sealed: true as const } : {}) });
       for (const element of h.elements as Array<Record<string, unknown>>) {
         if (element.selector === selector) element.value = text;
       }
+      const element = (h.elements as Array<Record<string, unknown>>).find(
+        (candidate) => candidate.selector === selector,
+      );
+      return sealed
+        ? [element?.screenPath, element?.testId, element?.visibleText]
+            .filter((key): key is string => typeof key === "string" && key.length > 0)
+        : [];
     }
     async markPreexistingTypeSuggestionPopups(): Promise<void> {}
     async detectTypeSuggestionPopup(_selector: string): Promise<string[]> {
@@ -471,7 +478,7 @@ vi.mock("../browser.js", () => ({
       selector: string,
       text: string,
       sealed = false,
-    ): Promise<void> {
+    ): Promise<string[]> {
       h.frameTypes.push({
         frameUrl: target.frameUrl,
         selector,
@@ -482,6 +489,13 @@ vi.mock("../browser.js", () => ({
         if (element.selector === selector && element.frameUrl === target.frameUrl)
           element.value = text;
       }
+      const element = (h.elements as Array<Record<string, unknown>>).find(
+        (candidate) => candidate.selector === selector && candidate.frameUrl === target.frameUrl,
+      );
+      return sealed
+        ? [element?.screenPath, element?.testId, element?.visibleText]
+            .filter((key): key is string => typeof key === "string" && key.length > 0)
+        : [];
     }
     async selectInFrame(
       target: { frameUrl: string },
@@ -5425,11 +5439,17 @@ describe("pending card-fill charge guard", () => {
   });
 
   it("serializes fill-card behind every other payment lease", async () => {
-    await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
     const claim = claimActivePaymentForOperatePay(undefined);
     if (claim.kind !== "lease") throw new Error("expected payment lease");
 
     expect(() => claimActivePaymentForOperatePay("fill_card")).toThrow(/already in progress/);
+    await expect(captureScreenshot(started.session_id)).rejects.toThrow(
+      "screenshot_unavailable_sealed_context",
+    );
+    expect(h.capturedSealedFieldKeys).toEqual([]);
     expect(releaseActivePaymentLease(claim.lease)).toBe(true);
   });
 

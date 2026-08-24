@@ -280,19 +280,18 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
       const browser = await chromium.launch({ headless: true });
       try {
         const page = await browser.newPage();
-        await page.setContent(
-          '<input data-testid="sealed-login" data-ts-sealed-payment="1" value="secret-value">',
-        );
+        await page.setContent("<nav><input></nav>");
+        const controller = BrowserController.fromHarnessPage(page);
+        const sealedFieldKeys = await controller.type("input", "secret-value", true);
         await page.locator("input").evaluate((input) => {
           const replacement = input.cloneNode(true) as HTMLInputElement;
           replacement.removeAttribute("data-ts-sealed-payment");
           input.replaceWith(replacement);
         });
-        const controller = BrowserController.fromHarnessPage(page);
 
-        await expect(controller.captureOperatorScreenshot({}, ["sealed-login"])).rejects.toThrow(
-          "screenshot_unavailable_sealed_context",
-        );
+        await expect(
+          controller.captureOperatorScreenshot({}, sealedFieldKeys),
+        ).rejects.toThrow("screenshot_unavailable_sealed_context");
       } finally {
         await browser.close();
       }
@@ -305,7 +304,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
       const browser = await chromium.launch({ headless: true });
       try {
         const page = await browser.newPage();
-        await page.setContent('<label for="secret">Login code</label><input id="secret">');
+        await page.setContent('<nav><input id="secret"></nav>');
         const controller = BrowserController.fromHarnessPage(page);
         const resolved = await controller.resolvePageTarget("css", "#secret", "type");
         expect(resolved.ok).toBe(true);
@@ -420,6 +419,79 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
           );
           await page.close();
         }
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "re-verifies sealed content immediately before pixel capture",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent("<div id=card></div>");
+        const context = page.context();
+        const newCDPSession = context.newCDPSession.bind(context);
+        let captureCalls = 0;
+        context.newCDPSession = async (target) => {
+          const session = await newCDPSession(target);
+          await page.locator("#card").evaluate((element) => {
+            element.textContent = "4242 4242 4242 4242";
+          });
+          const send = session.send.bind(session);
+          session.send = async (method, params) => {
+            if (method === "Page.captureScreenshot") captureCalls += 1;
+            return await send(method, params);
+          };
+          return session;
+        };
+        const controller = BrowserController.fromHarnessPage(page);
+
+        await expect(controller.captureOperatorScreenshot()).rejects.toThrow(
+          "screenshot_unavailable_sealed_context",
+        );
+        expect(captureCalls).toBe(0);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "retries one observed capture mutation against fresh geometry",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent('<input id="secret" autocomplete="cc-number" value="">');
+        const context = page.context();
+        const newCDPSession = context.newCDPSession.bind(context);
+        let captureCalls = 0;
+        context.newCDPSession = async (target) => {
+          const session = await newCDPSession(target);
+          const send = session.send.bind(session);
+          session.send = async (method, params) => {
+            const result = await send(method, params);
+            if (method === "Page.captureScreenshot") {
+              captureCalls += 1;
+              if (captureCalls === 1) {
+                await page.locator("#secret").evaluate((element) => {
+                  (element as HTMLElement).style.marginLeft = "80px";
+                });
+              }
+            }
+            return result;
+          };
+          return session;
+        };
+        const controller = BrowserController.fromHarnessPage(page);
+
+        const result = await controller.captureOperatorScreenshot();
+
+        expect(isValidJpegBase64(result.base64)).toBe(true);
+        expect(captureCalls).toBe(2);
       } finally {
         await browser.close();
       }
