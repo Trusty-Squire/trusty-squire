@@ -1358,16 +1358,14 @@ export async function executeOperatePay(
     let paymentStatus = "payment_submitted";
     let submitResult: CheckoutSubmitResult = { three_ds_required: false, order_confirmed: false };
     try {
-      submitResult = await browser.fillAndSubmitCheckout(
-        {
-          ...card,
-          ...(args.card_label !== undefined ? { label: args.card_label } : {}),
-          ...(args.card_network !== undefined ? { network: args.card_network } : {}),
-          ...(args.card_issuer !== undefined
-            ? { issuer: args.card_issuer, issuer_source: "bin_metadata" as const }
-            : {}),
-        },
-      );
+      submitResult = await browser.fillAndSubmitCheckout({
+        ...card,
+        ...(args.card_label !== undefined ? { label: args.card_label } : {}),
+        ...(args.card_network !== undefined ? { network: args.card_network } : {}),
+        ...(args.card_issuer !== undefined
+          ? { issuer: args.card_issuer, issuer_source: "bin_metadata" as const }
+          : {}),
+      });
       if (submitResult.three_ds_required) paymentStatus = "payment_3ds_required";
       else if (!submitResult.order_confirmed) paymentStatus = "payment_outcome_unknown";
     } catch (error) {

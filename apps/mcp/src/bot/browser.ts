@@ -11141,9 +11141,10 @@ export class BrowserController {
       try {
         if (
           await frameElement
-            .evaluate((element) =>
-              element instanceof Element &&
-              element.matches('iframe[title*="3d secure" i],iframe[name*="3ds" i]'),
+            .evaluate(
+              (element) =>
+                element instanceof Element &&
+                element.matches('iframe[title*="3d secure" i],iframe[name*="3ds" i]'),
             )
             .catch(() => false)
         ) {
@@ -11217,9 +11218,12 @@ export class BrowserController {
       undefined;
     const observedIssuer =
       challengeText.match(/\b([A-Z][A-Z0-9]{2,})\s+(?:app|bank)\b/)?.[1] ??
-      challengeText.match(/\b(?:issuer|bank|app)\s*[:\-]\s*([A-Za-z][A-Za-z0-9 .-]{1,48})/i)?.[1]
+      challengeText
+        .match(/\b(?:issuer|bank|app)\s*[:\-]\s*([A-Za-z][A-Za-z0-9 .-]{1,48})/i)?.[1]
         ?.trim();
-    const observedNetwork = challengeText.match(/\b(visa|mastercard|amex|american express)\b/i)?.[1];
+    const observedNetwork = challengeText.match(
+      /\b(visa|mastercard|amex|american express)\b/i,
+    )?.[1];
     const normalizedExpectedIssuer = expected.issuer?.replace(/[^a-z0-9]/gi, "").toLowerCase();
     const normalizedObservedIssuer = observedIssuer?.replace(/[^a-z0-9]/gi, "").toLowerCase();
     const networkFamily = (value: string | undefined) => {
@@ -11283,10 +11287,7 @@ export class BrowserController {
   }
 
   private async detectThreeDsChallenge(
-    expectedCard?: Pick<
-      CheckoutCard,
-      "pan" | "issuer" | "issuer_source" | "network" | "label"
-    >,
+    expectedCard?: Pick<CheckoutCard, "pan" | "issuer" | "issuer_source" | "network" | "label">,
   ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     if (expectedCard !== undefined) {
@@ -11317,7 +11318,7 @@ export class BrowserController {
         (await this.frameWithinThreeDsStructuralFrame(frame)) ||
         /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i.test(
           text,
-      );
+        );
       if (!detected) continue;
       const mismatch = this.comparePaymentInstrumentEvidence(
         this.paymentInstrumentExpectation,
@@ -11383,10 +11384,7 @@ export class BrowserController {
     while (true) {
       await this.page.bringToFront().catch(() => undefined);
       await this.detectThreeDsChallenge().catch(() => undefined);
-      if (
-        mismatchAtEntry === undefined &&
-        this.observedPaymentInstrumentMismatch !== undefined
-      ) {
+      if (mismatchAtEntry === undefined && this.observedPaymentInstrumentMismatch !== undefined) {
         return "timeout";
       }
       if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) return "succeeded";

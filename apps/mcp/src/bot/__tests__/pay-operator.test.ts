@@ -922,9 +922,7 @@ describe("operate_pay", () => {
     );
 
     expect(result).toMatchObject({ warning: mismatch });
-    expect(pendingThreeDsStates).toMatchObject([
-      { payment_instrument_mismatch: mismatch },
-    ]);
+    expect(pendingThreeDsStates).toMatchObject([{ payment_instrument_mismatch: mismatch }]);
   });
 
   it("waits and hands back an app-push message without an on-page challenge", async () => {

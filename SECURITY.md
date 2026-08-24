@@ -199,10 +199,15 @@ a stuck, declined, or abandoned payment is closing the session with `operate_fin
 and starting a fresh one, not an in-place refill. Every payment entry is still
 claimed before asynchronous work begins, and a pending confirmation is claimed
 atomically, so overlapping `operate_pay` calls cannot race toward the same
-close-out. The single-page (`phase="single"`) checkout is unaffected by any of
-this: it still reads the live total, fills, and submits in one call exactly as
-before, including its own 3-D Secure wait and `payment_outcome_unknown` /
-`payment_3ds_required` handling.
+close-out. The single-page (`phase="single"`) checkout still reads the live total,
+fills, and submits in one call. Before dispatch it may select only the sole
+unambiguous new-card radio competing with a merchant-saved card, then re-verifies
+that choice and every sealed value at the final pre-click boundary; any ambiguity or
+state change fails closed. After dispatch, the native 3-D Secure wait passively
+compares issuer/network/last-four evidence rendered by the issuer/app with the
+released card. A discrepancy is returned and retained across resumable status polls
+as a structured `payment_instrument_mismatch` warning; it never mutates or cancels
+the challenge, creates a charge path, or introduces another approval.
 
 Payment state, the approval keypair, and the verified mandate remain attached to the
 addressed operate session. `operate_pay` and `operate_payment_status`
@@ -249,7 +254,8 @@ tier. Plaintext PAN and CVV are not returned through MCP to the coding-agent
 model, sent to the Trusty Squire API, logged, or stored in payment audit events.
 Issuer 3-D Secure is handed back to the user rather than automated; the operator
 may wait for the user to resolve the challenge, but it never completes the
-challenge itself.
+challenge itself. Its mismatch comparison reads only rendered ACS evidence and
+leaves the cardholder's approval decision unchanged.
 
 Payment audit events are deliberately metadata-only: merchant, amount,
 currency, card last four digits, status, and optional mandate, opaque card, and

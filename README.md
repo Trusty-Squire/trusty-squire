@@ -81,12 +81,23 @@ Trusty Squire reuses the original mandate-bound checkout values. Card entry requ
 expiry, and CVV fields; cardholder name and other explicitly labeled billing fields
 are filled best-effort, so a missing name field does not abort the payment. Sealing
 and cleanup touch only those selected payment controls; merchant shipping address and
-country controls remain untouched. A submit is reported as `payment_submitted` only
+country controls remain untouched. If the checkout has a selected merchant-saved card
+alongside the newly filled card, Trusty Squire selects the sole unambiguous new-card
+radio and verifies both that choice and the filled fields again immediately before
+submission; ambiguous choices, selected saved-card options, and failed verification
+are refused with `payment_card_selection_ambiguous`. A submit is reported as
+`payment_submitted` only
 after the checkout reaches a new merchant order-confirmation URL with a substantive
 order or receipt identity. The browser completes 3-D Secure natively, including
 out-of-band bank-app challenges — Trusty Squire never manipulates or intercepts the
 challenge; it uses read-only checks while polling for that same order-confirmation
-signal. A bare click that produces no confirmation and no detected challenge returns
+signal. At that last observable boundary, a mismatch between the released card and
+issuer, network, or last-four evidence rendered by the 3-D Secure issuer/app is
+returned as a structured `warning` with `kind: "payment_instrument_mismatch"` and
+expected-versus-observed evidence. The warning persists through resumable
+`operate_payment_status` calls; it neither changes the payment status nor cancels,
+approves, or modifies the challenge, so the cardholder retains the decision whether
+to continue. A bare click that produces no confirmation and no detected challenge returns
 `payment_outcome_unknown` instead of guessing that the charge succeeded. A detected
 challenge that remains unresolved on timeout stays
 `payment_3ds_required` with `needs_user.wall: "3ds"`, handing control back for user

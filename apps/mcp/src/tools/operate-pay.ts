@@ -138,7 +138,9 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
     "solves 3-D Secure; waits for user completion, then returns a needs_user handoff if unresolved " +
     "— including a decoupled/out-of-band app-push challenge that had not resolved yet, in which " +
     "case call operate_payment_status (not operate_pay again) to keep checking the same already-" +
-    "submitted charge. " +
+    "submitted charge. If the issuer/app challenge shows issuer, network, or last-four evidence " +
+    "for a different card, returns a structured payment_instrument_mismatch warning without " +
+    "altering or cancelling the challenge; the cardholder retains the decision. " +
     "With no card_ref/card_label and no card on file, the approval link becomes a first-time " +
     "add-card ceremony and the card is bound server-side before the mandate is signed. " +
     "On approval resume, an unreadable live checkout reuses the original mandate-bound checkout; " +
@@ -723,7 +725,9 @@ export const operatePaymentStatusTool: Tool<z.infer<typeof paymentStatusInputSch
     "(0-15, default 0) to bound-wait for a change instead of an instant peek; never blocks longer " +
     "than that. Never verifies a mandate or opens a card. Only candidate_kind=approval with " +
     "ready_to_charge=true is a final authorization; a review candidate still requires final " +
-    "approval. When a pending 3-D Secure outcome resolves or reaches its deadline, this records " +
+    "approval. Preserves any passively observed payment_instrument_mismatch warning from issuer/" +
+    "app evidence without altering the challenge. When a pending 3-D Secure outcome resolves or " +
+    "reaches its deadline, this records " +
     "a terminal payment audit and clears that session's pending tracking.",
   inputSchema: paymentStatusInputSchema,
   jsonInputSchema: {

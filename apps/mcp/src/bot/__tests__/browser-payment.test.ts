@@ -2241,48 +2241,63 @@ describe("3-D Secure resolution", () => {
         }
       ).detectThreeDsChallenge({
         pan: "5555555555559192",
-        ...(issuerSource !== null
-          ? { issuer: "DBS", issuer_source: issuerSource }
-          : { label }),
+        ...(issuerSource !== null ? { issuer: "DBS", issuer_source: issuerSource } : { label }),
       });
     } finally {
       await browser.close();
     }
   };
 
-  it.skipIf(!chromiumAvailable)("warns when a top-level token-override ACS names another issuer", async () => {
-    await expect(detectTokenOverride(true, "Approve in your ENBDX app")).resolves.toMatchObject({
-      three_ds_required: true,
-      payment_instrument_mismatch: {
-        kind: "payment_instrument_mismatch",
-        expected: { last4: "9192", issuer: "DBS" },
-        observed: { issuer: "ENBDX" },
-        provenance: {
-          expected: { last4: "released_card", issuer: "bin_metadata" },
-          observed: "3ds_challenge",
+  it.skipIf(!chromiumAvailable)(
+    "warns when a top-level token-override ACS names another issuer",
+    async () => {
+      await expect(detectTokenOverride(true, "Approve in your ENBDX app")).resolves.toMatchObject({
+        three_ds_required: true,
+        payment_instrument_mismatch: {
+          kind: "payment_instrument_mismatch",
+          expected: { last4: "9192", issuer: "DBS" },
+          observed: { issuer: "ENBDX" },
+          provenance: {
+            expected: { last4: "released_card", issuer: "bin_metadata" },
+            observed: "3ds_challenge",
+          },
         },
-      },
-    });
-  });
+      });
+    },
+  );
 
-  it.skipIf(!chromiumAvailable)("warns when an iframe token-override ACS names another issuer", async () => {
-    await expect(detectTokenOverride(false, "Approve in your ENBDX app")).resolves.toMatchObject({
-      payment_instrument_mismatch: { observed: { issuer: "ENBDX" } },
-    });
-  });
+  it.skipIf(!chromiumAvailable)(
+    "warns when an iframe token-override ACS names another issuer",
+    async () => {
+      await expect(detectTokenOverride(false, "Approve in your ENBDX app")).resolves.toMatchObject({
+        payment_instrument_mismatch: { observed: { issuer: "ENBDX" } },
+      });
+    },
+  );
 
-  it.skipIf(!chromiumAvailable)("does not warn when the ACS evidence matches the released card", async () => {
-    await expect(detectTokenOverride(false, "Approve in your DBS app for card ending 9192")).resolves.toMatchObject({
-      three_ds_required: true,
-    });
-    const result = await detectTokenOverride(false, "Approve in your DBS app for card ending 9192");
-    expect(result).not.toHaveProperty("payment_instrument_mismatch");
-  });
+  it.skipIf(!chromiumAvailable)(
+    "does not warn when the ACS evidence matches the released card",
+    async () => {
+      await expect(
+        detectTokenOverride(false, "Approve in your DBS app for card ending 9192"),
+      ).resolves.toMatchObject({
+        three_ds_required: true,
+      });
+      const result = await detectTokenOverride(
+        false,
+        "Approve in your DBS app for card ending 9192",
+      );
+      expect(result).not.toHaveProperty("payment_instrument_mismatch");
+    },
+  );
 
-  it.skipIf(!chromiumAvailable)("does not treat an editable card label as issuer evidence", async () => {
-    const result = await detectTokenOverride(false, "Approve in your ENBDX app", null);
-    expect(result).not.toHaveProperty("payment_instrument_mismatch");
-  });
+  it.skipIf(!chromiumAvailable)(
+    "does not treat an editable card label as issuer evidence",
+    async () => {
+      const result = await detectTokenOverride(false, "Approve in your ENBDX app", null);
+      expect(result).not.toHaveProperty("payment_instrument_mismatch");
+    },
+  );
 
   it.skipIf(!chromiumAvailable)("marks comparable label evidence as low confidence", async () => {
     await expect(
@@ -2348,43 +2363,46 @@ describe("3-D Secure resolution", () => {
     }
   });
 
-  it.skipIf(!chromiumAvailable)("observes mismatch evidence that renders during an existing 3DS wait", async () => {
-    const browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage();
-    await page.setContent(
-      '<iframe title="3D Secure authentication" srcdoc="<p>3D Secure authentication — Loading</p>"></iframe>',
-    );
-    const controller = new BrowserController({ humanize: false });
-    (controller as unknown as { page: Page }).page = page;
-    const privateController = controller as unknown as {
-      detectThreeDsChallenge: (card: {
-        pan: string;
-        issuer: string;
-        issuer_source: "bin_metadata";
-      }) => Promise<CheckoutSubmitResult>;
-    };
-    try {
-      const initial = await privateController.detectThreeDsChallenge({
-        pan: "5555555555559192",
-        issuer: "DBS",
-        issuer_source: "bin_metadata",
-      });
-      expect(initial).not.toHaveProperty("payment_instrument_mismatch");
-      await page
-        .frameLocator('iframe[title="3D Secure authentication"]')
-        .locator("p")
-        .evaluate((element) => {
-          element.textContent = "3D Secure authentication — Approve in your ENBDX app";
+  it.skipIf(!chromiumAvailable)(
+    "observes mismatch evidence that renders during an existing 3DS wait",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      const page = await browser.newPage();
+      await page.setContent(
+        '<iframe title="3D Secure authentication" srcdoc="<p>3D Secure authentication — Loading</p>"></iframe>',
+      );
+      const controller = new BrowserController({ humanize: false });
+      (controller as unknown as { page: Page }).page = page;
+      const privateController = controller as unknown as {
+        detectThreeDsChallenge: (card: {
+          pan: string;
+          issuer: string;
+          issuer_source: "bin_metadata";
+        }) => Promise<CheckoutSubmitResult>;
+      };
+      try {
+        const initial = await privateController.detectThreeDsChallenge({
+          pan: "5555555555559192",
+          issuer: "DBS",
+          issuer_source: "bin_metadata",
         });
-      await controller.waitForThreeDsResolution(0);
-      expect(controller.paymentInstrumentMismatch()).toMatchObject({
-        observed: { issuer: "ENBDX" },
-        provenance: { observed: "3ds_challenge" },
-      });
-    } finally {
-      await browser.close();
-    }
-  });
+        expect(initial).not.toHaveProperty("payment_instrument_mismatch");
+        await page
+          .frameLocator('iframe[title="3D Secure authentication"]')
+          .locator("p")
+          .evaluate((element) => {
+            element.textContent = "3D Secure authentication — Approve in your ENBDX app";
+          });
+        await controller.waitForThreeDsResolution(0);
+        expect(controller.paymentInstrumentMismatch()).toMatchObject({
+          observed: { issuer: "ENBDX" },
+          provenance: { observed: "3ds_challenge" },
+        });
+      } finally {
+        await browser.close();
+      }
+    },
+  );
 
   it.skipIf(!chromiumAvailable)(
     "resolves succeeded from the outer page's own order route while the challenge frame stays open and unresponsive",
