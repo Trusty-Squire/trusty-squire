@@ -2212,14 +2212,14 @@ describe("3-D Secure resolution", () => {
   const detectTokenOverride = async (
     topLevel: boolean,
     challengeCopy: string,
-    issuerSource: "bin_metadata" | undefined = "bin_metadata",
+    issuerSource: "bin_metadata" | null = "bin_metadata",
   ) => {
     const browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
     await page.setContent(
       topLevel
         ? `<main><p>3D Secure authentication — ${challengeCopy}</p></main>`
-        : `<main>Complete your payment securely</main><iframe title="3D Secure authentication" srcdoc="<p>3D Secure authentication — ${challengeCopy}</p>"></iframe>`,
+        : `<main>Complete your payment securely</main><iframe title="3D Secure authentication" srcdoc="<p>${challengeCopy}</p>"></iframe>`,
     );
     if (!topLevel) {
       await page.waitForFunction(
@@ -2240,7 +2240,7 @@ describe("3-D Secure resolution", () => {
         }
       ).detectThreeDsChallenge({
         pan: "5555555555559192",
-        ...(issuerSource !== undefined
+        ...(issuerSource !== null
           ? { issuer: "DBS", issuer_source: issuerSource }
           : { label: "DBS" }),
       });
@@ -2279,8 +2279,46 @@ describe("3-D Secure resolution", () => {
   });
 
   it.skipIf(!chromiumAvailable)("does not treat an editable card label as issuer evidence", async () => {
-    const result = await detectTokenOverride(false, "Approve in your ENBDX app", undefined);
+    const result = await detectTokenOverride(false, "Approve in your ENBDX app", null);
     expect(result).not.toHaveProperty("payment_instrument_mismatch");
+  });
+
+  it.skipIf(!chromiumAvailable)("canonicalizes qualified vault network metadata", async () => {
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.setContent("<p>3D Secure authentication — Mastercard Identity Check</p>");
+    const controller = new BrowserController({ humanize: false });
+    (controller as unknown as { page: Page }).page = page;
+    try {
+      const result = await (
+        controller as unknown as {
+          detectThreeDsChallenge: (card: {
+            pan: string;
+            network: string;
+          }) => Promise<CheckoutSubmitResult>;
+        }
+      ).detectThreeDsChallenge({ pan: "5555555555559192", network: "Mastercard DBS" });
+      expect(result).not.toHaveProperty("payment_instrument_mismatch");
+      await page.setContent("<p>3D Secure authentication — Approve in your ENBDX app</p>");
+      await expect(
+        (
+          controller as unknown as {
+            detectThreeDsChallenge: (card: {
+              pan: string;
+              network: string;
+            }) => Promise<CheckoutSubmitResult>;
+          }
+        ).detectThreeDsChallenge({ pan: "5555555555559192", network: "Mastercard DBS" }),
+      ).resolves.toMatchObject({
+        payment_instrument_mismatch: {
+          expected: { issuer: "DBS", network: "Mastercard DBS" },
+          observed: { issuer: "ENBDX" },
+          provenance: { expected: { issuer: "vault_metadata" } },
+        },
+      });
+    } finally {
+      await browser.close();
+    }
   });
 
   it.skipIf(!chromiumAvailable)("observes mismatch evidence that renders during an existing 3DS wait", async () => {
@@ -2569,6 +2607,40 @@ describe("split-checkout card fill (real browser)", () => {
         document.body.dataset.submitted = "true";
       });
     </script>`;
+
+  it.skipIf(!chromiumAvailable)(
+    "retains expected evidence when submit dispatch becomes uncertain",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent(FRAME_FORM);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+        (
+          controller as unknown as {
+            submitFilledCheckoutInScope: () => Promise<CheckoutSubmitResult>;
+          }
+        ).submitFilledCheckoutInScope = async () => {
+          throw new PaymentSubmitOutcomeUnknownError();
+        };
+
+        await expect(
+          controller.fillAndSubmitCheckout({ ...CARD, network: "Mastercard" }),
+        ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
+        await page.setContent(
+          '<iframe title="3D Secure authentication" srcdoc="<p>Card ending 0005</p>"></iframe>',
+        );
+        await controller.waitForThreeDsResolution(0);
+        expect(controller.paymentInstrumentMismatch()).toMatchObject({
+          expected: { last4: "4242", network: "Mastercard" },
+          observed: { last4: "0005" },
+        });
+      } finally {
+        await browser.close();
+      }
+    },
+  );
 
   const TOPMOST_SPLIT_PAN_STYLE = `
     <style>

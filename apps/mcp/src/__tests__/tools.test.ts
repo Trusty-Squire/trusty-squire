@@ -402,7 +402,9 @@ describe("list_credentials", () => {
 
 describe("list_payment_cards", () => {
   it("returns only saved card IDs and labels", async () => {
-    const listPaymentCards = vi.fn().mockResolvedValue([{ id: "card_1", label: "Personal" }]);
+    const listPaymentCards = vi
+      .fn()
+      .mockResolvedValue([{ id: "card_1", label: "Personal", brand: "Mastercard DBS" }]);
     const api = makeMockApi({ listPaymentCards } as unknown as ApiClient);
 
     await expect(listPaymentCardsTool.handler({}, api)).resolves.toEqual({

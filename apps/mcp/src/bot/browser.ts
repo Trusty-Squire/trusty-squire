@@ -226,7 +226,7 @@ export interface CheckoutCard {
   name: string;
   cvv: string;
   issuer?: string;
-  issuer_source?: "bin_metadata";
+  issuer_source?: "bin_metadata" | "vault_metadata";
   network?: string;
   label?: string;
   billing: {
@@ -283,7 +283,7 @@ export interface PaymentInstrumentMismatch {
   provenance: {
     expected: {
       last4: "released_card";
-      issuer?: "bin_metadata";
+      issuer?: "bin_metadata" | "vault_metadata";
       network?: "vault_metadata";
       label?: "vault_label";
     };
@@ -294,6 +294,7 @@ export interface PaymentInstrumentMismatch {
 interface PaymentInstrumentExpectation {
   last4: string;
   issuer?: string;
+  issuer_source?: "bin_metadata" | "vault_metadata";
   network?: string;
   label?: string;
 }
@@ -10322,9 +10323,10 @@ export class BrowserController {
       // sealing a shipping field would make the payment cleanup erase the
       // merchant's selected address, country, and shipping rate after submit.
       const cardGroup = await this.fillCheckoutCardIntoFrames(fillFrames, card, true);
+      this.rememberPaymentInstrumentExpectation(card);
       primary = {
         kind: "outcome",
-        value: await this.submitFilledCheckoutInScope(cardGroup, card),
+        value: await this.submitFilledCheckoutInScope(cardGroup),
       };
     } catch (error) {
       primary = { kind: "error", value: error };
@@ -10575,7 +10577,6 @@ export class BrowserController {
 
   private async submitFilledCheckoutInScope(
     cardGroup?: CheckoutCardGroupScope,
-    expectedCard?: Pick<CheckoutCard, "pan" | "issuer">,
   ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     const savedCardSelection = await this.resolveCompetingSavedCardSelection();
@@ -10843,7 +10844,7 @@ export class BrowserController {
         if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) {
           return { three_ds_required: false, order_confirmed: true };
         }
-        const challenge = await this.detectThreeDsChallenge(expectedCard);
+        const challenge = await this.detectThreeDsChallenge();
         if (challenge.three_ds_required) return challenge;
         await this.page.waitForTimeout(250).catch(() => undefined);
       }
@@ -11128,7 +11129,67 @@ export class BrowserController {
     }
   }
 
-  private paymentInstrumentMismatch(
+  private async frameWithinThreeDsStructuralFrame(frame: Frame): Promise<boolean> {
+    if (!this.page) return false;
+    let current: Frame | null = frame;
+    while (current !== this.page.mainFrame()) {
+      if (current === null) return false;
+      const frameElement = await current.frameElement().catch(() => null);
+      if (frameElement === null) return false;
+      try {
+        if (
+          await frameElement
+            .evaluate((element) =>
+              element.matches('iframe[title*="3d secure" i],iframe[name*="3ds" i]'),
+            )
+            .catch(() => false)
+        ) {
+          return true;
+        }
+      } finally {
+        await frameElement.dispose().catch(() => undefined);
+      }
+      current = current.parentFrame();
+    }
+    return false;
+  }
+
+  private rememberPaymentInstrumentExpectation(
+    card: Pick<CheckoutCard, "pan" | "issuer" | "issuer_source" | "network" | "label">,
+  ): void {
+    const derivedIssuer = card.network
+      ?.replace(/american\s+express|mastercard|amex|visa|discover|diners\s+club|jcb|unionpay/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    const stableDerivedIssuer =
+      derivedIssuer !== undefined &&
+      /^(?=.{2,32}$)[A-Z][A-Z0-9&.' -]*$/.test(derivedIssuer) &&
+      !/^(?:PLATINUM|GOLD|INFINITE|SIGNATURE|CLASSIC|DEBIT|CREDIT|BUSINESS|CORPORATE|REWARDS|WORLD|ELITE)$/i.test(
+        derivedIssuer,
+      )
+        ? derivedIssuer
+        : undefined;
+    const issuer =
+      card.issuer !== undefined && card.issuer_source !== undefined
+        ? card.issuer
+        : stableDerivedIssuer;
+    const issuerSource =
+      card.issuer !== undefined && card.issuer_source !== undefined
+        ? card.issuer_source
+        : stableDerivedIssuer !== undefined
+          ? "vault_metadata"
+          : undefined;
+    this.paymentInstrumentExpectation = {
+      last4: card.pan.slice(-4),
+      ...(issuer !== undefined && issuerSource !== undefined
+        ? { issuer, issuer_source: issuerSource }
+        : {}),
+      ...(card.network !== undefined ? { network: card.network } : {}),
+      ...(card.label !== undefined ? { label: card.label } : {}),
+    };
+  }
+
+  private comparePaymentInstrumentEvidence(
     expected: PaymentInstrumentExpectation | undefined,
     challengeText: string,
   ): PaymentInstrumentMismatch | undefined {
@@ -11146,8 +11207,18 @@ export class BrowserController {
     const observedNetwork = challengeText.match(/\b(visa|mastercard|amex|american express)\b/i)?.[1];
     const normalizedExpectedIssuer = expected.issuer?.replace(/[^a-z0-9]/gi, "").toLowerCase();
     const normalizedObservedIssuer = observedIssuer?.replace(/[^a-z0-9]/gi, "").toLowerCase();
-    const normalizeNetwork = (value: string | undefined) =>
-      value?.replace(/[^a-z0-9]/gi, "").toLowerCase().replace("americanexpress", "amex");
+    const networkFamily = (value: string | undefined) => {
+      const normalized = value?.replace(/[^a-z0-9]/gi, "").toLowerCase();
+      if (normalized === undefined) return undefined;
+      if (normalized.includes("mastercard")) return "mastercard";
+      if (normalized.includes("americanexpress") || normalized.includes("amex")) return "amex";
+      if (normalized.includes("visa")) return "visa";
+      if (normalized.includes("discover")) return "discover";
+      if (normalized.includes("diners")) return "diners";
+      if (normalized.includes("unionpay")) return "unionpay";
+      if (normalized.includes("jcb")) return "jcb";
+      return normalized;
+    };
     const last4Mismatch = observedLast4 !== undefined && observedLast4 !== expected.last4;
     const issuerMismatch =
       expected.issuer !== undefined &&
@@ -11158,7 +11229,7 @@ export class BrowserController {
     const networkMismatch =
       observedNetwork !== undefined &&
       expected.network !== undefined &&
-      normalizeNetwork(observedNetwork) !== normalizeNetwork(expected.network);
+      networkFamily(observedNetwork) !== networkFamily(expected.network);
     if (!last4Mismatch && !issuerMismatch && !networkMismatch) return undefined;
     return {
       kind: "payment_instrument_mismatch",
@@ -11176,7 +11247,9 @@ export class BrowserController {
       provenance: {
         expected: {
           last4: "released_card",
-          ...(expected.issuer !== undefined ? { issuer: "bin_metadata" as const } : {}),
+          ...(expected.issuer !== undefined && expected.issuer_source !== undefined
+            ? { issuer: expected.issuer_source }
+            : {}),
           ...(expected.network !== undefined ? { network: "vault_metadata" as const } : {}),
           ...(expected.label !== undefined ? { label: "vault_label" as const } : {}),
         },
@@ -11193,14 +11266,7 @@ export class BrowserController {
   ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     if (expectedCard !== undefined) {
-      this.paymentInstrumentExpectation = {
-        last4: expectedCard.pan.slice(-4),
-        ...(expectedCard.issuer !== undefined && expectedCard.issuer_source === "bin_metadata"
-          ? { issuer: expectedCard.issuer }
-          : {}),
-        ...(expectedCard.network !== undefined ? { network: expectedCard.network } : {}),
-        ...(expectedCard.label !== undefined ? { label: expectedCard.label } : {}),
-      };
+      this.rememberPaymentInstrumentExpectation(expectedCard);
     }
     // Cross-processor 3DS signals only — never key on a single PSP's internal
     // state. CardinalCommerce backs the ACS/StepUp flow for many processors
@@ -11224,11 +11290,15 @@ export class BrowserController {
       const detected =
         urlPattern.test(frame.url()) ||
         structural ||
+        (await this.frameWithinThreeDsStructuralFrame(frame)) ||
         /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i.test(
           text,
       );
       if (!detected) continue;
-      const mismatch = this.paymentInstrumentMismatch(this.paymentInstrumentExpectation, text);
+      const mismatch = this.comparePaymentInstrumentEvidence(
+        this.paymentInstrumentExpectation,
+        text,
+      );
       const result: CheckoutSubmitResult = {
         three_ds_required: true,
         order_confirmed: false,
