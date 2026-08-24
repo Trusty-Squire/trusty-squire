@@ -226,7 +226,7 @@ export interface CheckoutCard {
   name: string;
   cvv: string;
   issuer?: string;
-  issuer_source?: "bin_metadata" | "vault_metadata";
+  issuer_source?: "bin_metadata" | "vault_metadata" | "vault_label";
   network?: string;
   label?: string;
   billing: {
@@ -278,12 +278,14 @@ export interface CheckoutSubmitResult {
 
 export interface PaymentInstrumentMismatch {
   kind: "payment_instrument_mismatch";
+  confidence: "high" | "low";
+  evidence_used: Array<"last4" | "issuer" | "network">;
   expected: { last4: string; issuer?: string; network?: string; label?: string };
   observed: { last4?: string; issuer?: string; network?: string };
   provenance: {
     expected: {
       last4: "released_card";
-      issuer?: "bin_metadata" | "vault_metadata";
+      issuer?: "bin_metadata" | "vault_metadata" | "vault_label";
       network?: "vault_metadata";
       label?: "vault_label";
     };
@@ -294,7 +296,7 @@ export interface PaymentInstrumentMismatch {
 interface PaymentInstrumentExpectation {
   last4: string;
   issuer?: string;
-  issuer_source?: "bin_metadata" | "vault_metadata";
+  issuer_source?: "bin_metadata" | "vault_metadata" | "vault_label";
   network?: string;
   label?: string;
 }
@@ -11157,28 +11159,40 @@ export class BrowserController {
   private rememberPaymentInstrumentExpectation(
     card: Pick<CheckoutCard, "pan" | "issuer" | "issuer_source" | "network" | "label">,
   ): void {
-    const derivedIssuer = card.network
-      ?.replace(/american\s+express|mastercard|amex|visa|discover|diners\s+club|jcb|unionpay/gi, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-    const stableDerivedIssuer =
-      derivedIssuer !== undefined &&
-      /^(?=.{2,32}$)[A-Z][A-Z0-9&.' -]*$/.test(derivedIssuer) &&
-      !/^(?:PLATINUM|GOLD|INFINITE|SIGNATURE|CLASSIC|DEBIT|CREDIT|BUSINESS|CORPORATE|REWARDS|WORLD|ELITE)$/i.test(
-        derivedIssuer,
-      )
-        ? derivedIssuer
+    const comparableIssuer = (value: string | undefined) => {
+      const remainder = value
+        ?.replace(
+          /american\s+express|master\s*card|amex|visa|discover|diners\s+club|jcb|unionpay/gi,
+          " ",
+        )
+        .split(/\s+/)
+        .filter(
+          (token) =>
+            token.length > 0 &&
+            !/^(?:card|platinum|gold|infinite|signature|classic|debit|credit|business|corporate|rewards|world|elite|sapphire|personal|work|travel)$/i.test(
+              token,
+            ),
+        )
+        .join(" ")
+        .trim();
+      return remainder !== undefined && /^(?=.{2,32}$)[A-Za-z][A-Za-z0-9&.' -]*$/.test(remainder)
+        ? remainder
         : undefined;
+    };
+    const networkIssuer = comparableIssuer(card.network);
+    const labelIssuer = comparableIssuer(card.label);
     const issuer =
       card.issuer !== undefined && card.issuer_source !== undefined
         ? card.issuer
-        : stableDerivedIssuer;
+        : (networkIssuer ?? labelIssuer);
     const issuerSource =
       card.issuer !== undefined && card.issuer_source !== undefined
         ? card.issuer_source
-        : stableDerivedIssuer !== undefined
+        : networkIssuer !== undefined
           ? "vault_metadata"
-          : undefined;
+          : labelIssuer !== undefined
+            ? "vault_label"
+            : undefined;
     this.paymentInstrumentExpectation = {
       last4: card.pan.slice(-4),
       ...(issuer !== undefined && issuerSource !== undefined
@@ -11231,8 +11245,17 @@ export class BrowserController {
       expected.network !== undefined &&
       networkFamily(observedNetwork) !== networkFamily(expected.network);
     if (!last4Mismatch && !issuerMismatch && !networkMismatch) return undefined;
+    const evidenceUsed: Array<"last4" | "issuer" | "network"> = [];
+    if (last4Mismatch) evidenceUsed.push("last4");
+    if (issuerMismatch) evidenceUsed.push("issuer");
+    if (networkMismatch) evidenceUsed.push("network");
     return {
       kind: "payment_instrument_mismatch",
+      confidence:
+        last4Mismatch || networkMismatch || expected.issuer_source === "bin_metadata"
+          ? "high"
+          : "low",
+      evidence_used: evidenceUsed,
       expected: {
         last4: expected.last4,
         ...(expected.issuer !== undefined ? { issuer: expected.issuer } : {}),

@@ -1373,6 +1373,10 @@ export async function executeOperatePay(
     } catch (error) {
       const outcomeUnknown = error instanceof PaymentSubmitOutcomeUnknownError;
       paymentStatus = outcomeUnknown ? "payment_outcome_unknown" : "payment_checkout_failed";
+      if (outcomeUnknown) {
+        await browser.waitForThreeDsResolution(0).catch(() => undefined);
+        submitResult.payment_instrument_mismatch = browser.paymentInstrumentMismatch?.();
+      }
       let audit_recorded = true;
       try {
         await api.auditPayment({
@@ -1394,6 +1398,9 @@ export async function executeOperatePay(
             ? error.message
             : "payment_checkout_failed",
         approval_url: approvalUrl,
+        ...(submitResult.payment_instrument_mismatch !== undefined
+          ? { warning: submitResult.payment_instrument_mismatch }
+          : {}),
         ...(outcomeUnknown ? { next: pendingThreeDsNext } : {}),
       };
     } finally {

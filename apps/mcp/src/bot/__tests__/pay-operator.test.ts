@@ -867,6 +867,8 @@ describe("operate_pay", () => {
           order_confirmed: false,
           payment_instrument_mismatch: {
             kind: "payment_instrument_mismatch",
+            confidence: "high",
+            evidence_used: ["issuer"],
             expected: { last4: "9192", issuer: "DBS" },
             observed: { issuer: "ENBDX" },
             provenance: {
@@ -896,6 +898,8 @@ describe("operate_pay", () => {
   it("persists mismatch evidence first observed during the existing 3DS wait", async () => {
     const mismatch: NonNullable<CheckoutSubmitResult["payment_instrument_mismatch"]> = {
       kind: "payment_instrument_mismatch",
+      confidence: "high",
+      evidence_used: ["last4"],
       expected: { last4: "9192" },
       observed: { last4: "0005" },
       provenance: {
@@ -984,7 +988,22 @@ describe("operate_pay", () => {
   });
 
   it("records and tracks unknown when single-page submission fails after dispatch", async () => {
-    const { result, auditBodies, pendingThreeDsStates } = await harness(
+    const mismatch: NonNullable<CheckoutSubmitResult["payment_instrument_mismatch"]> = {
+      kind: "payment_instrument_mismatch",
+      confidence: "low",
+      evidence_used: ["issuer"],
+      expected: { last4: "4242", issuer: "DBS", label: "DBS Mastercard" },
+      observed: { issuer: "ENBDX" },
+      provenance: {
+        expected: {
+          last4: "released_card",
+          issuer: "vault_label",
+          label: "vault_label",
+        },
+        observed: "3ds_challenge",
+      },
+    };
+    const { result, auditBodies, browser, pendingThreeDsStates } = await harness(
       "happy",
       "customer_test",
       undefined,
@@ -993,6 +1012,7 @@ describe("operate_pay", () => {
         fillAndSubmitCheckout: async () => {
           throw new PaymentSubmitOutcomeUnknownError();
         },
+        paymentInstrumentMismatch: () => mismatch,
       },
     );
 
@@ -1000,9 +1020,12 @@ describe("operate_pay", () => {
       status: "payment_outcome_unknown",
       reason: "payment_submit_outcome_unknown",
       next: { tool: "operate_payment_status", wait_seconds: 15 },
+      warning: mismatch,
     });
     expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_outcome_unknown" })]);
+    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(0);
     expect(pendingThreeDsStates).toHaveLength(1);
+    expect(pendingThreeDsStates[0]).toMatchObject({ payment_instrument_mismatch: mismatch });
   });
 
   it("hands back immediately without notifying when the 3DS wait is disabled", async () => {

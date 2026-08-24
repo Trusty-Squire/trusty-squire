@@ -165,6 +165,8 @@ const h = vi.hoisted(() => ({
   waitForThreeDsCalls: [] as number[],
   paymentInstrumentMismatch: null as null | {
     kind: "payment_instrument_mismatch";
+    confidence: "high" | "low";
+    evidence_used: Array<"last4" | "issuer" | "network">;
     expected: { last4: string };
     observed: { last4: string };
     provenance: {
@@ -6298,12 +6300,14 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
     deadline = Date.now() + 60_000,
     payment_instrument_mismatch?: {
       kind: "payment_instrument_mismatch";
+      confidence: "high" | "low";
+      evidence_used: Array<"last4" | "issuer" | "network">;
       expected: { last4: string; issuer?: string; network?: string; label?: string };
       observed: { last4?: string; issuer?: string; network?: string };
       provenance: {
         expected: {
           last4: "released_card";
-          issuer?: "bin_metadata";
+          issuer?: "bin_metadata" | "vault_metadata" | "vault_label";
           network?: "vault_metadata";
           label?: "vault_label";
         };
@@ -6389,6 +6393,8 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
     setActivePendingThreeDs(
       buildThreeDsState(Date.now() + 60_000, {
         kind: "payment_instrument_mismatch",
+        confidence: "high",
+        evidence_used: ["issuer"],
         expected: { last4: "9192", issuer: "DBS" },
         observed: { issuer: "ENBDX" },
         provenance: {
@@ -6421,6 +6427,8 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
     setActivePendingThreeDs(buildThreeDsState());
     h.paymentInstrumentMismatch = {
       kind: "payment_instrument_mismatch",
+      confidence: "high",
+      evidence_used: ["last4"],
       expected: { last4: "9192" },
       observed: { last4: "0005" },
       provenance: {

@@ -2213,6 +2213,7 @@ describe("3-D Secure resolution", () => {
     topLevel: boolean,
     challengeCopy: string,
     issuerSource: "bin_metadata" | null = "bin_metadata",
+    label = "Travel",
   ) => {
     const browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
@@ -2242,7 +2243,7 @@ describe("3-D Secure resolution", () => {
         pan: "5555555555559192",
         ...(issuerSource !== null
           ? { issuer: "DBS", issuer_source: issuerSource }
-          : { label: "DBS" }),
+          : { label }),
       });
     } finally {
       await browser.close();
@@ -2283,6 +2284,20 @@ describe("3-D Secure resolution", () => {
     expect(result).not.toHaveProperty("payment_instrument_mismatch");
   });
 
+  it.skipIf(!chromiumAvailable)("marks comparable label evidence as low confidence", async () => {
+    await expect(
+      detectTokenOverride(false, "Approve in your ENBDX app", null, "DBS Mastercard"),
+    ).resolves.toMatchObject({
+      payment_instrument_mismatch: {
+        confidence: "low",
+        evidence_used: ["issuer"],
+        expected: { issuer: "DBS", label: "DBS Mastercard" },
+        observed: { issuer: "ENBDX" },
+        provenance: { expected: { issuer: "vault_label" } },
+      },
+    });
+  });
+
   it.skipIf(!chromiumAvailable)("canonicalizes qualified vault network metadata", async () => {
     const browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
@@ -2308,9 +2323,21 @@ describe("3-D Secure resolution", () => {
               network: string;
             }) => Promise<CheckoutSubmitResult>;
           }
+        ).detectThreeDsChallenge({ pan: "5555555555559192", network: "Mastercard World Elite" }),
+      ).resolves.not.toHaveProperty("payment_instrument_mismatch");
+      await expect(
+        (
+          controller as unknown as {
+            detectThreeDsChallenge: (card: {
+              pan: string;
+              network: string;
+            }) => Promise<CheckoutSubmitResult>;
+          }
         ).detectThreeDsChallenge({ pan: "5555555555559192", network: "Mastercard DBS" }),
       ).resolves.toMatchObject({
         payment_instrument_mismatch: {
+          confidence: "low",
+          evidence_used: ["issuer"],
           expected: { issuer: "DBS", network: "Mastercard DBS" },
           observed: { issuer: "ENBDX" },
           provenance: { expected: { issuer: "vault_metadata" } },
