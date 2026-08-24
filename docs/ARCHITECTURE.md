@@ -61,7 +61,8 @@ captcha handling, and extraction.
 
 A short-lived handoff from an active operate session to the user's phone. The
 phone can add and bind a card when needed. The anonymous approval shell displays
-the exact server-recorded purchase details for an amount-bound approval. One
+the exact server-recorded purchase details and identifies the bound card by its
+non-secret label and last four digits for an amount-bound approval. One
 payment-context passkey authorization signs that approval. The API relays the
 signed mandate and operator-sealed card through an account-scoped, short-TTL
 database record and mutates approval state only after operator verification. The

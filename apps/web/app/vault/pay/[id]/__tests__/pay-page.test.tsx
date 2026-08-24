@@ -51,11 +51,13 @@ vi.mock("@trusty-squire/vault/hpke", () => ({
 }));
 
 vi.mock("../../../../components/CardEntry", () => ({
-  CardEntry: (props: { onSaved?: (r: { id: string }) => void }) => (
+  CardEntry: (props: {
+    onSaved?: (r: { id: string; label: string; last4: string | null }) => void;
+  }) => (
     <button
       type="button"
       data-testid="card-entry"
-      onClick={() => props.onSaved?.({ id: "card_new" })}
+      onClick={() => props.onSaved?.({ id: "card_new", label: "Personal", last4: "4242" })}
     >
       add card (stub)
     </button>
@@ -77,6 +79,12 @@ const LEGACY_BOUND_CARD = {
   brand: null,
   last4: null,
 };
+const OTHER_BOUND_CARD = {
+  ...BOUND_CARD,
+  id: "card_other",
+  label: "Work",
+  last4: "1111",
+};
 
 let bound = false;
 let cardListFailures = 0;
@@ -89,7 +97,8 @@ let approvalAmountCents = 6000;
 let approvalCurrency = "USD";
 
 function approvalBody() {
-  const metadata = cardListOverride?.[0] ?? BOUND_CARD;
+  const metadata =
+    cardListOverride?.[0] ?? (lostResponseCardRef === "card_other" ? OTHER_BOUND_CARD : BOUND_CARD);
   return {
     id: "appr_1",
     status: "pending",
@@ -119,7 +128,16 @@ function ceremonyBody() {
   return {
     ...current,
     approval_payload_sha256: "synthetic-approval-payload-hash",
-    card: current.card === null ? null : { blob: current.card.blob },
+    card:
+      current.card === null
+        ? null
+        : {
+            blob: current.card.blob,
+            label:
+              (cardListOverride?.[0] as typeof BOUND_CARD | undefined)?.label ??
+              (lostResponseCardRef === "card_other" ? OTHER_BOUND_CARD.label : BOUND_CARD.label),
+            last4: current.card.last4,
+          },
   };
 }
 
@@ -145,7 +163,7 @@ beforeEach(() => {
   vault.decryptCard.mockResolvedValue({ pan: "4242424242424242" });
   api.apiGet.mockImplementation((path: string) => {
     if (path === "/v1/status") return Promise.resolve({ billing_enabled: false });
-    if (path === "/v1/vault/e2e") return Promise.resolve([]);
+    if (path === "/v1/vault/e2e") return Promise.resolve(cardListOverride ?? [BOUND_CARD]);
     if (path === "/v1/pay/approvals/appr_1/ceremony") {
       if (cardListFailures > 0) {
         cardListFailures -= 1;
@@ -217,6 +235,9 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(screen.getByText("phone case")).toBeTruthy();
     expect(screen.getByText("gift")).toBeTruthy();
     expect(screen.getByText(/Pay with/).textContent).toContain("$60.00");
+    const boundLine = screen.getByText(/Pay with/);
+    expect(boundLine.textContent).toContain("Personal •••• 4242");
+    expect(boundLine.textContent).not.toContain("4242424242424242");
     expect(approve.hasAttribute("disabled")).toBe(false);
     expect(vouchflow.signPayload).not.toHaveBeenCalled();
 
@@ -235,6 +256,7 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(screen.getByText("gift")).toBeTruthy();
     expect(screen.getByText(/Pay with/).textContent).toContain("$60.00");
     expect(api.apiGet).not.toHaveBeenCalledWith("/v1/pay/approvals/appr_1");
+    expect(api.apiGet).not.toHaveBeenCalledWith("/v1/vault/e2e");
     expect(api.apiGet).not.toHaveBeenCalledWith("/v1/vault/e2e/card_new");
     expect(router.replace).not.toHaveBeenCalled();
     expect(screen.queryByTestId("card-entry")).toBeNull();
@@ -269,7 +291,7 @@ describe("pay page — JIT add-card ceremony", () => {
 
     await screen.findByRole("button", { name: "Retry" });
     expect(screen.queryByRole("button", { name: /Approve payment/ })).toBeNull();
-    expect(screen.getByText(/your saved card/i)).toBeTruthy();
+    expect(screen.getByText(/Personal •••• 4242/i)).toBeTruthy();
     expect(screen.getByText("CASETiFY")).toBeTruthy();
     expect(screen.getByText("card unavailable")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
@@ -285,7 +307,7 @@ describe("pay page — JIT add-card ceremony", () => {
 
     const approve = await screen.findByRole("button", { name: /Approve payment/ });
     expect(approve.hasAttribute("disabled")).toBe(false);
-    expect(screen.getByText(/your saved card/i)).toBeTruthy();
+    expect(screen.getByText(/Pay with/).textContent).toContain("Personal");
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
 
@@ -299,7 +321,7 @@ describe("pay page — JIT add-card ceremony", () => {
 
     expect(screen.queryByRole("button", { name: /Approve payment/ })).toBeNull();
     expect(screen.queryByTestId("card-entry")).toBeNull();
-    expect(screen.getByText(/your saved card/i)).toBeTruthy();
+    expect(screen.getByText(/Personal •••• 4242/i)).toBeTruthy();
     expect(screen.getByText("card unavailable")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Retry" }));
@@ -370,7 +392,7 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(
       screen.getByText("This payment was attached to a different card than the one you added."),
     ).toBeTruthy();
-    expect(screen.getByText(/your saved card/i)).toBeTruthy();
+    expect(screen.getByText(/Pay with/).textContent).toContain("Work •••• 1111");
     expect(screen.getByText("CASETiFY")).toBeTruthy();
   });
 });
@@ -387,7 +409,7 @@ describe("pay page — single payment authorization", () => {
     expect(paymentLine.textContent).not.toMatch(/9,845\.00/);
   });
 
-  it("renders canonical merchant, origin, amount, item, and reason before authorization", async () => {
+  it("renders canonical payment details and names the bound card before authorization", async () => {
     bound = true;
     render(<PaymentApprovalPage />);
     await screen.findByRole("button", { name: /Approve payment/ });
@@ -395,7 +417,12 @@ describe("pay page — single payment authorization", () => {
     expect(screen.getByText("https://casetify.com")).toBeTruthy();
     expect(screen.getByText("phone case")).toBeTruthy();
     expect(screen.getByText("gift")).toBeTruthy();
-    expect(screen.getByText(/Pay with/).textContent).toContain("$60.00");
+    const namedLine = screen.getByText(/Pay with/);
+    expect(namedLine.textContent).toContain("$60.00");
+    // The bound card is named by non-secret label + last4; the sealed PAN
+    // never appears in rendered text.
+    expect(namedLine.textContent).toContain("Personal •••• 4242");
+    expect(namedLine.textContent).not.toContain("4242424242424242");
     expect(vouchflow.signPayload).not.toHaveBeenCalled();
   });
 

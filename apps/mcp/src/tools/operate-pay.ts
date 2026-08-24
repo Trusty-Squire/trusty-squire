@@ -75,6 +75,11 @@ function shouldRecordPaymentProvenance(status: unknown): boolean {
   return status === "payment_submitted" || status === "payment_3ds_required";
 }
 
+function approvalCardIdentity(card: { label: string; last4: string | null } | undefined): string {
+  if (card === undefined) return "this payment's card";
+  return card.last4 == null ? card.label : `${card.label} •••• ${card.last4}`;
+}
+
 function paymentSchemaRepair(
   _args: unknown,
   issues: readonly { path: (string | number)[]; message: string }[],
@@ -113,7 +118,8 @@ export const listPaymentCardsTool: Tool = {
   annotations: { readOnlyHint: true },
   async handler(_args, api) {
     assertApi(api);
-    return { cards: await api.listPaymentCards() };
+    const cards = await api.listPaymentCards();
+    return { cards: cards.map(({ id, label }) => ({ id, label })) };
   },
 };
 
@@ -271,8 +277,17 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         //      1 card   → use it
         //      >1 cards → error listing the labels (never silently guess)
         let cardRef = args.card_ref;
+        let cards: Array<{ id: string; label: string; last4: string | null }>;
         if (cardRef === undefined) {
-          const cards = await api.listPaymentCards();
+          cards = await api.listPaymentCards();
+        } else {
+          try {
+            cards = await api.listPaymentCards();
+          } catch {
+            cards = [];
+          }
+        }
+        if (cardRef === undefined) {
           if (args.card_label !== undefined) {
             const matches = cards.filter((card) => card.label === args.card_label);
             if (matches.length === 0) {
@@ -295,6 +310,13 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
           // cards.length === 0 → leave cardRef undefined; executeOperatePay runs
           // the JIT add-card ceremony.
         }
+        const approvalCardRef =
+          paymentClaim.resumeApproval === undefined
+            ? (cardRef ?? null)
+            : paymentClaim.resumeApproval.boundCardRef;
+        const cardIdentity = approvalCardIdentity(
+          approvalCardRef === null ? undefined : cards.find((card) => card.id === approvalCardRef),
+        );
         let resolvedCardRef: string | null = null;
         let filledPending: PendingCardFill | null = null;
         // Split checkouts (Rakuten-style) show no total on the card-entry page
@@ -330,9 +352,10 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
             ...(context !== undefined
               ? {
                   surfaceApprovalUrl: async (url: string) => {
-                    await context.notifyUser(`Approve this payment on your phone: ${url}`, {
-                      approval_url: url,
-                    });
+                    await context.notifyUser(
+                      `Approve payment using ${cardIdentity} on your phone: ${url}`,
+                      { approval_url: url },
+                    );
                   },
                 }
               : {}),
@@ -563,9 +586,7 @@ async function threeDsStatusResult(
   const browser = await activeProvisionBrowserForPayment(session);
   const expiredAtEntry = Date.now() >= state.deadline;
   const boundMs =
-    expiredAtEntry || waitSeconds <= 0
-      ? 0
-      : Math.min(Math.max(waitSeconds * 1000, 1_000), 15_000);
+    expiredAtEntry || waitSeconds <= 0 ? 0 : Math.min(Math.max(waitSeconds * 1000, 1_000), 15_000);
   const resolution = await browser.waitForThreeDsResolution(boundMs);
   const terminalStatus = threeDsResolutionStatus(resolution);
   const unresolvedPastDeadline =
@@ -665,7 +686,7 @@ export const operatePaymentStatusTool: Tool<z.infer<typeof paymentStatusInputSch
     "Report the status of the addressed session's payment approval currently awaiting " +
     "the human's phone tap, if any — started by an operate_pay call that returned approval_pending. " +
     "Also covers an already-submitted charge whose 3-D Secure challenge (including a decoupled/" +
-    'out-of-band app-push) had not resolved when a prior operate_pay call\'s own wait ended (that ' +
+    "out-of-band app-push) had not resolved when a prior operate_pay call's own wait ended (that " +
     'call returns payment_3ds_required or payment_outcome_unknown with needs_user.wall="3ds" and ' +
     "a next hint pointing here) — call this again to keep checking rather than re-calling " +
     "operate_pay, which does not resume a post-submit 3DS wait; reports payment_3ds_pending while " +

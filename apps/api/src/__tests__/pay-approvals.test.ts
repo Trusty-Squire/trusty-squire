@@ -260,7 +260,7 @@ describe("payment approval relay", () => {
     });
   });
 
-  it("discloses server-record payment details but never card data before authorization", async () => {
+  it("discloses bound-card display metadata but no plaintext card fields before authorization", async () => {
     const cardId = await createOwnedCard(webCookie);
     const created = await createApproval(cardId);
     const response = await server.inject({
@@ -281,7 +281,14 @@ describe("payment approval relay", () => {
       operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
       approval_payload_sha256: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
     });
-    expect(JSON.stringify(response.json())).not.toContain("4242");
+    expect(response.json().card).toEqual({
+      blob: '{ "ciphertext": "synthetic-sealed-card" }',
+      label: "Synthetic Visa",
+      last4: "4242",
+    });
+    expect(response.json().card).not.toHaveProperty("pan");
+    expect(response.json().card).not.toHaveProperty("expiry");
+    expect(response.json().card).not.toHaveProperty("cvv");
   });
 
   it("rejects legacy review-bound submissions as a stale payment client", async () => {
@@ -766,6 +773,49 @@ describe("payment approval relay", () => {
     expect(body.chat_id).toBe("555000111");
     expect(body.text).toContain("USD 25.99");
     expect(body.text).toContain(`/vault/pay/${created.id}`);
+  });
+
+  it("uses truthful generic card copy for a cardless Telegram approval", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "synthetic-bot-token");
+    const account = await deps.accountStore.findAccountByEmail("payer@example.test");
+    await deps.accountStore.setTelegramChatId(account!.id, "555000111");
+
+    const created = await createCardlessApproval();
+
+    const approvalCall = fetchMock.mock.calls.find(([, init]) =>
+      ((init as RequestInit).body?.toString() ?? "").includes(`/vault/pay/${created.id}`),
+    );
+    const body = JSON.parse((approvalCall![1] as RequestInit).body as string);
+    expect(body.text).toContain("A card will be entered during checkout.");
+    expect(body.text).not.toContain("your saved card");
+  });
+
+  it("names the bound card (label + last4) in the Telegram approval prompt, with no secret fields", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "synthetic-bot-token");
+    const account = await deps.accountStore.findAccountByEmail("payer@example.test");
+    await deps.accountStore.setTelegramChatId(account!.id, "555000111");
+    const cardId = await createOwnedCard(webCookie, "9192");
+    const blob = '{ "ciphertext": "synthetic-sealed-card" }';
+
+    const created = await createApproval(cardId);
+
+    // The card-store audit also pushes a vault alert, so locate the approval
+    // push by its vault URL rather than assuming a single call.
+    const approvalCall = fetchMock.mock.calls.find(([, init]) =>
+      ((init as RequestInit).body?.toString() ?? "").includes(`/vault/pay/${created.id}`),
+    );
+    expect(approvalCall).toBeTruthy();
+    const body = JSON.parse((approvalCall![1] as RequestInit).body as string);
+    expect(body.chat_id).toBe("555000111");
+    expect(body.text).toContain("Synthetic Visa •••• 9192");
+    expect(body.text).toContain(`/vault/pay/${created.id}`);
+    // The sealed blob and the raw PAN never render.
+    expect(body.text).not.toContain("synthetic-sealed-card");
+    expect(body.text).not.toContain(blob);
   });
 
   it("formats zero-decimal approval currencies without fake cents in Telegram", async () => {

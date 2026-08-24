@@ -216,9 +216,10 @@ export class ApiClient {
     return this.get("/v1/pay/config");
   }
 
-  async listPaymentCards(): Promise<Array<{ id: string; label: string }>> {
-    const records = await this.get<Array<{ id: string; label: string }>>("/v1/vault/e2e");
-    return records.map(({ id, label }) => ({ id, label }));
+  async listPaymentCards(): Promise<Array<{ id: string; label: string; last4: string | null }>> {
+    const records =
+      await this.get<Array<{ id: string; label: string; last4: string | null }>>("/v1/vault/e2e");
+    return records.map(({ id, label, last4 }) => ({ id, label, last4: last4 ?? null }));
   }
 
   async notifyThreeDs(

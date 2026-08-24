@@ -89,7 +89,11 @@ describe("CardEntry — the shared sensitive add-card flow", () => {
       // The full PAN must never leave the browser in the request body.
       expect(JSON.stringify(body)).not.toContain("4242 4242 4242 4242");
       expect(JSON.stringify(body)).not.toContain("4242424242424242");
-      expect(onSaved).toHaveBeenCalledWith({ id: "card_new" });
+      expect(onSaved).toHaveBeenCalledWith({
+        id: "card_new",
+        label: "Personal",
+        last4: "4242",
+      });
     },
   );
 });

@@ -17,7 +17,7 @@ interface CardEntryProps {
   // Receives the id of the just-stored card so a caller (the pay page) can
   // bind it to a pending approval. Callers that only need to refresh a list
   // ignore the argument.
-  onSaved?: (result: { id: string }) => void;
+  onSaved?: (result: { id: string; label: string; last4: string | null }) => void;
 }
 
 // The card ADD experience — device-pairing gate, then the card form itself,
@@ -139,7 +139,7 @@ export function CardEntry({ onSaved }: CardEntryProps) {
         setState("");
         setPostalCode("");
         setCountry("");
-        onSaved?.({ id });
+        onSaved?.({ id, label, last4 });
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) {
           router.replace(`/login?next=${encodeURIComponent(pathname)}`);
