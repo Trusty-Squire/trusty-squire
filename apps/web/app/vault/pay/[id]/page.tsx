@@ -7,6 +7,7 @@ import { sealToRecipient } from "@trusty-squire/vault/hpke";
 import { AppShell } from "../../../components/AppShell";
 import { CardEntry } from "../../../components/CardEntry";
 import { ApiError, apiGet, apiPost } from "../../../lib/api";
+import { boundCardMeta, formatCardIdentity, type CardMeta } from "../../../lib/wallet";
 import { getPairingState, isPaymentPasskeyUnavailable, pairDevice } from "../../../lib/pairing";
 import { getVouchflow } from "../../../lib/vouchflow";
 
@@ -94,6 +95,7 @@ export default function PaymentApprovalPage() {
   const [busy, setBusy] = useState(false);
   const [binding, setBinding] = useState(false);
   const [savedCardId, setSavedCardId] = useState<string | null>(null);
+  const [cards, setCards] = useState<CardMeta[]>([]);
   const [cardMetadataError, setCardMetadataError] = useState<string | null>(null);
   const [needsPasskeySetup, setNeedsPasskeySetup] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -107,6 +109,20 @@ export default function PaymentApprovalPage() {
     () => apiGet<CeremonyApproval>(`/v1/pay/approvals/${encodeURIComponent(id)}/ceremony`),
     [id],
   );
+
+  const loadCards = useCallback(async () => {
+    try {
+      // Non-secret card metadata (label + last4) from the account's card list —
+      // the only honest source for naming the card an operate_pay mandate
+      // binds. Cardless approvals have nothing to resolve yet and the pay line
+      // falls back to a generic phrase; it is never a misleading "saved card".
+      setCards(await apiGet<CardMeta[]>("/v1/vault/e2e"));
+    } catch {
+      // Display metadata is best-effort: an unreadable list must not fail the
+      // page, but the pay line cannot name a specific card.
+      setCards([]);
+    }
+  }, []);
 
   const applyCeremony = useCallback((current: CeremonyApproval) => {
     setJitOrigin((origin) => origin ?? current.card_ref === null);
@@ -124,9 +140,7 @@ export default function PaymentApprovalPage() {
       .then(async (current) => {
         if (cancelled) return;
         applyCeremony(current);
-        // A card-less approval is the enrollment fallback, not the hot path.
-        // It still needs OAuth because creating and binding a card mutates the vault.
-        if (current.card_ref === null) await apiGet("/v1/vault/e2e");
+        await loadCards();
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -139,18 +153,19 @@ export default function PaymentApprovalPage() {
     return () => {
       cancelled = true;
     };
-  }, [applyCeremony, fetchCeremony, redirectToLogin]);
+  }, [applyCeremony, fetchCeremony, redirectToLogin, loadCards]);
 
   const refreshCeremony = useCallback(async (): Promise<void> => {
     setCardMetadataError(null);
     try {
       applyCeremony(await fetchCeremony());
+      await loadCards();
     } catch (err) {
       setCardMetadataError(
         err instanceof Error ? err.message : "Failed to load the saved card details.",
       );
     }
-  }, [applyCeremony, fetchCeremony]);
+  }, [applyCeremony, fetchCeremony, loadCards]);
 
   const bindCard = useCallback(
     async (cardId: string) => {
@@ -308,10 +323,8 @@ export default function PaymentApprovalPage() {
   const needsCard = ceremony?.status === "pending" && ceremony.card_ref === null;
   const amountLabel =
     approval !== null ? formatAmount(approval.amount_cents, approval.currency) : "";
-  const cardLine =
-    approval?.card?.last4 != null
-      ? `${approval.card.brand !== null ? `${approval.card.brand} ` : ""}··${approval.card.last4}`
-      : "your saved card";
+  const boundCard = boundCardMeta(ceremony?.card_ref ?? null, cards);
+  const cardLine = boundCard === null ? "this payment's card" : formatCardIdentity(boundCard);
 
   return (
     <AppShell anonymous>

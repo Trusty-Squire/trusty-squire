@@ -145,7 +145,7 @@ beforeEach(() => {
   vault.decryptCard.mockResolvedValue({ pan: "4242424242424242" });
   api.apiGet.mockImplementation((path: string) => {
     if (path === "/v1/status") return Promise.resolve({ billing_enabled: false });
-    if (path === "/v1/vault/e2e") return Promise.resolve([]);
+    if (path === "/v1/vault/e2e") return Promise.resolve(cardListOverride ?? [BOUND_CARD]);
     if (path === "/v1/pay/approvals/appr_1/ceremony") {
       if (cardListFailures > 0) {
         cardListFailures -= 1;
@@ -217,6 +217,9 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(screen.getByText("phone case")).toBeTruthy();
     expect(screen.getByText("gift")).toBeTruthy();
     expect(screen.getByText(/Pay with/).textContent).toContain("$60.00");
+    const boundLine = screen.getByText(/Pay with/);
+    expect(boundLine.textContent).toContain("Personal •••• 4242");
+    expect(boundLine.textContent).not.toContain("4242424242424242");
     expect(approve.hasAttribute("disabled")).toBe(false);
     expect(vouchflow.signPayload).not.toHaveBeenCalled();
 
@@ -269,7 +272,7 @@ describe("pay page — JIT add-card ceremony", () => {
 
     await screen.findByRole("button", { name: "Retry" });
     expect(screen.queryByRole("button", { name: /Approve payment/ })).toBeNull();
-    expect(screen.getByText(/your saved card/i)).toBeTruthy();
+    expect(screen.getByText(/Personal •••• 4242/i)).toBeTruthy();
     expect(screen.getByText("CASETiFY")).toBeTruthy();
     expect(screen.getByText("card unavailable")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
@@ -285,7 +288,7 @@ describe("pay page — JIT add-card ceremony", () => {
 
     const approve = await screen.findByRole("button", { name: /Approve payment/ });
     expect(approve.hasAttribute("disabled")).toBe(false);
-    expect(screen.getByText(/your saved card/i)).toBeTruthy();
+    expect(screen.getByText(/Pay with/).textContent).toContain("Personal");
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
 
@@ -299,7 +302,7 @@ describe("pay page — JIT add-card ceremony", () => {
 
     expect(screen.queryByRole("button", { name: /Approve payment/ })).toBeNull();
     expect(screen.queryByTestId("card-entry")).toBeNull();
-    expect(screen.getByText(/your saved card/i)).toBeTruthy();
+    expect(screen.getByText(/Personal •••• 4242/i)).toBeTruthy();
     expect(screen.getByText("card unavailable")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Retry" }));
@@ -370,7 +373,7 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(
       screen.getByText("This payment was attached to a different card than the one you added."),
     ).toBeTruthy();
-    expect(screen.getByText(/your saved card/i)).toBeTruthy();
+    expect(screen.getByText(/this payment's/)).toBeTruthy();
     expect(screen.getByText("CASETiFY")).toBeTruthy();
   });
 });
@@ -387,7 +390,7 @@ describe("pay page — single payment authorization", () => {
     expect(paymentLine.textContent).not.toMatch(/9,845\.00/);
   });
 
-  it("renders canonical merchant, origin, amount, item, and reason before authorization", async () => {
+  it("renders canonical payment details and names the bound card before authorization", async () => {
     bound = true;
     render(<PaymentApprovalPage />);
     await screen.findByRole("button", { name: /Approve payment/ });
@@ -395,7 +398,12 @@ describe("pay page — single payment authorization", () => {
     expect(screen.getByText("https://casetify.com")).toBeTruthy();
     expect(screen.getByText("phone case")).toBeTruthy();
     expect(screen.getByText("gift")).toBeTruthy();
-    expect(screen.getByText(/Pay with/).textContent).toContain("$60.00");
+    const namedLine = screen.getByText(/Pay with/);
+    expect(namedLine.textContent).toContain("$60.00");
+    // The bound card is named by non-secret label + last4; the sealed PAN
+    // never appears in rendered text.
+    expect(namedLine.textContent).toContain("Personal •••• 4242");
+    expect(namedLine.textContent).not.toContain("4242424242424242");
     expect(vouchflow.signPayload).not.toHaveBeenCalled();
   });
 

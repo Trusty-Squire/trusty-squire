@@ -149,6 +149,28 @@ function submissionBinding(
   });
 }
 
+// Display-only identity for the card an approval releases: "Label •••• 1234"
+// (or the label alone for legacy cards stored before the last4 metadata
+// existed). Resolved from the non-secret label/brand/last4 metadata the vault
+// stores; never PAN/expiry/CVV. Returns null when the cardless approval binds
+// no card or the bound card can't be resolved, so the caller falls back to a
+// generic phrase instead of "your saved card".
+async function approvalCardName(
+  cardRef: string | null,
+  deps: Pick<ApiDeps, "e2eCredentialStore">,
+  accountId: string,
+): Promise<string | null> {
+  if (cardRef === null) return null;
+  try {
+    const card = await deps.e2eCredentialStore.getByIdForAccount(cardRef, accountId);
+    if (card === null) return null;
+    return card.last4 !== null ? `${card.label} •••• ${card.last4}` : card.label;
+  } catch {
+    // Display metadata is best-effort; never fail the approval over it.
+    return null;
+  }
+}
+
 const bindCardBody = z.object({
   card_ref: z.string().min(1).max(64),
 });
@@ -292,8 +314,14 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     const account = await opts.deps.accountStore.findAccountById(auth.account_id);
     if (account?.telegram_chat_id != null) {
       const amount = formatCurrencyAmount(parsed.data.amount_cents, parsed.data.currency);
+      const cardName = await approvalCardName(
+        parsed.data.card_ref ?? null,
+        opts.deps,
+        auth.account_id,
+      );
       const text =
         `Trusty Squire — approve ${amount} to ${parsed.data.merchant}\n` +
+        `${cardName !== null ? `Using ${cardName}.\n` : ""}` +
         `${webBaseUrl()}/vault/pay/${id}`;
       void sendTelegramMessage(account.telegram_chat_id, text).catch(() => {});
     }

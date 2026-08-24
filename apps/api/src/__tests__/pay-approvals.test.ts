@@ -768,6 +768,32 @@ describe("payment approval relay", () => {
     expect(body.text).toContain(`/vault/pay/${created.id}`);
   });
 
+  it("names the bound card (label + last4) in the Telegram approval prompt, with no secret fields", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "synthetic-bot-token");
+    const account = await deps.accountStore.findAccountByEmail("payer@example.test");
+    await deps.accountStore.setTelegramChatId(account!.id, "555000111");
+    const cardId = await createOwnedCard(webCookie, "9192");
+    const blob = '{ "ciphertext": "synthetic-sealed-card" }';
+
+    const created = await createApproval(cardId);
+
+    // The card-store audit also pushes a vault alert, so locate the approval
+    // push by its vault URL rather than assuming a single call.
+    const approvalCall = fetchMock.mock.calls.find(([, init]) =>
+      ((init as RequestInit).body?.toString() ?? "").includes(`/vault/pay/${created.id}`),
+    );
+    expect(approvalCall).toBeTruthy();
+    const body = JSON.parse((approvalCall![1] as RequestInit).body as string);
+    expect(body.chat_id).toBe("555000111");
+    expect(body.text).toContain("Synthetic Visa •••• 9192");
+    expect(body.text).toContain(`/vault/pay/${created.id}`);
+    // The sealed blob and the raw PAN never render.
+    expect(body.text).not.toContain("synthetic-sealed-card");
+    expect(body.text).not.toContain(blob);
+  });
+
   it("formats zero-decimal approval currencies without fake cents in Telegram", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal("fetch", fetchMock);
