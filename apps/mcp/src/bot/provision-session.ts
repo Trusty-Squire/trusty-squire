@@ -2349,6 +2349,7 @@ const SEALED_FIELD_PLACEHOLDER = "[sealed]";
 function isSealedFieldValue(el: InteractiveElement, sealed: ReadonlySet<string>): boolean {
   if (el.sealed === true) return true;
   if ((el.type ?? "").toLowerCase() === "password") return true;
+  if ((el.sealedIdentityKeys ?? []).some((key) => sealed.has(key))) return true;
   return elementTargetKeys(el).some((k) => sealed.has(k));
 }
 function presentFieldValue(
@@ -2786,49 +2787,24 @@ export interface ScreenshotCapture {
   image: { mime_type: string; data_base64: string };
 }
 
-// operate_screenshot's session-level entry point: mirrors observe()'s
-// sessionForCall resolution, then delegates the actual capture + money-fence
-// redaction to BrowserController.screenshotForOperator (browser.ts).
+// operate_screenshot's session-level entry point: refuses an active card-fill
+// lease, then delegates the capture-scoped sealed-value checks and pixel
+// redaction to BrowserController.captureOperatorScreenshot (browser.ts).
 export async function captureScreenshot(
   sessionId: string,
   opts: { frameIndex?: number; frameUrlContains?: string; fullPage?: boolean } = {},
 ): Promise<ScreenshotCapture> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  // Fail-closed strictness (2026-08-23): refuse outright whenever the
-  // session has EVER sealed a secret (sealedFieldKeys is cumulative and
-  // never cleared for the session's lifetime — see type_secret's ref-based
-  // path) or currently has an active payment fill (paymentFieldSealActive).
-  // This is deliberately in place of trying to redact correctly around
-  // every edge case a live sealed/card-bearing page can produce — a field
-  // sealed in a temporarily-unavailable frame, a nested hosted iframe, a
-  // value moving between fields mid-capture, a framework rerender losing
-  // the resolution marker — the exact class of gaps an adversarial review
-  // round found in the per-element mask-based redaction path below. No
-  // capture can leak what it refuses to take. The tool stays fully usable
-  // for what it exists to debug: a 3-D Secure/challenge or captcha page
-  // holds no card data and never seals anything, so this guard never fires
-  // on the case operate_screenshot was built for.
-  if (session.sealedFieldKeys.size > 0 || session.paymentFieldSealActive) {
+  // A live card fill is never safe to inspect, even when the caller selects a
+  // child frame. Historical seals are different: sealedFieldKeys is cumulative,
+  // so the browser must inspect only the frames this capture would include.
+  if (session.paymentFieldSealActive || session.activePayment?.status === "operating") {
     throw new Error("screenshot_unavailable_sealed_context");
   }
-  // Fields sealed via the ref-based type_secret path exist only in session
-  // state (sealedFieldKeys) — no DOM marker — so the redaction set is derived
-  // with the SAME helpers observe()'s JSON-masking uses and handed to the
-  // browser layer as extra mask selectors. An extraction failure propagates:
-  // a capture whose sealed set cannot be established must abort, not proceed
-  // with fewer redactions. In practice this is unreachable with a non-empty
-  // result — the guard above already refused whenever sealedFieldKeys is
-  // non-empty — kept as defense-in-depth, not the primary fence.
-  const elements = await session.browser.extractInteractiveElements();
-  const sealedFieldKeys = observationSealedFieldKeys(session, elements);
-  const extraRedactionSelectors = elements
-    .filter((el) => isSealedFieldValue(el, sealedFieldKeys))
-    .map((el) => el.selector);
-  const captured = await session.browser.screenshotForOperator({
-    ...opts,
-    extraRedactionSelectors,
-  });
+  const captured = await session.browser.captureOperatorScreenshot(opts, [
+    ...session.sealedFieldKeys,
+  ]);
   return {
     session_id: sessionId,
     url: session.browser.currentUrl(),
@@ -4765,7 +4741,8 @@ export async function act(
             assertSecretFrameTargetAllowed(session, resolved.frameTarget);
           }
           session.usedLocatorFallback = true;
-          await browser.typeHandle(resolved.handle, value, true);
+          const sealedFieldKeys = await browser.typeHandle(resolved.handle, value, true);
+          for (const key of sealedFieldKeys) session.sealedFieldKeys.add(key);
         } finally {
           await resolved.handle.dispose().catch(() => undefined);
         }
@@ -4793,14 +4770,14 @@ export async function act(
       // assertSecretFrameTargetAllowed; a main-frame or same-domain-frame
       // target is unaffected.
       assertSecretFrameTargetAllowed(session, el);
-      // Remember this field so the next observation masks its DOM value — the
-      // host sealed this secret into a slot and must never read it back.
-      for (const key of elementTargetKeys(el)) session.sealedFieldKeys.add(key);
       // Type the REAL value into the page. It crosses only browser↔page; the
       // value is never returned to the host and never logged.
       const target = frameTargetFor(el);
-      if (target !== null) await browser.typeInFrame(target, el.selector, value);
-      else await browser.type(el.selector, value);
+      const sealedFieldKeys =
+        target !== null
+          ? await browser.typeInFrame(target, el.selector, value, true)
+          : await browser.type(el.selector, value, true);
+      for (const key of sealedFieldKeys) session.sealedFieldKeys.add(key);
       audit(sessionId, "type_secret", {
         slot: action.slot,
         target: action.target,

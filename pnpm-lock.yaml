@@ -159,6 +159,9 @@ importers:
       rebrowser-playwright-core:
         specifier: ^1.52.0
         version: 1.52.0
+      sharp:
+        specifier: ^0.34.5
+        version: 0.34.5
       smol-toml:
         specifier: ^1.6.1
         version: 1.6.1
@@ -1180,7 +1183,6 @@ packages:
     engines: {node: '>=18'}
     requiresBuild: true
     dev: false
-    optional: true
 
   /@img/sharp-darwin-arm64@0.34.5:
     resolution: {integrity: sha512-imtQ3WMJXbMY4fxb/Ndp6HBTNVtWCUI0WdobyheGf5+ad6xX8VIDO8u2xE4qc/fr08CKG/7dDseFtn6M6g/r3w==}
@@ -2572,7 +2574,7 @@ packages:
       std-env: 3.10.0
       strip-literal: 2.1.1
       test-exclude: 6.0.0
-      vitest: 1.6.1(@types/node@22.19.19)
+      vitest: 1.6.1(@types/node@20.19.40)(happy-dom@20.11.1)
     transitivePeerDependencies:
       - supports-color
     dev: true
@@ -6774,7 +6776,6 @@ packages:
       '@img/sharp-win32-ia32': 0.34.5
       '@img/sharp-win32-x64': 0.34.5
     dev: false
-    optional: true
 
   /shebang-command@2.0.0:
     resolution: {integrity: sha512-kHxr2zZpYtdmrN1qDjrrX/Z1rR1kG8Dx+gkpK1G4eXmvXswmcE1hTWBWYUzlraYw1/yZp6YuDY77YtvbN0dmDA==}
