@@ -76,6 +76,7 @@ async function harness(
     checkout?: CheckoutSummary;
     readCheckoutSummary?: () => Promise<CheckoutSummary>;
     fillAndSubmitCheckout?: (card: CheckoutCard) => Promise<CheckoutSubmitResult>;
+    paymentInstrumentMismatch?: () => CheckoutSubmitResult["payment_instrument_mismatch"];
   } = {},
 ) {
   const checkout = checkoutOptions.checkout ?? CHECKOUT;
@@ -273,6 +274,9 @@ async function harness(
         }),
     ),
     waitForThreeDsResolution: vi.fn().mockResolvedValue(threeDs?.resolution ?? "timeout"),
+    ...(checkoutOptions.paymentInstrumentMismatch !== undefined
+      ? { paymentInstrumentMismatch: checkoutOptions.paymentInstrumentMismatch }
+      : {}),
   };
   const api = new ApiClient({
     apiBaseUrl: "https://api.test",
@@ -864,7 +868,11 @@ describe("operate_pay", () => {
           payment_instrument_mismatch: {
             kind: "payment_instrument_mismatch",
             expected: { last4: "9192", issuer: "DBS" },
-            observed: { issuer: "ENBDX", source: "3ds_challenge" },
+            observed: { issuer: "ENBDX" },
+            provenance: {
+              expected: { last4: "released_card", issuer: "bin_metadata" },
+              observed: "3ds_challenge",
+            },
           },
         }),
       },
@@ -879,9 +887,39 @@ describe("operate_pay", () => {
       },
       needs_user: { wall: "3ds", resume: "checkout" },
     });
-    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
+    expect(browser.waitForThreeDsResolution).not.toHaveBeenCalled();
     expect(pendingThreeDsStates).toMatchObject([
       { payment_instrument_mismatch: { observed: { issuer: "ENBDX" } } },
+    ]);
+  });
+
+  it("persists mismatch evidence first observed during the existing 3DS wait", async () => {
+    const mismatch: NonNullable<CheckoutSubmitResult["payment_instrument_mismatch"]> = {
+      kind: "payment_instrument_mismatch",
+      expected: { last4: "9192" },
+      observed: { last4: "0005" },
+      provenance: {
+        expected: { last4: "released_card" },
+        observed: "3ds_challenge",
+      },
+    };
+    const { result, pendingThreeDsStates } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      { resolution: "timeout" },
+      {
+        fillAndSubmitCheckout: async () => ({
+          three_ds_required: true,
+          order_confirmed: false,
+        }),
+        paymentInstrumentMismatch: () => mismatch,
+      },
+    );
+
+    expect(result).toMatchObject({ warning: mismatch });
+    expect(pendingThreeDsStates).toMatchObject([
+      { payment_instrument_mismatch: mismatch },
     ]);
   });
 

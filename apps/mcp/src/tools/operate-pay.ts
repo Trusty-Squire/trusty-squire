@@ -278,7 +278,13 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         //      >1 cards → error listing the labels (never silently guess)
         let cardRef = args.card_ref;
         let selectedCardLabel = args.card_label;
-        let cards: Array<{ id: string; label: string; last4: string | null }>;
+        let selectedCardNetwork: string | undefined;
+        let cards: Array<{
+          id: string;
+          label: string;
+          last4: string | null;
+          brand?: string;
+        }>;
         if (cardRef === undefined) {
           cards = await api.listPaymentCards();
         } else {
@@ -301,9 +307,11 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
             }
             cardRef = matches[0]!.id;
             selectedCardLabel = matches[0]!.label;
+            selectedCardNetwork = matches[0]!.brand;
           } else if (cards.length === 1) {
             cardRef = cards[0]!.id;
             selectedCardLabel = cards[0]!.label;
+            selectedCardNetwork = cards[0]!.brand;
           } else if (cards.length > 1) {
             const labels = cards.map((card) => `"${card.label}"`).join(", ");
             throw new Error(
@@ -323,8 +331,10 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         // An explicit ref normally avoids another vault metadata read. Best
         // effort here enriches only the passive post-submit ACS comparison;
         // its failure must never alter a charge path.
-        if (cardRef !== undefined && selectedCardLabel === undefined) {
-          selectedCardLabel = cards.find((candidate) => candidate.id === cardRef)?.label;
+        if (cardRef !== undefined && selectedCardNetwork === undefined) {
+          const selectedCard = cards.find((candidate) => candidate.id === cardRef);
+          selectedCardLabel ??= selectedCard?.label;
+          selectedCardNetwork = selectedCard?.brand;
         }
         let resolvedCardRef: string | null = null;
         let filledPending: PendingCardFill | null = null;
@@ -345,7 +355,8 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         const result = await executeOperatePay(
           {
             ...(cardRef !== undefined ? { card_ref: cardRef } : {}),
-            ...(selectedCardLabel !== undefined ? { card_issuer: selectedCardLabel } : {}),
+            ...(selectedCardLabel !== undefined ? { card_label: selectedCardLabel } : {}),
+            ...(selectedCardNetwork !== undefined ? { card_network: selectedCardNetwork } : {}),
             ...(args.merchant !== undefined ? { merchant: args.merchant } : {}),
             ...(args.amount_cents !== undefined ? { amount_cents: args.amount_cents } : {}),
             ...(args.currency !== undefined ? { currency: args.currency } : {}),
@@ -598,6 +609,7 @@ async function threeDsStatusResult(
   const boundMs =
     expiredAtEntry || waitSeconds <= 0 ? 0 : Math.min(Math.max(waitSeconds * 1000, 1_000), 15_000);
   const resolution = await browser.waitForThreeDsResolution(boundMs);
+  state.payment_instrument_mismatch ??= browser.paymentInstrumentMismatch?.();
   const terminalStatus = threeDsResolutionStatus(resolution);
   const unresolvedPastDeadline =
     terminalStatus === null && (expiredAtEntry || Date.now() >= state.deadline);

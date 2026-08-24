@@ -163,6 +163,15 @@ const h = vi.hoisted(() => ({
   clearSealedPaymentFieldsCalls: 0,
   waitForThreeDsResult: "timeout" as "succeeded" | "failed" | "timeout",
   waitForThreeDsCalls: [] as number[],
+  paymentInstrumentMismatch: null as null | {
+    kind: "payment_instrument_mismatch";
+    expected: { last4: string };
+    observed: { last4: string };
+    provenance: {
+      expected: { last4: "released_card" };
+      observed: "3ds_challenge";
+    };
+  },
 }));
 
 vi.mock("../browser.js", () => ({
@@ -617,6 +626,9 @@ vi.mock("../browser.js", () => ({
       h.waitForThreeDsCalls.push(timeoutMs);
       return h.waitForThreeDsResult;
     }
+    paymentInstrumentMismatch(): typeof h.paymentInstrumentMismatch {
+      return h.paymentInstrumentMismatch;
+    }
     async close(): Promise<"closed" | "force_closed_unproven" | "unknown"> {
       h.closeCalls += 1;
       if (h.connections[this.index] === true) h.started -= 1;
@@ -1017,6 +1029,7 @@ beforeEach(() => {
   h.clearSealedPaymentFieldsCalls = 0;
   h.waitForThreeDsResult = "timeout";
   h.waitForThreeDsCalls = [];
+  h.paymentInstrumentMismatch = null;
 });
 
 const replayRecipe = (overrides: Partial<OperatorRecipe> = {}): OperatorRecipe => ({
@@ -6285,8 +6298,17 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
     deadline = Date.now() + 60_000,
     payment_instrument_mismatch?: {
       kind: "payment_instrument_mismatch";
-      expected: { last4: string; issuer?: string };
-      observed: { last4?: string; issuer?: string; source: "3ds_challenge" };
+      expected: { last4: string; issuer?: string; network?: string; label?: string };
+      observed: { last4?: string; issuer?: string; network?: string };
+      provenance: {
+        expected: {
+          last4: "released_card";
+          issuer?: "bin_metadata";
+          network?: "vault_metadata";
+          label?: "vault_label";
+        };
+        observed: "3ds_challenge";
+      };
     },
   ) {
     return {
@@ -6368,7 +6390,11 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
       buildThreeDsState(Date.now() + 60_000, {
         kind: "payment_instrument_mismatch",
         expected: { last4: "9192", issuer: "DBS" },
-        observed: { issuer: "ENBDX", source: "3ds_challenge" },
+        observed: { issuer: "ENBDX" },
+        provenance: {
+          expected: { last4: "released_card", issuer: "bin_metadata" },
+          observed: "3ds_challenge",
+        },
       }),
     );
     h.waitForThreeDsResult = "timeout";
@@ -6378,11 +6404,38 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
       warning: {
         kind: "payment_instrument_mismatch",
         expected: { last4: "9192", issuer: "DBS" },
-        observed: { issuer: "ENBDX", source: "3ds_challenge" },
+        observed: { issuer: "ENBDX" },
+        provenance: {
+          expected: { last4: "released_card", issuer: "bin_metadata" },
+          observed: "3ds_challenge",
+        },
       },
     });
     h.waitForThreeDsResult = "failed";
     await operatePaymentStatusTool.handler({}, env.api);
+  });
+
+  it("persists mismatch evidence first observed by a resumable status poll", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({ serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html" });
+    setActivePendingThreeDs(buildThreeDsState());
+    h.paymentInstrumentMismatch = {
+      kind: "payment_instrument_mismatch",
+      expected: { last4: "9192" },
+      observed: { last4: "0005" },
+      provenance: {
+        expected: { last4: "released_card" },
+        observed: "3ds_challenge",
+      },
+    };
+
+    await expect(operatePaymentStatusTool.handler({}, env.api)).resolves.toMatchObject({
+      status: "payment_3ds_pending",
+      warning: h.paymentInstrumentMismatch,
+    });
+    expect(getActivePendingThreeDs()).toMatchObject({
+      payment_instrument_mismatch: h.paymentInstrumentMismatch,
+    });
   });
 
   it("records a declined outcome and clears state when the OOB challenge fails", async () => {

@@ -34,8 +34,8 @@ export interface OperatePayArgs {
   item: string;
   reason: string;
   three_ds_wait_seconds?: number;
-  // User-visible vault label, used only to compare passive ACS issuer/app
-  // evidence after submission. It is never sent to a merchant or audit API.
+  card_label?: string;
+  card_network?: string;
   card_issuer?: string;
   // "fill_card" = split-checkout card entry: a SINGLE amount-bound approval
   // (one human passkey tap) releases the vaulted card, then fills payment
@@ -56,6 +56,7 @@ export interface PaymentBrowser {
   clearSealedPaymentFields(): Promise<void>;
   clearCheckoutCardFields?(): Promise<void>;
   waitForThreeDsResolution(timeoutMs: number): Promise<ThreeDsResolution>;
+  paymentInstrumentMismatch?(): PaymentInstrumentMismatch | undefined;
   currentUrl(): string;
 }
 
@@ -1358,7 +1359,14 @@ export async function executeOperatePay(
     let submitResult: CheckoutSubmitResult = { three_ds_required: false, order_confirmed: false };
     try {
       submitResult = await browser.fillAndSubmitCheckout(
-        args.card_issuer === undefined ? card : { ...card, issuer: args.card_issuer },
+        {
+          ...card,
+          ...(args.card_label !== undefined ? { label: args.card_label } : {}),
+          ...(args.card_network !== undefined ? { network: args.card_network } : {}),
+          ...(args.card_issuer !== undefined
+            ? { issuer: args.card_issuer, issuer_source: "bin_metadata" as const }
+            : {}),
+        },
       );
       if (submitResult.three_ds_required) paymentStatus = "payment_3ds_required";
       else if (!submitResult.order_confirmed) paymentStatus = "payment_outcome_unknown";
@@ -1395,11 +1403,16 @@ export async function executeOperatePay(
     }
 
     let getThreeDsTelegramSent: () => boolean | undefined = () => undefined;
-    if (!submitResult.order_confirmed && threeDsWaitMs > 0) {
+    if (
+      submitResult.payment_instrument_mismatch === undefined &&
+      !submitResult.order_confirmed &&
+      threeDsWaitMs > 0
+    ) {
       getThreeDsTelegramSent = trackThreeDsNotification(
         api.notifyThreeDs(approvalId, threeDsNotificationMode(submitResult)),
       );
       const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
+      submitResult.payment_instrument_mismatch ??= browser.paymentInstrumentMismatch?.();
       paymentStatus = statusAfterThreeDsResolution(paymentStatus, resolution);
     }
 
@@ -1440,6 +1453,9 @@ export async function executeOperatePay(
         status: paymentStatus,
         audit_recorded: auditRecorded,
         approval_url: approvalUrl,
+        ...(submitResult.payment_instrument_mismatch !== undefined
+          ? { warning: submitResult.payment_instrument_mismatch }
+          : {}),
       };
     }
     return {
