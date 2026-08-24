@@ -1,6 +1,6 @@
 // End-to-end coverage for operate_screenshot through the REAL MCP tool-call
 // path (InMemoryTransport, same harness as server-resilience.test.ts): a
-// session, a mocked BrowserController.screenshotForOperator, and an assertion
+// session, a mocked BrowserController.captureOperatorScreenshot, and an assertion
 // on the RAW protocol response — that a screenshot result actually arrives as
 // an MCP `type: "image"` content block the host can render, not just a
 // base64 string buried in JSON text.
@@ -40,8 +40,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       currentUrl: vi.fn().mockReturnValue(url),
       readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
       close: vi.fn().mockResolvedValue(undefined),
-      assertOperatorScreenshotNoSealedValues: vi.fn().mockResolvedValue(undefined),
-      screenshotForOperator: vi.fn().mockResolvedValue({
+      captureOperatorScreenshot: vi.fn().mockResolvedValue({
         base64: TINY_JPEG_BASE64,
         frameUrl: null,
         frameCount: 1,
@@ -84,8 +83,8 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       expect(textBlock?.text ?? "").not.toContain(TINY_JPEG_BASE64);
 
       expect(
-        (browser.screenshotForOperator as ReturnType<typeof vi.fn>).mock.calls[0]?.[0],
-      ).toEqual({ extraRedactionSelectors: [] });
+        (browser.captureOperatorScreenshot as ReturnType<typeof vi.fn>).mock.calls[0]?.[0],
+      ).toEqual({});
     } finally {
       await client.close();
       await closeAllProvisionSessions();
@@ -108,8 +107,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       currentUrl: vi.fn().mockReturnValue(url),
       readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
       close: vi.fn().mockResolvedValue(undefined),
-      assertOperatorScreenshotNoSealedValues: vi.fn().mockResolvedValue(undefined),
-      screenshotForOperator: vi.fn().mockResolvedValue({
+      captureOperatorScreenshot: vi.fn().mockResolvedValue({
         base64: TINY_JPEG_BASE64,
         frameUrl: "https://authentication.cardinalcommerce.com/challenge",
         frameCount: 2,
@@ -130,16 +128,10 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
         },
       });
       expect(
-        (browser.screenshotForOperator as ReturnType<typeof vi.fn>).mock.calls[0]?.[0],
+        (browser.captureOperatorScreenshot as ReturnType<typeof vi.fn>).mock.calls[0]?.[0],
       ).toEqual({
         frameUrlContains: "cardinalcommerce.com",
         fullPage: true,
-        extraRedactionSelectors: ["#otp-code"],
-      });
-      expect(browser.assertOperatorScreenshotNoSealedValues).toHaveBeenCalledWith({
-        frameUrlContains: "cardinalcommerce.com",
-        fullPage: true,
-        extraRedactionSelectors: ["#otp-code"],
       });
     } finally {
       await client.close();
@@ -147,7 +139,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
     }
   });
 
-  it("aborts the capture when the sealed-field extraction itself fails", async () => {
+  it("does not run interactive extraction during capture", async () => {
     const url = "https://operator-screenshot.test/checkout";
     let failExtraction = false;
     const browser = {
@@ -164,8 +156,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       currentUrl: vi.fn().mockReturnValue(url),
       readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
       close: vi.fn().mockResolvedValue(undefined),
-      assertOperatorScreenshotNoSealedValues: vi.fn().mockResolvedValue(undefined),
-      screenshotForOperator: vi.fn().mockResolvedValue({
+      captureOperatorScreenshot: vi.fn().mockResolvedValue({
         base64: TINY_JPEG_BASE64,
         frameUrl: null,
         frameCount: 1,
@@ -177,12 +168,17 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
 
     try {
       failExtraction = true;
+      const extractionCalls = (browser.extractInteractiveElements as ReturnType<typeof vi.fn>).mock
+        .calls.length;
       const result = await client.callTool({
         name: "operate_screenshot",
         arguments: { session_id: started.session_id },
       });
-      expect(result.isError).toBe(true);
-      expect(browser.screenshotForOperator).not.toHaveBeenCalled();
+      expect(result.isError).not.toBe(true);
+      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({});
+      expect(
+        (browser.extractInteractiveElements as ReturnType<typeof vi.fn>).mock.calls.length,
+      ).toBe(extractionCalls);
     } finally {
       await client.close();
       await closeAllProvisionSessions();
@@ -199,8 +195,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       currentUrl: vi.fn().mockReturnValue(url),
       readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
       close: vi.fn().mockResolvedValue(undefined),
-      assertOperatorScreenshotNoSealedValues: vi.fn().mockResolvedValue(undefined),
-      screenshotForOperator: vi.fn().mockResolvedValue({
+      captureOperatorScreenshot: vi.fn().mockResolvedValue({
         base64: TINY_JPEG_BASE64,
         frameUrl: null,
         frameCount: 1,
@@ -221,10 +216,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       });
 
       expect(result.isError).not.toBe(true);
-      expect(browser.assertOperatorScreenshotNoSealedValues).toHaveBeenCalledWith({
-        extraRedactionSelectors: [],
-      });
-      expect(browser.screenshotForOperator).toHaveBeenCalled();
+      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({});
     } finally {
       await client.close();
       await closeAllProvisionSessions();
@@ -241,8 +233,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       currentUrl: vi.fn().mockReturnValue(url),
       readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
       close: vi.fn().mockResolvedValue(undefined),
-      assertOperatorScreenshotNoSealedValues: vi.fn().mockResolvedValue(undefined),
-      screenshotForOperator: vi.fn().mockResolvedValue({
+      captureOperatorScreenshot: vi.fn().mockResolvedValue({
         base64: TINY_JPEG_BASE64,
         frameUrl: null,
         frameCount: 1,
@@ -264,7 +255,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       const content = result.content as Array<{ type: string; text?: string }>;
       const text = content.find((c) => c.type === "text")?.text ?? "";
       expect(text).toContain("screenshot_unavailable_sealed_context");
-      expect(browser.screenshotForOperator).not.toHaveBeenCalled();
+      expect(browser.captureOperatorScreenshot).not.toHaveBeenCalled();
     } finally {
       await client.close();
       await closeAllProvisionSessions();

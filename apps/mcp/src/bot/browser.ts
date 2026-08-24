@@ -30,6 +30,7 @@ import type {
   ElementHandle,
   FileChooser,
   Frame,
+  JSHandle,
   Locator,
   Page,
 } from "playwright";
@@ -757,7 +758,16 @@ const CHECKOUT_CARD_VALUE_FIELD_SELECTORS = [
 // text-masking uses — see presentFieldValue) + any password input. A pixel
 // screenshot has no text-masking layer of its own, so this must catch everything
 // observe's masking catches that could actually be VISIBLE on screen.
-const SCREENSHOT_REDACTION_SELECTORS = `${CHECKOUT_CARD_VALUE_FIELD_SELECTORS},[data-ts-sealed-payment="1"],input[type="password" i]`;
+const SCREENSHOT_SECRET_FIELD_SELECTORS = [
+  '[data-ts-sealed-payment="1"]',
+  'input[type="password" i]',
+  'input[autocomplete~="one-time-code" i]',
+  'input[name*="otp" i]',
+  'input[id*="otp" i]',
+  'input[name*="pin" i]',
+  'input[id*="pin" i]',
+].join(",");
+const SCREENSHOT_REDACTION_SELECTORS = `${CHECKOUT_CARD_VALUE_FIELD_SELECTORS},${SCREENSHOT_SECRET_FIELD_SELECTORS}`;
 
 // Charge-verb button labels — the click that may move money. Used by
 // submitFilledCheckout to find the charge control, and by operate_act's
@@ -4503,15 +4513,20 @@ export class BrowserController {
     }
   }
 
-  async type(selector: string, text: string): Promise<void> {
+  async type(selector: string, text: string, sealed = false): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
-    await this.withModalInertNeutralized(selector, () => this.typeInner(selector, text));
+    await this.withModalInertNeutralized(selector, () => this.typeInner(selector, text, sealed));
   }
 
-  private async typeInner(selector: string, text: string): Promise<void> {
+  private async typeInner(selector: string, text: string, sealed = false): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     // Wait for element to be visible and enabled before typing.
     await this.page.waitForSelector(selector, { state: "visible", timeout: 10000 });
+    if (sealed) {
+      await this.page
+        .locator(selector)
+        .evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
+    }
 
     if (!this.humanize) {
       // Fast path for tests / non-humanized runs.
@@ -8438,11 +8453,9 @@ export class BrowserController {
   }
 
   // Resolve every card-shaped/sealed field in the captured frames to a
-  // Playwright screenshot `mask` Locator — text-masking (presentFieldValue in
+  // screenshot redaction rectangles — text-masking (presentFieldValue in
   // provision-session.ts) only covers the JSON observation, not a rendered
-  // image. The mask box is painted by Playwright's own capture machinery, so
-  // this path never writes a style or attribute into the live checkout DOM,
-  // and locator querying pierces open shadow roots. Beyond the attribute-based
+  // image. Beyond the attribute-based
   // selector set, every renderable input/textarea whose CURRENT value contains
   // a Luhn-valid PAN span is masked too (containsLuhnPanSpan — the same
   // detection the payment paths use), so a card number sitting in a field the
@@ -8455,19 +8468,24 @@ export class BrowserController {
   private async collectOperatorScreenshotMask(
     frames: readonly Frame[],
     extraRedactionSelectors: readonly string[],
-  ): Promise<{ mask: Locator[]; redactedCount: number; signature: string }> {
+  ): Promise<{
+    rectangles: Array<{ x: number; y: number; width: number; height: number }>;
+    redactedCount: number;
+    signature: string;
+  }> {
     const selector = [SCREENSHOT_REDACTION_SELECTORS, ...extraRedactionSelectors].join(",");
-    const mask: Locator[] = [];
+    const rectangles: Array<{ x: number; y: number; width: number; height: number }> = [];
     const perFrameCounts: number[] = [];
     try {
       for (const frame of frames) {
         let frameCount = 0;
         const matches = await frame.locator(selector).all();
         for (const match of matches) {
-          if ((await match.boundingBox({ timeout: 5_000 })) === null) {
+          const box = await match.boundingBox({ timeout: 5_000 });
+          if (box === null) {
             throw new Error("screenshot_redaction_unresolved");
           }
-          mask.push(match);
+          rectangles.push(box);
           frameCount += 1;
         }
         const valueCandidates = await frame.locator('input:not([type="hidden" i]),textarea').all();
@@ -8479,10 +8497,11 @@ export class BrowserController {
           ) {
             continue;
           }
-          if ((await candidate.boundingBox({ timeout: 5_000 })) === null) {
+          const box = await candidate.boundingBox({ timeout: 5_000 });
+          if (box === null) {
             throw new Error("screenshot_redaction_unresolved");
           }
-          mask.push(candidate);
+          rectangles.push(box);
           frameCount += 1;
         }
         perFrameCounts.push(frameCount);
@@ -8491,10 +8510,53 @@ export class BrowserController {
       throw new Error("screenshot_redaction_unresolved");
     }
     return {
-      mask,
+      rectangles,
       redactedCount: perFrameCounts.reduce((sum, count) => sum + count, 0),
       signature: perFrameCounts.join(","),
     };
+  }
+
+  private async redactOperatorScreenshot(
+    buffer: Buffer,
+    rectangles: ReadonlyArray<{ x: number; y: number; width: number; height: number }>,
+    origin: { x: number; y: number },
+    captureSize: { width: number; height: number },
+  ): Promise<string> {
+    if (!this.page) throw new Error("Browser not started");
+    return await this.page.evaluate(
+      async ({ source, boxes, imageOrigin, cssSize }) => {
+        const image = new Image();
+        await new Promise<void>((resolve, reject) => {
+          image.onload = () => resolve();
+          image.onerror = () => reject(new Error("screenshot decode failed"));
+          image.src = `data:image/jpeg;base64,${source}`;
+        });
+        const canvas = document.createElement("canvas");
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        const context = canvas.getContext("2d");
+        if (context === null) throw new Error("screenshot canvas unavailable");
+        context.drawImage(image, 0, 0);
+        context.fillStyle = "#ff00ff";
+        const scaleX = image.naturalWidth / cssSize.width;
+        const scaleY = image.naturalHeight / cssSize.height;
+        for (const box of boxes) {
+          context.fillRect(
+            (box.x - imageOrigin.x) * scaleX,
+            (box.y - imageOrigin.y) * scaleY,
+            box.width * scaleX,
+            box.height * scaleY,
+          );
+        }
+        return canvas.toDataURL("image/jpeg", 0.8).slice("data:image/jpeg;base64,".length);
+      },
+      {
+        source: buffer.toString("base64"),
+        boxes: rectangles,
+        imageOrigin: origin,
+        cssSize: captureSize,
+      },
+    );
   }
 
   // Verify the capture set before pixels are read. This is deliberately
@@ -8503,40 +8565,28 @@ export class BrowserController {
   // Luhn-valid PAN means the requested image could contain a secret. Every
   // frame included by the image must be readable; a detached or navigating
   // frame is not evidence that it is safe to capture.
-  async assertOperatorScreenshotNoSealedValues(
-    opts: {
-      frameIndex?: number;
-      frameUrlContains?: string;
-      extraRedactionSelectors?: readonly string[];
-    } = {},
+  private async assertOperatorScreenshotFramesNoSealedValues(
+    frames: readonly Frame[],
+    extraRedactionSelectors: readonly string[],
   ): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    const page = this.page;
-    const targetFrame = this.resolveOperatorScreenshotFrame(opts);
-    const frames =
-      targetFrame !== null && targetFrame !== page.mainFrame() ? [targetFrame] : page.frames();
-    const extraRedactionSelectors = opts.extraRedactionSelectors ?? [];
-    const sealedSelector = ['[data-ts-sealed-payment="1"]', 'input[type="password" i]'].join(
-      ",",
-    );
+    const sealedSelector = [SCREENSHOT_REDACTION_SELECTORS, ...extraRedactionSelectors].join(",");
 
     try {
       for (const frame of frames) {
         if (frame.isDetached()) throw new Error("frame detached");
-        if ((await frame.locator(sealedSelector).count()) > 0) {
-          throw new Error("sealed marker");
-        }
-        for (const selector of extraRedactionSelectors) {
-          const matches = await frame.locator(selector).all();
-          for (const match of matches) {
-            const hasValue = await match.evaluate((el) => {
-              if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-                return el.value.trim().length > 0;
-              }
-              return (el.textContent ?? "").trim().length > 0;
-            });
-            if (hasValue) throw new Error("sealed value");
-          }
+        const sealedMatches = await frame.locator(sealedSelector).all();
+        for (const match of sealedMatches) {
+          const hasValue = await match.evaluate((el) => {
+            if (
+              el instanceof HTMLInputElement ||
+              el instanceof HTMLTextAreaElement ||
+              el instanceof HTMLSelectElement
+            ) {
+              return el.value.trim().length > 0;
+            }
+            return (el.textContent ?? "").trim().length > 0;
+          });
+          if (hasValue) throw new Error("sealed value");
         }
         const candidates = await frame.locator('input:not([type="hidden" i]),textarea').all();
         for (const candidate of candidates) {
@@ -8562,7 +8612,10 @@ export class BrowserController {
               const maxLength = Math.min(19, digits.length - start);
               for (let length = 13; length <= maxLength; length += 1) {
                 const positions = digits.slice(start, start + length);
-                if (positions[positions.length - 1]! - positions[0]! + 1 > PAYMENT_PAN_MAX_SPAN_CHARS) {
+                if (
+                  positions[positions.length - 1]! - positions[0]! + 1 >
+                  PAYMENT_PAN_MAX_SPAN_CHARS
+                ) {
                   break;
                 }
                 if (luhn(positions.map((position) => text[position]).join(""))) return true;
@@ -8578,10 +8631,67 @@ export class BrowserController {
     }
   }
 
+  async captureOperatorScreenshot(
+    opts: {
+      frameIndex?: number;
+      frameUrlContains?: string;
+      fullPage?: boolean;
+    } = {},
+  ): Promise<{
+    base64: string;
+    frameUrl: string | null;
+    frameCount: number;
+    redactedCount: number;
+  }> {
+    if (!this.page) throw new Error("Browser not started");
+    const targetFrame = this.resolveOperatorScreenshotFrame(opts);
+    const frames =
+      targetFrame !== null && targetFrame !== this.page.mainFrame()
+        ? [targetFrame]
+        : this.page.frames();
+    const documents: JSHandle<Document>[] = [];
+    try {
+      for (const frame of frames) {
+        if (frame.isDetached()) throw new Error("frame detached");
+        documents.push(await frame.evaluateHandle(() => document));
+      }
+      await this.assertOperatorScreenshotFramesNoSealedValues(frames, []);
+      const documentsStillCurrent = async (): Promise<boolean> => {
+        if (documents.length !== frames.length) return false;
+        for (let index = 0; index < frames.length; index += 1) {
+          const frame = frames[index]!;
+          if (frame.isDetached()) return false;
+          if (!(await frame.evaluate((expected) => document === expected, documents[index]!))) {
+            return false;
+          }
+        }
+        return true;
+      };
+      if (!(await documentsStillCurrent())) {
+        throw new Error("screenshot_unavailable_sealed_context");
+      }
+      const captured = await this.screenshotForOperatorResolved(opts, targetFrame, frames);
+      if (!(await documentsStillCurrent())) {
+        throw new Error("screenshot_unavailable_sealed_context");
+      }
+      return captured;
+    } catch (error) {
+      if (error instanceof Error && error.message === "screenshot_frame_not_found") throw error;
+      if (error instanceof Error && error.message === "screenshot_unavailable_sealed_context") {
+        throw error;
+      }
+      throw new Error("screenshot_unavailable_sealed_context");
+    } finally {
+      await Promise.all(
+        documents.map(async (document) => await document.dispose().catch(() => undefined)),
+      );
+    }
+  }
+
   // operate_screenshot's implementation: a read-only capture of the page (or
   // one specific frame, so a cross-origin challenge/ACS iframe can be seen on
-  // its own) with card-shaped/sealed fields redacted at capture time via
-  // Playwright's screenshot mask. Never navigates, clicks, types, or calls
+  // its own) with card-shaped/sealed fields redacted in the captured bytes.
+  // Never navigates, clicks, types, or calls
   // bringToFront/focus — a debugging read, not an action. Redaction always
   // covers every frame that is actually part of the captured image: the whole
   // page when capturing the page (a full-page or viewport shot composites
@@ -8602,45 +8712,83 @@ export class BrowserController {
     redactedCount: number;
   }> {
     if (!this.page) throw new Error("Browser not started");
-    const page = this.page;
     const targetFrame = this.resolveOperatorScreenshotFrame(opts);
+    const frames =
+      targetFrame !== null && targetFrame !== this.page.mainFrame()
+        ? [targetFrame]
+        : this.page.frames();
+    return await this.screenshotForOperatorResolved(opts, targetFrame, frames);
+  }
+
+  private async screenshotForOperatorResolved(
+    opts: {
+      fullPage?: boolean;
+      extraRedactionSelectors?: readonly string[];
+    },
+    targetFrame: Frame | null,
+    framesBefore: readonly Frame[],
+  ): Promise<{
+    base64: string;
+    frameUrl: string | null;
+    frameCount: number;
+    redactedCount: number;
+  }> {
+    if (!this.page) throw new Error("Browser not started");
+    const page = this.page;
     const extraRedactionSelectors = opts.extraRedactionSelectors ?? [];
     const framesForRedaction = (): Frame[] =>
       targetFrame !== null && targetFrame !== page.mainFrame() ? [targetFrame] : page.frames();
-    const framesBefore = framesForRedaction();
-    const { mask, redactedCount, signature } = await this.collectOperatorScreenshotMask(
+    const { rectangles, redactedCount, signature } = await this.collectOperatorScreenshotMask(
       framesBefore,
       extraRedactionSelectors,
     );
     // caret:"initial" skips Playwright's default caret-hiding pass, which
     // writes (and restores) caret-color on every editable element's inline
     // style — this capture must leave element styles untouched.
-    let base64: string;
+    let buffer: Buffer;
+    let origin = { x: 0, y: 0 };
+    let captureSize: { width: number; height: number };
     if (targetFrame !== null && targetFrame !== page.mainFrame()) {
       const handle = await targetFrame.frameElement();
       try {
-        const buffer = await handle.screenshot({
+        const box = await handle.boundingBox();
+        if (box === null) throw new Error("screenshot_redaction_unresolved");
+        origin = { x: box.x, y: box.y };
+        captureSize = { width: box.width, height: box.height };
+        buffer = await handle.screenshot({
           type: "jpeg",
           quality: 80,
           timeout: 10_000,
           caret: "initial",
-          mask,
         });
-        base64 = buffer.toString("base64");
       } finally {
         await handle.dispose().catch(() => undefined);
       }
     } else {
-      const buffer = await page.screenshot({
+      if (opts.fullPage === true) {
+        const dimensions = await page.evaluate(() => ({
+          origin: { x: -window.scrollX, y: -window.scrollY },
+          size: {
+            width: document.documentElement.scrollWidth,
+            height: document.documentElement.scrollHeight,
+          },
+        }));
+        origin = dimensions.origin;
+        captureSize = dimensions.size;
+      } else {
+        const viewport = page.viewportSize();
+        if (viewport === null) throw new Error("screenshot_redaction_unresolved");
+        captureSize = viewport;
+      }
+      buffer = await page.screenshot({
         fullPage: opts.fullPage === true,
         type: "jpeg",
         quality: 80,
         timeout: 10_000,
         caret: "initial",
-        mask,
       });
-      base64 = buffer.toString("base64");
     }
+    const base64 = await this.redactOperatorScreenshot(buffer, rectangles, origin, captureSize);
     // Stability guard: the mask set was fixed before a capture that can take
     // seconds. If the page grew another matching field or frame meanwhile,
     // the image may hold pixels no mask covered — re-run the same collection
@@ -13741,13 +13889,21 @@ export class BrowserController {
   // type_secret targets that resolve into a frame. Same humanized-vs-fast
   // split as type() above, without the multi-input-OTP auto-advance nuance —
   // out of scope for the checkout-option case this exists for.
-  async typeInFrame(target: FrameTarget, selector: string, text: string): Promise<void> {
+  async typeInFrame(
+    target: FrameTarget,
+    selector: string,
+    text: string,
+    sealed = false,
+  ): Promise<void> {
     const handle = await this.resolveFrameElement(target, selector);
     if (handle === null) {
       throw new Error(`type: the target's frame is no longer present (${this.frameLabel(target)})`);
     }
     try {
       await handle.waitForElementState("visible", { timeout: 10000 });
+      if (sealed) {
+        await handle.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
+      }
       if (!this.humanize) {
         await handle.fill(text);
         return;

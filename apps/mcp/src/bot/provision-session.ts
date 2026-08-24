@@ -2801,27 +2801,7 @@ export async function captureScreenshot(
   if (session.paymentFieldSealActive) {
     throw new Error("screenshot_unavailable_sealed_context");
   }
-  // Fields sealed via the ref-based type_secret path exist only in session
-  // state (sealedFieldKeys) — no DOM marker — so the redaction set is derived
-  // with the SAME helpers observe()'s JSON-masking uses and handed to the
-  // browser layer as extra mask selectors. An extraction failure propagates:
-  // a capture whose sealed set cannot be established must abort, not proceed
-  // with fewer redactions. The browser's pre-capture check refuses if any of
-  // those live targets still has a value in the requested frame set; its mask
-  // remains a second fence against a value appearing during capture.
-  const elements = await session.browser.extractInteractiveElements();
-  const sealedFieldKeys = observationSealedFieldKeys(session, elements);
-  const extraRedactionSelectors = elements
-    .filter((el) => isSealedFieldValue(el, sealedFieldKeys))
-    .map((el) => el.selector);
-  await session.browser.assertOperatorScreenshotNoSealedValues({
-    ...opts,
-    extraRedactionSelectors,
-  });
-  const captured = await session.browser.screenshotForOperator({
-    ...opts,
-    extraRedactionSelectors,
-  });
+  const captured = await session.browser.captureOperatorScreenshot(opts);
   return {
     session_id: sessionId,
     url: session.browser.currentUrl(),
@@ -4792,8 +4772,8 @@ export async function act(
       // Type the REAL value into the page. It crosses only browser↔page; the
       // value is never returned to the host and never logged.
       const target = frameTargetFor(el);
-      if (target !== null) await browser.typeInFrame(target, el.selector, value);
-      else await browser.type(el.selector, value);
+      if (target !== null) await browser.typeInFrame(target, el.selector, value, true);
+      else await browser.type(el.selector, value, true);
       audit(sessionId, "type_secret", {
         slot: action.slot,
         target: action.target,

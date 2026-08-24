@@ -252,22 +252,63 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "refuses before capture when a requested page still contains a sealed type_secret target or PAN",
+    "refuses populated sealed, password, PAN, expiry, CVV, and select fields",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const sensitiveFields = [
+          '<input data-ts-sealed-payment="1" value="still-secret">',
+          '<input type="password" value="otp-secret">',
+          '<input autocomplete="one-time-code" value="654321">',
+          '<input name="challenge_pin" value="9876">',
+          '<input value="4242 4242 4242 4242">',
+          '<input autocomplete="cc-exp" value="12/30">',
+          '<input autocomplete="cc-csc" value="123">',
+          '<select autocomplete="cc-exp-year"><option value="30" selected>2030</option></select>',
+        ];
+        for (const field of sensitiveFields) {
+          const page = await browser.newPage();
+          await page.setContent(field);
+          const controller = BrowserController.fromHarnessPage(page);
+          await expect(controller.captureOperatorScreenshot()).rejects.toThrow(
+            "screenshot_unavailable_sealed_context",
+          );
+          await page.close();
+        }
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "allows empty ACS secret controls without mutating the document",
     async () => {
       const browser = await chromium.launch({ headless: true });
       try {
         const page = await browser.newPage();
         await page.setContent(`
-          <input id="typed-secret" value="still-secret">
-          <input value="4242 4242 4242 4242">
+          <input type="password" value="">
+          <input autocomplete="one-time-code" value="">
+          <select autocomplete="cc-exp-year"><option value="" selected>Year</option></select>
         `);
+        await page.evaluate(() => {
+          (window as Window & { mutationCount?: number }).mutationCount = 0;
+          new MutationObserver((records) => {
+            (window as Window & { mutationCount?: number }).mutationCount! += records.length;
+          }).observe(document, { attributes: true, childList: true, subtree: true });
+        });
         const controller = BrowserController.fromHarnessPage(page);
 
-        await expect(
-          controller.assertOperatorScreenshotNoSealedValues({
-            extraRedactionSelectors: ["#typed-secret"],
-          }),
-        ).rejects.toThrow("screenshot_unavailable_sealed_context");
+        const result = await controller.captureOperatorScreenshot();
+
+        expect(isValidJpegBase64(result.base64)).toBe(true);
+        await page.evaluate(() => new Promise(requestAnimationFrame));
+        expect(
+          await page.evaluate(
+            () => (window as Window & { mutationCount?: number }).mutationCount ?? -1,
+          ),
+        ).toBe(0);
       } finally {
         await browser.close();
       }
@@ -368,19 +409,69 @@ describe("operate_screenshot frame targeting (real browser)", () => {
         await page.waitForLoadState("networkidle");
         const controller = BrowserController.fromHarnessPage(page);
 
-        await expect(controller.assertOperatorScreenshotNoSealedValues()).rejects.toThrow(
+        await expect(controller.captureOperatorScreenshot()).rejects.toThrow(
           "screenshot_unavailable_sealed_context",
         );
-        await expect(
-          controller.assertOperatorScreenshotNoSealedValues({
-            frameUrlContains: "cardinalcommerce.com",
-          }),
-        ).resolves.toBeUndefined();
-        const result = await controller.screenshotForOperator({
+        const result = await controller.captureOperatorScreenshot({
           frameUrlContains: "cardinalcommerce.com",
         });
         expect(result.frameUrl).toBe(frameUrl);
         expect(isValidJpegBase64(result.base64)).toBe(true);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "fails closed on an unreadable included frame but allows a separate verified target",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const pageUrl = "https://shop.example.test/checkout";
+        const badFrameUrl = "https://broken.example.test/frame";
+        const acsFrameUrl = "https://authentication.cardinalcommerce.com/challenge";
+        const page = await servePages(browser, {
+          [pageUrl]: `<iframe src="${badFrameUrl}"></iframe><iframe src="${acsFrameUrl}"></iframe>`,
+          [badFrameUrl]: `<input type="password"><script>Object.defineProperty(document.querySelector('input'), 'value', { get() { throw new Error('unreadable'); } })</script>`,
+          [acsFrameUrl]: `<p>Approve in your banking app</p>`,
+        });
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = BrowserController.fromHarnessPage(page);
+
+        await expect(controller.captureOperatorScreenshot()).rejects.toThrow(
+          "screenshot_unavailable_sealed_context",
+        );
+        await expect(
+          controller.captureOperatorScreenshot({ frameUrlContains: "cardinalcommerce.com" }),
+        ).resolves.toMatchObject({ frameUrl: acsFrameUrl });
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "discards a targeted capture when its verified document navigates",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const pageUrl = "https://shop.example.test/checkout";
+        const frameUrl = "https://authentication.cardinalcommerce.com/challenge";
+        const replacementUrl = "https://issuer.example.test/replacement";
+        const page = await servePages(browser, {
+          [pageUrl]: `<iframe src="${frameUrl}"></iframe>`,
+          [frameUrl]: `<input type="password"><script>Object.defineProperty(document.querySelector('input'), 'value', { get() { location.href = '${replacementUrl}'; return ''; } })</script>`,
+          [replacementUrl]: `<input autocomplete="cc-csc" value="123">`,
+        });
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = BrowserController.fromHarnessPage(page);
+
+        await expect(
+          controller.captureOperatorScreenshot({ frameUrlContains: "cardinalcommerce.com" }),
+        ).rejects.toThrow("screenshot_unavailable_sealed_context");
       } finally {
         await browser.close();
       }

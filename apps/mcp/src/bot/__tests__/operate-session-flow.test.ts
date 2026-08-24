@@ -23,7 +23,7 @@ const h = vi.hoisted(() => ({
     browserConnected: boolean;
   },
   oauthRecoveryCalls: 0,
-  typed: [] as Array<{ selector: string; text: string }>,
+  typed: [] as Array<{ selector: string; text: string; sealed?: true }>,
   uploads: [] as Array<{ selector: string; filePath: string }>,
   selected: [] as Array<{ selector: string; matcher: string | undefined }>,
   selectMutation: null as unknown[] | null,
@@ -46,7 +46,7 @@ const h = vi.hoisted(() => ({
   clickCalls: 0,
   frameClicks: [] as string[],
   frameJsClicks: [] as string[],
-  frameTypes: [] as Array<{ frameUrl: string; selector: string; text: string }>,
+  frameTypes: [] as Array<{ frameUrl: string; selector: string; text: string; sealed?: true }>,
   frameSelects: [] as Array<{ frameUrl: string; selector: string; matcher: string | undefined }>,
   gotos: [] as string[],
   started: 0,
@@ -327,8 +327,8 @@ vi.mock("../browser.js", () => ({
     async scrollViewport(direction: string): Promise<void> {
       h.scrolls.push(direction);
     }
-    async type(selector: string, text: string): Promise<void> {
-      h.typed.push({ selector, text });
+    async type(selector: string, text: string, sealed = false): Promise<void> {
+      h.typed.push({ selector, text, ...(sealed ? { sealed: true as const } : {}) });
       for (const element of h.elements as Array<Record<string, unknown>>) {
         if (element.selector === selector) element.value = text;
       }
@@ -465,8 +465,18 @@ vi.mock("../browser.js", () => ({
       }
       return "dispatched";
     }
-    async typeInFrame(target: { frameUrl: string }, selector: string, text: string): Promise<void> {
-      h.frameTypes.push({ frameUrl: target.frameUrl, selector, text });
+    async typeInFrame(
+      target: { frameUrl: string },
+      selector: string,
+      text: string,
+      sealed = false,
+    ): Promise<void> {
+      h.frameTypes.push({
+        frameUrl: target.frameUrl,
+        selector,
+        text,
+        ...(sealed ? { sealed: true as const } : {}),
+      });
       for (const element of h.elements as Array<Record<string, unknown>>) {
         if (element.selector === selector && element.frameUrl === target.frameUrl)
           element.value = text;
@@ -611,9 +621,7 @@ vi.mock("../browser.js", () => ({
     async clearSealedPaymentFields(): Promise<void> {
       h.clearSealedPaymentFieldsCalls += 1;
     }
-    async waitForThreeDsResolution(
-      timeoutMs: number,
-    ): Promise<"succeeded" | "failed" | "timeout"> {
+    async waitForThreeDsResolution(timeoutMs: number): Promise<"succeeded" | "failed" | "timeout"> {
       h.waitForThreeDsCalls.push(timeoutMs);
       return h.waitForThreeDsResult;
     }
@@ -3530,7 +3538,7 @@ describe("operate session — manual card-entry guard", () => {
       slot: "sealed_card",
       target: "Sealed field",
     });
-    expect(h.typed).toEqual([{ selector: "#sealed", text: sealedPan }]);
+    expect(h.typed).toEqual([{ selector: "#sealed", text: sealedPan, sealed: true }]);
   });
 });
 
@@ -5220,7 +5228,12 @@ describe("frame targets — domain-lock (operator-frame-support)", () => {
     stashSecretSlot(started.session_id, "login", "s3cr3t-value");
     await act(started.session_id, { kind: "type_secret", slot: "login", target: "Password" });
     expect(h.frameTypes).toEqual([
-      { frameUrl: SAME_DOMAIN_FRAME_URL, selector: "#password", text: "s3cr3t-value" },
+      {
+        frameUrl: SAME_DOMAIN_FRAME_URL,
+        selector: "#password",
+        text: "s3cr3t-value",
+        sealed: true,
+      },
     ]);
   });
 
@@ -6313,13 +6326,18 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
 
   it("keeps checking the same live browser and clears state once the OOB challenge resolves", async () => {
     const env = buildStatusEnv();
-    await startProvisionSession({ serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html" });
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+    });
     const threeDsState = buildThreeDsState();
     setActivePendingThreeDs(threeDsState);
     expect(getActivePendingThreeDs()).toEqual(threeDsState);
 
     h.waitForThreeDsResult = "timeout";
-    const pending = (await operatePaymentStatusTool.handler({}, env.api)) as Record<string, unknown>;
+    const pending = (await operatePaymentStatusTool.handler({}, env.api)) as Record<
+      string,
+      unknown
+    >;
     expect(pending).toMatchObject({
       status: "payment_3ds_pending",
       next: { tool: "operate_payment_status", wait_seconds: 15 },
@@ -6355,7 +6373,9 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
 
   it("records a declined outcome and clears state when the OOB challenge fails", async () => {
     const env = buildStatusEnv();
-    await startProvisionSession({ serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html" });
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+    });
     setActivePendingThreeDs(buildThreeDsState());
 
     h.waitForThreeDsResult = "failed";
@@ -6371,7 +6391,9 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
 
   it("hands back an accurate unresolved status once the resumable deadline passes — never fabricates success", async () => {
     const env = buildStatusEnv();
-    await startProvisionSession({ serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html" });
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+    });
     setActivePendingThreeDs(buildThreeDsState(Date.now() - 1));
 
     h.waitForThreeDsResult = "timeout";
@@ -6434,17 +6456,15 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
       await firstAuditGate;
       return { id: "audit_first" };
     });
-    const firstStatus = operatePaymentStatusTool.handler(
-      {},
-      { auditPayment: firstAuditPayment } as unknown as ApiClient,
-    );
+    const firstStatus = operatePaymentStatusTool.handler({}, {
+      auditPayment: firstAuditPayment,
+    } as unknown as ApiClient);
     await firstAuditStarted;
 
     const secondAuditPayment = vi.fn().mockResolvedValue({ id: "audit_second" });
-    await operatePaymentStatusTool.handler(
-      {},
-      { auditPayment: secondAuditPayment } as unknown as ApiClient,
-    );
+    await operatePaymentStatusTool.handler({}, {
+      auditPayment: secondAuditPayment,
+    } as unknown as ApiClient);
     expect(getActivePendingThreeDs()).toBeNull();
 
     const newerState = {
@@ -6555,7 +6575,9 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
 
   it("reports no_pending_payment once nothing is outstanding", async () => {
     const env = buildStatusEnv();
-    await startProvisionSession({ serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html" });
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+    });
 
     const result = (await operatePaymentStatusTool.handler({}, env.api)) as Record<string, unknown>;
 
