@@ -6423,7 +6423,10 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
 
   it("persists mismatch evidence first observed by a resumable status poll", async () => {
     const env = buildStatusEnv();
-    await startProvisionSession({ serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html" });
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: env.api,
+    });
     setActivePendingThreeDs(buildThreeDsState());
     h.paymentInstrumentMismatch = {
       kind: "payment_instrument_mismatch",
