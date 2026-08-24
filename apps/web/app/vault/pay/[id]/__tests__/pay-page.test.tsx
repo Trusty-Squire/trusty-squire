@@ -51,11 +51,13 @@ vi.mock("@trusty-squire/vault/hpke", () => ({
 }));
 
 vi.mock("../../../../components/CardEntry", () => ({
-  CardEntry: (props: { onSaved?: (r: { id: string }) => void }) => (
+  CardEntry: (props: {
+    onSaved?: (r: { id: string; label: string; last4: string | null }) => void;
+  }) => (
     <button
       type="button"
       data-testid="card-entry"
-      onClick={() => props.onSaved?.({ id: "card_new" })}
+      onClick={() => props.onSaved?.({ id: "card_new", label: "Personal", last4: "4242" })}
     >
       add card (stub)
     </button>
@@ -77,6 +79,12 @@ const LEGACY_BOUND_CARD = {
   brand: null,
   last4: null,
 };
+const OTHER_BOUND_CARD = {
+  ...BOUND_CARD,
+  id: "card_other",
+  label: "Work",
+  last4: "1111",
+};
 
 let bound = false;
 let cardListFailures = 0;
@@ -89,7 +97,8 @@ let approvalAmountCents = 6000;
 let approvalCurrency = "USD";
 
 function approvalBody() {
-  const metadata = cardListOverride?.[0] ?? BOUND_CARD;
+  const metadata =
+    cardListOverride?.[0] ?? (lostResponseCardRef === "card_other" ? OTHER_BOUND_CARD : BOUND_CARD);
   return {
     id: "appr_1",
     status: "pending",
@@ -119,7 +128,16 @@ function ceremonyBody() {
   return {
     ...current,
     approval_payload_sha256: "synthetic-approval-payload-hash",
-    card: current.card === null ? null : { blob: current.card.blob },
+    card:
+      current.card === null
+        ? null
+        : {
+            blob: current.card.blob,
+            label:
+              (cardListOverride?.[0] as typeof BOUND_CARD | undefined)?.label ??
+              (lostResponseCardRef === "card_other" ? OTHER_BOUND_CARD.label : BOUND_CARD.label),
+            last4: current.card.last4,
+          },
   };
 }
 
@@ -238,6 +256,7 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(screen.getByText("gift")).toBeTruthy();
     expect(screen.getByText(/Pay with/).textContent).toContain("$60.00");
     expect(api.apiGet).not.toHaveBeenCalledWith("/v1/pay/approvals/appr_1");
+    expect(api.apiGet).not.toHaveBeenCalledWith("/v1/vault/e2e");
     expect(api.apiGet).not.toHaveBeenCalledWith("/v1/vault/e2e/card_new");
     expect(router.replace).not.toHaveBeenCalled();
     expect(screen.queryByTestId("card-entry")).toBeNull();
@@ -373,7 +392,7 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(
       screen.getByText("This payment was attached to a different card than the one you added."),
     ).toBeTruthy();
-    expect(screen.getByText(/this payment's/)).toBeTruthy();
+    expect(screen.getByText(/Pay with/).textContent).toContain("Work •••• 1111");
     expect(screen.getByText("CASETiFY")).toBeTruthy();
   });
 });

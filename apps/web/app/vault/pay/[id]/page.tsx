@@ -7,12 +7,14 @@ import { sealToRecipient } from "@trusty-squire/vault/hpke";
 import { AppShell } from "../../../components/AppShell";
 import { CardEntry } from "../../../components/CardEntry";
 import { ApiError, apiGet, apiPost } from "../../../lib/api";
-import { boundCardMeta, formatCardIdentity, type CardMeta } from "../../../lib/wallet";
+import { formatCardIdentity } from "../../../lib/wallet";
 import { getPairingState, isPaymentPasskeyUnavailable, pairDevice } from "../../../lib/pairing";
 import { getVouchflow } from "../../../lib/vouchflow";
 
 interface CeremonyCard {
   blob: string;
+  label: string;
+  last4: string | null;
 }
 
 interface CardDetails {
@@ -95,7 +97,10 @@ export default function PaymentApprovalPage() {
   const [busy, setBusy] = useState(false);
   const [binding, setBinding] = useState(false);
   const [savedCardId, setSavedCardId] = useState<string | null>(null);
-  const [cards, setCards] = useState<CardMeta[]>([]);
+  const [savedCardMeta, setSavedCardMeta] = useState<{
+    label: string;
+    last4: string | null;
+  } | null>(null);
   const [cardMetadataError, setCardMetadataError] = useState<string | null>(null);
   const [needsPasskeySetup, setNeedsPasskeySetup] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -110,20 +115,6 @@ export default function PaymentApprovalPage() {
     [id],
   );
 
-  const loadCards = useCallback(async () => {
-    try {
-      // Non-secret card metadata (label + last4) from the account's card list —
-      // the only honest source for naming the card an operate_pay mandate
-      // binds. Cardless approvals have nothing to resolve yet and the pay line
-      // falls back to a generic phrase; it is never a misleading "saved card".
-      setCards(await apiGet<CardMeta[]>("/v1/vault/e2e"));
-    } catch {
-      // Display metadata is best-effort: an unreadable list must not fail the
-      // page, but the pay line cannot name a specific card.
-      setCards([]);
-    }
-  }, []);
-
   const applyCeremony = useCallback((current: CeremonyApproval) => {
     setJitOrigin((origin) => origin ?? current.card_ref === null);
     setCeremony(current);
@@ -137,10 +128,9 @@ export default function PaymentApprovalPage() {
   useEffect(() => {
     let cancelled = false;
     void fetchCeremony()
-      .then(async (current) => {
+      .then((current) => {
         if (cancelled) return;
         applyCeremony(current);
-        await loadCards();
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -153,23 +143,23 @@ export default function PaymentApprovalPage() {
     return () => {
       cancelled = true;
     };
-  }, [applyCeremony, fetchCeremony, redirectToLogin, loadCards]);
+  }, [applyCeremony, fetchCeremony, redirectToLogin]);
 
   const refreshCeremony = useCallback(async (): Promise<void> => {
     setCardMetadataError(null);
     try {
       applyCeremony(await fetchCeremony());
-      await loadCards();
     } catch (err) {
       setCardMetadataError(
         err instanceof Error ? err.message : "Failed to load the saved card details.",
       );
     }
-  }, [applyCeremony, fetchCeremony, loadCards]);
+  }, [applyCeremony, fetchCeremony]);
 
   const bindCard = useCallback(
-    async (cardId: string) => {
+    async (cardId: string, cardMeta?: { label: string; last4: string | null }) => {
       setSavedCardId(cardId);
+      if (cardMeta !== undefined) setSavedCardMeta(cardMeta);
       setBinding(true);
       setError(null);
       try {
@@ -323,7 +313,10 @@ export default function PaymentApprovalPage() {
   const needsCard = ceremony?.status === "pending" && ceremony.card_ref === null;
   const amountLabel =
     approval !== null ? formatAmount(approval.amount_cents, approval.currency) : "";
-  const boundCard = boundCardMeta(ceremony?.card_ref ?? null, cards);
+  const boundCard =
+    ceremony?.card_ref == null
+      ? null
+      : (ceremony.card ?? (ceremony.card_ref === savedCardId ? savedCardMeta : null));
   const cardLine = boundCard === null ? "this payment's card" : formatCardIdentity(boundCard);
 
   return (
@@ -367,7 +360,11 @@ export default function PaymentApprovalPage() {
               </button>
             </div>
           ) : (
-            <CardEntry onSaved={({ id: cardId }) => void bindCard(cardId)} />
+            <CardEntry
+              onSaved={({ id: cardId, label, last4 }) =>
+                void bindCard(cardId, { label, last4 })
+              }
+            />
           )}
         </section>
       )}

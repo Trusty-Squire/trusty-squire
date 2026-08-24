@@ -529,7 +529,11 @@ describe("operate_pay card selection", () => {
       currency: "USD",
     });
 
-    const result = (await operatePayTool.handler(args, api)) as Record<string, unknown>;
+    const notifyUser = vi.fn().mockResolvedValue(undefined);
+    const result = (await operatePayTool.handler(args, api, { notifyUser })) as Record<
+      string,
+      unknown
+    >;
     expect(createPaymentApproval).toHaveBeenCalledOnce();
     // Card-less create — no card_ref sent.
     expect(createPaymentApproval.mock.calls[0]![0]).not.toHaveProperty("card_ref");
@@ -538,6 +542,10 @@ describe("operate_pay card selection", () => {
       status: "payment_card_required",
       needs_user: { wall: "card_required" },
     });
+    expect(notifyUser).toHaveBeenCalledWith(
+      "Approve payment using this payment's card on your phone: https://trustysquire.ai/vault/pay/appr_jit",
+      { approval_url: "https://trustysquire.ai/vault/pay/appr_jit" },
+    );
   });
 });
 
@@ -571,7 +579,9 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
       expires_at: new Date(Date.now() + 300_000).toISOString(),
     });
     const api = makeMockApi({
-      listPaymentCards: vi.fn().mockResolvedValue([{ id: "card_1", label: "Personal" }]),
+      listPaymentCards: vi
+        .fn()
+        .mockResolvedValue([{ id: "card_1", label: "Personal", last4: "9192" }]),
       createPaymentApproval,
       getPaymentConfig: vi.fn().mockResolvedValue({ vouchflow_audience: "cust" }),
       getPaymentApproval: vi.fn().mockResolvedValue({
@@ -621,7 +631,9 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
       sealed_card: null,
     });
     const api = makeMockApi({
-      listPaymentCards: vi.fn().mockResolvedValue([{ id: "card_1", label: "Personal" }]),
+      listPaymentCards: vi
+        .fn()
+        .mockResolvedValue([{ id: "card_1", label: "Personal", last4: "9192" }]),
       createPaymentApproval,
       getPaymentConfig,
       getPaymentApproval,
@@ -656,12 +668,12 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     expect(notifyUser).toHaveBeenCalledTimes(2);
     expect(notifyUser).toHaveBeenNthCalledWith(
       1,
-      "Approve this payment on your phone: https://trustysquire.ai/vault/pay/appr_wire",
+      "Approve payment using Personal •••• 9192 on your phone: https://trustysquire.ai/vault/pay/appr_wire",
       { approval_url: "https://trustysquire.ai/vault/pay/appr_wire" },
     );
     expect(notifyUser).toHaveBeenNthCalledWith(
       2,
-      "Approve this payment on your phone: https://trustysquire.ai/vault/pay/appr_wire",
+      "Approve payment using Personal •••• 9192 on your phone: https://trustysquire.ai/vault/pay/appr_wire",
       { approval_url: "https://trustysquire.ai/vault/pay/appr_wire" },
     );
   });
@@ -725,7 +737,7 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     expect(getPaymentApproval).toHaveBeenNthCalledWith(3, "appr_fresh", "immediate");
     expect(notifyUser).toHaveBeenCalledTimes(2);
     expect(notifyUser).toHaveBeenLastCalledWith(
-      "Approve this payment on your phone: https://trustysquire.ai/vault/pay/appr_fresh",
+      "Approve payment using Personal on your phone: https://trustysquire.ai/vault/pay/appr_fresh",
       { approval_url: "https://trustysquire.ai/vault/pay/appr_fresh" },
     );
   });
@@ -796,7 +808,7 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     expect(getPaymentApproval).toHaveBeenNthCalledWith(3, "appr_replacement", "immediate");
     expect(deletedState?.keypair.privateKey).toBe("");
     expect(notifyUser).toHaveBeenLastCalledWith(
-      "Approve this payment on your phone: https://trustysquire.ai/vault/pay/appr_replacement",
+      "Approve payment using Personal on your phone: https://trustysquire.ai/vault/pay/appr_replacement",
       { approval_url: "https://trustysquire.ai/vault/pay/appr_replacement" },
     );
   });

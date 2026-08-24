@@ -321,7 +321,13 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       );
       const text =
         `Trusty Squire — approve ${amount} to ${parsed.data.merchant}\n` +
-        `${cardName !== null ? `Using ${cardName}.\n` : ""}` +
+        `${
+          cardName !== null
+            ? `Using ${cardName}.\n`
+            : parsed.data.card_ref == null
+              ? "A card will be entered during checkout.\n"
+              : "Using this payment's card.\n"
+        }` +
         `${webBaseUrl()}/vault/pay/${id}`;
       void sendTelegramMessage(account.telegram_chat_id, text).catch(() => {});
     }
@@ -437,7 +443,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       id: record.id,
       status,
       // Capability-link disclosure: these are the exact server-stored values
-      // the later, single payment mandate must bind. No card data is included.
+      // the later, single payment mandate must bind. No plaintext card secrets are included.
       merchant: record.merchant,
       checkout_origin: record.checkoutOrigin,
       amount_cents: record.amountCents,
@@ -450,7 +456,10 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       agent: record.agent,
       expires_at: record.expiresAt.toISOString(),
       approval_payload_sha256: payloadHash?.toString("base64url") ?? null,
-      card: card === null ? null : { blob: card.blob },
+      card:
+        card === null
+          ? null
+          : { blob: card.blob, label: card.label, last4: card.last4 },
     });
   });
 
