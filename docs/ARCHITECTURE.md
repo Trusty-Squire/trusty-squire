@@ -218,6 +218,9 @@ agent starts operate_pay in the addressed checkout session
      can receive card data
   -> PAN, expiry, and CVV are required; cardholder name and other billing fields
      are filled best-effort, so a missing name field does not abort the payment
+  -> before a single-page submit, a competing merchant-saved card radio is switched
+     only when there is one unambiguous new-card choice; the choice and sealed values
+     are rechecked immediately before dispatch, and every ambiguous state fails closed
   -> the raw card is zeroed; sealed, observation-masked page fields remain, while
      session state retains only approval/mandate and card-reference metadata
   -> the caller verifies the live final total against the approved amount itself
@@ -246,8 +249,10 @@ agent starts operate_pay in the addressed checkout session
      bounded authentication/outcome wait below; the API sends a challenge-specific
      Telegram nudge for detected 3-D Secure or
      cautious bank-app guidance when authentication may be out of band
-  -> the browser completes authentication natively while the operator polls only for
-     a new merchant terminal route with a substantive order or receipt identity;
+  -> the browser completes authentication natively while the operator polls for a new
+     merchant terminal route with a substantive order or receipt identity and passively
+     compares ACS issuer/network/last-four evidence with the released card. A mismatch
+     is a persistent structured warning, not a challenge mutation or second approval;
      captcha-hosted frames are excluded from challenge and failure-text classification
   -> a visible decline is payment_declined; timeout, or a disabled wait, hands
      the unresolved outcome to the user instead of guessing success

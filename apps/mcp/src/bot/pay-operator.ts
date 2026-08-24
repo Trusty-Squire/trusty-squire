@@ -12,6 +12,7 @@ import type {
   CheckoutCard,
   CheckoutSubmitResult,
   CheckoutSummary,
+  PaymentInstrumentMismatch,
   ThreeDsResolution,
 } from "./browser.js";
 import {
@@ -33,6 +34,9 @@ export interface OperatePayArgs {
   item: string;
   reason: string;
   three_ds_wait_seconds?: number;
+  card_label?: string;
+  card_network?: string;
+  card_issuer?: string;
   // "fill_card" = split-checkout card entry: a SINGLE amount-bound approval
   // (one human passkey tap) releases the vaulted card, then fills payment
   // fields WITHOUT submitting. The caller verifies the final total and
@@ -52,6 +56,7 @@ export interface PaymentBrowser {
   clearSealedPaymentFields(): Promise<void>;
   clearCheckoutCardFields?(): Promise<void>;
   waitForThreeDsResolution(timeoutMs: number): Promise<ThreeDsResolution>;
+  paymentInstrumentMismatch?(): PaymentInstrumentMismatch | undefined;
   currentUrl(): string;
 }
 
@@ -83,6 +88,7 @@ export interface PendingThreeDsWait {
   approval_url: string;
   checkout: CheckoutSummary;
   last4: string;
+  payment_instrument_mismatch?: PaymentInstrumentMismatch;
   mandate_id?: string;
   deadline: number;
 }
@@ -1334,6 +1340,9 @@ export async function executeOperatePay(
         approval_url: approvalUrl,
         checkout,
         last4,
+        ...(submitResult.payment_instrument_mismatch !== undefined
+          ? { payment_instrument_mismatch: submitResult.payment_instrument_mismatch }
+          : {}),
         ...(mandateId !== undefined ? { mandate_id: mandateId } : {}),
         deadline: deps.now() + THREE_DS_RESUME_WINDOW_MS,
       });
@@ -1349,12 +1358,24 @@ export async function executeOperatePay(
     let paymentStatus = "payment_submitted";
     let submitResult: CheckoutSubmitResult = { three_ds_required: false, order_confirmed: false };
     try {
-      submitResult = await browser.fillAndSubmitCheckout(card);
+      submitResult = await browser.fillAndSubmitCheckout({
+        ...card,
+        ...(args.card_label !== undefined ? { label: args.card_label } : {}),
+        ...(args.card_network !== undefined ? { network: args.card_network } : {}),
+        ...(args.card_issuer !== undefined
+          ? { issuer: args.card_issuer, issuer_source: "bin_metadata" as const }
+          : {}),
+      });
       if (submitResult.three_ds_required) paymentStatus = "payment_3ds_required";
       else if (!submitResult.order_confirmed) paymentStatus = "payment_outcome_unknown";
     } catch (error) {
       const outcomeUnknown = error instanceof PaymentSubmitOutcomeUnknownError;
       paymentStatus = outcomeUnknown ? "payment_outcome_unknown" : "payment_checkout_failed";
+      if (outcomeUnknown) {
+        await browser.waitForThreeDsResolution(0).catch(() => undefined);
+        const mismatch = browser.paymentInstrumentMismatch?.();
+        if (mismatch !== undefined) submitResult.payment_instrument_mismatch = mismatch;
+      }
       let audit_recorded = true;
       try {
         await api.auditPayment({
@@ -1376,6 +1397,9 @@ export async function executeOperatePay(
             ? error.message
             : "payment_checkout_failed",
         approval_url: approvalUrl,
+        ...(submitResult.payment_instrument_mismatch !== undefined
+          ? { warning: submitResult.payment_instrument_mismatch }
+          : {}),
         ...(outcomeUnknown ? { next: pendingThreeDsNext } : {}),
       };
     } finally {
@@ -1385,11 +1409,17 @@ export async function executeOperatePay(
     }
 
     let getThreeDsTelegramSent: () => boolean | undefined = () => undefined;
-    if (!submitResult.order_confirmed && threeDsWaitMs > 0) {
+    if (
+      submitResult.payment_instrument_mismatch === undefined &&
+      !submitResult.order_confirmed &&
+      threeDsWaitMs > 0
+    ) {
       getThreeDsTelegramSent = trackThreeDsNotification(
         api.notifyThreeDs(approvalId, threeDsNotificationMode(submitResult)),
       );
       const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
+      const mismatch = browser.paymentInstrumentMismatch?.();
+      if (mismatch !== undefined) submitResult.payment_instrument_mismatch ??= mismatch;
       paymentStatus = statusAfterThreeDsResolution(paymentStatus, resolution);
     }
 
@@ -1413,6 +1443,9 @@ export async function executeOperatePay(
         ...(submitResult.challenge_url !== undefined
           ? { challenge_url: submitResult.challenge_url }
           : {}),
+        ...(submitResult.payment_instrument_mismatch !== undefined
+          ? { warning: submitResult.payment_instrument_mismatch }
+          : {}),
         needs_user: {
           wall: "3ds",
           message: threeDsHandoffMessage(submitResult, getThreeDsTelegramSent()),
@@ -1427,12 +1460,18 @@ export async function executeOperatePay(
         status: paymentStatus,
         audit_recorded: auditRecorded,
         approval_url: approvalUrl,
+        ...(submitResult.payment_instrument_mismatch !== undefined
+          ? { warning: submitResult.payment_instrument_mismatch }
+          : {}),
       };
     }
     return {
       status: paymentStatus,
       audit_recorded: auditRecorded,
       approval_url: approvalUrl,
+      ...(submitResult.payment_instrument_mismatch !== undefined
+        ? { warning: submitResult.payment_instrument_mismatch }
+        : {}),
       merchant: checkout.merchant,
       amount_cents: checkout.amount_cents,
       currency: checkout.currency,

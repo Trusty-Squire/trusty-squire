@@ -163,6 +163,17 @@ const h = vi.hoisted(() => ({
   clearSealedPaymentFieldsCalls: 0,
   waitForThreeDsResult: "timeout" as "succeeded" | "failed" | "timeout",
   waitForThreeDsCalls: [] as number[],
+  paymentInstrumentMismatch: null as null | {
+    kind: "payment_instrument_mismatch";
+    confidence: "high" | "low";
+    evidence_used: Array<"last4" | "issuer" | "network">;
+    expected: { last4: string };
+    observed: { last4: string };
+    provenance: {
+      expected: { last4: "released_card" };
+      observed: "3ds_challenge";
+    };
+  },
 }));
 
 vi.mock("../browser.js", () => ({
@@ -611,11 +622,12 @@ vi.mock("../browser.js", () => ({
     async clearSealedPaymentFields(): Promise<void> {
       h.clearSealedPaymentFieldsCalls += 1;
     }
-    async waitForThreeDsResolution(
-      timeoutMs: number,
-    ): Promise<"succeeded" | "failed" | "timeout"> {
+    async waitForThreeDsResolution(timeoutMs: number): Promise<"succeeded" | "failed" | "timeout"> {
       h.waitForThreeDsCalls.push(timeoutMs);
       return h.waitForThreeDsResult;
+    }
+    paymentInstrumentMismatch(): typeof h.paymentInstrumentMismatch {
+      return h.paymentInstrumentMismatch;
     }
     async close(): Promise<"closed" | "force_closed_unproven" | "unknown"> {
       h.closeCalls += 1;
@@ -1017,6 +1029,7 @@ beforeEach(() => {
   h.clearSealedPaymentFieldsCalls = 0;
   h.waitForThreeDsResult = "timeout";
   h.waitForThreeDsCalls = [];
+  h.paymentInstrumentMismatch = null;
 });
 
 const replayRecipe = (overrides: Partial<OperatorRecipe> = {}): OperatorRecipe => ({
@@ -6281,7 +6294,25 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
     amount_cents: 8_800,
     currency: "JPY",
   };
-  function buildThreeDsState(deadline = Date.now() + 60_000) {
+  function buildThreeDsState(
+    deadline = Date.now() + 60_000,
+    payment_instrument_mismatch?: {
+      kind: "payment_instrument_mismatch";
+      confidence: "high" | "low";
+      evidence_used: Array<"last4" | "issuer" | "network">;
+      expected: { last4: string; issuer?: string; network?: string; label?: string };
+      observed: { last4?: string; issuer?: string; network?: string };
+      provenance: {
+        expected: {
+          last4: "released_card";
+          issuer?: "bin_metadata" | "vault_metadata" | "vault_label";
+          network?: "vault_metadata";
+          label?: "vault_label";
+        };
+        observed: "3ds_challenge";
+      };
+    },
+  ) {
     return {
       approval_id: "appr_3ds",
       approval_url: "https://web.test/vault/pay/appr_3ds",
@@ -6289,6 +6320,7 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
       last4: "9192",
       mandate_id: "mandate_3ds",
       deadline,
+      ...(payment_instrument_mismatch !== undefined ? { payment_instrument_mismatch } : {}),
     };
   }
 
@@ -6313,13 +6345,18 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
 
   it("keeps checking the same live browser and clears state once the OOB challenge resolves", async () => {
     const env = buildStatusEnv();
-    await startProvisionSession({ serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html" });
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+    });
     const threeDsState = buildThreeDsState();
     setActivePendingThreeDs(threeDsState);
     expect(getActivePendingThreeDs()).toEqual(threeDsState);
 
     h.waitForThreeDsResult = "timeout";
-    const pending = (await operatePaymentStatusTool.handler({}, env.api)) as Record<string, unknown>;
+    const pending = (await operatePaymentStatusTool.handler({}, env.api)) as Record<
+      string,
+      unknown
+    >;
     expect(pending).toMatchObject({
       status: "payment_3ds_pending",
       next: { tool: "operate_payment_status", wait_seconds: 15 },
@@ -6353,9 +6390,75 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
     ]);
   });
 
+  it("keeps an ACS instrument-mismatch warning visible across 3DS status waits", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+    });
+    setActivePendingThreeDs(
+      buildThreeDsState(Date.now() + 60_000, {
+        kind: "payment_instrument_mismatch",
+        confidence: "high",
+        evidence_used: ["issuer"],
+        expected: { last4: "9192", issuer: "DBS" },
+        observed: { issuer: "ENBDX" },
+        provenance: {
+          expected: { last4: "released_card", issuer: "bin_metadata" },
+          observed: "3ds_challenge",
+        },
+      }),
+    );
+    h.waitForThreeDsResult = "timeout";
+
+    await expect(operatePaymentStatusTool.handler({}, env.api)).resolves.toMatchObject({
+      status: "payment_3ds_pending",
+      warning: {
+        kind: "payment_instrument_mismatch",
+        expected: { last4: "9192", issuer: "DBS" },
+        observed: { issuer: "ENBDX" },
+        provenance: {
+          expected: { last4: "released_card", issuer: "bin_metadata" },
+          observed: "3ds_challenge",
+        },
+      },
+    });
+    h.waitForThreeDsResult = "failed";
+    await operatePaymentStatusTool.handler({}, env.api);
+  });
+
+  it("persists mismatch evidence first observed by a resumable status poll", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: env.api,
+    });
+    setActivePendingThreeDs(buildThreeDsState());
+    h.paymentInstrumentMismatch = {
+      kind: "payment_instrument_mismatch",
+      confidence: "high",
+      evidence_used: ["last4"],
+      expected: { last4: "9192" },
+      observed: { last4: "0005" },
+      provenance: {
+        expected: { last4: "released_card" },
+        observed: "3ds_challenge",
+      },
+    };
+
+    await expect(operatePaymentStatusTool.handler({}, env.api)).resolves.toMatchObject({
+      status: "payment_3ds_pending",
+      warning: h.paymentInstrumentMismatch,
+    });
+    expect(getActivePendingThreeDs()).toMatchObject({
+      payment_instrument_mismatch: h.paymentInstrumentMismatch,
+    });
+  });
+
   it("records a declined outcome and clears state when the OOB challenge fails", async () => {
     const env = buildStatusEnv();
-    await startProvisionSession({ serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html" });
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+    });
     setActivePendingThreeDs(buildThreeDsState());
 
     h.waitForThreeDsResult = "failed";
@@ -6371,7 +6474,9 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
 
   it("hands back an accurate unresolved status once the resumable deadline passes — never fabricates success", async () => {
     const env = buildStatusEnv();
-    await startProvisionSession({ serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html" });
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+    });
     setActivePendingThreeDs(buildThreeDsState(Date.now() - 1));
 
     h.waitForThreeDsResult = "timeout";
@@ -6434,17 +6539,15 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
       await firstAuditGate;
       return { id: "audit_first" };
     });
-    const firstStatus = operatePaymentStatusTool.handler(
-      {},
-      { auditPayment: firstAuditPayment } as unknown as ApiClient,
-    );
+    const firstStatus = operatePaymentStatusTool.handler({}, {
+      auditPayment: firstAuditPayment,
+    } as unknown as ApiClient);
     await firstAuditStarted;
 
     const secondAuditPayment = vi.fn().mockResolvedValue({ id: "audit_second" });
-    await operatePaymentStatusTool.handler(
-      {},
-      { auditPayment: secondAuditPayment } as unknown as ApiClient,
-    );
+    await operatePaymentStatusTool.handler({}, {
+      auditPayment: secondAuditPayment,
+    } as unknown as ApiClient);
     expect(getActivePendingThreeDs()).toBeNull();
 
     const newerState = {
@@ -6555,7 +6658,9 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
 
   it("reports no_pending_payment once nothing is outstanding", async () => {
     const env = buildStatusEnv();
-    await startProvisionSession({ serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html" });
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+    });
 
     const result = (await operatePaymentStatusTool.handler({}, env.api)) as Record<string, unknown>;
 

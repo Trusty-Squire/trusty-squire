@@ -138,7 +138,9 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
     "solves 3-D Secure; waits for user completion, then returns a needs_user handoff if unresolved " +
     "— including a decoupled/out-of-band app-push challenge that had not resolved yet, in which " +
     "case call operate_payment_status (not operate_pay again) to keep checking the same already-" +
-    "submitted charge. " +
+    "submitted charge. If the issuer/app challenge shows issuer, network, or last-four evidence " +
+    "for a different card, returns a structured payment_instrument_mismatch warning without " +
+    "altering or cancelling the challenge; the cardholder retains the decision. " +
     "With no card_ref/card_label and no card on file, the approval link becomes a first-time " +
     "add-card ceremony and the card is bound server-side before the mandate is signed. " +
     "On approval resume, an unreadable live checkout reuses the original mandate-bound checkout; " +
@@ -277,7 +279,14 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         //      1 card   → use it
         //      >1 cards → error listing the labels (never silently guess)
         let cardRef = args.card_ref;
-        let cards: Array<{ id: string; label: string; last4: string | null }>;
+        let selectedCardLabel = args.card_label;
+        let selectedCardNetwork: string | undefined;
+        let cards: Array<{
+          id: string;
+          label: string;
+          last4: string | null;
+          brand?: string;
+        }>;
         if (cardRef === undefined) {
           cards = await api.listPaymentCards();
         } else {
@@ -299,8 +308,12 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
               );
             }
             cardRef = matches[0]!.id;
+            selectedCardLabel = matches[0]!.label;
+            selectedCardNetwork = matches[0]!.brand;
           } else if (cards.length === 1) {
             cardRef = cards[0]!.id;
+            selectedCardLabel = cards[0]!.label;
+            selectedCardNetwork = cards[0]!.brand;
           } else if (cards.length > 1) {
             const labels = cards.map((card) => `"${card.label}"`).join(", ");
             throw new Error(
@@ -317,6 +330,14 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         const cardIdentity = approvalCardIdentity(
           approvalCardRef === null ? undefined : cards.find((card) => card.id === approvalCardRef),
         );
+        // An explicit ref normally avoids another vault metadata read. Best
+        // effort here enriches only the passive post-submit ACS comparison;
+        // its failure must never alter a charge path.
+        if (cardRef !== undefined && selectedCardNetwork === undefined) {
+          const selectedCard = cards.find((candidate) => candidate.id === cardRef);
+          selectedCardLabel ??= selectedCard?.label;
+          selectedCardNetwork = selectedCard?.brand;
+        }
         let resolvedCardRef: string | null = null;
         let filledPending: PendingCardFill | null = null;
         // Split checkouts (Rakuten-style) show no total on the card-entry page
@@ -336,6 +357,8 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         const result = await executeOperatePay(
           {
             ...(cardRef !== undefined ? { card_ref: cardRef } : {}),
+            ...(selectedCardLabel !== undefined ? { card_label: selectedCardLabel } : {}),
+            ...(selectedCardNetwork !== undefined ? { card_network: selectedCardNetwork } : {}),
             ...(args.merchant !== undefined ? { merchant: args.merchant } : {}),
             ...(args.amount_cents !== undefined ? { amount_cents: args.amount_cents } : {}),
             ...(args.currency !== undefined ? { currency: args.currency } : {}),
@@ -588,6 +611,8 @@ async function threeDsStatusResult(
   const boundMs =
     expiredAtEntry || waitSeconds <= 0 ? 0 : Math.min(Math.max(waitSeconds * 1000, 1_000), 15_000);
   const resolution = await browser.waitForThreeDsResolution(boundMs);
+  const mismatch = browser.paymentInstrumentMismatch?.();
+  if (mismatch !== undefined) state.payment_instrument_mismatch ??= mismatch;
   const terminalStatus = threeDsResolutionStatus(resolution);
   const unresolvedPastDeadline =
     terminalStatus === null && (expiredAtEntry || Date.now() >= state.deadline);
@@ -598,6 +623,9 @@ async function threeDsStatusResult(
       merchant: state.checkout.merchant,
       amount_cents: state.checkout.amount_cents,
       currency: state.checkout.currency,
+      ...(state.payment_instrument_mismatch !== undefined
+        ? { warning: state.payment_instrument_mismatch }
+        : {}),
       next: { tool: "operate_payment_status", session_id: session.id, wait_seconds: 15 },
     };
   }
@@ -632,6 +660,9 @@ async function threeDsStatusResult(
     merchant: state.checkout.merchant,
     amount_cents: state.checkout.amount_cents,
     currency: state.checkout.currency,
+    ...(state.payment_instrument_mismatch !== undefined
+      ? { warning: state.payment_instrument_mismatch }
+      : {}),
     ...(terminalStatus === null
       ? {
           needs_user: {
@@ -694,7 +725,9 @@ export const operatePaymentStatusTool: Tool<z.infer<typeof paymentStatusInputSch
     "(0-15, default 0) to bound-wait for a change instead of an instant peek; never blocks longer " +
     "than that. Never verifies a mandate or opens a card. Only candidate_kind=approval with " +
     "ready_to_charge=true is a final authorization; a review candidate still requires final " +
-    "approval. When a pending 3-D Secure outcome resolves or reaches its deadline, this records " +
+    "approval. Preserves any passively observed payment_instrument_mismatch warning from issuer/" +
+    "app evidence without altering the challenge. When a pending 3-D Secure outcome resolves or " +
+    "reaches its deadline, this records " +
     "a terminal payment audit and clears that session's pending tracking.",
   inputSchema: paymentStatusInputSchema,
   jsonInputSchema: {
