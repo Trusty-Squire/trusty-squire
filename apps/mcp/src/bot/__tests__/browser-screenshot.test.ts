@@ -252,6 +252,29 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "refuses before capture when a requested page still contains a sealed type_secret target or PAN",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <input id="typed-secret" value="still-secret">
+          <input value="4242 4242 4242 4242">
+        `);
+        const controller = BrowserController.fromHarnessPage(page);
+
+        await expect(
+          controller.assertOperatorScreenshotNoSealedValues({
+            extraRedactionSelectors: ["#typed-secret"],
+          }),
+        ).rejects.toThrow("screenshot_unavailable_sealed_context");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "captures with no redaction when no card/sealed fields exist",
     async () => {
       const browser = await chromium.launch({ headless: true });
@@ -323,6 +346,40 @@ describe("operate_screenshot frame targeting (real browser)", () => {
         const result = await controller.screenshotForOperator({ frameIndex: 1 });
         expect(result.frameUrl).toBe(frameUrl);
         expect(result.redactedCount).toBe(1);
+        expect(isValidJpegBase64(result.base64)).toBe(true);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "allows an isolated clean ACS frame even while the parent checkout still has a sealed field",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const pageUrl = "https://shop.example.test/checkout";
+        const frameUrl = "https://authentication.cardinalcommerce.com/challenge/CReq";
+        const page = await servePages(browser, {
+          [pageUrl]: `<input data-ts-sealed-payment="1" value="4242424242424242"><iframe src="${frameUrl}"></iframe>`,
+          [frameUrl]: `<p>Complete authentication</p>`,
+        });
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = BrowserController.fromHarnessPage(page);
+
+        await expect(controller.assertOperatorScreenshotNoSealedValues()).rejects.toThrow(
+          "screenshot_unavailable_sealed_context",
+        );
+        await expect(
+          controller.assertOperatorScreenshotNoSealedValues({
+            frameUrlContains: "cardinalcommerce.com",
+          }),
+        ).resolves.toBeUndefined();
+        const result = await controller.screenshotForOperator({
+          frameUrlContains: "cardinalcommerce.com",
+        });
+        expect(result.frameUrl).toBe(frameUrl);
         expect(isValidJpegBase64(result.base64)).toBe(true);
       } finally {
         await browser.close();

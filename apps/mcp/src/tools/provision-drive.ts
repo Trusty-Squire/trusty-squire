@@ -402,12 +402,11 @@ export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
     "a full-page shot. Use this when text/el_table from operate_observe isn't enough to tell what state " +
     "a stuck page is actually in — a challenge that never advances, an unexpected layout, a captcha you " +
     "need to SEE. Read-only: never navigates, clicks, types, submits, or steals focus; it only reads " +
-    "pixels. Money-fence: refuses outright (screenshot_unavailable_sealed_context) whenever the session " +
-    "has ever sealed a secret (a password, an extracted credential typed via type_secret) or currently " +
-    "has an active payment card fill — no capture can leak what it refuses to take. This never blocks the " +
-    "case the tool exists for: a 3-D Secure/challenge or captcha page holds no card data and never seals " +
-    "anything. If you need to see a page WHILE a card fill is in progress, finish or cancel the payment " +
-    "step first, then screenshot.",
+    "pixels. Money-fence: refuses (screenshot_unavailable_sealed_context) during an active card fill or " +
+    "when a frame included in this capture still holds a sealed secret or card-shaped value. It fails closed " +
+    "when that frame cannot be checked, while capture-time masking remains a second fence. A historical fill " +
+    "does not block an isolated 3-D Secure/challenge frame or a page navigated away from the sealed form. " +
+    "If you need to see a page WHILE a card fill is in progress, finish or cancel the payment step first.",
   inputSchema: screenshotSchema,
   jsonInputSchema: {
     type: "object",

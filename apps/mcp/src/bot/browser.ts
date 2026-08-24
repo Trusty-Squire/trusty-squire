@@ -8497,6 +8497,87 @@ export class BrowserController {
     };
   }
 
+  // Verify the capture set before pixels are read. This is deliberately
+  // narrower than the capture-time mask: empty checkout controls are harmless,
+  // but a nonempty type_secret target, password, payment-sealed node, or
+  // Luhn-valid PAN means the requested image could contain a secret. Every
+  // frame included by the image must be readable; a detached or navigating
+  // frame is not evidence that it is safe to capture.
+  async assertOperatorScreenshotNoSealedValues(
+    opts: {
+      frameIndex?: number;
+      frameUrlContains?: string;
+      extraRedactionSelectors?: readonly string[];
+    } = {},
+  ): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    const page = this.page;
+    const targetFrame = this.resolveOperatorScreenshotFrame(opts);
+    const frames =
+      targetFrame !== null && targetFrame !== page.mainFrame() ? [targetFrame] : page.frames();
+    const extraRedactionSelectors = opts.extraRedactionSelectors ?? [];
+    const sealedSelector = ['[data-ts-sealed-payment="1"]', 'input[type="password" i]'].join(
+      ",",
+    );
+
+    try {
+      for (const frame of frames) {
+        if (frame.isDetached()) throw new Error("frame detached");
+        if ((await frame.locator(sealedSelector).count()) > 0) {
+          throw new Error("sealed marker");
+        }
+        for (const selector of extraRedactionSelectors) {
+          const matches = await frame.locator(selector).all();
+          for (const match of matches) {
+            const hasValue = await match.evaluate((el) => {
+              if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+                return el.value.trim().length > 0;
+              }
+              return (el.textContent ?? "").trim().length > 0;
+            });
+            if (hasValue) throw new Error("sealed value");
+          }
+        }
+        const candidates = await frame.locator('input:not([type="hidden" i]),textarea').all();
+        for (const candidate of candidates) {
+          const hasPan = await candidate.evaluate((el) => {
+            const text =
+              el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement ? el.value : "";
+            const digits = Array.from(text.matchAll(/\d/g), (match) => match.index);
+            const luhn = (value: string): boolean => {
+              let sum = 0;
+              let double = false;
+              for (let index = value.length - 1; index >= 0; index -= 1) {
+                let digit = Number(value[index]);
+                if (double) {
+                  digit *= 2;
+                  if (digit > 9) digit -= 9;
+                }
+                sum += digit;
+                double = !double;
+              }
+              return sum % 10 === 0;
+            };
+            for (let start = 0; start + 13 <= digits.length; start += 1) {
+              const maxLength = Math.min(19, digits.length - start);
+              for (let length = 13; length <= maxLength; length += 1) {
+                const positions = digits.slice(start, start + length);
+                if (positions[positions.length - 1]! - positions[0]! + 1 > PAYMENT_PAN_MAX_SPAN_CHARS) {
+                  break;
+                }
+                if (luhn(positions.map((position) => text[position]).join(""))) return true;
+              }
+            }
+            return false;
+          });
+          if (hasPan) throw new Error("card value");
+        }
+      }
+    } catch {
+      throw new Error("screenshot_unavailable_sealed_context");
+    }
+  }
+
   // operate_screenshot's implementation: a read-only capture of the page (or
   // one specific frame, so a cross-origin challenge/ACS iframe can be seen on
   // its own) with card-shaped/sealed fields redacted at capture time via
