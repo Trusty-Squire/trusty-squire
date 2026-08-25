@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.13-rc.7 (2026-08-25)
+
+- feat(mcp): add per-session proxy to operate_start (#585)
+
 ## 1.1.13-rc.6 (2026-08-24)
 
 - fix(mcp): scope screenshot sealing to active captures (#581)
