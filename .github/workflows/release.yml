@@ -329,7 +329,7 @@ jobs:
         run: |
           set -euo pipefail
           PACK_DIR="$(mktemp -d)"
-          pnpm --filter '@trusty-squire/mcp' pack --pack-destination "$PACK_DIR"
+          ( cd apps/mcp && pnpm pack --pack-destination "$PACK_DIR" )
           TARBALL="$(find "$PACK_DIR" -maxdepth 1 -type f -name '*.tgz' -print -quit)"
           test -n "$TARBALL"
           echo "Publishing $TARBALL as @trusty-squire/mcp@${{ needs.verify.outputs.version }} with dist-tag ${{ needs.verify.outputs.npm_dist_tag }}"
