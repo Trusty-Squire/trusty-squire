@@ -268,14 +268,14 @@ jobs:
           sudo docker system prune -af --volumes || true
 
       - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           # Node 24 includes an npm CLI new enough for npm OIDC publishing.
           node-version: 24.14.0
           cache: pnpm
-          # npm's default registry is registry.npmjs.org. Do not set
-          # registry-url here: setup-node would write a token-based .npmrc,
-          # which can prevent npm from selecting trusted-publisher OIDC.
+          # setup-node v6 configures npm's OIDC trusted-publishing handshake
+          # without a token-based .npmrc auth line.
+          registry-url: https://registry.npmjs.org
 
       # Install ONLY mcp's dep tree (mcp + transitive workspace deps), not
       # the entire monorepo. A full `pnpm install` creates ~4M symlinks
