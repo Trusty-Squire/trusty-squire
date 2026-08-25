@@ -4,7 +4,12 @@
 // residential users on a direct connection (zero proxy cost).
 
 import { describe, expect, it } from "vitest";
-import { parseProxyUrl, proxyHasCredentials, shouldRouteThroughProxy } from "../browser.js";
+import {
+  parseProxyUrl,
+  passwordOnlyProxyAuthOptions,
+  proxyHasCredentials,
+  shouldRouteThroughProxy,
+} from "../browser.js";
 
 describe("parseProxyUrl", () => {
   it("splits credentials out of an http proxy URL", () => {
@@ -29,6 +34,10 @@ describe("parseProxyUrl", () => {
       password: "token",
     });
     expect(proxyHasCredentials(proxy)).toBe(true);
+    expect(passwordOnlyProxyAuthOptions(proxy)).toEqual({
+      httpCredentials: { username: "", password: "token" },
+      extraHTTPHeaders: { "Proxy-Authorization": "Basic OnRva2Vu" },
+    });
   });
 
   it("supports socks5", () => {
