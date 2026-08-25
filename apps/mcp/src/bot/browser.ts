@@ -3649,7 +3649,7 @@ export class BrowserController {
     // module's existing logging convention).
     console.error(
       `[operator] launching browser channel=${channel ?? "bundled-chromium"} ` +
-        `proxy=${proxy?.server ?? "direct"}`,
+        `proxy=${proxy === null ? "direct" : "configured"}`,
     );
     // Remote-CDP mode (BOT_CDP_ENDPOINT): the browser runs on a REMOTE host
     // (e.g. a Mac with a real GPU + residential egress) and we attach over CDP
@@ -4304,7 +4304,7 @@ export class BrowserController {
       const reachable = await isProxyReachable(proxy.server);
       if (!reachable) {
         console.error(
-          `[operator] proxy ${proxy.server} is UNREACHABLE — falling back to ` +
+          `[operator] configured proxy is UNREACHABLE — falling back to ` +
             `DIRECT egress (datacenter IP; anti-bot services may block it, but far ` +
             `better than every navigation timing out)`,
         );

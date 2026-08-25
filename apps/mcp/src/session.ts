@@ -143,21 +143,35 @@ function withoutLegacyProxy(data: SessionData): { data: SessionData; changed: bo
   return { data: clean, changed: true };
 }
 
+async function migrateLegacyProxy(
+  clean: { data: SessionData; changed: boolean },
+  write: (data: SessionData) => Promise<void>,
+): Promise<void> {
+  if (!clean.changed) return;
+  try {
+    await write(clean.data);
+  } catch {
+    return;
+  }
+}
+
 class KeytarStorage implements SessionStorage {
   constructor(private readonly kt: KeytarShape) {}
 
   async read(): Promise<SessionData | null> {
     const raw = await this.kt.getPassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT);
     if (raw === null) return null;
+    let data: SessionData;
     try {
-      const clean = withoutLegacyProxy(JSON.parse(raw) as SessionData);
-      if (clean.changed) {
-        await this.kt.setPassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT, JSON.stringify(clean.data));
-      }
-      return clean.data;
+      data = JSON.parse(raw) as SessionData;
     } catch {
       return null;
     }
+    const clean = withoutLegacyProxy(data);
+    await migrateLegacyProxy(clean, async (session) => {
+      await this.kt.setPassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT, JSON.stringify(session));
+    });
+    return clean.data;
   }
 
   async write(data: SessionData): Promise<void> {
@@ -185,15 +199,16 @@ export class FileStorage implements SessionStorage {
   }
 
   async read(): Promise<SessionData | null> {
+    let raw: string;
     try {
-      const raw = await fs.readFile(this.filePath, "utf8");
-      const clean = withoutLegacyProxy(JSON.parse(raw) as SessionData);
-      if (clean.changed) await this.write(clean.data);
-      return clean.data;
+      raw = await fs.readFile(this.filePath, "utf8");
     } catch (err) {
       if ((err as { code?: string }).code === "ENOENT") return null;
       throw err;
     }
+    const clean = withoutLegacyProxy(JSON.parse(raw) as SessionData);
+    await migrateLegacyProxy(clean, async (session) => await this.write(session));
+    return clean.data;
   }
 
   async write(data: SessionData): Promise<void> {

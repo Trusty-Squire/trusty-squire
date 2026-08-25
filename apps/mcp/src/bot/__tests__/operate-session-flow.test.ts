@@ -4572,6 +4572,7 @@ describe("operate session — captcha gate", () => {
     expect(res.settled).toBe(false);
     expect(res.needs_user?.gate).toBe("captcha_wall");
     expect(res.needs_user?.remedy).toMatch(/proxy|manual/i);
+    expect(res.needs_user?.remedy).toContain("operate_start");
   });
 
   it("executes invisible reCAPTCHA and waits for a response token", async () => {
