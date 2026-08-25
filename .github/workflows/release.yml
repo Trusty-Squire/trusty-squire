@@ -250,8 +250,7 @@ jobs:
     needs: verify
     if: needs.verify.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
-    # NPM_TOKEN lives in the `npm-publish` GitHub Environment (not repo
-    # secrets), so we need this `environment:` block to access it. The
+    # The npm trusted publisher is scoped to this environment. The
     # environment's required-reviewers protection rule has been removed
     # (it was silently blocking rc.4/rc.5). If you re-add reviewers, make
     # sure they're actually monitored — a stuck-pending publish job is
@@ -270,11 +269,16 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 8.15.0
+          # pnpm 10.9+ supports npm OIDC trusted publishing; pin the current
+          # stable 10.x release while retaining pnpm's workspace: rewriting.
+          version: 10.34.5
       - uses: actions/setup-node@v4
         with:
-          node-version: 20.11.0
+          # Node 24 includes an npm CLI new enough for npm OIDC publishing.
+          node-version: 24.14.0
           cache: pnpm
+          # npm's OIDC workflow example retains registry-url; with no
+          # NODE_AUTH_TOKEN it does not force legacy-token authentication.
           registry-url: https://registry.npmjs.org
 
       # Install ONLY mcp's dep tree (mcp + transitive workspace deps), not
@@ -319,8 +323,6 @@ jobs:
       # commit SHA (we just rebuilt dist/).
       - name: Publish to npm
         working-directory: apps/mcp
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           echo "Publishing @trusty-squire/mcp@${{ needs.verify.outputs.version }} with dist-tag ${{ needs.verify.outputs.npm_dist_tag }}"
@@ -438,17 +440,16 @@ jobs:
           fi
           echo "✓ Tarball contains case \"connect\""
 
-      - name: Verify dist-tag points at this version (and fix if pnpm lied)
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Verify dist-tag points at this version
         run: |
           set -euo pipefail
           V="${{ needs.verify.outputs.version }}"
           TAG="${{ needs.verify.outputs.npm_dist_tag }}"
           echo "Asserting dist-tag '$TAG' → $V"
-          # pnpm publish has a known quirk in workspace mode where --tag is
-          # silently ignored. Read the registry's dist-tags blob and fix it
-          # explicitly if it's wrong. Idempotent.
+          # Read the registry's dist-tags blob. Trusted publishing authorizes
+          # `npm publish`, not a separate `npm dist-tag add`, so fail loudly
+          # rather than falling back to a legacy publish token if --tag is
+          # ever ignored.
           for i in $(seq 1 18); do
             CURRENT=$(npm view "@trusty-squire/mcp" dist-tags --json 2>/dev/null \
               | python3 -c "import json,sys; print(json.load(sys.stdin).get('$TAG',''))")
@@ -469,30 +470,7 @@ jobs:
             fi
             sleep 10
           done
-          echo "::warning::dist-tag $TAG = '$CURRENT', expected '$V'. Forcing it via npm dist-tag add."
-          npm dist-tag add "@trusty-squire/mcp@$V" "$TAG"
-          # Re-verify after the fix.
-          for i in $(seq 1 12); do
-            CURRENT=$(npm view "@trusty-squire/mcp" dist-tags --json 2>/dev/null \
-              | python3 -c "import json,sys; print(json.load(sys.stdin).get('$TAG',''))")
-            echo "  post-fix attempt $i — $TAG = '$CURRENT'"
-            if [[ "$CURRENT" == "$V" ]]; then
-              echo "✓ dist-tag $TAG now points at $V (after explicit fix)."
-              # Cross-check: the full package doc must agree. If it disagrees with
-              # npm view, something is wrong at the registry level (do not declare
-              # success — fail loud, surface the inconsistency).
-              DOC_TAG=$(curl -sS "https://registry.npmjs.org/@trusty-squire/mcp" \
-                | python3 -c "import json,sys; print(json.load(sys.stdin).get('dist-tags',{}).get('$TAG',''))")
-              if [[ "$DOC_TAG" != "$V" ]]; then
-                echo "::error::Registry inconsistency: npm view says $TAG=$CURRENT but package doc says $TAG=$DOC_TAG"
-                exit 1
-              fi
-              echo "✓ Cross-check: package doc also confirms $TAG=$V"
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "::error::dist-tag $TAG still wrong after fix attempt. Manual intervention required."
+          echo "::error::dist-tag $TAG = '$CURRENT', expected '$V'."
           exit 1
 
       - name: Canonical install verification
