@@ -268,10 +268,6 @@ jobs:
           sudo docker system prune -af --volumes || true
 
       - uses: pnpm/action-setup@v4
-        with:
-          # pnpm 10.9+ supports npm OIDC trusted publishing; pin the current
-          # stable 10.x release while retaining pnpm's workspace: rewriting.
-          version: 10.34.5
       - uses: actions/setup-node@v4
         with:
           # Node 24 includes an npm CLI new enough for npm OIDC publishing.
@@ -315,22 +311,21 @@ jobs:
           fi
 
       # ---- npm publish -----------------------------------------------------
-      # Use `pnpm publish`, NOT `npm publish`. pnpm rewrites `workspace:`
-      # specifiers (e.g. `"@trusty-squire/skill-schema": "workspace:^"`) to
-      # real semver (`^0.1.0`) before tarball assembly. `npm publish`
-      # ships them through literally, producing an unusable package.
-      # `--no-git-checks` because the working tree may differ from the
-      # commit SHA (we just rebuilt dist/).
+      # pnpm 8 rewrites workspace: specifiers only while packing. Publish that
+      # rewritten tarball with npm so the npm CLI performs OIDC authentication
+      # and provenance generation without an npm token.
       - name: Publish to npm
-        working-directory: apps/mcp
         run: |
           set -euo pipefail
-          echo "Publishing @trusty-squire/mcp@${{ needs.verify.outputs.version }} with dist-tag ${{ needs.verify.outputs.npm_dist_tag }}"
-          pnpm publish \
+          PACK_DIR="$(mktemp -d)"
+          pnpm --filter '@trusty-squire/mcp' pack --pack-destination "$PACK_DIR"
+          TARBALL="$(find "$PACK_DIR" -maxdepth 1 -type f -name '*.tgz' -print -quit)"
+          test -n "$TARBALL"
+          echo "Publishing $TARBALL as @trusty-squire/mcp@${{ needs.verify.outputs.version }} with dist-tag ${{ needs.verify.outputs.npm_dist_tag }}"
+          npm publish "$TARBALL" \
             --access=public \
             --tag="${{ needs.verify.outputs.npm_dist_tag }}" \
-            --provenance \
-            --no-git-checks
+            --provenance
 
       # ---- Ground-truth verification: NEVER trust npm's success output -----
       # The previous agent burned three version numbers because they trusted
