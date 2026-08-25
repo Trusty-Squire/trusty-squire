@@ -2,3 +2,8 @@ packages:
   - 'packages/*'
   - 'apps/*'
   - 'tools/*'
+
+# pnpm 10 requires explicit approval for dependency lifecycle scripts. MCP's
+# persisted profile pool imports better-sqlite3, which needs its native binding.
+onlyBuiltDependencies:
+  - better-sqlite3

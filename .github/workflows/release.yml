@@ -84,8 +84,6 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         if: steps.fast_path.outputs.already_released != 'true'
-        with:
-          version: 8.15.0   # match packageManager in root package.json
       - uses: actions/setup-node@v4
         if: steps.fast_path.outputs.already_released != 'true'
         with:
@@ -268,10 +266,6 @@ jobs:
           sudo docker system prune -af --volumes || true
 
       - uses: pnpm/action-setup@v4
-        with:
-          # pnpm 10.9+ supports npm OIDC trusted publishing; pin the current
-          # stable 10.x release while retaining pnpm's workspace: rewriting.
-          version: 10.34.5
       - uses: actions/setup-node@v4
         with:
           # Node 24 includes an npm CLI new enough for npm OIDC publishing.

@@ -184,8 +184,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with:
-          version: 8.15.0
       - uses: actions/setup-node@v4
         with:
           node-version: 20.11.0
@@ -237,8 +235,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with:
-          version: 8.15.0
       - uses: actions/setup-node@v4
         with:
           node-version: 20.11.0
@@ -280,8 +276,6 @@ jobs:
         if: needs.secret-scan.outputs.shell_tests == 'true'
         run: bash tools/__tests__/release-mcp.test.sh
       - uses: pnpm/action-setup@v4
-        with:
-          version: 8.15.0
       - uses: actions/setup-node@v4
         with:
           node-version: 20.11.0
