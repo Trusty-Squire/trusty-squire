@@ -1,5 +1,11 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.13-rc.6 (2026-08-24)
+
+- fix(mcp): scope screenshot sealing to active captures (#581)
+- fix(mcp): warn when 3DS evidence identifies a different card (#580)
+- fix: identify the bound card in payment approvals (#579)
+
 ## 1.1.13-rc.5 (2026-08-23)
 
 - feat(mcp): operate_screenshot; fix decoupled-3DS network scope; positive new-card selection (#574)
