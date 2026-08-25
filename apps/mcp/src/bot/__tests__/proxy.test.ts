@@ -50,6 +50,18 @@ describe("parseProxyUrl", () => {
     expect(() => parseProxyUrl("proxy.example.com:8080")).toThrow();
     expect(() => parseProxyUrl("not a proxy url")).toThrow();
   });
+
+  it("does not expose malformed proxy credentials in errors", () => {
+    const credential = "secret-proxy-password";
+    let thrown: unknown;
+    try {
+      parseProxyUrl(`http://${credential}@`);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect(String(thrown)).not.toContain(credential);
+  });
 });
 
 describe("shouldRouteThroughProxy", () => {

@@ -134,6 +134,15 @@ interface KeytarModule {
   default: KeytarShape;
 }
 
+function withoutLegacyProxy(data: SessionData): { data: SessionData; changed: boolean } {
+  const stored = data as SessionData & { proxy_url?: unknown };
+  if (!Object.prototype.hasOwnProperty.call(stored, "proxy_url")) {
+    return { data, changed: false };
+  }
+  const { proxy_url: _proxyUrl, ...clean } = stored;
+  return { data: clean, changed: true };
+}
+
 class KeytarStorage implements SessionStorage {
   constructor(private readonly kt: KeytarShape) {}
 
@@ -141,14 +150,19 @@ class KeytarStorage implements SessionStorage {
     const raw = await this.kt.getPassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT);
     if (raw === null) return null;
     try {
-      return JSON.parse(raw) as SessionData;
+      const clean = withoutLegacyProxy(JSON.parse(raw) as SessionData);
+      if (clean.changed) {
+        await this.kt.setPassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT, JSON.stringify(clean.data));
+      }
+      return clean.data;
     } catch {
       return null;
     }
   }
 
   async write(data: SessionData): Promise<void> {
-    await this.kt.setPassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT, JSON.stringify(data));
+    const clean = withoutLegacyProxy(data).data;
+    await this.kt.setPassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT, JSON.stringify(clean));
   }
 
   async clear(): Promise<void> {
@@ -173,7 +187,9 @@ export class FileStorage implements SessionStorage {
   async read(): Promise<SessionData | null> {
     try {
       const raw = await fs.readFile(this.filePath, "utf8");
-      return JSON.parse(raw) as SessionData;
+      const clean = withoutLegacyProxy(JSON.parse(raw) as SessionData);
+      if (clean.changed) await this.write(clean.data);
+      return clean.data;
     } catch (err) {
       if ((err as { code?: string }).code === "ENOENT") return null;
       throw err;
@@ -181,8 +197,9 @@ export class FileStorage implements SessionStorage {
   }
 
   async write(data: SessionData): Promise<void> {
+    const clean = withoutLegacyProxy(data).data;
     await fs.mkdir(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
-    await fs.writeFile(this.filePath, JSON.stringify(data, null, 2), { mode: 0o600 });
+    await fs.writeFile(this.filePath, JSON.stringify(clean, null, 2), { mode: 0o600 });
   }
 
   async clear(): Promise<void> {

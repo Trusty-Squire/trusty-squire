@@ -33,6 +33,7 @@ import process from "node:process";
 import { cpSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { loadHarvesterEnvFile } from "../operator-env.js";
 import { fileURLToPath } from "node:url";
 import { installInitiate, installPoll, issueMachineToken } from "../api-client.js";
 import { openSessionStorage, type SessionData } from "../session.js";
@@ -332,6 +333,7 @@ function resolveCopiedNpxServerLaunch(binPath: string): { command: string; args:
 
 export async function runCli(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
+  loadHarvesterEnvFile();
   switch (args.command) {
     case "connect":
       // `npx …/mcp connect` reuses a stale local copy instead of fetching the

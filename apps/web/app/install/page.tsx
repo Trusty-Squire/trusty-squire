@@ -45,7 +45,6 @@ interface WhoamiResponse {
 interface InstallPreferences {
   registry_enabled: boolean;
   consent_operator_inbox_otp: boolean;
-  proxy_url?: string;
 }
 
 function readStoredInstallPreferences(): InstallPreferences {
@@ -63,7 +62,6 @@ function readStoredInstallPreferences(): InstallPreferences {
     return {
       registry_enabled: parsed.registry_enabled === true,
       consent_operator_inbox_otp: parsed.consent_operator_inbox_otp === true,
-      ...(typeof parsed.proxy_url === "string" ? { proxy_url: parsed.proxy_url } : {}),
     };
   } catch {
     return fallback;
@@ -94,7 +92,6 @@ export default function InstallPage() {
   const [preferences, setPreferences] = useState<InstallPreferences>(readStoredInstallPreferences);
   const registryEnabled = preferences.registry_enabled;
   const otpEnabled = preferences.consent_operator_inbox_otp;
-  const proxyUrl = preferences.proxy_url ?? "";
 
   useEffect(() => {
     if (token === null) return;
@@ -168,18 +165,16 @@ export default function InstallPage() {
 
   useEffect(() => {
     if (token === null) return;
-    const proxy = proxyUrl.trim();
     const prefs: InstallPreferences = {
       registry_enabled: registryEnabled,
       consent_operator_inbox_otp: otpEnabled,
-      ...(proxy.length > 0 ? { proxy_url: proxy } : {}),
     };
     try {
       window.localStorage.setItem(`ts-install-prefs:${token}`, JSON.stringify(prefs));
     } catch {
       /* storage is advisory; the live React state still drives claim */
     }
-  }, [token, registryEnabled, otpEnabled, proxyUrl]);
+  }, [token, registryEnabled, otpEnabled]);
 
   // Auto-claim after the OAuth round-trip returns. The wizard's
   // step 1 ✓ depends on BOTH whoami.identities ⊇ ["google"] AND the
@@ -202,7 +197,6 @@ export default function InstallPage() {
           ...(agent !== null ? { agent_identity: agent } : {}),
           registry_enabled: registryEnabled,
           consent_operator_inbox_otp: otpEnabled,
-          ...(proxyUrl.trim().length > 0 ? { proxy_url: proxyUrl.trim() } : {}),
         });
         if (cancelled) return;
         setInstallClaimed(true);
@@ -250,7 +244,6 @@ export default function InstallPage() {
     router,
     registryEnabled,
     otpEnabled,
-    proxyUrl,
   ]);
 
   // Light polling on whoami — covers the case where the user does
@@ -410,7 +403,6 @@ export default function InstallPage() {
         disabled={installClaimed}
         registryEnabled={registryEnabled}
         otpEnabled={otpEnabled}
-        proxyUrl={proxyUrl}
         onToggle={() => setShowAdvanced((v) => !v)}
         onRegistryChange={(value) =>
           setPreferences((current) => ({ ...current, registry_enabled: value }))
@@ -420,16 +412,6 @@ export default function InstallPage() {
             ...current,
             consent_operator_inbox_otp: value,
           }))
-        }
-        onProxyChange={(value) =>
-          setPreferences((current) => {
-            if (value.trim().length > 0) return { ...current, proxy_url: value };
-            const rest: InstallPreferences = {
-              registry_enabled: current.registry_enabled,
-              consent_operator_inbox_otp: current.consent_operator_inbox_otp,
-            };
-            return rest;
-          })
         }
       />
 
@@ -539,21 +521,17 @@ function AdvancedInstallSettings({
   disabled,
   registryEnabled,
   otpEnabled,
-  proxyUrl,
   onToggle,
   onRegistryChange,
   onOtpChange,
-  onProxyChange,
 }: {
   open: boolean;
   disabled: boolean;
   registryEnabled: boolean;
   otpEnabled: boolean;
-  proxyUrl: string;
   onToggle: () => void;
   onRegistryChange: (value: boolean) => void;
   onOtpChange: (value: boolean) => void;
-  onProxyChange: (value: string) => void;
 }) {
   return (
     <section className="install-advanced" aria-label="Advanced install settings">
@@ -587,15 +565,6 @@ function AdvancedInstallSettings({
               <b>Email verification polling</b>
               Allow polling only for OTP messages matching services you ask the squire to handle.
             </span>
-          </label>
-          <label className="field compact">
-            <span>Proxy URL</span>
-            <input
-              value={proxyUrl}
-              disabled={disabled}
-              placeholder="http://user:pass@host:port or socks5://..."
-              onChange={(event) => onProxyChange(event.currentTarget.value)}
-            />
           </label>
         </div>
       )}

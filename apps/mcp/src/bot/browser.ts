@@ -4284,11 +4284,8 @@ export class BrowserController {
     let proxy: ProxySettings;
     try {
       proxy = parseProxyUrl(raw);
-    } catch (err) {
-      console.error(
-        `[operator] per-session proxy is malformed — running ` +
-          `direct: ${err instanceof Error ? err.message : String(err)}`,
-      );
+    } catch {
+      console.error(`[operator] per-session proxy is malformed — running direct`);
       return null;
     }
 
@@ -16456,7 +16453,7 @@ export async function isProxyReachable(server: string, timeoutMs = 4000): Promis
 export function parseProxyUrl(raw: string): ProxySettings {
   const u = new URL(raw.trim());
   if (u.hostname.length === 0) {
-    throw new Error(`proxy URL has no host: "${raw}" (expected e.g. http://host:port)`);
+    throw new Error("proxy URL has no host");
   }
   // `host` includes the port; `protocol` keeps its trailing ":".
   const settings: ProxySettings = { server: `${u.protocol}//${u.host}` };

@@ -27,7 +27,6 @@ export class PrismaPairingTokenStore implements PairingTokenStore {
         machine_token: record.machine_token,
         registry_enabled: record.registry_enabled,
         consent_operator_inbox_otp: record.consent_operator_inbox_otp,
-        proxy_url: record.proxy_url,
       },
     });
   }
@@ -45,7 +44,6 @@ export class PrismaPairingTokenStore implements PairingTokenStore {
     preferences: {
       registry_enabled?: boolean;
       consent_operator_inbox_otp?: boolean;
-      proxy_url?: string | null;
     } = {},
   ): Promise<boolean> {
     // Race-safe claim: update only if status is still "pending" AND
@@ -59,7 +57,6 @@ export class PrismaPairingTokenStore implements PairingTokenStore {
         agent_session_raw_token: rawAgentToken,
         registry_enabled: preferences.registry_enabled ?? null,
         consent_operator_inbox_otp: preferences.consent_operator_inbox_otp ?? null,
-        proxy_url: preferences.proxy_url ?? null,
       },
     });
     return result.count > 0;
@@ -109,7 +106,6 @@ export class PrismaPairingTokenStore implements PairingTokenStore {
     machine_token: string | null;
     registry_enabled?: boolean | null;
     consent_operator_inbox_otp?: boolean | null;
-    proxy_url?: string | null;
   }): PairingTokenRecord {
     return {
       token: row.token,
@@ -122,7 +118,6 @@ export class PrismaPairingTokenStore implements PairingTokenStore {
       machine_token: row.machine_token,
       registry_enabled: row.registry_enabled ?? null,
       consent_operator_inbox_otp: row.consent_operator_inbox_otp ?? null,
-      proxy_url: row.proxy_url ?? null,
     };
   }
 }

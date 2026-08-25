@@ -81,7 +81,6 @@ describe("single-tier install handshake", () => {
       {
         registry_enabled: true,
         consent_operator_inbox_otp: true,
-        proxy_url: "socks5://proxy.test:1080",
       },
     );
 
@@ -97,12 +96,12 @@ describe("single-tier install handshake", () => {
       install_preferences: {
         registry_enabled: true,
         consent_operator_inbox_otp: true,
-        proxy_url: "socks5://proxy.test:1080",
       },
     });
+    expect(status.json().install_preferences).not.toHaveProperty("proxy_url");
   });
 
-  it("rejects malformed proxy preferences at the browser claim boundary", async () => {
+  it("ignores legacy proxy preferences at the browser claim boundary", async () => {
     const initiate = await app.inject({
       method: "POST",
       url: "/v1/mcp/install/initiate",
@@ -119,12 +118,16 @@ describe("single-tier install handshake", () => {
       payload: {
         registry_enabled: true,
         consent_operator_inbox_otp: true,
-        proxy_url: "http://proxy.test:8080\nBAD=1",
+        proxy_url: "http://user:secret@proxy.test:8080",
       },
     });
 
-    expect(claim.statusCode).toBe(400);
-    expect(claim.json()).toMatchObject({ error: "invalid_request" });
+    expect(claim.statusCode).toBe(200);
+    const status = await app.inject({
+      method: "GET",
+      url: `/v1/mcp/install/${setup_code}/status`,
+    });
+    expect(status.json().install_preferences).not.toHaveProperty("proxy_url");
   });
 
   it("install/status returns the bound account_id", async () => {

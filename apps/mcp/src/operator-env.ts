@@ -32,6 +32,7 @@ export function loadHarvesterEnvFile(): void {
       const eq = line.indexOf("=");
       if (eq <= 0) continue;
       const key = line.slice(0, eq).trim();
+      if (key === "UNIVERSAL_BOT_PROXY_URL") continue;
       if (process.env[key] !== undefined) continue; // existing env wins
       let value = line.slice(eq + 1).trim();
       if (
