@@ -314,6 +314,18 @@ jobs:
       # pnpm 8 rewrites workspace: specifiers only while packing. Publish that
       # rewritten tarball with npm so the npm CLI performs OIDC authentication
       # and provenance generation without an npm token.
+      - name: Ensure npm supports OIDC trusted publishing
+        run: |
+          set -euo pipefail
+          npm install -g npm@latest
+          NPM_VERSION="$(npm --version)"
+          echo "Using npm $NPM_VERSION for trusted publishing"
+          node -e '
+            const [major, minor, patch = 0] = process.argv[1].split(".").map(Number);
+            if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) {
+              throw new Error(`npm ${process.argv[1]} is below the OIDC minimum of 11.5.1`);
+            }
+          ' "$NPM_VERSION"
       - name: Publish to npm
         run: |
           set -euo pipefail
