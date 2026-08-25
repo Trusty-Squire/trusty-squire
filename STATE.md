@@ -56,8 +56,8 @@ Driving the uncracked spine (openai/auth0/mongodb-atlas/huggingface/meilisearch)
     a `postVerifyMaxRounds` bump, and credential-surface routing to skip the cluster.
 - **huggingface → form-flow CRACKED via proxy; residual = hCaptcha-Enterprise + email.**
   Direct datacenter IP → `/join` `403 suspicious activity ~30min`. Through the Mac
-  residential proxy (`socks5://100.104.88.126:1081`, egress 1.240.236.25; set
-  `UNIVERSAL_BOT_PROXY_URL` + `UNIVERSAL_BOT_PROXY_ALWAYS=true`) the 403 is gone. The
+  residential proxy (`socks5://100.104.88.126:1081`, egress 1.240.236.25; passed
+  per session) the 403 is gone. The
   form-fill then died `planning_failed: submit_selector "div > form > button"` because
   HF's "Next" submit scored 0 in scoreSignupButton and got capped out of the 25-button
   inventory among nav anchors. FIXED (commit `8039bf2`): scoreSignupButton gives Next/
@@ -749,7 +749,7 @@ proxy is load-bearing post-Turnstile-fix:
 **Why the premise was ever true and isn't now:** the self-launch Turnstile fix
 (2026-06-12, above) retired the IP-sensitive captcha wall. What's left rarely cares
 about the IP. → **Action taken:** flipped `harvester.env` to direct-first
-(`UNIVERSAL_BOT_PROXY_URL=` empty, `PROXY_ALWAYS=false`). The Mac SPOF is retired.
+with direct egress. The Mac SPOF is retired.
 For the thin tail (`together` + post-OAuth-callback IP rejections) either dequeue or
 wire a MANAGED per-GB pool as a narrow fallback — never a personal laptop, never the
 default path. **Do NOT re-introduce "force the proxy" without re-running the
@@ -900,8 +900,7 @@ file. Currently set (names only):
 - `TWOCAPTCHA_API_KEY` — **SET.** The 2Captcha Tier-3 solver is funded and
   available in heal runs. (Turnstile escalation to it was historically *code*-
   gated off — that's a code switch, not a missing key.)
-- `UNIVERSAL_BOT_PROXY_URL` (`socks5://100.104.88.126:1081`, the Mac gost),
-  `UNIVERSAL_BOT_PROXY_ALWAYS`, `REGISTRY_ADMIN_BEARER`,
+- `UNIVERSAL_BOT_PROXY_ALWAYS`, `REGISTRY_ADMIN_BEARER`,
   `TRUSTY_SQUIRE_REGISTRY_URL`, `TELEGRAM_BOT_TOKEN`, `GH_REPO`,
   `BOT_INBOX_DOMAIN`, `TRUSTY_SQUIRE_FIX_AGENT_PUSH`,
   `UNIVERSAL_BOT_DAILY_SIGNUP_CAP`, `UNIVERSAL_BOT_MAX_LLM_CALLS` — all SET.

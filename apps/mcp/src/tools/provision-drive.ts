@@ -264,6 +264,9 @@ function recipeDomainLockViolationForReplay(
 
 const startSchema = z.object({
   service_url: z.string().url(),
+  // Sensitive: may include proxy credentials. It is launch-only and is never
+  // retained in the session state, action trail, status, or recipe.
+  proxy: z.string().min(1).max(2048).optional(),
   // Multi-app operate tasks declare every host they span up front (GCP Console
   // + Firebase + the user's app). Alias of extra_allowed_hosts; both seed
   // source "start". A single-service signup passes neither.
@@ -319,6 +322,11 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
     required: ["service_url"],
     properties: {
       service_url: { type: "string" },
+      proxy: {
+        type: "string",
+        description:
+          "Optional per-session proxy URL (including optional auth). Sensitive and launch-only; never returned or saved.",
+      },
       allowed_hosts: { type: "array", items: { type: "string" } },
       extra_allowed_hosts: { type: "array", items: { type: "string" } },
       require_live_identity: { type: "boolean" },
@@ -331,6 +339,7 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
     return await startProvisionSession({
       serviceUrl: args.service_url,
       consentInboxRead,
+      ...(args.proxy !== undefined ? { proxyUrl: args.proxy } : {}),
       ...(extra.length > 0 ? { extraAllowedHosts: extra } : {}),
       ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
       ...(hint !== undefined ? { hint } : {}),

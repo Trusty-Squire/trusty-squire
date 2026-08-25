@@ -4,15 +4,8 @@
 //
 // Loads ~/.config/trusty-squire/harvester.env into process.env. The systemd
 // heal timer pulls this in via EnvironmentFile=, but a hand-run shell does NOT
-// — so UNIVERSAL_BOT_PROXY_URL / REGISTRY_ADMIN_BEARER / notifier tokens were
-// silently absent unless the operator remembered `set -a; source harvester.env`.
-// That bit the GitHub session specifically: a `login` run WITHOUT the proxy in
-// env creates the provider session from the box's datacenter IP, then proxied
-// signups hit the provider from the residential IP, and the IP jump trips the
-// provider's session security and silently kills the auth cookie (the
-// "logged-in marker lies" failure; see google-login.ts loginProxyOption). Auto-
-// loading here makes `login` always route through the proxy, so the operator
-// cannot create a doomed non-proxied session by forgetting to source the file.
+// — so REGISTRY_ADMIN_BEARER / notifier tokens were silently absent unless the
+// operator remembered `set -a; source harvester.env`.
 //
 // Best-effort + NON-overwriting: an already-set env value always wins
 // (hand-exported vars, CI), and a missing/unreadable file is a no-op — so end

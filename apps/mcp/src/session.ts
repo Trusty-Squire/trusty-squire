@@ -62,7 +62,6 @@ export interface SessionData {
   // sessions do not silently opt into privacy-sensitive flows.
   consent_skillify_telemetry?: boolean;
   consent_operator_inbox_otp?: boolean;
-  proxy_url?: string;
 }
 
 export interface SessionStorage {

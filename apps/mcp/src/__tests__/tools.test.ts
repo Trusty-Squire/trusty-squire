@@ -315,6 +315,7 @@ import {
   operateRecipeSaveTool,
   provisionActTool,
   provisionFinishTool,
+  provisionStartTool,
 } from "../tools/provision-drive.js";
 
 function stubBrowser(): PaymentBrowser {
@@ -1607,6 +1608,15 @@ describe("audit_log", () => {
 });
 
 describe("TOOLS registry", () => {
+  it("accepts a launch-only authenticated proxy on operate_start", () => {
+    expect(
+      provisionStartTool.inputSchema.parse({
+        service_url: "https://service.example.com",
+        proxy: "http://user:pass@proxy.example.com:8080",
+      }),
+    ).toMatchObject({ proxy: "http://user:pass@proxy.example.com:8080" });
+  });
+
   it("exposes the essential 9-operator, 19-tool default surface without maintainer diagnostics", () => {
     // Credential read/write tools (write-only sink; rotation = re-store,
     // metadata edit/delete = passkey-vouched) + grant_app_access

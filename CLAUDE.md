@@ -174,7 +174,7 @@ silent failures.
   - **0.6.0 — writeConfig env merge (rc.21/rc.22).** All five host
     agents now merge env on top of any previously-set vars rather
     than replacing wholesale. A re-install that omits a flag (e.g.
-    forgets `--proxy-url=`) no longer wipes the previously-set value.
+    omits an optional configuration value) no longer wipes the previously-set value.
 - **F13 — headed signups via on-demand Xvfb (0.6.0).** Modern SaaS
   (Cloudflare/Stytch, Clerk, Auth0) detect Chromium-headless and gate
   their signup forms. `BrowserController.start()` now spawns a
@@ -734,7 +734,6 @@ extension state on launch and won't reload mid-session.
 | Env var | Default | Effect |
 |---|---|---|
 | `TWOCAPTCHA_API_KEY` | — | Optional Tier 3 captcha solver — fallback after the Tier 2 click-and-wait times out on a reCAPTCHA v2 image challenge. ~$0.003/solve. Skipped for Turnstile + reCAPTCHA v3 (those score at the IP layer; solver tokens get rejected). **Preferred path is the VAULT, not this env var:** `connect`/`settings` advanced setup prompts for the key and stores it encrypted as the `2captcha` credential; the captcha gate spends it through the injecting proxy (`use_credential`, `${SECRET}` in the `key` query / `clientKey` body) so the raw key never lives in the bot process or the MCP config. `buildTwoCaptchaSolver` prefers the vaulted cred and falls back to this env var for back-compat. The 2Captcha solve is a back-channel token fetch (the v2 token is injected into the user's real browser session and isn't IP-bound), so routing it through the vault adds no target-side fingerprinting. |
-| `UNIVERSAL_BOT_PROXY_URL` | — | Residential proxy (`http://user:pass@host:port` or `socks5://host:port`). Unset → direct connection. Used only for datacenter-class egress (see `shouldRouteThroughProxy`) — residential users pay nothing. (The old operator-housekeeper egress/proxy model was retired with the codex-verify refactor — the housekeeper no longer drives its own browser.) |
 | `UNIVERSAL_BOT_PROXY_ALWAYS` | `false` | Force the proxy on regardless of detected ASN class — for networks that misclassify as `unknown`. |
 | `TRUSTY_SQUIRE_MACHINE_TOKEN` | (from session) | Machine token for the operator inbox-OTP service |
 | `TRUSTY_SQUIRE_ACCOUNT_ID` | (from session) | Operator account ID (auto-promote attribution on provisions). End-user installs read this from session.json. |

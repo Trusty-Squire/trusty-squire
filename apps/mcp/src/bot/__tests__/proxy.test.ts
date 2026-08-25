@@ -1,5 +1,5 @@
 // Covers residential-proxy support (TODOS.md S1): parseProxyUrl turns a
-// UNIVERSAL_BOT_PROXY_URL into Playwright's proxy shape, and
+// a per-session proxy URL into Playwright's proxy shape, and
 // shouldRouteThroughProxy is the datacenter gate that keeps the ~80% of
 // residential users on a direct connection (zero proxy cost).
 

@@ -649,7 +649,6 @@ export interface InstallStatusResponse {
   install_preferences?: {
     registry_enabled?: boolean;
     consent_operator_inbox_otp?: boolean;
-    proxy_url?: string;
   };
 }
 

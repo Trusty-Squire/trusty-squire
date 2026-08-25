@@ -61,6 +61,7 @@ const h = vi.hoisted(() => ({
   workerEmail: null as string | null,
   connections: [] as boolean[],
   profileDirs: [] as Array<string | undefined>,
+  proxyUrls: [] as Array<string | undefined>,
   leaseSerial: 0,
   warmLeaseProfileDir: null as string | null,
   nextLeaseProfileDir: null as string | null,
@@ -186,6 +187,7 @@ vi.mock("../browser.js", () => ({
       this.opts = opts;
       h.connections.push(true);
       h.profileDirs.push(opts.profileDir);
+      h.proxyUrls.push(opts.proxyUrl);
     }
     async start(): Promise<void> {
       h.started += 1;
@@ -1009,6 +1011,7 @@ beforeEach(() => {
   h.workerEmail = null;
   h.connections = [];
   h.profileDirs = [];
+  h.proxyUrls = [];
   h.leaseSerial = 0;
   h.warmLeaseProfileDir = null;
   h.nextLeaseProfileDir = null;
@@ -4021,6 +4024,18 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     expect(h.startCalls).toBe(2);
     expect(h.closeCalls).toBe(1);
     await finishProvisionSession(next.session_id);
+  });
+
+  it("passes an authenticated proxy only to the launched controller", async () => {
+    const proxy = "http://user:pass@proxy.test:8080";
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/one",
+      proxyUrl: proxy,
+    });
+
+    expect(h.proxyUrls).toEqual([proxy]);
+    expect(JSON.stringify(started)).not.toContain(proxy);
+    await finishProvisionSession(started.session_id);
   });
 
   it("never reuses the prior closed controller", async () => {
