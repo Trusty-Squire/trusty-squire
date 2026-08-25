@@ -289,6 +289,16 @@ const proxySchema = z.string().min(1).max(2048).superRefine((value, ctx) => {
       message:
         "Authenticated SOCKS5 is unsupported by the browser engine; use HTTP/HTTPS with credentials or unauthenticated SOCKS5",
     });
+    return;
+  }
+  try {
+    decodeURIComponent(parsed.username);
+    decodeURIComponent(parsed.password);
+  } catch {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "proxy credentials contain invalid percent encoding",
+    });
   }
 });
 

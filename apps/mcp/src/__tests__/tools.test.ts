@@ -1643,6 +1643,22 @@ describe("TOOLS registry", () => {
     }
   });
 
+  it("rejects malformed proxy credential encoding before operate_start launches", () => {
+    const result = provisionStartTool.inputSchema.safeParse({
+      service_url: "https://service.example.com",
+      proxy: "http://user%ZZ:pass@proxy.example.com:8080",
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues).toEqual([
+        expect.objectContaining({
+          message: "proxy credentials contain invalid percent encoding",
+        }),
+      ]);
+    }
+  });
+
   it("exposes the essential 9-operator, 19-tool default surface without maintainer diagnostics", () => {
     // Credential read/write tools (write-only sink; rotation = re-store,
     // metadata edit/delete = passkey-vouched) + grant_app_access
