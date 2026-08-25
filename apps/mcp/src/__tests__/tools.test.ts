@@ -1617,6 +1617,32 @@ describe("TOOLS registry", () => {
     ).toMatchObject({ proxy: "http://user:pass@proxy.example.com:8080" });
   });
 
+  it("accepts unauthenticated SOCKS5 on operate_start", () => {
+    expect(
+      provisionStartTool.inputSchema.parse({
+        service_url: "https://service.example.com",
+        proxy: "socks5://proxy.example.com:1080",
+      }),
+    ).toMatchObject({ proxy: "socks5://proxy.example.com:1080" });
+  });
+
+  it("rejects authenticated SOCKS5 before operate_start launches", () => {
+    const result = provisionStartTool.inputSchema.safeParse({
+      service_url: "https://service.example.com",
+      proxy: "socks5://user:pass@proxy.example.com:1080",
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues).toEqual([
+        expect.objectContaining({
+          message:
+            "Authenticated SOCKS5 is unsupported by the browser engine; use HTTP/HTTPS with credentials or unauthenticated SOCKS5",
+        }),
+      ]);
+    }
+  });
+
   it("exposes the essential 9-operator, 19-tool default surface without maintainer diagnostics", () => {
     // Credential read/write tools (write-only sink; rotation = re-store,
     // metadata edit/delete = passkey-vouched) + grant_app_access

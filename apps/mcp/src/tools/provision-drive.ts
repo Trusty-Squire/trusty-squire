@@ -262,11 +262,41 @@ function recipeDomainLockViolationForReplay(
   return null;
 }
 
+const proxySchema = z.string().min(1).max(2048).superRefine((value, ctx) => {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "proxy must be a valid HTTP, HTTPS, or SOCKS5 URL",
+    });
+    return;
+  }
+  if (parsed.hostname.length === 0 || !["http:", "https:", "socks5:"].includes(parsed.protocol)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "proxy must be a valid HTTP, HTTPS, or SOCKS5 URL",
+    });
+    return;
+  }
+  if (
+    parsed.protocol === "socks5:" &&
+    (parsed.username.length > 0 || parsed.password.length > 0)
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message:
+        "Authenticated SOCKS5 is unsupported by the browser engine; use HTTP/HTTPS with credentials or unauthenticated SOCKS5",
+    });
+  }
+});
+
 const startSchema = z.object({
   service_url: z.string().url(),
   // Sensitive: may include proxy credentials. It is launch-only and is never
   // retained in the session state, action trail, status, or recipe.
-  proxy: z.string().min(1).max(2048).optional(),
+  proxy: proxySchema.optional(),
   // Multi-app operate tasks declare every host they span up front (GCP Console
   // + Firebase + the user's app). Alias of extra_allowed_hosts; both seed
   // source "start". A single-service signup passes neither.
@@ -325,7 +355,7 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
       proxy: {
         type: "string",
         description:
-          "Optional per-session proxy URL (including optional auth). Sensitive and launch-only; never returned or saved.",
+          "Optional per-session HTTP/HTTPS proxy URL with or without credentials, or unauthenticated SOCKS5 URL. Authenticated SOCKS5 is unsupported by the browser engine; use HTTP/HTTPS with credentials instead. Sensitive and launch-only; never returned or saved.",
       },
       allowed_hosts: { type: "array", items: { type: "string" } },
       extra_allowed_hosts: { type: "array", items: { type: "string" } },
