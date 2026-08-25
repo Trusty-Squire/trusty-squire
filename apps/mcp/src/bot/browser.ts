@@ -16415,7 +16415,6 @@ export function passwordOnlyProxyAuthOptions(proxy: ProxySettings | null):
   | Record<string, never>
   | {
       httpCredentials: { username: string; password: string };
-      extraHTTPHeaders: Record<string, string>;
     } {
   if (
     proxy === null ||
@@ -16427,10 +16426,8 @@ export function passwordOnlyProxyAuthOptions(proxy: ProxySettings | null):
   }
   const username = proxy.username ?? "";
   const password = proxy.password;
-  const token = Buffer.from(`${username}:${password}`).toString("base64");
   return {
     httpCredentials: { username, password },
-    extraHTTPHeaders: { "Proxy-Authorization": `Basic ${token}` },
   };
 }
 

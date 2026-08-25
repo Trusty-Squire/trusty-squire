@@ -36,7 +36,6 @@ describe("parseProxyUrl", () => {
     expect(proxyHasCredentials(proxy)).toBe(true);
     expect(passwordOnlyProxyAuthOptions(proxy)).toEqual({
       httpCredentials: { username: "", password: "token" },
-      extraHTTPHeaders: { "Proxy-Authorization": "Basic OnRva2Vu" },
     });
   });
 
