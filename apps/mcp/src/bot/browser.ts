@@ -16424,7 +16424,7 @@ export async function isProxyReachable(server: string, timeoutMs = 4000): Promis
   try {
     const u = new URL(server);
     host = u.hostname;
-    port = Number(u.port) || (u.protocol.startsWith("socks") ? 1080 : 8080);
+    port = Number(u.port) || proxyDefaultPort(u.protocol);
   } catch {
     return false;
   }
@@ -16448,6 +16448,13 @@ export async function isProxyReachable(server: string, timeoutMs = 4000): Promis
     sock.once("error", () => finish(false));
     sock.connect(port, host);
   });
+}
+
+export function proxyDefaultPort(protocol: string): number {
+  if (protocol === "http:") return 80;
+  if (protocol === "https:") return 443;
+  if (protocol.startsWith("socks")) return 1080;
+  return 8080;
 }
 
 export function parseProxyUrl(raw: string): ProxySettings {
