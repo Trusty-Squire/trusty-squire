@@ -3808,8 +3808,7 @@ export class BrowserController {
     const selfLaunchBinary = selfLaunchEnabled()
       ? (resolveChannelBinary(channel) ?? (channel === null ? launcher.executablePath() : null))
       : null;
-    const proxyHasAuth =
-      proxy !== null && typeof proxy.username === "string" && proxy.username.length > 0;
+    const proxyHasAuth = proxyHasCredentials(proxy);
     const useSelfLaunch =
       selfLaunchBinary !== null && existsSync(selfLaunchBinary) && !proxyHasAuth;
 
@@ -16401,6 +16400,14 @@ export interface ProxySettings {
   server: string;
   username?: string;
   password?: string;
+}
+
+export function proxyHasCredentials(proxy: ProxySettings | null): boolean {
+  return (
+    proxy !== null &&
+    ((typeof proxy.username === "string" && proxy.username.length > 0) ||
+      (typeof proxy.password === "string" && proxy.password.length > 0))
+  );
 }
 
 // Parse a per-session proxy URL — e.g. "http://user:pass@host:8080" or
