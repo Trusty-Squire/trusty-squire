@@ -40,7 +40,6 @@ import { Socket, createServer } from "node:net";
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { isSameRecipeDomain } from "@trusty-squire/recipe-schema";
-import { detectAsn, type AsnClass } from "./asn.js";
 import {
   acquireFreeProfileOperationGuard,
   CHROME_PROFILE_DIR,
@@ -2096,8 +2095,9 @@ export interface BrowserControllerOptions {
   profileDir?: string;
   profileOperationLease?: ProfileOperationLease;
   // Per-launch egress override. A session may supply its own proxy without
-  // affecting any other browser session. Subject to the ASN-class gate and
-  // liveness probe below. Unset means direct egress.
+  // affecting any other browser session. It is honored regardless of the host
+  // ASN; malformed or unreachable values fail startup rather than using direct
+  // egress. Unset means direct egress.
   proxyUrl?: string;
 }
 
@@ -3331,7 +3331,8 @@ export class BrowserController {
     return controller;
   }
 
-  // Per-launch egress override. null means direct egress. See resolveProxy().
+  // Per-launch egress override. null means direct egress. Explicit overrides
+  // are never subject to host-network classification.
   private readonly proxyOverride: string | null;
 
   // Warm reuse is deliberately narrow: a browser belongs to exactly one
@@ -3808,9 +3809,8 @@ export class BrowserController {
     const selfLaunchBinary = selfLaunchEnabled()
       ? (resolveChannelBinary(channel) ?? (channel === null ? launcher.executablePath() : null))
       : null;
-    const proxyHasAuth = proxyHasCredentials(proxy);
     const useSelfLaunch =
-      selfLaunchBinary !== null && existsSync(selfLaunchBinary) && !proxyHasAuth;
+      selfLaunchBinary !== null && existsSync(selfLaunchBinary) && canSelfLaunchWithProxy(proxy);
 
     let context: BrowserContext;
     this.throwIfStartCancelled();
@@ -3896,7 +3896,7 @@ export class BrowserController {
               headless: chromeHeadless,
               ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
               ...(channel !== null ? { channel } : {}),
-              ...(proxy !== null ? { proxy } : {}),
+              ...persistentProxyOptions(proxy),
               args: [...launchArgs],
               viewport: null,
               locale: "en-US",
@@ -4262,64 +4262,13 @@ export class BrowserController {
     }
   }
 
-  // Decide whether this run egresses through a residential proxy, and
-  // return Playwright's proxy settings or null for a direct connection.
-  //
-  // The fast path: when no per-session proxy is set (the default),
-  // this returns null before doing anything — no ASN lookup, no added
-  // latency for the ~80% of users who never configure a proxy.
-  //
-  // When a proxy IS configured, it's used only for datacenter-class
-  // egress: reCAPTCHA/Cloudflare score datacenter IPs as bot-likely no
-  // matter how clean the fingerprint is, while residential users
-  // already pass — so routing them through the proxy would just burn
-  // money. UNIVERSAL_BOT_PROXY_ALWAYS=true forces it on for networks
-  // that misclassify as "unknown". A malformed URL never aborts the
-  // run — we log and fall back to a direct connection.
+  // Resolve the deliberate per-session egress selection. A session proxy is
+  // not an optimization hint: falling back to the host's IP could submit a
+  // geo-gated flow from the wrong country, so malformed or unreachable values
+  // abort startup rather than silently egressing directly.
   private async resolveProxy(): Promise<ProxySettings | null> {
-    const raw = this.proxyOverride;
-    if (raw === null) return null;
-
-    let proxy: ProxySettings;
-    try {
-      proxy = parseProxyUrl(raw);
-    } catch {
-      console.error(`[operator] per-session proxy is malformed — running direct`);
-      return null;
-    }
-
-    const forceAlways = process.env.UNIVERSAL_BOT_PROXY_ALWAYS === "true";
-    // detectAsn is best-effort (5s timeout, null on failure) → "unknown".
-    const asn = await detectAsn();
-    const asnClass: AsnClass = asn?.class ?? "unknown";
-    if (shouldRouteThroughProxy(asnClass, forceAlways)) {
-      // Proxy liveness probe. A dead proxy (gost crashed, Tailscale down) makes
-      // EVERY navigation time out for 60s and silently breaks the whole heal
-      // pass — MEASURED 2026-06-12: the Mac gost SOCKS5 went down and every
-      // discover died on page.goto Timeout. A cheap TCP connect to the SOCKS
-      // host tells us it's reachable; if not, fall back to DIRECT (the box's own
-      // datacenter egress) so the run still serves the services that don't block
-      // datacenter IPs, instead of dying entirely. Self-healing > silent stall.
-      const reachable = await isProxyReachable(proxy.server);
-      if (!reachable) {
-        console.error(
-          `[operator] configured proxy is UNREACHABLE — falling back to ` +
-            `DIRECT egress (datacenter IP; anti-bot services may block it, but far ` +
-            `better than every navigation timing out)`,
-        );
-        return null;
-      }
-      console.error(
-        `[operator] routing through residential proxy ` +
-          `(asn=${asnClass}${forceAlways ? ", forced" : ""})`,
-      );
-      return proxy;
-    }
-    console.error(
-      `[operator] direct connection (asn=${asnClass}) — proxy ` +
-        `configured but not needed for this network`,
-    );
-    return null;
+    if (this.proxyOverride === null) return null;
+    return resolveExplicitProxy(this.proxyOverride);
   }
 
   // Reload the current page. Used by the post-verify flow to make a SPA
@@ -16417,8 +16366,7 @@ export function proxyHasCredentials(proxy: ProxySettings | null): boolean {
 // reserved characters in the username, which arrive %-encoded).
 //
 // Throws on a URL the WHATWG parser rejects, or one with no host (a bare
-// "host:port" parses as a scheme with an empty host) — the caller logs
-// and falls back to a direct connection.
+// "host:port" parses as a scheme with an empty host).
 //
 // Exported for unit testing — URL parsing is the error-prone bit.
 // Cheap TCP liveness probe for a proxy `server` string ("socks5://host:port").
@@ -16476,14 +16424,35 @@ export function parseProxyUrl(raw: string): ProxySettings {
   return settings;
 }
 
-// Should this run route through the configured proxy? True when the
-// egress network is datacenter-class (the case the proxy exists for) or
-// when the operator forced it on. Residential/unknown without the
-// override stay direct — the ~80% who don't need it pay nothing.
-//
-// Exported for unit testing.
-export function shouldRouteThroughProxy(asnClass: AsnClass, forceAlways: boolean): boolean {
-  return forceAlways || asnClass === "datacenter";
+/** Resolve an explicit session proxy, refusing an unsafe direct fallback. */
+export async function resolveExplicitProxy(
+  raw: string,
+  probe: (server: string) => Promise<boolean> = isProxyReachable,
+): Promise<ProxySettings> {
+  let proxy: ProxySettings;
+  try {
+    proxy = parseProxyUrl(raw);
+  } catch (err) {
+    throw new Error(
+      `explicit session proxy is malformed; refusing direct egress: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+  if (!(await probe(proxy.server))) {
+    throw new Error(`explicit session proxy ${proxy.server} is unreachable; refusing direct egress`);
+  }
+  return proxy;
+}
+
+/** Self-launched Chrome cannot authenticate an HTTP/SOCKS proxy. */
+export function canSelfLaunchWithProxy(proxy: ProxySettings | null): boolean {
+  return !proxyHasCredentials(proxy);
+}
+
+/** Options passed to launchPersistentContext, including proxy credentials. */
+export function persistentProxyOptions(proxy: ProxySettings | null): { proxy?: ProxySettings } {
+  return proxy === null ? {} : { proxy };
 }
 
 // ───────────── egress geo match (T3.1) ─────────────
