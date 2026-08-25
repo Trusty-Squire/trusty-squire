@@ -315,6 +315,7 @@ import {
   operateRecipeSaveTool,
   provisionActTool,
   provisionFinishTool,
+  provisionStartTool,
 } from "../tools/provision-drive.js";
 
 function stubBrowser(): PaymentBrowser {
@@ -1607,6 +1608,74 @@ describe("audit_log", () => {
 });
 
 describe("TOOLS registry", () => {
+  it("accepts a launch-only authenticated proxy on operate_start", () => {
+    expect(
+      provisionStartTool.inputSchema.parse({
+        service_url: "https://service.example.com",
+        proxy: "http://user:pass@proxy.example.com:8080",
+      }),
+    ).toMatchObject({ proxy: "http://user:pass@proxy.example.com:8080" });
+  });
+
+  it("rejects password-only HTTP proxy credentials before operate_start launches", () => {
+    const result = provisionStartTool.inputSchema.safeParse({
+      service_url: "https://service.example.com",
+      proxy: "http://:token@proxy.example.com:8080",
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues).toEqual([
+        expect.objectContaining({
+          message:
+            "Password-only HTTP/HTTPS proxy credentials are unsupported; include a non-empty username or use an unauthenticated proxy",
+        }),
+      ]);
+    }
+  });
+
+  it("accepts unauthenticated SOCKS5 on operate_start", () => {
+    expect(
+      provisionStartTool.inputSchema.parse({
+        service_url: "https://service.example.com",
+        proxy: "socks5://proxy.example.com:1080",
+      }),
+    ).toMatchObject({ proxy: "socks5://proxy.example.com:1080" });
+  });
+
+  it("rejects authenticated SOCKS5 before operate_start launches", () => {
+    const result = provisionStartTool.inputSchema.safeParse({
+      service_url: "https://service.example.com",
+      proxy: "socks5://user:pass@proxy.example.com:1080",
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues).toEqual([
+        expect.objectContaining({
+          message:
+            "Authenticated SOCKS5 is unsupported by the browser engine; use HTTP/HTTPS with credentials or unauthenticated SOCKS5",
+        }),
+      ]);
+    }
+  });
+
+  it("rejects malformed proxy credential encoding before operate_start launches", () => {
+    const result = provisionStartTool.inputSchema.safeParse({
+      service_url: "https://service.example.com",
+      proxy: "http://user%ZZ:pass@proxy.example.com:8080",
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues).toEqual([
+        expect.objectContaining({
+          message: "proxy credentials contain invalid percent encoding",
+        }),
+      ]);
+    }
+  });
+
   it("exposes the essential 9-operator, 19-tool default surface without maintainer diagnostics", () => {
     // Credential read/write tools (write-only sink; rotation = re-store,
     // metadata edit/delete = passkey-vouched) + grant_app_access

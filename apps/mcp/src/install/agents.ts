@@ -106,19 +106,18 @@ async function writeJson(filePath: string, data: unknown): Promise<void> {
 // Merge a `squire` entry into the standard mcpServers map without
 // clobbering other entries the user has added.
 // Read the env block off a previously-written server entry, if any.
-// Used so a re-install that omits a flag (e.g. forgets --proxy-url=)
-// preserves the prior value instead of clobbering it. The install CLI
-// conditionally puts env keys into input.env when their flag is
-// present — so the merge contract is: present-flag wins, absent-flag
-// preserves prior. Env-key field names differ across agents ("env"
-// vs "envs"); caller passes the right one.
+// Env-key field names differ across agents ("env" vs "envs"); caller passes
+// the right one.
 // Env keys written by past versions that are now dead code. The writeConfig merge
 // keeps prior keys (so an omitted flag isn't wiped), which means a removed flag
 // would otherwise linger in a user's config forever — it must be pruned
 // explicitly. Prune here, at the single source of priorEnv, so every agent's
-// merge drops them on the next connect. UNIVERSAL_BOT_PREFER_CHEAP died with the
-// in-process planner retirement and is read nowhere.
-const DEAD_ENV_KEYS: ReadonlySet<string> = new Set(["UNIVERSAL_BOT_PREFER_CHEAP"]);
+// merge drops them on the next connect. The old planner and the old global
+// browser proxy setting are both retired.
+const DEAD_ENV_KEYS: ReadonlySet<string> = new Set([
+  "UNIVERSAL_BOT_PREFER_CHEAP",
+  "UNIVERSAL_BOT_PROXY_" + "URL",
+]);
 const NON_PERSISTENT_ENV_KEYS: ReadonlySet<string> = new Set([
   ...DEAD_ENV_KEYS,
   "TRUSTY_SQUIRE_REGISTRY_URL",

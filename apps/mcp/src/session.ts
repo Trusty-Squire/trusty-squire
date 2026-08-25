@@ -62,7 +62,6 @@ export interface SessionData {
   // sessions do not silently opt into privacy-sensitive flows.
   consent_skillify_telemetry?: boolean;
   consent_operator_inbox_otp?: boolean;
-  proxy_url?: string;
 }
 
 export interface SessionStorage {
@@ -135,21 +134,50 @@ interface KeytarModule {
   default: KeytarShape;
 }
 
+function withoutLegacyProxy(data: SessionData): { data: SessionData; changed: boolean } {
+  const stored = data as SessionData & { proxy_url?: unknown };
+  if (!Object.prototype.hasOwnProperty.call(stored, "proxy_url")) {
+    return { data, changed: false };
+  }
+  const clean = { ...stored };
+  delete clean.proxy_url;
+  return { data: clean, changed: true };
+}
+
+async function migrateLegacyProxy(
+  clean: { data: SessionData; changed: boolean },
+  write: (data: SessionData) => Promise<void>,
+): Promise<void> {
+  if (!clean.changed) return;
+  try {
+    await write(clean.data);
+  } catch {
+    return;
+  }
+}
+
 class KeytarStorage implements SessionStorage {
   constructor(private readonly kt: KeytarShape) {}
 
   async read(): Promise<SessionData | null> {
     const raw = await this.kt.getPassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT);
     if (raw === null) return null;
+    let data: SessionData;
     try {
-      return JSON.parse(raw) as SessionData;
+      data = JSON.parse(raw) as SessionData;
     } catch {
       return null;
     }
+    const clean = withoutLegacyProxy(data);
+    await migrateLegacyProxy(clean, async (session) => {
+      await this.kt.setPassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT, JSON.stringify(session));
+    });
+    return clean.data;
   }
 
   async write(data: SessionData): Promise<void> {
-    await this.kt.setPassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT, JSON.stringify(data));
+    const clean = withoutLegacyProxy(data).data;
+    await this.kt.setPassword(KEYTAR_SERVICE, KEYTAR_ACCOUNT, JSON.stringify(clean));
   }
 
   async clear(): Promise<void> {
@@ -172,18 +200,22 @@ export class FileStorage implements SessionStorage {
   }
 
   async read(): Promise<SessionData | null> {
+    let raw: string;
     try {
-      const raw = await fs.readFile(this.filePath, "utf8");
-      return JSON.parse(raw) as SessionData;
+      raw = await fs.readFile(this.filePath, "utf8");
     } catch (err) {
       if ((err as { code?: string }).code === "ENOENT") return null;
       throw err;
     }
+    const clean = withoutLegacyProxy(JSON.parse(raw) as SessionData);
+    await migrateLegacyProxy(clean, async (session) => await this.write(session));
+    return clean.data;
   }
 
   async write(data: SessionData): Promise<void> {
+    const clean = withoutLegacyProxy(data).data;
     await fs.mkdir(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
-    await fs.writeFile(this.filePath, JSON.stringify(data, null, 2), { mode: 0o600 });
+    await fs.writeFile(this.filePath, JSON.stringify(clean, null, 2), { mode: 0o600 });
   }
 
   async clear(): Promise<void> {

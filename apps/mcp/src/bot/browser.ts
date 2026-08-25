@@ -2095,11 +2095,9 @@ export interface BrowserControllerOptions {
   // established. Defaults to CHROME_PROFILE_DIR.
   profileDir?: string;
   profileOperationLease?: ProfileOperationLease;
-  // Per-launch egress override. When set, this run routes through this proxy
-  // instead of the env-global UNIVERSAL_BOT_PROXY_URL — so a fleet of verify
-  // identities can each egress from a distinct residential IP in ONE process
-  // (no containers). Subject to the same ASN-class gating + liveness probe as
-  // the env proxy. Unset → fall back to the env behavior.
+  // Per-launch egress override. A session may supply its own proxy without
+  // affecting any other browser session. Subject to the ASN-class gate and
+  // liveness probe below. Unset means direct egress.
   proxyUrl?: string;
 }
 
@@ -3333,13 +3331,12 @@ export class BrowserController {
     return controller;
   }
 
-  // Per-launch egress override (verify-fleet identities each get their own IP).
-  // null → use the env-global proxy. See resolveProxy().
+  // Per-launch egress override. null means direct egress. See resolveProxy().
   private readonly proxyOverride: string | null;
 
   // Warm reuse is deliberately narrow: a browser belongs to exactly one
   // persistent profile and one explicit egress override. Undefined/blank proxy
-  // values both mean "use the environment/default route".
+  // values both mean direct egress.
   matchesLaunchOptions(opts: Pick<BrowserControllerOptions, "profileDir" | "proxyUrl">): boolean {
     const profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
     const proxyUrl =
@@ -3652,7 +3649,7 @@ export class BrowserController {
     // module's existing logging convention).
     console.error(
       `[operator] launching browser channel=${channel ?? "bundled-chromium"} ` +
-        `proxy=${proxy?.server ?? "direct"}`,
+        `proxy=${proxy === null ? "direct" : "configured"}`,
     );
     // Remote-CDP mode (BOT_CDP_ENDPOINT): the browser runs on a REMOTE host
     // (e.g. a Mac with a real GPU + residential egress) and we attach over CDP
@@ -3811,8 +3808,7 @@ export class BrowserController {
     const selfLaunchBinary = selfLaunchEnabled()
       ? (resolveChannelBinary(channel) ?? (channel === null ? launcher.executablePath() : null))
       : null;
-    const proxyHasAuth =
-      proxy !== null && typeof proxy.username === "string" && proxy.username.length > 0;
+    const proxyHasAuth = proxyHasCredentials(proxy);
     const useSelfLaunch =
       selfLaunchBinary !== null && existsSync(selfLaunchBinary) && !proxyHasAuth;
 
@@ -4269,7 +4265,7 @@ export class BrowserController {
   // Decide whether this run egresses through a residential proxy, and
   // return Playwright's proxy settings or null for a direct connection.
   //
-  // The fast path: when UNIVERSAL_BOT_PROXY_URL is unset (the default),
+  // The fast path: when no per-session proxy is set (the default),
   // this returns null before doing anything — no ASN lookup, no added
   // latency for the ~80% of users who never configure a proxy.
   //
@@ -4281,18 +4277,14 @@ export class BrowserController {
   // that misclassify as "unknown". A malformed URL never aborts the
   // run — we log and fall back to a direct connection.
   private async resolveProxy(): Promise<ProxySettings | null> {
-    // Per-launch override (verify fleet) wins over the env-global proxy.
-    const raw = this.proxyOverride ?? process.env.UNIVERSAL_BOT_PROXY_URL;
-    if (raw === undefined || raw.trim().length === 0) return null;
+    const raw = this.proxyOverride;
+    if (raw === null) return null;
 
     let proxy: ProxySettings;
     try {
       proxy = parseProxyUrl(raw);
-    } catch (err) {
-      console.error(
-        `[operator] UNIVERSAL_BOT_PROXY_URL is malformed — running ` +
-          `direct: ${err instanceof Error ? err.message : String(err)}`,
-      );
+    } catch {
+      console.error(`[operator] per-session proxy is malformed — running direct`);
       return null;
     }
 
@@ -4311,7 +4303,7 @@ export class BrowserController {
       const reachable = await isProxyReachable(proxy.server);
       if (!reachable) {
         console.error(
-          `[operator] proxy ${proxy.server} is UNREACHABLE — falling back to ` +
+          `[operator] configured proxy is UNREACHABLE — falling back to ` +
             `DIRECT egress (datacenter IP; anti-bot services may block it, but far ` +
             `better than every navigation timing out)`,
         );
@@ -16410,7 +16402,15 @@ export interface ProxySettings {
   password?: string;
 }
 
-// Parse a UNIVERSAL_BOT_PROXY_URL — e.g. "http://user:pass@host:8080" or
+export function proxyHasCredentials(proxy: ProxySettings | null): boolean {
+  return (
+    proxy !== null &&
+    ((typeof proxy.username === "string" && proxy.username.length > 0) ||
+      (typeof proxy.password === "string" && proxy.password.length > 0))
+  );
+}
+
+// Parse a per-session proxy URL — e.g. "http://user:pass@host:8080" or
 // "socks5://host:1080" — into Playwright's proxy option shape. Playwright
 // wants credentials separate from `server`, so we split them out and
 // percent-decode them (residential providers embed session IDs with
@@ -16431,7 +16431,7 @@ export async function isProxyReachable(server: string, timeoutMs = 4000): Promis
   try {
     const u = new URL(server);
     host = u.hostname;
-    port = Number(u.port) || (u.protocol.startsWith("socks") ? 1080 : 8080);
+    port = Number(u.port) || proxyDefaultPort(u.protocol);
   } catch {
     return false;
   }
@@ -16457,10 +16457,17 @@ export async function isProxyReachable(server: string, timeoutMs = 4000): Promis
   });
 }
 
+export function proxyDefaultPort(protocol: string): number {
+  if (protocol === "http:") return 80;
+  if (protocol === "https:") return 443;
+  if (protocol.startsWith("socks")) return 1080;
+  return 8080;
+}
+
 export function parseProxyUrl(raw: string): ProxySettings {
   const u = new URL(raw.trim());
   if (u.hostname.length === 0) {
-    throw new Error(`proxy URL has no host: "${raw}" (expected e.g. http://host:port)`);
+    throw new Error("proxy URL has no host");
   }
   // `host` includes the port; `protocol` keeps its trailing ":".
   const settings: ProxySettings = { server: `${u.protocol}//${u.host}` };

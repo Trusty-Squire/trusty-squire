@@ -24,8 +24,6 @@
 //   --skip-browser       don't launch the bot's Chrome; just print the
 //                        confirm URL and expect the user to open it in
 //                        their own browser (CI / scripted installs)
-//   --proxy-url=<url>    bake a residential proxy into the MCP config's
-//                        env (UNIVERSAL_BOT_PROXY_URL)
 //   --no-registry        disable managed registry participation
 //
 // Pure module — `runCli()` is invoked by bin.ts. No shebang, no
@@ -81,7 +79,6 @@ import {
 } from "./interactive.js";
 import chalk from "chalk";
 import { confirm, isCancel } from "@clack/prompts";
-import { normalizeProxyUrl } from "./proxy-url.js";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
 // Managed skill-registry URL. Advanced setup decides whether this is written
@@ -94,10 +91,6 @@ type Argv = {
   command: string;
   target?: AgentTarget;
   apiBase: string;
-  // Residential proxy URL to bake into the written MCP config's env as
-  // UNIVERSAL_BOT_PROXY_URL — so the proxy is set once at install time
-  // and the user never hand-edits the config env.
-  proxyUrl?: string;
   // Optional 2Captcha API key from advanced setup. Stored ENCRYPTED in the
   // vault (never written to the MCP config) by maybeStoreTwoCaptchaKey once the
   // session is paired; the bot spends it through the injecting proxy.
@@ -156,7 +149,6 @@ function parseArgs(argv: string[]): Argv {
   }
   let target: AgentTarget | undefined;
   let apiBase = DEFAULT_API_BASE;
-  let proxyUrl: string | undefined;
   let noRegistry = false;
   let registryConfigured = false;
   let providerArg: ProviderArg | undefined;
@@ -178,14 +170,6 @@ function parseArgs(argv: string[]): Argv {
       target = t;
     } else if (arg.startsWith("--api-base=")) {
       apiBase = arg.slice("--api-base=".length);
-    } else if (arg.startsWith("--proxy-url=")) {
-      const rawProxyUrl = arg.slice("--proxy-url=".length);
-      const normalized = normalizeProxyUrl(rawProxyUrl);
-      if (rawProxyUrl.length > 0 && normalized === undefined) {
-        console.error("invalid --proxy-url. Use http://user:pass@host:port or socks5://host:port.");
-        process.exit(64);
-      }
-      proxyUrl = normalized;
     } else if (arg.startsWith("--registry-url=")) {
       rejectDeprecatedCli(
         "`--registry-url` has been removed. Trusty Squire uses the managed skill registry.",
@@ -229,7 +213,6 @@ function parseArgs(argv: string[]): Argv {
     noInteractive,
   };
   if (target !== undefined) args.target = target;
-  if (proxyUrl !== undefined && proxyUrl.length > 0) args.proxyUrl = proxyUrl;
   if (providerArg !== undefined) args.providerArg = providerArg;
   if (profileDir !== undefined && profileDir.length > 0) args.profileDir = profileDir;
   return args;
@@ -350,14 +333,6 @@ function resolveCopiedNpxServerLaunch(binPath: string): { command: string; args:
 
 export async function runCli(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
-  // Auto-load the operator's harvester.env so a `login`/`connect` here picks
-  // up UNIVERSAL_BOT_PROXY_URL — establishing the provider session through the
-  // SAME residential egress the bot's signups use. Without it, an operator who
-  // forgets `set -a; source harvester.env` creates the session from the box's
-  // datacenter IP; the proxied signups then hit the provider from a residential
-  // IP and the jump silently kills the auth cookie (the GitHub-session-keeps-
-  // getting-wiped bug). No-op for end users (no harvester.env) + non-
-  // overwriting, so an explicitly-set env always wins.
   loadHarvesterEnvFile();
   switch (args.command) {
     case "connect":
@@ -444,12 +419,10 @@ async function settings(args: Argv): Promise<void> {
   if (!args.noInteractive && process.stdin.isTTY === true) {
     const picker = await runSettingsSetup({
       ...(args.target !== undefined ? { initialTarget: args.target } : {}),
-      ...(session.proxy_url !== undefined ? { initialProxyUrl: session.proxy_url } : {}),
       initialRegistryEnabled: session.consent_skillify_telemetry === true,
       initialConsentOperatorInboxOtp: session.consent_operator_inbox_otp === true,
     });
     args.target = picker.target;
-    if (picker.proxyUrl !== undefined) args.proxyUrl = picker.proxyUrl;
     args.noRegistry = !picker.registryEnabled;
     args.advancedConfigured = true;
     args.consentOperatorInboxOtp = picker.consentOperatorInboxOtp === true;
@@ -464,9 +437,6 @@ async function settings(args: Argv): Promise<void> {
     if (args.registryConfigured !== true) {
       args.noRegistry = session.consent_skillify_telemetry !== true;
     }
-    if (args.proxyUrl === undefined && session.proxy_url !== undefined) {
-      args.proxyUrl = session.proxy_url;
-    }
   }
 
   const target = await resolveTarget(args.target);
@@ -476,9 +446,6 @@ async function settings(args: Argv): Promise<void> {
     saved_at: new Date().toISOString(),
     consent_skillify_telemetry: !args.noRegistry,
     consent_operator_inbox_otp: args.consentOperatorInboxOtp === true,
-    ...(args.proxyUrl !== undefined && args.proxyUrl.trim().length > 0
-      ? { proxy_url: args.proxyUrl.trim() }
-      : {}),
   };
   await storage.write(updated);
   await writeAgentConfig(target, agent, args);
@@ -527,11 +494,9 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
     // surfaces agent + advanced.
     const picker = await runInteractiveSetup({
       ...(args.target !== undefined ? { initialTarget: args.target } : {}),
-      ...(args.proxyUrl !== undefined ? { initialProxyUrl: args.proxyUrl } : {}),
       initialRegistryEnabled: !args.noRegistry,
     });
     args.target = picker.target;
-    if (picker.proxyUrl !== undefined) args.proxyUrl = picker.proxyUrl;
     args.noRegistry = !picker.registryEnabled;
     args.advancedConfigured = picker.advancedConfigured;
     if (picker.consentOperatorInboxOtp !== undefined) {
@@ -700,7 +665,6 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
   ui.success(`Session saved (${storage.backendName()})`);
   args.noRegistry = session.consent_skillify_telemetry !== true;
   args.consentOperatorInboxOtp = session.consent_operator_inbox_otp === true;
-  if (session.proxy_url !== undefined) args.proxyUrl = session.proxy_url;
 
   // 0.8.1 — the bot's persistent profile may have a stale provider
   // marker from a previous install (the marker is sticky on disk).
@@ -777,7 +741,6 @@ async function hydrateArgsFromStoredPreferences(args: Argv): Promise<void> {
     if (session === null) return;
     args.noRegistry = session.consent_skillify_telemetry !== true;
     args.consentOperatorInboxOtp = session.consent_operator_inbox_otp === true;
-    if (session.proxy_url !== undefined) args.proxyUrl = session.proxy_url;
   } catch {
     // Best-effort. Missing preferences fall back to the privacy-safe defaults.
   }
@@ -1076,9 +1039,6 @@ async function writeAgentConfig(
   const env: Record<string, string> = {
     TRUSTY_SQUIRE_AGENT_IDENTITY: target,
   };
-  if (args.proxyUrl !== undefined) {
-    env.UNIVERSAL_BOT_PROXY_URL = args.proxyUrl;
-  }
   // Skill registry URL. The endpoint is not user-configurable; Advanced setup
   // controls whether it is written at all. Registry participation is also the
   // user's consent to contribute successful non-personal signup recipes.
@@ -1100,9 +1060,6 @@ async function writeAgentConfig(
     } catch {
       ui.hint("  Couldn't write .claude/settings.json permissions (non-fatal)");
     }
-  }
-  if (args.proxyUrl !== undefined) {
-    ui.hint(`  Residential proxy baked in: ${args.proxyUrl}`);
   }
   if (args.noRegistry) {
     ui.hint(
@@ -1161,7 +1118,7 @@ async function runInstallClaim(
   skipBrowser: boolean,
   options: {
     // Whether to let the SERVER's stored install_preferences override the local
-    // session's consent/proxy. Only for the non-interactive path (CI / re-install
+    // session's consent choices. Only for the non-interactive path (CI / re-install
     // inheritance). In the interactive flow the user JUST answered these questions,
     // so baseSession is authoritative — applying stale server prefs there silently
     // discarded a fresh "yes" to inbox-OTP consent (readInboxConsent → false →
@@ -1320,12 +1277,10 @@ export function applyInstallPreferences(
   applyServerPrefs: boolean,
 ): SessionData {
   if (!applyServerPrefs || preferences === undefined) return baseSession;
-  const proxy = preferences.proxy_url?.trim();
   return {
     ...baseSession,
     consent_skillify_telemetry: preferences.registry_enabled === true,
     consent_operator_inbox_otp: preferences.consent_operator_inbox_otp === true,
-    ...(proxy !== undefined && proxy.length > 0 ? { proxy_url: proxy } : {}),
   };
 }
 
@@ -1426,16 +1381,13 @@ function printHelp(): void {
   console.warn(`${chalk.bold("Commands")}`);
   console.warn(`  ${ui.code("connect")}                       set up this machine (default)`);
   console.warn(`  ${ui.code("login --provider=<p>")}          add a Google or GitHub session`);
-  console.warn(
-    `  ${ui.code("settings")}                      edit registry, OTP, and proxy choices`,
-  );
+  console.warn(`  ${ui.code("settings")}                      edit registry and OTP choices`);
   console.warn(`  ${ui.code("logout")}                        clear the local session`);
   console.warn("");
   console.warn(`${chalk.bold("Flags for connect")}`);
   console.warn(`  --target=<${Object.keys(AGENTS).join("|")}>`);
   console.warn(`  --skip-browser               don't launch a browser (CI mode)`);
   console.warn(`  --force-relogin[=google|github] switch the bound account or one provider`);
-  console.warn(`  --proxy-url=<url>            bake a residential proxy into the bot env`);
   console.warn(`  --no-registry                disable managed registry participation`);
   console.warn(`  --no-interactive             skip the TUI picker (use flag defaults only)`);
   console.warn("");
@@ -1450,7 +1402,6 @@ interface ClaimResult {
   preferences?: {
     registry_enabled?: boolean;
     consent_operator_inbox_otp?: boolean;
-    proxy_url?: string;
   };
 }
 

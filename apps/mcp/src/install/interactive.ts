@@ -8,29 +8,16 @@
 // to imply scripted install. CI / piped input falls through to the
 // flag-driven non-interactive path in cli.ts.
 
-import {
-  intro,
-  outro,
-  select,
-  confirm,
-  text,
-  password,
-  note,
-  isCancel,
-  cancel,
-} from "@clack/prompts";
+import { intro, outro, select, confirm, password, note, isCancel, cancel } from "@clack/prompts";
 import chalk from "chalk";
 
 import { detectInstalledAgents, AGENTS, type AgentTarget } from "./agents.js";
-import { normalizeProxyUrl } from "./proxy-url.js";
 
 // What the picker resolves to. The caller spreads this into its Argv.
 // The picker no longer asks about OAuth providers — the install wizard
 // rendered in the bot's Chrome owns that conversation as of 0.8.2.
 export interface InteractiveConfig {
   target: AgentTarget;
-  // Optional residential proxy URL (UNIVERSAL_BOT_PROXY_URL).
-  proxyUrl?: string;
   // Managed registry router. The endpoint is product-owned; advanced setup only
   // controls whether this install uses it. User-facing registry ON also means
   // successful non-personal signup recipes may be contributed back to it.
@@ -55,7 +42,7 @@ export interface InteractiveConfig {
 //     just be a hurdle in CI)
 //
 // Anything that already has a definitive choice baked in (an explicit
-// --target=, a --proxy-url=, etc.) still gets to flow through the
+// --target=, etc.) still gets to flow through the
 // picker — the picker prefills those choices and the user just hits
 // enter to accept. The scripted detection is intentionally narrow.
 export function shouldRunInteractive(opts: {
@@ -86,7 +73,9 @@ function showIntro(): void {
   intro(chalk.hex("#cf3a52").bold("Trusty Squire") + chalk.dim(" — setup"));
 }
 
-async function pickAgent(detected: Awaited<ReturnType<typeof detectInstalledAgents>>): Promise<AgentTarget> {
+async function pickAgent(
+  detected: Awaited<ReturnType<typeof detectInstalledAgents>>,
+): Promise<AgentTarget> {
   // One detected → fast-path confirm.
   if (detected.length === 1) {
     const only = detected[0]!;
@@ -109,9 +98,7 @@ async function pickAgent(detected: Awaited<ReturnType<typeof detectInstalledAgen
     await select({
       message: "Which coding agent should we configure?",
       options: Object.values(AGENTS).map((a) => {
-        const hint = detected.some((d) => d.target === a.target)
-          ? "installed"
-          : "";
+        const hint = detected.some((d) => d.target === a.target) ? "installed" : "";
         return { value: a.target, label: a.display_name, hint };
       }),
     }),
@@ -120,11 +107,9 @@ async function pickAgent(detected: Awaited<ReturnType<typeof detectInstalledAgen
 }
 
 async function pickAdvancedOptionsWithDefaults(opts: {
-  initialProxyUrl?: string;
   initialRegistryEnabled?: boolean;
 }): Promise<{
   advancedConfigured: boolean;
-  proxyUrl?: string;
   registryEnabled: boolean;
   consentOperatorInboxOtp?: boolean;
   twoCaptchaKey?: string;
@@ -132,44 +117,15 @@ async function pickAdvancedOptionsWithDefaults(opts: {
   const initialRegistryEnabled = opts.initialRegistryEnabled ?? true;
   const wantAdvanced = bailIfCancelled(
     await confirm({
-      message: "Configure advanced options? (proxy, registry, OTP)",
-      initialValue: opts.initialProxyUrl !== undefined,
+      message: "Configure advanced options? (registry, OTP)",
+      initialValue: false,
     }),
   );
   if (!wantAdvanced) {
     return {
       advancedConfigured: false,
       registryEnabled: initialRegistryEnabled,
-      ...(opts.initialProxyUrl !== undefined ? { proxyUrl: opts.initialProxyUrl } : {}),
     };
-  }
-
-  // Residential proxy. Most users skip this — datacenter egress is
-  // re-routed through our proxy automatically when configured; only
-  // power users running on a misclassified residential network ever
-  // touch this.
-  let proxyUrl = opts.initialProxyUrl;
-  if (proxyUrl === undefined) {
-    const wantProxy = bailIfCancelled(
-      await confirm({
-        message: "Route the bot through a residential proxy?",
-        initialValue: false,
-      }),
-    );
-    if (wantProxy) {
-      const url = bailIfCancelled(
-        await text({
-          message: "Proxy URL (http://user:pass@host:port or socks5://…)",
-          validate: (v) => {
-            if (v === undefined || normalizeProxyUrl(v) === undefined) {
-              return "URL must start with http://, https://, or socks5://";
-            }
-            return undefined;
-          },
-        }),
-      );
-      proxyUrl = normalizeProxyUrl(url ?? "");
-    }
   }
 
   const registryEnabled = bailIfCancelled(
@@ -182,8 +138,7 @@ async function pickAdvancedOptionsWithDefaults(opts: {
 
   const consentOperatorInboxOtp = bailIfCancelled(
     await confirm({
-      message:
-        "Let the squire poll only matching OTP/verification emails for requested services?",
+      message: "Let the squire poll only matching OTP/verification emails for requested services?",
       initialValue: false,
     }),
   );
@@ -217,7 +172,6 @@ async function pickAdvancedOptionsWithDefaults(opts: {
     advancedConfigured: true,
     registryEnabled,
     consentOperatorInboxOtp,
-    ...(proxyUrl !== undefined ? { proxyUrl } : {}),
     ...(twoCaptchaKey !== undefined ? { twoCaptchaKey } : {}),
   };
 }
@@ -228,9 +182,6 @@ function summarize(config: InteractiveConfig): void {
   lines.push(`${chalk.dim("Agent:        ")}${chalk.bold(agentLabel)}`);
   lines.push(`${chalk.dim("Signup:       ")}${chalk.dim("session agent")}`);
   lines.push(`${chalk.dim("OAuth:        ")}${chalk.dim("set up in browser")}`);
-  if (config.proxyUrl !== undefined) {
-    lines.push(`${chalk.dim("Proxy:        ")}${config.proxyUrl}`);
-  }
   lines.push(
     `${chalk.dim("Registry:     ")}${config.registryEnabled ? "managed" : chalk.yellow("disabled")}`,
   );
@@ -240,7 +191,9 @@ function summarize(config: InteractiveConfig): void {
     );
   }
   if (config.twoCaptchaKey !== undefined) {
-    lines.push(`${chalk.dim("2Captcha:     ")}${chalk.green("configured")} ${chalk.dim("(vaulted)")}`);
+    lines.push(
+      `${chalk.dim("2Captcha:     ")}${chalk.green("configured")} ${chalk.dim("(vaulted)")}`,
+    );
   }
   note(lines.join("\n"), "Setup summary");
 }
@@ -251,10 +204,9 @@ function summarize(config: InteractiveConfig): void {
 // existing install ceremony.
 export async function runInteractiveSetup(opts: {
   // Pre-resolved overrides from flags — used to prefill picker defaults
-  // so a user who passed `--target=goose --proxy-url=…` still sees the
+  // so a user who passed `--target=goose` still sees the
   // picker but with their choices baked in. Each is optional.
   initialTarget?: AgentTarget;
-  initialProxyUrl?: string;
   initialRegistryEnabled?: boolean;
 }): Promise<InteractiveConfig> {
   showIntro();
@@ -263,12 +215,7 @@ export async function runInteractiveSetup(opts: {
   const detected = await detectInstalledAgents();
   const target = opts.initialTarget ?? (await pickAgent(detected));
 
-  // Default-no advanced when --proxy-url isn't passed; if it IS passed,
-  // carry the value straight through rather than asking yes/no. Signup
-  // planning is driven by the session agent, so there is no user-facing LLM
-  // picker here.
   const advanced = await pickAdvancedOptionsWithDefaults({
-    ...(opts.initialProxyUrl !== undefined ? { initialProxyUrl: opts.initialProxyUrl } : {}),
     ...(opts.initialRegistryEnabled !== undefined
       ? { initialRegistryEnabled: opts.initialRegistryEnabled }
       : {}),
@@ -276,7 +223,6 @@ export async function runInteractiveSetup(opts: {
 
   const config: InteractiveConfig = {
     target,
-    ...(advanced.proxyUrl !== undefined ? { proxyUrl: advanced.proxyUrl } : {}),
     registryEnabled: advanced.registryEnabled,
     ...(advanced.consentOperatorInboxOtp !== undefined
       ? { consentOperatorInboxOtp: advanced.consentOperatorInboxOtp }
@@ -301,17 +247,17 @@ export async function runInteractiveSetup(opts: {
   return config;
 }
 
-export async function runSettingsSetup(opts: {
-  initialTarget?: AgentTarget;
-  initialProxyUrl?: string;
-  initialRegistryEnabled?: boolean;
-  initialConsentOperatorInboxOtp?: boolean;
-} = {}): Promise<InteractiveConfig> {
+export async function runSettingsSetup(
+  opts: {
+    initialTarget?: AgentTarget;
+    initialRegistryEnabled?: boolean;
+    initialConsentOperatorInboxOtp?: boolean;
+  } = {},
+): Promise<InteractiveConfig> {
   intro("Trusty Squire settings");
   const detected = await detectInstalledAgents();
   const target = opts.initialTarget ?? (await pickAgent(detected));
   const advanced = await pickAdvancedOptionsWithDefaults({
-    ...(opts.initialProxyUrl !== undefined ? { initialProxyUrl: opts.initialProxyUrl } : {}),
     ...(opts.initialRegistryEnabled !== undefined
       ? { initialRegistryEnabled: opts.initialRegistryEnabled }
       : {}),
@@ -320,7 +266,6 @@ export async function runSettingsSetup(opts: {
     advanced.consentOperatorInboxOtp ?? opts.initialConsentOperatorInboxOtp ?? false;
   const config: InteractiveConfig = {
     target,
-    ...(advanced.proxyUrl !== undefined ? { proxyUrl: advanced.proxyUrl } : {}),
     registryEnabled: advanced.registryEnabled,
     consentOperatorInboxOtp,
     ...(advanced.twoCaptchaKey !== undefined ? { twoCaptchaKey: advanced.twoCaptchaKey } : {}),

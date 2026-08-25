@@ -899,8 +899,6 @@ describe("confirmed login finalization", () => {
 
   it("threads completed Google provenance without opening a validation browser", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-connect-seed-"));
-    const previousProxy = process.env.UNIVERSAL_BOT_PROXY_URL;
-    process.env.UNIVERSAL_BOT_PROXY_URL = "http://agent:secret@proxy.example:8080";
     mkdirSync(join(profileDir, "Default"));
     const db = new Database(join(profileDir, "Default", "Cookies"));
     db.exec("CREATE TABLE cookies (host_key TEXT NOT NULL, name TEXT NOT NULL)");
@@ -938,8 +936,6 @@ describe("confirmed login finalization", () => {
       expect(pollUntilClaimed).toHaveBeenCalledWith(profileDir, true);
       expect(runChrome).toHaveBeenCalledOnce();
     } finally {
-      if (previousProxy === undefined) delete process.env.UNIVERSAL_BOT_PROXY_URL;
-      else process.env.UNIVERSAL_BOT_PROXY_URL = previousProxy;
       rmSync(profileDir, { recursive: true, force: true });
     }
   });

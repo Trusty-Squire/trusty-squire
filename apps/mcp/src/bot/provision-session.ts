@@ -7339,8 +7339,7 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
               `A ${det.variant} captcha could not be solved automatically ` +
               "(usually IP/behavior scoring, which a solver can't bypass).",
             remedy:
-              "Route the bot through a residential proxy " +
-              "(`npx @trusty-squire/mcp settings` → advanced → proxy URL), or " +
+              "Retry operate_start with its proxy argument set to a residential proxy, or " +
               "complete this one signup manually.",
           };
   }

@@ -1,4 +1,4 @@
-// Covers parseArgs (the --proxy-url / --provider / --skip-browser flags).
+// Covers parseArgs (the --provider / --skip-browser flags).
 //
 // The 0.5.1 install flow does not have a separate runLoginStage —
 // the bot's Chrome IS where the user signs in to confirm the install,
@@ -7,7 +7,6 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { parseArgs, applyInstallPreferences } from "../install/cli.js";
-import { normalizeProxyUrl } from "../install/proxy-url.js";
 import type { SessionData } from "../session.js";
 
 describe("applyInstallPreferences (fresh interactive consent must win)", () => {
@@ -31,42 +30,6 @@ describe("applyInstallPreferences (fresh interactive consent must win)", () => {
   });
   it("undefined server prefs → baseSession unchanged either way", () => {
     expect(applyInstallPreferences(base, undefined, true).consent_operator_inbox_otp).toBe(true);
-  });
-});
-
-describe("parseArgs --proxy-url", () => {
-  it("parses --proxy-url into proxyUrl", () => {
-    expect(
-      parseArgs(["connect", "--proxy-url=socks5://127.0.0.1:1080"]).proxyUrl,
-    ).toBe("socks5://127.0.0.1:1080");
-  });
-
-  it("leaves proxyUrl undefined when the flag is absent", () => {
-    expect(parseArgs(["connect"]).proxyUrl).toBeUndefined();
-  });
-
-  it("treats an empty --proxy-url= as unset", () => {
-    expect(parseArgs(["connect", "--proxy-url="]).proxyUrl).toBeUndefined();
-  });
-
-  it("parses --proxy-url alongside --target", () => {
-    const a = parseArgs([
-      "connect",
-      "--target=claude-code",
-      "--proxy-url=http://user:pass@host:8080",
-    ]);
-    expect(a.target).toBe("claude-code");
-    expect(a.proxyUrl).toBe("http://user:pass@host:8080");
-  });
-
-  it("rejects whitespace/control characters in proxy URLs", () => {
-    expect(normalizeProxyUrl("http://host:8080\nBAD=1")).toBeUndefined();
-  });
-
-  it("keeps valid socks5 proxy URLs", () => {
-    expect(normalizeProxyUrl(" socks5://127.0.0.1:1080 ")).toBe(
-      "socks5://127.0.0.1:1080",
-    );
   });
 });
 

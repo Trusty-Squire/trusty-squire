@@ -115,7 +115,7 @@ describe("claude-code config writer", () => {
       args: ["-y", "@trusty-squire/mcp"],
       env: {
         TRUSTY_SQUIRE_AGENT_IDENTITY: "claude-code",
-        UNIVERSAL_BOT_PROXY_URL: "socks5://127.0.0.1:1080",
+        CUSTOM_ENV: "preserved",
       },
     });
     await AGENTS["claude-code"].writeConfig({
@@ -127,7 +127,7 @@ describe("claude-code config writer", () => {
     const parsed = JSON.parse(raw) as {
       mcpServers: { squire: { env: Record<string, string> } };
     };
-    expect(parsed.mcpServers.squire.env.UNIVERSAL_BOT_PROXY_URL).toBe("socks5://127.0.0.1:1080");
+    expect(parsed.mcpServers.squire.env.CUSTOM_ENV).toBe("preserved");
     expect(parsed.mcpServers.squire.env.TRUSTY_SQUIRE_AGENT_IDENTITY).toBe("claude-code");
   });
 
@@ -258,7 +258,7 @@ describe("goose YAML writer", () => {
             args: ["-y", "@trusty-squire/mcp@0.4.1", "server"],
             envs: {
               TRUSTY_SQUIRE_AGENT_IDENTITY: "goose",
-              UNIVERSAL_BOT_PROXY_URL: "socks5://127.0.0.1:1080",
+              CUSTOM_ENV: "preserved",
             },
           },
           custom: { cmd: "echo", args: ["hi"] },
@@ -290,27 +290,25 @@ describe("goose YAML writer", () => {
       "@trusty-squire/mcp@0.9.19-rc.12",
       "server",
     ]);
-    expect(parsed.extensions.squire.envs.UNIVERSAL_BOT_PROXY_URL).toBe("socks5://127.0.0.1:1080");
+    expect(parsed.extensions.squire.envs.CUSTOM_ENV).toBe("preserved");
     expect(parsed.extensions.squire.envs.TRUSTY_SQUIRE_REGISTRY_URL).toBe(
       "https://registry.trustysquire.ai",
     );
   });
 
   // Regression: pre-rc.21 writeConfig replaced the entire envs block on
-  // every install. A re-install that omitted --proxy-url= wiped the
-  // previously-set value. Merge contract: present key in input.env
-  // wins; absent key preserves prior value.
+  // every install. A re-install must preserve unrelated env values.
   it("merges prior envs across re-installs instead of clobbering", async () => {
-    // Seed: install with a proxy URL set.
+    // Seed: install with an unrelated environment value.
     await AGENTS.goose.writeConfig({
       command: "npx",
       args: ["-y", "@trusty-squire/mcp"],
       env: {
         TRUSTY_SQUIRE_AGENT_IDENTITY: "goose",
-        UNIVERSAL_BOT_PROXY_URL: "socks5://127.0.0.1:1080",
+        CUSTOM_ENV: "preserved",
       },
     });
-    // Re-install: --proxy-url not passed this run, so input.env omits it.
+    // Re-install: input.env omits the existing custom value.
     await AGENTS.goose.writeConfig({
       command: "npx",
       args: ["-y", "@trusty-squire/mcp"],
@@ -320,7 +318,7 @@ describe("goose YAML writer", () => {
     const parsed = yamlParse(raw) as {
       extensions: { squire: { envs: Record<string, string> } };
     };
-    expect(parsed.extensions.squire.envs.UNIVERSAL_BOT_PROXY_URL).toBe("socks5://127.0.0.1:1080");
+    expect(parsed.extensions.squire.envs.CUSTOM_ENV).toBe("preserved");
     expect(parsed.extensions.squire.envs.TRUSTY_SQUIRE_AGENT_IDENTITY).toBe("goose");
   });
 });
@@ -361,12 +359,12 @@ describe("hermes YAML writer", () => {
           squire: {
             command: "node",
             args: ["old", "server"],
-            env: { UNIVERSAL_BOT_PROXY_URL: "socks5://127.0.0.1:1080" },
+            env: { CUSTOM_ENV: "preserved" },
           },
         },
       }),
     );
-    // A re-install that omits --proxy-url must not wipe the prior value.
+    // A re-install must not wipe unrelated prior values.
     await AGENTS.hermes.writeConfig({ command: "node", args: ["new", "server"], env: {} });
     const raw = await fs.readFile(filePath, "utf8");
     const parsed = yamlParse(raw) as {
@@ -374,7 +372,7 @@ describe("hermes YAML writer", () => {
     };
     expect(parsed.mcp_servers.filesystem).toBeDefined();
     expect(parsed.mcp_servers.squire.args).toEqual(["new", "server"]);
-    expect(parsed.mcp_servers.squire.env.UNIVERSAL_BOT_PROXY_URL).toBe("socks5://127.0.0.1:1080");
+    expect(parsed.mcp_servers.squire.env.CUSTOM_ENV).toBe("preserved");
   });
 });
 
@@ -541,7 +539,7 @@ describe("opencode JSONC writer", () => {
           trustysquire: {
             type: "local",
             command: ["npx", "old-package", "server"],
-            environment: { UNIVERSAL_BOT_PROXY_URL: "socks5://127.0.0.1:1080" },
+            environment: { CUSTOM_ENV: "preserved" },
           },
           squire: {
             type: "local",
@@ -563,7 +561,7 @@ describe("opencode JSONC writer", () => {
       };
     };
     expect(parsed.mcp.trustysquire).toBeUndefined();
-    expect(parsed.mcp.squire.environment.UNIVERSAL_BOT_PROXY_URL).toBe("socks5://127.0.0.1:1080");
+    expect(parsed.mcp.squire.environment.CUSTOM_ENV).toBe("preserved");
     expect(parsed.mcp.squire.environment.TRUSTY_SQUIRE_AGENT_IDENTITY).toBe("opencode");
     expect(parsed.mcp.squire.environment.UNIVERSAL_BOT_PREFER_CHEAP).toBeUndefined();
   });

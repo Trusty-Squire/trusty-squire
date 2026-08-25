@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isProxyReachable } from "../browser.js";
+import { isProxyReachable, proxyDefaultPort } from "../browser.js";
 
 describe("isProxyReachable", () => {
   it("returns false for a malformed server string", async () => {
@@ -17,5 +17,13 @@ describe("isProxyReachable", () => {
     const t0 = Date.now();
     expect(await isProxyReachable("socks5://192.0.2.1:1081", 1500)).toBe(false);
     expect(Date.now() - t0).toBeLessThan(4000); // respects the timeout
+  });
+});
+
+describe("proxyDefaultPort", () => {
+  it("uses protocol-correct defaults for portless proxy URLs", () => {
+    expect(proxyDefaultPort("http:")).toBe(80);
+    expect(proxyDefaultPort("https:")).toBe(443);
+    expect(proxyDefaultPort("socks5:")).toBe(1080);
   });
 });

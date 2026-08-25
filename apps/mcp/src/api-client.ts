@@ -219,9 +219,10 @@ export class ApiClient {
   async listPaymentCards(): Promise<
     Array<{ id: string; label: string; last4: string | null; brand?: string }>
   > {
-    const records = await this.get<
-      Array<{ id: string; label: string; last4: string | null; brand?: string | null }>
-    >("/v1/vault/e2e");
+    const records =
+      await this.get<
+        Array<{ id: string; label: string; last4: string | null; brand?: string | null }>
+      >("/v1/vault/e2e");
     return records.map(({ id, label, last4, brand }) => ({
       id,
       label,
@@ -649,7 +650,6 @@ export interface InstallStatusResponse {
   install_preferences?: {
     registry_enabled?: boolean;
     consent_operator_inbox_otp?: boolean;
-    proxy_url?: string;
   };
 }
 

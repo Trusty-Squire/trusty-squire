@@ -81,14 +81,6 @@ import {
 
 const require = createRequire(import.meta.url);
 
-// Route the INTERACTIVE login through the same proxy the bot uses, so the
-// provider session is established from the bot's egress IP. Without this,
-// GitHub/Google create the session from the box's (datacenter) IP, then the
-// proxied bot run hits the provider from a residential IP — the big IP jump
-// trips the provider's security and silently kills the session. That is the
-// "logged-in marker lies" failure: the marker records a login whose auth
-// cookie the provider already invalidated. Honors UNIVERSAL_BOT_PROXY_URL;
-// unset (the default for end users) → direct, no change.
 export type LoginProxyDisposition = {
   server: string;
   username?: string;
@@ -96,20 +88,7 @@ export type LoginProxyDisposition = {
 } | null;
 
 function loginProxyOption(): Exclude<LoginProxyDisposition, null> | undefined {
-  const raw = process.env.UNIVERSAL_BOT_PROXY_URL;
-  if (raw === undefined || raw.trim().length === 0) return undefined;
-  try {
-    const u = new URL(raw.trim());
-    if (u.hostname.length === 0) return undefined;
-    const opt: { server: string; username?: string; password?: string } = {
-      server: `${u.protocol}//${u.host}`,
-    };
-    if (u.username.length > 0) opt.username = decodeURIComponent(u.username);
-    if (u.password.length > 0) opt.password = decodeURIComponent(u.password);
-    return opt;
-  } catch {
-    return undefined;
-  }
+  return undefined;
 }
 
 function selfLaunchProxyDisposition(

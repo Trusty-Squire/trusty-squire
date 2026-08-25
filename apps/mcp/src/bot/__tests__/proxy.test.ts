@@ -1,5 +1,5 @@
 // Covers residential-proxy support (TODOS.md S1): parseProxyUrl turns a
-// UNIVERSAL_BOT_PROXY_URL into Playwright's proxy shape, and
+// a per-session proxy URL into Playwright's proxy shape, and
 // shouldRouteThroughProxy is the datacenter gate that keeps the ~80% of
 // residential users on a direct connection (zero proxy cost).
 
@@ -30,9 +30,7 @@ describe("parseProxyUrl", () => {
   it("percent-decodes credentials", () => {
     // Residential providers embed session IDs with reserved characters
     // in the username — they arrive percent-encoded in the URL.
-    expect(
-      parseProxyUrl("http://user%40acct:p%3Ass@proxy.example.com:8080"),
-    ).toEqual({
+    expect(parseProxyUrl("http://user%40acct:p%3Ass@proxy.example.com:8080")).toEqual({
       server: "http://proxy.example.com:8080",
       username: "user@acct",
       password: "p:ss",
@@ -49,6 +47,18 @@ describe("parseProxyUrl", () => {
     // A bare "host:port" parses as a scheme with an empty host.
     expect(() => parseProxyUrl("proxy.example.com:8080")).toThrow();
     expect(() => parseProxyUrl("not a proxy url")).toThrow();
+  });
+
+  it("does not expose malformed proxy credentials in errors", () => {
+    const credential = "secret-proxy-password";
+    let thrown: unknown;
+    try {
+      parseProxyUrl(`http://${credential}@`);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect(String(thrown)).not.toContain(credential);
   });
 });
 

@@ -42,6 +42,46 @@ describe("FileStorage", () => {
     expect(await store.read()).toBeNull();
   });
 
+  it("loads legacy sessions while pruning the retired proxy credential", async () => {
+    await fs.mkdir(path.dirname(tmpFile), { recursive: true });
+    await fs.writeFile(
+      tmpFile,
+      JSON.stringify({
+        api_base_url: "http://api",
+        saved_at: "x",
+        agent_session_token: "tok",
+        proxy_url: "http://user:secret@proxy.example:8080",
+      }),
+    );
+
+    const session = await new FileStorage(tmpFile).read();
+    expect(session).toMatchObject({ agent_session_token: "tok" });
+    expect(session).not.toHaveProperty("proxy_url");
+    expect(JSON.parse(await fs.readFile(tmpFile, "utf8"))).not.toHaveProperty("proxy_url");
+  });
+
+  it("loads a cleaned legacy session when migration persistence fails", async () => {
+    await fs.mkdir(path.dirname(tmpFile), { recursive: true });
+    await fs.writeFile(
+      tmpFile,
+      JSON.stringify({
+        api_base_url: "http://api",
+        saved_at: "x",
+        agent_session_token: "tok",
+        proxy_url: "http://user:secret@proxy.example:8080",
+      }),
+    );
+    const store = new FileStorage(tmpFile);
+    store.write = async () => {
+      throw new Error("temporary write failure");
+    };
+
+    const session = await store.read();
+
+    expect(session).toMatchObject({ agent_session_token: "tok" });
+    expect(session).not.toHaveProperty("proxy_url");
+  });
+
   it("clear removes the file, idempotent", async () => {
     const store = new FileStorage(tmpFile);
     await store.write({
