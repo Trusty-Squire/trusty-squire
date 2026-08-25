@@ -1118,7 +1118,7 @@ async function runInstallClaim(
   skipBrowser: boolean,
   options: {
     // Whether to let the SERVER's stored install_preferences override the local
-    // session's consent/proxy. Only for the non-interactive path (CI / re-install
+    // session's consent choices. Only for the non-interactive path (CI / re-install
     // inheritance). In the interactive flow the user JUST answered these questions,
     // so baseSession is authoritative — applying stale server prefs there silently
     // discarded a fresh "yes" to inbox-OTP consent (readInboxConsent → false →
@@ -1381,9 +1381,7 @@ function printHelp(): void {
   console.warn(`${chalk.bold("Commands")}`);
   console.warn(`  ${ui.code("connect")}                       set up this machine (default)`);
   console.warn(`  ${ui.code("login --provider=<p>")}          add a Google or GitHub session`);
-  console.warn(
-    `  ${ui.code("settings")}                      edit registry and OTP choices`,
-  );
+  console.warn(`  ${ui.code("settings")}                      edit registry and OTP choices`);
   console.warn(`  ${ui.code("logout")}                        clear the local session`);
   console.warn("");
   console.warn(`${chalk.bold("Flags for connect")}`);

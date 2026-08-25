@@ -139,7 +139,8 @@ function withoutLegacyProxy(data: SessionData): { data: SessionData; changed: bo
   if (!Object.prototype.hasOwnProperty.call(stored, "proxy_url")) {
     return { data, changed: false };
   }
-  const { proxy_url: _proxyUrl, ...clean } = stored;
+  const clean = { ...stored };
+  delete clean.proxy_url;
   return { data: clean, changed: true };
 }
 

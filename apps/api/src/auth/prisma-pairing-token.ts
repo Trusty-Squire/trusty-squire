@@ -5,11 +5,7 @@
 // collection.
 
 import type { ApiPrismaClient } from "../services/api-prisma-client.js";
-import type {
-  PairingStatus,
-  PairingTokenRecord,
-  PairingTokenStore,
-} from "./pairing-token.js";
+import type { PairingStatus, PairingTokenRecord, PairingTokenStore } from "./pairing-token.js";
 
 export class PrismaPairingTokenStore implements PairingTokenStore {
   constructor(private readonly prisma: ApiPrismaClient) {}

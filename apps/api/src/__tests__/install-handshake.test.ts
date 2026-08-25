@@ -21,10 +21,7 @@ import { issueSession, signSessionJwt, SESSION_COOKIE_NAME } from "../auth/sessi
 const JSON_HEADERS = { "content-type": "application/json" };
 const SESSION_SECRET = "test-secret-not-used";
 
-async function makeWebSession(
-  deps: ApiDeps,
-  accountId: string,
-): Promise<string> {
+async function makeWebSession(deps: ApiDeps, accountId: string): Promise<string> {
   const { record, jwt } = issueSession({
     account_id: accountId,
     ip: null,
@@ -73,16 +70,10 @@ describe("single-tier install handshake", () => {
     });
     const { setup_code } = initiate.json() as { setup_code: string };
 
-    await deps.pairingTokenStore.claim(
-      setup_code,
-      "acct-pref",
-      "agent_raw",
-      new Date(),
-      {
-        registry_enabled: true,
-        consent_operator_inbox_otp: true,
-      },
-    );
+    await deps.pairingTokenStore.claim(setup_code, "acct-pref", "agent_raw", new Date(), {
+      registry_enabled: true,
+      consent_operator_inbox_otp: true,
+    });
 
     const status = await app.inject({
       method: "GET",

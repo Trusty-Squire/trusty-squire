@@ -734,7 +734,7 @@ extension state on launch and won't reload mid-session.
 | Env var | Default | Effect |
 |---|---|---|
 | `TWOCAPTCHA_API_KEY` | — | Optional Tier 3 captcha solver — fallback after the Tier 2 click-and-wait times out on a reCAPTCHA v2 image challenge. ~$0.003/solve. Skipped for Turnstile + reCAPTCHA v3 (those score at the IP layer; solver tokens get rejected). **Preferred path is the VAULT, not this env var:** `connect`/`settings` advanced setup prompts for the key and stores it encrypted as the `2captcha` credential; the captcha gate spends it through the injecting proxy (`use_credential`, `${SECRET}` in the `key` query / `clientKey` body) so the raw key never lives in the bot process or the MCP config. `buildTwoCaptchaSolver` prefers the vaulted cred and falls back to this env var for back-compat. The 2Captcha solve is a back-channel token fetch (the v2 token is injected into the user's real browser session and isn't IP-bound), so routing it through the vault adds no target-side fingerprinting. |
-| `UNIVERSAL_BOT_PROXY_ALWAYS` | `false` | Force the proxy on regardless of detected ASN class — for networks that misclassify as `unknown`. |
+| `UNIVERSAL_BOT_PROXY_ALWAYS` | `false` | Force a supplied per-session proxy on regardless of detected ASN class — for networks that misclassify as `unknown`. It has no effect when `operate_start.proxy` is omitted. |
 | `TRUSTY_SQUIRE_MACHINE_TOKEN` | (from session) | Machine token for the operator inbox-OTP service |
 | `TRUSTY_SQUIRE_ACCOUNT_ID` | (from session) | Operator account ID (auto-promote attribution on provisions). End-user installs read this from session.json. |
 | `TRUSTY_SQUIRE_API_BASE` | `https://trusty-squire-api.fly.dev` | API base URL |

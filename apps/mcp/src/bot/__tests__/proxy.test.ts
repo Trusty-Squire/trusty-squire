@@ -4,10 +4,7 @@
 // residential users on a direct connection (zero proxy cost).
 
 import { describe, expect, it } from "vitest";
-import {
-  parseProxyUrl,
-  shouldRouteThroughProxy,
-} from "../browser.js";
+import { parseProxyUrl, shouldRouteThroughProxy } from "../browser.js";
 
 describe("parseProxyUrl", () => {
   it("splits credentials out of an http proxy URL", () => {
@@ -33,9 +30,7 @@ describe("parseProxyUrl", () => {
   it("percent-decodes credentials", () => {
     // Residential providers embed session IDs with reserved characters
     // in the username — they arrive percent-encoded in the URL.
-    expect(
-      parseProxyUrl("http://user%40acct:p%3Ass@proxy.example.com:8080"),
-    ).toEqual({
+    expect(parseProxyUrl("http://user%40acct:p%3Ass@proxy.example.com:8080")).toEqual({
       server: "http://proxy.example.com:8080",
       username: "user@acct",
       password: "p:ss",

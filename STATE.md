@@ -18,9 +18,10 @@ CONFIRMED**, **? OPEN** (current best guess + what would test it).
 > inline as the falsification chain), not an old date.
 >
 > Two caveats on the operational notes near the bottom, which predate the
-> 2026-06 housekeeper-repo split: (1) the **residential proxy is retired**
-> (direct-first since 2026-06-13 — the "Configured secrets" proxy URL below is
-> historical, not live); (2) the **housekeeper discover sweep + its queue/env**
+> 2026-06 housekeeper-repo split: (1) the **housekeeper's global residential
+> proxy is retired** (direct-first since 2026-06-13; browser sessions can still
+> opt into a launch-only proxy); (2) the **housekeeper discover sweep + its
+> queue/env**
 > (`harvester.env`, `housekeeper-services.yaml`, `--mode=discover`) moved to
 > `Trusty-Squire/trusty-squire-housekeeper` — discovery is now on-provision
 > auto-promote. The falsified-hypothesis log itself stays here.

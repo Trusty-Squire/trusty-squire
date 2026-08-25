@@ -262,57 +262,61 @@ function recipeDomainLockViolationForReplay(
   return null;
 }
 
-const proxySchema = z.string().min(1).max(2048).superRefine((value, ctx) => {
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "proxy must be a valid HTTP, HTTPS, or SOCKS5 URL",
-    });
-    return;
-  }
-  if (parsed.hostname.length === 0 || !["http:", "https:", "socks5:"].includes(parsed.protocol)) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "proxy must be a valid HTTP, HTTPS, or SOCKS5 URL",
-    });
-    return;
-  }
-  if (
-    parsed.protocol === "socks5:" &&
-    (parsed.username.length > 0 || parsed.password.length > 0)
-  ) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message:
-        "Authenticated SOCKS5 is unsupported by the browser engine; use HTTP/HTTPS with credentials or unauthenticated SOCKS5",
-    });
-    return;
-  }
-  if (
-    (parsed.protocol === "http:" || parsed.protocol === "https:") &&
-    parsed.password.length > 0 &&
-    parsed.username.length === 0
-  ) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message:
-        "Password-only HTTP/HTTPS proxy credentials are unsupported; include a non-empty username or use an unauthenticated proxy",
-    });
-    return;
-  }
-  try {
-    decodeURIComponent(parsed.username);
-    decodeURIComponent(parsed.password);
-  } catch {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "proxy credentials contain invalid percent encoding",
-    });
-  }
-});
+const proxySchema = z
+  .string()
+  .min(1)
+  .max(2048)
+  .superRefine((value, ctx) => {
+    let parsed: URL;
+    try {
+      parsed = new URL(value);
+    } catch {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "proxy must be a valid HTTP, HTTPS, or SOCKS5 URL",
+      });
+      return;
+    }
+    if (parsed.hostname.length === 0 || !["http:", "https:", "socks5:"].includes(parsed.protocol)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "proxy must be a valid HTTP, HTTPS, or SOCKS5 URL",
+      });
+      return;
+    }
+    if (
+      parsed.protocol === "socks5:" &&
+      (parsed.username.length > 0 || parsed.password.length > 0)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Authenticated SOCKS5 is unsupported by the browser engine; use HTTP/HTTPS with credentials or unauthenticated SOCKS5",
+      });
+      return;
+    }
+    if (
+      (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+      parsed.password.length > 0 &&
+      parsed.username.length === 0
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Password-only HTTP/HTTPS proxy credentials are unsupported; include a non-empty username or use an unauthenticated proxy",
+      });
+      return;
+    }
+    try {
+      decodeURIComponent(parsed.username);
+      decodeURIComponent(parsed.password);
+    } catch {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "proxy credentials contain invalid percent encoding",
+      });
+    }
+  });
 
 const startSchema = z.object({
   service_url: z.string().url(),

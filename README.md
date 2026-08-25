@@ -313,6 +313,11 @@ DOM-diagnostics pair is excluded from that surface; set
   `require_live_identity: true` to `operate_start`. The start fails closed with
   a connect handoff if that Google session is unavailable; otherwise it uses the
   signed-in profile directly, with one such session active at a time.
+  To route only that browser session through a proxy, pass `proxy` to
+  `operate_start` as an HTTP or HTTPS URL (credentials are optional), or as an
+  unauthenticated SOCKS5 URL. The value is launch-only and sensitive: it is not
+  returned in session status, action traces, or saved recipes. Omitting it uses
+  direct egress.
   When DOM churn invalidates an `@e:` ref, `operate_act` returns `target_stale`
   with the last observation generation, `reobserve_required: true`, best-effort
   label-keyed `replacement_candidates`, and

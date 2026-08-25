@@ -8,16 +8,7 @@
 // to imply scripted install. CI / piped input falls through to the
 // flag-driven non-interactive path in cli.ts.
 
-import {
-  intro,
-  outro,
-  select,
-  confirm,
-  password,
-  note,
-  isCancel,
-  cancel,
-} from "@clack/prompts";
+import { intro, outro, select, confirm, password, note, isCancel, cancel } from "@clack/prompts";
 import chalk from "chalk";
 
 import { detectInstalledAgents, AGENTS, type AgentTarget } from "./agents.js";
@@ -82,7 +73,9 @@ function showIntro(): void {
   intro(chalk.hex("#cf3a52").bold("Trusty Squire") + chalk.dim(" — setup"));
 }
 
-async function pickAgent(detected: Awaited<ReturnType<typeof detectInstalledAgents>>): Promise<AgentTarget> {
+async function pickAgent(
+  detected: Awaited<ReturnType<typeof detectInstalledAgents>>,
+): Promise<AgentTarget> {
   // One detected → fast-path confirm.
   if (detected.length === 1) {
     const only = detected[0]!;
@@ -105,9 +98,7 @@ async function pickAgent(detected: Awaited<ReturnType<typeof detectInstalledAgen
     await select({
       message: "Which coding agent should we configure?",
       options: Object.values(AGENTS).map((a) => {
-        const hint = detected.some((d) => d.target === a.target)
-          ? "installed"
-          : "";
+        const hint = detected.some((d) => d.target === a.target) ? "installed" : "";
         return { value: a.target, label: a.display_name, hint };
       }),
     }),
@@ -147,8 +138,7 @@ async function pickAdvancedOptionsWithDefaults(opts: {
 
   const consentOperatorInboxOtp = bailIfCancelled(
     await confirm({
-      message:
-        "Let the squire poll only matching OTP/verification emails for requested services?",
+      message: "Let the squire poll only matching OTP/verification emails for requested services?",
       initialValue: false,
     }),
   );
@@ -201,7 +191,9 @@ function summarize(config: InteractiveConfig): void {
     );
   }
   if (config.twoCaptchaKey !== undefined) {
-    lines.push(`${chalk.dim("2Captcha:     ")}${chalk.green("configured")} ${chalk.dim("(vaulted)")}`);
+    lines.push(
+      `${chalk.dim("2Captcha:     ")}${chalk.green("configured")} ${chalk.dim("(vaulted)")}`,
+    );
   }
   note(lines.join("\n"), "Setup summary");
 }
@@ -255,11 +247,13 @@ export async function runInteractiveSetup(opts: {
   return config;
 }
 
-export async function runSettingsSetup(opts: {
-  initialTarget?: AgentTarget;
-  initialRegistryEnabled?: boolean;
-  initialConsentOperatorInboxOtp?: boolean;
-} = {}): Promise<InteractiveConfig> {
+export async function runSettingsSetup(
+  opts: {
+    initialTarget?: AgentTarget;
+    initialRegistryEnabled?: boolean;
+    initialConsentOperatorInboxOtp?: boolean;
+  } = {},
+): Promise<InteractiveConfig> {
   intro("Trusty Squire settings");
   const detected = await detectInstalledAgents();
   const target = opts.initialTarget ?? (await pickAgent(detected));
