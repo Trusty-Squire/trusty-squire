@@ -291,6 +291,18 @@ const proxySchema = z.string().min(1).max(2048).superRefine((value, ctx) => {
     });
     return;
   }
+  if (
+    (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+    parsed.password.length > 0 &&
+    parsed.username.length === 0
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message:
+        "Password-only HTTP/HTTPS proxy credentials are unsupported; include a non-empty username or use an unauthenticated proxy",
+    });
+    return;
+  }
   try {
     decodeURIComponent(parsed.username);
     decodeURIComponent(parsed.password);
@@ -365,7 +377,7 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
       proxy: {
         type: "string",
         description:
-          "Optional per-session HTTP/HTTPS proxy URL with or without credentials, or unauthenticated SOCKS5 URL. Authenticated SOCKS5 is unsupported by the browser engine; use HTTP/HTTPS with credentials instead. Sensitive and launch-only; never returned or saved.",
+          "Optional per-session HTTP/HTTPS proxy URL with or without credentials, or unauthenticated SOCKS5 URL. HTTP/HTTPS passwords require a non-empty username; authenticated SOCKS5 is unsupported by the browser engine. Sensitive and launch-only; never returned or saved.",
       },
       allowed_hosts: { type: "array", items: { type: "string" } },
       extra_allowed_hosts: { type: "array", items: { type: "string" } },

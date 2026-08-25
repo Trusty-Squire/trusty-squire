@@ -1617,6 +1617,23 @@ describe("TOOLS registry", () => {
     ).toMatchObject({ proxy: "http://user:pass@proxy.example.com:8080" });
   });
 
+  it("rejects password-only HTTP proxy credentials before operate_start launches", () => {
+    const result = provisionStartTool.inputSchema.safeParse({
+      service_url: "https://service.example.com",
+      proxy: "http://:token@proxy.example.com:8080",
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues).toEqual([
+        expect.objectContaining({
+          message:
+            "Password-only HTTP/HTTPS proxy credentials are unsupported; include a non-empty username or use an unauthenticated proxy",
+        }),
+      ]);
+    }
+  });
+
   it("accepts unauthenticated SOCKS5 on operate_start", () => {
     expect(
       provisionStartTool.inputSchema.parse({

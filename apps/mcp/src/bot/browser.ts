@@ -3897,7 +3897,6 @@ export class BrowserController {
               ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
               ...(channel !== null ? { channel } : {}),
               ...(proxy !== null ? { proxy } : {}),
-              ...passwordOnlyProxyAuthOptions(proxy),
               args: [...launchArgs],
               viewport: null,
               locale: "en-US",
@@ -16409,26 +16408,6 @@ export function proxyHasCredentials(proxy: ProxySettings | null): boolean {
     ((typeof proxy.username === "string" && proxy.username.length > 0) ||
       (typeof proxy.password === "string" && proxy.password.length > 0))
   );
-}
-
-export function passwordOnlyProxyAuthOptions(proxy: ProxySettings | null):
-  | Record<string, never>
-  | {
-      httpCredentials: { username: string; password: string };
-    } {
-  if (
-    proxy === null ||
-    typeof proxy.password !== "string" ||
-    proxy.password.length === 0 ||
-    (typeof proxy.username === "string" && proxy.username.length > 0)
-  ) {
-    return {};
-  }
-  const username = proxy.username ?? "";
-  const password = proxy.password;
-  return {
-    httpCredentials: { username, password },
-  };
 }
 
 // Parse a per-session proxy URL — e.g. "http://user:pass@host:8080" or

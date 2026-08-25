@@ -6,8 +6,6 @@
 import { describe, expect, it } from "vitest";
 import {
   parseProxyUrl,
-  passwordOnlyProxyAuthOptions,
-  proxyHasCredentials,
   shouldRouteThroughProxy,
 } from "../browser.js";
 
@@ -23,19 +21,6 @@ describe("parseProxyUrl", () => {
   it("handles a credential-less proxy URL", () => {
     expect(parseProxyUrl("http://proxy.example.com:3128")).toEqual({
       server: "http://proxy.example.com:3128",
-    });
-  });
-
-  it("preserves password-only HTTP proxy authentication", () => {
-    const proxy = parseProxyUrl("http://:token@proxy.example.com:8080");
-
-    expect(proxy).toEqual({
-      server: "http://proxy.example.com:8080",
-      password: "token",
-    });
-    expect(proxyHasCredentials(proxy)).toBe(true);
-    expect(passwordOnlyProxyAuthOptions(proxy)).toEqual({
-      httpCredentials: { username: "", password: "token" },
     });
   });
 
