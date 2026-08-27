@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.13-rc.8 (2026-08-27)
+
+- fix(mcp): Node 26 better-sqlite3 prebuild so @next installs without a source build (#594)
+
 ## 1.1.13-rc.7 (2026-08-25)
 
 - feat(mcp): add per-session proxy to operate_start (#585)
