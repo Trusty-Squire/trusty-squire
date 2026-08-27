@@ -265,6 +265,41 @@ jobs:
         if: needs.secret-scan.outputs.web == 'true'
         run: pnpm seo:verify-services
 
+  # better-sqlite3 is a required runtime dependency for the MCP server. Its
+  # Node 26 prebuild prevents npx installs from falling back to a fragile
+  # node-gyp compile on users' machines.
+  mcp-node26-native-prebuild:
+    needs: secret-scan
+    if: >-
+      github.event_name == 'pull_request' &&
+      needs.secret-scan.outputs.mcp == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: pnpm
+      - name: Install MCP without a usable node-gyp toolchain
+        env:
+          CC: /bin/false
+          CXX: /bin/false
+          PYTHON: /bin/false
+          NODE_GYP_FORCE_PYTHON: /bin/false
+          npm_config_python: /bin/false
+        run: pnpm install --frozen-lockfile --filter '@trusty-squire/mcp...'
+      - name: Load better-sqlite3 on Node 26
+        run: |
+          pnpm --filter '@trusty-squire/mcp' exec node -e '
+            const Database = require("better-sqlite3");
+            const version = new Database(":memory:").prepare("select sqlite_version() as version").get().version;
+            if (!version) throw new Error("better-sqlite3 did not return a SQLite version");
+            console.log(`better-sqlite3 loaded SQLite ${version}`);
+          '
+
   test:
     needs: secret-scan
     if: >-

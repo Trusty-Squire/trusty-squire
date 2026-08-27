@@ -121,8 +121,8 @@ importers:
         specifier: workspace:0.1.6
         version: link:../../packages/skill-schema
       better-sqlite3:
-        specifier: 12.8.0
-        version: 12.8.0
+        specifier: ^12.10.0
+        version: 12.11.1
       boxen:
         specifier: ^8.0.1
         version: 8.0.1
@@ -3021,9 +3021,9 @@ packages:
     engines: {node: '>=6.0.0'}
     hasBin: true
 
-  /better-sqlite3@12.8.0:
-    resolution: {integrity: sha512-RxD2Vd96sQDjQr20kdP+F+dK/1OUNiVOl200vKBZY8u0vTwysfolF6Hq+3ZK2+h8My9YvZhHsF+RSGZW2VYrPQ==}
-    engines: {node: 20.x || 22.x || 23.x || 24.x || 25.x}
+  /better-sqlite3@12.11.1:
+    resolution: {integrity: sha512-dq9AtApgg5PGFtBzPFSBl3HZQjHok5gaQCM6zh2Yk0aSmDCs1CbnVI8/HgASQkNKsWFpseIO9beg5xxpYhbIfA==}
+    engines: {node: 20.x || 22.x || 23.x || 24.x || 25.x || 26.x}
     requiresBuild: true
     dependencies:
       bindings: 1.5.0
