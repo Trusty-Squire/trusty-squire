@@ -288,6 +288,7 @@ jobs:
           CC: /bin/false
           CXX: /bin/false
           PYTHON: /bin/false
+          NODE_GYP_FORCE_PYTHON: /bin/false
           npm_config_python: /bin/false
         run: pnpm install --frozen-lockfile --filter '@trusty-squire/mcp...'
       - name: Load better-sqlite3 on Node 26
