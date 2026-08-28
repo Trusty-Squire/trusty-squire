@@ -23,8 +23,7 @@ The current pool is 1,117 lines and its focused test is 922 lines. This is the c
 
 History check: the immediate parent of the pooling commit is a shared warm-controller implementation,
 not a literal per-instance state-seeding implementation. Therefore this is not a blind `git revert`;
-reuse the current filtered SQLite seed as the safe starting point, then generalize it into the small
-session-state mechanism below.
+replace the legacy filtered seed with the small, portable Playwright storage-state mechanism below.
 
 ## Canonical state and seeding
 
@@ -62,7 +61,7 @@ Preserve current call-drain, audit, payment, and session-removal ordering (`prov
 
 1. Capture `context.storageState({ indexedDB: true })` before close.
 2. Use the rc.9 bounded terminal owner to perform the existing identity-proven browser close.
-3. Only after close is proven, asynchronously replace the canonical state JSON if the terminal owner is still authoritative immediately before the atomic rename.
+3. Only after close is proven, encode and write the canonical state JSON off the main event loop, then replace it if the terminal owner is still authoritative immediately before the atomic rename.
 4. Release the in-memory browser lease and schedule detached best-effort removal
    of the unique directory. Normal and forced terminal paths never await the
    recursive delete.

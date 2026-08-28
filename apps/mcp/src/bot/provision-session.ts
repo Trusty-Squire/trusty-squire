@@ -713,7 +713,7 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
   }
   const profileDir = createEphemeralProfile();
   const canonicalProfileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
-  const storageState = readSessionState(canonicalProfileDir);
+  const storageState = await readSessionState(canonicalProfileDir);
   const controller = new BrowserController({
     profileDir,
     ...(storageState === undefined ? {} : { storageState }),

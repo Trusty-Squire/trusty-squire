@@ -195,7 +195,7 @@ vi.mock("../session-state.js", () => ({
     h.destroyedProfiles.push(profileDir);
     if (h.profileDestroyGate !== null) await h.profileDestroyGate;
   },
-  readSessionState: (profileDir: string) => {
+  readSessionState: async (profileDir: string) => {
     h.storageStateReads.push(profileDir);
     return h.storageStates.get(profileDir);
   },

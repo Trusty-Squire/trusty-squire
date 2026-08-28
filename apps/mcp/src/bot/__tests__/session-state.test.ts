@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createEphemeralProfile,
   destroyEphemeralProfile,
@@ -27,7 +27,7 @@ describe("operator session storage state", () => {
 
     await writeSessionState(canonical, state);
 
-    expect(readSessionState(canonical)).toEqual(state);
+    await expect(readSessionState(canonical)).resolves.toEqual(state);
     expect(JSON.parse(readFileSync(sessionStatePath(canonical), "utf8"))).toEqual(state);
     expect(statSync(sessionStatePath(canonical)).mode & 0o777).toBe(0o600);
   });
@@ -52,7 +52,7 @@ describe("operator session storage state", () => {
     await writeSessionState(canonical, prior);
     await expect(writeSessionState(canonical, replacement, () => false)).resolves.toBe(false);
 
-    expect(readSessionState(canonical)).toEqual(prior);
+    await expect(readSessionState(canonical)).resolves.toEqual(prior);
   });
 
   it("leaves one complete snapshot after concurrent last-writer-wins publishes", async () => {
@@ -69,7 +69,39 @@ describe("operator session storage state", () => {
       writeSessionState(canonical, second),
     ]);
 
-    expect([first, second]).toContainEqual(readSessionState(canonical));
+    expect([first, second]).toContainEqual(await readSessionState(canonical));
+  });
+
+  it("encodes and decodes snapshots outside the main event loop", async () => {
+    const canonical = mkdtempSync(join(tmpdir(), "ts-session-state-worker-"));
+    roots.push(canonical);
+    const state = {
+      cookies: [],
+      origins: [{ origin: "https://worker.example", localStorage: [] }],
+    };
+
+    const stringify = vi.spyOn(JSON, "stringify").mockImplementation(() => {
+      throw new Error("main-thread JSON.stringify called");
+    });
+    let published: boolean;
+    try {
+      published = await writeSessionState(canonical, state);
+    } finally {
+      stringify.mockRestore();
+    }
+
+    const parse = vi.spyOn(JSON, "parse").mockImplementation(() => {
+      throw new Error("main-thread JSON.parse called");
+    });
+    let restored: Awaited<ReturnType<typeof readSessionState>>;
+    try {
+      restored = await readSessionState(canonical);
+    } finally {
+      parse.mockRestore();
+    }
+
+    expect(published).toBe(true);
+    expect(restored).toEqual(state);
   });
 
   it("creates distinct 0700 profiles and removes only the finished instance", async () => {
