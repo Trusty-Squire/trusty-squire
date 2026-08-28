@@ -327,8 +327,8 @@ export interface Observation {
   };
   // Change 5 — fail-closed identity hand-back: set ONLY when an operate task
   // required a live Google session that was absent. The task did NOT start; the
-  // host asks the user to connect, then retries. No browser was driven.
-  needs_user?: NeedsUserConnect;
+  // host asks the user to log in, then retries. No browser was driven.
+  needs_user?: NeedsUserLogin;
   // PR3 signin-vault: the user's own email (the Google identity captured at
   // login), present on the start observation when known. The host fills THIS as
   // the signup email so the account is user-owned, and it is the same identity
@@ -2679,7 +2679,7 @@ export interface StartOptions {
   hint?: string;
   // Change 5 — operate tasks that act AS the user require a live Google session
   // in the fresh seeded profile before driving. When true and no live session exists,
-  // start hands back (needs_user.connect) BEFORE touching the task.
+  // start hands back (needs_user.login) BEFORE touching the task.
   requireLiveIdentity?: boolean;
   // PR2 — may the operator read the inbox for email verification? Sourced from
   // the install-time `consent_operator_inbox_otp` flag. Default-OFF: when false,
@@ -2701,14 +2701,14 @@ export interface HarnessStartOptions extends Omit<StartOptions, "profileDir" | "
 // expired / 2FA-challenged → hand back BEFORE the task starts, so the
 // human-in-the-loop dependency is explicit, never hidden (Codex). Pairs with the
 // install-time gate (install/cli.ts) that already requires a Google session.
-export interface NeedsUserConnect {
+export interface NeedsUserLogin {
   wall: "google_session";
   message: string;
-  resume: "connect";
+  resume: "login";
 }
 export function googleSessionGate(
   liveProviders: readonly OAuthProviderId[],
-): { ok: true } | { ok: false; needs_user: NeedsUserConnect } {
+): { ok: true } | { ok: false; needs_user: NeedsUserLogin } {
   if (liveProviders.includes("google")) return { ok: true };
   return {
     ok: false,
@@ -2719,7 +2719,7 @@ export function googleSessionGate(
         "as you yet. Refresh it with `npx @trusty-squire/mcp login --provider=google --force-relogin` " +
         "so the interactive context captures a fresh portable session snapshot. Then retry " +
         "— the task has NOT started and nothing was changed.",
-      resume: "connect",
+      resume: "login",
     },
   };
 }

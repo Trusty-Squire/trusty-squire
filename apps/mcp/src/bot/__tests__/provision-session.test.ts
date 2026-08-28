@@ -1294,12 +1294,12 @@ describe("googleSessionGate (Change 5 — fail-closed precondition gate)", () =>
     expect(googleSessionGate(["google"])).toEqual({ ok: true });
     expect(googleSessionGate(["github", "google"])).toEqual({ ok: true });
   });
-  it("fails closed to a connect hand-back when Google is absent", () => {
+  it("fails closed to a context-backed login hand-back when Google is absent", () => {
     const r = googleSessionGate([]);
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.needs_user.wall).toBe("google_session");
-      expect(r.needs_user.resume).toBe("connect");
+      expect(r.needs_user.resume).toBe("login");
       expect(r.needs_user.message).toMatch(/has NOT started/i);
       expect(r.needs_user.message).toContain(
         "login --provider=google --force-relogin",

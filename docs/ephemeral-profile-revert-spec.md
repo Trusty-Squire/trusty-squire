@@ -65,7 +65,7 @@ Preserve current call-drain, audit, payment, and session-removal ordering (`prov
 3. Only after close is proven, atomically replace the canonical state JSON.
 4. Recursively remove the unique directory.
 
-If the existing `profileRequiresDestroy` condition is true (`activePayment` or `paymentFieldSealActive`, `provision-session.ts:7522-7534`), close and destroy the profile but skip write-back. If close cannot be proved, retain that unique directory and the prior canonical snapshot, and report the retained directory; it is a disk leak, never a future-agent lock wedge.
+If the existing `profileRequiresDestroy` condition is true (`activePayment`, `paymentFieldSealActive`, or `pendingThreeDs`, `provision-session.ts:7846-7852`), close and destroy the profile but skip write-back. If close cannot be proved, retain that unique directory and the prior canonical snapshot, and report the retained directory; it is a disk leak, never a future-agent lock wedge.
 
 `connect`/`login` keeps editing the canonical authoring profile. On a successful context-backed login, write the full JSON state as well. A plain Chrome path has no context to capture, so it preserves the existing snapshot rather than clearing saved logins.
 
@@ -93,7 +93,7 @@ Keep only the small process-identity/close-proof helpers needed to kill an owned
 
 1. Three simultaneous `operate_start` calls receive three distinct profile paths and no capacity/seed-lock wait.
 2. Storage-state JSON round-trips cookies, local storage, and IndexedDB; no profile, cache, history, or SQLite-cookie bootstrap is used.
-3. A clean finish persists a login to a later fresh task, closes Chrome, and removes its profile. A payment/sealed session destroys without snapshot write-back. Unknown close retains only its unique directory.
+3. A clean finish persists a login to a later fresh task, closes Chrome, and removes its profile. A payment, sealed-field, or pending-3DS session destroys without snapshot write-back. Unknown close retains only its unique directory.
 4. Two clean finishes leave one valid state file; the last completed snapshot is visible.
 5. Multiple observe/act calls on one session do not create a second browser/profile.
 6. `require_live_identity` tests prove a fresh seeded profile, never canonical profile access.
@@ -160,7 +160,8 @@ Two eng-review decisions override the spec's original seeding design. Implement 
 
 Everything else in the spec stands: remove the pool + shared seed lock + `operator-direct-identity.ts`,
 per-instance mkdtemp profile per `operate_start`, destroy-on-finish, destroy (skip write-back) on
-`activePayment`/`paymentFieldSealActive`, last-writer-wins atomic JSON write-back, retain rc.9 watchdog.
+`activePayment`/`paymentFieldSealActive`/`pendingThreeDs`, last-writer-wins atomic JSON write-back,
+retain rc.9 watchdog.
 Delete `google-login.ts`'s `publishOperatorProfileSeed` path — write full `storageState` on any clean
 context-backed login, not a Google-gated seed.
 
@@ -201,7 +202,7 @@ No cross-model tension.
 
 Tests required in implementation: 3 simultaneous `operate_start` → 3 distinct profiles, no lock wait;
 storageState round-trips cookies+localStorage+IndexedDB and authenticates; clean finish persists a
-login to a later task; payment/sealed session destroys without write-back; multi-observe on one session
+login to a later task; payment/sealed/pending-3DS session destroys without write-back; multi-observe on one session
 reuses one browser; **stale-session re-login guardrail fires and re-authenticates**;
 `require_live_identity` uses a seeded profile; retain rc.9 watchdog + `closeAllProvisionSessions` tests.
 

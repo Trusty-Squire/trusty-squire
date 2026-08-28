@@ -15,17 +15,17 @@ broker, daemon, or feature flag.
 
 The existing live-provider detector remains the guardrail for restored state.
 `require_live_identity` evaluates it against the fresh seeded browser and fails
-closed with the existing connect handoff if the session is stale. It never
+closed with a context-backed login handoff if the session is stale. It never
 falls back to running an operator browser on the canonical profile.
 
 `operate_finish` retains session call-drain, audit, and payment ordering. A
 clean finish captures storage state, then uses the rc.9 bounded terminal owner
 to prove the identity-scoped Chrome close. Only after that proof does it
 atomically write the snapshot back (last completed writer wins) and remove the
-unique directory. A session with active payment state or sealed payment fields
-skips write-back and is destroyed after a proven close. If close cannot be
-proven, the unique directory and prior canonical snapshot are retained; the
-directory cannot block another agent.
+unique directory. A session with active payment state, sealed payment fields,
+or pending 3DS skips write-back and is destroyed after a proven close. If close
+cannot be proven, the unique directory and prior canonical snapshot are
+retained; the directory cannot block another agent.
 
 Card sealing, one-human approval per purchase, host-scoped egress, 3DS,
 payment-audit ordering, vault restrictions, session addressing, the rc.9

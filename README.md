@@ -313,8 +313,8 @@ DOM-diagnostics pair is excluded from that surface; set
   For a task gated by the user's connected Google account, pass
   `require_live_identity: true` to `operate_start`. The start restores the
   canonical login snapshot into a fresh private profile, then fails closed with
-  a connect handoff if the existing live-provider detector finds no current
-  Google session. It never opens Chrome on the canonical profile.
+  a context-backed login handoff if the existing live-provider detector finds
+  no current Google session. It never opens Chrome on the canonical profile.
   To route only that browser session through a proxy, pass `proxy` to
   `operate_start` as an HTTP or HTTPS URL (credentials are optional), or as an
   unauthenticated SOCKS5 URL. The value is launch-only and sensitive: it is not

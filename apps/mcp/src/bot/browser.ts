@@ -3647,109 +3647,103 @@ export class BrowserController {
       }
       return ctx;
     }
-    const endpoint = await withChromeStartupLock(
-      async () => {
-        this.throwIfStartCancelled();
-        const port = await findFreePort();
-        this.throwIfStartCancelled();
-        clearStaleSingletonLock(this.profileDir);
-        const argv = [
-          `--remote-debugging-port=${port}`,
-          "--remote-debugging-address=127.0.0.1",
-          `--user-data-dir=${this.profileDir}`,
-          "--no-first-run",
-          "--no-default-browser-check",
-          "--password-store=basic",
-          "--window-position=0,0",
-          `--window-size=${params.window.width},${params.window.height}`,
-          "--lang=en-US",
-          ...params.args,
-          ...(params.proxy !== null ? [`--proxy-server=${params.proxy.server}`] : []),
-          "--headless=new",
-          "about:blank",
-        ];
-        this.commitProfileLaunch();
-        const child = spawn(params.binary, argv, {
-          env: params.env,
-          stdio: ["ignore", "ignore", "pipe"],
-          // A dedicated process group gives the session a single, identity-
-          // proven teardown target for Chrome plus every renderer/GPU helper.
-          detached: process.platform !== "win32",
-        });
-        this.childChrome = child;
-        this.childChromeProcessGroup = process.platform !== "win32";
-        this.childChromeIdentity = registerSelfManagedChrome(
+    const endpoint = await (async () => {
+      this.throwIfStartCancelled();
+      const port = await findFreePort();
+      this.throwIfStartCancelled();
+      clearStaleSingletonLock(this.profileDir);
+      const argv = [
+        `--remote-debugging-port=${port}`,
+        "--remote-debugging-address=127.0.0.1",
+        `--user-data-dir=${this.profileDir}`,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--password-store=basic",
+        "--window-position=0,0",
+        `--window-size=${params.window.width},${params.window.height}`,
+        "--lang=en-US",
+        ...params.args,
+        ...(params.proxy !== null ? [`--proxy-server=${params.proxy.server}`] : []),
+        "--headless=new",
+        "about:blank",
+      ];
+      this.commitProfileLaunch();
+      const child = spawn(params.binary, argv, {
+        env: params.env,
+        stdio: ["ignore", "ignore", "pipe"],
+        // A dedicated process group gives the session a single, identity-
+        // proven teardown target for Chrome plus every renderer/GPU helper.
+        detached: process.platform !== "win32",
+      });
+      this.childChrome = child;
+      this.childChromeProcessGroup = process.platform !== "win32";
+      this.childChromeIdentity = registerSelfManagedChrome(
+        child,
+        this.profileDir,
+        this.childChromeProcessGroup,
+      );
+      if (this.childChromeIdentity !== null) {
+        this.adoptOwnedChromeProcessTree(this.childChromeIdentity, this.childChromeProcessGroup);
+      }
+      let chromeStderr = "";
+      let chromeExit = "";
+      child.stderr?.on("data", (chunk: Buffer) => {
+        chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
+      });
+      child.on("exit", (code, signal) => {
+        chromeExit = ` exit=${code ?? "null"} signal=${signal ?? "none"}`;
+      });
+      if (this.startCancellationRequested) {
+        await this.cancelSpawnedSelfManagedChrome(child);
+        throw new Error("BrowserController start cancelled");
+      }
+      try {
+        const endpoint = await waitForDevtools(port, 30_000);
+        this.childChromeIdentity = await resolveAttachedProfileChildIdentity(
           child,
           this.profileDir,
-          this.childChromeProcessGroup,
+          this.childChromeIdentity,
+          { processGroup: this.childChromeProcessGroup },
         );
+        if (process.platform === "linux" && this.childChromeIdentity === null) {
+          throw new Error("self-launched Chrome exited before identity was proven");
+        }
         if (this.childChromeIdentity !== null) {
           this.adoptOwnedChromeProcessTree(this.childChromeIdentity, this.childChromeProcessGroup);
         }
-        let chromeStderr = "";
-        let chromeExit = "";
-        child.stderr?.on("data", (chunk: Buffer) => {
-          chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
-        });
-        child.on("exit", (code, signal) => {
-          chromeExit = ` exit=${code ?? "null"} signal=${signal ?? "none"}`;
-        });
-        if (this.startCancellationRequested) {
-          await this.cancelSpawnedSelfManagedChrome(child);
-          throw new Error("BrowserController start cancelled");
-        }
-        try {
-          const endpoint = await waitForDevtools(port, 30_000);
-          this.childChromeIdentity = await resolveAttachedProfileChildIdentity(
-            child,
-            this.profileDir,
-            this.childChromeIdentity,
-            { processGroup: this.childChromeProcessGroup },
-          );
-          if (process.platform === "linux" && this.childChromeIdentity === null) {
-            throw new Error("self-launched Chrome exited before identity was proven");
-          }
-          if (this.childChromeIdentity !== null) {
-            this.adoptOwnedChromeProcessTree(
-              this.childChromeIdentity,
+        return endpoint;
+      } catch (err) {
+        const alive =
+          this.childChromeIdentity !== null &&
+          profileProcessMatches(this.childChromeIdentity, this.profileDir);
+        this.childChromeIdentity = await terminateTrackedProfileChild(child, this.profileDir, {
+          identity: this.childChromeIdentity,
+          terminate: (identity, profileDir) => {
+            const signalled = signalOwnedChromeProcessTree(
+              identity,
               this.childChromeProcessGroup,
+              "SIGKILL",
+              {
+                ...(this.ownedChromeProcessTreeProof === null
+                  ? {}
+                  : { proof: this.ownedChromeProcessTreeProof }),
+              },
             );
-          }
-          return endpoint;
-        } catch (err) {
-          const alive =
-            this.childChromeIdentity !== null &&
-            profileProcessMatches(this.childChromeIdentity, this.profileDir);
-          this.childChromeIdentity = await terminateTrackedProfileChild(child, this.profileDir, {
-            identity: this.childChromeIdentity,
-            terminate: (identity, profileDir) => {
-              const signalled = signalOwnedChromeProcessTree(
-                identity,
-                this.childChromeProcessGroup,
-                "SIGKILL",
-                {
-                  ...(this.ownedChromeProcessTreeProof === null
-                    ? {}
-                    : { proof: this.ownedChromeProcessTreeProof }),
-                },
-              );
-              reapProfileHolderIfOwned(profileDir, identity);
-              return signalled;
-            },
-            processGroup: this.childChromeProcessGroup,
-          });
-          this.childChrome = null;
-          this.childChromeIdentity = null;
-          this.childChromeProcessGroup = false;
-          const detail = chromeStderr.trim();
-          throw new Error(
-            `${err instanceof Error ? err.message : String(err)}; Chrome pid=${child.pid ?? "unknown"} alive=${alive ? 1 : 0}` +
-              `${chromeExit}${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
-          );
-        }
-      },
-      { deadlineMs: 0 },
-    );
+            reapProfileHolderIfOwned(profileDir, identity);
+            return signalled;
+          },
+          processGroup: this.childChromeProcessGroup,
+        });
+        this.childChrome = null;
+        this.childChromeIdentity = null;
+        this.childChromeProcessGroup = false;
+        const detail = chromeStderr.trim();
+        throw new Error(
+          `${err instanceof Error ? err.message : String(err)}; Chrome pid=${child.pid ?? "unknown"} alive=${alive ? 1 : 0}` +
+            `${chromeExit}${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
+        );
+      }
+    })();
     // Use the patchright launcher's connectOverCDP — it's the exact path the
     // falsification experiment validated (its connect avoids Runtime.enable,
     // which a plain attach would emit). The anti-detection that matters here
