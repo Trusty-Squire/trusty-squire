@@ -232,6 +232,11 @@ function readOperatorBrowserProcess(pid: number): OperatorBrowserProcessRecord |
   return stat === null ? null : { pid, marker, ...stat };
 }
 
+export function operatorBrowserProcessMatchesMarker(pid: number, marker: string): boolean {
+  if (process.platform !== "linux") return false;
+  return readOperatorBrowserProcess(pid)?.marker === marker;
+}
+
 export function linuxOperatorBrowserProcesses(): OperatorBrowserProcessRecord[] {
   if (process.platform !== "linux") return [];
   try {

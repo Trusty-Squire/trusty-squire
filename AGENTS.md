@@ -440,11 +440,12 @@ On macOS and Windows, bounded Playwright close plus profile-lease release remain
 the ordinary finish, disconnect, abandon, and startup-cancellation guarantee;
 those platforms do not yet have the Linux `/proc` last-resort process sweep.
 
-PID snapshots cannot provide strict zero-orphan containment. A rare escaped idle
-child may briefly remain at 0% CPU, but the Linux process-wide watchdog kills it
-if it spins or reaches its lifetime. Processes that fork and exit wholly between
-watchdog scans remain outside PID sampling. `ts-operator-browser-cgroup-containment`
-tracks that gap, strict Linux ownership, and macOS/Windows last-resort containment.
+PID snapshots cannot provide strict zero-orphan containment. A rare renderer that
+reparents after the fallback snapshot may briefly linger idle at 0% CPU, but the
+Linux process-wide watchdog kills it if it spins or reaches its lifetime. Processes
+that fork and exit wholly between watchdog scans remain outside PID sampling.
+`ts-operator-browser-cgroup-containment` tracks that gap, strict Linux ownership,
+and macOS/Windows last-resort containment.
 
 ## Final note
 

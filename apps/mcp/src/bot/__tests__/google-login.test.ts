@@ -8,7 +8,7 @@ import { readFileSync, mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
-import type { ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import Database from "better-sqlite3";
 import { shortenVncUrl } from "../../api-client.js";
 import {
@@ -27,6 +27,7 @@ import {
   launchWithProfileGate,
   ProfileBusyError,
 } from "../profile.js";
+import { OPERATOR_BROWSER_MARKER_ENV } from "../operator-browser-watchdog.js";
 import { loggedInProviders, markProviderLoggedIn } from "../login-state.js";
 import {
   binaryOnPath,
@@ -482,6 +483,42 @@ describe("login browser lifecycle guards", () => {
       expect(closeImpl).toHaveBeenCalledOnce();
       expect(releaseLease).toHaveBeenCalledOnce();
     } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("never adopts a replacement profile holder after cancellation releases custody", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-browser-replacement-"));
+    const replacement = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => undefined, 1000)", "--", `--user-data-dir=${profileDir}`],
+      {
+        argv0: "chromium",
+        env: {
+          ...process.env,
+          [OPERATOR_BROWSER_MARKER_ENV]: "v1:1:replacement",
+        },
+        stdio: "ignore",
+      },
+    );
+    try {
+      await new Promise<void>((resolve, reject) => {
+        replacement.once("spawn", resolve);
+        replacement.once("error", reject);
+      });
+      symlinkSync(`${hostname()}-${replacement.pid!}`, join(profileDir, "SingletonLock"));
+      const controller = new BrowserController({ profileDir });
+      const internals = controller as unknown as {
+        startCancellationRequested: boolean;
+        profileOperationLease: null;
+      };
+      internals.startCancellationRequested = true;
+      internals.profileOperationLease = null;
+
+      await expect(controller.forceCloseOwnedProcessTree()).resolves.toBe("unknown");
+      expect(() => process.kill(replacement.pid!, 0)).not.toThrow();
+    } finally {
+      replacement.kill("SIGKILL");
       rmSync(profileDir, { recursive: true, force: true });
     }
   });

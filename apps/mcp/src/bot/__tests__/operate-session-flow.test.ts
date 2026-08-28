@@ -892,7 +892,9 @@ import {
   replayOperatorRecipe,
   activeProvisionBrowserForPayment,
   activeCartCheckoutForOrigin,
+  armPaymentDispatchHandoff,
   cartAdd,
+  coordinatePaymentDispatchAudit,
   recordActivePaymentProvenance,
   setActivePendingCardFill,
   claimActivePaymentForOperatePay,
@@ -4560,6 +4562,55 @@ describe("operate session — isolated profile-pool lifecycle", () => {
       vi.unstubAllEnvs();
       vi.useRealTimers();
     }
+  });
+
+  it("hands a dispatch racing forced teardown to one terminal audit owner", async () => {
+    const auditPayment = vi.fn().mockResolvedValue({ id: "audit_dispatch_race" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: { auditPayment } as unknown as ApiClient,
+    });
+    const session = paymentSession(started.session_id);
+    const state = {
+      approval_id: "appr_dispatch_race",
+      approval_url: "https://web.test/vault/pay/appr_dispatch_race",
+      checkout: {
+        merchant: "Hibiya Kadan",
+        checkout_origin: "https://hibiyakadan.example.test",
+        amount_cents: 8_800,
+        currency: "JPY",
+      },
+      last4: "9192",
+      mandate_id: "mandate_dispatch_race",
+      deadline: Date.now() + 60_000,
+    };
+    armPaymentDispatchHandoff(state, session);
+
+    const closing = closeAllProvisionSessions();
+    await vi.waitFor(() =>
+      expect(
+        (session.terminalTeardownOwner as { forced: boolean } | null)?.forced,
+      ).toBe(true),
+    );
+    setActivePendingThreeDs(state, session);
+    const racingAudit = coordinatePaymentDispatchAudit(
+      state,
+      async () => {
+        await auditPayment({ status: "payment_outcome_unknown" });
+      },
+      session,
+    );
+
+    await Promise.all([closing, racingAudit]);
+
+    expect(h.waitForThreeDsCalls).toEqual([0]);
+    expect(auditPayment).toHaveBeenCalledOnce();
+    expect(auditPayment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approval_id: "appr_dispatch_race",
+        status: "payment_3ds_unresolved",
+      }),
+    );
   });
 
   it("closes an active session and its warm browser during shutdown", async () => {

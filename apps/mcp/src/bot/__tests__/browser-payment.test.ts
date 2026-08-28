@@ -68,6 +68,21 @@ describe("captured payment submit dispatch", () => {
 
     expect(onSubmitDispatched).toHaveBeenCalledOnce();
   });
+
+  it("retains an unknown charge when trusted input completes without observer evidence", async () => {
+    const onSubmitDispatched = vi.fn();
+
+    await expect(
+      runCaptureConfirmedPaymentSubmit({
+        click: async () => undefined,
+        readEvidence: async () => ({ baseline: null, dispatched: false }),
+        clear: async () => undefined,
+        onSubmitDispatched,
+      }),
+    ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
+
+    expect(onSubmitDispatched).toHaveBeenCalledOnce();
+  });
 });
 
 describe("charge-verb label recognition (CHECKOUT_SUBMIT_LABEL_RE)", () => {

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  armPaymentDispatchHandoff,
   activeCartCheckoutForOrigin,
   activeProvisionBrowserForPayment,
   claimActivePaymentForOperatePay,
@@ -7,6 +8,8 @@ import {
   clearActivePendingThreeDsIfCurrent,
   completeActivePaymentLeaseWithPendingApproval,
   completeActivePaymentLeaseWithPendingFill,
+  coordinatePaymentDispatchAudit,
+  finishPaymentDispatchHandoff,
   getActivePendingApproval,
   getActivePendingThreeDs,
   recordActivePaymentProvenance,
@@ -249,6 +252,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
       let paymentLeaseCompleted = false;
       let paymentFieldsCleared = true;
       let approvalPending: PendingApprovalWait | null = null;
+      let paymentDispatchHandoff: PendingThreeDsWait | null = null;
       let operatorStarted = false;
       try {
         const browser = await activeProvisionBrowserForPayment(session);
@@ -396,6 +400,12 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
             onApprovalPending: (state) => {
               approvalPending = state;
             },
+            onThreeDsHandoffArmed: (state) => {
+              paymentDispatchHandoff = state;
+              armPaymentDispatchHandoff(state, session);
+            },
+            coordinateThreeDsAudit: async (state, recordAudit) =>
+              await coordinatePaymentDispatchAudit(state, recordAudit, session),
             onThreeDsPending: (state) => {
               setActivePendingThreeDs(state, session);
             },
@@ -464,6 +474,9 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         }
         throw error;
       } finally {
+        if (paymentDispatchHandoff !== null) {
+          finishPaymentDispatchHandoff(paymentDispatchHandoff, session);
+        }
         if (!paymentLeaseCompleted) {
           releaseActivePaymentLease(paymentLease, paymentFieldsCleared, session);
         }

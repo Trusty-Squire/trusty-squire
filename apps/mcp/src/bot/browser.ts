@@ -74,6 +74,7 @@ import { startXvfb, xvfbAvailable, type XvfbRig } from "./xvfb.js";
 import {
   createOperatorBrowserMarker,
   OPERATOR_BROWSER_MARKER_ENV,
+  operatorBrowserProcessMatchesMarker,
   startGlobalOperatorBrowserProcessWatchdog,
 } from "./operator-browser-watchdog.js";
 
@@ -471,7 +472,8 @@ export async function runCaptureConfirmedPaymentSubmit<T>(options: {
   await options.clear();
   if (!evidence.dispatched) {
     if (clickError !== undefined) throw clickError;
-    throw new Error("payment_submit_dispatch_unconfirmed");
+    options.onSubmitDispatched?.();
+    throw new PaymentSubmitOutcomeUnknownError();
   }
   options.onSubmitDispatched?.();
   if (clickError !== undefined) throw new PaymentSubmitOutcomeUnknownError();
@@ -16536,7 +16538,13 @@ export class BrowserController {
       this.launchedProfileHolderIdentity;
     if (known !== null) return known;
     const holderPid = currentProfileHolderPid(this.profileDir);
-    return holderPid === null ? null : profileProcessIdentity(holderPid, this.profileDir);
+    if (holderPid === null) return null;
+    const identity = profileProcessIdentity(holderPid, this.profileDir);
+    if (identity === null) return null;
+    if (!this.startCancellationRequested || this.profileOperationLease !== null) return identity;
+    return operatorBrowserProcessMatchesMarker(identity.pid, this.operatorProcessMarker)
+      ? identity
+      : null;
   }
 
   private async waitForPersistentFallbackIdentity(): Promise<PersistentFallbackIdentityProof> {
@@ -16544,6 +16552,14 @@ export class BrowserController {
       return { state: "owned", identity: this.ownedChromeProcessTreeProof.identity };
     }
     const proof = await resolvePersistentFallbackIdentity({ profileDir: this.profileDir });
+    if (
+      proof.state === "owned" &&
+      this.startCancellationRequested &&
+      this.profileOperationLease === null &&
+      !operatorBrowserProcessMatchesMarker(proof.identity.pid, this.operatorProcessMarker)
+    ) {
+      return { state: "unknown" };
+    }
     if (proof.state === "owned") this.adoptOwnedChromeProcessTree(proof.identity, false);
     return proof;
   }
@@ -16558,7 +16574,12 @@ export class BrowserController {
         const holderPid = currentProfileHolderPid(this.profileDir);
         const identity =
           holderPid === null ? null : profileProcessIdentity(holderPid, this.profileDir);
-        if (identity !== null) {
+        const controllerOwnsIdentity =
+          identity !== null &&
+          (!this.startCancellationRequested ||
+            this.profileOperationLease !== null ||
+            operatorBrowserProcessMatchesMarker(identity.pid, this.operatorProcessMarker));
+        if (identity !== null && controllerOwnsIdentity) {
           this.launchedProfileHolderIdentity = identity;
           this.adoptOwnedChromeProcessTree(identity, false);
           return;

@@ -498,6 +498,16 @@ interface SessionTerminalTeardownOwner {
   forcePromise: Promise<unknown | undefined> | null;
 }
 
+interface PaymentDispatchHandoff {
+  state: PendingThreeDsWait;
+  settled: Promise<void>;
+  resolveSettled: () => void;
+  terminalizing: boolean;
+  terminalAuditReady: Promise<void>;
+  resolveTerminalAuditReady: () => void;
+  auditPromise: Promise<void> | null;
+}
+
 export interface Session {
   id: string;
   browser: BrowserController;
@@ -588,6 +598,7 @@ export interface Session {
   // Set by setActivePendingThreeDs, read by getActivePendingThreeDs, cleared
   // by clearActivePendingThreeDsIfCurrent once resolved or its deadline passes.
   pendingThreeDs: PendingThreeDsWait | null;
+  paymentDispatchHandoff: PaymentDispatchHandoff | null;
   // Snapshot of the single approval a filled card belongs to, captured at
   // fill time (setActivePendingCardFill / completeActivePaymentLeaseWithPendingFill)
   // so the place-order guard below still has what it needs after activePayment
@@ -1047,9 +1058,22 @@ async function forceTerminateProvisionSessionOwned(
   auditPendingThreeDs: boolean,
 ): Promise<unknown | undefined> {
   session.closing = true;
-  if (sessions.get(session.id) === session) sessions.delete(session.id);
   stopSessionWatchdog(session);
   audit(session.id, event, detail);
+  const handoff = session.paymentDispatchHandoff;
+  if (handoff !== null) {
+    handoff.terminalizing = true;
+    const timeoutMs = positiveTimeout(
+      "TRUSTY_SQUIRE_OPERATOR_PENDING_3DS_FINALIZE_TIMEOUT_MS",
+      DEFAULT_PENDING_THREE_DS_FINALIZE_TIMEOUT_MS,
+    );
+    await withTerminalTimeout(
+      handoff.settled,
+      timeoutMs,
+      `payment dispatch handoff exceeded ${timeoutMs}ms`,
+    ).catch(() => undefined);
+  }
+  if (sessions.get(session.id) === session) sessions.delete(session.id);
   let terminalError: unknown;
   if (auditPendingThreeDs && session.pendingThreeDs !== null) {
     try {
@@ -1062,9 +1086,11 @@ async function forceTerminateProvisionSessionOwned(
       );
     }
   }
+  handoff?.resolveTerminalAuditReady();
   session.activePayment = null;
   session.paymentFieldSealActive = false;
   session.pendingThreeDs = null;
+  session.paymentDispatchHandoff = null;
   await forceReleaseWarmBrowserPage(session.browser).catch((error: unknown) => {
     if (terminalError === undefined) terminalError = error;
     const message = error instanceof Error ? error.message : String(error);
@@ -2855,6 +2881,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     activePayment: null,
     paymentFieldSealActive: false,
     pendingThreeDs: null,
+    paymentDispatchHandoff: null,
     placeOrderApproval: null,
     placeOrderAttempted: false,
     lastCartCheckout: null,
@@ -2965,6 +2992,7 @@ export async function startHarnessProvisionSession(
     activePayment: null,
     paymentFieldSealActive: false,
     pendingThreeDs: null,
+    paymentDispatchHandoff: null,
     placeOrderApproval: null,
     placeOrderAttempted: false,
     lastCartCheckout: null,
@@ -3171,11 +3199,72 @@ export function getActivePendingThreeDs(selectedSession?: Session): PendingThree
   return (selectedSession ?? activeProvisionSession()).pendingThreeDs ?? null;
 }
 
+export function armPaymentDispatchHandoff(
+  state: PendingThreeDsWait,
+  selectedSession?: Session,
+): void {
+  const session = selectedSession ?? activeProvisionSession();
+  if (session.closing) {
+    throw new Error(`provision session ${session.id} closed before payment dispatch`);
+  }
+  let resolveSettled = (): void => undefined;
+  const settled = new Promise<void>((resolve) => {
+    resolveSettled = resolve;
+  });
+  let resolveTerminalAuditReady = (): void => undefined;
+  const terminalAuditReady = new Promise<void>((resolve) => {
+    resolveTerminalAuditReady = resolve;
+  });
+  session.paymentDispatchHandoff = {
+    state,
+    settled,
+    resolveSettled,
+    terminalizing: false,
+    terminalAuditReady,
+    resolveTerminalAuditReady,
+    auditPromise: null,
+  };
+}
+
+export function finishPaymentDispatchHandoff(
+  state: PendingThreeDsWait,
+  selectedSession?: Session,
+): void {
+  const session = selectedSession ?? activeProvisionSession();
+  const handoff = session.paymentDispatchHandoff;
+  if (handoff?.state !== state) return;
+  handoff.resolveSettled();
+  if (!handoff.terminalizing) session.paymentDispatchHandoff = null;
+}
+
+export async function coordinatePaymentDispatchAudit(
+  state: PendingThreeDsWait,
+  recordAudit: () => Promise<void>,
+  selectedSession?: Session,
+): Promise<void> {
+  const session = selectedSession ?? activeProvisionSession();
+  const handoff = session.paymentDispatchHandoff;
+  if (handoff?.state === state && handoff.terminalizing) {
+    await handoff.terminalAuditReady;
+    if (handoff.auditPromise !== null) await handoff.auditPromise;
+    return;
+  }
+  if (handoff?.state !== state || session.pendingThreeDs !== state) {
+    await recordAudit();
+    return;
+  }
+  await recordAudit();
+}
+
 export function setActivePendingThreeDs(
   state: PendingThreeDsWait,
   selectedSession?: Session,
 ): void {
-  (selectedSession ?? activeProvisionSession()).pendingThreeDs = state;
+  const session = selectedSession ?? activeProvisionSession();
+  const handoff = session.paymentDispatchHandoff;
+  if (session.closing && handoff?.state !== state) return;
+  session.pendingThreeDs = state;
+  if (handoff?.state === state) handoff.resolveSettled();
 }
 
 export function clearActivePendingThreeDsIfCurrent(
@@ -7869,14 +7958,24 @@ async function auditPendingThreeDsForSessionClose(session: Session): Promise<voi
       "operate_finish refused: pending 3-D Secure outcome cannot be audited without an active API session",
     );
   }
-  const resolution = await session.browser.waitForThreeDsResolution(0);
-  await session.api.auditPayment({
-    ...pending.checkout,
-    last4: pending.last4,
-    status: pendingThreeDsAuditStatus(resolution),
-    approval_id: pending.approval_id,
-    ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
-  });
+  const recordAudit = async (): Promise<void> => {
+      const resolution = await session.browser.waitForThreeDsResolution(0);
+      await session.api!.auditPayment({
+        ...pending.checkout,
+        last4: pending.last4,
+        status: pendingThreeDsAuditStatus(resolution),
+        approval_id: pending.approval_id,
+        ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
+      });
+  };
+  const handoff = session.paymentDispatchHandoff;
+  if (handoff?.state === pending && handoff.terminalizing) {
+    handoff.auditPromise ??= recordAudit();
+    handoff.resolveTerminalAuditReady();
+    await handoff.auditPromise;
+    return;
+  }
+  await recordAudit();
 }
 
 async function auditPendingThreeDsForSessionCloseBounded(session: Session): Promise<void> {
