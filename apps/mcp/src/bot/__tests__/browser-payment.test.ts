@@ -69,6 +69,24 @@ describe("captured payment submit dispatch", () => {
     expect(onSubmitDispatched).toHaveBeenCalledOnce();
   });
 
+  it("retains an unknown charge when input dispatch may precede click rejection", async () => {
+    const onSubmitDispatched = vi.fn();
+
+    await expect(
+      runCaptureConfirmedPaymentSubmit({
+        click: async (markInputDispatchPossible) => {
+          markInputDispatchPossible();
+          throw new Error("target closed after input dispatch");
+        },
+        readEvidence: async () => ({ baseline: null, dispatched: false }),
+        clear: async () => undefined,
+        onSubmitDispatched,
+      }),
+    ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
+
+    expect(onSubmitDispatched).toHaveBeenCalledOnce();
+  });
+
   it("retains an unknown charge when trusted input completes without observer evidence", async () => {
     const onSubmitDispatched = vi.fn();
 

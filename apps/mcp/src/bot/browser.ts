@@ -457,21 +457,24 @@ export class PaymentSubmitOutcomeUnknownError extends Error {
 }
 
 export async function runCaptureConfirmedPaymentSubmit<T>(options: {
-  click: () => Promise<void>;
+  click: (markInputDispatchPossible: () => void) => Promise<void>;
   readEvidence: () => Promise<{ baseline: T | null; dispatched: boolean }>;
   clear: () => Promise<void>;
   onSubmitDispatched?: () => void;
 }): Promise<T | null> {
   let clickError: unknown;
+  let inputDispatchPossible = false;
   try {
-    await options.click();
+    await options.click(() => {
+      inputDispatchPossible = true;
+    });
   } catch (error) {
     clickError = error;
   }
   const evidence = await options.readEvidence();
   await options.clear();
   if (!evidence.dispatched) {
-    if (clickError !== undefined) throw clickError;
+    if (clickError !== undefined && !inputDispatchPossible) throw clickError;
     options.onSubmitDispatched?.();
     throw new PaymentSubmitOutcomeUnknownError();
   }
@@ -11913,11 +11916,15 @@ export class BrowserController {
         let capturedBaseline: CheckoutOutcomeBaseline | null = null;
         try {
           await this.page.bringToFront().catch(() => undefined);
+          await candidate.click({ trial: true });
           if (!(await this.savedCardSelectionVerified(savedCardSelection.verification))) {
             throw new Error("payment_card_selection_ambiguous");
           }
           capturedBaseline = await runCaptureConfirmedPaymentSubmit({
-            click: async () => await candidate.click(),
+            click: async (markInputDispatchPossible) => {
+              markInputDispatchPossible();
+              await candidate.click({ noWaitAfter: true });
+            },
             readEvidence: async () => {
               const documentBaseline = await readDispatchOutcomeBaseline();
               const baseline = documentBaseline ?? (await readBoundDispatchOutcomeBaseline());
