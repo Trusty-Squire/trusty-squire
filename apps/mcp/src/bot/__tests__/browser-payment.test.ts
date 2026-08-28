@@ -11,6 +11,7 @@ import {
   parseCheckoutAmounts,
   parseStructuredCheckoutTotal,
   recognizedPaymentProviderFrame,
+  runCaptureConfirmedPaymentSubmit,
   type CheckoutSubmitResult,
   UnrecognizedPaymentFrameError,
 } from "../browser.js";
@@ -30,6 +31,44 @@ try {
 } catch {
   chromiumAvailable = false;
 }
+
+describe("captured payment submit dispatch", () => {
+  it("does not report dispatch when the click fails before capture", async () => {
+    const onSubmitDispatched = vi.fn();
+    const clear = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      runCaptureConfirmedPaymentSubmit({
+        click: async () => {
+          throw new Error("element detached");
+        },
+        readEvidence: async () => ({ baseline: null, dispatched: false }),
+        clear,
+        onSubmitDispatched,
+      }),
+    ).rejects.toThrow("element detached");
+
+    expect(clear).toHaveBeenCalledOnce();
+    expect(onSubmitDispatched).not.toHaveBeenCalled();
+  });
+
+  it("reports capture-confirmed dispatch before returning an unknown outcome", async () => {
+    const onSubmitDispatched = vi.fn();
+
+    await expect(
+      runCaptureConfirmedPaymentSubmit({
+        click: async () => {
+          throw new Error("navigation interrupted click completion");
+        },
+        readEvidence: async () => ({ baseline: { url: "before" }, dispatched: true }),
+        clear: async () => undefined,
+        onSubmitDispatched,
+      }),
+    ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
+
+    expect(onSubmitDispatched).toHaveBeenCalledOnce();
+  });
+});
 
 describe("charge-verb label recognition (CHECKOUT_SUBMIT_LABEL_RE)", () => {
   it("recognizes English charge verbs (regression)", () => {

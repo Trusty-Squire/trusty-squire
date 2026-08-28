@@ -3,6 +3,7 @@ import {
   OperatorBrowserProcessWatchdog,
   OperatorBrowserWatchdog,
   createOperatorBrowserMarker,
+  isOperatorChromiumCommand,
   operatorBrowserMarkerStartedAt,
   type OperatorBrowserProcessRecord,
 } from "../operator-browser-watchdog.js";
@@ -113,5 +114,17 @@ describe("operator browser process watchdog", () => {
   it("encodes a durable launch timestamp in every marker", () => {
     expect(operatorBrowserMarkerStartedAt(createOperatorBrowserMarker(42, "test"))).toBe(42);
     expect(operatorBrowserMarkerStartedAt("invalid")).toBeNull();
+  });
+
+  it("recognizes marked Chromium crash handlers as watchdog candidates", () => {
+    expect(isOperatorChromiumCommand("/opt/chrome/chrome_crashpad_handler\0--monitor-self")).toBe(
+      true,
+    );
+    expect(
+      isOperatorChromiumCommand("/usr/lib/chromium/chromium_crashpad_handler\0--database=/tmp"),
+    ).toBe(true);
+    expect(isOperatorChromiumCommand("/usr/bin/unrelated_crashpad_handler\0--monitor-self")).toBe(
+      false,
+    );
   });
 });

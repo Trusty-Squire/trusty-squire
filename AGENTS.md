@@ -427,19 +427,23 @@ its profile lease. These caps are intentional backstops for a bot-blocked host
 that abandons `operate_finish` while leaving its stdio pipe open; the server's
 12-hour open-session idle grace is not a substitute.
 
-Each local operator launch injects an inherited Trusty Squire marker. The
-process-wide watchdog scans marked Chromium processes independently of session
-state, meters aggregate CPU with per-PID birth-safe deltas, and enforces the
-30-minute lifetime even after the browser root exits or children are reparented.
-`BrowserController.close()` also performs best-effort clean teardown: self-launched
-Chrome uses a detached process group, while the Playwright fallback (including
-`chrome-headless-shell`) uses an identity-proven profile-root snapshot. Never use
-a root-PID-only signal or broad `pkill`.
+Each local operator launch injects an inherited Trusty Squire marker. On Linux,
+the process-wide watchdog scans marked Chromium processes independently of
+session state, meters aggregate CPU with per-PID birth-safe deltas, and enforces
+the 30-minute lifetime even after the browser root exits or children are
+reparented. `BrowserController.close()` also performs best-effort clean teardown:
+self-launched Chrome uses a detached process group, while the Playwright fallback
+(including `chrome-headless-shell`) uses an identity-proven profile-root snapshot.
+Never use a root-PID-only signal or broad `pkill`.
+
+On macOS and Windows, bounded Playwright close plus profile-lease release remains
+the ordinary finish, disconnect, abandon, and startup-cancellation guarantee;
+those platforms do not yet have the Linux `/proc` last-resort process sweep.
 
 PID snapshots cannot provide strict zero-orphan containment. A rare escaped idle
-child may briefly remain at 0% CPU, but the process-wide watchdog kills it if it
-spins or reaches its lifetime. `ts-operator-browser-cgroup-containment` tracks the
-cgroup v2/systemd-scope follow-up required for a strict OS-backed boundary.
+child may briefly remain at 0% CPU, but the Linux process-wide watchdog kills it
+if it spins or reaches its lifetime. `ts-operator-browser-cgroup-containment`
+tracks strict Linux ownership and macOS/Windows last-resort containment.
 
 ## Final note
 

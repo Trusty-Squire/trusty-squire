@@ -12,10 +12,12 @@ are isolated at the bottom so the actionable list stays scannable.
 
 ### ts-operator-browser-cgroup-containment [P1 infra]
 
-Place every local operator Chromium launch in its own cgroup v2/systemd scope
+Place every Linux operator Chromium launch in its own cgroup v2/systemd scope
 before it can fork, and use that scope for accounting and terminal teardown.
-This replaces the current marker-based process watchdog's documented residual
-for a rare escaped idle child with a strict zero-orphan OS ownership boundary.
+Add platform-appropriate last-resort containment for macOS and Windows, where
+ordinary bounded Playwright close currently has no process-wide fallback. This
+replaces the Linux marker watchdog's rare escaped-idle-child residual with a
+strict zero-orphan boundary and closes the cross-platform containment gap.
 
 ## Launch readiness — post-launch follow-ups (2026-06-30)
 

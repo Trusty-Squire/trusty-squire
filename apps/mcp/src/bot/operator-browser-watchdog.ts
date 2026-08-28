@@ -200,9 +200,9 @@ function parseProcessStat(pid: number): {
   }
 }
 
-function chromiumCommand(command: string): boolean {
+export function isOperatorChromiumCommand(command: string): boolean {
   const executable = command.split("\0", 1)[0] ?? "";
-  return /(?:^|\/)(?:chrome|google-chrome(?:-stable)?|chromium(?:-browser)?|chrome-headless-shell|headless_shell)$/i.test(
+  return /(?:^|\/)(?:chrome|google-chrome(?:-stable)?|chromium(?:-browser)?|chrome-headless-shell|headless_shell|chrome_crashpad_handler|chromium_crashpad_handler)$/i.test(
     executable,
   );
 }
@@ -221,7 +221,7 @@ function processMarker(pid: number): string | null {
 
 function readOperatorBrowserProcess(pid: number): OperatorBrowserProcessRecord | null {
   try {
-    if (!chromiumCommand(readFileSync(`/proc/${pid}/cmdline`, "utf8"))) return null;
+    if (!isOperatorChromiumCommand(readFileSync(`/proc/${pid}/cmdline`, "utf8"))) return null;
   } catch {
     return null;
   }
@@ -402,12 +402,17 @@ const processTerminationCallbacks = new Map<
 >();
 let globalProcessWatchdog: OperatorBrowserProcessWatchdog | null = null;
 
+export async function dispatchOperatorBrowserProcessTermination(
+  marker: string,
+  reason: OperatorBrowserWatchdogReason,
+): Promise<void> {
+  await processTerminationCallbacks.get(marker)?.(reason);
+}
+
 export function startGlobalOperatorBrowserProcessWatchdog(): void {
-  if (globalProcessWatchdog !== null) return;
+  if (process.platform !== "linux" || globalProcessWatchdog !== null) return;
   globalProcessWatchdog = new OperatorBrowserProcessWatchdog({
-    onTerminate: async (marker, reason) => {
-      await processTerminationCallbacks.get(marker)?.(reason);
-    },
+    onTerminate: dispatchOperatorBrowserProcessTermination,
   });
   globalProcessWatchdog.start();
 }

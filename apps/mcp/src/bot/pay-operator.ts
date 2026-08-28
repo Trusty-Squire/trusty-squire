@@ -1406,8 +1406,8 @@ export async function executeOperatePay(
       } catch {
         audit_recorded = false;
       }
-      if (outcomeUnknown) retainPendingThreeDs();
-      else clearPendingThreeDs();
+      if (outcomeUnknown && retainedPendingThreeDs !== null) retainPendingThreeDs();
+      else if (!outcomeUnknown) clearPendingThreeDs();
       return {
         status: paymentStatus,
         audit_recorded,
@@ -1420,7 +1420,9 @@ export async function executeOperatePay(
         ...(submitResult.payment_instrument_mismatch !== undefined
           ? { warning: submitResult.payment_instrument_mismatch }
           : {}),
-        ...(outcomeUnknown ? { next: pendingThreeDsNext } : {}),
+        ...(outcomeUnknown && retainedPendingThreeDs !== null
+          ? { next: pendingThreeDsNext }
+          : {}),
       };
     } finally {
       cardBytes?.fill(0);

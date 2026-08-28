@@ -676,6 +676,7 @@ interface StartingBrowser {
   lease: OperatorLease;
   launch: Promise<void>;
   cancelRequested: boolean;
+  cleanupPromise: Promise<void> | null;
 }
 
 interface CapacityWaiter {
@@ -863,6 +864,7 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
     lease,
     launch: startBrowserBounded(controller, sessionId),
     cancelRequested: false,
+    cleanupPromise: null,
   };
   startingBrowsers.add(pending);
   try {
@@ -910,6 +912,17 @@ async function releaseWarmBrowserPage(
 async function forceReleaseWarmBrowserPage(browser: BrowserController): Promise<void> {
   const slot = leasedBrowsers.get(browser);
   if (slot !== undefined) leasedBrowsers.delete(browser);
+  const closeState = await closeBrowserBounded(browser, false, "operator browser force-close timed out");
+  if (slot === undefined) return;
+  if (closeState === "closed") await slot.lease.destroy();
+  else await slot.lease.retain(true);
+}
+
+async function closeBrowserBounded(
+  browser: BrowserController,
+  cancelStart: boolean,
+  timeoutMessage: string,
+): Promise<"closed" | "force_closed_unproven" | "unknown"> {
   const forceClose = (
     browser as BrowserController & {
       forceCloseOwnedProcessTree?: () => Promise<
@@ -917,17 +930,40 @@ async function forceReleaseWarmBrowserPage(browser: BrowserController): Promise<
       >;
     }
   ).forceCloseOwnedProcessTree;
-  const closeState = await withTerminalTimeout(
-    forceClose === undefined ? browser.close() : forceClose.call(browser),
+  const ordinaryClose = browser
+    .close(cancelStart ? { cancelStart: true } : undefined)
+    .catch(() => "unknown" as const);
+  const forcedClose =
+    process.platform !== "linux" || forceClose === undefined
+      ? ordinaryClose
+      : forceClose.call(browser).catch(() => "unknown" as const);
+  const closed = Promise.race([
+    ordinaryClose.then((state) => (state === "closed" ? state : forcedClose)),
+    forcedClose.then((state) => (state === "closed" ? state : ordinaryClose)),
+  ]);
+  return await withTerminalTimeout(
+    closed,
     positiveTimeout(
       "TRUSTY_SQUIRE_OPERATOR_FORCE_CLOSE_TIMEOUT_MS",
       DEFAULT_OPERATOR_FORCE_CLOSE_TIMEOUT_MS,
     ),
-    "operator browser force-close timed out",
+    timeoutMessage,
   ).catch(() => "unknown" as const);
-  if (slot === undefined) return;
-  if (closeState === "closed") await slot.lease.destroy();
-  else await slot.lease.retain(true);
+}
+
+async function cancelStartingBrowser(pending: StartingBrowser): Promise<void> {
+  pending.cancelRequested = true;
+  if (pending.cleanupPromise !== null) return await pending.cleanupPromise;
+  pending.cleanupPromise = (async () => {
+    const closeState = await closeBrowserBounded(
+      pending.controller,
+      true,
+      "operator browser startup cancellation timed out",
+    );
+    if (closeState === "closed") await pending.lease.destroy();
+    else await pending.lease.retain(true);
+  })();
+  return await pending.cleanupPromise;
 }
 
 async function closeLeasedBrowser(
@@ -7958,10 +7994,7 @@ export async function closeAllProvisionSessions(): Promise<void> {
   }
   await Promise.all(waiters.map((waiter) => waiter.settled));
   for (const pending of [...startingBrowsers]) {
-    pending.cancelRequested = true;
-    await pending.controller.close({ cancelStart: true }).catch(() => undefined);
-    await pending.launch.catch(() => undefined);
-    await closeLeasedBrowser(pending.controller, pending.lease, false).catch(() => undefined);
+    await cancelStartingBrowser(pending).catch(() => undefined);
   }
   const closingSessions = [...sessions.values()];
   for (const session of closingSessions) {

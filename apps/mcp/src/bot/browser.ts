@@ -447,6 +447,29 @@ export class PaymentSubmitOutcomeUnknownError extends Error {
   }
 }
 
+export async function runCaptureConfirmedPaymentSubmit<T>(options: {
+  click: () => Promise<void>;
+  readEvidence: () => Promise<{ baseline: T | null; dispatched: boolean }>;
+  clear: () => Promise<void>;
+  onSubmitDispatched?: () => void;
+}): Promise<T | null> {
+  let clickError: unknown;
+  try {
+    await options.click();
+  } catch (error) {
+    clickError = error;
+  }
+  const evidence = await options.readEvidence();
+  await options.clear();
+  if (!evidence.dispatched) {
+    if (clickError !== undefined) throw clickError;
+    throw new Error("payment_submit_dispatch_unconfirmed");
+  }
+  options.onSubmitDispatched?.();
+  if (clickError !== undefined) throw new PaymentSubmitOutcomeUnknownError();
+  return evidence.baseline;
+}
+
 const CHECKOUT_TERMINAL_RESERVED_SEGMENTS = new Set([
   "about_blank",
   "blank",
@@ -11736,6 +11759,25 @@ export class BrowserController {
           }
           return checkoutOutcomeBaselineFromDispatchSnapshot(snapshot);
         };
+        const readDispatchState = async (): Promise<{
+          sameDocument: boolean;
+          dispatched: boolean;
+        } | null> =>
+          await frame
+            .evaluate((token) => {
+              const stateWindow = window as Window & {
+                __trustySquirePaymentSubmitDispatch?: {
+                  token: string;
+                  dispatched: boolean;
+                };
+              };
+              const state = stateWindow.__trustySquirePaymentSubmitDispatch;
+              return {
+                sameDocument: state?.token === token,
+                dispatched: state?.token === token && state.dispatched,
+              };
+            }, dispatchToken)
+            .catch(() => null);
         const clearDispatchTracking = async (): Promise<void> => {
           await candidate
             .evaluate((element) => {
@@ -11780,33 +11822,21 @@ export class BrowserController {
           await clearDispatchTracking();
           throw new Error("payment_card_selection_ambiguous");
         }
-        onSubmitDispatched?.();
-        try {
-          await candidate.click();
-        } catch (error) {
-          const dispatchState = await frame
-            .evaluate((token) => {
-              const stateWindow = window as Window & {
-                __trustySquirePaymentSubmitDispatch?: {
-                  token: string;
-                  dispatched: boolean;
-                };
-              };
-              const state = stateWindow.__trustySquirePaymentSubmitDispatch;
-              return {
-                sameDocument: state?.token === token,
-                dispatched: state?.token === token && state.dispatched,
-              };
-            }, dispatchToken)
-            .catch(() => null);
-          await clearDispatchTracking();
-          if (dispatchState?.sameDocument === true && !dispatchState.dispatched) throw error;
-          throw new PaymentSubmitOutcomeUnknownError();
-        }
-        outcomeBaseline =
-          (await readDispatchOutcomeBaseline()) ?? (await this.captureCheckoutOutcomeBaseline());
+        const capturedBaseline = await runCaptureConfirmedPaymentSubmit({
+          click: async () => await candidate.click(),
+          readEvidence: async () => {
+            const baseline = await readDispatchOutcomeBaseline();
+            const dispatchState = baseline === null ? await readDispatchState() : null;
+            return {
+              baseline,
+              dispatched: baseline !== null || dispatchState?.dispatched === true,
+            };
+          },
+          clear: clearDispatchTracking,
+          ...(onSubmitDispatched === undefined ? {} : { onSubmitDispatched }),
+        });
+        outcomeBaseline = capturedBaseline ?? (await this.captureCheckoutOutcomeBaseline());
         this.checkoutOutcomeBaseline = outcomeBaseline;
-        await clearDispatchTracking();
         submitted = true;
         break;
       }

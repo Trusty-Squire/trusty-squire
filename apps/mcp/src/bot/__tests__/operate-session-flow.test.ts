@@ -667,8 +667,14 @@ vi.mock("../browser.js", () => ({
     paymentInstrumentMismatch(): typeof h.paymentInstrumentMismatch {
       return h.paymentInstrumentMismatch;
     }
-    async close(): Promise<"closed" | "force_closed_unproven" | "unknown"> {
+    operatorBrowserMarker(): string {
+      return `v1:1:mock-${this.index}`;
+    }
+    async close(options?: {
+      cancelStart?: boolean;
+    }): Promise<"closed" | "force_closed_unproven" | "unknown"> {
       h.closeCalls += 1;
+      if (options?.cancelStart === true && h.startGate !== null) await h.startGate;
       if (h.connections[this.index] === true) h.started -= 1;
       h.connections[this.index] = false;
       return h.closeState;
@@ -677,7 +683,9 @@ vi.mock("../browser.js", () => ({
       "closed" | "force_closed_unproven" | "unknown"
     > {
       h.forceCloseCalls += 1;
-      return await this.close();
+      if (h.connections[this.index] === true) h.started -= 1;
+      h.connections[this.index] = false;
+      return h.closeState;
     }
   },
   // Mirrors the real export — the pending-card-fill charge guard reads it.
@@ -863,6 +871,7 @@ import { exportJWK, SignJWT } from "jose";
 import { sealToRecipient } from "../payment-hpke.js";
 import { operatePayTool, operatePaymentStatusTool } from "../../tools/operate-pay.js";
 import { ApiClient } from "../../api-client.js";
+import { dispatchOperatorBrowserProcessTermination } from "../operator-browser-watchdog.js";
 import type { formSelectMany } from "../provision-session.js";
 import {
   startProvisionSession,
@@ -4569,7 +4578,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     await finishProvisionSession(recovered.session_id);
   });
 
-  it("waits for an in-progress browser launch and closes its controller", async () => {
+  it("force-closes an in-progress browser launch without awaiting startup", async () => {
     let releaseStart: (() => void) | undefined;
     h.startGate = new Promise<void>((resolve) => {
       releaseStart = resolve;
@@ -4580,38 +4589,33 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     );
     await vi.waitFor(() => expect(h.startCalls).toBe(1));
 
-    let shutdownSettled = false;
-    const shutdown = closeAllProvisionSessions().then(() => {
-      shutdownSettled = true;
-    });
-    await vi.waitFor(() => expect(h.closeCalls).toBe(1));
-    expect(shutdownSettled).toBe(false);
+    await closeAllProvisionSessions();
+
+    expect(h.forceCloseCalls).toBe(1);
+    expect(h.leaseDestroyCalls).toBe(1);
+    expect(h.activeLeaseCount).toBe(0);
 
     releaseStart?.();
-    await shutdown;
-
     await expect(startResult).resolves.toEqual(
       expect.objectContaining({
         message: "operate_start cancelled: operator server is shutting down",
       }),
     );
-    expect(h.closeCalls).toBe(2);
+    expect(h.closeCalls).toBe(1);
+    expect(h.leaseDestroyCalls).toBe(1);
   });
 
-  it("hard-stops a session at its maximum browser lifetime", async () => {
-    vi.useFakeTimers();
-    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_SESSION_IDLE_TIMEOUT_MS", "3600000");
-    try {
-      await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+  it("hard-stops a session when the process watchdog reports maximum lifetime", async () => {
+    await startProvisionSession({ serviceUrl: "https://app.example.com/" });
 
-      await vi.advanceTimersByTimeAsync(30 * 60 * 1_000);
+    await dispatchOperatorBrowserProcessTermination("v1:1:mock-0", {
+      kind: "max_lifetime",
+      lifetime_ms: 30 * 60 * 1_000,
+      timeout_ms: 30 * 60 * 1_000,
+    });
 
-      expect(h.closeCalls).toBe(1);
-      expect(activeSessionCount()).toBe(0);
-    } finally {
-      vi.unstubAllEnvs();
-      vi.useRealTimers();
-    }
+    expect(h.closeCalls).toBe(1);
+    expect(activeSessionCount()).toBe(0);
   });
 
   it("returns each clean closed profile through the lease boundary", async () => {
