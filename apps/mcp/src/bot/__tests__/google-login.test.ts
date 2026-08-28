@@ -458,9 +458,13 @@ describe("login browser lifecycle guards", () => {
     expect(clearStaleLock).toHaveBeenCalled();
   });
 
-  it("cancels a wedged pre-launch stage without awaiting its settlement", async () => {
+  it("returns an unproven pre-launch close for quarantine and releases its lease", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-browser-cancel-"));
-    const controller = new BrowserController({ profileDir });
+    const releaseLease = vi.fn();
+    const controller = new BrowserController({
+      profileDir,
+      profileOperationLease: { release: releaseLease },
+    });
     const internals = controller as unknown as {
       startWithProfileGuard: () => Promise<void>;
       closeWithProfileGuard: () => Promise<"closed" | "force_closed_unproven" | "unknown">;
@@ -473,22 +477,27 @@ describe("login browser lifecycle guards", () => {
     try {
       void controller.start().catch(() => undefined);
       await vi.waitFor(() => expect(startImpl).toHaveBeenCalledOnce());
-      await expect(controller.close({ cancelStart: true })).resolves.toBe("closed");
-      await expect(controller.close()).resolves.toBe("closed");
+      await expect(controller.close({ cancelStart: true })).resolves.toBe("unknown");
+      await expect(controller.close()).resolves.toBe("unknown");
       expect(closeImpl).toHaveBeenCalledOnce();
+      expect(releaseLease).toHaveBeenCalledOnce();
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }
   });
 
-  it("waits for a committed launch to reach terminal settlement", async () => {
+  it("closes a committed launch immediately and cleans late settlement once", async () => {
     vi.useFakeTimers();
     const profileDir = mkdtempSync(join(tmpdir(), "ts-browser-cancel-"));
     let releaseStart: (() => void) | undefined;
     const startGate = new Promise<void>((resolve) => {
       releaseStart = resolve;
     });
-    const controller = new BrowserController({ profileDir });
+    const releaseLease = vi.fn();
+    const controller = new BrowserController({
+      profileDir,
+      profileOperationLease: { release: releaseLease },
+    });
     const internals = controller as unknown as {
       startLaunchCommitted: boolean;
       startWithProfileGuard: () => Promise<void>;
@@ -503,21 +512,18 @@ describe("login browser lifecycle guards", () => {
       const starting = controller.start().catch((error: unknown) => error);
       await vi.waitFor(() => expect(startImpl).toHaveBeenCalledOnce());
       internals.startLaunchCommitted = true;
-      let closeSettled = false;
-      const closing = controller.close({ cancelStart: true }).then((state) => {
-        closeSettled = true;
-        return state;
-      });
-      await vi.advanceTimersByTimeAsync(2_100);
-      expect(closeSettled).toBe(false);
+      const closing = controller.close({ cancelStart: true });
+      await expect(closing).resolves.toBe("closed");
+      await expect(controller.close()).resolves.toBe("closed");
+      expect(releaseLease).not.toHaveBeenCalled();
 
       releaseStart?.();
       await vi.advanceTimersByTimeAsync(25);
       await expect(starting).resolves.toEqual(
         expect.objectContaining({ message: "BrowserController start cancelled" }),
       );
-      await expect(closing).resolves.toBe("closed");
       await expect(controller.close()).resolves.toBe("closed");
+      expect(releaseLease).toHaveBeenCalledOnce();
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }

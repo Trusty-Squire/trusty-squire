@@ -51,6 +51,7 @@ export interface OperatorBrowserWatchdogOptions {
   onTerminate: (reason: OperatorBrowserWatchdogReason) => void | Promise<void>;
   now?: () => number;
   idleTimeoutMs?: number;
+  maxLifetimeMs?: number;
   intervalMs?: number;
   registerProcessWatchdog?: (
     marker: string,
@@ -333,6 +334,8 @@ export class OperatorBrowserProcessWatchdog {
           const previousTicks = previous.processes.get(identity);
           if (previousTicks !== undefined && currentTicks >= previousTicks) {
             ticks += currentTicks - previousTicks;
+          } else if (previousTicks === undefined && currentTicks >= 0) {
+            ticks += currentTicks;
           }
         }
         cpuPercent = (ticks * 100_000) / ((now - previous.at) * this.ticksPerSecond);
@@ -433,6 +436,7 @@ export function registerOperatorBrowserProcessWatchdog(
 export class OperatorBrowserWatchdog {
   private readonly now: () => number;
   private readonly idleTimeoutMs: number;
+  private readonly maxLifetimeMs: number;
   private readonly intervalMs: number;
   private timer: NodeJS.Timeout | null = null;
   private unregisterProcessWatchdog: (() => void) | null = null;
@@ -442,6 +446,7 @@ export class OperatorBrowserWatchdog {
     const config = operatorBrowserWatchdogConfig();
     this.now = options.now ?? Date.now;
     this.idleTimeoutMs = options.idleTimeoutMs ?? config.idleTimeoutMs;
+    this.maxLifetimeMs = options.maxLifetimeMs ?? config.maxLifetimeMs;
     this.intervalMs = options.intervalMs ?? config.intervalMs;
   }
 
@@ -471,7 +476,16 @@ export class OperatorBrowserWatchdog {
   }
 
   check(now = this.now()): OperatorBrowserWatchdogReason | null {
-    if (this.terminated || this.options.hasActiveCall()) return null;
+    if (this.terminated) return null;
+    const lifetimeMs = now - this.options.startedAt;
+    if (lifetimeMs >= this.maxLifetimeMs) {
+      return this.terminate({
+        kind: "max_lifetime",
+        lifetime_ms: lifetimeMs,
+        timeout_ms: this.maxLifetimeMs,
+      });
+    }
+    if (this.options.hasActiveCall()) return null;
     const idleMs = now - this.options.lastActivityAt();
     if (idleMs < this.idleTimeoutMs) return null;
     return this.terminate({

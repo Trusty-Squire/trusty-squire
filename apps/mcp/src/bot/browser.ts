@@ -11909,25 +11909,29 @@ export class BrowserController {
         // can themselves trigger a merchant default-selection revert; the
         // re-verification is then the LAST thing before the charge click is
         // dispatched — never proceed on a stale check.
-        await this.page.bringToFront().catch(() => undefined);
-        if (!(await this.savedCardSelectionVerified(savedCardSelection.verification))) {
+        let capturedBaseline: CheckoutOutcomeBaseline | null = null;
+        try {
+          await this.page.bringToFront().catch(() => undefined);
+          if (!(await this.savedCardSelectionVerified(savedCardSelection.verification))) {
+            throw new Error("payment_card_selection_ambiguous");
+          }
+          capturedBaseline = await runCaptureConfirmedPaymentSubmit({
+            click: async () => await candidate.click(),
+            readEvidence: async () => {
+              const documentBaseline = await readDispatchOutcomeBaseline();
+              const baseline = documentBaseline ?? (await readBoundDispatchOutcomeBaseline());
+              const dispatchState = baseline === null ? await readDispatchState() : null;
+              return {
+                baseline,
+                dispatched: baseline !== null || dispatchState?.dispatched === true,
+              };
+            },
+            clear: async () => undefined,
+            onSubmitDispatched: reportSubmitDispatched,
+          });
+        } finally {
           await clearDispatchTracking();
-          throw new Error("payment_card_selection_ambiguous");
         }
-        const capturedBaseline = await runCaptureConfirmedPaymentSubmit({
-          click: async () => await candidate.click(),
-          readEvidence: async () => {
-            const documentBaseline = await readDispatchOutcomeBaseline();
-            const baseline = documentBaseline ?? (await readBoundDispatchOutcomeBaseline());
-            const dispatchState = baseline === null ? await readDispatchState() : null;
-            return {
-              baseline,
-              dispatched: baseline !== null || dispatchState?.dispatched === true,
-            };
-          },
-          clear: clearDispatchTracking,
-          onSubmitDispatched: reportSubmitDispatched,
-        });
         outcomeBaseline = capturedBaseline ?? (await this.captureCheckoutOutcomeBaseline());
         this.checkoutOutcomeBaseline = outcomeBaseline;
         submitted = true;

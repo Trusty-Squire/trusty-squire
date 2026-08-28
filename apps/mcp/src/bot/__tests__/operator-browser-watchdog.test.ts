@@ -53,6 +53,37 @@ describe("operator browser process watchdog", () => {
     );
   });
 
+  it("accounts CPU from marked renderer identities replaced between samples", async () => {
+    const marker = createOperatorBrowserMarker(1, "renderer-churn");
+    let processes: OperatorBrowserProcessRecord[] = [
+      { pid: 301, parentPid: 1, startTime: 31, cpuTicks: 0, marker },
+    ];
+    const killed: number[] = [];
+    const watchdog = new OperatorBrowserProcessWatchdog({
+      readProcesses: () => processes,
+      processMatches: () => true,
+      kill: (pid) => killed.push(pid),
+      maxLifetimeMs: 60_000,
+      cpuCeilingPercent: 100,
+      cpuConsecutiveSamples: 2,
+      ticksPerSecond: 100,
+    });
+
+    expect(await watchdog.check(1_000)).toEqual([]);
+    processes = [{ pid: 302, parentPid: 1, startTime: 32, cpuTicks: 750, marker }];
+    expect(await watchdog.check(6_000)).toEqual([]);
+    processes = [{ pid: 303, parentPid: 1, startTime: 33, cpuTicks: 750, marker }];
+    expect(await watchdog.check(11_000)).toEqual([
+      {
+        kind: "cpu_budget_exceeded",
+        cpu_percent: 150,
+        ceiling_percent: 100,
+        consecutive_samples: 2,
+      },
+    ]);
+    await vi.waitFor(() => expect(killed).toEqual([303]));
+  });
+
   it("kills a discovered orphan at its marker lifetime without session state", async () => {
     const marker = createOperatorBrowserMarker(1_000, "orphan");
     const killed: number[] = [];
@@ -106,6 +137,28 @@ describe("operator browser process watchdog", () => {
       kind: "idle_timeout",
       idle_ms: 10_000,
       timeout_ms: 10_000,
+    });
+    await Promise.resolve();
+    expect(terminate).toHaveBeenCalledOnce();
+  });
+
+  it("ends a continuously active session at maximum lifetime", async () => {
+    const terminate = vi.fn();
+    const watchdog = new OperatorBrowserWatchdog({
+      startedAt: 1_000,
+      lastActivityAt: () => 30_999,
+      hasActiveCall: () => true,
+      processMarker: () => null,
+      onTerminate: terminate,
+      idleTimeoutMs: 10_000,
+      maxLifetimeMs: 30_000,
+    });
+
+    expect(watchdog.check(30_999)).toBeNull();
+    expect(watchdog.check(31_000)).toEqual({
+      kind: "max_lifetime",
+      lifetime_ms: 30_000,
+      timeout_ms: 30_000,
     });
     await Promise.resolve();
     expect(terminate).toHaveBeenCalledOnce();

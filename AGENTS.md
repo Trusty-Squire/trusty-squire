@@ -442,8 +442,9 @@ those platforms do not yet have the Linux `/proc` last-resort process sweep.
 
 PID snapshots cannot provide strict zero-orphan containment. A rare escaped idle
 child may briefly remain at 0% CPU, but the Linux process-wide watchdog kills it
-if it spins or reaches its lifetime. `ts-operator-browser-cgroup-containment`
-tracks strict Linux ownership and macOS/Windows last-resort containment.
+if it spins or reaches its lifetime. Processes that fork and exit wholly between
+watchdog scans remain outside PID sampling. `ts-operator-browser-cgroup-containment`
+tracks that gap, strict Linux ownership, and macOS/Windows last-resort containment.
 
 ## Final note
 

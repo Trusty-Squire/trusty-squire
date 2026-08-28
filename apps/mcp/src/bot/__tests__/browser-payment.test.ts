@@ -603,6 +603,38 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "removes dispatch tracking when final card verification aborts submission",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent('<button type="button">Pay now</button>');
+        const controller = BrowserController.fromHarnessPage(page);
+        const internals = controller as unknown as {
+          savedCardSelectionVerified: () => Promise<boolean>;
+          submitFilledCheckoutInScope: (
+            cardGroup: undefined,
+            onDispatched: () => void,
+          ) => Promise<CheckoutSubmitResult>;
+        };
+        internals.savedCardSelectionVerified = vi.fn(async () => {
+          throw new Error("verification document replaced");
+        });
+        const onSubmitDispatched = vi.fn();
+
+        await expect(
+          internals.submitFilledCheckoutInScope(undefined, onSubmitDispatched),
+        ).rejects.toThrow("verification document replaced");
+        await page.getByRole("button", { name: "Pay now" }).click();
+        await page.waitForTimeout(50);
+        expect(onSubmitDispatched).not.toHaveBeenCalled();
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "types digits into a combined numeric expiry field and lets the site format MM/YY",
     async () => {
       const browser = await chromium.launch({ headless: true });
