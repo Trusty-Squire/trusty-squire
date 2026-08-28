@@ -58,12 +58,12 @@ Remove the `requireLiveIdentity` direct-canonical exception. Preserve the existi
 
 ### Finish
 
-Preserve current call-drain, audit, payment, and session-removal ordering (`provision-session.ts:7538-7584`). On a clean finish:
+Preserve current call-drain, audit, payment, and session-removal ordering (`provision-session.ts:7538-7584`). On an explicit successful finish:
 
 1. Capture `context.storageState({ indexedDB: true })` before close.
 2. Use the rc.9 bounded terminal owner to perform the existing identity-proven browser close.
-3. Only after close is proven, atomically replace the canonical state JSON.
-4. Recursively remove the unique directory.
+3. Only after close is proven, asynchronously replace the canonical state JSON if the terminal owner is still authoritative immediately before the atomic rename.
+4. Asynchronously remove the unique directory.
 
 If the existing `profileRequiresDestroy` condition is true (`activePayment`, `paymentFieldSealActive`, or `pendingThreeDs`, `provision-session.ts:7846-7852`), close and destroy the profile but skip write-back. If close cannot be proved, retain that unique directory and the prior canonical snapshot, and report the retained directory; it is a disk leak, never a future-agent lock wedge.
 
@@ -93,8 +93,8 @@ Keep only the small process-identity/close-proof helpers needed to kill an owned
 
 1. Three simultaneous `operate_start` calls receive three distinct profile paths and no capacity/seed-lock wait.
 2. Storage-state JSON round-trips cookies, local storage, and IndexedDB; no profile, cache, history, or SQLite-cookie bootstrap is used.
-3. A clean finish persists a login to a later fresh task, closes Chrome, and removes its profile. A payment, sealed-field, or pending-3DS session destroys without snapshot write-back. Unknown close retains only its unique directory.
-4. Two clean finishes leave one valid state file; the last completed snapshot is visible.
+3. An explicit successful finish persists a login to a later fresh task, closes Chrome, and removes its profile. No-outcome or failed finishes preserve the prior snapshot. A payment, sealed-field, or pending-3DS session destroys without snapshot write-back. Unknown close retains only its unique directory.
+4. Two explicit successful finishes leave one valid state file; the last completed snapshot is visible.
 5. Multiple observe/act calls on one session do not create a second browser/profile.
 6. `require_live_identity` tests prove a fresh seeded profile, never canonical profile access.
 7. Retain rc.9 watchdog and `closeAllProvisionSessions` closure tests; remove pool slot/warm/seed-lock expectations.
@@ -148,7 +148,7 @@ Two eng-review decisions override the spec's original seeding design. Implement 
    Removing it is simpler AND more robust. No cookie-DB seed path, no Google cookie-marker filter.
 
 2. **Persist ALL session logins, not just the Google anchor — with a best-effort re-login guardrail.**
-   Capture the full `storageState` on clean finish, restore it into every fresh profile. Persist every
+   Capture the full `storageState` on explicit successful finish, restore it into every fresh profile. Persist every
    site's session, not a filtered identity anchor. GUARDRAIL (required, keeps it safe): a restored
    session is best-effort — at session start / before an authenticated action, verify logged-in state
    using the EXISTING live-provider detector (`browser.ts:2198-2211`, cookie families `user_session`
@@ -201,7 +201,7 @@ SHIP-WITH-FIXES, converging with the review on both P1s (storageState-only; keyr
 No cross-model tension.
 
 Tests required in implementation: 3 simultaneous `operate_start` → 3 distinct profiles, no lock wait;
-storageState round-trips cookies+localStorage+IndexedDB and authenticates; clean finish persists a
+storageState round-trips cookies+localStorage+IndexedDB and authenticates; explicit successful finish persists a
 login to a later task; payment/sealed/pending-3DS session destroys without write-back; multi-observe on one session
 reuses one browser; **stale-session re-login guardrail fires and re-authenticates**;
 `require_live_identity` uses a seeded profile; retain rc.9 watchdog + `closeAllProvisionSessions` tests.

@@ -17,7 +17,7 @@ afterEach(() => {
 });
 
 describe("operator session storage state", () => {
-  it("atomically preserves cookies, local storage, and IndexedDB in a 0600 snapshot", () => {
+  it("atomically preserves cookies, local storage, and IndexedDB in a 0600 snapshot", async () => {
     const canonical = mkdtempSync(join(tmpdir(), "ts-session-state-"));
     roots.push(canonical);
     const state = {
@@ -25,24 +25,64 @@ describe("operator session storage state", () => {
       origins: [{ origin: "https://merchant.example", localStorage: [{ name: "token", value: "opaque" }], indexedDB: [{ name: "auth", version: 1, stores: [] }] }],
     };
 
-    writeSessionState(canonical, state);
+    await writeSessionState(canonical, state);
 
     expect(readSessionState(canonical)).toEqual(state);
     expect(JSON.parse(readFileSync(sessionStatePath(canonical), "utf8"))).toEqual(state);
     expect(statSync(sessionStatePath(canonical)).mode & 0o777).toBe(0o600);
   });
 
-  it("creates distinct 0700 profiles and removes only the finished instance", () => {
+  it("keeps the prior snapshot when terminal ownership is revoked before publish", async () => {
+    const canonical = mkdtempSync(join(tmpdir(), "ts-session-state-revoked-"));
+    roots.push(canonical);
+    const cookie = {
+      domain: ".google.com",
+      path: "/",
+      expires: -1,
+      httpOnly: true,
+      secure: true,
+      sameSite: "Lax" as const,
+    };
+    const prior = { cookies: [{ ...cookie, name: "SID", value: "prior" }], origins: [] };
+    const replacement = {
+      cookies: [{ ...cookie, name: "SID", value: "replacement" }],
+      origins: [],
+    };
+
+    await writeSessionState(canonical, prior);
+    await expect(writeSessionState(canonical, replacement, () => false)).resolves.toBe(false);
+
+    expect(readSessionState(canonical)).toEqual(prior);
+  });
+
+  it("leaves one complete snapshot after concurrent last-writer-wins publishes", async () => {
+    const canonical = mkdtempSync(join(tmpdir(), "ts-session-state-concurrent-"));
+    roots.push(canonical);
+    const first = { cookies: [], origins: [{ origin: "https://first.example", localStorage: [] }] };
+    const second = {
+      cookies: [],
+      origins: [{ origin: "https://second.example", localStorage: [] }],
+    };
+
+    await Promise.all([
+      writeSessionState(canonical, first),
+      writeSessionState(canonical, second),
+    ]);
+
+    expect([first, second]).toContainEqual(readSessionState(canonical));
+  });
+
+  it("creates distinct 0700 profiles and removes only the finished instance", async () => {
     const first = createEphemeralProfile();
     const second = createEphemeralProfile();
     try {
       expect(first).not.toBe(second);
       expect(statSync(first).mode & 0o777).toBe(0o700);
-      destroyEphemeralProfile(first);
+      await destroyEphemeralProfile(first);
       expect(() => statSync(first)).toThrow();
       expect(statSync(second).isDirectory()).toBe(true);
     } finally {
-      destroyEphemeralProfile(second);
+      await destroyEphemeralProfile(second);
     }
   });
 });

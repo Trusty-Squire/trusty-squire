@@ -1,13 +1,11 @@
+import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   existsSync,
-  mkdirSync,
   mkdtempSync,
   readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
 } from "node:fs";
+import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserContext } from "playwright";
@@ -35,8 +33,8 @@ export function createEphemeralProfile(): string {
   return profileDir;
 }
 
-export function destroyEphemeralProfile(profileDir: string): void {
-  rmSync(profileDir, { recursive: true, force: true });
+export async function destroyEphemeralProfile(profileDir: string): Promise<void> {
+  await rm(profileDir, { recursive: true, force: true });
 }
 
 /**
@@ -54,12 +52,23 @@ export function readSessionState(profileDir: string): BrowserStorageState | unde
 }
 
 /** Last completed snapshot wins. Rename keeps concurrent writers from corrupting it. */
-export function writeSessionState(profileDir: string, state: BrowserStorageState): void {
-  mkdirSync(profileDir, { recursive: true, mode: 0o700 });
+export async function writeSessionState(
+  profileDir: string,
+  state: BrowserStorageState,
+  canPublish: () => boolean = () => true,
+): Promise<boolean> {
+  await mkdir(profileDir, { recursive: true, mode: 0o700 });
   const destination = sessionStatePath(profileDir);
-  const temporary = `${destination}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync(temporary, JSON.stringify(state), { mode: 0o600 });
-  chmodSync(temporary, 0o600);
-  renameSync(temporary, destination);
-  chmodSync(destination, 0o600);
+  const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
+  let published = false;
+  try {
+    await writeFile(temporary, JSON.stringify(state), { mode: 0o600 });
+    await chmod(temporary, 0o600);
+    if (!canPublish()) return false;
+    await rename(temporary, destination);
+    published = true;
+    return true;
+  } finally {
+    if (!published) await rm(temporary, { force: true }).catch(() => undefined);
+  }
 }

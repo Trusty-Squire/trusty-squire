@@ -1623,49 +1623,51 @@ async function handleFinishOutcome(
   outcome: Exclude<FinishOutcome, { kind: "none" }>,
   api: ApiClient,
 ) {
-  const { finish, prepared } = await finishProvisionSessionWithPreparation(sessionId, async () => {
-    if (outcome.kind === "credentials") {
-      const extracted = await extractCredentials(sessionId);
-      const blocked = extracted.blocked_reason;
-      const stored =
-        Object.keys(extracted.credentials).length > 0
-          ? await persistExtracted(sessionId, extracted.credentials, outcome.store, api)
-          : null;
-      const autoPromote =
-        stored !== null && blocked === undefined
-          ? await autoPromoteProvision(sessionId)
-          : undefined;
-      emitProvisionMeasurement(
-        sessionId,
-        stored !== null && blocked === undefined ? "success" : "fail",
-      );
+  let successfulOutcome = false;
+  const { finish, prepared } = await finishProvisionSessionWithPreparation(
+    sessionId,
+    async () => {
+      if (outcome.kind === "credentials") {
+        const extracted = await extractCredentials(sessionId);
+        const blocked = extracted.blocked_reason;
+        const stored =
+          Object.keys(extracted.credentials).length > 0
+            ? await persistExtracted(sessionId, extracted.credentials, outcome.store, api)
+            : null;
+        const autoPromote =
+          stored !== null && blocked === undefined
+            ? await autoPromoteProvision(sessionId)
+            : undefined;
+        successfulOutcome = stored !== null && blocked === undefined;
+        emitProvisionMeasurement(sessionId, successfulOutcome ? "success" : "fail");
+        return {
+          kind: "credentials" as const,
+          candidate_count: extracted.candidate_count,
+          ...(blocked !== undefined ? { blocked_reason: blocked } : {}),
+          stored_credential: stored,
+          ...(autoPromote !== undefined ? { auto_promote: autoPromote } : {}),
+        };
+      }
+      const verified =
+        outcome.verify_recipe === undefined
+          ? undefined
+          : ((await verifyActiveRecipePostcondition(sessionId, outcome.verify_recipe)) ??
+            (await verifySavedRecipePostcondition(
+              sessionId,
+              await readRecipe(outcome.verify_recipe),
+            )));
+      successfulOutcome =
+        outcome.verify_recipe === undefined || verified?.confirmed === true;
+      emitProvisionMeasurement(sessionId, successfulOutcome ? "success" : "fail");
       return {
-        kind: "credentials" as const,
-        candidate_count: extracted.candidate_count,
-        ...(blocked !== undefined ? { blocked_reason: blocked } : {}),
-        stored_credential: stored,
-        ...(autoPromote !== undefined ? { auto_promote: autoPromote } : {}),
+        kind: "result" as const,
+        summary: (outcome.summary ?? "").slice(0, 4000),
+        ...(verified !== undefined ? { verified } : {}),
+        ...(outcome.data !== undefined ? { data: outcome.data } : {}),
       };
-    }
-    const verified =
-      outcome.verify_recipe === undefined
-        ? undefined
-        : ((await verifyActiveRecipePostcondition(sessionId, outcome.verify_recipe)) ??
-          (await verifySavedRecipePostcondition(
-            sessionId,
-            await readRecipe(outcome.verify_recipe),
-          )));
-    emitProvisionMeasurement(
-      sessionId,
-      verified === undefined || verified.confirmed ? "success" : "fail",
-    );
-    return {
-      kind: "result" as const,
-      summary: (outcome.summary ?? "").slice(0, 4000),
-      ...(verified !== undefined ? { verified } : {}),
-      ...(outcome.data !== undefined ? { data: outcome.data } : {}),
-    };
-  });
+    },
+    () => successfulOutcome,
+  );
   return { ...prepared, url: finish.url };
 }
 
@@ -1748,7 +1750,8 @@ export const provisionFinishTool: Tool<z.infer<typeof finishSchema>> = {
     "'credentials' extracts and vault-stores a credential using required `store`; " +
     "'result' reports required `summary` or `data` and can verify_recipe before closing. " +
     "All credential values remain server-side; after Chrome closes, its private per-session " +
-    "profile is destroyed. A clean session atomically saves portable login state for a later task.",
+    "profile is destroyed. An explicit successful outcome atomically saves portable login state " +
+    "for a later task; no-outcome and failed closes preserve the prior snapshot.",
   inputSchema: finishSchema,
   jsonInputSchema: {
     type: "object",

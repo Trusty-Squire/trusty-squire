@@ -751,9 +751,12 @@ async function forceReleaseWarmBrowserPage(browser: BrowserController): Promise<
     "operator browser force-close timed out",
   );
   if (ephemeral === undefined) return;
+  if (closeState === "closed") {
+    await destroyEphemeralProfile(ephemeral.profileDir);
+  } else {
+    console.error(`[operator] retained ephemeral profile after unproven browser close: ${ephemeral.profileDir}`);
+  }
   if (leasedBrowsers.get(browser) === ephemeral) leasedBrowsers.delete(browser);
-  if (closeState === "closed") destroyEphemeralProfile(ephemeral.profileDir);
-  else console.error(`[operator] retained ephemeral profile after unproven browser close: ${ephemeral.profileDir}`);
 }
 
 async function closeBrowserBounded(
@@ -796,7 +799,7 @@ async function cancelStartingBrowser(pending: StartingBrowser): Promise<void> {
       true,
       "operator browser startup cancellation timed out",
     );
-    if (closeState === "closed") destroyEphemeralProfile(pending.profileDir);
+    if (closeState === "closed") await destroyEphemeralProfile(pending.profileDir);
   })();
   return await pending.cleanupPromise;
 }
@@ -825,13 +828,22 @@ async function closeEphemeralBrowser(
     throw new Error("operator browser terminal teardown was forced");
   }
   if (closeState === "closed") {
-    try {
-      if (state !== undefined) writeSessionState(ephemeral.canonicalProfileDir, state);
-    } finally {
-      if (leasedBrowsers.get(ephemeral.controller) === ephemeral) {
-        leasedBrowsers.delete(ephemeral.controller);
+    if (state !== undefined) {
+      const published = await writeSessionState(
+        ephemeral.canonicalProfileDir,
+        state,
+        () => owner?.forced !== true,
+      );
+      if (!published) {
+        throw new Error("operator browser terminal teardown was forced");
       }
-      destroyEphemeralProfile(ephemeral.profileDir);
+    }
+    if (owner?.forced) {
+      throw new Error("operator browser terminal teardown was forced");
+    }
+    await destroyEphemeralProfile(ephemeral.profileDir);
+    if (leasedBrowsers.get(ephemeral.controller) === ephemeral) {
+      leasedBrowsers.delete(ephemeral.controller);
     }
   } else {
     if (leasedBrowsers.get(ephemeral.controller) === ephemeral) {
@@ -7898,7 +7910,7 @@ async function auditPendingThreeDsForSessionCloseBounded(session: Session): Prom
 
 async function closeFinishingProvisionSession(
   session: Session,
-  destroyProfile: boolean,
+  persistState: boolean,
 ): Promise<FinishResult> {
   const sessionId = session.id;
   await auditPendingThreeDsForSessionCloseBounded(session);
@@ -7911,7 +7923,7 @@ async function closeFinishingProvisionSession(
   stopSessionWatchdog(session);
   await releaseWarmBrowserPage(
     session.browser,
-    !destroyProfile,
+    persistState,
     session.terminalTeardownOwner ?? undefined,
   );
   disposeSessionWatchdog(session);
@@ -7921,6 +7933,7 @@ async function closeFinishingProvisionSession(
 export async function finishProvisionSessionWithPreparation<T>(
   sessionId: string,
   prepare: () => Promise<T>,
+  successfulOutcome: () => boolean = () => false,
 ): Promise<PreparedFinishResult<T>> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
@@ -7950,9 +7963,9 @@ export async function finishProvisionSessionWithPreparation<T>(
     if (owner.forced || sessions.get(sessionId) !== session) {
       throw new Error(`provision session ${sessionId} terminal transition was forced`);
     }
-    const destroyProfile = profileRequiresDestroy(session);
+    const persistState = successfulOutcome() && !profileRequiresDestroy(session);
     try {
-      const finish = await closeFinishingProvisionSession(session, destroyProfile);
+      const finish = await closeFinishingProvisionSession(session, persistState);
       return { finish, prepared };
     } catch (error) {
       await forceTerminateProvisionSession(

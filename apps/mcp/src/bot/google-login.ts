@@ -654,7 +654,7 @@ export async function finalizeLoginRun(
   // Plain Chrome has no context to capture. Leave the existing snapshot alone;
   // it is safer than erasing every saved login after an interactive connect.
   if (result.closeState === "closed" && result.storageState !== undefined) {
-    writeSessionState(opts.profileDir, result.storageState);
+    await writeSessionState(opts.profileDir, result.storageState);
   }
 }
 

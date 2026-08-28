@@ -66,6 +66,8 @@ const h = vi.hoisted(() => ({
   storageStateReads: [] as string[],
   storageStateWrites: [] as Array<{ profileDir: string; state: unknown }>,
   storageStateWriteError: null as Error | null,
+  storageStateWriteGate: null as Promise<void> | null,
+  storageStateWriteAttempts: 0,
   ephemeralSerial: 0,
   createdProfiles: [] as string[],
   destroyedProfiles: [] as string[],
@@ -187,17 +189,25 @@ vi.mock("../session-state.js", () => ({
     h.createdProfiles.push(profileDir);
     return profileDir;
   },
-  destroyEphemeralProfile: (profileDir: string) => {
+  destroyEphemeralProfile: async (profileDir: string) => {
     h.destroyedProfiles.push(profileDir);
   },
   readSessionState: (profileDir: string) => {
     h.storageStateReads.push(profileDir);
     return h.storageStates.get(profileDir);
   },
-  writeSessionState: (profileDir: string, state: unknown) => {
+  writeSessionState: async (
+    profileDir: string,
+    state: unknown,
+    canPublish: () => boolean = () => true,
+  ) => {
+    h.storageStateWriteAttempts += 1;
+    if (h.storageStateWriteGate !== null) await h.storageStateWriteGate;
+    if (!canPublish()) return false;
     if (h.storageStateWriteError !== null) throw h.storageStateWriteError;
     h.storageStateWrites.push({ profileDir, state });
     h.storageStates.set(profileDir, state);
+    return true;
   },
 }));
 
@@ -949,6 +959,8 @@ beforeEach(() => {
   h.storageStateReads = [];
   h.storageStateWrites = [];
   h.storageStateWriteError = null;
+  h.storageStateWriteGate = null;
+  h.storageStateWriteAttempts = 0;
   h.ephemeralSerial = 0;
   h.createdProfiles = [];
   h.destroyedProfiles = [];
@@ -3942,9 +3954,13 @@ describe("operate session — ephemeral profile lifecycle", () => {
     });
     try {
       const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
-      const finishing = expect(finishProvisionSession(started.session_id)).rejects.toThrow(
-        /terminal transition timed out; browser terminated/,
-      );
+      const finishing = expect(
+        finishProvisionSessionWithPreparation(
+          started.session_id,
+          async () => "prepared",
+          () => true,
+        ),
+      ).rejects.toThrow(/terminal transition timed out; browser terminated/);
       await vi.advanceTimersByTimeAsync(0);
       expect(h.storageStateWrites).toEqual([]);
 
@@ -3961,6 +3977,42 @@ describe("operate session — ephemeral profile lifecycle", () => {
     } finally {
       releaseCapture?.();
       h.captureStorageStateGate = null;
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    }
+  });
+
+  it("never publishes state after terminal ownership is forced during write", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS", "50");
+    let releaseWrite: (() => void) | undefined;
+    h.storageStateWriteGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    try {
+      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+      const finishing = expect(
+        finishProvisionSessionWithPreparation(
+          started.session_id,
+          async () => "prepared",
+          () => true,
+        ),
+      ).rejects.toThrow(/terminal transition timed out; browser terminated/);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.storageStateWriteAttempts).toBe(1);
+      expect(h.storageStateWrites).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(50);
+      await finishing;
+      expect(h.forceCloseCalls).toBe(2);
+      expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
+
+      releaseWrite?.();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.storageStateWrites).toEqual([]);
+    } finally {
+      releaseWrite?.();
+      h.storageStateWriteGate = null;
       vi.unstubAllEnvs();
       vi.useRealTimers();
     }
@@ -4685,12 +4737,18 @@ describe("operate session — ephemeral profile lifecycle", () => {
     expect(activeSessionCount()).toBe(0);
   });
 
-  it("writes and destroys each clean closed profile", async () => {
+  it("writes and destroys each explicitly successful closed profile", async () => {
     for (let index = 0; index < 3; index += 1) {
       const session = await startProvisionSession({
         serviceUrl: `https://app.example.com/task-${index}`,
       });
-      await finishProvisionSession(session.session_id);
+      await provisionFinishTool.handler(
+        {
+          session_id: session.session_id,
+          outcome: { kind: "result", summary: `Task ${index} complete` },
+        },
+        null,
+      );
     }
 
     expect(h.createdProfiles).toHaveLength(3);
@@ -4977,6 +5035,33 @@ describe("operate_finish lifecycle consolidation", () => {
       ...legacy,
       session_id: "normalized",
     });
+    expect(h.storageStateWrites).toEqual([]);
+    expect(h.destroyedProfiles).toEqual([h.profileDirs[0], h.profileDirs[1]]);
+  });
+
+  it("preserves prior state when an explicit credential outcome fails", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-failed-outcome";
+    const prior = { cookies: [{ name: "SID", value: "prior" }], origins: [] };
+    h.storageStates.set(canonical, prior);
+    h.visibleText = "No credential is present";
+    const storeCredential = vi.fn();
+    const session = await startProvisionSession({
+      serviceUrl: "https://app.example.com/done",
+      profileDir: canonical,
+    });
+
+    const result = await provisionFinishTool.handler(
+      {
+        session_id: session.session_id,
+        outcome: { kind: "credentials", store: { service: "example" } },
+      },
+      { storeCredential } as unknown as ApiClient,
+    );
+
+    expect(result).toMatchObject({ kind: "credentials", stored_credential: null });
+    expect(storeCredential).not.toHaveBeenCalled();
+    expect(h.storageStateWrites).toEqual([]);
+    expect(h.storageStates.get(canonical)).toBe(prior);
   });
 
   it("returns the legacy result shape from outcome=result, including scalar data coercion", async () => {
