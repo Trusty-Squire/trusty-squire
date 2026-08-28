@@ -9,6 +9,7 @@ import {
   BrowserController,
   claimOrphanBrowserReapScope,
   matchesReapableBrowserArgs,
+  signalOwnedChromeProcessTree,
 } from "../browser.js";
 
 describe("BrowserController humanize option", () => {
@@ -174,5 +175,49 @@ describe("orphan browser profile matching", () => {
       profileDirs: ["/tmp/operator-b"],
     });
     expect(claimOrphanBrowserReapScope("/tmp/operator-b")).toBeNull();
+  });
+});
+
+describe("self-managed Chrome process ownership", () => {
+  const identity = {
+    host: "test-host",
+    pid: 4_242,
+    start_time: "12345",
+    user_data_dir: "/tmp/operator-profile",
+  };
+
+  it("signals the identity-proven detached process group, including renderers", () => {
+    const killed: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    expect(
+      signalOwnedChromeProcessTree(identity, true, "SIGKILL", {
+        platform: "linux",
+        profileMatches: () => true,
+        kill: (pid, signal) => killed.push({ pid, signal }),
+      }),
+    ).toBe(true);
+    expect(killed).toEqual([{ pid: -4_242, signal: "SIGKILL" }]);
+  });
+
+  it("will not signal a PID whose profile identity has changed", () => {
+    const kill = vi.fn();
+    expect(
+      signalOwnedChromeProcessTree(identity, true, "SIGKILL", {
+        platform: "linux",
+        profileMatches: () => false,
+        kill,
+      }),
+    ).toBe(false);
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("walks the profile-rooted tree for the non-detached headless fallback", () => {
+    const killed: number[] = [];
+    signalOwnedChromeProcessTree(identity, false, "SIGTERM", {
+      platform: "linux",
+      profileMatches: () => true,
+      processTreePids: () => [4_242, 4_243, 4_244],
+      kill: (pid) => killed.push(pid),
+    });
+    expect(killed).toEqual([4_244, 4_243, 4_242]);
   });
 });

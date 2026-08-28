@@ -417,6 +417,22 @@ After submission, ACS content is untrusted, read-only evidence. `detectThreeDsCh
 
 Post-submit 3DS tracking remains resumable for 20 minutes without becoming a second authorization or charge path. While `pendingThreeDs` exists, new `operate_pay` calls and guarded `operate_act` charge clicks are refused; session close performs one final live check and audit before clearing it. A charge click issued through `operate_act` during `operate_pay`'s own in-progress 3DS wait is still governed by the existing `activePayment: "operating"` lease rather than `pendingThreeDs`.
 
+### 12. An operator browser is session-scoped: never remove its watchdog or process-tree teardown
+
+`apps/mcp/src/bot/provision-session.ts` owns a session watchdog, and
+`apps/mcp/src/bot/operator-browser-watchdog.ts` owns its policy: 10 minutes
+without an MCP operation, 30 minutes total lifetime, or sustained aggregate
+Chrome-tree CPU above the configured ceiling terminates the session and destroys
+its profile lease. These caps are intentional backstops for a bot-blocked host
+that abandons `operate_finish` while leaving its stdio pipe open; the server's
+12-hour open-session idle grace is not a substitute.
+
+`BrowserController.close()` must tear down the entire identity-proven Chromium
+tree: self-launched Chrome is a detached process group, while the Playwright
+fallback (including `chrome-headless-shell`) is walked from its profile-root PID.
+Do not replace this with a root-PID-only signal or a broad `pkill`; both have
+previously left renderer processes running or risked unrelated operator browsers.
+
 ## Final note
 
 You are reading this file because a prior agent burned four version numbers, confused users, and forced a human to intervene. The agent was not malicious. It was not lazy. It was pattern-matching on its own prose instead of on tool output.

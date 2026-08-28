@@ -4328,16 +4328,33 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     }
   });
 
-  it("does not reap the shared browser while a session is in flight", async () => {
+  it("releases the abandoned session's shared profile lease so the next operate_start is not wedged", async () => {
     vi.useFakeTimers();
     try {
       const session = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+      expect(h.activeLeaseCount).toBe(1);
 
-      await vi.advanceTimersByTimeAsync(6 * 60 * 60 * 1_000);
+      // Regression for a bot-blocked task whose host abandoned the session
+      // while its stdio pipe stayed open. The server-level 12h grace cannot
+      // protect this case; the session watchdog must destroy its browser AND
+      // terminally release the active profile/seed-pool lease. Otherwise a
+      // dead session wedges every later operate_start until manual finish.
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1_000);
 
-      expect(h.closeCalls).toBe(0);
-      await finishProvisionSession(session.session_id);
-      await closeAllProvisionSessions();
+      expect(h.closeCalls).toBe(1);
+      expect(activeSessionCount()).toBe(0);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+      await expect(finishProvisionSession(session.session_id)).rejects.toThrow(
+        "unknown provision session",
+      );
+
+      const recovered = await startProvisionSession({
+        serviceUrl: "https://app.example.com/retry",
+      });
+      expect(h.leaseAcquireCalls).toBe(2);
+      expect(h.activeLeaseCount).toBe(1);
+      await finishProvisionSession(recovered.session_id);
     } finally {
       vi.useRealTimers();
     }
@@ -4351,6 +4368,12 @@ describe("operate session — isolated profile-pool lifecycle", () => {
 
     expect(activeSessionCount()).toBe(0);
     expect(h.closeCalls).toBe(1);
+    expect(h.leaseDestroyCalls).toBe(1);
+    expect(h.activeLeaseCount).toBe(0);
+
+    const recovered = await startProvisionSession({ serviceUrl: "https://app.example.com/retry" });
+    expect(h.activeLeaseCount).toBe(1);
+    await finishProvisionSession(recovered.session_id);
   });
 
   it("waits for an in-progress browser launch and closes its controller", async () => {
@@ -4382,17 +4405,18 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     expect(h.closeCalls).toBe(2);
   });
 
-  it("does not age-reap an active task", async () => {
+  it("hard-stops a session at its maximum browser lifetime", async () => {
     vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_SESSION_IDLE_TIMEOUT_MS", "3600000");
     try {
-      const session = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+      await startProvisionSession({ serviceUrl: "https://app.example.com/" });
 
-      await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1_000);
-      expect(h.closeCalls).toBe(0);
+      await vi.advanceTimersByTimeAsync(30 * 60 * 1_000);
 
-      await finishProvisionSession(session.session_id);
       expect(h.closeCalls).toBe(1);
+      expect(activeSessionCount()).toBe(0);
     } finally {
+      vi.unstubAllEnvs();
       vi.useRealTimers();
     }
   });

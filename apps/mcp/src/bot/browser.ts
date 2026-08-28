@@ -37,7 +37,7 @@ import type {
 } from "playwright";
 import { createRequire } from "node:module";
 import { Socket, createServer } from "node:net";
-import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { isSameRecipeDomain } from "@trusty-squire/recipe-schema";
 import {
@@ -2539,15 +2539,23 @@ export async function withChromeStartupLock<T>(
   }
 }
 
-const selfManagedChromes = new Map<number, ProfileProcessIdentity>();
+interface SelfManagedChrome {
+  identity: ProfileProcessIdentity;
+  // A detached POSIX child becomes the leader of a dedicated process group.
+  // Chrome's renderer/GPU descendants stay in that group, so a verified group
+  // signal tears down the entire browser rather than only its profile root.
+  processGroup: boolean;
+}
+
+const selfManagedChromes = new Map<number, SelfManagedChrome>();
 let selfManagedCleanupInstalled = false;
 let selfManagedTerminationSignalExitEnabled = true;
 let orphanVerifierReapRan = false;
 const orphanOperatorProfilesReaped = new Set<string>();
 
 function cleanupSelfManagedChromes(): void {
-  for (const identity of selfManagedChromes.values()) {
-    signalProfileProcess(identity, identity.user_data_dir, "SIGKILL");
+  for (const chrome of selfManagedChromes.values()) {
+    signalOwnedChromeProcessTree(chrome.identity, chrome.processGroup, "SIGKILL");
   }
   selfManagedChromes.clear();
 }
@@ -2594,10 +2602,11 @@ function installSelfManagedChromeCleanup(): void {
 function registerSelfManagedChrome(
   child: ChildProcess,
   profileDir: string,
+  processGroup = false,
 ): ProfileProcessIdentity | null {
   installSelfManagedChromeCleanup();
   const identity = child.pid === undefined ? null : profileProcessIdentity(child.pid, profileDir);
-  if (identity !== null) selfManagedChromes.set(identity.pid, identity);
+  if (identity !== null) selfManagedChromes.set(identity.pid, { identity, processGroup });
   child.once("exit", () => {
     if (child.pid !== undefined) selfManagedChromes.delete(child.pid);
   });
@@ -2610,12 +2619,13 @@ async function waitForTrackedProfileChildIdentity(
   readIdentity: (pid: number, profileDir: string) => ProfileProcessIdentity | null,
   timeoutMs: number,
   pollMs: number,
+  processGroup = false,
 ): Promise<ProfileProcessIdentity | null> {
   const deadline = Date.now() + timeoutMs;
   while (childProcessIsRunning(child)) {
     const identity = child.pid === undefined ? null : readIdentity(child.pid, profileDir);
     if (identity !== null) {
-      selfManagedChromes.set(identity.pid, identity);
+      selfManagedChromes.set(identity.pid, { identity, processGroup });
       return identity;
     }
     if (Date.now() >= deadline) return null;
@@ -2636,6 +2646,7 @@ export async function resolveAttachedProfileChildIdentity(
     readIdentity?: (pid: number, profileDir: string) => ProfileProcessIdentity | null;
     identityTimeoutMs?: number;
     identityPollMs?: number;
+    processGroup?: boolean;
   } = {},
 ): Promise<ProfileProcessIdentity | null> {
   if (identity !== null || (options.platform ?? process.platform) !== "linux") return identity;
@@ -2645,7 +2656,97 @@ export async function resolveAttachedProfileChildIdentity(
     options.readIdentity ?? profileProcessIdentity,
     options.identityTimeoutMs ?? PROFILE_IDENTITY_PROOF_TIMEOUT_MS,
     options.identityPollMs ?? PROFILE_IDENTITY_POLL_MS,
+    options.processGroup ?? false,
   );
+}
+
+// Call this ONLY for a Chrome child spawned with detached:true. The identity
+// check protects against PID reuse, then POSIX negative-PID signalling reaches
+// Chrome's renderer/GPU/helper tree in one operation. A normal profile-root
+// signal remains the portable fallback for launchPersistentContext and Windows.
+export function signalOwnedChromeProcessTree(
+  identity: ProfileProcessIdentity,
+  processGroup: boolean,
+  signal: NodeJS.Signals,
+  options: {
+    platform?: NodeJS.Platform;
+    profileMatches?: (identity: ProfileProcessIdentity, profileDir: string) => boolean;
+    kill?: (pid: number, signal: NodeJS.Signals) => unknown;
+    processTreePids?: (rootPid: number) => number[];
+  } = {},
+): boolean {
+  const profileMatches = options.profileMatches ?? profileProcessMatches;
+  const kill = options.kill ?? process.kill;
+  if (!profileMatches(identity, identity.user_data_dir)) return false;
+  if (processGroup && (options.platform ?? process.platform) !== "win32") {
+    try {
+      kill(-identity.pid, signal);
+      return true;
+    } catch {
+      // A process may exit between the proof and the signal. Fall through to
+      // the root PID only while it is still identity-proven.
+    }
+  }
+  const processTreePids = options.processTreePids ?? linuxProcessTreePids;
+  const pids =
+    (options.platform ?? process.platform) === "linux"
+      ? processTreePids(identity.pid)
+      : [identity.pid];
+  let signalled = false;
+  // Signal leaves first. This covers the Playwright persistent-context fallback
+  // (including chrome-headless-shell), whose child is not a detached process
+  // group leader but whose renderer tree is still rooted at the identity-proven
+  // browser PID.
+  for (const pid of [...pids].reverse()) {
+    try {
+      kill(pid, signal);
+      signalled = true;
+    } catch {
+      // A child can naturally exit while the tree is being walked.
+    }
+  }
+  return signalled;
+}
+
+function linuxProcessTreePids(rootPid: number): number[] {
+  try {
+    const childrenByParent = new Map<number, number[]>();
+    for (const entry of readdirSync("/proc")) {
+      if (!/^\d+$/.test(entry)) continue;
+      const pid = Number(entry);
+      try {
+        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+        const closeParen = stat.lastIndexOf(")");
+        if (closeParen < 0) continue;
+        const parentPid = Number(
+          stat
+            .slice(closeParen + 2)
+            .trim()
+            .split(/\s+/)[1],
+        );
+        if (!Number.isSafeInteger(parentPid)) continue;
+        const children = childrenByParent.get(parentPid) ?? [];
+        children.push(pid);
+        childrenByParent.set(parentPid, children);
+      } catch {
+        // Processes leave /proc constantly; a partial tree is still safer than
+        // abandoning the profile-root browser after a failed close.
+      }
+    }
+    const pids: number[] = [];
+    const pending = [rootPid];
+    const seen = new Set<number>();
+    while (pending.length > 0) {
+      const pid = pending.pop()!;
+      if (seen.has(pid)) continue;
+      seen.add(pid);
+      pids.push(pid);
+      for (const child of childrenByParent.get(pid) ?? []) pending.push(child);
+    }
+    return pids;
+  } catch {
+    return [rootPid];
+  }
 }
 
 export async function terminateTrackedProfileChild(
@@ -2658,6 +2759,7 @@ export async function terminateTrackedProfileChild(
     terminate?: (identity: ProfileProcessIdentity, profileDir: string) => boolean;
     identityTimeoutMs?: number;
     identityPollMs?: number;
+    processGroup?: boolean;
   } = {},
 ): Promise<ProfileProcessIdentity | null> {
   const readIdentity = options.readIdentity ?? profileProcessIdentity;
@@ -2679,7 +2781,10 @@ export async function terminateTrackedProfileChild(
       options.identityPollMs ?? PROFILE_IDENTITY_POLL_MS,
     );
     if (identity === null) break;
-    selfManagedChromes.set(identity.pid, identity);
+    selfManagedChromes.set(identity.pid, {
+      identity,
+      processGroup: options.processGroup ?? false,
+    });
     const terminated = terminate(identity, profileDir);
     if (!terminated) {
       identity = null;
@@ -3107,7 +3212,9 @@ export async function launchPlainLoginBrowser(params: {
         params.profileDir,
         childIdentity,
       );
-      if (childIdentity !== null) selfManagedChromes.set(childIdentity.pid, childIdentity);
+      if (childIdentity !== null) {
+        selfManagedChromes.set(childIdentity.pid, { identity: childIdentity, processGroup: false });
+      }
       if (!childProcessIsRunning(spawned)) {
         reapProfileHolderIfOwned(params.profileDir, childIdentity);
         const detail = chromeStderr.trim();
@@ -3179,6 +3286,7 @@ export class BrowserController {
   // the connected Browser so close() can tear both down.
   private childChrome: ChildProcess | null = null;
   private childChromeIdentity: ProfileProcessIdentity | null = null;
+  private childChromeProcessGroup = false;
   private cdpBrowser: Browser | null = null;
   // True once a local browser context launched this session.
   private launchedContext = false;
@@ -3350,6 +3458,18 @@ export class BrowserController {
     return this.childChromeIdentity ?? this.launchedProfileHolderIdentity;
   }
 
+  /** Root PID for the local operator Chrome. Its descendant tree is CPU-metered by the session watchdog. */
+  operatorBrowserRootPid(): number | null {
+    return this.operatorWorkerIdentity()?.pid ?? null;
+  }
+
+  private signalCurrentSelfManagedChrome(
+    identity: ProfileProcessIdentity,
+    signal: NodeJS.Signals,
+  ): boolean {
+    return signalOwnedChromeProcessTree(identity, this.childChromeProcessGroup, signal);
+  }
+
   // Required health gate for a warm browser. BrowserContext alone is not a
   // sufficient signal: a dead CDP transport can leave stale JS objects behind.
   isConnected(): boolean {
@@ -3455,9 +3575,17 @@ export class BrowserController {
         const child = spawn(params.binary, argv, {
           env: params.env,
           stdio: ["ignore", "ignore", "pipe"],
+          // A dedicated process group gives the session a single, identity-
+          // proven teardown target for Chrome plus every renderer/GPU helper.
+          detached: process.platform !== "win32",
         });
         this.childChrome = child;
-        this.childChromeIdentity = registerSelfManagedChrome(child, this.profileDir);
+        this.childChromeProcessGroup = process.platform !== "win32";
+        this.childChromeIdentity = registerSelfManagedChrome(
+          child,
+          this.profileDir,
+          this.childChromeProcessGroup,
+        );
         let chromeStderr = "";
         let chromeExit = "";
         child.stderr?.on("data", (chunk: Buffer) => {
@@ -3476,6 +3604,7 @@ export class BrowserController {
             child,
             this.profileDir,
             this.childChromeIdentity,
+            { processGroup: this.childChromeProcessGroup },
           );
           if (process.platform === "linux" && this.childChromeIdentity === null) {
             throw new Error("self-launched Chrome exited before identity was proven");
@@ -3487,9 +3616,20 @@ export class BrowserController {
             profileProcessMatches(this.childChromeIdentity, this.profileDir);
           this.childChromeIdentity = await terminateTrackedProfileChild(child, this.profileDir, {
             identity: this.childChromeIdentity,
+            terminate: (identity, profileDir) => {
+              const signalled = signalOwnedChromeProcessTree(
+                identity,
+                this.childChromeProcessGroup,
+                "SIGKILL",
+              );
+              reapProfileHolderIfOwned(profileDir, identity);
+              return signalled;
+            },
+            processGroup: this.childChromeProcessGroup,
           });
           this.childChrome = null;
           this.childChromeIdentity = null;
+          this.childChromeProcessGroup = false;
           const detail = chromeStderr.trim();
           throw new Error(
             `${err instanceof Error ? err.message : String(err)}; Chrome pid=${child.pid ?? "unknown"} alive=${alive ? 1 : 0}` +
@@ -3516,9 +3656,20 @@ export class BrowserController {
   private async cancelSpawnedSelfManagedChrome(child: ChildProcess): Promise<void> {
     this.childChromeIdentity = await terminateTrackedProfileChild(child, this.profileDir, {
       identity: this.childChromeIdentity,
+      terminate: (identity, profileDir) => {
+        const signalled = signalOwnedChromeProcessTree(
+          identity,
+          this.childChromeProcessGroup,
+          "SIGKILL",
+        );
+        reapProfileHolderIfOwned(profileDir, identity);
+        return signalled;
+      },
+      processGroup: this.childChromeProcessGroup,
     });
     if (this.childChrome === child) this.childChrome = null;
     this.childChromeIdentity = null;
+    this.childChromeProcessGroup = false;
   }
 
   // Resource blocking for speed (BOT_BLOCK_RESOURCES, default OFF). Aborts
@@ -3861,7 +4012,7 @@ export class BrowserController {
         if (proof.state === "absent") return "closed";
         if (proof.state === "unknown") return "unknown";
         const { identity } = proof;
-        signalProfileProcess(identity, this.profileDir, "SIGKILL");
+        signalOwnedChromeProcessTree(identity, false, "SIGKILL");
         return (await this.waitForOwnedProfileExit(identity)) ? "closed" : "unknown";
       };
       const cleanupCancelled = async (lateContext: BrowserContext): Promise<ProfileCloseState> => {
@@ -3876,7 +4027,7 @@ export class BrowserController {
           identity,
           close: () => lateContext.close(),
           forceClose: () => {
-            signalProfileProcess(identity, this.profileDir, "SIGKILL");
+            signalOwnedChromeProcessTree(identity, false, "SIGKILL");
             reapProfileHolderIfOwned(this.profileDir, identity);
           },
         });
@@ -15980,7 +16131,7 @@ export class BrowserController {
     while (!this.startSettled) {
       const identity = this.currentOwnedProfileIdentity();
       if (identity !== null) {
-        signalProfileProcess(identity, this.profileDir, "SIGKILL");
+        this.signalCurrentSelfManagedChrome(identity, "SIGKILL");
         reapProfileHolderIfOwned(this.profileDir, identity);
       }
       await new Promise<void>((resolveWait) => {
@@ -16005,7 +16156,7 @@ export class BrowserController {
     let state = profileProcessIdentityState(identity, this.profileDir);
     while (state !== "stale" && Date.now() < deadline) {
       if (profileProcessMatches(identity, this.profileDir)) {
-        signalProfileProcess(identity, this.profileDir, "SIGKILL");
+        signalOwnedChromeProcessTree(identity, false, "SIGKILL");
       }
       await new Promise<void>((resolveWait) => {
         const timer = setTimeout(resolveWait, PROFILE_IDENTITY_POLL_MS);
@@ -16060,6 +16211,7 @@ export class BrowserController {
     const context = this.context;
     const cdpBrowser = this.cdpBrowser;
     const childIdentity = this.childChromeIdentity;
+    const childChromeProcessGroup = this.childChromeProcessGroup;
     const holderIdentity = this.launchedProfileHolderIdentity ?? this.currentOwnedProfileIdentity();
     const identity = childIdentity ?? holderIdentity;
     this.page = null;
@@ -16072,21 +16224,35 @@ export class BrowserController {
     this.cdpBrowser = null;
     this.childChrome = null;
     this.childChromeIdentity = null;
+    this.childChromeProcessGroup = false;
     this.launchedContext = false;
     this.launchedProfileHolderIdentity = null;
     const closeState = await closeProfileWithProof({
       profileDir: this.profileDir,
       identity,
       close: async () => {
-        if (page !== null) await page.close();
-        if (context !== null) await context.close();
-        if (cdpBrowser !== null) await cdpBrowser.close();
-        if (childIdentity !== null) {
-          signalProfileProcess(childIdentity, this.profileDir, "SIGTERM");
+        if (identity !== null) {
+          signalOwnedChromeProcessTree(
+            identity,
+            childIdentity !== null ? childChromeProcessGroup : false,
+            "SIGTERM",
+          );
         }
+        // A process-tree SIGTERM can close the CDP target before Playwright
+        // observes it. That is successful teardown, not a reason to skip the
+        // proof/reap path or quarantine a cleanly closed warm profile.
+        if (page !== null) await page.close().catch(() => undefined);
+        if (context !== null) await context.close().catch(() => undefined);
+        if (cdpBrowser !== null) await cdpBrowser.close().catch(() => undefined);
       },
       forceClose: () => {
-        if (identity !== null) signalProfileProcess(identity, this.profileDir, "SIGKILL");
+        if (identity !== null) {
+          signalOwnedChromeProcessTree(
+            identity,
+            childIdentity !== null ? childChromeProcessGroup : false,
+            "SIGKILL",
+          );
+        }
         reapProfileHolderIfOwned(this.profileDir, identity);
       },
     });

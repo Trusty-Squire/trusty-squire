@@ -122,6 +122,10 @@ import {
   resolveExtraction,
   type CandidateClass,
 } from "./extraction.js";
+import {
+  OperatorBrowserWatchdog,
+  type OperatorBrowserWatchdogReason,
+} from "./operator-browser-watchdog.js";
 
 // Identity-provider + auth-handler hosts a signup legitimately bounces
 // through. Used to widen domain-scope so an OAuth `goto` (rare) isn't blocked.
@@ -617,6 +621,12 @@ export interface Session {
   closing: boolean;
   callCount: number;
   callDrainWaiters: Set<() => void>;
+  // Session ownership must be a resource boundary, not merely a convention for
+  // cooperative hosts. The watchdog destroys this browser if its client goes
+  // away without operate_finish, if it lives too long, or if its Chromium tree
+  // exceeds the CPU budget.
+  lastActivityAt: number;
+  watchdog: OperatorBrowserWatchdog | null;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -905,6 +915,49 @@ async function closeLeasedBrowser(
   else await lease.destroy();
 }
 
+function stopSessionWatchdog(session: Session): void {
+  session.watchdog?.stop();
+  session.watchdog = null;
+}
+
+async function terminateExpiredProvisionSession(
+  session: Session,
+  reason: OperatorBrowserWatchdogReason,
+): Promise<void> {
+  // A normal finish owns its more careful call-drain transition. A watchdog
+  // eviction is intentionally different: an abandoned or over-budget browser
+  // must be closed immediately even when a stuck CDP call never settles.
+  if (sessions.get(session.id) !== session || session.closing) return;
+  session.closing = true;
+  sessions.delete(session.id);
+  stopSessionWatchdog(session);
+  session.activePayment = null;
+  session.paymentFieldSealActive = false;
+  audit(session.id, "browser_watchdog_terminate", reason);
+  await releaseWarmBrowserPage(session.browser, false).catch((error: unknown) => {
+    const detail = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`[operator] watchdog close failed session=${session.id}: ${detail}\n`);
+  });
+}
+
+function startSessionWatchdog(session: Session): void {
+  // Older narrow unit doubles do not expose a local Chrome PID. They still
+  // receive the idle/lifetime boundary; production BrowserController exposes
+  // the identity-proven browser root so the CPU budget includes its renderers.
+  const browser = session.browser as BrowserController & {
+    operatorBrowserRootPid?: () => number | null;
+  };
+  const watchdog = new OperatorBrowserWatchdog({
+    startedAt: session.startedAt,
+    lastActivityAt: () => session.lastActivityAt,
+    hasActiveCall: () => session.callCount > 0,
+    processId: () => browser.operatorBrowserRootPid?.() ?? null,
+    onTerminate: async (reason) => await terminateExpiredProvisionSession(session, reason),
+  });
+  session.watchdog = watchdog;
+  watchdog.start();
+}
+
 function sessionForCall(sessionId: string): Session | undefined {
   return sessions.get(sessionId);
 }
@@ -944,6 +997,7 @@ export function paymentSession(sessionId?: string): Session {
 
 function acquireSessionCallLease(session: Session): () => void {
   if (session.closing) throw new Error(`provision session ${session.id} is closing`);
+  session.lastActivityAt = Date.now();
   session.callCount += 1;
   let released = false;
   return () => {
@@ -2643,6 +2697,8 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     callCount: 0,
     callDrainWaiters: new Set(),
     startedAt: Date.now(),
+    lastActivityAt: Date.now(),
+    watchdog: null,
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
     consentInboxRead: opts.consentInboxRead === true,
@@ -2650,6 +2706,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     ...(opts.api !== undefined ? { api: opts.api } : {}),
   };
   sessions.set(id, session);
+  startSessionWatchdog(session);
   try {
     if (typeof browser.setHostScopeAllowedHosts === "function") {
       await browser.setHostScopeAllowedHosts(
@@ -2694,6 +2751,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     };
   } catch (err) {
     sessions.delete(id);
+    stopSessionWatchdog(session);
     await releaseWarmBrowserPage(browser, false);
     throw err;
   }
@@ -2748,6 +2806,8 @@ export async function startHarnessProvisionSession(
     callCount: 0,
     callDrainWaiters: new Set(),
     startedAt: Date.now(),
+    lastActivityAt: Date.now(),
+    watchdog: null,
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
     consentInboxRead: false,
@@ -2755,6 +2815,7 @@ export async function startHarnessProvisionSession(
     ...(opts.api === undefined ? {} : { api: opts.api }),
   };
   sessions.set(id, session);
+  startSessionWatchdog(session);
   try {
     audit(id, "start_harness", {
       service_url: opts.serviceUrl,
@@ -2764,6 +2825,7 @@ export async function startHarnessProvisionSession(
     return { ...(await observeSession(session)), hint: opts.hint ?? "" };
   } catch (error) {
     sessions.delete(id);
+    stopSessionWatchdog(session);
     await opts.browser.close().catch(() => undefined);
     throw error;
   }
@@ -7658,6 +7720,7 @@ async function closeFinishingProvisionSession(
   session.paymentFieldSealActive = false;
   session.pendingThreeDs = null;
   sessions.delete(sessionId);
+  stopSessionWatchdog(session);
   await releaseWarmBrowserPage(session.browser, !destroyProfile);
   return { session_id: sessionId, url, closed: true };
 }
@@ -7710,15 +7773,23 @@ export async function closeAllProvisionSessions(): Promise<void> {
       await waitForSessionCallsToDrain(session);
       await closeFinishingProvisionSession(session, true);
     } catch (error) {
-      if (sessions.get(session.id) === session) session.closing = false;
+      // Shutdown is terminal even when a pending-payment audit or a stuck call
+      // fails. Remove the session and destroy its browser/profile lease so a
+      // disconnected transport cannot leave Chrome spinning or wedge the pool.
+      sessions.delete(session.id);
+      stopSessionWatchdog(session);
+      session.activePayment = null;
+      session.paymentFieldSealActive = false;
+      session.pendingThreeDs = null;
+      await releaseWarmBrowserPage(session.browser, false).catch(() => undefined);
       if (closeError === undefined) closeError = error;
     }
   }
-  if (closeError !== undefined) throw closeError;
   for (const slot of [...leasedBrowsers.values()]) {
     leasedBrowsers.delete(slot.controller);
     await closeLeasedBrowser(slot.controller, slot.lease, false).catch(() => undefined);
   }
+  if (closeError !== undefined) throw closeError;
 }
 
 export function activeSessionCount(): number {
