@@ -87,6 +87,43 @@ describe("compact observation v2", () => {
     expect(page.payload.stage).toBe("browse");
   });
 
+  it("clamps a dense page with long raw labels to a paged, sealed first action map", () => {
+    const longLabel = "merchant-controlled label ".repeat(12);
+    const dense = Array.from({ length: 94 }, (_, index) =>
+      element({
+        index,
+        visibleText: `${longLabel}${index}`,
+        labelText: `${longLabel}${index}`,
+        selector: `#control-${index}`,
+      }),
+    );
+    const safe = buildSafeControlsV2({
+      elements: dense,
+      legacyRefs: new Map(dense.map((control, index) => [control, `@e:legacy_${index}`])),
+      secret: randomBytes(32),
+      pageOrigin: "https://merchant.invalid",
+      selected: dense.map((_, index) => ({
+        backend_node_id: index + 1,
+        tag: "button",
+        role: "button",
+        name: `${longLabel}${index}`,
+      })),
+    });
+    const page = encodeV2Page({
+      sessionId: "session",
+      generation: 7,
+      stage: "browse",
+      rows: safe.rows,
+      cursorFor: (offset) => `cursor-${offset}`,
+    });
+    const wire = JSON.stringify(page.payload);
+    expect(safe.rows).toHaveLength(94);
+    expect((page.payload.safe_table as unknown[])).toHaveLength(4);
+    expect(page.payload.overflow).toEqual({ remaining: 90, next_cursor: "cursor-4" });
+    expect(Buffer.byteLength(wire, "utf8")).toBeLessThanOrEqual(OBSERVE_V2_MAX_WIRE_BYTES);
+    expect(wire).not.toContain(longLabel);
+  });
+
   it("turns form semantics into finite fields and never forwards their labels", () => {
     const input = element({
       tag: "input",
