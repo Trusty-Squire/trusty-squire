@@ -358,12 +358,23 @@ const OBSERVE_DELTA_CONTRACT =
   "intercepts; dismiss the overlay or deliberately use `js_click`, which directly dispatches through a " +
   "transparent overlay. ";
 
+const COMPACT_V2_CONTRACT =
+  "When format is `compact-v2`, use `safe_table` instead of el_table: its @e: refs and finite " +
+  "role/action/field/stage enums are the only emitted page view. safe_table rows are [ref,role,action,field," +
+  "state_or_choice?], where role is b=button,l=link,t=textbox,s=select,c=checkbox,r=radio,tb=tab,m=menuitem," +
+  "f=file; null is absent. For a named product/control from the task, " +
+  "call operate_observe_query with those task words; it returns matching actionable refs without revealing " +
+  "page labels, values, snapshots, or raw DOM. Use overflow.next_cursor to page. `detail:full` does not bypass " +
+  "this seal while V2 is enabled; set TRUSTY_SQUIRE_OBSERVE_V2=off for the legacy format. If delta:true is " +
+  "returned without safe_table, retain the preceding V2 table: its safe refs and map are unchanged. ";
+
 export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   name: "operate_start",
   description:
     "Begin an interactive website task: opens a scoped browser on the " +
     "user's machine at service_url and returns the initial compact observation " +
-    "{session_id, url, text, el_table, delta, snapshot_file}. " +
+    "(legacy el_table/delta or compact-v2 safe_table). " +
+    COMPACT_V2_CONTRACT +
     OBSERVE_DELTA_CONTRACT +
     "YOU are the planner — read the observation, then drive the signup, setup, or " +
     "checkout with operate_act (and operate_pay for a purchase), re-read with " +
@@ -424,6 +435,7 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
     "cross-origin frames are included, while known captcha challenge frames stay " +
     "behind the dedicated captcha flow. Path is retained only in snapshot_file, " +
     "and redundant screen/accessibility trees are omitted. " +
+    COMPACT_V2_CONTRACT +
     OBSERVE_DELTA_CONTRACT +
     "Pass " +
     'detail:"full" for the legacy screen+accessibility+full-field payload on a ' +
@@ -507,8 +519,9 @@ const observeQuerySchema = z.object({
 export const provisionObserveQueryTool: Tool<z.infer<typeof observeQuerySchema>> = {
   name: "operate_observe_query",
   description:
-    "Page compact-v2 overflow or find query. Matches query only inside the live browser and returns " +
-    "opaque refs plus finite role/state/action enums. Use overflow.next_cursor to page; never read a snapshot file.",
+    "Page compact-v2 overflow or named-control lookup. Supply the product/control words already in the task; " +
+    "matching happens only inside the live browser and returns actionable opaque refs plus finite role/state/action " +
+    "enums. Use overflow.next_cursor to page; never read a snapshot file.",
   inputSchema: observeQuerySchema,
   jsonInputSchema: {
     type: "object",
@@ -1155,8 +1168,9 @@ async function handleAwaitVerification(args: AwaitVerificationArgs) {
 export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
   name: "operate_act",
   description:
-    "Take one action in an operate session, then return the resulting " +
-    "observation. kinds: click (target=element ref, preferably an el_table row's ref), " +
+    "Take one action in an operate session. Under compact-v2 the default follow-up is a sealed delta " +
+    "when its action map is unchanged; call operate_observe or operate_observe_query when you need a new map. " +
+    "kinds: click (target=element ref, preferably a safe_table row's ref), " +
     "type (target + text; model-supplied card-number-shaped text is refused — card payment " +
     "must use operate_pay, which fills a vaulted card without exposing it to the model), " +
     "" +

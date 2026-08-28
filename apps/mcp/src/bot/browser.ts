@@ -4037,6 +4037,15 @@ export class BrowserController {
       : null;
     const useSelfLaunch =
       selfLaunchBinary !== null && existsSync(selfLaunchBinary) && canSelfLaunchWithProxy(proxy);
+    // The authenticated-proxy path has to use Playwright's persistent-context
+    // launcher.  Give that already-owned Chrome a loopback-only CDP endpoint so
+    // the pinned browser-use serializer can observe the *same* browser.  This
+    // is intentionally opt-out with Compact V2: it is not a general debugging
+    // surface and is never bound beyond localhost.
+    const compactV2Enabled = !["off", "0"].includes(
+      (process.env.TRUSTY_SQUIRE_OBSERVE_V2 ?? "on").toLowerCase(),
+    );
+    const persistentBrowserUseCdpPort = !useSelfLaunch && compactV2Enabled ? await findFreePort() : null;
 
     let context: BrowserContext;
     this.throwIfStartCancelled();
@@ -4124,7 +4133,15 @@ export class BrowserController {
               },
               ...(channel !== null ? { channel } : {}),
               ...persistentProxyOptions(proxy),
-              args: [...launchArgs],
+              args: [
+                ...launchArgs,
+                ...(persistentBrowserUseCdpPort === null
+                  ? []
+                  : [
+                      "--remote-debugging-address=127.0.0.1",
+                      `--remote-debugging-port=${persistentBrowserUseCdpPort}`,
+                    ]),
+              ],
               viewport: null,
               locale: "en-US",
               timezoneId: geo?.timezoneId ?? "America/New_York",
@@ -4169,6 +4186,13 @@ export class BrowserController {
         this.adoptOwnedChromeProcessTree(this.launchedProfileHolderIdentity, false);
       }
       this.commitProfileLaunch();
+      if (persistentBrowserUseCdpPort !== null) {
+        // A failed attach degrades only the optional compact serializer; normal
+        // browser operation remains on its established persistent path.
+        this.browserUseCdpEndpoint = await waitForDevtools(persistentBrowserUseCdpPort, 10_000).catch(
+          () => null,
+        );
+      }
       this.persistentFallbackLaunchInFlight = false;
     }
     this.context = context;

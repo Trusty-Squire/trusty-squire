@@ -11,6 +11,12 @@ interface BridgeResponse {
   selected?: BrowserUseSelectedNode[];
 }
 
+// Browser-use's maintained serializer may need several seconds on a first
+// large-SPA snapshot. Falling back at 2s emitted the legacy V1 payload (often
+// tens of KB), defeating the hard V2 budget. This is an availability timeout,
+// not a response budget: the sealed V2 result remains capped independently.
+const SERIALIZER_TIMEOUT_MS = 12_000;
+
 class BrowserUseObserver {
   private child: ChildProcess | null = null;
   private pending: Array<(response: BridgeResponse) => void> = [];
@@ -78,7 +84,7 @@ class BrowserUseObserver {
     const child = this.ensureStarted();
     if (child === null || !cdpUrl.startsWith("http")) return null;
     const response = await new Promise<BridgeResponse>((resolveResponse) => {
-      const timeout = setTimeout(() => resolveResponse({ ok: false }), 2_000);
+      const timeout = setTimeout(() => resolveResponse({ ok: false }), SERIALIZER_TIMEOUT_MS);
       this.pending.push((response) => {
         clearTimeout(timeout);
         resolveResponse(response);

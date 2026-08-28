@@ -5,6 +5,7 @@ import {
   OBSERVE_V2_MAX_WIRE_BYTES,
   buildSafeControlsV2,
   encodeV2Page,
+  safeStageV2,
 } from "../compact-observation-v2.js";
 import type { InteractiveElement } from "../browser.js";
 
@@ -71,6 +72,7 @@ describe("compact observation v2", () => {
     const page = encodeV2Page({
       sessionId: "session",
       generation: 4,
+      stage: "browse",
       rows,
       cursorFor: (offset) => `cursor-${offset}`,
     });
@@ -80,5 +82,51 @@ describe("compact observation v2", () => {
     expect(page.nextOffset).toBeGreaterThan(0);
     expect(page.nextOffset).toBeLessThan(rows.length);
     expect((page.payload.overflow as { next_cursor: string }).next_cursor).toBe(`cursor-${page.nextOffset}`);
+    expect(page.payload.stage).toBe("browse");
+  });
+
+  it("turns form semantics into finite fields and never forwards their labels", () => {
+    const input = element({
+      tag: "input",
+      type: "email",
+      role: "textbox",
+      ariaLabel: "Private customer contact address: private@example.test",
+      autocomplete: "email",
+    });
+    const safe = buildSafeControlsV2({
+      elements: [input],
+      legacyRefs: new Map([[input, "@e:email_1"]]),
+      secret: randomBytes(32),
+      pageOrigin: "https://merchant.invalid",
+      selected: [{ backend_node_id: 1, tag: "input", role: "textbox", name: "anything" }],
+    });
+    expect(safe.rows).toEqual([expect.objectContaining({ role: "textbox", field: "email" })]);
+    expect(JSON.stringify(safe.rows)).not.toContain("private@example.test");
+  });
+
+  it("reduces completion and checkout signals to a finite page-stage enum", () => {
+    expect(safeStageV2("https://merchant.invalid/thank-you", [])).toBe("complete");
+    expect(
+      safeStageV2("https://merchant.invalid/order", [element({ visibleText: "Checkout", role: "button" })]),
+    ).toBe("checkout");
+  });
+
+  it("uses a tiny sealed delta when the safe map is unchanged", () => {
+    const page = encodeV2Page({
+      sessionId: "session",
+      generation: 5,
+      stage: "form",
+      rows: [],
+      cursorFor: () => "unused",
+      unchanged: true,
+    });
+    expect(page.payload).toEqual({
+      format: "compact-v2",
+      session_id: "session",
+      generation: 5,
+      stage: "form",
+      delta: true,
+    });
+    expect(Buffer.byteLength(JSON.stringify(page.payload), "utf8")).toBeLessThan(128);
   });
 });

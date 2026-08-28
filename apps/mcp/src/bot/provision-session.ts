@@ -43,6 +43,7 @@ import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2c
 import {
   buildSafeControlsV2,
   encodeV2Page,
+  safeStageV2,
   type SafeControlV2,
   type SafeObservationIndexV2,
 } from "./compact-observation-v2.js";
@@ -547,6 +548,9 @@ export interface Session {
   compactV2Secret: Buffer;
   compactV2Refs: Map<string, string>;
   compactV2Index: SafeObservationIndexV2 | null;
+  // Safe enum-only digest of the last V2 map. It lets unchanged action
+  // follow-ups use the V2 delta envelope without retaining raw DOM data.
+  compactV2PreviousDigest: string | null;
   // Phase A operator-recipe capture (docs/ARCHITECTURE.md): the
   // ordered, TEXT-targeted action trace of this session, so a successful run can
   // be `remember`ed as a replayable rail. Records visible text + non-secret
@@ -2874,6 +2878,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     compactV2Secret: randomBytes(32),
     compactV2Refs: new Map(),
     compactV2Index: null,
+    compactV2PreviousDigest: null,
     actionTrace: [],
     recordedValues: [],
     committedSelectValues: new Map(),
@@ -2992,6 +2997,7 @@ export async function startHarnessProvisionSession(
     compactV2Secret: randomBytes(32),
     compactV2Refs: new Map(),
     compactV2Index: null,
+    compactV2PreviousDigest: null,
     actionTrace: [],
     recordedValues: [],
     committedSelectValues: new Map(),
@@ -4644,8 +4650,12 @@ function compactV2Observation(
     pageOrigin,
     selected,
   });
+  const stage = safeStageV2(session.browser.currentUrl(), elements);
+  const digest = JSON.stringify({ stage, rows: safe.rows });
+  const unchanged = session.compactV2PreviousDigest === digest;
   const index: SafeObservationIndexV2 = {
     generation,
+    stage,
     rows: safe.rows,
     byRef: safe.byRef,
     expiresAt: Date.now() + 5 * 60_000,
@@ -4654,12 +4664,15 @@ function compactV2Observation(
   // Only this enum-only index survives to delta/query/action resolution.
   session.compactV2Index = index;
   session.compactV2Refs = safe.byRef;
+  session.compactV2PreviousDigest = digest;
   session.prevObserve = null;
   const page = encodeV2Page({
     sessionId: session.id,
     generation,
+    stage: index.stage,
     rows: index.rows,
     cursorFor: (offset) => compactV2Cursor(session, generation, offset),
+    unchanged,
   });
   return { ...(page.payload as unknown as Observation), url: "", text: "" };
 }
@@ -4694,6 +4707,7 @@ export async function observeQuery(
   const page = encodeV2Page({
     sessionId: session.id,
     generation: index.generation,
+    stage: index.stage,
     rows,
     offset,
     cursorFor: (next) => compactV2Cursor(session, index.generation, next),
@@ -4745,7 +4759,7 @@ async function observeSession(
     // seals it into code-owned enums before a delta, snapshot, audit, or MCP
     // response can observe it. If the pinned Python dependency/CDP endpoint is
     // unavailable, retain the backwards-compatible V1 path rather than guess.
-    if (detail !== "full" && compactV2Mode() !== "off") {
+    if (compactV2Mode() !== "off") {
       const selected = await observeWithBrowserUse(session.browser.browserUseObservationEndpoint());
       if (selected !== null) {
         const v2 = compactV2Observation(session, generation, elements, selected);
