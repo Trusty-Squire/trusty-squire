@@ -4622,6 +4622,15 @@ function compactV2Cursor(session: Session, generation: number, offset: number): 
   return `${body}.${signature}`;
 }
 
+// Deltas are valid only for the same document location. The URL itself stays
+// on the private side of V2; the session keeps this HMAC solely to decide
+// whether a subsequent observe may reuse the preceding safe action map.
+function compactV2PageKey(session: Session): string {
+  return createHmac("sha256", session.compactV2Secret)
+    .update(session.browser.currentUrl())
+    .digest("base64url");
+}
+
 function parseCompactV2Cursor(session: Session, cursor: string): { generation: number; offset: number } {
   const [body, signature, extra] = cursor.split(".");
   if (body === undefined || signature === undefined || extra !== undefined) throw new Error("invalid_cursor");
@@ -4667,6 +4676,7 @@ function compactV2Observation(
   });
   const stage = safeStageV2(session.browser.currentUrl(), elements);
   const semantics = safePageSemanticsV2(semanticSource);
+  const pageKey = compactV2PageKey(session);
   const previous = session.compactV2Previous;
   const index: SafeObservationIndexV2 = {
     generation,
@@ -4681,12 +4691,13 @@ function compactV2Observation(
   session.compactV2Index = index;
   session.compactV2Refs = safe.byRef;
   session.compactV2Previous = {
+    pageKey,
     stage,
     semantics,
     byRef: new Map(safe.rows.map((row) => [row.ref, row])),
   };
   session.prevObserve = null;
-  if (previous !== null) {
+  if (previous !== null && previous.pageKey === pageKey) {
     const delta = encodeV2Delta({
       stage,
       // The first V2 page establishes semantic essentials. On a delta they
@@ -4697,7 +4708,7 @@ function compactV2Observation(
     });
     // A high-churn delta is less useful than a fresh paged map.  This also
     // guarantees any overflow remains in the MCP cursor protocol.
-    if (delta !== null) return delta as unknown as Observation;
+    if (delta !== null) return { ...(delta as unknown as Observation), url: "", text: "" };
   }
   const page = encodeV2Page({
     sessionId: session.id,
@@ -4706,7 +4717,7 @@ function compactV2Observation(
     rows: index.rows,
     cursorFor: (offset) => compactV2Cursor(session, generation, offset),
   });
-  return page.payload as unknown as Observation;
+  return { ...(page.payload as unknown as Observation), url: "", text: "" };
 }
 
 /**
@@ -4724,14 +4735,15 @@ function compactV2UnavailableObservation(
 ): Observation {
   const stage = safeStageV2(session.browser.currentUrl(), elements);
   const semantics = safePageSemanticsV2(semanticSource);
+  const pageKey = compactV2PageKey(session);
   const previous = session.compactV2Previous;
-  if (previous !== null && previous.stage === stage) {
+  if (previous !== null && previous.pageKey === pageKey && previous.stage === stage) {
     const delta = encodeV2Delta({
       stage,
       semantics: equalSafePageSemanticsV2(previous.semantics, semantics) ? undefined : semantics,
       delta: { added: [], changed: [], removed: [], stageChanged: false },
     });
-    if (delta !== null) return delta as unknown as Observation;
+    if (delta !== null) return { ...(delta as unknown as Observation), url: "", text: "" };
   }
   const index: SafeObservationIndexV2 = {
     generation,
@@ -4743,7 +4755,7 @@ function compactV2UnavailableObservation(
   };
   session.compactV2Index = index;
   session.compactV2Refs = new Map();
-  session.compactV2Previous = { stage, semantics, byRef: new Map() };
+  session.compactV2Previous = { pageKey, stage, semantics, byRef: new Map() };
   const page = encodeV2Page({
     sessionId: session.id,
     stage,
@@ -4751,7 +4763,7 @@ function compactV2UnavailableObservation(
     rows: [],
     cursorFor: (offset) => compactV2Cursor(session, generation, offset),
   });
-  return page.payload as unknown as Observation;
+  return { ...(page.payload as unknown as Observation), url: "", text: "" };
 }
 
 export async function observeQuery(

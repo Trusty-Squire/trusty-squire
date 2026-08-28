@@ -96,6 +96,8 @@ export interface SafeObservationIndexV2 {
  * never browser-use names, DOM values, or page copy.
  */
 export interface SafeObservationBaselineV2 {
+  /** Internal HMAC page identity; never emitted or persisted outside the session. */
+  pageKey: string;
   stage: SafeStageV2;
   semantics: SafePageSemanticsV2;
   byRef: Map<string, SafeControlV2>;

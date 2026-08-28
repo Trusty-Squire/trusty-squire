@@ -213,6 +213,33 @@ describe("compact observation v2", () => {
     expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThan(80);
   });
 
+  it("keeps controls on the first page and sends no rows for its unchanged re-observe", () => {
+    const first = encodeV2Page({
+      sessionId: "session",
+      stage: "browse",
+      semantics: { title: "Sample", headings: ["Choose an option"] },
+      rows: [
+        {
+          ref: "@e:first-control",
+          role: "button",
+          visibility: "viewport",
+          frame: "main",
+          name: "Continue",
+        },
+      ],
+      cursorFor: (offset) => `cursor-${offset}`,
+    });
+    expect(first.payload.safe_table).toEqual([
+      ["@e:first-control", "b", null, null, "", "Continue"],
+    ]);
+    const repeat = encodeV2Delta({
+      stage: "browse",
+      delta: { added: [], changed: [], removed: [], stageChanged: false },
+    });
+    expect(repeat).toEqual({ format: "compact-v2", delta: true });
+    expect(Buffer.byteLength(JSON.stringify(repeat), "utf8")).toBeLessThan(40);
+  });
+
   it("keeps unchanged semantic essentials sticky instead of repeating them in every delta", () => {
     const semantics = { title: "Example storefront", headings: ["Create your account"] };
     expect(equalSafePageSemanticsV2(semantics, { ...semantics, headings: ["Create your account"] })).toBe(true);
@@ -238,7 +265,12 @@ describe("compact observation v2", () => {
     const changed = { ...before, action: "submit" as const };
     const added = { ...before, ref: "@e:added", field: "email" as const };
     const delta = diffSafeControlsV2(
-      { stage: "form", semantics: {}, byRef: new Map([[before.ref, before], ["@e:removed", before]]) },
+      {
+        pageKey: "same-page",
+        stage: "form",
+        semantics: {},
+        byRef: new Map([[before.ref, before], ["@e:removed", before]]),
+      },
       "form",
       [changed, added],
     );
