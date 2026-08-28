@@ -171,7 +171,7 @@ request.
 npx @trusty-squire/mcp connect
 ```
 
-`connect` signs you in with Google or GitHub, detects your coding agent, and merges the `squire` MCP server into its existing configuration. Restart the agent and ask for the finished website outcome. Trusty Squire is free to start.
+`connect` signs you in with Google or GitHub, detects your coding agent, and merges the `squire` MCP server into its existing configuration. Run it from a machine with a user-visible desktop: the sign-in opens a local Chrome window, and headless or SSH/TTY-only Linux sessions are not supported. Restart the agent and ask for the finished website outcome. Trusty Squire is free to start.
 
 To choose a target explicitly:
 

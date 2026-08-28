@@ -41,7 +41,6 @@ import {
   runDisplayedChrome,
   scopesAreBasic,
   scrapeGoogleScopePhrases,
-  teardownLoginBrowser,
   trackActiveLoginBrowser,
   ensureOAuthSession,
   finalizeLoginRun,

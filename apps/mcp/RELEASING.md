@@ -9,7 +9,7 @@ machine with a user-visible display:
       a Google sign-in completes.
 - [ ] Starting a concurrent `connect` or `login` exits non-zero without
       waiting and prints `another Trusty Squire session is already using
-    the browser — close it first`.
+      the browser — close it first`.
 
 ## Publish
 

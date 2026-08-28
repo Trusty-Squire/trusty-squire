@@ -528,9 +528,9 @@ virgin signup succeeds on an UNCOVERED service (no active skill in registry)
 
 ## Browser launch posture
 
-- `BrowserController` is new-headless only; do not reintroduce virtual-display
-  launch or remote-VNC login machinery. `apps/mcp/src/bot/browser.ts` owns the
-  supported headless and remote-CDP paths.
+- `BrowserController` local launches are new-headless only; do not reintroduce
+  virtual-display launch or remote-VNC login machinery. `apps/mcp/src/bot/browser.ts`
+  owns the supported local-headless and remote-CDP paths.
 - Keep self-launch + `connectOverCDP` and Patchright as the defaults. The
   2026-08-28 read-only A/B used serial, fresh-profile trials against Exa, Groq,
   Cartesia, Replit, Runpod, and Turso from egress `172.93.111.86`:
