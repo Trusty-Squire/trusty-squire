@@ -42,9 +42,12 @@ import type {
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import {
   buildSafeControlsV2,
+  diffSafeControlsV2,
+  encodeV2Delta,
   encodeV2Page,
   safeStageV2,
   type SafeControlV2,
+  type SafeObservationBaselineV2,
   type SafeObservationIndexV2,
 } from "./compact-observation-v2.js";
 import { closeBrowserUseObserver, observeWithBrowserUse } from "./browser-use-observer.js";
@@ -548,9 +551,10 @@ export interface Session {
   compactV2Secret: Buffer;
   compactV2Refs: Map<string, string>;
   compactV2Index: SafeObservationIndexV2 | null;
-  // Safe enum-only digest of the last V2 map. It lets unchanged action
-  // follow-ups use the V2 delta envelope without retaining raw DOM data.
-  compactV2PreviousDigest: string | null;
+  // Safe enum-only prior map. Repeat observes diff this representation, never
+  // raw DOM/browser-use output, so every delta remains inside the allowlist
+  // seal even when a page mutates confidential values or live regions.
+  compactV2Previous: SafeObservationBaselineV2 | null;
   // Phase A operator-recipe capture (docs/ARCHITECTURE.md): the
   // ordered, TEXT-targeted action trace of this session, so a successful run can
   // be `remember`ed as a replayable rail. Records visible text + non-secret
@@ -2878,7 +2882,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     compactV2Secret: randomBytes(32),
     compactV2Refs: new Map(),
     compactV2Index: null,
-    compactV2PreviousDigest: null,
+    compactV2Previous: null,
     actionTrace: [],
     recordedValues: [],
     committedSelectValues: new Map(),
@@ -2997,7 +3001,7 @@ export async function startHarnessProvisionSession(
     compactV2Secret: randomBytes(32),
     compactV2Refs: new Map(),
     compactV2Index: null,
-    compactV2PreviousDigest: null,
+    compactV2Previous: null,
     actionTrace: [],
     recordedValues: [],
     committedSelectValues: new Map(),
@@ -4649,10 +4653,12 @@ function compactV2Observation(
     secret: session.compactV2Secret,
     pageOrigin,
     selected,
+    ...(session.compactV2Previous === null
+      ? {}
+      : { previouslySelected: new Set(session.compactV2Previous.byRef.keys()) }),
   });
   const stage = safeStageV2(session.browser.currentUrl(), elements);
-  const digest = JSON.stringify({ stage, rows: safe.rows });
-  const unchanged = session.compactV2PreviousDigest === digest;
+  const previous = session.compactV2Previous;
   const index: SafeObservationIndexV2 = {
     generation,
     stage,
@@ -4664,15 +4670,66 @@ function compactV2Observation(
   // Only this enum-only index survives to delta/query/action resolution.
   session.compactV2Index = index;
   session.compactV2Refs = safe.byRef;
-  session.compactV2PreviousDigest = digest;
+  session.compactV2Previous = { stage, byRef: new Map(safe.rows.map((row) => [row.ref, row])) };
   session.prevObserve = null;
+  if (previous !== null) {
+    const delta = encodeV2Delta({
+      generation,
+      stage,
+      delta: diffSafeControlsV2(previous, stage, safe.rows),
+    });
+    // A high-churn delta is less useful than a fresh paged map.  This also
+    // guarantees any overflow remains in the MCP cursor protocol.
+    if (delta !== null) return { ...(delta as unknown as Observation), url: "", text: "" };
+  }
   const page = encodeV2Page({
     sessionId: session.id,
     generation,
     stage: index.stage,
     rows: index.rows,
     cursorFor: (offset) => compactV2Cursor(session, generation, offset),
-    unchanged,
+  });
+  return { ...(page.payload as unknown as Observation), url: "", text: "" };
+}
+
+/**
+ * Browser-use/CDP is an upstream dependency, so it can be temporarily
+ * unavailable.  V2 must nevertheless remain sealed: do not fall through to
+ * the legacy text/inventory path, which would bypass the allowlist and its
+ * hard payload cap.  A prior sealed map is safe to retain for one retry; on a
+ * new stage we send an explicit empty sealed resync instead.
+ */
+function compactV2UnavailableObservation(
+  session: Session,
+  generation: number,
+  elements: readonly InteractiveElement[],
+): Observation {
+  const stage = safeStageV2(session.browser.currentUrl(), elements);
+  const previous = session.compactV2Previous;
+  if (previous !== null && previous.stage === stage) {
+    const delta = encodeV2Delta({
+      generation,
+      stage,
+      delta: { added: [], changed: [], removed: [], stageChanged: false },
+    });
+    if (delta !== null) return { ...(delta as unknown as Observation), url: "", text: "" };
+  }
+  const index: SafeObservationIndexV2 = {
+    generation,
+    stage,
+    rows: [],
+    byRef: new Map(),
+    expiresAt: Date.now() + 5 * 60_000,
+  };
+  session.compactV2Index = index;
+  session.compactV2Refs = new Map();
+  session.compactV2Previous = { stage, byRef: new Map() };
+  const page = encodeV2Page({
+    sessionId: session.id,
+    generation,
+    stage,
+    rows: [],
+    cursorFor: (offset) => compactV2Cursor(session, generation, offset),
   });
   return { ...(page.payload as unknown as Observation), url: "", text: "" };
 }
@@ -4758,12 +4815,16 @@ async function observeSession(
     // serializer output remains within this short-lived call; TS immediately
     // seals it into code-owned enums before a delta, snapshot, audit, or MCP
     // response can observe it. If the pinned Python dependency/CDP endpoint is
-    // unavailable, retain the backwards-compatible V1 path rather than guess.
+    // unavailable, retain only an already-sealed V2 map. Never fall through to
+    // V1: that would turn a transient upstream outage into an unbounded raw
+    // observation and breach the allowlist-before-any-sink rule.
     if (compactV2Mode() !== "off") {
       const selected = await observeWithBrowserUse(session.browser.browserUseObservationEndpoint());
       if (selected !== null) {
         const v2 = compactV2Observation(session, generation, elements, selected);
         if (compactV2Mode() === "on") return v2;
+      } else if (compactV2Mode() === "on") {
+        return compactV2UnavailableObservation(session, generation, elements);
       }
     }
     const sealedFieldKeys = observationSealedFieldKeys(session, elements);

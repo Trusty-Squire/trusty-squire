@@ -15,7 +15,7 @@ interface BridgeResponse {
 // large-SPA snapshot. Falling back at 2s emitted the legacy V1 payload (often
 // tens of KB), defeating the hard V2 budget. This is an availability timeout,
 // not a response budget: the sealed V2 result remains capped independently.
-const SERIALIZER_TIMEOUT_MS = 12_000;
+const SERIALIZER_TIMEOUT_MS = 30_000;
 
 class BrowserUseObserver {
   private child: ChildProcess | null = null;

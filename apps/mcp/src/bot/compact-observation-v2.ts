@@ -76,6 +76,16 @@ export interface SafeObservationIndexV2 {
   expiresAt: number;
 }
 
+/**
+ * The only V2 state retained between observations.  These rows have already
+ * crossed the allowlist seal: they contain HMAC refs and code-owned enums,
+ * never browser-use names, DOM values, or page copy.
+ */
+export interface SafeObservationBaselineV2 {
+  stage: SafeStageV2;
+  byRef: Map<string, SafeControlV2>;
+}
+
 type WireControlV2 = [string, string, SafeIntentV2 | null, SafeFieldV2 | null, string?];
 
 // The protocol is intentionally positional to keep repeated observes small.
@@ -98,6 +108,60 @@ function wireControl(row: SafeControlV2): WireControlV2 {
   return signal === undefined
     ? [row.ref, role[row.role], row.action ?? null, row.field ?? null]
     : [row.ref, role[row.role], row.action ?? null, row.field ?? null, signal];
+}
+
+export interface SafeObservationDeltaV2 {
+  added: SafeControlV2[];
+  changed: SafeControlV2[];
+  removed: string[];
+  stageChanged: boolean;
+}
+
+/**
+ * Diff only the sealed representation.  In particular, raw changes to a
+ * field value, card number, live region, or merchant copy cannot cause either
+ * the raw data or a page-derived derivative to cross into the delta.
+ */
+export function diffSafeControlsV2(
+  previous: SafeObservationBaselineV2,
+  stage: SafeStageV2,
+  rows: readonly SafeControlV2[],
+): SafeObservationDeltaV2 {
+  const current = new Map(rows.map((row) => [row.ref, row]));
+  const added: SafeControlV2[] = [];
+  const changed: SafeControlV2[] = [];
+  for (const row of rows) {
+    const before = previous.byRef.get(row.ref);
+    if (before === undefined) added.push(row);
+    else if (JSON.stringify(wireControl(before)) !== JSON.stringify(wireControl(row))) changed.push(row);
+  }
+  const removed = [...previous.byRef.keys()].filter((ref) => !current.has(ref));
+  return { added, changed, removed, stageChanged: previous.stage !== stage };
+}
+
+/**
+ * Encodes a structural V2 delta. `null` deliberately asks the caller to send
+ * a paged full resync instead: a delta must never exceed the hard wire budget.
+ */
+export function encodeV2Delta(args: {
+  generation: number;
+  stage: SafeStageV2;
+  delta: SafeObservationDeltaV2;
+}): Record<string, unknown> | null {
+  const payload: Record<string, unknown> = {
+    format: "compact-v2",
+    generation: args.generation,
+    delta: true,
+    ...(args.delta.stageChanged ? { stage: args.stage } : {}),
+    // `safe_table` follows the established TS delta protocol: rows are
+    // upserts, irrespective of whether their ref is new or changed. This keeps
+    // existing delta consumers compatible while the @e: map itself stays V2.
+    ...(args.delta.added.length + args.delta.changed.length > 0
+      ? { safe_table: [...args.delta.added, ...args.delta.changed].map(wireControl) }
+      : {}),
+    ...(args.delta.removed.length > 0 ? { removed: args.delta.removed } : {}),
+  };
+  return Buffer.byteLength(JSON.stringify(payload), "utf8") <= OBSERVE_V2_MAX_WIRE_BYTES ? payload : null;
 }
 
 const INTENTS: ReadonlyArray<[SafeIntentV2, RegExp]> = [
@@ -227,6 +291,8 @@ export function buildSafeControlsV2(args: {
   secret: Buffer;
   pageOrigin: string;
   selected: readonly BrowserUseSelectedNode[];
+  /** Safe refs selected by browser-use on the preceding observation. */
+  previouslySelected?: ReadonlySet<string>;
 }): { rows: SafeControlV2[]; byRef: Map<string, string> } {
   const rows: Array<{ row: SafeControlV2; priority: number }> = [];
   const byRef = new Map<string, string>();
@@ -234,8 +300,14 @@ export function buildSafeControlsV2(args: {
     if (el.visible !== true || el.topmost === false) continue;
     const role = roleOf(el);
     const legacy = args.legacyRefs.get(el);
-    if (role === null || legacy === undefined || !upstreamSelected(el, args.selected)) continue;
+    if (role === null || legacy === undefined) continue;
     const ref = safeV2Ref(args.secret, legacy);
+    // Browser-use is authoritative for a NEW candidate. Once it has selected a
+    // candidate, retain only its sealed HMAC ref through this page's delta
+    // stream. Browser-use's serializer can legitimately vary its viewport
+    // shortlist between identical snapshots; without this tiny safe cache that
+    // variation looks like DOM churn and defeats the delta protocol.
+    if (!upstreamSelected(el, args.selected) && !args.previouslySelected?.has(ref)) continue;
     byRef.set(ref, legacy);
     const state = stateOf(el);
     const action = intentOf(el);

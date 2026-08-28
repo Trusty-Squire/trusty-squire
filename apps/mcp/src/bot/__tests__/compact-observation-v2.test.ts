@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 import {
   OBSERVE_V2_MAX_WIRE_BYTES,
   buildSafeControlsV2,
+  diffSafeControlsV2,
+  encodeV2Delta,
   encodeV2Page,
   safeStageV2,
 } from "../compact-observation-v2.js";
@@ -104,6 +106,28 @@ describe("compact observation v2", () => {
     expect(JSON.stringify(safe.rows)).not.toContain("private@example.test");
   });
 
+  it("keeps only an already browser-use-authorized sealed ref across a transient shortlist change", () => {
+    const button = element({ visibleText: "private merchant copy" });
+    const refs = new Map<InteractiveElement, string>([[button, "@e:stable_button"]]);
+    const initial = buildSafeControlsV2({
+      elements: [button],
+      legacyRefs: refs,
+      secret: Buffer.alloc(32, 7),
+      pageOrigin: "https://merchant.invalid",
+      selected: [{ backend_node_id: 1, tag: "button", role: "button", name: "private merchant copy" }],
+    });
+    const repeated = buildSafeControlsV2({
+      elements: [button],
+      legacyRefs: refs,
+      secret: Buffer.alloc(32, 7),
+      pageOrigin: "https://merchant.invalid",
+      selected: [],
+      previouslySelected: new Set(initial.rows.map((row) => row.ref)),
+    });
+    expect(repeated.rows).toEqual(initial.rows);
+    expect(JSON.stringify(repeated.rows)).not.toContain("private merchant copy");
+  });
+
   it("reduces completion and checkout signals to a finite page-stage enum", () => {
     expect(safeStageV2("https://merchant.invalid/thank-you", [])).toBe("complete");
     expect(
@@ -112,21 +136,41 @@ describe("compact observation v2", () => {
   });
 
   it("uses a tiny sealed delta when the safe map is unchanged", () => {
-    const page = encodeV2Page({
-      sessionId: "session",
+    const page = encodeV2Delta({
       generation: 5,
       stage: "form",
-      rows: [],
-      cursorFor: () => "unused",
-      unchanged: true,
+      delta: { added: [], changed: [], removed: [], stageChanged: false },
     });
-    expect(page.payload).toEqual({
+    expect(page).toEqual({
       format: "compact-v2",
-      session_id: "session",
       generation: 5,
-      stage: "form",
       delta: true,
     });
-    expect(Buffer.byteLength(JSON.stringify(page.payload), "utf8")).toBeLessThan(128);
+    expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThan(80);
+  });
+
+  it("emits only safe upserts and removed refs for a structural delta", () => {
+    const planted = "4111111111111111 CVV=123 merchant=Northwind";
+    const before = {
+      ref: "@e:before",
+      role: "button" as const,
+      visibility: "viewport" as const,
+      frame: "main" as const,
+      action: "continue" as const,
+    };
+    const changed = { ...before, action: "submit" as const };
+    const added = { ...before, ref: "@e:added", field: "email" as const };
+    const delta = diffSafeControlsV2(
+      { stage: "form", byRef: new Map([[before.ref, before], ["@e:removed", before]]) },
+      "form",
+      [changed, added],
+    );
+    const page = encodeV2Delta({ generation: 6, stage: "form", delta });
+    const wire = JSON.stringify(page);
+    expect(wire).toContain("safe_table");
+    expect(wire).toContain("@e:added");
+    expect(wire).toContain("@e:removed");
+    expect(wire).not.toContain(planted);
+    expect(wire).not.toContain("Northwind");
   });
 });

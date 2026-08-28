@@ -365,8 +365,9 @@ const COMPACT_V2_CONTRACT =
   "f=file; null is absent. For a named product/control from the task, " +
   "call operate_observe_query with those task words; it returns matching actionable refs without revealing " +
   "page labels, values, snapshots, or raw DOM. Use overflow.next_cursor to page. `detail:full` does not bypass " +
-  "this seal while V2 is enabled; set TRUSTY_SQUIRE_OBSERVE_V2=off for the legacy format. If delta:true is " +
-  "returned without safe_table, retain the preceding V2 table: its safe refs and map are unchanged. ";
+  "this seal while V2 is enabled; set TRUSTY_SQUIRE_OBSERVE_V2=off for the legacy format. A delta:true " +
+  "retains the preceding V2 table, then upserts tuple rows in safe_table, removes refs in removed, " +
+  "and updates stage only when it is present. A delta with none of those fields means the safe map is unchanged. ";
 
 export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   name: "operate_start",
