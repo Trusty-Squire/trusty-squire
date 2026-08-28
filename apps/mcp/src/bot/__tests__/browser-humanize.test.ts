@@ -7,10 +7,13 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   BrowserController,
+  captureOwnedChromeProcessTreeProof,
   claimOrphanBrowserReapScope,
   matchesReapableBrowserArgs,
+  ownedChromeProcessTreeState,
   signalOwnedChromeProcessTree,
 } from "../browser.js";
+import { closeProfileWithProof } from "../profile.js";
 
 describe("BrowserController humanize option", () => {
   it("defaults humanize to true", () => {
@@ -216,8 +219,103 @@ describe("self-managed Chrome process ownership", () => {
       platform: "linux",
       profileMatches: () => true,
       processTreePids: () => [4_242, 4_243, 4_244],
+      readBirthIdentity: (pid) => ({ pid, start_time: String(pid) }),
+      memberState: () => "matching",
       kill: (pid) => killed.push(pid),
     });
     expect(killed).toEqual([4_244, 4_243, 4_242]);
+  });
+
+  it("keeps process-group ownership after the Chrome root exits", () => {
+    const proof = captureOwnedChromeProcessTreeProof(identity, true, {
+      platform: "linux",
+      profileMatches: () => true,
+      processTreePids: () => [4_242, 4_243],
+      readBirthIdentity: (pid) => ({ pid, start_time: String(pid) }),
+    });
+    if (proof === null) throw new Error("expected process-tree proof");
+    const kill = vi.fn();
+
+    expect(
+      ownedChromeProcessTreeState(proof, {
+        platform: "linux",
+        profileMatches: () => false,
+        processGroupExists: () => "matching",
+      }),
+    ).toBe("matching");
+    expect(
+      signalOwnedChromeProcessTree(identity, true, "SIGKILL", {
+        platform: "linux",
+        profileMatches: () => false,
+        proof,
+        kill,
+      }),
+    ).toBe(true);
+    expect(kill).toHaveBeenCalledWith(-4_242, "SIGKILL");
+  });
+
+  it("does not report closed while an owned process-group member survives", async () => {
+    const proof = captureOwnedChromeProcessTreeProof(identity, true, {
+      platform: "linux",
+      profileMatches: () => true,
+    });
+    if (proof === null) throw new Error("expected process-tree proof");
+    let rootMatches = true;
+    let groupExists = true;
+    const killed: NodeJS.Signals[] = [];
+
+    await expect(
+      closeProfileWithProof({
+        profileDir: identity.user_data_dir,
+        identity,
+        close: async () => {
+          signalOwnedChromeProcessTree(identity, true, "SIGTERM", {
+            platform: "linux",
+            proof,
+            kill: (_pid, signal) => killed.push(signal),
+          });
+          rootMatches = false;
+        },
+        forceClose: () => {
+          signalOwnedChromeProcessTree(identity, true, "SIGKILL", {
+            platform: "linux",
+            proof,
+            kill: (_pid, signal) => killed.push(signal),
+          });
+          groupExists = false;
+        },
+        identityState: () =>
+          ownedChromeProcessTreeState(proof, {
+            platform: "linux",
+            profileMatches: () => rootMatches,
+            processGroupExists: () => (groupExists ? "matching" : "stale"),
+          }),
+        proofTimeoutMs: 1,
+        pollMs: 1,
+      }),
+    ).resolves.toBe("force_closed_unproven");
+    expect(killed).toEqual(["SIGTERM", "SIGKILL"]);
+  });
+
+  it("keeps fallback descendant ownership after the profile root exits", () => {
+    const proof = captureOwnedChromeProcessTreeProof(identity, false, {
+      platform: "linux",
+      profileMatches: () => true,
+      processTreePids: () => [4_242, 4_243, 4_244],
+      readBirthIdentity: (pid) => ({ pid, start_time: String(pid) }),
+    });
+    if (proof === null) throw new Error("expected process-tree proof");
+    const killed: number[] = [];
+
+    expect(
+      signalOwnedChromeProcessTree(identity, false, "SIGKILL", {
+        platform: "linux",
+        profileMatches: () => false,
+        proof,
+        memberState: (member) => (member.pid === 4_244 ? "matching" : "stale"),
+        kill: (pid) => killed.push(pid),
+      }),
+    ).toBe(true);
+    expect(killed).toEqual([4_244]);
   });
 });

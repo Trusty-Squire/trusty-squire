@@ -3887,6 +3887,70 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     expect(h.resetCalls).toBe(1);
   });
 
+  it("forces operate_finish teardown when an entered call never drains", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_DRAIN_TIMEOUT_MS", "50");
+    try {
+      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+      let releaseCall: (() => void) | undefined;
+      const entered = withProvisionSessionCall(
+        started.session_id,
+        async () =>
+          await new Promise<void>((resolve) => {
+            releaseCall = resolve;
+          }),
+      );
+      await vi.waitFor(() => expect(releaseCall).toBeTypeOf("function"));
+
+      const finishing = expect(finishProvisionSession(started.session_id)).rejects.toThrow(
+        /call drain timed out; browser terminated/,
+      );
+      await vi.advanceTimersByTimeAsync(50);
+      await finishing;
+
+      expect(h.closeCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+      expect(activeSessionCount()).toBe(0);
+      releaseCall?.();
+      await entered;
+    } finally {
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    }
+  });
+
+  it("forces disconnect teardown when an entered call never drains", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_DRAIN_TIMEOUT_MS", "50");
+    try {
+      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+      let releaseCall: (() => void) | undefined;
+      const entered = withProvisionSessionCall(
+        started.session_id,
+        async () =>
+          await new Promise<void>((resolve) => {
+            releaseCall = resolve;
+          }),
+      );
+      await vi.waitFor(() => expect(releaseCall).toBeTypeOf("function"));
+
+      const shutdown = closeAllProvisionSessions();
+      await vi.advanceTimersByTimeAsync(50);
+      await shutdown;
+
+      expect(h.closeCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+      expect(activeSessionCount()).toBe(0);
+      releaseCall?.();
+      await entered;
+    } finally {
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    }
+  });
+
   it("closes after a submitted confirmation throws and leaves stale confirming state", async () => {
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
     const originalSession = paymentSession(started.session_id);
@@ -4356,6 +4420,80 @@ describe("operate session — isolated profile-pool lifecycle", () => {
       expect(h.activeLeaseCount).toBe(1);
       await finishProvisionSession(recovered.session_id);
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refreshes the idle deadline when the final active call completes", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_SESSION_IDLE_TIMEOUT_MS", "100");
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_BROWSER_WATCHDOG_INTERVAL_MS", "10");
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_BROWSER_MAX_LIFETIME_MS", "10000");
+    try {
+      const session = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+      let releaseCall: (() => void) | undefined;
+      const entered = withProvisionSessionCall(
+        session.session_id,
+        async () =>
+          await new Promise<void>((resolve) => {
+            releaseCall = resolve;
+          }),
+      );
+      await vi.waitFor(() => expect(releaseCall).toBeTypeOf("function"));
+
+      await vi.advanceTimersByTimeAsync(90);
+      releaseCall?.();
+      await entered;
+      await vi.advanceTimersByTimeAsync(90);
+      expect(h.closeCalls).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(10);
+      expect(h.closeCalls).toBe(1);
+      expect(activeSessionCount()).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds the pending 3DS final audit before watchdog teardown", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_SESSION_IDLE_TIMEOUT_MS", "100");
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_BROWSER_WATCHDOG_INTERVAL_MS", "10");
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_PENDING_3DS_FINALIZE_TIMEOUT_MS", "50");
+    const auditPayment = vi.fn(async () => await new Promise<never>(() => undefined));
+    try {
+      const session = await startProvisionSession({
+        serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+        api: { auditPayment } as unknown as ApiClient,
+      });
+      setActivePendingThreeDs(
+        {
+          approval_id: "appr_watchdog_3ds",
+          approval_url: "https://web.test/vault/pay/appr_watchdog_3ds",
+          checkout: {
+            merchant: "Hibiya Kadan",
+            checkout_origin: "https://hibiyakadan.example.test",
+            amount_cents: 8_800,
+            currency: "JPY",
+          },
+          last4: "9192",
+          mandate_id: "mandate_watchdog_3ds",
+          deadline: Date.now() + 60_000,
+        },
+        paymentSession(session.session_id),
+      );
+
+      await vi.advanceTimersByTimeAsync(150);
+
+      expect(h.waitForThreeDsCalls).toEqual([0]);
+      expect(auditPayment).toHaveBeenCalledOnce();
+      expect(h.closeCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+      expect(activeSessionCount()).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
       vi.useRealTimers();
     }
   });
