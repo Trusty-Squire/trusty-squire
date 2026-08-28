@@ -98,7 +98,8 @@ expected-versus-observed evidence. The warning persists through resumable
 `operate_payment_status` calls; it neither changes the payment status nor cancels,
 approves, or modifies the challenge, so the cardholder retains the decision whether
 to continue. A bare click that produces no confirmation and no detected challenge returns
-`payment_outcome_unknown` instead of guessing that the charge succeeded. A detected
+`payment_outcome_unknown` instead of guessing that the charge succeeded, as does a click-
+completion failure after input dispatch may already have begun. A detected
 challenge that remains unresolved on timeout stays
 `payment_3ds_required` with `needs_user.wall: "3ds"`, handing control back for user
 completion. Neither status is success or permits blind resubmission: manually check

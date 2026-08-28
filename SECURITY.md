@@ -207,7 +207,11 @@ state change fails closed. After dispatch, the native 3-D Secure wait passively
 compares issuer/network/last-four evidence rendered by the issuer/app with the
 released card. A discrepancy is returned and retained across resumable status polls
 as a structured `payment_instrument_mismatch` warning; it never mutates or cancels
-the challenge, creates a charge path, or introduces another approval.
+the challenge, creates a charge path, or introduces another approval. Once the trusted
+click reaches the input-dispatch boundary, a rejected click completion or missing page
+observer is conservatively retained as an unknown submitted payment with resumable 3-D
+Secure state. Only a failure known to precede that boundary is classified as a checkout
+failure and allowed to clear the pending-submit state.
 
 Payment state, the approval keypair, and the verified mandate remain attached to the
 addressed operate session. `operate_pay` and `operate_payment_status`
