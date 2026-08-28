@@ -57,6 +57,7 @@ const h = vi.hoisted(() => ({
   closeState: "closed" as "closed" | "force_closed_unproven" | "unknown",
   resetCalls: 0,
   resetFailuresRemaining: 0,
+  resetGate: null as Promise<void> | null,
   profileProbeCalls: 0,
   controllerProviderProbeCalls: 0,
   workerEmail: null as string | null,
@@ -207,6 +208,7 @@ vi.mock("../browser.js", () => ({
     }
     async resetPageForReuse(): Promise<void> {
       h.resetCalls += 1;
+      if (h.resetGate !== null) await h.resetGate;
       if (h.resetFailuresRemaining > 0) {
         h.resetFailuresRemaining -= 1;
         throw new Error("page reset failed");
@@ -895,6 +897,7 @@ import {
   armPaymentDispatchHandoff,
   cartAdd,
   coordinatePaymentDispatchAudit,
+  finishPaymentDispatchHandoff,
   recordActivePaymentProvenance,
   setActivePendingCardFill,
   claimActivePaymentForOperatePay,
@@ -1025,6 +1028,7 @@ beforeEach(() => {
   h.closeState = "closed";
   h.resetCalls = 0;
   h.resetFailuresRemaining = 0;
+  h.resetGate = null;
   h.profileProbeCalls = 0;
   h.controllerProviderProbeCalls = 0;
   h.workerEmail = null;
@@ -4017,6 +4021,35 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     }
   });
 
+  it("keeps the profile lease reachable while a finishing page reset is forced closed", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS", "50");
+    let releaseReset: (() => void) | undefined;
+    h.resetGate = new Promise<void>((resolve) => {
+      releaseReset = resolve;
+    });
+    try {
+      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+      const finishing = expect(finishProvisionSession(started.session_id)).rejects.toThrow(
+        /terminal transition timed out; browser terminated/,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.resetCalls).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(50);
+      await finishing;
+
+      expect(h.forceCloseCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+    } finally {
+      releaseReset?.();
+      h.resetGate = null;
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    }
+  });
+
   it("closes after a submitted confirmation throws and leaves stale confirming state", async () => {
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
     const originalSession = paymentSession(started.session_id);
@@ -4593,15 +4626,15 @@ describe("operate session — isolated profile-pool lifecycle", () => {
       ).toBe(true),
     );
     setActivePendingThreeDs(state, session);
-    const racingAudit = coordinatePaymentDispatchAudit(
+    await closing;
+    await coordinatePaymentDispatchAudit(
       state,
       async () => {
         await auditPayment({ status: "payment_outcome_unknown" });
       },
       session,
     );
-
-    await Promise.all([closing, racingAudit]);
+    finishPaymentDispatchHandoff(state, session);
 
     expect(h.waitForThreeDsCalls).toEqual([0]);
     expect(auditPayment).toHaveBeenCalledOnce();
@@ -4611,6 +4644,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
         status: "payment_3ds_unresolved",
       }),
     );
+    expect(session.paymentDispatchHandoff).toBeNull();
   });
 
   it("closes an active session and its warm browser during shutdown", async () => {
@@ -4629,31 +4663,40 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     await finishProvisionSession(recovered.session_id);
   });
 
-  it("force-closes an in-progress browser launch without awaiting startup", async () => {
+  it("force-closes an in-progress browser launch on non-Linux without awaiting startup", async () => {
+    const platform = process.platform;
+    Object.defineProperty(process, "platform", { configurable: true, value: "darwin" });
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_FORCE_CLOSE_TIMEOUT_MS", "25");
     let releaseStart: (() => void) | undefined;
     h.startGate = new Promise<void>((resolve) => {
       releaseStart = resolve;
     });
-    const startResult = startProvisionSession({ serviceUrl: "https://app.example.com/" }).then(
-      () => null,
-      (err: unknown) => err,
-    );
-    await vi.waitFor(() => expect(h.startCalls).toBe(1));
+    try {
+      const startResult = startProvisionSession({ serviceUrl: "https://app.example.com/" }).then(
+        () => null,
+        (err: unknown) => err,
+      );
+      await vi.waitFor(() => expect(h.startCalls).toBe(1));
 
-    await closeAllProvisionSessions();
+      await closeAllProvisionSessions();
 
-    expect(h.forceCloseCalls).toBe(1);
-    expect(h.leaseDestroyCalls).toBe(1);
-    expect(h.activeLeaseCount).toBe(0);
+      expect(h.forceCloseCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
 
-    releaseStart?.();
-    await expect(startResult).resolves.toEqual(
-      expect.objectContaining({
-        message: "operate_start cancelled: operator server is shutting down",
-      }),
-    );
-    expect(h.closeCalls).toBe(1);
-    expect(h.leaseDestroyCalls).toBe(1);
+      releaseStart?.();
+      await expect(startResult).resolves.toEqual(
+        expect.objectContaining({
+          message: "operate_start cancelled: operator server is shutting down",
+        }),
+      );
+      expect(h.closeCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+    } finally {
+      releaseStart?.();
+      vi.unstubAllEnvs();
+      Object.defineProperty(process, "platform", { configurable: true, value: platform });
+    }
   });
 
   it("bounds startup timeout cleanup without awaiting a hung launch", async () => {

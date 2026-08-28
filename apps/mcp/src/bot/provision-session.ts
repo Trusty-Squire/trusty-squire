@@ -914,22 +914,22 @@ async function releaseWarmBrowserPage(
     await browser.close().catch(() => undefined);
     return;
   }
-  leasedBrowsers.delete(browser);
   try {
     if (reusable) await browser.resetPageForReuse();
     await closeLeasedBrowser(browser, slot.lease, reusable);
   } catch {
     await closeLeasedBrowser(browser, slot.lease, false);
   }
+  if (leasedBrowsers.get(browser) === slot) leasedBrowsers.delete(browser);
 }
 
 async function forceReleaseWarmBrowserPage(browser: BrowserController): Promise<void> {
   const slot = leasedBrowsers.get(browser);
-  if (slot !== undefined) leasedBrowsers.delete(browser);
   const closeState = await closeBrowserBounded(browser, false, "operator browser force-close timed out");
   if (slot === undefined) return;
   if (closeState === "closed") await slot.lease.destroy();
   else await slot.lease.retain(true);
+  if (leasedBrowsers.get(browser) === slot) leasedBrowsers.delete(browser);
 }
 
 async function closeBrowserBounded(
@@ -948,7 +948,7 @@ async function closeBrowserBounded(
     .close(cancelStart ? { cancelStart: true } : undefined)
     .catch(() => "unknown" as const);
   const forcedClose =
-    process.platform !== "linux" || forceClose === undefined
+    forceClose === undefined
       ? ordinaryClose
       : forceClose.call(browser).catch(() => "unknown" as const);
   const closed = Promise.race([
@@ -1090,7 +1090,6 @@ async function forceTerminateProvisionSessionOwned(
   session.activePayment = null;
   session.paymentFieldSealActive = false;
   session.pendingThreeDs = null;
-  session.paymentDispatchHandoff = null;
   await forceReleaseWarmBrowserPage(session.browser).catch((error: unknown) => {
     if (terminalError === undefined) terminalError = error;
     const message = error instanceof Error ? error.message : String(error);
@@ -3234,7 +3233,7 @@ export function finishPaymentDispatchHandoff(
   const handoff = session.paymentDispatchHandoff;
   if (handoff?.state !== state) return;
   handoff.resolveSettled();
-  if (!handoff.terminalizing) session.paymentDispatchHandoff = null;
+  session.paymentDispatchHandoff = null;
 }
 
 export async function coordinatePaymentDispatchAudit(
@@ -8114,8 +8113,7 @@ export async function closeAllProvisionSessions(): Promise<void> {
     if (closeError === undefined && error !== undefined) closeError = error;
   }
   for (const slot of [...leasedBrowsers.values()]) {
-    leasedBrowsers.delete(slot.controller);
-    await closeLeasedBrowser(slot.controller, slot.lease, false).catch(() => undefined);
+    await forceReleaseWarmBrowserPage(slot.controller).catch(() => undefined);
   }
   if (closeError !== undefined) throw closeError;
 }
