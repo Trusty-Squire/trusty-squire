@@ -7,6 +7,7 @@ import {
   diffSafeControlsV2,
   encodeV2Delta,
   encodeV2Page,
+  safePageSemanticsV2,
   safeStageV2,
 } from "../compact-observation-v2.js";
 import type { InteractiveElement } from "../browser.js";
@@ -73,7 +74,6 @@ describe("compact observation v2", () => {
     }));
     const page = encodeV2Page({
       sessionId: "session",
-      generation: 4,
       stage: "browse",
       rows,
       cursorFor: (offset) => `cursor-${offset}`,
@@ -83,8 +83,8 @@ describe("compact observation v2", () => {
     );
     expect(page.nextOffset).toBeGreaterThan(0);
     expect(page.nextOffset).toBeLessThan(rows.length);
-    expect((page.payload.overflow as { next_cursor: string }).next_cursor).toBe(`cursor-${page.nextOffset}`);
-    expect(page.payload.stage).toBe("browse");
+    expect((page.payload.o as [number, string])[1]).toBe(`cursor-${page.nextOffset}`);
+    expect(page.payload.s).toBe("b");
   });
 
   it("clamps a dense page with long raw labels to a paged, sealed first action map", () => {
@@ -111,15 +111,16 @@ describe("compact observation v2", () => {
     });
     const page = encodeV2Page({
       sessionId: "session",
-      generation: 7,
       stage: "browse",
+      semantics: { title: "Dense sample", headings: ["First controls"] },
       rows: safe.rows,
       cursorFor: (offset) => `cursor-${offset}`,
     });
     const wire = JSON.stringify(page.payload);
     expect(safe.rows).toHaveLength(94);
-    expect((page.payload.safe_table as unknown[])).toHaveLength(4);
-    expect(page.payload.overflow).toEqual({ remaining: 90, next_cursor: "cursor-4" });
+    expect((page.payload.a as unknown[])).toHaveLength(4);
+    expect(page.payload.o).toEqual([90, "cursor-4"]);
+    expect(page.payload.p).toEqual(["Dense sample", "First controls"]);
     expect(Buffer.byteLength(wire, "utf8")).toBeLessThanOrEqual(OBSERVE_V2_MAX_WIRE_BYTES);
     expect(wire).not.toContain(longLabel);
   });
@@ -162,7 +163,33 @@ describe("compact observation v2", () => {
       previouslySelected: new Set(initial.rows.map((row) => row.ref)),
     });
     expect(repeated.rows).toEqual(initial.rows);
-    expect(JSON.stringify(repeated.rows)).not.toContain("private merchant copy");
+    expect(repeated.rows[0]).toEqual(expect.objectContaining({ name: "private merchant copy" }));
+  });
+
+  it("preserves short semantic essentials while rejecting card and secret-shaped text", () => {
+    expect(
+      safePageSemanticsV2({
+        title: "Example storefront",
+        headings: ["Create your account", "4111111111111111", "API key: abcdefghijklmnopqrstuvwxyz"],
+      }),
+    ).toEqual({ title: "Example storefront", headings: ["Create your account"] });
+    const button = element({ visibleText: "Continue to registration" });
+    const cardLike = element({ selector: "#secret", visibleText: "4111111111111111" });
+    const safe = buildSafeControlsV2({
+      elements: [button, cardLike],
+      legacyRefs: new Map([
+        [button, "@e:continue"],
+        [cardLike, "@e:card"],
+      ]),
+      secret: randomBytes(32),
+      pageOrigin: "https://merchant.invalid",
+      selected: [
+        { backend_node_id: 1, tag: "button", role: "button", name: "Continue to registration" },
+        { backend_node_id: 2, tag: "button", role: "button", name: "4111111111111111" },
+      ],
+    });
+    expect(safe.rows).toContainEqual(expect.objectContaining({ name: "Continue to registration" }));
+    expect(JSON.stringify(safe.rows)).not.toContain("4111111111111111");
   });
 
   it("reduces completion and checkout signals to a finite page-stage enum", () => {
@@ -174,14 +201,12 @@ describe("compact observation v2", () => {
 
   it("uses a tiny sealed delta when the safe map is unchanged", () => {
     const page = encodeV2Delta({
-      generation: 5,
       stage: "form",
       delta: { added: [], changed: [], removed: [], stageChanged: false },
     });
     expect(page).toEqual({
       format: "compact-v2",
-      generation: 5,
-      delta: true,
+      d: true,
     });
     expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThan(80);
   });
@@ -202,9 +227,9 @@ describe("compact observation v2", () => {
       "form",
       [changed, added],
     );
-    const page = encodeV2Delta({ generation: 6, stage: "form", delta });
+    const page = encodeV2Delta({ stage: "form", delta });
     const wire = JSON.stringify(page);
-    expect(wire).toContain("safe_table");
+    expect(wire).toContain("\"a\"");
     expect(wire).toContain("@e:added");
     expect(wire).toContain("@e:removed");
     expect(wire).not.toContain(planted);

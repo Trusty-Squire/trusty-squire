@@ -359,15 +359,16 @@ const OBSERVE_DELTA_CONTRACT =
   "transparent overlay. ";
 
 const COMPACT_V2_CONTRACT =
-  "When format is `compact-v2`, use `safe_table` instead of el_table: its @e: refs and finite " +
-  "role/action/field/stage enums are the only emitted page view. safe_table rows are [ref,role,action,field," +
-  "state_or_choice?], where role is b=button,l=link,t=textbox,s=select,c=checkbox,r=radio,tb=tab,m=menuitem," +
-  "f=file; null is absent. For a named product/control from the task, " +
+  "When format is `compact-v2`, use its compact sealed map: i=session id, s=stage (b=browse,a=auth,f=form,r=cart,k=checkout,z=complete), " +
+  "p=[screened title,primary visible heading], a=action rows, o=[remaining,next_cursor]. Rows are [ref,role,action,field," +
+  "state_or_choice?,short_label?], where role is b=button,l=link,t=textbox,s=select,c=checkbox,r=radio,tb=tab,m=menuitem,f=file; " +
+  "action is q=search,x=close,n=next,p=previous,u=submit,c=continue,i=login,g=signup,a=add_to_cart,k=checkout,y=payment; " +
+  "field is e=email,p=password,u=username,n=name,h=phone,q=search,a=address,c=city,r=region,z=postal,o=country,d=date,t=quantity,m=promo,y=payment. " +
+  "Null/empty is absent. Short labels are included for the viewport-prioritized controls; card/secret-shaped text and field values are never emitted. For a named product/control from the task, " +
   "call operate_observe_query with those task words; it returns matching actionable refs without revealing " +
-  "page labels, values, snapshots, or raw DOM. Use overflow.next_cursor to page. `detail:full` does not bypass " +
-  "this seal while V2 is enabled; set TRUSTY_SQUIRE_OBSERVE_V2=off for the legacy format. A delta:true " +
-  "retains the preceding V2 table, then upserts tuple rows in safe_table, removes refs in removed, " +
-  "and updates stage only when it is present. A delta with none of those fields means the safe map is unchanged. ";
+  "page labels, values, snapshots, or raw DOM. Use o[1] to page. `detail:full` does not bypass this seal while V2 is enabled; " +
+  "set TRUSTY_SQUIRE_OBSERVE_V2=off for the legacy format. A d:true delta retains the preceding V2 table, then upserts tuple rows in a, " +
+  "removes refs in r, and updates stage only when s is present. A delta with none of those fields means the safe map is unchanged. ";
 
 export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   name: "operate_start",

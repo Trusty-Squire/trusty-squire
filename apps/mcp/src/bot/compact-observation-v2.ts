@@ -56,8 +56,21 @@ export interface SafeControlV2 {
   visibility: "viewport" | "near";
   action?: SafeIntentV2;
   field?: SafeFieldV2;
+  /** Short, screened descriptive control label; never a field value. */
+  name?: string;
   choice?: string;
   frame: "main" | "same_origin" | "cross_origin";
+}
+
+/** Raw DOM input is accepted only from title and visible heading elements. */
+export interface ObservationSemanticSourceV2 {
+  title: string;
+  headings: readonly string[];
+}
+
+export interface SafePageSemanticsV2 {
+  title?: string;
+  headings?: string[];
 }
 
 export interface BrowserUseSelectedNode {
@@ -71,6 +84,7 @@ export interface BrowserUseSelectedNode {
 export interface SafeObservationIndexV2 {
   generation: number;
   stage: SafeStageV2;
+  semantics: SafePageSemanticsV2;
   rows: SafeControlV2[];
   byRef: Map<string, string>;
   expiresAt: number;
@@ -86,7 +100,42 @@ export interface SafeObservationBaselineV2 {
   byRef: Map<string, SafeControlV2>;
 }
 
-type WireControlV2 = [string, string, SafeIntentV2 | null, SafeFieldV2 | null, string?];
+type WireControlV2 = [string, string, string | null, string | null, string?, string?];
+
+// These codes are protocol literals, not page text. Keeping this mapping here
+// (rather than deriving it from a label) makes the short wire representation
+// deterministic and preserves the closed allowlist boundary.
+const WIRE_INTENT: Record<SafeIntentV2, string> = {
+  search: "q",
+  close: "x",
+  next: "n",
+  previous: "p",
+  submit: "u",
+  continue: "c",
+  login: "i",
+  signup: "g",
+  add_to_cart: "a",
+  checkout: "k",
+  payment: "y",
+};
+
+const WIRE_FIELD: Record<SafeFieldV2, string> = {
+  email: "e",
+  password: "p",
+  username: "u",
+  name: "n",
+  phone: "h",
+  search: "q",
+  address: "a",
+  city: "c",
+  region: "r",
+  postal: "z",
+  country: "o",
+  date: "d",
+  quantity: "t",
+  promo: "m",
+  payment: "y",
+};
 
 // The protocol is intentionally positional to keep repeated observes small.
 // Tuple schema: [ref, role(b/l/t/s/c/r/tb/m/f), action|null, field|null,
@@ -105,9 +154,64 @@ function wireControl(row: SafeControlV2): WireControlV2 {
     file: "f",
   };
   const signal = row.choice ?? row.state;
-  return signal === undefined
-    ? [row.ref, role[row.role], row.action ?? null, row.field ?? null]
-    : [row.ref, role[row.role], row.action ?? null, row.field ?? null, signal];
+  if (row.name === undefined) {
+    return signal === undefined
+      ? [row.ref, role[row.role], row.action === undefined ? null : WIRE_INTENT[row.action], row.field === undefined ? null : WIRE_FIELD[row.field]]
+      : [row.ref, role[row.role], row.action === undefined ? null : WIRE_INTENT[row.action], row.field === undefined ? null : WIRE_FIELD[row.field], signal];
+  }
+  return [
+    row.ref,
+    role[row.role],
+    row.action === undefined ? null : WIRE_INTENT[row.action],
+    row.field === undefined ? null : WIRE_FIELD[row.field],
+    signal ?? "",
+    row.name,
+  ];
+}
+
+const SAFE_DESCRIPTION_MAX_CHARS = 40;
+const EMAIL_VALUE_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
+const SECRET_ASSIGNMENT_RE = /\b(?:password|passcode|token|api[_ -]?key|secret)\b\s*[:=]\s*\S{4,}/i;
+const HIGH_ENTROPY_TOKEN_RE = /\b[A-Za-z0-9_-]{24,}\b/;
+
+function hasPanLikeDigits(value: string): boolean {
+  return value.replace(/\D/g, "").length >= 13;
+}
+
+/**
+ * A positive safe-text gate for the tiny semantic layer. It receives only
+ * title/heading/control-label sources (never input values or arbitrary page
+ * regions), rejects credential/card-shaped content, then truncates the
+ * remaining human description before it can enter a wire row or delta.
+ */
+export function safeDescriptionV2(value: string | null | undefined): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (
+    normalized.length === 0 ||
+    hasPanLikeDigits(normalized) ||
+    EMAIL_VALUE_RE.test(normalized) ||
+    SECRET_ASSIGNMENT_RE.test(normalized) ||
+    HIGH_ENTROPY_TOKEN_RE.test(normalized)
+  ) {
+    return undefined;
+  }
+  return normalized.length <= SAFE_DESCRIPTION_MAX_CHARS
+    ? normalized
+    : `${normalized.slice(0, SAFE_DESCRIPTION_MAX_CHARS - 1)}…`;
+}
+
+export function safePageSemanticsV2(source: ObservationSemanticSourceV2): SafePageSemanticsV2 {
+  const title = safeDescriptionV2(source.title);
+  const headings = source.headings
+    .map(safeDescriptionV2)
+    .filter((value): value is string => value !== undefined)
+    .filter((value, index, all) => all.indexOf(value) === index)
+    .slice(0, 1);
+  return {
+    ...(title === undefined ? {} : { title }),
+    ...(headings.length === 0 ? {} : { headings }),
+  };
 }
 
 export interface SafeObservationDeltaV2 {
@@ -144,24 +248,34 @@ export function diffSafeControlsV2(
  * a paged full resync instead: a delta must never exceed the hard wire budget.
  */
 export function encodeV2Delta(args: {
-  generation: number;
   stage: SafeStageV2;
+  semantics?: SafePageSemanticsV2;
   delta: SafeObservationDeltaV2;
 }): Record<string, unknown> | null {
   const payload: Record<string, unknown> = {
     format: "compact-v2",
-    generation: args.generation,
-    delta: true,
-    ...(args.delta.stageChanged ? { stage: args.stage } : {}),
+    d: true,
+    ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
+      ? {}
+      : { p: compactSemantics(args.semantics) }),
+    ...(args.delta.stageChanged ? { s: wireStage(args.stage) } : {}),
     // `safe_table` follows the established TS delta protocol: rows are
     // upserts, irrespective of whether their ref is new or changed. This keeps
     // existing delta consumers compatible while the @e: map itself stays V2.
     ...(args.delta.added.length + args.delta.changed.length > 0
-      ? { safe_table: [...args.delta.added, ...args.delta.changed].map(wireControl) }
+      ? { a: [...args.delta.added, ...args.delta.changed].map(wireControl) }
       : {}),
-    ...(args.delta.removed.length > 0 ? { removed: args.delta.removed } : {}),
+    ...(args.delta.removed.length > 0 ? { r: args.delta.removed } : {}),
   };
   return Buffer.byteLength(JSON.stringify(payload), "utf8") <= OBSERVE_V2_MAX_WIRE_BYTES ? payload : null;
+}
+
+function wireStage(stage: SafeStageV2): string {
+  return { browse: "b", auth: "a", form: "f", cart: "r", checkout: "k", complete: "z" }[stage];
+}
+
+function compactSemantics(semantics: SafePageSemanticsV2): string[] {
+  return [semantics.title ?? "", semantics.headings?.[0] ?? ""];
 }
 
 const INTENTS: ReadonlyArray<[SafeIntentV2, RegExp]> = [
@@ -191,6 +305,12 @@ function candidateText(el: InteractiveElement): string {
   ]
     .filter((part): part is string => typeof part === "string")
     .join(" ");
+}
+
+function controlDescription(el: InteractiveElement): string | undefined {
+  // Labels are chosen from visible/accessibility naming sources only. `value`,
+  // `name`, and `id` deliberately remain outside this allowlist.
+  return safeDescriptionV2(el.visibleText ?? el.labelText ?? el.ariaLabel ?? el.iconLabel ?? el.title ?? el.placeholder);
 }
 
 function roleOf(el: InteractiveElement): SafeRoleV2 | null {
@@ -282,7 +402,7 @@ function upstreamSelected(el: InteractiveElement, selected: readonly BrowserUseS
 }
 
 export function safeV2Ref(secret: Buffer, legacyRef: string): string {
-  return `@e:${createHmac("sha256", secret).update(legacyRef).digest("base64url").slice(0, 18)}`;
+  return `@e:${createHmac("sha256", secret).update(legacyRef).digest("base64url").slice(0, 12)}`;
 }
 
 export function buildSafeControlsV2(args: {
@@ -313,6 +433,7 @@ export function buildSafeControlsV2(args: {
     const action = intentOf(el);
     const field = fieldOf(el);
     const cardChoice = el.cardRadioGroup;
+    const name = controlDescription(el);
     const row: SafeControlV2 = {
       ref,
       role,
@@ -321,6 +442,7 @@ export function buildSafeControlsV2(args: {
       ...(state === undefined ? {} : { state }),
       ...(action === undefined ? {} : { action }),
       ...(field === undefined ? {} : { field }),
+      ...(name === undefined ? {} : { name }),
       ...(cardChoice === null || cardChoice === undefined
         ? {}
         : { choice: `${cardChoice.position}/${cardChoice.total}` }),
@@ -333,8 +455,8 @@ export function buildSafeControlsV2(args: {
 
 export function encodeV2Page(args: {
   sessionId: string;
-  generation: number;
   stage: SafeStageV2;
+  semantics?: SafePageSemanticsV2;
   rows: readonly SafeControlV2[];
   cursorFor: (offset: number) => string;
   offset?: number;
@@ -345,10 +467,12 @@ export function encodeV2Page(args: {
     return {
       payload: {
         format: "compact-v2",
-        session_id: args.sessionId,
-        generation: args.generation,
-        stage: args.stage,
-        delta: true,
+        i: args.sessionId,
+        s: wireStage(args.stage),
+        ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
+          ? {}
+          : { p: compactSemantics(args.semantics) }),
+        d: true,
       },
       nextOffset: 0,
     };
@@ -362,11 +486,13 @@ export function encodeV2Page(args: {
     const remainder = args.rows.length - (index + 1);
     const payload: Record<string, unknown> = {
       format: "compact-v2",
-      session_id: args.sessionId,
-      generation: args.generation,
-      stage: args.stage,
-      safe_table: [...visible, wireControl(candidate)],
-      ...(remainder > 0 ? { overflow: { remaining: remainder, next_cursor: args.cursorFor(index + 1) } } : {}),
+      i: args.sessionId,
+      s: wireStage(args.stage),
+      ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
+        ? {}
+        : { p: compactSemantics(args.semantics) }),
+      a: [...visible, wireControl(candidate)],
+      ...(remainder > 0 ? { o: [remainder, args.cursorFor(index + 1)] } : {}),
     };
     if (Buffer.byteLength(JSON.stringify(payload), "utf8") > OBSERVE_V2_MAX_WIRE_BYTES) break;
     visible.push(wireControl(candidate));
@@ -375,11 +501,13 @@ export function encodeV2Page(args: {
   const remaining = args.rows.length - nextOffset;
   const payload: Record<string, unknown> = {
     format: "compact-v2",
-    session_id: args.sessionId,
-    generation: args.generation,
-    stage: args.stage,
-    safe_table: visible,
-    ...(remaining > 0 ? { overflow: { remaining, next_cursor: args.cursorFor(nextOffset) } } : {}),
+    i: args.sessionId,
+    s: wireStage(args.stage),
+    ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
+      ? {}
+      : { p: compactSemantics(args.semantics) }),
+    a: visible,
+    ...(remaining > 0 ? { o: [remaining, args.cursorFor(nextOffset)] } : {}),
   };
   // The fixed fields are deliberately tiny, so failure means a hostilely long
   // session id/cursor. Fail closed rather than exceeding the wire contract.

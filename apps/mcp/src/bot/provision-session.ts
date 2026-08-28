@@ -45,8 +45,11 @@ import {
   diffSafeControlsV2,
   encodeV2Delta,
   encodeV2Page,
+  safePageSemanticsV2,
   safeStageV2,
   type SafeControlV2,
+  type ObservationSemanticSourceV2,
+  type SafePageSemanticsV2,
   type SafeObservationBaselineV2,
   type SafeObservationIndexV2,
 } from "./compact-observation-v2.js";
@@ -358,6 +361,7 @@ export interface Observation {
   format?: "compact-v2";
   generation?: number;
   safe_table?: SafeControlV2[];
+  semantic?: SafePageSemanticsV2;
   overflow?: { remaining: number; next_cursor: string };
 }
 
@@ -4609,27 +4613,29 @@ function compactV2Mode(): "off" | "shadow" | "on" {
 }
 
 function compactV2Cursor(session: Session, generation: number, offset: number): string {
-  const expires = Date.now() + 5 * 60_000;
-  const body = Buffer.from(`${session.id}\u001f${generation}\u001f${offset}\u001f${expires}`).toString("base64url");
-  const signature = createHmac("sha256", session.compactV2Secret).update(body).digest("base64url");
+  // The session-held index owns the five-minute expiry, so the cursor need not
+  // repeat a UUID/timestamp on every dense-page observation. A session-secret
+  // HMAC makes this compact in-MCP token unforgeable across sessions.
+  const body = `${generation.toString(36)}:${offset.toString(36)}`;
+  const signature = createHmac("sha256", session.compactV2Secret).update(body).digest("base64url").slice(0, 12);
   return `${body}.${signature}`;
 }
 
 function parseCompactV2Cursor(session: Session, cursor: string): { generation: number; offset: number } {
   const [body, signature, extra] = cursor.split(".");
   if (body === undefined || signature === undefined || extra !== undefined) throw new Error("invalid_cursor");
-  const expected = createHmac("sha256", session.compactV2Secret).update(body).digest("base64url");
+  const expected = createHmac("sha256", session.compactV2Secret).update(body).digest("base64url").slice(0, 12);
   if (signature !== expected) throw new Error("invalid_cursor");
-  const [id, generationRaw, offsetRaw, expiresRaw] = Buffer.from(body, "base64url").toString("utf8").split("\u001f");
-  const generation = Number(generationRaw);
-  const offset = Number(offsetRaw);
+  const [generationRaw, offsetRaw, extraPart] = body.split(":");
+  if (generationRaw === undefined || offsetRaw === undefined || extraPart !== undefined) throw new Error("invalid_cursor");
+  const generation = Number.parseInt(generationRaw, 36);
+  const offset = Number.parseInt(offsetRaw, 36);
   if (
-    id !== session.id ||
     !Number.isSafeInteger(generation) ||
     !Number.isSafeInteger(offset) ||
     offset < 0 ||
-    !Number.isFinite(Number(expiresRaw)) ||
-    Number(expiresRaw) < Date.now()
+    generation.toString(36) !== generationRaw ||
+    offset.toString(36) !== offsetRaw
   ) {
     throw new Error("stale_cursor");
   }
@@ -4641,6 +4647,7 @@ function compactV2Observation(
   generation: number,
   elements: readonly InteractiveElement[],
   selected: Parameters<typeof buildSafeControlsV2>[0]["selected"],
+  semanticSource: ObservationSemanticSourceV2,
 ): Observation {
   const legacyRefs = provisionElementRefs(elements);
   let pageOrigin = "";
@@ -4658,10 +4665,12 @@ function compactV2Observation(
       : { previouslySelected: new Set(session.compactV2Previous.byRef.keys()) }),
   });
   const stage = safeStageV2(session.browser.currentUrl(), elements);
+  const semantics = safePageSemanticsV2(semanticSource);
   const previous = session.compactV2Previous;
   const index: SafeObservationIndexV2 = {
     generation,
     stage,
+    semantics,
     rows: safe.rows,
     byRef: safe.byRef,
     expiresAt: Date.now() + 5 * 60_000,
@@ -4674,8 +4683,8 @@ function compactV2Observation(
   session.prevObserve = null;
   if (previous !== null) {
     const delta = encodeV2Delta({
-      generation,
       stage,
+      semantics,
       delta: diffSafeControlsV2(previous, stage, safe.rows),
     });
     // A high-churn delta is less useful than a fresh paged map.  This also
@@ -4684,8 +4693,8 @@ function compactV2Observation(
   }
   const page = encodeV2Page({
     sessionId: session.id,
-    generation,
     stage: index.stage,
+    semantics,
     rows: index.rows,
     cursorFor: (offset) => compactV2Cursor(session, generation, offset),
   });
@@ -4703,13 +4712,15 @@ function compactV2UnavailableObservation(
   session: Session,
   generation: number,
   elements: readonly InteractiveElement[],
+  semanticSource: ObservationSemanticSourceV2,
 ): Observation {
   const stage = safeStageV2(session.browser.currentUrl(), elements);
+  const semantics = safePageSemanticsV2(semanticSource);
   const previous = session.compactV2Previous;
   if (previous !== null && previous.stage === stage) {
     const delta = encodeV2Delta({
-      generation,
       stage,
+      semantics,
       delta: { added: [], changed: [], removed: [], stageChanged: false },
     });
     if (delta !== null) return { ...(delta as unknown as Observation), url: "", text: "" };
@@ -4717,6 +4728,7 @@ function compactV2UnavailableObservation(
   const index: SafeObservationIndexV2 = {
     generation,
     stage,
+    semantics,
     rows: [],
     byRef: new Map(),
     expiresAt: Date.now() + 5 * 60_000,
@@ -4726,8 +4738,8 @@ function compactV2UnavailableObservation(
   session.compactV2Previous = { stage, byRef: new Map() };
   const page = encodeV2Page({
     sessionId: session.id,
-    generation,
     stage,
+    semantics,
     rows: [],
     cursorFor: (offset) => compactV2Cursor(session, generation, offset),
   });
@@ -4763,8 +4775,8 @@ export async function observeQuery(
   const rows = index.rows.filter((row) => allowed.has(row.ref) && (role === undefined || row.role === role));
   const page = encodeV2Page({
     sessionId: session.id,
-    generation: index.generation,
     stage: index.stage,
+    semantics: index.semantics,
     rows,
     offset,
     cursorFor: (next) => compactV2Cursor(session, index.generation, next),
@@ -4811,6 +4823,13 @@ async function observeSession(
     const generation = session.generation;
     const elements = await session.browser.extractInteractiveElements();
     session.lastElements = elements;
+    let semanticSource: ObservationSemanticSourceV2 = { title: "", headings: [] };
+    try {
+      semanticSource = await session.browser.extractObservationSemantics();
+    } catch {
+      // Semantic context is optional availability-wise; it is independently
+      // sealed below and never changes action-map safety.
+    }
     // Browser-use is the maintained DOM selection engine for V2.  Its raw
     // serializer output remains within this short-lived call; TS immediately
     // seals it into code-owned enums before a delta, snapshot, audit, or MCP
@@ -4821,10 +4840,10 @@ async function observeSession(
     if (compactV2Mode() !== "off") {
       const selected = await observeWithBrowserUse(session.browser.browserUseObservationEndpoint());
       if (selected !== null) {
-        const v2 = compactV2Observation(session, generation, elements, selected);
+        const v2 = compactV2Observation(session, generation, elements, selected, semanticSource);
         if (compactV2Mode() === "on") return v2;
       } else if (compactV2Mode() === "on") {
-        return compactV2UnavailableObservation(session, generation, elements);
+        return compactV2UnavailableObservation(session, generation, elements, semanticSource);
       }
     }
     const sealedFieldKeys = observationSealedFieldKeys(session, elements);

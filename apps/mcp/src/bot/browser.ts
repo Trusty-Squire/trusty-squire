@@ -9521,6 +9521,29 @@ export class BrowserController {
     return await this.page.evaluate(extractObservationVisibleText);
   }
 
+  /**
+   * Tiny structural source for compact V2. The raw values never leave the
+   * provision session: compact-observation-v2 applies its allowlist seal
+   * before the result is stored, delta'd, or emitted.
+   */
+  async extractObservationSemantics(): Promise<{ title: string; headings: string[] }> {
+    if (!this.page) throw new Error("Browser not started");
+    return await this.page.evaluate(() => {
+      const visible = (element: Element): boolean => {
+        const html = element as HTMLElement;
+        const style = window.getComputedStyle(html);
+        const rect = html.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+      };
+      const headings = Array.from(document.querySelectorAll("h1,h2"))
+        .filter(visible)
+        .map((element) => (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 160))
+        .filter(Boolean)
+        .slice(0, 2);
+      return { title: document.title.slice(0, 160), headings };
+    });
+  }
+
   async readCheckoutSummary(fallbackCurrency?: string): Promise<CheckoutSummary> {
     if (!this.page) throw new Error("Browser not started");
     const page = this.page;
