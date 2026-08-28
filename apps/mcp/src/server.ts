@@ -39,15 +39,11 @@ const DEFAULT_REGISTRY_BASE =
 // from a host like that will ever arrive, so this is a time bound, not an
 // event.
 //
-// It also has to cover a server that still holds an open provision session:
-// the operator-profile-pool ACTIVE-slot reclaim (operator-profile-pool.ts,
-// scavengeActiveSlots) only ever reclaims a slot once its *owning process* is
-// provably dead — a live-but-abandoned zombie server is, by that design, a
-// "genuine concurrent run" the pool must never touch. So a background
-// pool-level reaper cannot free an active session's Chrome on its own; only
-// the owning server exiting (which runs closeAllProvisionSessions, which
-// calls browser.close() on the leased Chrome — already timeout-capped down
-// to a SIGKILL reap, see browser.ts's closeWithProfileGuard) can. Hence two
+// It also has to cover a server that still holds an open provision session.
+// Each session owns a private profile, so it cannot block another start, but
+// the browser still needs its bounded identity-proven teardown. Only the
+// owning server can run closeAllProvisionSessions and close that browser.
+// Hence two
 // bounds: a short one when idle with no session (routine), and a longer one
 // when a session is still open — wide enough that no real in-flight flow
 // (operate_pay no longer blocks a call for approval; verification polling is
