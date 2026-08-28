@@ -61,11 +61,11 @@ Remove the `requireLiveIdentity` direct-canonical exception. Preserve the existi
 Preserve current call-drain, audit, payment, and session-removal ordering (`provision-session.ts:7538-7584`). On a clean finish:
 
 1. Capture `context.storageState({ indexedDB: true })` before close.
-2. Atomically replace the canonical state JSON.
-3. Use the existing bounded, identity-proven browser close.
-4. Recursively remove the unique directory only after close is proven.
+2. Use the rc.9 bounded terminal owner to perform the existing identity-proven browser close.
+3. Only after close is proven, atomically replace the canonical state JSON.
+4. Recursively remove the unique directory.
 
-If the existing `profileRequiresDestroy` condition is true (`activePayment` or `paymentFieldSealActive`, `provision-session.ts:7522-7534`), close and destroy the profile but skip write-back. If close cannot be proved, retain that unique directory and report it; it is a disk leak, never a future-agent lock wedge.
+If the existing `profileRequiresDestroy` condition is true (`activePayment` or `paymentFieldSealActive`, `provision-session.ts:7522-7534`), close and destroy the profile but skip write-back. If close cannot be proved, retain that unique directory and the prior canonical snapshot, and report the retained directory; it is a disk leak, never a future-agent lock wedge.
 
 `connect`/`login` keeps editing the canonical authoring profile. On a successful context-backed login, write the full JSON state as well. A plain Chrome path has no context to capture, so it preserves the existing snapshot rather than clearing saved logins.
 

@@ -19,12 +19,13 @@ closed with the existing connect handoff if the session is stale. It never
 falls back to running an operator browser on the canonical profile.
 
 `operate_finish` retains session call-drain, audit, and payment ordering. A
-clean finish captures storage state, atomically writes it back (last completed
-writer wins), uses the bounded identity-proven Chrome close, then removes the
+clean finish captures storage state, then uses the rc.9 bounded terminal owner
+to prove the identity-scoped Chrome close. Only after that proof does it
+atomically write the snapshot back (last completed writer wins) and remove the
 unique directory. A session with active payment state or sealed payment fields
 skips write-back and is destroyed after a proven close. If close cannot be
-proven, only that unique directory is retained for inspection; it cannot block
-another agent.
+proven, the unique directory and prior canonical snapshot are retained; the
+directory cannot block another agent.
 
 Card sealing, one-human approval per purchase, host-scoped egress, 3DS,
 payment-audit ordering, vault restrictions, session addressing, the rc.9
