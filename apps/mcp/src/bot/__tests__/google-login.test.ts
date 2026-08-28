@@ -85,6 +85,31 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("interactive login display detection", () => {
+  it("accepts native desktop windowing and Linux desktop displays", () => {
+    expect(hasDisplay("darwin", {})).toBe(true);
+    expect(hasDisplay("win32", {})).toBe(true);
+    expect(hasDisplay("linux", { DISPLAY: ":0", XDG_SESSION_TYPE: "x11" })).toBe(true);
+    expect(hasDisplay("linux", { DISPLAY: ":1", XDG_SESSION_TYPE: "wayland" })).toBe(true);
+  });
+
+  it("rejects inherited displays in SSH and TTY sessions", () => {
+    expect(
+      hasDisplay("linux", {
+        DISPLAY: ":99",
+        SSH_CONNECTION: "203.0.113.1 12345 203.0.113.2 22",
+      }),
+    ).toBe(false);
+    expect(hasDisplay("linux", { DISPLAY: ":99", SSH_TTY: "/dev/pts/2" })).toBe(false);
+    expect(hasDisplay("linux", { DISPLAY: ":99", XDG_SESSION_TYPE: "tty" })).toBe(false);
+  });
+
+  it("rejects Linux sessions without a display", () => {
+    expect(hasDisplay("linux", {})).toBe(false);
+    expect(hasDisplay("linux", { DISPLAY: "  " })).toBe(false);
+  });
+});
+
 function fakeProcess(name: string): ChildProcess {
   return Object.assign(new EventEmitter(), {
     exitCode: null as number | null,

@@ -430,11 +430,22 @@ export function extractGoogleNumberMatch(text: string): string | null {
 }
 
 // --- environment helpers ----------------------------------------------
-export function hasDisplay(): boolean {
+export function hasDisplay(
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
   // macOS (Aqua) and Windows (Win32) have native windowing; Linux needs
   // an existing user-visible X display.
-  if (process.platform === "darwin" || process.platform === "win32") return true;
-  return typeof process.env.DISPLAY === "string" && process.env.DISPLAY.length > 0;
+  if (platform === "darwin" || platform === "win32") return true;
+  if (typeof env.DISPLAY !== "string" || env.DISPLAY.trim().length === 0) return false;
+  if (
+    (typeof env.SSH_CONNECTION === "string" && env.SSH_CONNECTION.trim().length > 0) ||
+    (typeof env.SSH_TTY === "string" && env.SSH_TTY.trim().length > 0) ||
+    env.XDG_SESSION_TYPE?.trim().toLowerCase() === "tty"
+  ) {
+    return false;
+  }
+  return true;
 }
 
 export async function teardownLoginBrowser(opts: {
@@ -470,8 +481,8 @@ export function trackActiveLoginBrowser(cancel: () => Promise<void>): () => void
   };
 }
 
-// Cancel every in-flight login run's browser (and headless rig, where one
-// exists). Called by the MCP server's shutdown path; idempotent and
+// Cancel every in-flight login run's browser. Called by the MCP server's
+// shutdown path; idempotent and
 // best-effort — a failed teardown must not stall the process exit, whose
 // process-level exit hooks still force-kill anything identity-proven.
 export async function cancelActiveLoginBrowsers(): Promise<void> {
@@ -560,8 +571,6 @@ function createTrackedLoginBrowserLifecycle(
   };
   return lifecycle;
 }
-
-type LoginProcessRuntime = Pick<NodeJS.Process, "on" | "once" | "removeListener" | "exit">;
 
 // Open the bot's visible Chrome at `url` and run `pollUntilDone`
 // against the live context until it resolves true, the deadline passes,

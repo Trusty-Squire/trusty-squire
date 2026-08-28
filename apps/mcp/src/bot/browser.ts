@@ -85,6 +85,8 @@ const require = createRequire(import.meta.url);
 
 export type StealthProfile = "baseline" | "cdp_hardened";
 
+const OPERATOR_BROWSER_HEADLESS = true;
+
 export type ContextInitScriptId = "evaluate-name-shim" | "navigator-webdriver" | "webgl-spoof";
 
 export function contextInitScriptsFor(options: {
@@ -3748,7 +3750,6 @@ export class BrowserController {
   //   • locale/geo/permissions → applied post-connect by start()
   private async launchSelfManagedContext(params: {
     binary: string;
-    headless: boolean;
     args: readonly string[];
     proxy: ProxySettings | null;
     env: NodeJS.ProcessEnv;
@@ -3794,7 +3795,7 @@ export class BrowserController {
           "--lang=en-US",
           ...params.args,
           ...(params.proxy !== null ? [`--proxy-server=${params.proxy.server}`] : []),
-          ...(params.headless ? ["--headless=new"] : []),
+          "--headless=new",
           "about:blank",
         ];
         this.commitProfileLaunch();
@@ -4084,7 +4085,6 @@ export class BrowserController {
     // Browser automation is always Chrome's new headless mode. The virtual
     // display path was removed after its strict-Cloudflare gain proved too
     // narrow for its startup and CPU cost.
-    const chromeHeadless = true;
     this.launchedMode = "headless";
 
     const free = await waitForProfileFree(this.profileDir, { deadlineMs: 0 });
@@ -4162,7 +4162,6 @@ export class BrowserController {
           this.throwIfStartCancelled();
           return this.launchSelfManagedContext({
             binary: selfLaunchBinary,
-            headless: chromeHeadless,
             args: launchArgs,
             proxy,
             env: selfEnv,
@@ -4233,7 +4232,7 @@ export class BrowserController {
                 { failFast: true },
               ),
             options: {
-              headless: chromeHeadless,
+              headless: OPERATOR_BROWSER_HEADLESS,
               env: {
                 ...process.env,
                 [OPERATOR_BROWSER_MARKER_ENV]: this.operatorBrowserMarker(),
@@ -4591,7 +4590,7 @@ export class BrowserController {
     let probe: Browser | undefined;
     try {
       probe = await getChromium().launch({
-        headless: process.env.UNIVERSAL_BOT_HEADLESS !== "false",
+        headless: OPERATOR_BROWSER_HEADLESS,
         ...(channel !== null ? { channel } : {}),
         ...(proxy !== null ? { proxy } : {}),
         args: ["--no-sandbox", "--disable-dev-shm-usage"],
