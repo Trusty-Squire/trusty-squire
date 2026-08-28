@@ -207,18 +207,26 @@ state change fails closed. After dispatch, the native 3-D Secure wait passively
 compares issuer/network/last-four evidence rendered by the issuer/app with the
 released card. A discrepancy is returned and retained across resumable status polls
 as a structured `payment_instrument_mismatch` warning; it never mutates or cancels
-the challenge, creates a charge path, or introduces another approval.
+the challenge, creates a charge path, or introduces another approval. Once the trusted
+click reaches the input-dispatch boundary, a rejected click completion or missing page
+observer is conservatively retained as an unknown submitted payment with resumable 3-D
+Secure state. Only a failure known to precede that boundary is classified as a checkout
+failure and allowed to clear the pending-submit state.
 
 Payment state, the approval keypair, and the verified mandate remain attached to the
 addressed operate session. `operate_pay` and `operate_payment_status`
 resolve `session_id` once at tool entry and return that ID in
 their results and follow-up hints. Omitting the ID is accepted only when exactly one
-process-local session exists; no path selects a newest or arbitrary session. Closing a
-session first rejects new calls and drains calls that already entered. Remaining payment
-state never blocks teardown: close records that the profile is payment-sensitive, clears
-the active payment and payment-field seal, and destroys or quarantines the profile instead
-of returning it to the warm pool. No payment state or card-bearing browser profile can
-therefore carry into a later session.
+process-local session exists; no path selects a newest or arbitrary session. Ordinary finish
+first rejects new calls and drains calls that already entered within the bounded terminal
+transition. Watchdog and disconnect teardown also close admission; maximum-lifetime and CPU
+termination defer only an active payment, and only until that same hard deadline. Existing
+captured dispatch evidence shares one metadata-only audit, and teardown performs the bounded
+pending-3DS live check before clearing payment state. Remaining payment state never makes the
+browser immortal: close records that the profile is payment-sensitive, clears the active payment
+and payment-field seal, and destroys or quarantines the profile instead of returning it to the
+warm pool. No payment state or card-bearing browser profile can therefore carry into a later
+session.
 
 The phone decrypts the saved card locally, then HPKE-seals it directly to that
 ephemeral X25519 key using HKDF-SHA256 and AES-256-GCM. Each signed payload hash

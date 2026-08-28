@@ -53,9 +53,11 @@ const h = vi.hoisted(() => ({
   startCalls: 0,
   startGate: null as Promise<void> | null,
   closeCalls: 0,
+  forceCloseCalls: 0,
   closeState: "closed" as "closed" | "force_closed_unproven" | "unknown",
   resetCalls: 0,
   resetFailuresRemaining: 0,
+  resetGate: null as Promise<void> | null,
   profileProbeCalls: 0,
   controllerProviderProbeCalls: 0,
   workerEmail: null as string | null,
@@ -206,6 +208,7 @@ vi.mock("../browser.js", () => ({
     }
     async resetPageForReuse(): Promise<void> {
       h.resetCalls += 1;
+      if (h.resetGate !== null) await h.resetGate;
       if (h.resetFailuresRemaining > 0) {
         h.resetFailuresRemaining -= 1;
         throw new Error("page reset failed");
@@ -666,8 +669,20 @@ vi.mock("../browser.js", () => ({
     paymentInstrumentMismatch(): typeof h.paymentInstrumentMismatch {
       return h.paymentInstrumentMismatch;
     }
-    async close(): Promise<"closed" | "force_closed_unproven" | "unknown"> {
+    operatorBrowserMarker(): string {
+      return `v1:1:mock-${this.index}`;
+    }
+    async close(options?: {
+      cancelStart?: boolean;
+    }): Promise<"closed" | "force_closed_unproven" | "unknown"> {
       h.closeCalls += 1;
+      if (options?.cancelStart === true && h.startGate !== null) await h.startGate;
+      if (h.connections[this.index] === true) h.started -= 1;
+      h.connections[this.index] = false;
+      return h.closeState;
+    }
+    async forceCloseOwnedProcessTree(): Promise<"closed" | "force_closed_unproven" | "unknown"> {
+      h.forceCloseCalls += 1;
       if (h.connections[this.index] === true) h.started -= 1;
       h.connections[this.index] = false;
       return h.closeState;
@@ -856,6 +871,7 @@ import { exportJWK, SignJWT } from "jose";
 import { sealToRecipient } from "../payment-hpke.js";
 import { operatePayTool, operatePaymentStatusTool } from "../../tools/operate-pay.js";
 import { ApiClient } from "../../api-client.js";
+import { dispatchOperatorBrowserProcessTermination } from "../operator-browser-watchdog.js";
 import type { formSelectMany } from "../provision-session.js";
 import {
   startProvisionSession,
@@ -867,6 +883,7 @@ import {
   captchaGate,
   finishProvisionSession,
   finishProvisionSessionWithPreparation,
+  withPaymentSessionCall,
   withProvisionSessionCall,
   paymentSession,
   closeAllProvisionSessions,
@@ -876,7 +893,10 @@ import {
   replayOperatorRecipe,
   activeProvisionBrowserForPayment,
   activeCartCheckoutForOrigin,
+  armPaymentDispatchHandoff,
   cartAdd,
+  coordinatePaymentDispatchAudit,
+  finishPaymentDispatchHandoff,
   recordActivePaymentProvenance,
   setActivePendingCardFill,
   claimActivePaymentForOperatePay,
@@ -1003,9 +1023,11 @@ beforeEach(() => {
   h.startCalls = 0;
   h.startGate = null;
   h.closeCalls = 0;
+  h.forceCloseCalls = 0;
   h.closeState = "closed";
   h.resetCalls = 0;
   h.resetFailuresRemaining = 0;
+  h.resetGate = null;
   h.profileProbeCalls = 0;
   h.controllerProviderProbeCalls = 0;
   h.workerEmail = null;
@@ -3887,6 +3909,146 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     expect(h.resetCalls).toBe(1);
   });
 
+  it("forces operate_finish teardown when an entered call never drains", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_DRAIN_TIMEOUT_MS", "50");
+    try {
+      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+      let releaseCall: (() => void) | undefined;
+      const entered = withProvisionSessionCall(
+        started.session_id,
+        async () =>
+          await new Promise<void>((resolve) => {
+            releaseCall = resolve;
+          }),
+      );
+      await vi.waitFor(() => expect(releaseCall).toBeTypeOf("function"));
+
+      const finishing = expect(finishProvisionSession(started.session_id)).rejects.toThrow(
+        /call drain timed out; browser terminated/,
+      );
+      await vi.advanceTimersByTimeAsync(50);
+      await finishing;
+
+      expect(h.closeCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+      expect(activeSessionCount()).toBe(0);
+      releaseCall?.();
+      await entered;
+    } finally {
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    }
+  });
+
+  it("forces disconnect teardown when an entered call never drains", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_DRAIN_TIMEOUT_MS", "50");
+    try {
+      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+      let releaseCall: (() => void) | undefined;
+      const entered = withProvisionSessionCall(
+        started.session_id,
+        async () =>
+          await new Promise<void>((resolve) => {
+            releaseCall = resolve;
+          }),
+      );
+      await vi.waitFor(() => expect(releaseCall).toBeTypeOf("function"));
+
+      const shutdown = closeAllProvisionSessions();
+      await vi.advanceTimersByTimeAsync(50);
+      await shutdown;
+
+      expect(h.closeCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+      expect(activeSessionCount()).toBe(0);
+      releaseCall?.();
+      await entered;
+    } finally {
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds finish preparation and audits pending 3DS before forced teardown", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS", "50");
+    try {
+      const auditPayment = vi.fn().mockResolvedValue({ id: "audit_timeout" });
+      const started = await startProvisionSession({
+        serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+        api: { auditPayment } as unknown as ApiClient,
+      });
+      setActivePendingThreeDs({
+        approval_id: "appr_timeout_3ds",
+        approval_url: "https://web.test/vault/pay/appr_timeout_3ds",
+        checkout: {
+          merchant: "Hibiya Kadan",
+          checkout_origin: "https://hibiyakadan.example.test",
+          amount_cents: 8_800,
+          currency: "JPY",
+        },
+        last4: "9192",
+        mandate_id: "mandate_timeout_3ds",
+        deadline: Date.now() + 60_000,
+      });
+      h.waitForThreeDsResult = "timeout";
+
+      const finishing = expect(
+        finishProvisionSessionWithPreparation(
+          started.session_id,
+          async () => await new Promise<never>(() => undefined),
+        ),
+      ).rejects.toThrow(/terminal transition timed out; browser terminated/);
+      await vi.advanceTimersByTimeAsync(50);
+      await finishing;
+
+      expect(h.waitForThreeDsCalls).toEqual([0]);
+      expect(auditPayment).toHaveBeenCalledWith(
+        expect.objectContaining({ status: "payment_3ds_unresolved" }),
+      );
+      expect(h.forceCloseCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+      expect(activeSessionCount()).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the profile lease reachable while a finishing page reset is forced closed", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS", "50");
+    let releaseReset: (() => void) | undefined;
+    h.resetGate = new Promise<void>((resolve) => {
+      releaseReset = resolve;
+    });
+    try {
+      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+      const finishing = expect(finishProvisionSession(started.session_id)).rejects.toThrow(
+        /terminal transition timed out; browser terminated/,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.resetCalls).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(50);
+      await finishing;
+
+      expect(h.forceCloseCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+    } finally {
+      releaseReset?.();
+      h.resetGate = null;
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    }
+  });
+
   it("closes after a submitted confirmation throws and leaves stale confirming state", async () => {
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
     const originalSession = paymentSession(started.session_id);
@@ -4328,19 +4490,296 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     }
   });
 
-  it("does not reap the shared browser while a session is in flight", async () => {
+  it("releases the abandoned session's shared profile lease so the next operate_start is not wedged", async () => {
     vi.useFakeTimers();
     try {
       const session = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+      expect(h.activeLeaseCount).toBe(1);
 
-      await vi.advanceTimersByTimeAsync(6 * 60 * 60 * 1_000);
+      // Regression for a bot-blocked task whose host abandoned the session
+      // while its stdio pipe stayed open. The server-level 12h grace cannot
+      // protect this case; the session watchdog must destroy its browser AND
+      // terminally release the active profile/seed-pool lease. Otherwise a
+      // dead session wedges every later operate_start until manual finish.
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1_000);
 
-      expect(h.closeCalls).toBe(0);
-      await finishProvisionSession(session.session_id);
-      await closeAllProvisionSessions();
+      expect(h.closeCalls).toBe(1);
+      expect(activeSessionCount()).toBe(0);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+      await expect(finishProvisionSession(session.session_id)).rejects.toThrow(
+        "unknown provision session",
+      );
+
+      const recovered = await startProvisionSession({
+        serviceUrl: "https://app.example.com/retry",
+      });
+      expect(h.leaseAcquireCalls).toBe(2);
+      expect(h.activeLeaseCount).toBe(1);
+      await finishProvisionSession(recovered.session_id);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("refreshes the idle deadline when the final active call completes", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_SESSION_IDLE_TIMEOUT_MS", "100");
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_BROWSER_WATCHDOG_INTERVAL_MS", "10");
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_BROWSER_MAX_LIFETIME_MS", "10000");
+    try {
+      const session = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+      let releaseCall: (() => void) | undefined;
+      const entered = withProvisionSessionCall(
+        session.session_id,
+        async () =>
+          await new Promise<void>((resolve) => {
+            releaseCall = resolve;
+          }),
+      );
+      await vi.waitFor(() => expect(releaseCall).toBeTypeOf("function"));
+
+      await vi.advanceTimersByTimeAsync(90);
+      releaseCall?.();
+      await entered;
+      await vi.advanceTimersByTimeAsync(90);
+      expect(h.closeCalls).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(10);
+      expect(h.closeCalls).toBe(1);
+      expect(activeSessionCount()).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    [
+      "maximum lifetime",
+      {
+        kind: "max_lifetime",
+        lifetime_ms: 30 * 60 * 1_000,
+        timeout_ms: 30 * 60 * 1_000,
+      },
+    ],
+    [
+      "CPU ceiling",
+      {
+        kind: "cpu_budget_exceeded",
+        cpu_percent: 800,
+        ceiling_percent: 200,
+        consecutive_samples: 3,
+      },
+    ],
+  ] as const)(
+    "defers %s watchdog teardown until an active payment call settles",
+    async (_label, reason) => {
+      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+      let releasePayment: (() => void) | undefined;
+      const payment = withPaymentSessionCall(
+        started.session_id,
+        async () =>
+          await new Promise<void>((resolve) => {
+            releasePayment = resolve;
+          }),
+      );
+      await vi.waitFor(() => expect(releasePayment).toBeTypeOf("function"));
+
+      let terminated = false;
+      const termination = dispatchOperatorBrowserProcessTermination("v1:1:mock-0", reason).then(
+        () => {
+          terminated = true;
+        },
+      );
+      await Promise.resolve();
+
+      expect(terminated).toBe(false);
+      expect(h.closeCalls).toBe(0);
+      expect(activeSessionCount()).toBe(1);
+
+      releasePayment?.();
+      await payment;
+      await termination;
+
+      expect(h.closeCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+      expect(activeSessionCount()).toBe(0);
+    },
+  );
+
+  it("forces the outer deadline while sharing an in-flight payment audit", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS", "50");
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_PENDING_3DS_FINALIZE_TIMEOUT_MS", "10");
+    let releaseAudit: (() => void) | undefined;
+    const auditPayment = vi.fn(
+      async (_input: unknown) =>
+        await new Promise<void>((resolve) => {
+          releaseAudit = resolve;
+        }),
+    );
+    try {
+      const started = await startProvisionSession({
+        serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+        api: { auditPayment } as unknown as ApiClient,
+      });
+      const selectedSession = paymentSession(started.session_id);
+      const state = {
+        approval_id: "appr_outer_deadline",
+        approval_url: "https://web.test/vault/pay/appr_outer_deadline",
+        checkout: {
+          merchant: "Hibiya Kadan",
+          checkout_origin: "https://hibiyakadan.example.test",
+          amount_cents: 8_800,
+          currency: "JPY",
+        },
+        last4: "9192",
+        mandate_id: "mandate_outer_deadline",
+        deadline: Date.now() + 60_000,
+      };
+      const payment = withPaymentSessionCall(started.session_id, async (session) => {
+        armPaymentDispatchHandoff(state, session);
+        setActivePendingThreeDs(state, session);
+        await coordinatePaymentDispatchAudit(
+          state,
+          async () => {
+            await auditPayment({ status: "payment_outcome_unknown" });
+          },
+          session,
+        );
+        finishPaymentDispatchHandoff(state, session);
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(auditPayment).toHaveBeenCalledOnce();
+
+      const termination = dispatchOperatorBrowserProcessTermination("v1:1:mock-0", {
+        kind: "max_lifetime",
+        lifetime_ms: 30 * 60 * 1_000,
+        timeout_ms: 30 * 60 * 1_000,
+      });
+      await vi.advanceTimersByTimeAsync(49);
+      expect(h.closeCalls).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(() =>
+        armPaymentDispatchHandoff(
+          {
+            ...state,
+            approval_id: "appr_after_outer_deadline",
+            approval_url: "https://web.test/vault/pay/appr_after_outer_deadline",
+          },
+          selectedSession,
+        ),
+      ).toThrow("closed before payment dispatch");
+      await vi.advanceTimersByTimeAsync(10);
+      await termination;
+
+      expect(h.waitForThreeDsCalls).toEqual([0]);
+      expect(auditPayment).toHaveBeenCalledOnce();
+      expect(h.closeCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+      expect(activeSessionCount()).toBe(0);
+
+      releaseAudit?.();
+      await payment;
+    } finally {
+      releaseAudit?.();
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds the pending 3DS final audit before watchdog teardown", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_SESSION_IDLE_TIMEOUT_MS", "100");
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_BROWSER_WATCHDOG_INTERVAL_MS", "10");
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_PENDING_3DS_FINALIZE_TIMEOUT_MS", "50");
+    const auditPayment = vi.fn(async () => await new Promise<never>(() => undefined));
+    try {
+      const session = await startProvisionSession({
+        serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+        api: { auditPayment } as unknown as ApiClient,
+      });
+      setActivePendingThreeDs(
+        {
+          approval_id: "appr_watchdog_3ds",
+          approval_url: "https://web.test/vault/pay/appr_watchdog_3ds",
+          checkout: {
+            merchant: "Hibiya Kadan",
+            checkout_origin: "https://hibiyakadan.example.test",
+            amount_cents: 8_800,
+            currency: "JPY",
+          },
+          last4: "9192",
+          mandate_id: "mandate_watchdog_3ds",
+          deadline: Date.now() + 60_000,
+        },
+        paymentSession(session.session_id),
+      );
+
+      await vi.advanceTimersByTimeAsync(150);
+
+      expect(h.waitForThreeDsCalls).toEqual([0]);
+      expect(auditPayment).toHaveBeenCalledOnce();
+      expect(h.closeCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+      expect(activeSessionCount()).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    }
+  });
+
+  it("hands a dispatch racing forced teardown to one terminal audit owner", async () => {
+    const auditPayment = vi.fn().mockResolvedValue({ id: "audit_dispatch_race" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: { auditPayment } as unknown as ApiClient,
+    });
+    const session = paymentSession(started.session_id);
+    const state = {
+      approval_id: "appr_dispatch_race",
+      approval_url: "https://web.test/vault/pay/appr_dispatch_race",
+      checkout: {
+        merchant: "Hibiya Kadan",
+        checkout_origin: "https://hibiyakadan.example.test",
+        amount_cents: 8_800,
+        currency: "JPY",
+      },
+      last4: "9192",
+      mandate_id: "mandate_dispatch_race",
+      deadline: Date.now() + 60_000,
+    };
+    armPaymentDispatchHandoff(state, session);
+
+    const closing = closeAllProvisionSessions();
+    await vi.waitFor(() =>
+      expect((session.terminalTeardownOwner as { forced: boolean } | null)?.forced).toBe(true),
+    );
+    setActivePendingThreeDs(state, session);
+    await closing;
+    await coordinatePaymentDispatchAudit(
+      state,
+      async () => {
+        await auditPayment({ status: "payment_outcome_unknown" });
+      },
+      session,
+    );
+    finishPaymentDispatchHandoff(state, session);
+
+    expect(h.waitForThreeDsCalls).toEqual([0]);
+    expect(auditPayment).toHaveBeenCalledOnce();
+    expect(auditPayment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approval_id: "appr_dispatch_race",
+        status: "payment_3ds_unresolved",
+      }),
+    );
+    expect(session.paymentDispatchHandoff).toBeNull();
   });
 
   it("closes an active session and its warm browser during shutdown", async () => {
@@ -4351,50 +4790,92 @@ describe("operate session — isolated profile-pool lifecycle", () => {
 
     expect(activeSessionCount()).toBe(0);
     expect(h.closeCalls).toBe(1);
+    expect(h.leaseDestroyCalls).toBe(1);
+    expect(h.activeLeaseCount).toBe(0);
+
+    const recovered = await startProvisionSession({ serviceUrl: "https://app.example.com/retry" });
+    expect(h.activeLeaseCount).toBe(1);
+    await finishProvisionSession(recovered.session_id);
   });
 
-  it("waits for an in-progress browser launch and closes its controller", async () => {
+  it("force-closes an in-progress browser launch on non-Linux without awaiting startup", async () => {
+    const platform = process.platform;
+    Object.defineProperty(process, "platform", { configurable: true, value: "darwin" });
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_FORCE_CLOSE_TIMEOUT_MS", "25");
     let releaseStart: (() => void) | undefined;
     h.startGate = new Promise<void>((resolve) => {
       releaseStart = resolve;
     });
-    const startResult = startProvisionSession({ serviceUrl: "https://app.example.com/" }).then(
-      () => null,
-      (err: unknown) => err,
-    );
-    await vi.waitFor(() => expect(h.startCalls).toBe(1));
+    try {
+      const startResult = startProvisionSession({ serviceUrl: "https://app.example.com/" }).then(
+        () => null,
+        (err: unknown) => err,
+      );
+      await vi.waitFor(() => expect(h.startCalls).toBe(1));
 
-    let shutdownSettled = false;
-    const shutdown = closeAllProvisionSessions().then(() => {
-      shutdownSettled = true;
-    });
-    await vi.waitFor(() => expect(h.closeCalls).toBe(1));
-    expect(shutdownSettled).toBe(false);
+      await closeAllProvisionSessions();
 
-    releaseStart?.();
-    await shutdown;
+      expect(h.forceCloseCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
 
-    await expect(startResult).resolves.toEqual(
-      expect.objectContaining({
-        message: "operate_start cancelled: operator server is shutting down",
-      }),
-    );
-    expect(h.closeCalls).toBe(2);
+      releaseStart?.();
+      await expect(startResult).resolves.toEqual(
+        expect.objectContaining({
+          message: "operate_start cancelled: operator server is shutting down",
+        }),
+      );
+      expect(h.closeCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+    } finally {
+      releaseStart?.();
+      vi.unstubAllEnvs();
+      Object.defineProperty(process, "platform", { configurable: true, value: platform });
+    }
   });
 
-  it("does not age-reap an active task", async () => {
-    vi.useFakeTimers();
+  it("bounds startup timeout cleanup without awaiting a hung launch", async () => {
+    vi.stubEnv("BOT_START_TIMEOUT_MS", "25");
+    let releaseStart: (() => void) | undefined;
+    h.startGate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
     try {
-      const session = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+      const startResult = startProvisionSession({ serviceUrl: "https://app.example.com/" }).then(
+        () => null,
+        (err: unknown) => err,
+      );
+      await vi.waitFor(() => expect(h.startCalls).toBe(1));
 
-      await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1_000);
-      expect(h.closeCalls).toBe(0);
+      await expect(startResult).resolves.toEqual(
+        expect.objectContaining({
+          message: expect.stringContaining("browser did not launch within"),
+        }),
+      );
+      expect(h.forceCloseCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
 
-      await finishProvisionSession(session.session_id);
-      expect(h.closeCalls).toBe(1);
+      releaseStart?.();
+      await vi.waitFor(() => expect(h.closeCalls).toBe(1));
+      expect(h.leaseDestroyCalls).toBe(1);
     } finally {
-      vi.useRealTimers();
+      vi.unstubAllEnvs();
+      releaseStart?.();
     }
+  });
+
+  it("hard-stops a session when the process watchdog reports maximum lifetime", async () => {
+    await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+
+    await dispatchOperatorBrowserProcessTermination("v1:1:mock-0", {
+      kind: "max_lifetime",
+      lifetime_ms: 30 * 60 * 1_000,
+      timeout_ms: 30 * 60 * 1_000,
+    });
+
+    expect(h.closeCalls).toBe(1);
+    expect(activeSessionCount()).toBe(0);
   });
 
   it("returns each clean closed profile through the lease boundary", async () => {

@@ -60,6 +60,11 @@ operate_finish
   -> clear the session's active payment and payment-field seal
   -> reset only an isolated reusable profile, then close Chrome with proof
   -> return a safe isolated profile to the warm slot, or release the direct-profile guard
+
+watchdog / disconnect / startup cancellation
+  -> close admission and use the bounded ordinary Playwright teardown first
+  -> force-close or quarantine the owned browser and profile lease when ordinary close cannot finish
+  -> release the shared seed or canonical-profile guard without awaiting a hung launch
 ```
 
 ## 2. Filesystem model
@@ -154,7 +159,7 @@ current-generation invalidation are enforced deterministically on the next seria
 operation; there is no background timer or daemon. Publishing a new seed therefore invalidates the
 old warm profile before it can be claimed again.
 
-## 5. Ownership and crash recovery
+## 5. Ownership, crash recovery, and containment
 
 Seed-lock ownership records bind a host, PID, process start time, and private token. Given a valid
 owner record, a contender reclaims the lock only when the recorded local process has exited or its
@@ -178,6 +183,36 @@ first drains every tracked OAuth-bootstrap login, then closes provision sessions
 Cancellation and normal completion share one memoized, identity-proven browser teardown; process
 `exit` hooks remain the force-kill backstop.
 
+Every provision session also owns a cross-platform watchdog. Ten minutes without an entered MCP
+operation closes an abandoned session, and the 30-minute lifetime check is evaluated before the
+active-call guard, so continuous non-payment activity cannot extend the session indefinitely. A
+maximum-lifetime or Linux CPU-budget termination may let an active payment finish only within the
+shared 30-second terminal-transition deadline. At that deadline, teardown uses the existing bounded
+pending-3DS live check and metadata-only audit before destruction; an idle, disconnected, or
+payment-free session does not receive that deferral. The server's separate 12-hour open-session idle
+exit remains a process-level backstop, not operator-browser ownership.
+
+The 10-minute browser-start timeout and shutdown cancellation do not await an unresolved launch.
+They race ordinary close with a bounded custody-release force boundary, then destroy a proven-closed
+lease or retain it quarantined. Late launch settlement cleans up idempotently using this controller's
+inherited marker and launch custody, never the shared profile's current holder, so it cannot signal a
+replacement session that acquired the profile afterward.
+
+Ordinary bounded Playwright close and profile-lease release are the primary path on every platform.
+On Linux, self-launched Chrome additionally runs in a detached process group and every local launch
+inherits a Trusty Squire marker. A process-wide `/proc` watchdog groups marked Chromium descendants,
+uses birth-safe per-process CPU deltas, and enforces the aggregate CPU and lifetime budgets even when
+the browser root exits or children reparent. The Playwright persistent-context fallback uses the
+identity-proven profile-root process snapshot captured for that launch. Signals are always scoped to
+that proof or marker; root-PID-only cleanup and broad `pkill` are forbidden.
+
+That snapshot is intentionally best effort rather than strict containment. A renderer that reparents
+after the fallback snapshot can briefly remain idle, and a process that forks and exits wholly between
+Linux watchdog polls is outside PID sampling. A spinning or long-lived marked renderer is still caught
+by the Linux watchdog. [`TODOS.md`](../TODOS.md#ts-operator-browser-cgroup-containment-p1-infra)
+tracks cgroup ownership for a strict Linux zero-orphan boundary and last-resort macOS/Windows
+containment.
+
 Destructive cleanup first atomically renames a claimable active or warm lease into `tombstones/`.
 Only the private, unclaimable tombstone is inspected, signalled, or deleted. An unknown owner or
 worker identity is retained for later inspection; it is not treated as stale. A verified matching
@@ -196,12 +231,15 @@ payment-sensitive state. Failure to prove closure quarantines the lease instead 
 deleting it. A direct-identity session never pools or deletes the canonical profile; browser
 teardown releases its exclusive profile-operation guard.
 
-`operate_finish` first marks the addressed session closing. New calls for that session are rejected,
-calls that already acquired the session drain, and outcome preparation runs behind the same closed
-admission gate. Remaining payment state never vetoes teardown. Finish records whether the profile is
-destroy-required, clears the active payment object and payment-field seal, removes the session, and
-then closes Chrome. A payment-sensitive profile is destroyed or quarantined instead of entering the
-warm slot.
+`operate_finish` first marks the addressed session closing and installs one bounded terminal owner.
+New calls for that session are rejected, calls that already acquired the session drain within the
+configured drain bound, and outcome preparation runs behind the same closed admission gate. The
+whole drain, preparation, and close transition has a 30-second outer deadline; exceeding it routes
+through that owner's force-close path instead of reopening admission or waiting indefinitely.
+Remaining payment state never vetoes teardown. Finish records whether the profile is
+destroy-required, performs the bounded pending-3DS close audit, clears the active payment object and
+payment-field seal, removes the session, and then closes Chrome. A payment-sensitive profile is
+destroyed or quarantined instead of entering the warm slot.
 
 The profile is destroy-required when any of these are true at finish:
 
@@ -228,12 +266,13 @@ fixed two-session pool and is not required for isolated local controllers.
 
 ## 8. Code map
 
-| Contract                                           | Owner                                                             |
-| -------------------------------------------------- | ----------------------------------------------------------------- |
-| Pool layout, seed lock, leases, warm slot, GC      | `apps/mcp/src/bot/operator-profile-pool.ts`                       |
-| Direct Google-identity lease                       | `apps/mcp/src/bot/operator-direct-identity.ts`                    |
-| Process birth and profile-path identity            | `apps/mcp/src/bot/profile.ts`                                     |
-| Local Chrome lifecycle and closure proof           | `apps/mcp/src/bot/browser.ts`                                     |
-| Login lifecycle and seed-publication provenance     | `apps/mcp/src/bot/google-login.ts`                               |
-| Acquire seam, payment selection, call drain, finish disposition | `apps/mcp/src/bot/provision-session.ts`              |
-| Install provider-completion evidence               | `apps/mcp/src/bot/install-completion.ts`, `apps/web/app/install/` |
+| Contract                                                        | Owner                                                             |
+| --------------------------------------------------------------- | ----------------------------------------------------------------- |
+| Pool layout, seed lock, leases, warm slot, GC                   | `apps/mcp/src/bot/operator-profile-pool.ts`                       |
+| Direct Google-identity lease                                    | `apps/mcp/src/bot/operator-direct-identity.ts`                    |
+| Process birth and profile-path identity                         | `apps/mcp/src/bot/profile.ts`                                     |
+| Local Chrome lifecycle and closure proof                        | `apps/mcp/src/bot/browser.ts`                                     |
+| Session/process watchdog policy and Linux marker accounting     | `apps/mcp/src/bot/operator-browser-watchdog.ts`                   |
+| Login lifecycle and seed-publication provenance                 | `apps/mcp/src/bot/google-login.ts`                                |
+| Acquire seam, payment selection, call drain, finish disposition | `apps/mcp/src/bot/provision-session.ts`                           |
+| Install provider-completion evidence                            | `apps/mcp/src/bot/install-completion.ts`, `apps/web/app/install/` |

@@ -122,6 +122,10 @@ import {
   resolveExtraction,
   type CandidateClass,
 } from "./extraction.js";
+import {
+  OperatorBrowserWatchdog,
+  type OperatorBrowserWatchdogReason,
+} from "./operator-browser-watchdog.js";
 
 // Identity-provider + auth-handler hosts a signup legitimately bounces
 // through. Used to widen domain-scope so an OAuth `goto` (rare) isn't blocked.
@@ -489,6 +493,22 @@ interface CartIdentityContext {
   onActionReady?: () => void;
 }
 
+interface SessionTerminalTeardownOwner {
+  forced: boolean;
+  forcePromise: Promise<unknown | undefined> | null;
+  routinePromise: Promise<void> | null;
+}
+
+interface PaymentDispatchHandoff {
+  state: PendingThreeDsWait;
+  settled: Promise<void>;
+  resolveSettled: () => void;
+  terminalizing: boolean;
+  terminalComplete: boolean;
+  released: boolean;
+  auditPromise: Promise<void> | null;
+}
+
 export interface Session {
   id: string;
   browser: BrowserController;
@@ -579,6 +599,7 @@ export interface Session {
   // Set by setActivePendingThreeDs, read by getActivePendingThreeDs, cleared
   // by clearActivePendingThreeDsIfCurrent once resolved or its deadline passes.
   pendingThreeDs: PendingThreeDsWait | null;
+  paymentDispatchHandoff: PaymentDispatchHandoff | null;
   // Snapshot of the single approval a filled card belongs to, captured at
   // fill time (setActivePendingCardFill / completeActivePaymentLeaseWithPendingFill)
   // so the place-order guard below still has what it needs after activePayment
@@ -617,6 +638,16 @@ export interface Session {
   closing: boolean;
   callCount: number;
   callDrainWaiters: Set<() => void>;
+  paymentCallCount: number;
+  paymentCallDrainWaiters: Set<() => void>;
+  paymentDispatchClosed: boolean;
+  // Session ownership must be a resource boundary, not merely a convention for
+  // cooperative hosts. The watchdog destroys this browser if its client goes
+  // away without operate_finish, if it lives too long, or if its Chromium tree
+  // exceeds the CPU budget.
+  lastActivityAt: number;
+  watchdog: OperatorBrowserWatchdog | null;
+  terminalTeardownOwner: SessionTerminalTeardownOwner | null;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -660,6 +691,7 @@ interface StartingBrowser {
   lease: OperatorLease;
   launch: Promise<void>;
   cancelRequested: boolean;
+  cleanupPromise: Promise<void> | null;
 }
 
 interface CapacityWaiter {
@@ -845,9 +877,13 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
   const pending: StartingBrowser = {
     controller,
     lease,
-    launch: startBrowserBounded(controller, sessionId),
+    launch: Promise.resolve(),
     cancelRequested: false,
+    cleanupPromise: null,
   };
+  pending.launch = startBrowserBounded(controller, sessionId, async () => {
+    await cancelStartingBrowser(pending);
+  });
   startingBrowsers.add(pending);
   try {
     await pending.launch;
@@ -882,13 +918,72 @@ async function releaseWarmBrowserPage(
     await browser.close().catch(() => undefined);
     return;
   }
-  leasedBrowsers.delete(browser);
   try {
     if (reusable) await browser.resetPageForReuse();
     await closeLeasedBrowser(browser, slot.lease, reusable);
   } catch {
     await closeLeasedBrowser(browser, slot.lease, false);
   }
+  if (leasedBrowsers.get(browser) === slot) leasedBrowsers.delete(browser);
+}
+
+async function forceReleaseWarmBrowserPage(browser: BrowserController): Promise<void> {
+  const slot = leasedBrowsers.get(browser);
+  const closeState = await closeBrowserBounded(
+    browser,
+    false,
+    "operator browser force-close timed out",
+  );
+  if (slot === undefined) return;
+  if (closeState === "closed") await slot.lease.destroy();
+  else await slot.lease.retain(true);
+  if (leasedBrowsers.get(browser) === slot) leasedBrowsers.delete(browser);
+}
+
+async function closeBrowserBounded(
+  browser: BrowserController,
+  cancelStart: boolean,
+  timeoutMessage: string,
+): Promise<"closed" | "force_closed_unproven" | "unknown"> {
+  const forceClose = (
+    browser as BrowserController & {
+      forceCloseOwnedProcessTree?: () => Promise<"closed" | "force_closed_unproven" | "unknown">;
+    }
+  ).forceCloseOwnedProcessTree;
+  const ordinaryClose = browser
+    .close(cancelStart ? { cancelStart: true } : undefined)
+    .catch(() => "unknown" as const);
+  const forcedClose =
+    forceClose === undefined
+      ? ordinaryClose
+      : forceClose.call(browser).catch(() => "unknown" as const);
+  const closed = Promise.race([
+    ordinaryClose.then((state) => (state === "closed" ? state : forcedClose)),
+    forcedClose.then((state) => (state === "closed" ? state : ordinaryClose)),
+  ]);
+  return await withTerminalTimeout(
+    closed,
+    positiveTimeout(
+      "TRUSTY_SQUIRE_OPERATOR_FORCE_CLOSE_TIMEOUT_MS",
+      DEFAULT_OPERATOR_FORCE_CLOSE_TIMEOUT_MS,
+    ),
+    timeoutMessage,
+  ).catch(() => "unknown" as const);
+}
+
+async function cancelStartingBrowser(pending: StartingBrowser): Promise<void> {
+  pending.cancelRequested = true;
+  if (pending.cleanupPromise !== null) return await pending.cleanupPromise;
+  pending.cleanupPromise = (async () => {
+    const closeState = await closeBrowserBounded(
+      pending.controller,
+      true,
+      "operator browser startup cancellation timed out",
+    );
+    if (closeState === "closed") await pending.lease.destroy();
+    else await pending.lease.retain(true);
+  })();
+  return await pending.cleanupPromise;
 }
 
 async function closeLeasedBrowser(
@@ -903,6 +998,177 @@ async function closeLeasedBrowser(
   }
   if (reusable) await lease.returnWarm(closeState);
   else await lease.destroy();
+}
+
+function stopSessionWatchdog(session: Session): void {
+  session.watchdog?.stop();
+}
+
+function disposeSessionWatchdog(session: Session): void {
+  session.watchdog?.dispose();
+  session.watchdog = null;
+}
+
+const DEFAULT_SESSION_TERMINAL_DRAIN_TIMEOUT_MS = 5_000;
+const DEFAULT_PENDING_THREE_DS_FINALIZE_TIMEOUT_MS = 3_000;
+const DEFAULT_SESSION_TERMINAL_TRANSITION_TIMEOUT_MS = 30_000;
+const DEFAULT_OPERATOR_FORCE_CLOSE_TIMEOUT_MS = 3_000;
+
+function positiveTimeout(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+async function withTerminalTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+async function forceTerminateProvisionSession(
+  session: Session,
+  event: string,
+  detail: Record<string, unknown>,
+  auditPendingThreeDs = true,
+): Promise<unknown | undefined> {
+  session.paymentDispatchClosed = true;
+  const owner =
+    session.terminalTeardownOwner ??
+    (session.terminalTeardownOwner = {
+      forced: false,
+      forcePromise: null,
+      routinePromise: null,
+    });
+  if (owner.forcePromise !== null) return await owner.forcePromise;
+  owner.forced = true;
+  owner.forcePromise = forceTerminateProvisionSessionOwned(
+    session,
+    event,
+    detail,
+    auditPendingThreeDs,
+  );
+  return await owner.forcePromise;
+}
+
+async function forceTerminateProvisionSessionOwned(
+  session: Session,
+  event: string,
+  detail: Record<string, unknown>,
+  auditPendingThreeDs: boolean,
+): Promise<unknown | undefined> {
+  session.closing = true;
+  stopSessionWatchdog(session);
+  audit(session.id, event, detail);
+  const handoff = session.paymentDispatchHandoff;
+  if (handoff !== null) {
+    handoff.terminalizing = true;
+    const timeoutMs = positiveTimeout(
+      "TRUSTY_SQUIRE_OPERATOR_PENDING_3DS_FINALIZE_TIMEOUT_MS",
+      DEFAULT_PENDING_THREE_DS_FINALIZE_TIMEOUT_MS,
+    );
+    await withTerminalTimeout(
+      handoff.settled,
+      timeoutMs,
+      `payment dispatch handoff exceeded ${timeoutMs}ms`,
+    ).catch(() => undefined);
+  }
+  if (sessions.get(session.id) === session) sessions.delete(session.id);
+  let terminalError: unknown;
+  if (auditPendingThreeDs && session.pendingThreeDs !== null) {
+    try {
+      await auditPendingThreeDsForSessionCloseBounded(session);
+    } catch (error) {
+      terminalError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(
+        `[operator] terminal 3DS audit failed session=${session.id}: ${message}\n`,
+      );
+    }
+  }
+  if (handoff !== null) {
+    handoff.terminalComplete = true;
+    if (handoff.released && session.paymentDispatchHandoff === handoff) {
+      session.paymentDispatchHandoff = null;
+    }
+  }
+  session.activePayment = null;
+  session.paymentFieldSealActive = false;
+  session.pendingThreeDs = null;
+  await forceReleaseWarmBrowserPage(session.browser).catch((error: unknown) => {
+    if (terminalError === undefined) terminalError = error;
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(
+      `[operator] terminal browser close failed session=${session.id}: ${message}\n`,
+    );
+  });
+  disposeSessionWatchdog(session);
+  return terminalError;
+}
+
+async function terminateExpiredProvisionSession(
+  session: Session,
+  reason: OperatorBrowserWatchdogReason,
+): Promise<void> {
+  const owner =
+    session.terminalTeardownOwner ??
+    (session.terminalTeardownOwner = {
+      forced: false,
+      forcePromise: null,
+      routinePromise: null,
+    });
+  if (owner.routinePromise !== null) return await owner.routinePromise;
+  session.closing = true;
+  stopSessionWatchdog(session);
+  owner.routinePromise = (async () => {
+    if (reason.kind !== "idle_timeout" && session.paymentCallCount > 0) {
+      const timeoutMs = positiveTimeout(
+        "TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS",
+        DEFAULT_SESSION_TERMINAL_TRANSITION_TIMEOUT_MS,
+      );
+      await withTerminalTimeout(
+        waitForPaymentCallsToDrain(session),
+        timeoutMs,
+        `payment call drain exceeded ${timeoutMs}ms`,
+      ).catch(() => undefined);
+    }
+    if (owner.forcePromise !== null) {
+      await owner.forcePromise;
+      return;
+    }
+    await forceTerminateProvisionSession(session, "browser_watchdog_terminate", { ...reason });
+  })();
+  await owner.routinePromise;
+}
+
+function startSessionWatchdog(session: Session): void {
+  if (session.watchdog !== null) {
+    session.watchdog.start();
+    return;
+  }
+  const browser = session.browser as BrowserController & {
+    operatorBrowserMarker?: () => string;
+  };
+  const watchdog = new OperatorBrowserWatchdog({
+    startedAt: session.startedAt,
+    lastActivityAt: () => session.lastActivityAt,
+    hasActiveCall: () => session.callCount > 0,
+    processMarker: () => browser.operatorBrowserMarker?.() ?? null,
+    onTerminate: async (reason) => await terminateExpiredProvisionSession(session, reason),
+  });
+  session.watchdog = watchdog;
+  watchdog.start();
 }
 
 function sessionForCall(sessionId: string): Session | undefined {
@@ -944,6 +1210,7 @@ export function paymentSession(sessionId?: string): Session {
 
 function acquireSessionCallLease(session: Session): () => void {
   if (session.closing) throw new Error(`provision session ${session.id} is closing`);
+  session.lastActivityAt = Date.now();
   session.callCount += 1;
   let released = false;
   return () => {
@@ -951,15 +1218,56 @@ function acquireSessionCallLease(session: Session): () => void {
     released = true;
     session.callCount -= 1;
     if (session.callCount === 0) {
+      session.lastActivityAt = Date.now();
       for (const wake of session.callDrainWaiters) wake();
       session.callDrainWaiters.clear();
     }
   };
 }
 
-async function waitForSessionCallsToDrain(session: Session): Promise<void> {
-  if (session.callCount === 0) return;
-  await new Promise<void>((resolve) => session.callDrainWaiters.add(resolve));
+function acquirePaymentCallLease(session: Session): () => void {
+  session.paymentCallCount += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    session.paymentCallCount -= 1;
+    if (session.paymentCallCount === 0) {
+      for (const wake of session.paymentCallDrainWaiters) wake();
+      session.paymentCallDrainWaiters.clear();
+    }
+  };
+}
+
+async function waitForPaymentCallsToDrain(session: Session): Promise<void> {
+  if (session.paymentCallCount === 0) return;
+  await new Promise<void>((resolve) => {
+    session.paymentCallDrainWaiters.add(resolve);
+  });
+}
+
+async function waitForSessionCallsToDrain(session: Session): Promise<boolean> {
+  if (session.callCount === 0) return true;
+  const timeoutMs = positiveTimeout(
+    "TRUSTY_SQUIRE_OPERATOR_TERMINAL_DRAIN_TIMEOUT_MS",
+    DEFAULT_SESSION_TERMINAL_DRAIN_TIMEOUT_MS,
+  );
+  let timer: NodeJS.Timeout | undefined;
+  let wake: (() => void) | undefined;
+  try {
+    return await Promise.race([
+      new Promise<true>((resolve) => {
+        wake = () => resolve(true);
+        session.callDrainWaiters.add(wake);
+      }),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (wake !== undefined) session.callDrainWaiters.delete(wake);
+  }
 }
 
 async function withSelectedProvisionSessionCall<T>(
@@ -988,7 +1296,14 @@ export async function withPaymentSessionCall<T>(
   fn: (session: Session) => Promise<T>,
 ): Promise<T> {
   const session = paymentSession(sessionId);
-  return await withSelectedProvisionSessionCall(session, fn);
+  return await withSelectedProvisionSessionCall(session, async (selectedSession) => {
+    const releasePaymentCall = acquirePaymentCallLease(selectedSession);
+    try {
+      return await fn(selectedSession);
+    } finally {
+      releasePaymentCall();
+    }
+  });
 }
 
 const settle = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -1011,28 +1326,31 @@ function audit(sessionId: string, event: string, detail: Record<string, unknown>
 // it's broken and never comes back). Cap it so a stuck launch fails LOUDLY with
 // an actionable message. The default is generous (a cold Chromium download is
 // legitimately multi-minute — better to wait than false-fail a slow-but-working
-// launch); tune with BOT_START_TIMEOUT_MS. On timeout we close() the
-// half-launched browser so a wedged Chrome can't keep the profile lock and brick
-// the next attempt.
-const START_TIMEOUT_MS = Number(process.env.BOT_START_TIMEOUT_MS) || 600_000;
-
-async function startBrowserBounded(browser: BrowserController, sessionId: string): Promise<void> {
+// launch); tune with BOT_START_TIMEOUT_MS. Timeout uses the independent bounded
+// cancellation boundary: it releases or quarantines profile custody without
+// awaiting the unresolved launch, and late settlement cleans up only this
+// controller's marked process.
+async function startBrowserBounded(
+  browser: BrowserController,
+  sessionId: string,
+  cancel: () => Promise<void>,
+): Promise<void> {
+  const timeoutMs = Number(process.env.BOT_START_TIMEOUT_MS) || 600_000;
   audit(sessionId, "browser_launch", {
     note: "first launch may download Chromium + start Xvfb; slow but one-time",
-    timeout_ms: START_TIMEOUT_MS,
+    timeout_ms: timeoutMs,
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error("__browser_start_timeout__")), START_TIMEOUT_MS);
+    timer = setTimeout(() => reject(new Error("__browser_start_timeout__")), timeoutMs);
   });
   try {
     await Promise.race([browser.start(), timeout]);
   } catch (err) {
     if (err instanceof Error && err.message === "__browser_start_timeout__") {
-      // Release the wedged Chrome/profile lock so the next operate_start isn't bricked.
-      await browser.close({ cancelStart: true }).catch(() => undefined);
+      await cancel().catch(() => undefined);
       throw new Error(
-        `operate_start: browser did not launch within ${Math.round(START_TIMEOUT_MS / 1000)}s. ` +
+        `operate_start: browser did not launch within ${Math.round(timeoutMs / 1000)}s. ` +
           "On a fresh machine the first launch downloads Chromium and starts a virtual display " +
           "(Xvfb) — slow but one-time. A hang this long usually means the browser binaries or Xvfb " +
           "are missing on this box. Retry once (a partial download resumes and later launches reuse " +
@@ -2632,6 +2950,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     activePayment: null,
     paymentFieldSealActive: false,
     pendingThreeDs: null,
+    paymentDispatchHandoff: null,
     placeOrderApproval: null,
     placeOrderAttempted: false,
     lastCartCheckout: null,
@@ -2642,7 +2961,13 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     closing: false,
     callCount: 0,
     callDrainWaiters: new Set(),
+    paymentCallCount: 0,
+    paymentCallDrainWaiters: new Set(),
+    paymentDispatchClosed: false,
     startedAt: Date.now(),
+    lastActivityAt: Date.now(),
+    watchdog: null,
+    terminalTeardownOwner: null,
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
     consentInboxRead: opts.consentInboxRead === true,
@@ -2650,6 +2975,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     ...(opts.api !== undefined ? { api: opts.api } : {}),
   };
   sessions.set(id, session);
+  startSessionWatchdog(session);
   try {
     if (typeof browser.setHostScopeAllowedHosts === "function") {
       await browser.setHostScopeAllowedHosts(
@@ -2694,6 +3020,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     };
   } catch (err) {
     sessions.delete(id);
+    disposeSessionWatchdog(session);
     await releaseWarmBrowserPage(browser, false);
     throw err;
   }
@@ -2737,6 +3064,7 @@ export async function startHarnessProvisionSession(
     activePayment: null,
     paymentFieldSealActive: false,
     pendingThreeDs: null,
+    paymentDispatchHandoff: null,
     placeOrderApproval: null,
     placeOrderAttempted: false,
     lastCartCheckout: null,
@@ -2747,7 +3075,13 @@ export async function startHarnessProvisionSession(
     closing: false,
     callCount: 0,
     callDrainWaiters: new Set(),
+    paymentCallCount: 0,
+    paymentCallDrainWaiters: new Set(),
+    paymentDispatchClosed: false,
     startedAt: Date.now(),
+    lastActivityAt: Date.now(),
+    watchdog: null,
+    terminalTeardownOwner: null,
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
     consentInboxRead: false,
@@ -2755,6 +3089,7 @@ export async function startHarnessProvisionSession(
     ...(opts.api === undefined ? {} : { api: opts.api }),
   };
   sessions.set(id, session);
+  startSessionWatchdog(session);
   try {
     audit(id, "start_harness", {
       service_url: opts.serviceUrl,
@@ -2764,6 +3099,7 @@ export async function startHarnessProvisionSession(
     return { ...(await observeSession(session)), hint: opts.hint ?? "" };
   } catch (error) {
     sessions.delete(id);
+    disposeSessionWatchdog(session);
     await opts.browser.close().catch(() => undefined);
     throw error;
   }
@@ -2938,11 +3274,67 @@ export function getActivePendingThreeDs(selectedSession?: Session): PendingThree
   return (selectedSession ?? activeProvisionSession()).pendingThreeDs ?? null;
 }
 
+export function armPaymentDispatchHandoff(
+  state: PendingThreeDsWait,
+  selectedSession?: Session,
+): void {
+  const session = selectedSession ?? activeProvisionSession();
+  if (session.paymentDispatchClosed || (session.closing && session.paymentCallCount === 0)) {
+    throw new Error(`provision session ${session.id} closed before payment dispatch`);
+  }
+  let resolveSettled = (): void => undefined;
+  const settled = new Promise<void>((resolve) => {
+    resolveSettled = resolve;
+  });
+  session.paymentDispatchHandoff = {
+    state,
+    settled,
+    resolveSettled,
+    terminalizing: false,
+    terminalComplete: false,
+    released: false,
+    auditPromise: null,
+  };
+}
+
+export function finishPaymentDispatchHandoff(
+  state: PendingThreeDsWait,
+  selectedSession?: Session,
+): void {
+  const session = selectedSession ?? activeProvisionSession();
+  const handoff = session.paymentDispatchHandoff;
+  if (handoff?.state !== state) return;
+  handoff.released = true;
+  handoff.resolveSettled();
+  if (!handoff.terminalizing || handoff.terminalComplete) {
+    session.paymentDispatchHandoff = null;
+  }
+}
+
+export async function coordinatePaymentDispatchAudit(
+  state: PendingThreeDsWait,
+  recordAudit: () => Promise<void>,
+  selectedSession?: Session,
+): Promise<void> {
+  const session = selectedSession ?? activeProvisionSession();
+  const handoff = session.paymentDispatchHandoff;
+  if (handoff?.state === state) {
+    handoff.auditPromise ??= recordAudit();
+    await handoff.auditPromise;
+    return;
+  }
+  await recordAudit();
+}
+
 export function setActivePendingThreeDs(
   state: PendingThreeDsWait,
   selectedSession?: Session,
 ): void {
-  (selectedSession ?? activeProvisionSession()).pendingThreeDs = state;
+  const session = selectedSession ?? activeProvisionSession();
+  const handoff = session.paymentDispatchHandoff;
+  if (session.closing && handoff?.state !== state) return;
+  session.pendingThreeDs = state;
+  if (handoff?.state === state) handoff.resolveSettled();
 }
 
 export function clearActivePendingThreeDsIfCurrent(
@@ -7637,13 +8029,34 @@ async function auditPendingThreeDsForSessionClose(session: Session): Promise<voi
     );
   }
   const resolution = await session.browser.waitForThreeDsResolution(0);
-  await session.api.auditPayment({
-    ...pending.checkout,
-    last4: pending.last4,
-    status: pendingThreeDsAuditStatus(resolution),
-    approval_id: pending.approval_id,
-    ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
-  });
+  const recordAudit = async (): Promise<void> => {
+    await session.api!.auditPayment({
+      ...pending.checkout,
+      last4: pending.last4,
+      status: pendingThreeDsAuditStatus(resolution),
+      approval_id: pending.approval_id,
+      ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
+    });
+  };
+  const handoff = session.paymentDispatchHandoff;
+  if (handoff?.state === pending) {
+    handoff.auditPromise ??= recordAudit();
+    await handoff.auditPromise;
+    return;
+  }
+  await recordAudit();
+}
+
+async function auditPendingThreeDsForSessionCloseBounded(session: Session): Promise<void> {
+  const timeoutMs = positiveTimeout(
+    "TRUSTY_SQUIRE_OPERATOR_PENDING_3DS_FINALIZE_TIMEOUT_MS",
+    DEFAULT_PENDING_THREE_DS_FINALIZE_TIMEOUT_MS,
+  );
+  await withTerminalTimeout(
+    auditPendingThreeDsForSessionClose(session),
+    timeoutMs,
+    `pending 3-D Secure finalization exceeded ${timeoutMs}ms`,
+  );
 }
 
 async function closeFinishingProvisionSession(
@@ -7651,14 +8064,16 @@ async function closeFinishingProvisionSession(
   destroyProfile: boolean,
 ): Promise<FinishResult> {
   const sessionId = session.id;
-  await auditPendingThreeDsForSessionClose(session);
+  await auditPendingThreeDsForSessionCloseBounded(session);
   const url = session.browser.currentUrl();
   audit(sessionId, "finish", { url });
   session.activePayment = null;
   session.paymentFieldSealActive = false;
   session.pendingThreeDs = null;
   sessions.delete(sessionId);
+  stopSessionWatchdog(session);
   await releaseWarmBrowserPage(session.browser, !destroyProfile);
+  disposeSessionWatchdog(session);
   return { session_id: sessionId, url, closed: true };
 }
 
@@ -7669,16 +8084,75 @@ export async function finishProvisionSessionWithPreparation<T>(
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   if (session.closing) throw new Error(`provision session ${sessionId} is already closing`);
+  const owner: SessionTerminalTeardownOwner = {
+    forced: false,
+    forcePromise: null,
+    routinePromise: null,
+  };
+  session.terminalTeardownOwner = owner;
   session.closing = true;
-  try {
-    await waitForSessionCallsToDrain(session);
-    const destroyProfile = profileRequiresDestroy(session);
+  stopSessionWatchdog(session);
+  const timeoutMs = positiveTimeout(
+    "TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS",
+    DEFAULT_SESSION_TERMINAL_TRANSITION_TIMEOUT_MS,
+  );
+  let timer: NodeJS.Timeout | undefined;
+  const transition = (async (): Promise<PreparedFinishResult<T>> => {
+    const drained = await waitForSessionCallsToDrain(session);
+    if (!drained) {
+      await forceTerminateProvisionSession(session, "finish_forced_terminate", {
+        reason: "call_drain_timeout",
+      });
+      throw new Error(`provision session ${sessionId} call drain timed out; browser terminated`);
+    }
     const prepared = await prepare();
-    const finish = await closeFinishingProvisionSession(session, destroyProfile);
-    return { finish, prepared };
+    if (owner.forced || sessions.get(sessionId) !== session) {
+      throw new Error(`provision session ${sessionId} terminal transition was forced`);
+    }
+    const destroyProfile = profileRequiresDestroy(session);
+    try {
+      const finish = await closeFinishingProvisionSession(session, destroyProfile);
+      return { finish, prepared };
+    } catch (error) {
+      await forceTerminateProvisionSession(
+        session,
+        "finish_forced_terminate",
+        { reason: "terminal_close_failed" },
+        false,
+      );
+      throw error;
+    }
+  })();
+  try {
+    return await Promise.race([
+      transition,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          void forceTerminateProvisionSession(session, "finish_forced_terminate", {
+            reason: "terminal_transition_timeout",
+            timeout_ms: timeoutMs,
+          }).then(
+            () =>
+              reject(
+                new Error(
+                  `provision session ${sessionId} terminal transition timed out; browser terminated`,
+                ),
+              ),
+            reject,
+          );
+        }, timeoutMs);
+        timer.unref();
+      }),
+    ]);
   } catch (error) {
-    if (sessions.get(sessionId) === session) session.closing = false;
+    if (!owner.forced && sessions.get(sessionId) === session) {
+      session.closing = false;
+      session.terminalTeardownOwner = null;
+      startSessionWatchdog(session);
+    }
     throw error;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -7697,28 +8171,25 @@ export async function closeAllProvisionSessions(): Promise<void> {
   }
   await Promise.all(waiters.map((waiter) => waiter.settled));
   for (const pending of [...startingBrowsers]) {
-    pending.cancelRequested = true;
-    await pending.controller.close({ cancelStart: true }).catch(() => undefined);
-    await pending.launch.catch(() => undefined);
-    await closeLeasedBrowser(pending.controller, pending.lease, false).catch(() => undefined);
+    await cancelStartingBrowser(pending).catch(() => undefined);
   }
   const closingSessions = [...sessions.values()];
-  for (const session of closingSessions) session.closing = true;
+  for (const session of closingSessions) {
+    session.closing = true;
+    stopSessionWatchdog(session);
+  }
   let closeError: unknown;
   for (const session of closingSessions) {
-    try {
-      await waitForSessionCallsToDrain(session);
-      await closeFinishingProvisionSession(session, true);
-    } catch (error) {
-      if (sessions.get(session.id) === session) session.closing = false;
-      if (closeError === undefined) closeError = error;
-    }
+    const drained = await waitForSessionCallsToDrain(session);
+    const error = await forceTerminateProvisionSession(session, "shutdown_terminate", {
+      reason: drained ? "transport_disconnect" : "call_drain_timeout",
+    });
+    if (closeError === undefined && error !== undefined) closeError = error;
+  }
+  for (const slot of [...leasedBrowsers.values()]) {
+    await forceReleaseWarmBrowserPage(slot.controller).catch(() => undefined);
   }
   if (closeError !== undefined) throw closeError;
-  for (const slot of [...leasedBrowsers.values()]) {
-    leasedBrowsers.delete(slot.controller);
-    await closeLeasedBrowser(slot.controller, slot.lease, false).catch(() => undefined);
-  }
 }
 
 export function activeSessionCount(): number {

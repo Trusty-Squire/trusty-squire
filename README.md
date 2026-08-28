@@ -98,7 +98,8 @@ expected-versus-observed evidence. The warning persists through resumable
 `operate_payment_status` calls; it neither changes the payment status nor cancels,
 approves, or modifies the challenge, so the cardholder retains the decision whether
 to continue. A bare click that produces no confirmation and no detected challenge returns
-`payment_outcome_unknown` instead of guessing that the charge succeeded. A detected
+`payment_outcome_unknown` instead of guessing that the charge succeeded, as does a click-
+completion failure after input dispatch may already have begun. A detected
 challenge that remains unresolved on timeout stays
 `payment_3ds_required` with `needs_user.wall: "3ds"`, handing control back for user
 completion. Neither status is success or permits blind resubmission: manually check
@@ -372,9 +373,13 @@ DOM-diagnostics pair is excluded from that surface; set
   `none` only closes; `credentials` requires `store` and preserves credential
   extraction, vault storage, and auto-promotion; `result` requires `summary` or
   `data` and can run `verify_recipe` before closing. Finish first stops new
-  calls and drains calls already using that session. Payment state never blocks
-  teardown: finish clears any remaining payment state and destroys, rather than
-  pools, a payment-sensitive browser profile.
+  calls and drains calls already using that session within a bounded terminal
+  transition. Payment state never blocks teardown: finish clears any remaining
+  payment state and destroys, rather than pools, a payment-sensitive browser
+  profile. Sessions also close automatically after 10 minutes without an
+  operation and begin terminal teardown at 30 minutes; only an active payment
+  receives the short bounded close grace. Callers should finish promptly instead
+  of treating an open browser as durable background state.
 - `operate_recipe_save` saves a postcondition-verified local recipe under a
   closed task verb plus the service's registrable domain. It records stable target
   attributes and exact provenance for Squire-supplied values, not observed refs

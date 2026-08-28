@@ -417,6 +417,15 @@ After submission, ACS content is untrusted, read-only evidence. `detectThreeDsCh
 
 Post-submit 3DS tracking remains resumable for 20 minutes without becoming a second authorization or charge path. While `pendingThreeDs` exists, new `operate_pay` calls and guarded `operate_act` charge clicks are refused; session close performs one final live check and audit before clearing it. A charge click issued through `operate_act` during `operate_pay`'s own in-progress 3DS wait is still governed by the existing `activePayment: "operating"` lease rather than `pendingThreeDs`.
 
+### 12. An operator browser is session-scoped: never remove its watchdog or containment
+
+The authoritative lifecycle, bounded teardown, Linux marker-watchdog, and accepted
+reparented-idle-renderer residual are documented in
+[`docs/DESIGN-warm-browser-reuse.md`](docs/DESIGN-warm-browser-reuse.md#5-ownership-crash-recovery-and-containment).
+Preserve that contract when changing browser startup or shutdown: never replace its
+identity-proven scope with root-PID-only signaling or broad `pkill`. The strict
+containment follow-up is `ts-operator-browser-cgroup-containment` in `TODOS.md`.
+
 ## Final note
 
 You are reading this file because a prior agent burned four version numbers, confused users, and forced a human to intervene. The agent was not malicious. It was not lazy. It was pattern-matching on its own prose instead of on tool output.

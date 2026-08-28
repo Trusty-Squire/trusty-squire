@@ -50,7 +50,10 @@ export interface PaymentBrowser {
   isPayPalHostedCheckout(): Promise<boolean>;
   readCheckoutSummary(fallbackCurrency?: string): Promise<CheckoutSummary>;
   readCheckoutConfirmSummary(approvedCurrency?: string): Promise<CheckoutSummary>;
-  fillAndSubmitCheckout(card: CheckoutCard): Promise<CheckoutSubmitResult>;
+  fillAndSubmitCheckout(
+    card: CheckoutCard,
+    options?: { onSubmitDispatched?: () => void },
+  ): Promise<CheckoutSubmitResult>;
   fillCheckoutCardFields(card: CheckoutCard): Promise<void>;
   submitFilledCheckout(): Promise<CheckoutSubmitResult>;
   clearSealedPaymentFields(): Promise<void>;
@@ -167,11 +170,14 @@ interface PayDependencies {
   // [P0] Fired when a call ends still-pending (poll budget exhausted, human
   // hasn't responded yet) so the session layer can persist resumable state.
   onApprovalPending: (state: PendingApprovalWait) => void;
+  onThreeDsHandoffArmed: (state: PendingThreeDsWait) => void;
+  coordinateThreeDsAudit: (state: PendingThreeDsWait, audit: () => Promise<void>) => Promise<void>;
   // Fired when the submit-time waitForThreeDsResolution wait exhausts its
   // budget with NO terminal signal (genuinely still pending, not declined,
   // not confirmed) so the session layer can persist resumable state for
   // operate_payment_status to keep checking the SAME live browser.
   onThreeDsPending: (state: PendingThreeDsWait) => void;
+  onThreeDsCleared: (state: PendingThreeDsWait) => void;
 }
 
 const cardSchema = z.object({
@@ -615,7 +621,10 @@ function defaultDependencies(): PayDependencies {
     onCardFillCleanupFailed: () => undefined,
     onSubmitStarted: () => undefined,
     onApprovalPending: () => undefined,
+    onThreeDsHandoffArmed: () => undefined,
+    coordinateThreeDsAudit: async (_state, audit) => await audit(),
     onThreeDsPending: () => undefined,
+    onThreeDsCleared: () => undefined,
   };
 }
 
@@ -1334,18 +1343,31 @@ export async function executeOperatePay(
       };
     }
 
+    const pendingThreeDsHandoff: PendingThreeDsWait = {
+      approval_id: approvalId,
+      approval_url: approvalUrl,
+      checkout,
+      last4,
+      ...(mandateId !== undefined ? { mandate_id: mandateId } : {}),
+      deadline: deps.now() + THREE_DS_RESUME_WINDOW_MS,
+    };
+    deps.onThreeDsHandoffArmed(pendingThreeDsHandoff);
+    let retainedPendingThreeDs: PendingThreeDsWait | null = null;
     const retainPendingThreeDs = (): void => {
-      deps.onThreeDsPending({
-        approval_id: approvalId,
-        approval_url: approvalUrl,
-        checkout,
-        last4,
-        ...(submitResult.payment_instrument_mismatch !== undefined
-          ? { payment_instrument_mismatch: submitResult.payment_instrument_mismatch }
-          : {}),
-        ...(mandateId !== undefined ? { mandate_id: mandateId } : {}),
-        deadline: deps.now() + THREE_DS_RESUME_WINDOW_MS,
-      });
+      const firstRetention = retainedPendingThreeDs === null;
+      if (retainedPendingThreeDs === null) {
+        retainedPendingThreeDs = pendingThreeDsHandoff;
+      }
+      if (submitResult.payment_instrument_mismatch !== undefined) {
+        retainedPendingThreeDs.payment_instrument_mismatch =
+          submitResult.payment_instrument_mismatch;
+      }
+      if (firstRetention) deps.onThreeDsPending(retainedPendingThreeDs);
+    };
+    const clearPendingThreeDs = (): void => {
+      if (retainedPendingThreeDs === null) return;
+      deps.onThreeDsCleared(retainedPendingThreeDs);
+      retainedPendingThreeDs = null;
     };
     const pendingThreeDsNext = {
       tool: "operate_payment_status",
@@ -1358,14 +1380,17 @@ export async function executeOperatePay(
     let paymentStatus = "payment_submitted";
     let submitResult: CheckoutSubmitResult = { three_ds_required: false, order_confirmed: false };
     try {
-      submitResult = await browser.fillAndSubmitCheckout({
-        ...card,
-        ...(args.card_label !== undefined ? { label: args.card_label } : {}),
-        ...(args.card_network !== undefined ? { network: args.card_network } : {}),
-        ...(args.card_issuer !== undefined
-          ? { issuer: args.card_issuer, issuer_source: "bin_metadata" as const }
-          : {}),
-      });
+      submitResult = await browser.fillAndSubmitCheckout(
+        {
+          ...card,
+          ...(args.card_label !== undefined ? { label: args.card_label } : {}),
+          ...(args.card_network !== undefined ? { network: args.card_network } : {}),
+          ...(args.card_issuer !== undefined
+            ? { issuer: args.card_issuer, issuer_source: "bin_metadata" as const }
+            : {}),
+        },
+        { onSubmitDispatched: retainPendingThreeDs },
+      );
       if (submitResult.three_ds_required) paymentStatus = "payment_3ds_required";
       else if (!submitResult.order_confirmed) paymentStatus = "payment_outcome_unknown";
     } catch (error) {
@@ -1378,16 +1403,21 @@ export async function executeOperatePay(
       }
       let audit_recorded = true;
       try {
-        await api.auditPayment({
-          ...checkout,
-          last4,
-          status: paymentStatus,
-          ...(mandateId !== undefined ? { mandate_id: mandateId } : {}),
-        });
+        const recordAudit = async (): Promise<void> => {
+          await api.auditPayment({
+            ...checkout,
+            last4,
+            status: paymentStatus,
+            ...(mandateId !== undefined ? { mandate_id: mandateId } : {}),
+          });
+        };
+        if (retainedPendingThreeDs === null) await recordAudit();
+        else await deps.coordinateThreeDsAudit(retainedPendingThreeDs, recordAudit);
       } catch {
         audit_recorded = false;
       }
-      if (outcomeUnknown) retainPendingThreeDs();
+      if (outcomeUnknown && retainedPendingThreeDs !== null) retainPendingThreeDs();
+      else if (!outcomeUnknown) clearPendingThreeDs();
       return {
         status: paymentStatus,
         audit_recorded,
@@ -1400,7 +1430,7 @@ export async function executeOperatePay(
         ...(submitResult.payment_instrument_mismatch !== undefined
           ? { warning: submitResult.payment_instrument_mismatch }
           : {}),
-        ...(outcomeUnknown ? { next: pendingThreeDsNext } : {}),
+        ...(outcomeUnknown && retainedPendingThreeDs !== null ? { next: pendingThreeDsNext } : {}),
       };
     } finally {
       cardBytes?.fill(0);
@@ -1425,11 +1455,13 @@ export async function executeOperatePay(
 
     let auditRecorded = true;
     try {
-      await api.auditPayment({
-        ...checkout,
-        last4,
-        status: paymentStatus,
-        ...(mandateId !== undefined ? { mandate_id: mandateId } : {}),
+      await deps.coordinateThreeDsAudit(pendingThreeDsHandoff, async () => {
+        await api.auditPayment({
+          ...checkout,
+          last4,
+          status: paymentStatus,
+          ...(mandateId !== undefined ? { mandate_id: mandateId } : {}),
+        });
       });
     } catch {
       auditRecorded = false;
@@ -1456,6 +1488,7 @@ export async function executeOperatePay(
       };
     }
     if (paymentStatus === "payment_declined") {
+      clearPendingThreeDs();
       return {
         status: paymentStatus,
         audit_recorded: auditRecorded,
@@ -1465,6 +1498,7 @@ export async function executeOperatePay(
           : {}),
       };
     }
+    clearPendingThreeDs();
     return {
       status: paymentStatus,
       audit_recorded: auditRecorded,
