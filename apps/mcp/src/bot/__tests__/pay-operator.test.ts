@@ -75,7 +75,10 @@ async function harness(
   checkoutOptions: {
     checkout?: CheckoutSummary;
     readCheckoutSummary?: () => Promise<CheckoutSummary>;
-    fillAndSubmitCheckout?: (card: CheckoutCard) => Promise<CheckoutSubmitResult>;
+    fillAndSubmitCheckout?: (
+      card: CheckoutCard,
+      options?: { onSubmitDispatched?: () => void },
+    ) => Promise<CheckoutSubmitResult>;
     paymentInstrumentMismatch?: () => CheckoutSubmitResult["payment_instrument_mismatch"];
   } = {},
 ) {
@@ -93,6 +96,8 @@ async function harness(
   const confirmationBodies: Array<Record<string, unknown>> = [];
   const pendingStates: PendingApprovalWait[] = [];
   const pendingThreeDsStates: PendingThreeDsWait[] = [];
+  const pendingAtDispatchCounts: number[] = [];
+  let activePendingThreeDs: PendingThreeDsWait | null = null;
   const nonce = "synthetic-nonce";
   const agent = "synthetic-payment-test-agent";
   let approvalPolls = 0;
@@ -262,8 +267,13 @@ async function harness(
     clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
     fillAndSubmitCheckout: vi.fn(
       checkoutOptions.fillAndSubmitCheckout ??
-        (async (card: CheckoutCard) => {
+        (async (
+          card: CheckoutCard,
+          options?: { onSubmitDispatched?: () => void },
+        ) => {
           filledCards.push(card);
+          options?.onSubmitDispatched?.();
+          pendingAtDispatchCounts.push(pendingThreeDsStates.length);
           return threeDs === undefined
             ? { three_ds_required: false, order_confirmed: true }
             : {
@@ -306,7 +316,13 @@ async function harness(
       surfaceApprovalUrl: vi.fn(),
       onCardResolved: (cardRef) => resolvedCardRefs.push(cardRef),
       onApprovalPending: (state) => pendingStates.push(state),
-      onThreeDsPending: (state) => pendingThreeDsStates.push(state),
+      onThreeDsPending: (state) => {
+        activePendingThreeDs = state;
+        pendingThreeDsStates.push(state);
+      },
+      onThreeDsCleared: (state) => {
+        if (activePendingThreeDs === state) activePendingThreeDs = null;
+      },
     },
   );
 
@@ -321,6 +337,10 @@ async function harness(
     confirmationBodies,
     pendingStates,
     pendingThreeDsStates,
+    pendingAtDispatchCounts,
+    get activePendingThreeDs() {
+      return activePendingThreeDs;
+    },
     browser,
   };
 }
@@ -781,7 +801,7 @@ describe("operate_pay", () => {
   });
 
   it("notifies and records submitted when the 3DS challenge succeeds", async () => {
-    const { result, auditBodies, notifyCalls, browser } = await harness(
+    const { result, auditBodies, notifyCalls, browser, pendingAtDispatchCounts } = await harness(
       "happy",
       "customer_test",
       undefined,
@@ -792,6 +812,7 @@ describe("operate_pay", () => {
     expect(notifyCalls).toHaveLength(1);
     expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
     expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_submitted" })]);
+    expect(pendingAtDispatchCounts).toEqual([1]);
   });
 
   it("does not wait for notification delivery before resolving 3DS", async () => {
@@ -970,19 +991,21 @@ describe("operate_pay", () => {
   });
 
   it("records declined when the 3DS challenge fails", async () => {
-    const { result, auditBodies, notifyCalls, pendingThreeDsStates } = await harness(
+    const outcome = await harness(
       "happy",
       "customer_test",
       undefined,
       { resolution: "failed" },
     );
 
-    expect(result).toMatchObject({ status: "payment_declined" });
-    expect(result).not.toHaveProperty("merchant");
-    expect(notifyCalls).toHaveLength(1);
-    expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_declined" })]);
-    // A firm decline is terminal, not still-pending — no resumable 3DS state.
-    expect(pendingThreeDsStates).toHaveLength(0);
+    expect(outcome.result).toMatchObject({ status: "payment_declined" });
+    expect(outcome.result).not.toHaveProperty("merchant");
+    expect(outcome.notifyCalls).toHaveLength(1);
+    expect(outcome.auditBodies).toEqual([
+      expect.objectContaining({ status: "payment_declined" }),
+    ]);
+    expect(outcome.pendingThreeDsStates).toHaveLength(1);
+    expect(outcome.activePendingThreeDs).toBeNull();
   });
 
   it("records and tracks unknown when single-page submission fails after dispatch", async () => {

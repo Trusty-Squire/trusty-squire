@@ -70,6 +70,11 @@ import {
   type OperatorWorkerIdentity,
 } from "./operator-profile-pool.js";
 import { startXvfb, xvfbAvailable, type XvfbRig } from "./xvfb.js";
+import {
+  createOperatorBrowserMarker,
+  OPERATOR_BROWSER_MARKER_ENV,
+  startGlobalOperatorBrowserProcessWatchdog,
+} from "./operator-browser-watchdog.js";
 
 // Lazy registration: installing the plugin mutates the chromium singleton
 // from playwright-extra so we only do it once per process. We require()
@@ -2559,10 +2564,6 @@ export interface OwnedChromeProcessTreeProof {
 
 const selfManagedChromes = new Map<number, SelfManagedChrome>();
 const ownedChromeProcessTrees = new Set<OwnedChromeProcessTreeProof>();
-const ownedChromeProcessTreeRefreshers = new Map<
-  OwnedChromeProcessTreeProof,
-  NodeJS.Timeout
->();
 let selfManagedCleanupInstalled = false;
 let selfManagedTerminationSignalExitEnabled = true;
 let orphanVerifierReapRan = false;
@@ -2629,7 +2630,6 @@ function registerSelfManagedChrome(
     if (child.pid === undefined) return;
     const tracked = selfManagedChromes.get(child.pid);
     if (tracked === undefined) return;
-    refreshOwnedChromeProcessTreeProof(tracked.proof);
     if (ownedChromeProcessTreeState(tracked.proof) === "stale") {
       releaseOwnedChromeProcessTree(tracked.proof);
       selfManagedChromes.delete(child.pid);
@@ -2726,17 +2726,6 @@ export function signalOwnedChromeProcessTree(
   if (proof === null) return false;
   const platform = options.platform ?? process.platform;
   const memberState = options.memberState ?? processBirthIdentityState;
-  refreshOwnedChromeProcessTreeProof(proof, {
-    platform,
-    profileMatches,
-    ...(options.processTreePids === undefined
-      ? {}
-      : { processTreePids: options.processTreePids }),
-    ...(options.readBirthIdentity === undefined
-      ? {}
-      : { readBirthIdentity: options.readBirthIdentity }),
-    memberState,
-  });
   const matchingMembers = proof.members.filter((member) => memberState(member) === "matching");
   const matchingGroupMember =
     proof.processGroup && platform !== "win32"
@@ -2801,45 +2790,6 @@ export function captureOwnedChromeProcessTreeProof(
   return { identity, processGroup, members };
 }
 
-export function refreshOwnedChromeProcessTreeProof(
-  proof: OwnedChromeProcessTreeProof,
-  options: {
-    platform?: NodeJS.Platform;
-    profileMatches?: (identity: ProfileProcessIdentity, profileDir: string) => boolean;
-    processTreePids?: (rootPid: number) => number[];
-    readBirthIdentity?: typeof processBirthIdentity;
-    memberState?: typeof processBirthIdentityState;
-  } = {},
-): void {
-  const platform = options.platform ?? process.platform;
-  if (platform !== "linux") return;
-  const memberState = options.memberState ?? processBirthIdentityState;
-  const rootMatches = (options.profileMatches ?? profileProcessMatches)(
-    proof.identity,
-    proof.identity.user_data_dir,
-  );
-  const roots = proof.members.filter(
-    (member) =>
-      (member.pid === proof.identity.pid && rootMatches) || memberState(member) === "matching",
-  );
-  const known = new Set(proof.members.map((member) => `${member.pid}:${member.start_time}`));
-  const processTreePids = options.processTreePids ?? linuxProcessTreePids;
-  const readBirthIdentity = options.readBirthIdentity ?? processBirthIdentity;
-  for (const root of roots) {
-    for (const pid of processTreePids(root.pid)) {
-      const member =
-        pid === proof.identity.pid
-          ? { pid, start_time: proof.identity.start_time }
-          : readBirthIdentity(pid);
-      if (member === null) continue;
-      const key = `${member.pid}:${member.start_time}`;
-      if (known.has(key)) continue;
-      known.add(key);
-      proof.members.push(member);
-    }
-  }
-}
-
 function trackOwnedChromeProcessTree(
   identity: ProfileProcessIdentity,
   processGroup: boolean,
@@ -2848,24 +2798,11 @@ function trackOwnedChromeProcessTree(
   const proof = captureOwnedChromeProcessTreeProof(identity, processGroup);
   if (proof === null) return null;
   ownedChromeProcessTrees.add(proof);
-  const refresher = setInterval(() => {
-    refreshOwnedChromeProcessTreeProof(proof);
-    if (ownedChromeProcessTreeState(proof) === "stale") {
-      const tracked = selfManagedChromes.get(proof.identity.pid);
-      if (tracked?.proof === proof) selfManagedChromes.delete(proof.identity.pid);
-      releaseOwnedChromeProcessTree(proof);
-    }
-  }, PROFILE_IDENTITY_POLL_MS);
-  refresher.unref();
-  ownedChromeProcessTreeRefreshers.set(proof, refresher);
   return proof;
 }
 
 function releaseOwnedChromeProcessTree(proof: OwnedChromeProcessTreeProof | null): void {
   if (proof === null) return;
-  const refresher = ownedChromeProcessTreeRefreshers.get(proof);
-  if (refresher !== undefined) clearInterval(refresher);
-  ownedChromeProcessTreeRefreshers.delete(proof);
   ownedChromeProcessTrees.delete(proof);
 }
 
@@ -3507,6 +3444,7 @@ export class BrowserController {
   private childChromeIdentity: ProfileProcessIdentity | null = null;
   private childChromeProcessGroup = false;
   private ownedChromeProcessTreeProof: OwnedChromeProcessTreeProof | null = null;
+  private readonly operatorProcessMarker = createOperatorBrowserMarker();
   private cdpBrowser: Browser | null = null;
   // True once a local browser context launched this session.
   private launchedContext = false;
@@ -3679,16 +3617,8 @@ export class BrowserController {
     return this.childChromeIdentity ?? this.launchedProfileHolderIdentity;
   }
 
-  /** Root PID for the local operator Chrome. Its descendant tree is CPU-metered by the session watchdog. */
-  operatorBrowserRootPid(): number | null {
-    const proof = this.ownedChromeProcessTreeProof;
-    if (proof !== null) {
-      const living = proof.members.find(
-        (member) => processBirthIdentityState(member) === "matching",
-      );
-      if (living !== undefined) return living.pid;
-    }
-    return this.operatorWorkerIdentity()?.pid ?? null;
+  operatorBrowserMarker(): string {
+    return this.operatorProcessMarker;
   }
 
   private adoptOwnedChromeProcessTree(
@@ -3699,7 +3629,6 @@ export class BrowserController {
       this.ownedChromeProcessTreeProof?.identity.pid === identity.pid &&
       this.ownedChromeProcessTreeProof.identity.start_time === identity.start_time
     ) {
-      refreshOwnedChromeProcessTreeProof(this.ownedChromeProcessTreeProof);
       return this.ownedChromeProcessTreeProof;
     }
     const tracked = selfManagedChromes.get(identity.pid);
@@ -4026,6 +3955,7 @@ export class BrowserController {
 
   private async startOnce(): Promise<void> {
     const remoteMode = (process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0;
+    if (!remoteMode) startGlobalOperatorBrowserProcessWatchdog();
     const lease =
       this.profileOperationLease ??
       (remoteMode ? null : await acquireFreeProfileOperationGuard(this.profileDir));
@@ -4250,6 +4180,7 @@ export class BrowserController {
       const selfEnv: NodeJS.ProcessEnv = {
         ...(chromeEnv ?? process.env),
         TZ: geo?.timezoneId ?? "America/New_York",
+        [OPERATOR_BROWSER_MARKER_ENV]: this.operatorProcessMarker,
       };
       context = await launchWithProfileGate(
         this.profileDir,
@@ -4329,7 +4260,10 @@ export class BrowserController {
               ),
             options: {
               headless: chromeHeadless,
-              ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
+              env: {
+                ...(chromeEnv ?? process.env),
+                [OPERATOR_BROWSER_MARKER_ENV]: this.operatorProcessMarker,
+              },
               ...(channel !== null ? { channel } : {}),
               ...persistentProxyOptions(proxy),
               args: [...launchArgs],
@@ -11321,7 +11255,10 @@ export class BrowserController {
       : { selected: cardGroup, groups: [...groups.values()] };
   }
 
-  async fillAndSubmitCheckout(card: CheckoutCard): Promise<CheckoutSubmitResult> {
+  async fillAndSubmitCheckout(
+    card: CheckoutCard,
+    options: { onSubmitDispatched?: () => void } = {},
+  ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     this.checkoutCardGroupScope = undefined;
     this.paymentInstrumentExpectation = undefined;
@@ -11362,7 +11299,7 @@ export class BrowserController {
       this.rememberPaymentInstrumentExpectation(card);
       primary = {
         kind: "outcome",
-        value: await this.submitFilledCheckoutInScope(cardGroup),
+        value: await this.submitFilledCheckoutInScope(cardGroup, options.onSubmitDispatched),
       };
     } catch (error) {
       primary = { kind: "error", value: error };
@@ -11613,6 +11550,7 @@ export class BrowserController {
 
   private async submitFilledCheckoutInScope(
     cardGroup?: CheckoutCardGroupScope,
+    onSubmitDispatched?: () => void,
   ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     const savedCardSelection = await this.resolveCompetingSavedCardSelection();
@@ -11842,6 +11780,7 @@ export class BrowserController {
           await clearDispatchTracking();
           throw new Error("payment_card_selection_ambiguous");
         }
+        onSubmitDispatched?.();
         try {
           await candidate.click();
         } catch (error) {
@@ -16513,14 +16452,12 @@ export class BrowserController {
   ): Promise<boolean> {
     const deadline = Date.now() + PROFILE_IDENTITY_PROOF_TIMEOUT_MS;
     const proof = existingProof ?? captureOwnedChromeProcessTreeProof(identity, false);
-    if (proof !== null) refreshOwnedChromeProcessTreeProof(proof);
     let state =
       proof === null
         ? profileProcessIdentityState(identity, this.profileDir)
         : ownedChromeProcessTreeState(proof);
     while (state !== "stale" && Date.now() < deadline) {
       if (proof !== null) {
-        refreshOwnedChromeProcessTreeProof(proof);
         signalOwnedChromeProcessTree(identity, false, "SIGKILL", { proof });
       } else if (profileProcessMatches(identity, this.profileDir)) {
         signalOwnedChromeProcessTree(identity, false, "SIGKILL");

@@ -417,7 +417,7 @@ After submission, ACS content is untrusted, read-only evidence. `detectThreeDsCh
 
 Post-submit 3DS tracking remains resumable for 20 minutes without becoming a second authorization or charge path. While `pendingThreeDs` exists, new `operate_pay` calls and guarded `operate_act` charge clicks are refused; session close performs one final live check and audit before clearing it. A charge click issued through `operate_act` during `operate_pay`'s own in-progress 3DS wait is still governed by the existing `activePayment: "operating"` lease rather than `pendingThreeDs`.
 
-### 12. An operator browser is session-scoped: never remove its watchdog or process-tree teardown
+### 12. An operator browser is session-scoped: never remove its watchdog or containment
 
 `apps/mcp/src/bot/provision-session.ts` owns a session watchdog, and
 `apps/mcp/src/bot/operator-browser-watchdog.ts` owns its policy: 10 minutes
@@ -427,11 +427,19 @@ its profile lease. These caps are intentional backstops for a bot-blocked host
 that abandons `operate_finish` while leaving its stdio pipe open; the server's
 12-hour open-session idle grace is not a substitute.
 
-`BrowserController.close()` must tear down the entire identity-proven Chromium
-tree: self-launched Chrome is a detached process group, while the Playwright
-fallback (including `chrome-headless-shell`) is walked from its profile-root PID.
-Do not replace this with a root-PID-only signal or a broad `pkill`; both have
-previously left renderer processes running or risked unrelated operator browsers.
+Each local operator launch injects an inherited Trusty Squire marker. The
+process-wide watchdog scans marked Chromium processes independently of session
+state, meters aggregate CPU with per-PID birth-safe deltas, and enforces the
+30-minute lifetime even after the browser root exits or children are reparented.
+`BrowserController.close()` also performs best-effort clean teardown: self-launched
+Chrome uses a detached process group, while the Playwright fallback (including
+`chrome-headless-shell`) uses an identity-proven profile-root snapshot. Never use
+a root-PID-only signal or broad `pkill`.
+
+PID snapshots cannot provide strict zero-orphan containment. A rare escaped idle
+child may briefly remain at 0% CPU, but the process-wide watchdog kills it if it
+spins or reaches its lifetime. `ts-operator-browser-cgroup-containment` tracks the
+cgroup v2/systemd-scope follow-up required for a strict OS-backed boundary.
 
 ## Final note
 

@@ -399,6 +399,9 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
             onThreeDsPending: (state) => {
               setActivePendingThreeDs(state, session);
             },
+            onThreeDsCleared: (state) => {
+              clearActivePendingThreeDsIfCurrent(state, session);
+            },
             ...(cartFallbackCheckout !== undefined ? { cartFallbackCheckout } : {}),
             ...(paymentClaim.resumeApproval !== undefined
               ? { resumeFrom: paymentClaim.resumeApproval }

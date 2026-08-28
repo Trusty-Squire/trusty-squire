@@ -946,6 +946,10 @@ async function closeLeasedBrowser(
 
 function stopSessionWatchdog(session: Session): void {
   session.watchdog?.stop();
+}
+
+function disposeSessionWatchdog(session: Session): void {
+  session.watchdog?.dispose();
   session.watchdog = null;
 }
 
@@ -1029,6 +1033,7 @@ async function forceTerminateProvisionSessionOwned(
       `[operator] terminal browser close failed session=${session.id}: ${message}\n`,
     );
   });
+  disposeSessionWatchdog(session);
   return terminalError;
 }
 
@@ -1039,22 +1044,22 @@ async function terminateExpiredProvisionSession(
   // A normal finish owns its more careful call-drain transition. A watchdog
   // eviction is intentionally different: an abandoned or over-budget browser
   // must be closed immediately even when a stuck CDP call never settles.
-  if (sessions.get(session.id) !== session || session.closing) return;
   await forceTerminateProvisionSession(session, "browser_watchdog_terminate", reason);
 }
 
 function startSessionWatchdog(session: Session): void {
-  // Older narrow unit doubles do not expose a local Chrome PID. They still
-  // receive the idle/lifetime boundary; production BrowserController exposes
-  // the identity-proven browser root so the CPU budget includes its renderers.
+  if (session.watchdog !== null) {
+    session.watchdog.start();
+    return;
+  }
   const browser = session.browser as BrowserController & {
-    operatorBrowserRootPid?: () => number | null;
+    operatorBrowserMarker?: () => string;
   };
   const watchdog = new OperatorBrowserWatchdog({
     startedAt: session.startedAt,
     lastActivityAt: () => session.lastActivityAt,
     hasActiveCall: () => session.callCount > 0,
-    processId: () => browser.operatorBrowserRootPid?.() ?? null,
+    processMarker: () => browser.operatorBrowserMarker?.() ?? null,
     onTerminate: async (reason) => await terminateExpiredProvisionSession(session, reason),
   });
   session.watchdog = watchdog;
@@ -2875,7 +2880,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     };
   } catch (err) {
     sessions.delete(id);
-    stopSessionWatchdog(session);
+    disposeSessionWatchdog(session);
     await releaseWarmBrowserPage(browser, false);
     throw err;
   }
@@ -2950,7 +2955,7 @@ export async function startHarnessProvisionSession(
     return { ...(await observeSession(session)), hint: opts.hint ?? "" };
   } catch (error) {
     sessions.delete(id);
-    stopSessionWatchdog(session);
+    disposeSessionWatchdog(session);
     await opts.browser.close().catch(() => undefined);
     throw error;
   }
@@ -7859,6 +7864,7 @@ async function closeFinishingProvisionSession(
   sessions.delete(sessionId);
   stopSessionWatchdog(session);
   await releaseWarmBrowserPage(session.browser, !destroyProfile);
+  disposeSessionWatchdog(session);
   return { session_id: sessionId, url, closed: true };
 }
 

@@ -1,8 +1,4 @@
-// A session owns its operator browser. This watchdog is a backstop for a host
-// that loses interest without sending operate_finish or closing the MCP stdio
-// transport: a target page must never be able to keep a Chromium tree alive
-// and consuming the machine indefinitely.
-
+import { randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 
 export const DEFAULT_OPERATOR_SESSION_IDLE_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -10,16 +6,18 @@ export const DEFAULT_OPERATOR_BROWSER_MAX_LIFETIME_MS = 30 * 60 * 1_000;
 export const DEFAULT_OPERATOR_BROWSER_WATCHDOG_INTERVAL_MS = 5_000;
 export const DEFAULT_OPERATOR_BROWSER_CPU_CEILING_PERCENT = 200;
 export const DEFAULT_OPERATOR_BROWSER_CPU_CONSECUTIVE_SAMPLES = 3;
-
-// Linux /proc CPU times are reported in USER_HZ ticks. Linux distributions
-// supported by the MCP use 100 here; callers can override this in tests or on
-// an unusual host without changing the safety policy itself.
 export const LINUX_PROCESS_TICKS_PER_SECOND = 100;
+export const OPERATOR_BROWSER_MARKER_ENV = "TRUSTY_SQUIRE_OPERATOR_BROWSER_MARKER";
 
 export interface ProcessCpuRecord {
   pid: number;
   parentPid: number;
   cpuTicks: number;
+}
+
+export interface OperatorBrowserProcessRecord extends ProcessCpuRecord {
+  startTime: number;
+  marker: string;
 }
 
 export interface CpuSample {
@@ -49,16 +47,32 @@ export interface OperatorBrowserWatchdogOptions {
   startedAt: number;
   lastActivityAt: () => number;
   hasActiveCall: () => boolean;
-  processId: () => number | null;
+  processMarker: () => string | null;
   onTerminate: (reason: OperatorBrowserWatchdogReason) => void | Promise<void>;
   now?: () => number;
-  readCpuTicks?: (rootPid: number) => number | null;
   idleTimeoutMs?: number;
-  maxLifetimeMs?: number;
   intervalMs?: number;
+  registerProcessWatchdog?: (
+    marker: string,
+    onTerminate: (reason: OperatorBrowserWatchdogReason) => void | Promise<void>,
+  ) => () => void;
+}
+
+export interface OperatorBrowserProcessWatchdogOptions {
+  readProcesses?: () => OperatorBrowserProcessRecord[];
+  processMatches?: (pid: number, startTime: number, marker: string) => boolean;
+  kill?: (pid: number, signal: NodeJS.Signals) => unknown;
+  onTerminate?: (
+    marker: string,
+    reason: OperatorBrowserWatchdogReason,
+  ) => void | Promise<void>;
+  now?: () => number;
+  intervalMs?: number;
+  maxLifetimeMs?: number;
   cpuCeilingPercent?: number;
   cpuConsecutiveSamples?: number;
   ticksPerSecond?: number;
+  terminationGraceMs?: number;
 }
 
 function positiveEnvNumber(name: string, fallback: number): number {
@@ -102,7 +116,20 @@ export function operatorBrowserWatchdogConfig(): {
   };
 }
 
-/** Sum a root process and every descendant, including Chrome renderers. */
+export function createOperatorBrowserMarker(
+  startedAt = Date.now(),
+  nonce = randomUUID(),
+): string {
+  return `v1:${Math.floor(startedAt)}:${nonce}`;
+}
+
+export function operatorBrowserMarkerStartedAt(marker: string): number | null {
+  const match = /^v1:(\d+):[A-Za-z0-9_-]+$/.exec(marker);
+  if (match === null) return null;
+  const startedAt = Number(match[1]);
+  return Number.isSafeInteger(startedAt) && startedAt > 0 ? startedAt : null;
+}
+
 export function processTreeCpuTicks(
   rootPid: number,
   processes: readonly ProcessCpuRecord[],
@@ -116,7 +143,6 @@ export function processTreeCpuTicks(
     byParent.set(process.parentPid, children);
   }
   if (!byPid.has(rootPid)) return null;
-
   let ticks = 0;
   const pending = [rootPid];
   const visited = new Set<number>();
@@ -132,49 +158,6 @@ export function processTreeCpuTicks(
   return ticks;
 }
 
-function processCpuRecord(pid: number): ProcessCpuRecord | null {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const closeParen = stat.lastIndexOf(")");
-    if (closeParen < 0) return null;
-    // The suffix starts at process-state (field 3). ppid is field 4; utime
-    // and stime are 14 and 15. The command field may itself contain spaces or
-    // parentheses, hence the lastIndexOf above rather than split(" ").
-    const fields = stat
-      .slice(closeParen + 2)
-      .trim()
-      .split(/\s+/);
-    const parentPid = Number(fields[1]);
-    const utime = Number(fields[11]);
-    const stime = Number(fields[12]);
-    if (!Number.isSafeInteger(parentPid) || !Number.isFinite(utime) || !Number.isFinite(stime)) {
-      return null;
-    }
-    return { pid, parentPid, cpuTicks: utime + stime };
-  } catch {
-    return null;
-  }
-}
-
-/** Best-effort Linux process-tree accounting. Unsupported hosts return null. */
-export function linuxProcessTreeCpuTicks(rootPid: number): number | null {
-  if (process.platform !== "linux" || !Number.isSafeInteger(rootPid) || rootPid <= 0) {
-    return null;
-  }
-  try {
-    const processes: ProcessCpuRecord[] = [];
-    for (const entry of readdirSync("/proc")) {
-      if (!/^\d+$/.test(entry)) continue;
-      const pid = Number(entry);
-      const record = processCpuRecord(pid);
-      if (record !== null) processes.push(record);
-    }
-    return processTreeCpuTicks(rootPid, processes);
-  } catch {
-    return null;
-  }
-}
-
 export function cpuPercentBetween(
   previous: CpuSample,
   current: CpuSample,
@@ -186,33 +169,286 @@ export function cpuPercentBetween(
   return (ticks * 100_000) / (elapsedMs * ticksPerSecond);
 }
 
-export class OperatorBrowserWatchdog {
+function parseProcessStat(pid: number): {
+  parentPid: number;
+  cpuTicks: number;
+  startTime: number;
+} | null {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const closeParen = stat.lastIndexOf(")");
+    if (closeParen < 0) return null;
+    const fields = stat
+      .slice(closeParen + 2)
+      .trim()
+      .split(/\s+/);
+    const parentPid = Number(fields[1]);
+    const utime = Number(fields[11]);
+    const stime = Number(fields[12]);
+    const startTime = Number(fields[19]);
+    if (
+      !Number.isSafeInteger(parentPid) ||
+      !Number.isFinite(utime) ||
+      !Number.isFinite(stime) ||
+      !Number.isSafeInteger(startTime)
+    ) {
+      return null;
+    }
+    return { parentPid, cpuTicks: utime + stime, startTime };
+  } catch {
+    return null;
+  }
+}
+
+function chromiumCommand(command: string): boolean {
+  const executable = command.split("\0", 1)[0] ?? "";
+  return /(?:^|\/)(?:chrome|google-chrome(?:-stable)?|chromium(?:-browser)?|chrome-headless-shell|headless_shell)$/i.test(
+    executable,
+  );
+}
+
+function processMarker(pid: number): string | null {
+  try {
+    const prefix = `${OPERATOR_BROWSER_MARKER_ENV}=`;
+    for (const entry of readFileSync(`/proc/${pid}/environ`, "utf8").split("\0")) {
+      if (entry.startsWith(prefix)) return entry.slice(prefix.length);
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function readOperatorBrowserProcess(pid: number): OperatorBrowserProcessRecord | null {
+  try {
+    if (!chromiumCommand(readFileSync(`/proc/${pid}/cmdline`, "utf8"))) return null;
+  } catch {
+    return null;
+  }
+  const marker = processMarker(pid);
+  if (marker === null || operatorBrowserMarkerStartedAt(marker) === null) return null;
+  const stat = parseProcessStat(pid);
+  return stat === null ? null : { pid, marker, ...stat };
+}
+
+export function linuxOperatorBrowserProcesses(): OperatorBrowserProcessRecord[] {
+  if (process.platform !== "linux") return [];
+  try {
+    return readdirSync("/proc").flatMap((entry) => {
+      if (!/^\d+$/.test(entry)) return [];
+      const record = readOperatorBrowserProcess(Number(entry));
+      return record === null ? [] : [record];
+    });
+  } catch {
+    return [];
+  }
+}
+
+interface MarkerCpuState {
+  at: number;
+  processes: Map<string, number>;
+  breachCount: number;
+}
+
+export class OperatorBrowserProcessWatchdog {
+  private readonly readProcesses: () => OperatorBrowserProcessRecord[];
+  private readonly processMatches: (pid: number, startTime: number, marker: string) => boolean;
+  private readonly kill: (pid: number, signal: NodeJS.Signals) => unknown;
   private readonly now: () => number;
-  private readonly readCpuTicks: (rootPid: number) => number | null;
-  private readonly idleTimeoutMs: number;
-  private readonly maxLifetimeMs: number;
   private readonly intervalMs: number;
+  private readonly maxLifetimeMs: number;
   private readonly cpuCeilingPercent: number;
   private readonly cpuConsecutiveSamples: number;
   private readonly ticksPerSecond: number;
+  private readonly terminationGraceMs: number;
+  private readonly samples = new Map<string, MarkerCpuState>();
+  private readonly terminating = new Set<string>();
   private timer: NodeJS.Timeout | null = null;
-  private previousCpu: CpuSample | null = null;
-  private cpuBreachCount = 0;
+
+  constructor(private readonly options: OperatorBrowserProcessWatchdogOptions = {}) {
+    const config = operatorBrowserWatchdogConfig();
+    this.readProcesses = options.readProcesses ?? linuxOperatorBrowserProcesses;
+    this.processMatches =
+      options.processMatches ??
+      ((pid, startTime, marker) => {
+        const current = readOperatorBrowserProcess(pid);
+        return current?.startTime === startTime && current.marker === marker;
+      });
+    this.kill = options.kill ?? process.kill;
+    this.now = options.now ?? Date.now;
+    this.intervalMs = options.intervalMs ?? config.intervalMs;
+    this.maxLifetimeMs = options.maxLifetimeMs ?? config.maxLifetimeMs;
+    this.cpuCeilingPercent = options.cpuCeilingPercent ?? config.cpuCeilingPercent;
+    this.cpuConsecutiveSamples = options.cpuConsecutiveSamples ?? config.cpuConsecutiveSamples;
+    this.ticksPerSecond = options.ticksPerSecond ?? LINUX_PROCESS_TICKS_PER_SECOND;
+    this.terminationGraceMs = options.terminationGraceMs ?? 7_000;
+  }
+
+  start(): void {
+    if (this.timer !== null) return;
+    this.timer = setInterval(() => void this.check(), this.intervalMs);
+    this.timer.unref();
+  }
+
+  stop(): void {
+    if (this.timer !== null) clearInterval(this.timer);
+    this.timer = null;
+  }
+
+  async check(now = this.now()): Promise<OperatorBrowserWatchdogReason[]> {
+    const processes = this.readProcesses();
+    const groups = new Map<string, OperatorBrowserProcessRecord[]>();
+    for (const record of processes) {
+      const group = groups.get(record.marker) ?? [];
+      group.push(record);
+      groups.set(record.marker, group);
+    }
+    for (const marker of [...this.samples.keys()]) {
+      if (!groups.has(marker)) this.samples.delete(marker);
+    }
+    const reasons: OperatorBrowserWatchdogReason[] = [];
+    for (const [marker, records] of groups) {
+      if (this.terminating.has(marker)) continue;
+      const startedAt = operatorBrowserMarkerStartedAt(marker);
+      if (startedAt === null) continue;
+      const lifetimeMs = now - startedAt;
+      if (lifetimeMs >= this.maxLifetimeMs) {
+        const reason: OperatorBrowserWatchdogReason = {
+          kind: "max_lifetime",
+          lifetime_ms: lifetimeMs,
+          timeout_ms: this.maxLifetimeMs,
+        };
+        reasons.push(reason);
+        void this.terminate(marker, records, reason);
+        continue;
+      }
+      const previous = this.samples.get(marker);
+      const currentProcesses = new Map(
+        records.map((record) => [`${record.pid}:${record.startTime}`, record.cpuTicks]),
+      );
+      let cpuPercent: number | null = null;
+      if (previous !== undefined && now > previous.at) {
+        let ticks = 0;
+        for (const [identity, currentTicks] of currentProcesses) {
+          const previousTicks = previous.processes.get(identity);
+          if (previousTicks !== undefined && currentTicks >= previousTicks) {
+            ticks += currentTicks - previousTicks;
+          }
+        }
+        cpuPercent = (ticks * 100_000) / ((now - previous.at) * this.ticksPerSecond);
+      }
+      const breachCount =
+        cpuPercent !== null && cpuPercent > this.cpuCeilingPercent
+          ? (previous?.breachCount ?? 0) + 1
+          : 0;
+      this.samples.set(marker, { at: now, processes: currentProcesses, breachCount });
+      if (cpuPercent === null || breachCount < this.cpuConsecutiveSamples) continue;
+      const reason: OperatorBrowserWatchdogReason = {
+        kind: "cpu_budget_exceeded",
+        cpu_percent: Math.round(cpuPercent),
+        ceiling_percent: this.cpuCeilingPercent,
+        consecutive_samples: breachCount,
+      };
+      reasons.push(reason);
+      void this.terminate(marker, records, reason);
+    }
+    return reasons;
+  }
+
+  private async terminate(
+    marker: string,
+    records: readonly OperatorBrowserProcessRecord[],
+    reason: OperatorBrowserWatchdogReason,
+  ): Promise<void> {
+    this.terminating.add(marker);
+    process.stderr.write(
+      `[operator] process watchdog terminate marker=${marker} reason=${JSON.stringify(reason)}\n`,
+    );
+    if (this.options.onTerminate !== undefined) {
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          Promise.resolve(this.options.onTerminate(marker, reason)),
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, this.terminationGraceMs);
+            timer.unref();
+          }),
+        ]);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        process.stderr.write(`[operator] process watchdog teardown failed: ${detail}\n`);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    }
+    const current = this.readProcesses().filter((record) => record.marker === marker);
+    const candidates = current.length > 0 ? current : records;
+    for (const record of candidates) {
+      if (!this.processMatches(record.pid, record.startTime, marker)) continue;
+      try {
+        this.kill(record.pid, "SIGKILL");
+      } catch {
+        continue;
+      }
+    }
+    this.samples.delete(marker);
+    this.terminating.delete(marker);
+  }
+}
+
+const processTerminationCallbacks = new Map<
+  string,
+  (reason: OperatorBrowserWatchdogReason) => void | Promise<void>
+>();
+let globalProcessWatchdog: OperatorBrowserProcessWatchdog | null = null;
+
+export function startGlobalOperatorBrowserProcessWatchdog(): void {
+  if (globalProcessWatchdog !== null) return;
+  globalProcessWatchdog = new OperatorBrowserProcessWatchdog({
+    onTerminate: async (marker, reason) => {
+      await processTerminationCallbacks.get(marker)?.(reason);
+    },
+  });
+  globalProcessWatchdog.start();
+}
+
+export function registerOperatorBrowserProcessWatchdog(
+  marker: string,
+  onTerminate: (reason: OperatorBrowserWatchdogReason) => void | Promise<void>,
+): () => void {
+  startGlobalOperatorBrowserProcessWatchdog();
+  processTerminationCallbacks.set(marker, onTerminate);
+  return () => {
+    if (processTerminationCallbacks.get(marker) === onTerminate) {
+      processTerminationCallbacks.delete(marker);
+    }
+  };
+}
+
+export class OperatorBrowserWatchdog {
+  private readonly now: () => number;
+  private readonly idleTimeoutMs: number;
+  private readonly intervalMs: number;
+  private timer: NodeJS.Timeout | null = null;
+  private unregisterProcessWatchdog: (() => void) | null = null;
   private terminated = false;
 
   constructor(private readonly options: OperatorBrowserWatchdogOptions) {
     const config = operatorBrowserWatchdogConfig();
     this.now = options.now ?? Date.now;
-    this.readCpuTicks = options.readCpuTicks ?? linuxProcessTreeCpuTicks;
     this.idleTimeoutMs = options.idleTimeoutMs ?? config.idleTimeoutMs;
-    this.maxLifetimeMs = options.maxLifetimeMs ?? config.maxLifetimeMs;
     this.intervalMs = options.intervalMs ?? config.intervalMs;
-    this.cpuCeilingPercent = options.cpuCeilingPercent ?? config.cpuCeilingPercent;
-    this.cpuConsecutiveSamples = options.cpuConsecutiveSamples ?? config.cpuConsecutiveSamples;
-    this.ticksPerSecond = options.ticksPerSecond ?? LINUX_PROCESS_TICKS_PER_SECOND;
   }
 
   start(): void {
+    if (this.unregisterProcessWatchdog === null) {
+      const marker = this.options.processMarker();
+      if (marker !== null) {
+        this.unregisterProcessWatchdog = (
+          this.options.registerProcessWatchdog ?? registerOperatorBrowserProcessWatchdog
+        )(marker, async (reason) => await this.terminateAndWait(reason));
+      }
+    }
     if (this.timer !== null || this.terminated) return;
     this.timer = setInterval(() => this.check(), this.intervalMs);
     this.timer.unref();
@@ -223,52 +459,27 @@ export class OperatorBrowserWatchdog {
     this.timer = null;
   }
 
+  dispose(): void {
+    this.stop();
+    this.unregisterProcessWatchdog?.();
+    this.unregisterProcessWatchdog = null;
+  }
+
   check(now = this.now()): OperatorBrowserWatchdogReason | null {
-    if (this.terminated) return null;
-    const lifetimeMs = now - this.options.startedAt;
-    if (lifetimeMs >= this.maxLifetimeMs) {
-      return this.terminate({
-        kind: "max_lifetime",
-        lifetime_ms: lifetimeMs,
-        timeout_ms: this.maxLifetimeMs,
-      });
-    }
-
-    if (!this.options.hasActiveCall()) {
-      const idleMs = now - this.options.lastActivityAt();
-      if (idleMs >= this.idleTimeoutMs) {
-        return this.terminate({
-          kind: "idle_timeout",
-          idle_ms: idleMs,
-          timeout_ms: this.idleTimeoutMs,
-        });
-      }
-    }
-
-    const processId = this.options.processId();
-    if (processId === null) return null;
-    const ticks = this.readCpuTicks(processId);
-    if (ticks === null) return null;
-    const current: CpuSample = { at: now, ticks };
-    const cpuPercent =
-      this.previousCpu === null
-        ? null
-        : cpuPercentBetween(this.previousCpu, current, this.ticksPerSecond);
-    this.previousCpu = current;
-    if (cpuPercent === null) return null;
-
-    if (cpuPercent > this.cpuCeilingPercent) this.cpuBreachCount += 1;
-    else this.cpuBreachCount = 0;
-    if (this.cpuBreachCount < this.cpuConsecutiveSamples) return null;
+    if (this.terminated || this.options.hasActiveCall()) return null;
+    const idleMs = now - this.options.lastActivityAt();
+    if (idleMs < this.idleTimeoutMs) return null;
     return this.terminate({
-      kind: "cpu_budget_exceeded",
-      cpu_percent: Math.round(cpuPercent),
-      ceiling_percent: this.cpuCeilingPercent,
-      consecutive_samples: this.cpuBreachCount,
+      kind: "idle_timeout",
+      idle_ms: idleMs,
+      timeout_ms: this.idleTimeoutMs,
     });
   }
 
-  private terminate(reason: OperatorBrowserWatchdogReason): OperatorBrowserWatchdogReason {
+  private terminate(
+    reason: OperatorBrowserWatchdogReason,
+  ): OperatorBrowserWatchdogReason {
+    if (this.terminated) return reason;
     this.terminated = true;
     this.stop();
     void Promise.resolve(this.options.onTerminate(reason)).catch((error: unknown) => {
@@ -276,5 +487,12 @@ export class OperatorBrowserWatchdog {
       process.stderr.write(`[operator] browser watchdog teardown failed: ${detail}\n`);
     });
     return reason;
+  }
+
+  private async terminateAndWait(reason: OperatorBrowserWatchdogReason): Promise<void> {
+    if (this.terminated) return;
+    this.terminated = true;
+    this.stop();
+    await this.options.onTerminate(reason);
   }
 }

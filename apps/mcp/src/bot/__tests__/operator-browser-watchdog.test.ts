@@ -1,67 +1,103 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  OperatorBrowserProcessWatchdog,
   OperatorBrowserWatchdog,
-  cpuPercentBetween,
-  processTreeCpuTicks,
+  createOperatorBrowserMarker,
+  operatorBrowserMarkerStartedAt,
+  type OperatorBrowserProcessRecord,
 } from "../operator-browser-watchdog.js";
 
-describe("operator browser watchdog", () => {
-  it("counts Chromium renderer descendants instead of only the browser root", () => {
-    // The reported 826% was the aggregate of a Chrome root plus renderer/GPU
-    // helpers. A root-only sample would miss the process that is actually hot.
-    expect(
-      processTreeCpuTicks(100, [
-        { pid: 100, parentPid: 1, cpuTicks: 20 },
-        { pid: 101, parentPid: 100, cpuTicks: 30 },
-        { pid: 102, parentPid: 101, cpuTicks: 50 },
-        { pid: 999, parentPid: 1, cpuTicks: 1_000 },
-      ]),
-    ).toBe(100);
-    expect(processTreeCpuTicks(404, [{ pid: 100, parentPid: 1, cpuTicks: 20 }])).toBeNull();
-  });
-
-  it("terminates a sustained multi-core Chrome tree before it can run for an hour", async () => {
+describe("operator browser process watchdog", () => {
+  it("meters reparented Chromium siblings as one marked browser", async () => {
+    const marker = createOperatorBrowserMarker(1, "session-a");
+    let processes: OperatorBrowserProcessRecord[] = [
+      { pid: 101, parentPid: 100, startTime: 11, cpuTicks: 0, marker },
+      { pid: 102, parentPid: 100, startTime: 12, cpuTicks: 0, marker },
+    ];
+    const killed: number[] = [];
     const terminate = vi.fn();
-    const samples = [0, 1_500, 3_000];
-    const watchdog = new OperatorBrowserWatchdog({
-      startedAt: 0,
-      lastActivityAt: () => 0,
-      hasActiveCall: () => false,
-      processId: () => 100,
-      readCpuTicks: () => samples.shift() ?? null,
+    const watchdog = new OperatorBrowserProcessWatchdog({
+      readProcesses: () => processes,
+      processMatches: () => true,
+      kill: (pid) => killed.push(pid),
       onTerminate: terminate,
-      // 1,500 ticks in five seconds at 100 USER_HZ = 300% CPU. Two
-      // consecutive samples prove this is not a short rendering burst.
+      maxLifetimeMs: 60_000,
       cpuCeilingPercent: 200,
       cpuConsecutiveSamples: 2,
-      idleTimeoutMs: 60_000,
-      maxLifetimeMs: 60_000,
+      ticksPerSecond: 100,
     });
 
-    expect(watchdog.check(0)).toBeNull();
-    expect(watchdog.check(5_000)).toBeNull();
-    expect(watchdog.check(10_000)).toEqual({
-      kind: "cpu_budget_exceeded",
-      cpu_percent: 300,
-      ceiling_percent: 200,
-      consecutive_samples: 2,
-    });
-    await Promise.resolve();
+    expect(await watchdog.check(1_000)).toEqual([]);
+    processes = [
+      { pid: 101, parentPid: 1, startTime: 11, cpuTicks: 750, marker },
+      { pid: 102, parentPid: 1, startTime: 12, cpuTicks: 750, marker },
+    ];
+    expect(await watchdog.check(6_000)).toEqual([]);
+    processes = [
+      { pid: 101, parentPid: 1, startTime: 11, cpuTicks: 1_500, marker },
+      { pid: 102, parentPid: 1, startTime: 12, cpuTicks: 1_500, marker },
+    ];
+    expect(await watchdog.check(11_000)).toEqual([
+      {
+        kind: "cpu_budget_exceeded",
+        cpu_percent: 300,
+        ceiling_percent: 200,
+        consecutive_samples: 2,
+      },
+    ]);
+    await vi.waitFor(() => expect(killed).toEqual([101, 102]));
     expect(terminate).toHaveBeenCalledWith(
+      marker,
       expect.objectContaining({ kind: "cpu_budget_exceeded", cpu_percent: 300 }),
     );
   });
 
-  it("ends an abandoned session even when its process is quiet", async () => {
+  it("kills a discovered orphan at its marker lifetime without session state", async () => {
+    const marker = createOperatorBrowserMarker(1_000, "orphan");
+    const killed: number[] = [];
+    const watchdog = new OperatorBrowserProcessWatchdog({
+      readProcesses: () => [
+        { pid: 205, parentPid: 1, startTime: 44, cpuTicks: 0, marker },
+      ],
+      processMatches: (pid, startTime, expectedMarker) =>
+        pid === 205 && startTime === 44 && expectedMarker === marker,
+      kill: (pid) => killed.push(pid),
+      maxLifetimeMs: 10_000,
+    });
+
+    expect(await watchdog.check(10_999)).toEqual([]);
+    expect(await watchdog.check(11_000)).toEqual([
+      { kind: "max_lifetime", lifetime_ms: 10_000, timeout_ms: 10_000 },
+    ]);
+    await vi.waitFor(() => expect(killed).toEqual([205]));
+  });
+
+  it("revalidates process birth and marker identity before signaling", async () => {
+    const marker = createOperatorBrowserMarker(1_000, "reused");
+    const kill = vi.fn();
+    const watchdog = new OperatorBrowserProcessWatchdog({
+      readProcesses: () => [
+        { pid: 205, parentPid: 1, startTime: 44, cpuTicks: 0, marker },
+      ],
+      processMatches: () => false,
+      kill,
+      maxLifetimeMs: 10_000,
+    });
+
+    await watchdog.check(11_000);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("ends an abandoned session even when its browser is quiet", async () => {
     const terminate = vi.fn();
     const watchdog = new OperatorBrowserWatchdog({
       startedAt: 0,
       lastActivityAt: () => 0,
       hasActiveCall: () => false,
-      processId: () => null,
+      processMarker: () => null,
       onTerminate: terminate,
       idleTimeoutMs: 10_000,
-      maxLifetimeMs: 60_000,
     });
 
     expect(watchdog.check(9_999)).toBeNull();
@@ -74,9 +110,8 @@ describe("operator browser watchdog", () => {
     expect(terminate).toHaveBeenCalledOnce();
   });
 
-  it("uses deltas, so accumulated CPU time cannot false-trigger a fresh browser", () => {
-    expect(cpuPercentBetween({ at: 10_000, ticks: 50_000 }, { at: 15_000, ticks: 50_100 })).toBe(
-      20,
-    );
+  it("encodes a durable launch timestamp in every marker", () => {
+    expect(operatorBrowserMarkerStartedAt(createOperatorBrowserMarker(42, "test"))).toBe(42);
+    expect(operatorBrowserMarkerStartedAt("invalid")).toBeNull();
   });
 });

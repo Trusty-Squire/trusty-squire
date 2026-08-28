@@ -11,7 +11,6 @@ import {
   claimOrphanBrowserReapScope,
   matchesReapableBrowserArgs,
   ownedChromeProcessTreeState,
-  refreshOwnedChromeProcessTreeProof,
   signalOwnedChromeProcessTree,
 } from "../browser.js";
 import { closeProfileWithProof } from "../profile.js";
@@ -351,33 +350,4 @@ describe("self-managed Chrome process ownership", () => {
     expect(killed).toEqual([4_244]);
   });
 
-  it("adds fallback descendants while the proven root remains live", () => {
-    const proof = captureOwnedChromeProcessTreeProof(identity, false, {
-      platform: "linux",
-      profileMatches: () => true,
-      processTreePids: () => [4_242],
-    });
-    if (proof === null) throw new Error("expected process-tree proof");
-    refreshOwnedChromeProcessTreeProof(proof, {
-      platform: "linux",
-      profileMatches: () => true,
-      processTreePids: () => [4_242, 4_245],
-      readBirthIdentity: (pid) => ({ pid, start_time: String(pid) }),
-      memberState: () => "matching",
-    });
-    const killed: number[] = [];
-
-    expect(
-      signalOwnedChromeProcessTree(identity, false, "SIGKILL", {
-        platform: "linux",
-        profileMatches: () => false,
-        proof,
-        processTreePids: () => [4_245],
-        readBirthIdentity: (pid) => ({ pid, start_time: String(pid) }),
-        memberState: (member) => (member.pid === 4_245 ? "matching" : "stale"),
-        kill: (pid) => killed.push(pid),
-      }),
-    ).toBe(true);
-    expect(killed).toEqual([4_245]);
-  });
 });
