@@ -70,7 +70,6 @@ import {
   GOOGLE_LOGIN_COOKIE_MARKERS,
   type OperatorWorkerIdentity,
 } from "./operator-profile-pool.js";
-import { startXvfb, xvfbAvailable, type XvfbRig } from "./xvfb.js";
 import {
   createOperatorBrowserMarker,
   OPERATOR_BROWSER_MARKER_ENV,
@@ -85,6 +84,8 @@ import {
 const require = createRequire(import.meta.url);
 
 export type StealthProfile = "baseline" | "cdp_hardened";
+
+const OPERATOR_BROWSER_HEADLESS = true;
 
 export type ContextInitScriptId = "evaluate-name-shim" | "navigator-webdriver" | "webgl-spoof";
 
@@ -2386,7 +2387,7 @@ export function resolveChannelBinary(channel: string | null): string | null {
 // Cloudflare Turnstile's interactive challenge FAILS a Playwright/patchright
 // launchPersistentContext-driven Chrome and PASSES a Chrome the operator
 // launches itself and then attaches to over CDP — every other variable held
-// constant (same box, same datacenter IP, same Xvfb display, same Chrome 148
+// constant (same box, same datacenter IP, same headed display, same Chrome 148
 // binary, same software-WebGL, same humanized click). The discriminator
 // matrix:
 //   launchPersistentContext + CDP click   → "Verification failed"
@@ -3222,8 +3223,7 @@ export async function launchSelfManagedLoginContext(params: {
   binary: string;
   profileDir: string;
   initialUrl: string;
-  // App mode (--app=URL) opens a chromeless window — the connect noVNC path
-  // needs it so tabs/URL bar don't eat the phone-shaped framebuffer.
+  // App mode (--app=URL) opens a chromeless window for interactive login.
   appMode: boolean;
   window: { width: number; height: number };
   env: NodeJS.ProcessEnv;
@@ -3349,7 +3349,7 @@ export interface PlainLoginBrowser {
 // though the same CDP browser passes a DIRECT accounts.google.com sign-in. The
 // tell is the CDP attachment itself (NOT the launcher, NOT the flags, NOT
 // `navigator.webdriver` — all separately ruled out). The connect claim doesn't
-// need to drive the browser: the USER signs in over noVNC, completion is read
+// need to drive the browser: the USER signs in interactively, completion is read
 // from the API (`installPoll`), and provider seeding is read from the profile's
 // SQLite cookie store (`profileHasProviderCookies`). So we spawn Chrome and
 // only ever kill it — never attach.
@@ -3360,7 +3360,7 @@ export async function launchPlainLoginBrowser(params: {
   binary: string;
   profileDir: string;
   // App mode (--app=URL) opens a chromeless window so the install page fills the
-  // phone-shaped noVNC framebuffer.
+  // interactive browser window.
   url: string;
   window: { width: number; height: number };
   env: NodeJS.ProcessEnv;
@@ -3397,7 +3397,7 @@ export async function launchPlainLoginBrowser(params: {
       // Give Chrome a moment to actually come up (or die). Unlike the CDP path
       // there is no devtools endpoint to poll — but a crash-on-launch (bad
       // profile, missing lib) should surface here, not 15min later as a blank
-      // noVNC. If the process is already dead, throw with its stderr.
+      // browser. If the process is already dead, throw with its stderr.
       await new Promise((r) => setTimeout(r, 1_200));
       childIdentity ??=
         spawned.pid === undefined ? null : profileProcessIdentity(spawned.pid, params.profileDir);
@@ -3617,19 +3617,11 @@ export class BrowserController {
   private oauthNetLog: Array<{ url: string; status: number; setCookie: boolean; ct: string }> = [];
   private oauthNetListenerAttached = false;
 
-  // F13 — on-demand Xvfb. Set when start() determined the host has no
-  // display surface but Xvfb is available, so Chrome can run with
-  // `headless: false` against a virtual display (Cloudflare/Stytch et
-  // al. detect Chromium-headless and block their signup forms). Torn
-  // down by close().
-  private xvfb: XvfbRig | null = null;
+  // Surfaced in the run trail so operators can distinguish local, remote,
+  // and headless launches without retaining a virtual-display mode.
+  private launchedMode: "headless" | "remote" | "unknown" = "unknown";
 
-  // F13 — which launch path start() took. Surfaced via .launchMode so
-  // the agent can push it into the run's step trail and we can see
-  // (from outside the box) whether the bot ran headed.
-  private launchedMode: "display" | "xvfb" | "headless" | "remote" | "unknown" = "unknown";
-
-  get launchMode(): "display" | "xvfb" | "headless" | "remote" | "unknown" {
+  get launchMode(): "headless" | "remote" | "unknown" {
     return this.launchedMode;
   }
 
@@ -3758,7 +3750,6 @@ export class BrowserController {
   //   • locale/geo/permissions → applied post-connect by start()
   private async launchSelfManagedContext(params: {
     binary: string;
-    headless: boolean;
     args: readonly string[];
     proxy: ProxySettings | null;
     env: NodeJS.ProcessEnv;
@@ -3804,7 +3795,7 @@ export class BrowserController {
           "--lang=en-US",
           ...params.args,
           ...(params.proxy !== null ? [`--proxy-server=${params.proxy.server}`] : []),
-          ...(params.headless ? ["--headless=new"] : []),
+          "--headless=new",
           "about:blank",
         ];
         this.commitProfileLaunch();
@@ -4063,7 +4054,7 @@ export class BrowserController {
     // (e.g. a Mac with a real GPU + residential egress) and we attach over CDP
     // across Tailscale. The remote machine IS a real device, so we spoof
     // NOTHING — no WebGL/device fingerprint patch (a fake-Intel string over a
-    // real Apple-GPU output would be its own mismatch tell), no local Xvfb, no
+    // real Apple-GPU output would be its own mismatch tell), no local display, no
     // egress-geo override (the remote host's real timezone + residential IP are
     // authentic). software-WebGL output is exactly what the toughest anti-bot
     // (hCaptcha Enterprise) scores; only real hardware fixes the pixel
@@ -4072,7 +4063,7 @@ export class BrowserController {
     if (remoteMode) {
       console.error(
         `[operator] REMOTE-CDP mode — attaching to ${(process.env.BOT_CDP_ENDPOINT ?? "").trim()} ` +
-          `(real-host GPU + egress; local fingerprint spoof + Xvfb DISABLED)`,
+          `(real-host GPU + egress; local fingerprint spoof + display setup disabled)`,
       );
     }
     // T3.1: probe where this run's traffic actually exits so the
@@ -4091,76 +4082,10 @@ export class BrowserController {
             : ""),
       );
     }
-    // F13 — decide whether to spin up Xvfb and run Chrome headed.
-    // Modern SaaS signups (Cloudflare/Stytch, Clerk, Auth0) detect
-    // Chromium-headless via JS fingerprints and gate their forms
-    // behind the check. Running headed against Xvfb defeats the gate
-    // — the user never sees the display.
-    //
-    // The decision matrix:
-    //   - UNIVERSAL_BOT_HEADLESS=true (explicit opt-in): keep true
-    //     headless. CI / Codespaces that lack Xvfb.
-    //   - UNIVERSAL_BOT_HEADLESS=false (explicit opt-out): the
-    //     current pre-F13 behavior — DISPLAY must exist already.
-    //   - default + DISPLAY set: run headed against the existing
-    //     display (laptop/desktop install).
-    //   - default + no DISPLAY + Xvfb on PATH: spawn Xvfb, run
-    //     headed against it (the headless-server install — what
-    //     Cloudflare needed).
-    //   - default + no DISPLAY + no Xvfb: fall back to true
-    //     headless with a clear stderr warning.
-    let chromeEnv: NodeJS.ProcessEnv | undefined;
-    let chromeHeadless: boolean;
-    const explicitHeadless = process.env.UNIVERSAL_BOT_HEADLESS;
-    const hostHasDisplay =
-      process.platform === "darwin" ||
-      process.platform === "win32" ||
-      (typeof process.env.DISPLAY === "string" && process.env.DISPLAY.length > 0);
-    if (explicitHeadless === "true") {
-      chromeHeadless = true;
-      this.launchedMode = "headless";
-    } else if (explicitHeadless === "false") {
-      chromeHeadless = false;
-      this.launchedMode = "display";
-    } else if (hostHasDisplay) {
-      chromeHeadless = false;
-      this.launchedMode = "display";
-    } else if (xvfbAvailable()) {
-      try {
-        // 1920×1080 — the most common real desktop resolution. The old
-        // 1280×720 here was exactly Playwright's emulated-device viewport
-        // default (the code's own comments flag that as an anti-bot tell),
-        // and with viewport:null the page read it straight back. A 720p
-        // screen whose availHeight==height (no taskbar) is a headless
-        // signature strict Turnstiles (exa/cartesia) score against.
-        const xvfb = await startXvfb({ width: 1920, height: 1080 });
-        if (this.startCancellationRequested) {
-          xvfb.stop();
-          this.throwIfStartCancelled();
-        }
-        this.xvfb = xvfb;
-        chromeEnv = { ...process.env, DISPLAY: xvfb.display };
-        chromeHeadless = false;
-        this.launchedMode = "xvfb";
-        console.error(
-          `[operator] no DISPLAY — spawned Xvfb at ${this.xvfb.display} for headed Chrome`,
-        );
-      } catch (err) {
-        console.error(
-          `[operator] Xvfb failed (${err instanceof Error ? err.message : String(err)}) — ` +
-            `falling back to true headless; Cloudflare/Stytch-class signups may fail`,
-        );
-        chromeHeadless = true;
-        this.launchedMode = "headless";
-      }
-    } else {
-      console.error(
-        `[operator] no DISPLAY and Xvfb not installed — running true headless. ` +
-          `For Cloudflare/Stytch-class signups install xvfb: apt-get install -y xvfb`,
-      );
-      chromeHeadless = true;
-      this.launchedMode = "headless";
-    }
+    // Browser automation is always Chrome's new headless mode. The virtual
+    // display path was removed after its strict-Cloudflare gain proved too
+    // narrow for its startup and CPU cost.
+    this.launchedMode = "headless";
 
     const free = await waitForProfileFree(this.profileDir, { deadlineMs: 0 });
     this.throwIfStartCancelled();
@@ -4186,7 +4111,7 @@ export class BrowserController {
     this.launchedChannel = channel;
     // Launch args shared by BOTH paths (launchPersistentContext and the
     // self-launch). See the per-flag rationale: swiftshader gives a real
-    // (software) WebGL context on the GPU-less Xvfb box; the others are the
+    // (software) WebGL context on GPU-less hosts; the others are the
     // standard headless/sandbox flags. The three background-throttling disables
     // are payment correctness controls: a backgrounded CardinalCommerce ACS
     // frame must keep running its timers long enough to finish the issuer's OOB
@@ -4225,12 +4150,9 @@ export class BrowserController {
       console.error(
         `[operator] self-launch + connectOverCDP (Turnstile-safe launch) binary=${selfLaunchBinary}`,
       );
-      const window =
-        this.launchedMode === "xvfb"
-          ? { width: 1920, height: 1080 }
-          : { width: 1280, height: 1024 };
+      const window = { width: 1280, height: 1024 };
       const selfEnv: NodeJS.ProcessEnv = {
-        ...(chromeEnv ?? process.env),
+        ...process.env,
         TZ: geo?.timezoneId ?? "America/New_York",
         [OPERATOR_BROWSER_MARKER_ENV]: this.operatorBrowserMarker(),
       };
@@ -4240,7 +4162,6 @@ export class BrowserController {
           this.throwIfStartCancelled();
           return this.launchSelfManagedContext({
             binary: selfLaunchBinary,
-            headless: chromeHeadless,
             args: launchArgs,
             proxy,
             env: selfEnv,
@@ -4311,9 +4232,9 @@ export class BrowserController {
                 { failFast: true },
               ),
             options: {
-              headless: chromeHeadless,
+              headless: OPERATOR_BROWSER_HEADLESS,
               env: {
-                ...(chromeEnv ?? process.env),
+                ...process.env,
                 [OPERATOR_BROWSER_MARKER_ENV]: this.operatorBrowserMarker(),
               },
               ...(channel !== null ? { channel } : {}),
@@ -4486,7 +4407,7 @@ export class BrowserController {
             get: () => 8,
             configurable: true,
           });
-          // Screen availHeight tell: a headless Xvfb screen reports
+          // Screen availHeight tell: a virtual screen reports
           // availHeight == height (no OS taskbar), whereas a real Windows
           // desktop reserves ~40px for the taskbar (availHeight = height-40,
           // availWidth = width). Reinstate that gap so the screen reads like
@@ -4669,7 +4590,7 @@ export class BrowserController {
     let probe: Browser | undefined;
     try {
       probe = await getChromium().launch({
-        headless: process.env.UNIVERSAL_BOT_HEADLESS !== "false",
+        headless: OPERATOR_BROWSER_HEADLESS,
         ...(channel !== null ? { channel } : {}),
         ...(proxy !== null ? { proxy } : {}),
         args: ["--no-sandbox", "--disable-dev-shm-usage"],
@@ -7729,7 +7650,7 @@ export class BrowserController {
     // device memory, screen, languages, webdriver flag. Turnstile
     // error 600010 ("internal client execution error") usually points
     // at one of these returning something the challenge JS can't
-    // handle (e.g. SwiftShader/llvmpipe renderer under Xvfb).
+    // handle (e.g. a SwiftShader/llvmpipe renderer).
     if (process.env.UNIVERSAL_BOT_CAPTCHA_TRACE === "1") {
       try {
         const fp = await this.page.evaluate(() => {
@@ -16483,12 +16404,6 @@ export class BrowserController {
     const lease = this.profileOperationLease;
     this.profileOperationLease = null;
     lease?.release();
-    if (this.xvfb !== null) {
-      try {
-        this.xvfb.stop();
-      } catch {}
-      this.xvfb = null;
-    }
     return closed ? "closed" : "unknown";
   }
 
@@ -16652,9 +16567,8 @@ export class BrowserController {
       return "closed";
     }
     // Each step is best-effort and independent: a throw closing the page
-    // or context must NOT skip the Xvfb teardown below, or the virtual
-    // display leaks (orphaned Xvfb procs pile up over a long-lived MCP
-    // server and, worse, the un-closed Chrome keeps the profile's
+    // or context must NOT skip the browser reap below, or an un-closed Chrome
+    // keeps the profile's
     // SingletonLock held — bricking the next signup + `mcp login`).
     //
     // EVERY close call is timeout-capped. On a wedged headed Chrome (e.g. a
@@ -16738,17 +16652,6 @@ export class BrowserController {
       if (this.ownedChromeProcessTreeProof === treeProof) {
         this.ownedChromeProcessTreeProof = null;
       }
-    }
-    // F13 — release the on-demand Xvfb if we spawned one. Order
-    // matters: kill Chrome (context.close) first so it has its
-    // display until it exits, THEN kill Xvfb.
-    if (this.xvfb !== null) {
-      try {
-        this.xvfb.stop();
-      } catch {
-        /* best-effort */
-      }
-      this.xvfb = null;
     }
     return closeState;
   }

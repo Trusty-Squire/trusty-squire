@@ -33,7 +33,6 @@ import type { StripeClient } from "./services/stripe-client.js";
 import type { VouchMandateVerifier } from "./services/vouch-mandate.js";
 import { registerMcpInstallRoute } from "./routes/mcp-install.js";
 import { registerMcpSessionsRoute } from "./routes/mcp-sessions.js";
-import { registerShortRoute } from "./routes/short.js";
 import { registerNotifyRoute } from "./routes/notify.js";
 import { registerOperatorOtpRoute } from "./routes/operator-otp.js";
 import { registerWorkspaceInboxRoute } from "./routes/workspace-inbox.js";
@@ -329,15 +328,6 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     deps,
     requireWeb: auth.requireWeb,
   });
-  // G15: tiny noVNC-tunnel URL shortener. webBaseUrl is the host
-  // that will serve the /g/:slug redirect — the web app, not the API.
-  await fastify.register(registerShortRoute, {
-    deps: {
-      webBaseUrl: defaultPwaBaseUrl(),
-      ...(deps.now !== undefined ? { now: deps.now } : {}),
-    },
-  });
-
   // Liveness — shallow + DB-independent. Fly's http_service check hits this; it
   // must NOT depend on the DB, or a DB wedge would trigger an API restart loop
   // that can't fix the DB.

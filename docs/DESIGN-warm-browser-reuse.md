@@ -175,13 +175,13 @@ Raw PID equality is never authority to signal a process. A worker binding record
 process start time, and the normalized expected `--user-data-dir`. Cleanup signals Chrome only when
 both the process birth identity and exact worker-profile path still match.
 
-Process shutdown has one exit owner per mode. During an interactive headless CLI login, the login
-lifecycle temporarily suspends the general Chrome `SIGINT`/`SIGTERM` exit handlers, performs its
-capped browser-and-rig teardown, and then restores them. In server mode those login exit handlers
-remain disabled: on transport/stdin disconnect or a termination signal, the server coordinator
-first drains every tracked OAuth-bootstrap login, then closes provision sessions and the server.
-Cancellation and normal completion share one memoized, identity-proven browser teardown; process
-`exit` hooks remain the force-kill backstop.
+Interactive login uses the caller's existing visible desktop and owns only its Chrome process or
+Playwright context; there is no display rig or remote-login teardown. Each in-flight login registers
+its identity-proven browser close with the shared login registry. Normal completion and cancellation
+share one memoized teardown. In server mode, transport/stdin disconnect or a termination signal is
+owned by the server coordinator, which first drains every tracked OAuth-bootstrap login, then closes
+provision sessions and the server. Process `exit` hooks remain the synchronous force-kill backstop
+for identity-proven self-managed Chrome processes.
 
 Every provision session also owns a cross-platform watchdog. Ten minutes without an entered MCP
 operation closes an abandoned session, and the 30-minute lifetime check is evaluated before the

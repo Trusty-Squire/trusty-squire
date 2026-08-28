@@ -1,7 +1,4 @@
-// Covers the pure environment helpers in google-login.ts (T2). The
-// login orchestration itself spawns real processes (Xvfb, x11vnc,
-// cloudflared) and is validated by running it, not unit-tested — these
-// are the deterministic pieces that can be.
+// Covers deterministic Google-login helpers and lifecycle boundaries.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { readFileSync, mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
@@ -10,7 +7,6 @@ import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { spawn, type ChildProcess } from "node:child_process";
 import Database from "better-sqlite3";
-import { shortenVncUrl } from "../../api-client.js";
 import {
   attachSelfManagedLoginContext,
   BrowserController,
@@ -30,9 +26,7 @@ import {
 import { OPERATOR_BROWSER_MARKER_ENV } from "../operator-browser-watchdog.js";
 import { loggedInProviders, markProviderLoggedIn } from "../login-state.js";
 import {
-  binaryOnPath,
   cancelActiveLoginBrowsers,
-  installHint,
   installClaimPollCompleted,
   openInstallConfirmInBotChrome,
   classifyGoogleAuthState,
@@ -41,22 +35,16 @@ import {
   extractGoogleAccountEmail,
   extractGoogleNumberMatch,
   extractOAuthScopes,
-  findFreePort,
-  fallbackCloudflaredArgs,
   hasDisplay,
   pollUntil,
   profileHasProviderCookies,
-  registerHeadlessRigCleanup,
   runDisplayedChrome,
   scopesAreBasic,
   scrapeGoogleScopePhrases,
-  teardownHeadlessRig,
-  teardownLoginBrowser,
   trackActiveLoginBrowser,
   ensureOAuthSession,
   finalizeLoginRun,
   launchPersistentLoginContext,
-  type HeadlessRig,
   type PersistentLauncher,
   type RunInBotChromeOpts,
 } from "../google-login.js";
@@ -96,8 +84,33 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function fakeProcess(name: string, ignoreSigterm = false): ChildProcess {
-  const child = Object.assign(new EventEmitter(), {
+describe("interactive login display detection", () => {
+  it("accepts native desktop windowing and Linux desktop displays", () => {
+    expect(hasDisplay("darwin", {})).toBe(true);
+    expect(hasDisplay("win32", {})).toBe(true);
+    expect(hasDisplay("linux", { DISPLAY: ":0", XDG_SESSION_TYPE: "x11" })).toBe(true);
+    expect(hasDisplay("linux", { DISPLAY: ":1", XDG_SESSION_TYPE: "wayland" })).toBe(true);
+  });
+
+  it("rejects inherited displays in SSH and TTY sessions", () => {
+    expect(
+      hasDisplay("linux", {
+        DISPLAY: ":99",
+        SSH_CONNECTION: "203.0.113.1 12345 203.0.113.2 22",
+      }),
+    ).toBe(false);
+    expect(hasDisplay("linux", { DISPLAY: ":99", SSH_TTY: "/dev/pts/2" })).toBe(false);
+    expect(hasDisplay("linux", { DISPLAY: ":99", XDG_SESSION_TYPE: "tty" })).toBe(false);
+  });
+
+  it("rejects Linux sessions without a display", () => {
+    expect(hasDisplay("linux", {})).toBe(false);
+    expect(hasDisplay("linux", { DISPLAY: "  " })).toBe(false);
+  });
+});
+
+function fakeProcess(name: string): ChildProcess {
+  return Object.assign(new EventEmitter(), {
     exitCode: null as number | null,
     signalCode: null as NodeJS.Signals | null,
     stdout: { destroy: vi.fn() },
@@ -105,224 +118,8 @@ function fakeProcess(name: string, ignoreSigterm = false): ChildProcess {
     unref: vi.fn(),
     spawnargs: [name],
     kill: vi.fn(),
-  });
-  child.kill.mockImplementation((signal: NodeJS.Signals = "SIGTERM") => {
-    if (ignoreSigterm && signal === "SIGTERM") return true;
-    child.exitCode = 0;
-    child.signalCode = signal;
-    queueMicrotask(() => child.emit("exit", null, signal));
-    return true;
-  });
-  return child as unknown as ChildProcess;
+  }) as unknown as ChildProcess;
 }
-
-function rigWithEverySessionProcess(): { rig: HeadlessRig; processes: ChildProcess[] } {
-  const processes = ["Xvfb", "x11vnc", "websockify", "cloudflared"].map((name) =>
-    fakeProcess(name),
-  );
-  return { rig: { display: ":99", procs: processes }, processes };
-}
-
-function cleanupRuntime(): {
-  handlers: Map<string, (...args: never[]) => void>;
-  runtime: Parameters<typeof registerHeadlessRigCleanup>[2];
-  exit: ReturnType<typeof vi.fn>;
-} {
-  const handlers = new Map<string, (...args: never[]) => void>();
-  const exit = vi.fn();
-  const runtime = {
-    on: vi.fn((event: string, listener: (...args: never[]) => void) => {
-      handlers.set(event, listener);
-      return runtime;
-    }),
-    once: vi.fn((event: string, listener: (...args: never[]) => void) => {
-      handlers.set(event, listener);
-      return runtime;
-    }),
-    removeListener: vi.fn((event: string) => {
-      handlers.delete(event);
-      return runtime;
-    }),
-    exit,
-  } as unknown as Parameters<typeof registerHeadlessRigCleanup>[2];
-  return { handlers, runtime, exit };
-}
-
-describe("headless login VNC lifecycle", () => {
-  it("cleans every session process once from the normal timeout/error finally path", async () => {
-    const { rig, processes } = rigWithEverySessionProcess();
-
-    await teardownHeadlessRig(rig, 1);
-    await teardownHeadlessRig(rig, 1);
-
-    for (const child of processes) {
-      expect(child.kill).toHaveBeenCalledTimes(1);
-      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
-      expect(child.stdout?.destroy).toHaveBeenCalledTimes(1);
-      expect(child.stderr?.destroy).toHaveBeenCalledTimes(1);
-      expect(child.unref).toHaveBeenCalledTimes(1);
-    }
-  });
-
-  it.each(["SIGINT", "SIGTERM"])("cleans every session process on %s", async (signal) => {
-    const { rig, processes } = rigWithEverySessionProcess();
-    const { handlers, runtime, exit } = cleanupRuntime();
-    const remove = registerHeadlessRigCleanup(rig, () => undefined, runtime);
-
-    handlers.get(signal)!();
-    const expectedCode = signal === "SIGINT" ? 130 : 143;
-    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(expectedCode));
-
-    for (const child of processes) expect(child.kill).toHaveBeenCalledWith("SIGTERM");
-    remove();
-  });
-
-  it.each(["SIGINT", "SIGTERM"])(
-    "force-cleans synchronously when %s repeats during graceful teardown",
-    (signal) => {
-      vi.useFakeTimers();
-      const child = fakeProcess("cloudflared", true);
-      const rig: HeadlessRig = { display: ":99", procs: [child] };
-      const { handlers, runtime, exit } = cleanupRuntime();
-      const set = vi.fn();
-      registerHeadlessRigCleanup(
-        rig,
-        () => vi.fn(() => new Promise<void>(() => undefined)),
-        runtime,
-        { enabled: () => true, set },
-      );
-
-      handlers.get(signal)!();
-      handlers.get(signal)!();
-
-      expect(child.kill).toHaveBeenCalledWith("SIGKILL");
-      expect(exit).toHaveBeenCalledWith(signal === "SIGINT" ? 130 : 143);
-      expect(set).toHaveBeenLastCalledWith(true);
-    },
-  );
-
-  it("escalates to SIGKILL when a session process ignores SIGTERM", async () => {
-    const child = fakeProcess("cloudflared", true);
-    const rig: HeadlessRig = { display: ":99", procs: [child] };
-
-    await teardownHeadlessRig(rig, 1);
-
-    expect(child.kill).toHaveBeenNthCalledWith(1, "SIGTERM");
-    expect(child.kill).toHaveBeenNthCalledWith(2, "SIGKILL");
-  });
-
-  it("uses synchronous SIGKILL cleanup during process exit", () => {
-    const child = fakeProcess("websockify", true);
-    const rig: HeadlessRig = { display: ":99", procs: [child] };
-    const { handlers, runtime } = cleanupRuntime();
-    const remove = registerHeadlessRigCleanup(rig, () => undefined, runtime);
-
-    handlers.get("exit")!();
-
-    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
-    remove();
-  });
-
-  it("forces browser cleanup when graceful teardown stalls", async () => {
-    vi.useFakeTimers();
-    const forceClose = vi.fn();
-    const waiting = teardownLoginBrowser({
-      profileDir: "/unused/profile",
-      identity: null,
-      closeBrowser: () => new Promise<void>(() => undefined),
-      forceClose,
-      timeoutMs: 100,
-    });
-
-    await vi.advanceTimersByTimeAsync(100);
-    await expect(waiting).resolves.toBe("force_closed_unproven");
-
-    expect(forceClose).toHaveBeenCalledOnce();
-  });
-
-  it("cleans every session process and the active browser on an uncaught exception", async () => {
-    const { rig, processes } = rigWithEverySessionProcess();
-    const { handlers, runtime, exit } = cleanupRuntime();
-    const browserTeardown = vi.fn(async () => undefined);
-    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const remove = registerHeadlessRigCleanup(rig, () => browserTeardown, runtime);
-
-    handlers.get("uncaughtException")!(new Error("boom") as never);
-    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(1));
-
-    expect(browserTeardown).toHaveBeenCalledTimes(1);
-    for (const child of processes) expect(child.kill).toHaveBeenCalledWith("SIGTERM");
-    error.mockRestore();
-    remove();
-  });
-
-  it("takes sole signal ownership from the self-managed Chrome handlers for its duration", () => {
-    const { rig } = rigWithEverySessionProcess();
-    const { handlers, runtime } = cleanupRuntime();
-    const set = vi.fn();
-    const remove = registerHeadlessRigCleanup(rig, () => undefined, runtime, {
-      enabled: () => true,
-      set,
-    });
-
-    expect(set).toHaveBeenCalledTimes(1);
-    expect(set).toHaveBeenCalledWith(false);
-    for (const event of ["exit", "SIGTERM", "SIGINT", "uncaughtException", "unhandledRejection"]) {
-      expect(handlers.has(event)).toBe(true);
-    }
-
-    remove();
-    expect(set).toHaveBeenLastCalledWith(true);
-    expect(handlers.size).toBe(0);
-  });
-
-  it("stands down to the central shutdown coordinator when signal exit is disabled", () => {
-    const { rig } = rigWithEverySessionProcess();
-    const { handlers, runtime } = cleanupRuntime();
-    const set = vi.fn();
-    const remove = registerHeadlessRigCleanup(rig, () => undefined, runtime, {
-      enabled: () => false,
-      set,
-    });
-
-    // Only the pure-cleanup exit hook: the server's requestShutdown owns
-    // signals/exit and drains the login via cancelActiveLoginBrowsers, and
-    // exit-calling uncaught/unhandled handlers would break the server's
-    // log-and-keep-serving process guards.
-    expect(handlers.has("exit")).toBe(true);
-    for (const event of ["SIGTERM", "SIGINT", "uncaughtException", "unhandledRejection"]) {
-      expect(handlers.has(event)).toBe(false);
-    }
-    expect(set).not.toHaveBeenCalled();
-
-    remove();
-    expect(set).not.toHaveBeenCalled();
-    expect(handlers.size).toBe(0);
-  });
-
-  it("uses HTTP/2 for the per-session cloudflared fallback", () => {
-    expect(fallbackCloudflaredArgs(4567)).toEqual([
-      "tunnel",
-      "--protocol",
-      "http2",
-      "--url",
-      "http://127.0.0.1:4567",
-    ]);
-  });
-
-  it("bounds the fallback URL shortener request", async () => {
-    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
-      expect(init?.signal).toBeInstanceOf(AbortSignal);
-      return new Response(JSON.stringify({ short_url: "https://trustysquire.ai/g/short" }), {
-        status: 200,
-      });
-    }) as unknown as typeof fetch;
-
-    await expect(
-      shortenVncUrl("https://api.test", "https://long.test/#p=secret", fetchImpl),
-    ).resolves.toBe("https://trustysquire.ai/g/short");
-  });
-});
 
 describe("operator shutdown — OAuth-bootstrap login browser cancellation", () => {
   it("cancels every tracked login browser once and drains the registry", async () => {
@@ -1244,134 +1041,6 @@ describe("claimed worker Google identity", () => {
     ]);
 
     await expect(controller.detectGoogleAccountEmail()).resolves.toBeNull();
-  });
-});
-
-describe("google-login env helpers", () => {
-  it("binaryOnPath finds a real binary and rejects a fake one", () => {
-    expect(binaryOnPath("sh")).toBe(true);
-    expect(binaryOnPath("definitely-not-a-real-binary-xyz123")).toBe(false);
-  });
-
-  it("binaryOnPath still finds a standard-dir binary when PATH is trimmed", () => {
-    // Reproduces the cloudflared false-missing: a spawner (systemd/agent)
-    // drops /usr/local/bin etc., yet the binary is installed in a standard
-    // dir. `sh` lives in /bin — a standard dir — so it must resolve even
-    // with an empty PATH.
-    const saved = process.env.PATH;
-    process.env.PATH = "";
-    try {
-      expect(binaryOnPath("sh")).toBe(true);
-    } finally {
-      process.env.PATH = saved;
-    }
-  });
-
-  it("installHint gives cloudflared its own step, not an apt line that omits it", () => {
-    const hint = installHint(["cloudflared"]);
-    // The old bug: cloudflared missing → an apt-get line that can't install it.
-    expect(hint).not.toMatch(/apt-get/);
-    expect(hint).toContain("cloudflared-linux-");
-    expect(hint).toContain("dpkg -i");
-  });
-
-  it("installHint maps each missing binary to its real package", () => {
-    const hint = installHint(["Xvfb", "x11vnc", "websockify", "cloudflared"]);
-    expect(hint).toContain("apt-get install -y xvfb x11vnc novnc websockify");
-    expect(hint).toContain("cloudflared-linux-");
-  });
-
-  it("findFreePort returns a usable TCP port", async () => {
-    const port = await findFreePort();
-    expect(port).toBeGreaterThan(0);
-    expect(port).toBeLessThan(65536);
-  });
-
-  it("hasDisplay honors the force-headless override", () => {
-    const saved = process.env.TRUSTY_SQUIRE_FORCE_HEADLESS;
-    process.env.TRUSTY_SQUIRE_FORCE_HEADLESS = "true";
-    try {
-      expect(hasDisplay()).toBe(false);
-    } finally {
-      if (saved === undefined) delete process.env.TRUSTY_SQUIRE_FORCE_HEADLESS;
-      else process.env.TRUSTY_SQUIRE_FORCE_HEADLESS = saved;
-    }
-  });
-
-  it("hasDisplay returns true on macOS and Windows without DISPLAY", () => {
-    // The pre-0.5.3 regression: DISPLAY is a Unix concept that Mac
-    // (Aqua) and Windows (Win32) don't set, so a DISPLAY-only check
-    // would have routed both platforms into the headless noVNC rig
-    // and failed at the missing Xvfb binary check.
-    const savedDisplay = process.env.DISPLAY;
-    const savedPlatform = process.platform;
-    delete process.env.DISPLAY;
-    try {
-      for (const platform of ["darwin", "win32"]) {
-        Object.defineProperty(process, "platform", { value: platform });
-        expect(hasDisplay(), `${platform} should report a display`).toBe(true);
-      }
-    } finally {
-      Object.defineProperty(process, "platform", { value: savedPlatform });
-      if (savedDisplay !== undefined) process.env.DISPLAY = savedDisplay;
-    }
-  });
-
-  it("hasDisplay returns true on Linux only when DISPLAY is set", () => {
-    const savedDisplay = process.env.DISPLAY;
-    const savedPlatform = process.platform;
-    const savedSshConnection = process.env.SSH_CONNECTION;
-    const savedSshTty = process.env.SSH_TTY;
-    const savedSessionType = process.env.XDG_SESSION_TYPE;
-    Object.defineProperty(process, "platform", { value: "linux" });
-    try {
-      delete process.env.SSH_CONNECTION;
-      delete process.env.SSH_TTY;
-      delete process.env.XDG_SESSION_TYPE;
-      delete process.env.DISPLAY;
-      expect(hasDisplay()).toBe(false);
-      process.env.DISPLAY = ":0";
-      expect(hasDisplay()).toBe(true);
-    } finally {
-      Object.defineProperty(process, "platform", { value: savedPlatform });
-      if (savedDisplay !== undefined) process.env.DISPLAY = savedDisplay;
-      else delete process.env.DISPLAY;
-      if (savedSshConnection !== undefined) process.env.SSH_CONNECTION = savedSshConnection;
-      else delete process.env.SSH_CONNECTION;
-      if (savedSshTty !== undefined) process.env.SSH_TTY = savedSshTty;
-      else delete process.env.SSH_TTY;
-      if (savedSessionType !== undefined) process.env.XDG_SESSION_TYPE = savedSessionType;
-      else delete process.env.XDG_SESSION_TYPE;
-    }
-  });
-
-  it("hasDisplay routes SSH/TTY Linux sessions to noVNC even when DISPLAY is set", () => {
-    const savedDisplay = process.env.DISPLAY;
-    const savedPlatform = process.platform;
-    const savedSshConnection = process.env.SSH_CONNECTION;
-    const savedSessionType = process.env.XDG_SESSION_TYPE;
-    const savedForceDisplay = process.env.TRUSTY_SQUIRE_FORCE_DISPLAY;
-    Object.defineProperty(process, "platform", { value: "linux" });
-    try {
-      process.env.DISPLAY = ":99";
-      process.env.SSH_CONNECTION = "203.0.113.1 12345 203.0.113.2 22";
-      process.env.XDG_SESSION_TYPE = "tty";
-      delete process.env.TRUSTY_SQUIRE_FORCE_DISPLAY;
-      expect(hasDisplay()).toBe(false);
-      process.env.TRUSTY_SQUIRE_FORCE_DISPLAY = "true";
-      expect(hasDisplay()).toBe(true);
-    } finally {
-      Object.defineProperty(process, "platform", { value: savedPlatform });
-      if (savedDisplay !== undefined) process.env.DISPLAY = savedDisplay;
-      else delete process.env.DISPLAY;
-      if (savedSshConnection !== undefined) process.env.SSH_CONNECTION = savedSshConnection;
-      else delete process.env.SSH_CONNECTION;
-      if (savedSessionType !== undefined) process.env.XDG_SESSION_TYPE = savedSessionType;
-      else delete process.env.XDG_SESSION_TYPE;
-      if (savedForceDisplay !== undefined)
-        process.env.TRUSTY_SQUIRE_FORCE_DISPLAY = savedForceDisplay;
-      else delete process.env.TRUSTY_SQUIRE_FORCE_DISPLAY;
-    }
   });
 });
 
