@@ -3423,6 +3423,10 @@ export class BrowserController {
   private ownedChromeProcessTreeProof: OwnedChromeProcessTreeProof | null = null;
   private operatorProcessMarker: string | null = null;
   private cdpBrowser: Browser | null = null;
+  // The read-only browser-use observation bridge attaches to this same endpoint.
+  // It is populated only for explicit CDP connections; ordinary Playwright
+  // contexts intentionally expose no new debugging surface.
+  private browserUseCdpEndpoint: string | null = null;
   // True once a local browser context launched this session.
   private launchedContext = false;
   private launchedProfileHolderIdentity: ProfileProcessIdentity | null = null;
@@ -3612,6 +3616,11 @@ export class BrowserController {
     return browser?.isConnected() === true;
   }
 
+  /** Read-only endpoint for the pinned browser-use serializer, if available. */
+  browserUseObservationEndpoint(): string | null {
+    return this.browserUseCdpEndpoint;
+  }
+
   // Which browser channel the most recent .start() actually used.
   // `null` means bundled Chromium; a string like "chrome" means a
   // real installed browser of that channel. Throws if .start() hasn't
@@ -3675,6 +3684,7 @@ export class BrowserController {
       const launcher = getChromium();
       const browser = await launcher.connectOverCDP(remoteEndpoint);
       this.cdpBrowser = browser;
+      this.browserUseCdpEndpoint = remoteEndpoint;
       this.launchedMode = "remote";
       const ctx = browser.contexts()[0];
       if (ctx === undefined) {
@@ -3787,6 +3797,7 @@ export class BrowserController {
     const launcher = getChromium();
     const browser = await launcher.connectOverCDP(endpoint);
     this.cdpBrowser = browser;
+    this.browserUseCdpEndpoint = endpoint;
     const ctx = browser.contexts()[0];
     if (ctx === undefined) {
       throw new Error("self-launched Chrome exposed no default browser context");

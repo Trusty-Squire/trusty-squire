@@ -13,6 +13,7 @@ import {
   startProvisionSession,
   observe,
   captureScreenshot,
+  observeQuery,
   act,
   cartAdd,
   formSelectMany,
@@ -491,6 +492,36 @@ export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
         : {}),
       ...(args.full_page !== undefined ? { fullPage: args.full_page } : {}),
     });
+  },
+};
+
+const observeQuerySchema = z.object({
+  session_id: z.string().min(1),
+  // This string is matched only inside the live session; returned rows remain
+  // the compact-v2 enum-only action map.
+  query: z.string().max(160).default(""),
+  role: z.enum(["button", "link", "textbox", "select", "checkbox", "radio", "tab", "menuitem", "file"]).optional(),
+  cursor: z.string().max(1_024).optional(),
+});
+
+export const provisionObserveQueryTool: Tool<z.infer<typeof observeQuerySchema>> = {
+  name: "operate_observe_query",
+  description:
+    "Page compact-v2 overflow or find query. Matches query only inside the live browser and returns " +
+    "opaque refs plus finite role/state/action enums. Use overflow.next_cursor to page; never read a snapshot file.",
+  inputSchema: observeQuerySchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id"],
+    properties: {
+      session_id: { type: "string" },
+      query: { type: "string" },
+      role: { type: "string", enum: ["button", "link", "textbox", "select", "checkbox", "radio", "tab", "menuitem", "file"] },
+      cursor: { type: "string" },
+    },
+  },
+  async handler(args) {
+    return await observeQuery(args.session_id, args.query, args.role, args.cursor);
   },
 };
 
@@ -2470,6 +2501,7 @@ export const OPERATE_TOOLS: Tool[] = [
   provisionStartTool,
   provisionObserveTool,
   provisionScreenshotTool,
+  provisionObserveQueryTool,
   provisionActTool,
   operateRecipeSaveTool,
   operateRecipeRunTool,

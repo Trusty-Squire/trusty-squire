@@ -16,7 +16,7 @@
 //  - no credential is ever read back to the agent except via the explicit
 //    `finish`/extract path; the vault stays write-only.
 
-import { createHash, randomInt, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomInt, randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -40,6 +40,13 @@ import type {
   PendingThreeDsWait,
 } from "./pay-operator.js";
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
+import {
+  buildSafeControlsV2,
+  encodeV2Page,
+  type SafeControlV2,
+  type SafeObservationIndexV2,
+} from "./compact-observation-v2.js";
+import { closeBrowserUseObserver, observeWithBrowserUse } from "./browser-use-observer.js";
 import type { ApiClient } from "../api-client.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
 import { pickVerificationLink } from "./email-verification.js";
@@ -342,6 +349,12 @@ export interface Observation {
   // canonical cart URL and safe retry semantics from operate_act { kind: "cart_add" }.
   cart_delta?: "+1" | "0" | "unknown";
   selected_option?: string;
+  // compact-v2's closed action map. It is intentionally value-free and does
+  // not use the V1 snapshot-file recovery protocol.
+  format?: "compact-v2";
+  generation?: number;
+  safe_table?: SafeControlV2[];
+  overflow?: { remaining: number; next_cursor: string };
 }
 
 export interface AccessibilitySnapshot {
@@ -531,6 +544,9 @@ export interface Session {
   // observe. Reset on a URL change so a delta never crosses pages.
   prevObserve: ObserveDeltaState | null;
   observeSnapshotFile: string | null;
+  compactV2Secret: Buffer;
+  compactV2Refs: Map<string, string>;
+  compactV2Index: SafeObservationIndexV2 | null;
   // Phase A operator-recipe capture (docs/ARCHITECTURE.md): the
   // ordered, TEXT-targeted action trace of this session, so a successful run can
   // be `remember`ed as a replayable rail. Records visible text + non-secret
@@ -1908,6 +1924,16 @@ export function resolveTarget(
   return best?.el ?? null;
 }
 
+// V2 refs are HMACs of the legacy stable identity.  Translate only inside the
+// owning session, then retain the existing live re-resolution/stale semantics.
+function resolveSessionTarget(
+  session: Pick<Session, "compactV2Refs">,
+  elements: readonly InteractiveElement[],
+  target: string,
+): InteractiveElement | null {
+  return resolveTarget(elements, session.compactV2Refs.get(target) ?? target);
+}
+
 // Squire's OWN control plane. The operator browser runs in the connect-seeded
 // profile, so it is authenticated as the user (a live Google session). It must
 // therefore NEVER be allowed to reach Squire's own web app / API: otherwise a
@@ -2845,6 +2871,9 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     lastElements: [],
     prevObserve: null,
     observeSnapshotFile: null,
+    compactV2Secret: randomBytes(32),
+    compactV2Refs: new Map(),
+    compactV2Index: null,
     actionTrace: [],
     recordedValues: [],
     committedSelectValues: new Map(),
@@ -2918,6 +2947,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
       loginSessionGuidance(liveProviders),
       ...(opts.hint !== undefined ? [opts.hint] : []),
     ];
+    if (observation.format === "compact-v2") return observation;
     return {
       ...observation,
       hint: hintParts.join("\n"),
@@ -2959,6 +2989,9 @@ export async function startHarnessProvisionSession(
     lastElements: [],
     prevObserve: null,
     observeSnapshotFile: null,
+    compactV2Secret: randomBytes(32),
+    compactV2Refs: new Map(),
+    compactV2Index: null,
     actionTrace: [],
     recordedValues: [],
     committedSelectValues: new Map(),
@@ -3001,7 +3034,10 @@ export async function startHarnessProvisionSession(
       allowed_hosts: hostStrings(session),
     });
     await opts.browser.goto(opts.serviceUrl);
-    return { ...(await observeSession(session)), hint: opts.hint ?? "" };
+    const observation = await observeSession(session);
+    // A registry hint can contain service-authored route prose. Compact V2 is
+    // a closed safe view, so it never mixes that prose into its action map.
+    return observation.format === "compact-v2" ? observation : { ...observation, hint: opts.hint ?? "" };
   } catch (error) {
     sessions.delete(id);
     disposeSessionWatchdog(session);
@@ -4556,6 +4592,115 @@ function isCartAffectingAction(
   );
 }
 
+function compactV2Mode(): "off" | "shadow" | "on" {
+  const configured = (process.env.TRUSTY_SQUIRE_OBSERVE_V2 ?? "on").toLowerCase();
+  if (configured === "off" || configured === "0") return "off";
+  return configured === "shadow" ? "shadow" : "on";
+}
+
+function compactV2Cursor(session: Session, generation: number, offset: number): string {
+  const expires = Date.now() + 5 * 60_000;
+  const body = Buffer.from(`${session.id}\u001f${generation}\u001f${offset}\u001f${expires}`).toString("base64url");
+  const signature = createHmac("sha256", session.compactV2Secret).update(body).digest("base64url");
+  return `${body}.${signature}`;
+}
+
+function parseCompactV2Cursor(session: Session, cursor: string): { generation: number; offset: number } {
+  const [body, signature, extra] = cursor.split(".");
+  if (body === undefined || signature === undefined || extra !== undefined) throw new Error("invalid_cursor");
+  const expected = createHmac("sha256", session.compactV2Secret).update(body).digest("base64url");
+  if (signature !== expected) throw new Error("invalid_cursor");
+  const [id, generationRaw, offsetRaw, expiresRaw] = Buffer.from(body, "base64url").toString("utf8").split("\u001f");
+  const generation = Number(generationRaw);
+  const offset = Number(offsetRaw);
+  if (
+    id !== session.id ||
+    !Number.isSafeInteger(generation) ||
+    !Number.isSafeInteger(offset) ||
+    offset < 0 ||
+    !Number.isFinite(Number(expiresRaw)) ||
+    Number(expiresRaw) < Date.now()
+  ) {
+    throw new Error("stale_cursor");
+  }
+  return { generation, offset };
+}
+
+function compactV2Observation(
+  session: Session,
+  generation: number,
+  elements: readonly InteractiveElement[],
+  selected: Parameters<typeof buildSafeControlsV2>[0]["selected"],
+): Observation {
+  const legacyRefs = provisionElementRefs(elements);
+  let pageOrigin = "";
+  try {
+    pageOrigin = new URL(session.browser.currentUrl()).origin;
+  } catch {}
+  const safe = buildSafeControlsV2({
+    elements,
+    legacyRefs,
+    secret: session.compactV2Secret,
+    pageOrigin,
+    selected,
+  });
+  const index: SafeObservationIndexV2 = {
+    generation,
+    rows: safe.rows,
+    byRef: safe.byRef,
+    expiresAt: Date.now() + 5 * 60_000,
+  };
+  // The raw browser-use selector-map and raw DOM values fall out of scope here.
+  // Only this enum-only index survives to delta/query/action resolution.
+  session.compactV2Index = index;
+  session.compactV2Refs = safe.byRef;
+  session.prevObserve = null;
+  const page = encodeV2Page({
+    sessionId: session.id,
+    generation,
+    rows: index.rows,
+    cursorFor: (offset) => compactV2Cursor(session, generation, offset),
+  });
+  return { ...(page.payload as unknown as Observation), url: "", text: "" };
+}
+
+export async function observeQuery(
+  sessionId: string,
+  query: string,
+  role?: SafeControlV2["role"],
+  cursor?: string,
+): Promise<Record<string, unknown>> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  if (session.paymentFieldSealActive) throw new Error("sealed_observation_query_rejected");
+  const index = session.compactV2Index;
+  if (index === null || index.expiresAt < Date.now()) throw new Error("stale_cursor");
+  let offset = 0;
+  if (cursor !== undefined) {
+    const parsed = parseCompactV2Cursor(session, cursor);
+    if (parsed.generation !== index.generation) throw new Error("stale_cursor");
+    offset = parsed.offset;
+  }
+  const needle = norm(query);
+  const currentRefs = provisionElementRefs(session.lastElements);
+  const allowed = new Set<string>();
+  for (const el of session.lastElements) {
+    const legacy = currentRefs.get(el);
+    if (legacy === undefined) continue;
+    const safeRef = [...index.byRef.entries()].find(([, value]) => value === legacy)?.[0];
+    if (safeRef !== undefined && (needle.length === 0 || norm(elementRef(el)).includes(needle))) allowed.add(safeRef);
+  }
+  const rows = index.rows.filter((row) => allowed.has(row.ref) && (role === undefined || row.role === role));
+  const page = encodeV2Page({
+    sessionId: session.id,
+    generation: index.generation,
+    rows,
+    offset,
+    cursorFor: (next) => compactV2Cursor(session, index.generation, next),
+  });
+  return page.payload;
+}
+
 async function observeSession(
   session: Session,
   detail: "compact" | "full" = "compact",
@@ -4595,6 +4740,18 @@ async function observeSession(
     const generation = session.generation;
     const elements = await session.browser.extractInteractiveElements();
     session.lastElements = elements;
+    // Browser-use is the maintained DOM selection engine for V2.  Its raw
+    // serializer output remains within this short-lived call; TS immediately
+    // seals it into code-owned enums before a delta, snapshot, audit, or MCP
+    // response can observe it. If the pinned Python dependency/CDP endpoint is
+    // unavailable, retain the backwards-compatible V1 path rather than guess.
+    if (detail !== "full" && compactV2Mode() !== "off") {
+      const selected = await observeWithBrowserUse(session.browser.browserUseObservationEndpoint());
+      if (selected !== null) {
+        const v2 = compactV2Observation(session, generation, elements, selected);
+        if (compactV2Mode() === "on") return v2;
+      }
+    }
     const sealedFieldKeys = observationSealedFieldKeys(session, elements);
     const text = redactPaymentObservationText(
       await session.browser.extractVisibleText(),
@@ -5055,7 +5212,7 @@ export async function act(
       // resolveTarget recomputes identities (incl. volatile positional-group
       // fingerprints) from these FRESH elements, so a ref whose group fingerprint
       // changed since the last observe resolves to null, not a survivor (#399).
-      const el = resolveTarget(fresh, action.target);
+      const el = resolveSessionTarget(session, fresh, action.target);
       if (el === null) {
         const stale = staleTargetError(session, action.target, fresh);
         if (stale !== null) throw stale;
@@ -5088,7 +5245,7 @@ export async function act(
       // uses selectInFrame. text is the fuzzy option matcher in both paths.
       const fresh = await browser.extractInteractiveElements();
       session.lastElements = fresh;
-      const el = resolveTarget(fresh, action.target);
+      const el = resolveSessionTarget(session, fresh, action.target);
       if (el === null) {
         const stale = staleTargetError(session, action.target, fresh);
         if (stale !== null) throw stale;
@@ -5213,7 +5370,7 @@ export async function act(
       // resolveTarget recomputes identities (incl. volatile positional-group
       // fingerprints) from these FRESH elements, so a ref whose group fingerprint
       // changed since the last observe resolves to null, not a survivor (#399).
-      const el = resolveTarget(fresh, action.target);
+      const el = resolveSessionTarget(session, fresh, action.target);
       if (el === null) {
         const stale = staleTargetError(session, action.target, fresh);
         if (stale !== null) throw stale;
@@ -5375,7 +5532,7 @@ export async function act(
       // action before the provider transition begins.
       const fresh = await browser.extractInteractiveElements();
       session.lastElements = fresh;
-      const el = resolveTarget(fresh, action.target);
+      const el = resolveSessionTarget(session, fresh, action.target);
       if (el === null) {
         throw new Error(
           `oauth_login: no element matched target "${action.target}". Re-observe and use the OAuth button ref.`,
@@ -5417,7 +5574,7 @@ export async function act(
           observed: "none" as const,
         }
       : await observeSession(session, detail === "none" ? "compact" : detail);
-  return completedAction.kind === "select"
+  return completedAction.kind === "select" && observation.format !== "compact-v2"
     ? { ...observation, selected_option: completedAction.text }
     : observation;
 }
@@ -8113,6 +8270,7 @@ export async function closeAllProvisionSessions(): Promise<void> {
   } finally {
     shutdownInProgress -= 1;
   }
+  closeBrowserUseObserver();
 }
 
 export function activeSessionCount(): number {
