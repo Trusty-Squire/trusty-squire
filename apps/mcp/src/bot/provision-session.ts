@@ -31,28 +31,23 @@ import {
   type FrameTarget,
   type InteractiveElement,
   type PageTargetSafetySignals,
-  type ThreeDsResolution,
 } from "./browser.js";
 import type {
   CartCheckoutObservation,
   PendingApprovalWait,
   PendingCardFill,
-  PendingThreeDsWait,
 } from "./pay-operator.js";
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import type { ApiClient } from "../api-client.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
 import { pickVerificationLink } from "./email-verification.js";
 import {
-  acquireOperatorProfile,
-  OperatorProfileAcquisitionInterruptedError,
-  type OperatorProfileLease,
-} from "./operator-profile-pool.js";
-import {
-  acquireDirectIdentityProfile,
-  OperatorDirectIdentityAcquisitionInterruptedError,
-  type DirectIdentityProfileLease,
-} from "./operator-direct-identity.js";
+  createEphemeralProfile,
+  destroyEphemeralProfile,
+  readSessionState,
+  writeSessionState,
+} from "./session-state.js";
+import { CHROME_PROFILE_DIR } from "./profile.js";
 import { loginSessionGuidance } from "./skill-hint.js";
 import {
   type OperatorRecipe,
@@ -122,10 +117,6 @@ import {
   resolveExtraction,
   type CandidateClass,
 } from "./extraction.js";
-import {
-  OperatorBrowserWatchdog,
-  type OperatorBrowserWatchdogReason,
-} from "./operator-browser-watchdog.js";
 
 // Identity-provider + auth-handler hosts a signup legitimately bounces
 // through. Used to widen domain-scope so an OAuth `goto` (rare) isn't blocked.
@@ -281,11 +272,6 @@ export interface Observation {
   // was capped at 4000 characters. Absent in full mode.
   elements_total?: number;
   text_truncated?: boolean;
-  // True when a dialog/modal region (role="dialog", <dialog>, aria-modal="true")
-  // currently has at least one topmost (unoccluded) element — i.e. a modal is
-  // open and interactable. Omitted (never `false`) when no modal is active, so
-  // its presence alone is the signal.
-  modal_active?: boolean;
   // Per-session observe delta (docs/DESIGN-observe-compact.md). On a DELTA emit,
   // `el_table` carries ONLY the rows whose compact form changed vs the previous
   // observation; `delta` is true and `unchanged` counts the elements that were
@@ -493,22 +479,6 @@ interface CartIdentityContext {
   onActionReady?: () => void;
 }
 
-interface SessionTerminalTeardownOwner {
-  forced: boolean;
-  forcePromise: Promise<unknown | undefined> | null;
-  routinePromise: Promise<void> | null;
-}
-
-interface PaymentDispatchHandoff {
-  state: PendingThreeDsWait;
-  settled: Promise<void>;
-  resolveSettled: () => void;
-  terminalizing: boolean;
-  terminalComplete: boolean;
-  released: boolean;
-  auditPromise: Promise<void> | null;
-}
-
 export interface Session {
   id: string;
   browser: BrowserController;
@@ -590,16 +560,6 @@ export interface Session {
     | { status: "sealed" }
     | null;
   paymentFieldSealActive: boolean;
-  // A completed operate_pay single-page submit whose post-submit 3DS wait
-  // exhausted its budget with no terminal signal. Deliberately NOT part of
-  // activePayment: the card is already released and the charge already
-  // submitted, so there is no lease to hold and no re-authorization risk —
-  // this is resumable bookkeeping for operate_payment_status,
-  // mirroring the "awaiting_approval" gap it closes for the pre-charge wait.
-  // Set by setActivePendingThreeDs, read by getActivePendingThreeDs, cleared
-  // by clearActivePendingThreeDsIfCurrent once resolved or its deadline passes.
-  pendingThreeDs: PendingThreeDsWait | null;
-  paymentDispatchHandoff: PaymentDispatchHandoff | null;
   // Snapshot of the single approval a filled card belongs to, captured at
   // fill time (setActivePendingCardFill / completeActivePaymentLeaseWithPendingFill)
   // so the place-order guard below still has what it needs after activePayment
@@ -638,16 +598,6 @@ export interface Session {
   closing: boolean;
   callCount: number;
   callDrainWaiters: Set<() => void>;
-  paymentCallCount: number;
-  paymentCallDrainWaiters: Set<() => void>;
-  paymentDispatchClosed: boolean;
-  // Session ownership must be a resource boundary, not merely a convention for
-  // cooperative hosts. The watchdog destroys this browser if its client goes
-  // away without operate_finish, if it lives too long, or if its Chromium tree
-  // exceeds the CPU budget.
-  lastActivityAt: number;
-  watchdog: OperatorBrowserWatchdog | null;
-  terminalTeardownOwner: SessionTerminalTeardownOwner | null;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -670,15 +620,10 @@ function merchantSiblingSeedHosts(session: Session): string[] {
 
 const sessions = new Map<string, Session>();
 
-// Either lease kind — the isolated per-session profile-pool clone, or the
-// direct exclusive lease on the canonical Google-authenticated profile
-// (operator-direct-identity.ts) — drives the same warm-browser lifecycle
-// below identically; only acquireWarmBrowser cares which one it holds.
-type OperatorLease = OperatorProfileLease | DirectIdentityProfileLease;
-
-interface WarmBrowser {
+interface EphemeralBrowser {
   controller: BrowserController;
-  lease: OperatorLease;
+  profileDir: string;
+  canonicalProfileDir: string;
 }
 
 interface AcquiredBrowser {
@@ -688,487 +633,77 @@ interface AcquiredBrowser {
 
 interface StartingBrowser {
   controller: BrowserController;
-  lease: OperatorLease;
+  profileDir: string;
   launch: Promise<void>;
   cancelRequested: boolean;
-  cleanupPromise: Promise<void> | null;
 }
-
-interface CapacityWaiter {
-  generation: number;
-  cancelRequested: boolean;
-  abortController: AbortController;
-  wake: () => void;
-  settled: Promise<void>;
-  resolveSettled: () => void;
-}
-
-// The pool and canonical-profile guard are authoritative for their respective
-// cross-process capacity. These maps only retain the local controller/lease
-// pairing needed for lifecycle cleanup; they deliberately do not impose a
-// process-global single-session gate.
-const leasedBrowsers = new Map<BrowserController, WarmBrowser>();
+const leasedBrowsers = new Map<BrowserController, EphemeralBrowser>();
 const startingBrowsers = new Set<StartingBrowser>();
-const capacityWaiters = new Set<CapacityWaiter>();
-let shutdownGeneration = 0;
-const START_CAPACITY_WAIT_MS = 30_000;
-const START_CAPACITY_RETRY_MS = 50;
-
-function isOperatorCapacityError(error: unknown): boolean {
-  return error instanceof Error && error.message.startsWith("operate_start capacity reached:");
-}
-
-async function acquireOperatorProfileBounded(
-  opts: StartOptions,
-  sessionId: string,
-  generation: number,
-): Promise<OperatorProfileLease> {
-  let wake = (): void => undefined;
-  let resolveSettled = (): void => undefined;
-  const waiter: CapacityWaiter = {
-    generation,
-    cancelRequested: false,
-    abortController: new AbortController(),
-    wake: () => wake(),
-    settled: new Promise<void>((resolve) => {
-      resolveSettled = resolve;
-    }),
-    resolveSettled: () => resolveSettled(),
-  };
-  capacityWaiters.add(waiter);
-  const deadline = Date.now() + START_CAPACITY_WAIT_MS;
-  try {
-    for (;;) {
-      if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
-        throw new Error("operate_start cancelled: operator server is shutting down");
-      }
-      try {
-        const lease = await acquireOperatorProfile(sessionId, {
-          ...(opts.profileDir !== undefined ? { sourceProfileDir: opts.profileDir } : {}),
-          deadline,
-          signal: waiter.abortController.signal,
-        });
-        if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
-          await lease.destroy();
-          throw new Error("operate_start cancelled: operator server is shutting down");
-        }
-        return lease;
-      } catch (error) {
-        if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
-          throw new Error("operate_start cancelled: operator server is shutting down");
-        }
-        if (
-          error instanceof OperatorProfileAcquisitionInterruptedError &&
-          error.reason === "cancelled"
-        ) {
-          throw new Error("operate_start cancelled: operator server is shutting down");
-        }
-        if (
-          error instanceof OperatorProfileAcquisitionInterruptedError &&
-          error.reason === "timeout"
-        ) {
-          if (error.phase === "seed_lock") {
-            throw new Error(
-              "operate_start failed: start deadline exceeded while waiting to acquire the shared seed lock",
-            );
-          }
-          throw new Error(
-            "operate_start failed: start deadline exceeded while acquiring an isolated operator profile",
-          );
-        }
-        if (isOperatorCapacityError(error) && Date.now() >= deadline) {
-          throw new Error(
-            "operate_start capacity wait timed out: 2 operator sessions are active; finish one and retry",
-          );
-        }
-        if (!isOperatorCapacityError(error)) {
-          throw error;
-        }
-        await new Promise<void>((resolve) => {
-          wake = resolve;
-          const timer = setTimeout(resolve, START_CAPACITY_RETRY_MS);
-          waiter.wake = () => {
-            clearTimeout(timer);
-            resolve();
-          };
-        });
-      }
-    }
-  } finally {
-    capacityWaiters.delete(waiter);
-    waiter.resolveSettled();
-  }
-}
-
-// The Google-authenticated counterpart of acquireOperatorProfileBounded — see
-// operator-direct-identity.ts. Registers the same CapacityWaiter shape so
-// closeAllProvisionSessions cancels an in-flight acquisition uniformly,
-// but the underlying resource is the single canonical profile, not a
-// two-slot pool: acquireDirectIdentityProfile already polls/blocks
-// internally, so there is no outer capacity-retry loop to drive here.
-async function acquireDirectIdentityProfileBounded(
-  opts: StartOptions,
-  generation: number,
-): Promise<DirectIdentityProfileLease> {
-  const waiter: CapacityWaiter = {
-    generation,
-    cancelRequested: false,
-    abortController: new AbortController(),
-    wake: () => undefined,
-    settled: Promise.resolve(),
-    resolveSettled: () => undefined,
-  };
-  let resolveSettled = (): void => undefined;
-  waiter.settled = new Promise<void>((resolve) => {
-    resolveSettled = resolve;
-  });
-  waiter.resolveSettled = () => resolveSettled();
-  capacityWaiters.add(waiter);
-  try {
-    if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
-      throw new Error("operate_start cancelled: operator server is shutting down");
-    }
-    try {
-      return await acquireDirectIdentityProfile({
-        ...(opts.profileDir !== undefined ? { profileDir: opts.profileDir } : {}),
-        deadline: Date.now() + START_CAPACITY_WAIT_MS,
-        signal: waiter.abortController.signal,
-      });
-    } catch (error) {
-      if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
-        throw new Error("operate_start cancelled: operator server is shutting down");
-      }
-      if (error instanceof OperatorDirectIdentityAcquisitionInterruptedError) {
-        throw error.reason === "cancelled"
-          ? new Error("operate_start cancelled: operator server is shutting down")
-          : new Error(
-              "operate_start capacity reached: the Google-identity operator profile is in " +
-                "use by another session; finish it and retry",
-            );
-      }
-      throw error;
-    }
-  } finally {
-    capacityWaiters.delete(waiter);
-    waiter.resolveSettled();
-  }
-}
-
-async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promise<AcquiredBrowser> {
+async function acquireEphemeralBrowser(opts: StartOptions, sessionId: string): Promise<AcquiredBrowser> {
   if ((process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0) {
-    throw new Error("operate_start does not support remote CDP with isolated profile leases");
+    throw new Error("operate_start does not support remote CDP with ephemeral profiles");
   }
-  const generation = shutdownGeneration;
-  const lease: OperatorLease =
-    opts.requireLiveIdentity === true
-      ? await acquireDirectIdentityProfileBounded(opts, generation)
-      : await acquireOperatorProfileBounded(opts, sessionId, generation);
-  if (generation !== shutdownGeneration) {
-    await lease.destroy();
-    throw new Error("operate_start cancelled: operator server is shutting down");
-  }
+  const profileDir = createEphemeralProfile();
+  const canonicalProfileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
+  const storageState = readSessionState(canonicalProfileDir);
   const controller = new BrowserController({
-    profileDir: lease.profileDir,
-    ...("takeProfileOperationLease" in lease
-      ? { profileOperationLease: lease.takeProfileOperationLease() }
-      : {}),
+    profileDir,
+    ...(storageState === undefined ? {} : { storageState }),
     ...(opts.proxyUrl !== undefined ? { proxyUrl: opts.proxyUrl } : {}),
   });
   const pending: StartingBrowser = {
     controller,
-    lease,
-    launch: Promise.resolve(),
+    profileDir,
+    launch: startBrowserBounded(controller, sessionId),
     cancelRequested: false,
-    cleanupPromise: null,
   };
-  pending.launch = startBrowserBounded(controller, sessionId, async () => {
-    await cancelStartingBrowser(pending);
-  });
   startingBrowsers.add(pending);
   try {
     await pending.launch;
     if (pending.cancelRequested) {
       throw new Error("operate_start cancelled: operator server is shutting down");
     }
-    // Several unit harnesses replace BrowserController with the narrow legacy
-    // shape. Production controllers always expose identity; a harness without
-    // a real process simply leaves the descriptor worker-less.
-    if (typeof controller.operatorWorkerIdentity === "function") {
-      const worker = controller.operatorWorkerIdentity();
-      if (worker !== null) lease.bindWorker(worker);
-    }
   } catch (err) {
     if (!pending.cancelRequested) {
-      await closeLeasedBrowser(controller, lease, false);
+      await closeEphemeralBrowser({ controller, profileDir, canonicalProfileDir }, false);
     }
     throw err;
   } finally {
     startingBrowsers.delete(pending);
   }
-  leasedBrowsers.set(controller, { controller, lease });
-  return { controller, profileDir: lease.profileDir };
+  leasedBrowsers.set(controller, { controller, profileDir, canonicalProfileDir });
+  return { controller, profileDir };
 }
 
-async function releaseWarmBrowserPage(
+async function releaseEphemeralBrowserPage(
   browser: BrowserController,
-  reusable: boolean,
+  persistState: boolean,
 ): Promise<void> {
-  const slot = leasedBrowsers.get(browser);
-  if (slot === undefined) {
+  const ephemeral = leasedBrowsers.get(browser);
+  if (ephemeral === undefined) {
     await browser.close().catch(() => undefined);
     return;
   }
-  try {
-    if (reusable) await browser.resetPageForReuse();
-    await closeLeasedBrowser(browser, slot.lease, reusable);
-  } catch {
-    await closeLeasedBrowser(browser, slot.lease, false);
-  }
-  if (leasedBrowsers.get(browser) === slot) leasedBrowsers.delete(browser);
+  leasedBrowsers.delete(browser);
+  await closeEphemeralBrowser(ephemeral, persistState);
 }
 
-async function forceReleaseWarmBrowserPage(browser: BrowserController): Promise<void> {
-  const slot = leasedBrowsers.get(browser);
-  const closeState = await closeBrowserBounded(
-    browser,
-    false,
-    "operator browser force-close timed out",
-  );
-  if (slot === undefined) return;
-  if (closeState === "closed") await slot.lease.destroy();
-  else await slot.lease.retain(true);
-  if (leasedBrowsers.get(browser) === slot) leasedBrowsers.delete(browser);
-}
-
-async function closeBrowserBounded(
-  browser: BrowserController,
-  cancelStart: boolean,
-  timeoutMessage: string,
-): Promise<"closed" | "force_closed_unproven" | "unknown"> {
-  const forceClose = (
-    browser as BrowserController & {
-      forceCloseOwnedProcessTree?: () => Promise<"closed" | "force_closed_unproven" | "unknown">;
-    }
-  ).forceCloseOwnedProcessTree;
-  const ordinaryClose = browser
-    .close(cancelStart ? { cancelStart: true } : undefined)
-    .catch(() => "unknown" as const);
-  const forcedClose =
-    forceClose === undefined
-      ? ordinaryClose
-      : forceClose.call(browser).catch(() => "unknown" as const);
-  const closed = Promise.race([
-    ordinaryClose.then((state) => (state === "closed" ? state : forcedClose)),
-    forcedClose.then((state) => (state === "closed" ? state : ordinaryClose)),
-  ]);
-  return await withTerminalTimeout(
-    closed,
-    positiveTimeout(
-      "TRUSTY_SQUIRE_OPERATOR_FORCE_CLOSE_TIMEOUT_MS",
-      DEFAULT_OPERATOR_FORCE_CLOSE_TIMEOUT_MS,
-    ),
-    timeoutMessage,
-  ).catch(() => "unknown" as const);
-}
-
-async function cancelStartingBrowser(pending: StartingBrowser): Promise<void> {
-  pending.cancelRequested = true;
-  if (pending.cleanupPromise !== null) return await pending.cleanupPromise;
-  pending.cleanupPromise = (async () => {
-    const closeState = await closeBrowserBounded(
-      pending.controller,
-      true,
-      "operator browser startup cancellation timed out",
-    );
-    if (closeState === "closed") await pending.lease.destroy();
-    else await pending.lease.retain(true);
-  })();
-  return await pending.cleanupPromise;
-}
-
-async function closeLeasedBrowser(
-  browser: BrowserController,
-  lease: OperatorLease,
-  reusable: boolean,
+async function closeEphemeralBrowser(
+  ephemeral: EphemeralBrowser,
+  persistState: boolean,
 ): Promise<void> {
-  const closeState = await browser.close().catch(() => "unknown" as const);
-  if (closeState !== "closed") {
-    await lease.retain(!reusable);
-    return;
+  if (persistState && typeof ephemeral.controller.captureStorageState === "function") {
+    const state = await ephemeral.controller.captureStorageState().catch(() => undefined);
+    if (state !== undefined) writeSessionState(ephemeral.canonicalProfileDir, state);
   }
-  if (reusable) await lease.returnWarm(closeState);
-  else await lease.destroy();
-}
-
-function stopSessionWatchdog(session: Session): void {
-  session.watchdog?.stop();
-}
-
-function disposeSessionWatchdog(session: Session): void {
-  session.watchdog?.dispose();
-  session.watchdog = null;
-}
-
-const DEFAULT_SESSION_TERMINAL_DRAIN_TIMEOUT_MS = 5_000;
-const DEFAULT_PENDING_THREE_DS_FINALIZE_TIMEOUT_MS = 3_000;
-const DEFAULT_SESSION_TERMINAL_TRANSITION_TIMEOUT_MS = 30_000;
-const DEFAULT_OPERATOR_FORCE_CLOSE_TIMEOUT_MS = 3_000;
-
-function positiveTimeout(name: string, fallback: number): number {
-  const value = Number(process.env[name]);
-  return Number.isFinite(value) && value > 0 ? value : fallback;
-}
-
-async function withTerminalTimeout<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  message: string,
-): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
-}
-
-async function forceTerminateProvisionSession(
-  session: Session,
-  event: string,
-  detail: Record<string, unknown>,
-  auditPendingThreeDs = true,
-): Promise<unknown | undefined> {
-  session.paymentDispatchClosed = true;
-  const owner =
-    session.terminalTeardownOwner ??
-    (session.terminalTeardownOwner = {
-      forced: false,
-      forcePromise: null,
-      routinePromise: null,
-    });
-  if (owner.forcePromise !== null) return await owner.forcePromise;
-  owner.forced = true;
-  owner.forcePromise = forceTerminateProvisionSessionOwned(
-    session,
-    event,
-    detail,
-    auditPendingThreeDs,
-  );
-  return await owner.forcePromise;
-}
-
-async function forceTerminateProvisionSessionOwned(
-  session: Session,
-  event: string,
-  detail: Record<string, unknown>,
-  auditPendingThreeDs: boolean,
-): Promise<unknown | undefined> {
-  session.closing = true;
-  stopSessionWatchdog(session);
-  audit(session.id, event, detail);
-  const handoff = session.paymentDispatchHandoff;
-  if (handoff !== null) {
-    handoff.terminalizing = true;
-    const timeoutMs = positiveTimeout(
-      "TRUSTY_SQUIRE_OPERATOR_PENDING_3DS_FINALIZE_TIMEOUT_MS",
-      DEFAULT_PENDING_THREE_DS_FINALIZE_TIMEOUT_MS,
+  const closeState = await ephemeral.controller.close().catch(() => "unknown" as const);
+  if (closeState === "closed") {
+    destroyEphemeralProfile(ephemeral.profileDir);
+  } else {
+    console.error(
+      `[operator] retained ephemeral profile after unproven browser close: ${ephemeral.profileDir}`,
     );
-    await withTerminalTimeout(
-      handoff.settled,
-      timeoutMs,
-      `payment dispatch handoff exceeded ${timeoutMs}ms`,
-    ).catch(() => undefined);
   }
-  if (sessions.get(session.id) === session) sessions.delete(session.id);
-  let terminalError: unknown;
-  if (auditPendingThreeDs && session.pendingThreeDs !== null) {
-    try {
-      await auditPendingThreeDsForSessionCloseBounded(session);
-    } catch (error) {
-      terminalError = error;
-      const message = error instanceof Error ? error.message : String(error);
-      process.stderr.write(
-        `[operator] terminal 3DS audit failed session=${session.id}: ${message}\n`,
-      );
-    }
-  }
-  if (handoff !== null) {
-    handoff.terminalComplete = true;
-    if (handoff.released && session.paymentDispatchHandoff === handoff) {
-      session.paymentDispatchHandoff = null;
-    }
-  }
-  session.activePayment = null;
-  session.paymentFieldSealActive = false;
-  session.pendingThreeDs = null;
-  await forceReleaseWarmBrowserPage(session.browser).catch((error: unknown) => {
-    if (terminalError === undefined) terminalError = error;
-    const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(
-      `[operator] terminal browser close failed session=${session.id}: ${message}\n`,
-    );
-  });
-  disposeSessionWatchdog(session);
-  return terminalError;
-}
-
-async function terminateExpiredProvisionSession(
-  session: Session,
-  reason: OperatorBrowserWatchdogReason,
-): Promise<void> {
-  const owner =
-    session.terminalTeardownOwner ??
-    (session.terminalTeardownOwner = {
-      forced: false,
-      forcePromise: null,
-      routinePromise: null,
-    });
-  if (owner.routinePromise !== null) return await owner.routinePromise;
-  session.closing = true;
-  stopSessionWatchdog(session);
-  owner.routinePromise = (async () => {
-    if (reason.kind !== "idle_timeout" && session.paymentCallCount > 0) {
-      const timeoutMs = positiveTimeout(
-        "TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS",
-        DEFAULT_SESSION_TERMINAL_TRANSITION_TIMEOUT_MS,
-      );
-      await withTerminalTimeout(
-        waitForPaymentCallsToDrain(session),
-        timeoutMs,
-        `payment call drain exceeded ${timeoutMs}ms`,
-      ).catch(() => undefined);
-    }
-    if (owner.forcePromise !== null) {
-      await owner.forcePromise;
-      return;
-    }
-    await forceTerminateProvisionSession(session, "browser_watchdog_terminate", { ...reason });
-  })();
-  await owner.routinePromise;
-}
-
-function startSessionWatchdog(session: Session): void {
-  if (session.watchdog !== null) {
-    session.watchdog.start();
-    return;
-  }
-  const browser = session.browser as BrowserController & {
-    operatorBrowserMarker?: () => string;
-  };
-  const watchdog = new OperatorBrowserWatchdog({
-    startedAt: session.startedAt,
-    lastActivityAt: () => session.lastActivityAt,
-    hasActiveCall: () => session.callCount > 0,
-    processMarker: () => browser.operatorBrowserMarker?.() ?? null,
-    onTerminate: async (reason) => await terminateExpiredProvisionSession(session, reason),
-  });
-  session.watchdog = watchdog;
-  watchdog.start();
 }
 
 function sessionForCall(sessionId: string): Session | undefined {
@@ -1210,7 +745,6 @@ export function paymentSession(sessionId?: string): Session {
 
 function acquireSessionCallLease(session: Session): () => void {
   if (session.closing) throw new Error(`provision session ${session.id} is closing`);
-  session.lastActivityAt = Date.now();
   session.callCount += 1;
   let released = false;
   return () => {
@@ -1218,56 +752,15 @@ function acquireSessionCallLease(session: Session): () => void {
     released = true;
     session.callCount -= 1;
     if (session.callCount === 0) {
-      session.lastActivityAt = Date.now();
       for (const wake of session.callDrainWaiters) wake();
       session.callDrainWaiters.clear();
     }
   };
 }
 
-function acquirePaymentCallLease(session: Session): () => void {
-  session.paymentCallCount += 1;
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    session.paymentCallCount -= 1;
-    if (session.paymentCallCount === 0) {
-      for (const wake of session.paymentCallDrainWaiters) wake();
-      session.paymentCallDrainWaiters.clear();
-    }
-  };
-}
-
-async function waitForPaymentCallsToDrain(session: Session): Promise<void> {
-  if (session.paymentCallCount === 0) return;
-  await new Promise<void>((resolve) => {
-    session.paymentCallDrainWaiters.add(resolve);
-  });
-}
-
-async function waitForSessionCallsToDrain(session: Session): Promise<boolean> {
-  if (session.callCount === 0) return true;
-  const timeoutMs = positiveTimeout(
-    "TRUSTY_SQUIRE_OPERATOR_TERMINAL_DRAIN_TIMEOUT_MS",
-    DEFAULT_SESSION_TERMINAL_DRAIN_TIMEOUT_MS,
-  );
-  let timer: NodeJS.Timeout | undefined;
-  let wake: (() => void) | undefined;
-  try {
-    return await Promise.race([
-      new Promise<true>((resolve) => {
-        wake = () => resolve(true);
-        session.callDrainWaiters.add(wake);
-      }),
-      new Promise<false>((resolve) => {
-        timer = setTimeout(() => resolve(false), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-    if (wake !== undefined) session.callDrainWaiters.delete(wake);
-  }
+async function waitForSessionCallsToDrain(session: Session): Promise<void> {
+  if (session.callCount === 0) return;
+  await new Promise<void>((resolve) => session.callDrainWaiters.add(resolve));
 }
 
 async function withSelectedProvisionSessionCall<T>(
@@ -1296,14 +789,7 @@ export async function withPaymentSessionCall<T>(
   fn: (session: Session) => Promise<T>,
 ): Promise<T> {
   const session = paymentSession(sessionId);
-  return await withSelectedProvisionSessionCall(session, async (selectedSession) => {
-    const releasePaymentCall = acquirePaymentCallLease(selectedSession);
-    try {
-      return await fn(selectedSession);
-    } finally {
-      releasePaymentCall();
-    }
-  });
+  return await withSelectedProvisionSessionCall(session, fn);
 }
 
 const settle = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -1319,40 +805,38 @@ function audit(sessionId: string, event: string, detail: Record<string, unknown>
 }
 
 // operate_start's browser launch is the one UNBOUNDED step in the session
-// bootstrap: on a fresh box the first launch downloads Chromium, and a wedged
-// profile lock or missing browser deps can
+// bootstrap: on a fresh box the first launch downloads Chromium and spins up a
+// virtual display (Xvfb), and a wedged profile lock or missing browser deps can
 // otherwise hang it indefinitely — a real dogfood run sat on a silent ~30-min
 // hang here with zero feedback (the worst first-run failure: the user assumes
 // it's broken and never comes back). Cap it so a stuck launch fails LOUDLY with
 // an actionable message. The default is generous (a cold Chromium download is
 // legitimately multi-minute — better to wait than false-fail a slow-but-working
-// launch); tune with BOT_START_TIMEOUT_MS. Timeout uses the independent bounded
-// cancellation boundary: it releases or quarantines profile custody without
-// awaiting the unresolved launch, and late settlement cleans up only this
-// controller's marked process.
-async function startBrowserBounded(
-  browser: BrowserController,
-  sessionId: string,
-  cancel: () => Promise<void>,
-): Promise<void> {
-  const timeoutMs = Number(process.env.BOT_START_TIMEOUT_MS) || 600_000;
+// launch); tune with BOT_START_TIMEOUT_MS. On timeout we close() the
+// half-launched browser so a wedged Chrome can't keep the profile lock and brick
+// the next attempt.
+const START_TIMEOUT_MS = Number(process.env.BOT_START_TIMEOUT_MS) || 600_000;
+
+async function startBrowserBounded(browser: BrowserController, sessionId: string): Promise<void> {
   audit(sessionId, "browser_launch", {
-    note: "first launch may download Chromium; slow but one-time",
-    timeout_ms: timeoutMs,
+    note: "first launch may download Chromium + start Xvfb; slow but one-time",
+    timeout_ms: START_TIMEOUT_MS,
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error("__browser_start_timeout__")), timeoutMs);
+    timer = setTimeout(() => reject(new Error("__browser_start_timeout__")), START_TIMEOUT_MS);
   });
   try {
     await Promise.race([browser.start(), timeout]);
   } catch (err) {
     if (err instanceof Error && err.message === "__browser_start_timeout__") {
-      await cancel().catch(() => undefined);
+      // Release the wedged Chrome/profile lock so the next operate_start isn't bricked.
+      await browser.close({ cancelStart: true }).catch(() => undefined);
       throw new Error(
-        `operate_start: browser did not launch within ${Math.round(timeoutMs / 1000)}s. ` +
-          "On a fresh machine the first launch downloads Chromium — slow but one-time. A hang this long " +
-          "usually means browser binaries are missing on this box. Retry once (a partial download resumes and later launches reuse " +
+        `operate_start: browser did not launch within ${Math.round(START_TIMEOUT_MS / 1000)}s. ` +
+          "On a fresh machine the first launch downloads Chromium and starts a virtual display " +
+          "(Xvfb) — slow but one-time. A hang this long usually means the browser binaries or Xvfb " +
+          "are missing on this box. Retry once (a partial download resumes and later launches reuse " +
           "the cache); if it recurs, run `npx @trusty-squire/mcp connect` here to install the browser " +
           "deps, or raise BOT_START_TIMEOUT_MS to wait longer.",
       );
@@ -2666,7 +2150,6 @@ const SEALED_FIELD_PLACEHOLDER = "[sealed]";
 function isSealedFieldValue(el: InteractiveElement, sealed: ReadonlySet<string>): boolean {
   if (el.sealed === true) return true;
   if ((el.type ?? "").toLowerCase() === "password") return true;
-  if ((el.sealedIdentityKeys ?? []).some((key) => sealed.has(key))) return true;
   return elementTargetKeys(el).some((k) => sealed.has(k));
 }
 function presentFieldValue(
@@ -2897,7 +2380,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
   let browser: BrowserController;
   let liveProviders: OAuthProviderId[];
   let workerEmail: string | null;
-  const acquired = await acquireWarmBrowser(opts, id);
+  const acquired = await acquireEphemeralBrowser(opts, id);
   browser = acquired.controller;
   // Probe the selected browser: ordinary sessions use a claimed/cloned worker,
   // while requireLiveIdentity uses the canonical login-authoring profile directly.
@@ -2914,7 +2397,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     const gate = googleSessionGate(liveProviders);
     if (!gate.ok) {
       audit(id, "connect_gate", { ok: false, wall: "google_session" });
-      await releaseWarmBrowserPage(browser, true);
+      await releaseEphemeralBrowserPage(browser, true);
       return { session_id: id, url: "", text: "", elements: [], needs_user: gate.needs_user };
     }
   }
@@ -2948,8 +2431,6 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     replayState: null,
     activePayment: null,
     paymentFieldSealActive: false,
-    pendingThreeDs: null,
-    paymentDispatchHandoff: null,
     placeOrderApproval: null,
     placeOrderAttempted: false,
     lastCartCheckout: null,
@@ -2960,13 +2441,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     closing: false,
     callCount: 0,
     callDrainWaiters: new Set(),
-    paymentCallCount: 0,
-    paymentCallDrainWaiters: new Set(),
-    paymentDispatchClosed: false,
     startedAt: Date.now(),
-    lastActivityAt: Date.now(),
-    watchdog: null,
-    terminalTeardownOwner: null,
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
     consentInboxRead: opts.consentInboxRead === true,
@@ -2974,7 +2449,6 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     ...(opts.api !== undefined ? { api: opts.api } : {}),
   };
   sessions.set(id, session);
-  startSessionWatchdog(session);
   try {
     if (typeof browser.setHostScopeAllowedHosts === "function") {
       await browser.setHostScopeAllowedHosts(
@@ -3019,8 +2493,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     };
   } catch (err) {
     sessions.delete(id);
-    disposeSessionWatchdog(session);
-    await releaseWarmBrowserPage(browser, false);
+    await releaseEphemeralBrowserPage(browser, false);
     throw err;
   }
 }
@@ -3062,8 +2535,6 @@ export async function startHarnessProvisionSession(
     replayState: null,
     activePayment: null,
     paymentFieldSealActive: false,
-    pendingThreeDs: null,
-    paymentDispatchHandoff: null,
     placeOrderApproval: null,
     placeOrderAttempted: false,
     lastCartCheckout: null,
@@ -3074,13 +2545,7 @@ export async function startHarnessProvisionSession(
     closing: false,
     callCount: 0,
     callDrainWaiters: new Set(),
-    paymentCallCount: 0,
-    paymentCallDrainWaiters: new Set(),
-    paymentDispatchClosed: false,
     startedAt: Date.now(),
-    lastActivityAt: Date.now(),
-    watchdog: null,
-    terminalTeardownOwner: null,
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
     consentInboxRead: false,
@@ -3088,7 +2553,6 @@ export async function startHarnessProvisionSession(
     ...(opts.api === undefined ? {} : { api: opts.api }),
   };
   sessions.set(id, session);
-  startSessionWatchdog(session);
   try {
     audit(id, "start_harness", {
       service_url: opts.serviceUrl,
@@ -3098,7 +2562,6 @@ export async function startHarnessProvisionSession(
     return { ...(await observeSession(session)), hint: opts.hint ?? "" };
   } catch (error) {
     sessions.delete(id);
-    disposeSessionWatchdog(session);
     await opts.browser.close().catch(() => undefined);
     throw error;
   }
@@ -3111,43 +2574,6 @@ export async function observe(
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   return await observeSession(session, detail);
-}
-
-export interface ScreenshotCapture {
-  session_id: string;
-  url: string;
-  frame_url: string | null;
-  frame_count: number;
-  redacted_count: number;
-  image: { mime_type: string; data_base64: string };
-}
-
-// operate_screenshot's session-level entry point: refuses an active card-fill
-// lease, then delegates the capture-scoped sealed-value checks and pixel
-// redaction to BrowserController.captureOperatorScreenshot (browser.ts).
-export async function captureScreenshot(
-  sessionId: string,
-  opts: { frameIndex?: number; frameUrlContains?: string; fullPage?: boolean } = {},
-): Promise<ScreenshotCapture> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  // A live card fill is never safe to inspect, even when the caller selects a
-  // child frame. Historical seals are different: sealedFieldKeys is cumulative,
-  // so the browser must inspect only the frames this capture would include.
-  if (session.paymentFieldSealActive || session.activePayment?.status === "operating") {
-    throw new Error("screenshot_unavailable_sealed_context");
-  }
-  const captured = await session.browser.captureOperatorScreenshot(opts, [
-    ...session.sealedFieldKeys,
-  ]);
-  return {
-    session_id: sessionId,
-    url: session.browser.currentUrl(),
-    frame_url: captured.frameUrl,
-    frame_count: captured.frameCount,
-    redacted_count: captured.redactedCount,
-    image: { mime_type: "image/jpeg", data_base64: captured.base64 },
-  };
 }
 
 // Hosts to seed credential EGRESS from when storing a key extracted in this
@@ -3269,83 +2695,6 @@ export function getActivePendingApproval(selectedSession?: Session): PendingAppr
   return state?.status === "awaiting_approval" ? state.state : null;
 }
 
-export function getActivePendingThreeDs(selectedSession?: Session): PendingThreeDsWait | null {
-  return (selectedSession ?? activeProvisionSession()).pendingThreeDs ?? null;
-}
-
-export function armPaymentDispatchHandoff(
-  state: PendingThreeDsWait,
-  selectedSession?: Session,
-): void {
-  const session = selectedSession ?? activeProvisionSession();
-  if (session.paymentDispatchClosed || (session.closing && session.paymentCallCount === 0)) {
-    throw new Error(`provision session ${session.id} closed before payment dispatch`);
-  }
-  let resolveSettled = (): void => undefined;
-  const settled = new Promise<void>((resolve) => {
-    resolveSettled = resolve;
-  });
-  session.paymentDispatchHandoff = {
-    state,
-    settled,
-    resolveSettled,
-    terminalizing: false,
-    terminalComplete: false,
-    released: false,
-    auditPromise: null,
-  };
-}
-
-export function finishPaymentDispatchHandoff(
-  state: PendingThreeDsWait,
-  selectedSession?: Session,
-): void {
-  const session = selectedSession ?? activeProvisionSession();
-  const handoff = session.paymentDispatchHandoff;
-  if (handoff?.state !== state) return;
-  handoff.released = true;
-  handoff.resolveSettled();
-  if (!handoff.terminalizing || handoff.terminalComplete) {
-    session.paymentDispatchHandoff = null;
-  }
-}
-
-export async function coordinatePaymentDispatchAudit(
-  state: PendingThreeDsWait,
-  recordAudit: () => Promise<void>,
-  selectedSession?: Session,
-): Promise<void> {
-  const session = selectedSession ?? activeProvisionSession();
-  const handoff = session.paymentDispatchHandoff;
-  if (handoff?.state === state) {
-    handoff.auditPromise ??= recordAudit();
-    await handoff.auditPromise;
-    return;
-  }
-  await recordAudit();
-}
-
-export function setActivePendingThreeDs(
-  state: PendingThreeDsWait,
-  selectedSession?: Session,
-): void {
-  const session = selectedSession ?? activeProvisionSession();
-  const handoff = session.paymentDispatchHandoff;
-  if (session.closing && handoff?.state !== state) return;
-  session.pendingThreeDs = state;
-  if (handoff?.state === state) handoff.resolveSettled();
-}
-
-export function clearActivePendingThreeDsIfCurrent(
-  state: PendingThreeDsWait,
-  selectedSession?: Session,
-): boolean {
-  const session = selectedSession ?? activeProvisionSession();
-  if (session.pendingThreeDs !== state) return false;
-  session.pendingThreeDs = null;
-  return true;
-}
-
 export interface ActivePaymentLease {
   phase: "fill_card" | "single";
 }
@@ -3360,12 +2709,6 @@ export function claimActivePaymentForOperatePay(
   selectedSession?: Session,
 ): ActivePaymentClaim {
   const session = selectedSession ?? activeProvisionSession();
-  if (getActivePendingThreeDs(session) !== null) {
-    throw new Error(
-      "operate_pay refused: a prior charge has unresolved 3-D Secure state; call " +
-        "operate_payment_status first",
-    );
-  }
   const state = session.activePayment;
   if (state?.status === "operating") {
     throw new Error("operate_pay refused: another payment operation is already in progress");
@@ -4273,13 +3616,6 @@ export function buildCompactObservation(args: {
   }
   const nextState: ObserveDeltaState = { url, byRef: serializedByRef, text };
 
-  // A dialog/modal region with at least one topmost (unoccluded) element is
-  // "active" — the host planner should treat it as the current interaction
-  // surface rather than the page behind it. Uses each element's dedicated
-  // dialog-membership flag, independent of container grouping, and the FULL
-  // element set so it stays accurate on every emit, delta or full.
-  const modalActive = elements.some((el) => el.inDialog === true && el.topmost !== false);
-
   const base: Observation = {
     session_id: sessionId,
     url,
@@ -4287,7 +3623,6 @@ export function buildCompactObservation(args: {
     ...(args.guidance !== undefined ? { guidance: args.guidance } : {}),
     elements_total: elements.length,
     ...(args.textTruncated === true ? { text_truncated: true } : {}),
-    ...(modalActive ? { modal_active: true } : {}),
   };
 
   // Delta path: same URL as last observe, and churn under the threshold.
@@ -4760,7 +4095,6 @@ async function observeSession(
             delta: false,
             elements_total: elements.length,
             ...(textTruncated ? { text_truncated: true } : {}),
-            ...(built.observation.modal_active === true ? { modal_active: true } : {}),
           },
           checkoutState,
           currentCartMutation,
@@ -4914,14 +4248,7 @@ function enforcePlaceOrderGuard(
   session: Session,
   labels: readonly (string | null | undefined)[],
 ): Session["placeOrderApproval"] {
-  if (!isCheckoutSubmitLabeled(labels)) return null;
-  if (getActivePendingThreeDs(session) !== null) {
-    throw new Error(
-      "operate_act refused: a prior charge has unresolved 3-D Secure state; call " +
-        "operate_payment_status first",
-    );
-  }
-  if (session.placeOrderApproval === null) return null;
+  if (session.placeOrderApproval === null || !isCheckoutSubmitLabeled(labels)) return null;
   if (session.placeOrderAttempted) {
     throw new Error(
       "operate_act refused: a place-order attempt already fired for this approval " +
@@ -5132,8 +4459,7 @@ export async function act(
             assertSecretFrameTargetAllowed(session, resolved.frameTarget);
           }
           session.usedLocatorFallback = true;
-          const sealedFieldKeys = await browser.typeHandle(resolved.handle, value, true);
-          for (const key of sealedFieldKeys) session.sealedFieldKeys.add(key);
+          await browser.typeHandle(resolved.handle, value, true);
         } finally {
           await resolved.handle.dispose().catch(() => undefined);
         }
@@ -5161,14 +4487,14 @@ export async function act(
       // assertSecretFrameTargetAllowed; a main-frame or same-domain-frame
       // target is unaffected.
       assertSecretFrameTargetAllowed(session, el);
+      // Remember this field so the next observation masks its DOM value — the
+      // host sealed this secret into a slot and must never read it back.
+      for (const key of elementTargetKeys(el)) session.sealedFieldKeys.add(key);
       // Type the REAL value into the page. It crosses only browser↔page; the
       // value is never returned to the host and never logged.
       const target = frameTargetFor(el);
-      const sealedFieldKeys =
-        target !== null
-          ? await browser.typeInFrame(target, el.selector, value, true)
-          : await browser.type(el.selector, value, true);
-      for (const key of sealedFieldKeys) session.sealedFieldKeys.add(key);
+      if (target !== null) await browser.typeInFrame(target, el.selector, value);
+      else await browser.type(el.selector, value);
       audit(sessionId, "type_secret", {
         slot: action.slot,
         target: action.target,
@@ -5277,7 +4603,11 @@ export async function act(
             resolved.text,
             ...resolved.labels,
           ]);
-          if (isPlaceOrderCandidate && (action.kind === "click" || action.kind === "js_click")) {
+          if (
+            session.placeOrderApproval !== null &&
+            isPlaceOrderCandidate &&
+            (action.kind === "click" || action.kind === "js_click")
+          ) {
             await runClickWithPlaceOrderGuard(session, (shouldTrack) =>
               browser.clickWithDispatchTracking(
                 {
@@ -5326,7 +4656,7 @@ export async function act(
       bindCartIdentity(isCartAffectingAction(action, el));
       if (action.kind === "click" || action.kind === "js_click") {
         const target = frameTargetFor(el);
-        if (isPlaceOrderClickCandidate(el)) {
+        if (session.placeOrderApproval !== null && isPlaceOrderClickCandidate(el)) {
           await runClickWithPlaceOrderGuard(session, (shouldTrack) =>
             browser.clickWithDispatchTracking(
               target !== null
@@ -7730,7 +7060,8 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
               `A ${det.variant} captcha could not be solved automatically ` +
               "(usually IP/behavior scoring, which a solver can't bypass).",
             remedy:
-              "Retry operate_start with its proxy argument set to a residential proxy, or " +
+              "Route the bot through a residential proxy " +
+              "(`npx @trusty-squire/mcp settings` → advanced → proxy URL), or " +
               "complete this one signup manually.",
           };
   }
@@ -8006,73 +7337,18 @@ export interface PreparedFinishResult<T> {
 }
 
 function profileRequiresDestroy(session: Session): boolean {
-  return (
-    session.activePayment !== null ||
-    session.paymentFieldSealActive ||
-    session.pendingThreeDs !== null
-  );
+  return session.activePayment !== null || session.paymentFieldSealActive;
 }
 
-function pendingThreeDsAuditStatus(resolution: ThreeDsResolution): string {
-  if (resolution === "succeeded") return "payment_submitted";
-  if (resolution === "failed") return "payment_declined";
-  return "payment_3ds_unresolved";
-}
-
-async function auditPendingThreeDsForSessionClose(session: Session): Promise<void> {
-  const pending = session.pendingThreeDs;
-  if (pending === null) return;
-  if (session.api === undefined) {
-    throw new Error(
-      "operate_finish refused: pending 3-D Secure outcome cannot be audited without an active API session",
-    );
-  }
-  const resolution = await session.browser.waitForThreeDsResolution(0);
-  const recordAudit = async (): Promise<void> => {
-    await session.api!.auditPayment({
-      ...pending.checkout,
-      last4: pending.last4,
-      status: pendingThreeDsAuditStatus(resolution),
-      approval_id: pending.approval_id,
-      ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
-    });
-  };
-  const handoff = session.paymentDispatchHandoff;
-  if (handoff?.state === pending) {
-    handoff.auditPromise ??= recordAudit();
-    await handoff.auditPromise;
-    return;
-  }
-  await recordAudit();
-}
-
-async function auditPendingThreeDsForSessionCloseBounded(session: Session): Promise<void> {
-  const timeoutMs = positiveTimeout(
-    "TRUSTY_SQUIRE_OPERATOR_PENDING_3DS_FINALIZE_TIMEOUT_MS",
-    DEFAULT_PENDING_THREE_DS_FINALIZE_TIMEOUT_MS,
-  );
-  await withTerminalTimeout(
-    auditPendingThreeDsForSessionClose(session),
-    timeoutMs,
-    `pending 3-D Secure finalization exceeded ${timeoutMs}ms`,
-  );
-}
-
-async function closeFinishingProvisionSession(
-  session: Session,
-  destroyProfile: boolean,
-): Promise<FinishResult> {
+async function closeFinishingProvisionSession(session: Session): Promise<FinishResult> {
   const sessionId = session.id;
-  await auditPendingThreeDsForSessionCloseBounded(session);
   const url = session.browser.currentUrl();
   audit(sessionId, "finish", { url });
+  const destroyProfile = profileRequiresDestroy(session);
   session.activePayment = null;
   session.paymentFieldSealActive = false;
-  session.pendingThreeDs = null;
   sessions.delete(sessionId);
-  stopSessionWatchdog(session);
-  await releaseWarmBrowserPage(session.browser, !destroyProfile);
-  disposeSessionWatchdog(session);
+  await releaseEphemeralBrowserPage(session.browser, !destroyProfile);
   return { session_id: sessionId, url, closed: true };
 }
 
@@ -8083,75 +7359,15 @@ export async function finishProvisionSessionWithPreparation<T>(
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   if (session.closing) throw new Error(`provision session ${sessionId} is already closing`);
-  const owner: SessionTerminalTeardownOwner = {
-    forced: false,
-    forcePromise: null,
-    routinePromise: null,
-  };
-  session.terminalTeardownOwner = owner;
   session.closing = true;
-  stopSessionWatchdog(session);
-  const timeoutMs = positiveTimeout(
-    "TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS",
-    DEFAULT_SESSION_TERMINAL_TRANSITION_TIMEOUT_MS,
-  );
-  let timer: NodeJS.Timeout | undefined;
-  const transition = (async (): Promise<PreparedFinishResult<T>> => {
-    const drained = await waitForSessionCallsToDrain(session);
-    if (!drained) {
-      await forceTerminateProvisionSession(session, "finish_forced_terminate", {
-        reason: "call_drain_timeout",
-      });
-      throw new Error(`provision session ${sessionId} call drain timed out; browser terminated`);
-    }
-    const prepared = await prepare();
-    if (owner.forced || sessions.get(sessionId) !== session) {
-      throw new Error(`provision session ${sessionId} terminal transition was forced`);
-    }
-    const destroyProfile = profileRequiresDestroy(session);
-    try {
-      const finish = await closeFinishingProvisionSession(session, destroyProfile);
-      return { finish, prepared };
-    } catch (error) {
-      await forceTerminateProvisionSession(
-        session,
-        "finish_forced_terminate",
-        { reason: "terminal_close_failed" },
-        false,
-      );
-      throw error;
-    }
-  })();
   try {
-    return await Promise.race([
-      transition,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          void forceTerminateProvisionSession(session, "finish_forced_terminate", {
-            reason: "terminal_transition_timeout",
-            timeout_ms: timeoutMs,
-          }).then(
-            () =>
-              reject(
-                new Error(
-                  `provision session ${sessionId} terminal transition timed out; browser terminated`,
-                ),
-              ),
-            reject,
-          );
-        }, timeoutMs);
-        timer.unref();
-      }),
-    ]);
+    await waitForSessionCallsToDrain(session);
+    const prepared = await prepare();
+    const finish = await closeFinishingProvisionSession(session);
+    return { finish, prepared };
   } catch (error) {
-    if (!owner.forced && sessions.get(sessionId) === session) {
-      session.closing = false;
-      session.terminalTeardownOwner = null;
-      startSessionWatchdog(session);
-    }
+    if (sessions.get(sessionId) === session) session.closing = false;
     throw error;
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -8161,34 +7377,27 @@ export async function finishProvisionSession(sessionId: string): Promise<FinishR
 
 // Test/teardown helper — close every live session (used by the dev shim on exit).
 export async function closeAllProvisionSessions(): Promise<void> {
-  shutdownGeneration += 1;
-  const waiters = [...capacityWaiters];
-  for (const waiter of waiters) {
-    waiter.cancelRequested = true;
-    waiter.abortController.abort();
-    waiter.wake();
-  }
-  await Promise.all(waiters.map((waiter) => waiter.settled));
   for (const pending of [...startingBrowsers]) {
-    await cancelStartingBrowser(pending).catch(() => undefined);
+    pending.cancelRequested = true;
+    await pending.controller.close({ cancelStart: true }).catch(() => undefined);
+    await pending.launch.catch(() => undefined);
+    await closeEphemeralBrowser(
+      {
+        controller: pending.controller,
+        profileDir: pending.profileDir,
+        canonicalProfileDir: CHROME_PROFILE_DIR,
+      },
+      false,
+    ).catch(() => undefined);
   }
-  const closingSessions = [...sessions.values()];
-  for (const session of closingSessions) {
-    session.closing = true;
-    stopSessionWatchdog(session);
+  for (const [id, session] of [...sessions.entries()]) {
+    sessions.delete(id);
+    await releaseEphemeralBrowserPage(session.browser, false).catch(() => undefined);
   }
-  let closeError: unknown;
-  for (const session of closingSessions) {
-    const drained = await waitForSessionCallsToDrain(session);
-    const error = await forceTerminateProvisionSession(session, "shutdown_terminate", {
-      reason: drained ? "transport_disconnect" : "call_drain_timeout",
-    });
-    if (closeError === undefined && error !== undefined) closeError = error;
+  for (const ephemeral of [...leasedBrowsers.values()]) {
+    leasedBrowsers.delete(ephemeral.controller);
+    await closeEphemeralBrowser(ephemeral, false).catch(() => undefined);
   }
-  for (const slot of [...leasedBrowsers.values()]) {
-    await forceReleaseWarmBrowserPage(slot.controller).catch(() => undefined);
-  }
-  if (closeError !== undefined) throw closeError;
 }
 
 export function activeSessionCount(): number {

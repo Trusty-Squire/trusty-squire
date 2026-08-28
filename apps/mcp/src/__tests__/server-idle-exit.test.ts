@@ -5,14 +5,11 @@
 // stdio or signaling it. shouldIdleExit is the pure decision function behind
 // the time-bound backstop for that case.
 //
-// An open provision session's Chrome is only ever reclaimed by the pool
-// once its OWNING PROCESS is dead (operator-profile-pool.ts's
-// scavengeActiveSlots treats a live owner as a genuine concurrent run and
-// never touches it) — so a session left open by an abandoned server can
-// only be freed by that server itself exiting. shouldIdleExit therefore
+// A session left open by an abandoned server can only be freed by that server
+// itself exiting. shouldIdleExit therefore
 // uses a longer bound when a session is open rather than never exiting, but
 // still applies real teardown (closeAllProvisionSessions, which kills the
-// leased Chrome) once that longer bound is crossed.
+// session-owned Chrome) once that longer bound is crossed.
 
 import { describe, expect, it } from "vitest";
 import { shouldIdleExit } from "../server.js";

@@ -703,12 +703,12 @@ describe("confirmed login finalization", () => {
     }
   });
 
-  it("does not replace the Google seed after a completed GitHub login", async () => {
+  it("clears a stale snapshot after a plain completed login", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
     const publishSeed = vi.fn();
     try {
       await finalizeLoginRun(
-        { profileDir, seedProvider: "github" },
+        { profileDir },
         { status: "completed", closeState: "closed" },
         publishSeed,
       );
@@ -719,19 +719,18 @@ describe("confirmed login finalization", () => {
     }
   });
 
-  it("publishes on completed closed Google login provenance alone — no re-validation", async () => {
+  it("persists a completed context-backed login snapshot", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
-    const publishSeed = vi.fn(async () => "generation");
+    const publishState = vi.fn();
+    const storageState = { cookies: [], origins: [] };
     try {
       await finalizeLoginRun(
-        { profileDir, seedProvider: "google" },
-        { status: "completed", closeState: "closed" },
-        publishSeed,
+        { profileDir },
+        { status: "completed", closeState: "closed", storageState },
+        publishState,
       );
 
-      expect(publishSeed).toHaveBeenCalledWith(profileDir, {
-        proof: { loginStatus: "completed", closeState: "closed", provider: "google" },
-      });
+      expect(publishState).toHaveBeenCalledWith(profileDir, storageState);
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }

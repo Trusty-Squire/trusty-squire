@@ -46,7 +46,7 @@ nothing else down.
   count. For a simple service that's one account+key. For a **composite
   navigation case (e.g. provisioning GCP) it is a nested chain of
   multiple provisions** that all have to land for the task to count as
-  done; the objective is the probability the _whole_ chain completes,
+  done; the objective is the probability the *whole* chain completes,
   not any single hop.
 - The skill registry and the auto-promote loop are **means, not the
   end** — a published skill matters only because replaying it raises the
@@ -66,7 +66,6 @@ silent failures.
 ## Current State
 
 ### Production, deployed, verified end-to-end
-
 - **API on Fly** (`trusty-squire-api.fly.dev`) — Fastify + Prisma,
   v16+ shipped.
 - **Email verification — the user's own inbox.** Signups are user-owned:
@@ -122,31 +121,6 @@ silent failures.
     primitives the host agent drives via `operate_*`.
   - DOM/screenshot observation + vault-backed credential extraction +
     operator-recipe replay (`operate_recipe_run`) the host agent composes per step.
-  - **`operate_screenshot` (2026-08-23) — a dedicated debugging capture,**
-    separate from the per-step planner screenshot baked into `operate_observe`.
-    Page (viewport or `full_page`) or ONE frame in isolation (`frame_index` /
-    `frame_url_contains` — the case it exists for: a cross-origin ACS/challenge
-    or captcha iframe a full-page shot won't show clearly). Read-only — no
-    navigation, click, type, focus/`bringToFront`, or DOM mutation.
-    **Primary money-fence: capture-scoped fail-closed refusal.**
-    `captureScreenshot` (`provision-session.ts`) always refuses during an
-    active card fill (`session.paymentFieldSealActive` or an operating payment
-    lease). Otherwise `assertOperatorScreenshotFramesNoSealedValues`
-    (`browser.ts`) checks only the page/frame set requested for capture and
-    refuses with
-    `screenshot_unavailable_sealed_context` if it finds a live sealed,
-    password, or card-shaped value (including a Luhn-valid PAN), or cannot
-    inspect an included frame. Historical `session.sealedFieldKeys` alone are
-    not a refusal: that allows an isolated clean ACS/3DS challenge frame and a
-    post-navigation error page after the sealed form has gone. The pixel-
-    redaction machinery (`SCREENSHOT_REDACTION_SELECTORS` + durable sealed-field
-    identity + Luhn-valid-value detection via `containsLuhnPanSpan`, collected
-    as capture-time rectangles, fail-closed on any unresolvable selector/
-    geometry, composited over the captured bytes with `sharp`, and guarded by a
-    post-capture stability re-check) remains defense in depth. Server-
-    side, a tool result carrying `image:{mime_type,data_base64}` (this tool,
-    or any future one) gets a real MCP `type:"image"` content block
-    (`toolResultContent` in `server.ts`), not base64 buried in JSON text.
   - **Frame/iframe support (operator-frame-support).** Ordinary child-frame
     controls now retain their frame origin through observation, action, and
     operator-recipe replay. The user-facing contract lives in README's MCP-tool
@@ -161,22 +135,31 @@ silent failures.
      account-bound `agent_session_token` to the local session file.
   3. Runs the one-time OAuth login (the `mcp login` flow folded in —
      Google/GitHub session into the bot's Chrome profile; non-fatal,
-     `--skip-browser` opts out for CI). Interactive login requires a
-     user-visible browser display.
-     Every install is account-bound — there is no anonymous tier.
-     Provisioning is free during beta (the signup quota + `402 payment_required`
-     paywall were removed). See the 2026-05-18
-     streamlined-oauth-onboarding CEO plan (now combined with the 2026-05-19
-     single-tier collapse).
+     `--skip-browser` opts out for CI). Headed (laptop/desktop) is the
+     recommended environment; a headless box does a one-time remote-
+     browser login (noVNC).
+  Every install is account-bound — there is no anonymous tier.
+  Provisioning is free during beta (the signup quota + `402 payment_required`
+  paywall were removed). See the 2026-05-18
+  streamlined-oauth-onboarding CEO plan (now combined with the 2026-05-19
+  single-tier collapse).
   - **0.6.0 — install preflight (rc.15).** Re-installs with a valid
     session file + bot Google session skip the browser dance entirely
     and just rewrite the MCP config. Pass `--force-relogin` to bypass.
   - **0.6.0 — writeConfig env merge (rc.21/rc.22).** All five host
     agents now merge env on top of any previously-set vars rather
     than replacing wholesale. A re-install that omits a flag (e.g.
-    omits an optional configuration value) no longer wipes the previously-set value.
+    forgets `--proxy-url=`) no longer wipes the previously-set value.
+- **F13 — headed signups via on-demand Xvfb (0.6.0).** Modern SaaS
+  (Cloudflare/Stytch, Clerk, Auth0) detect Chromium-headless and gate
+  their signup forms. `BrowserController.start()` now spawns a
+  temporary Xvfb at 1280x720x24 when DISPLAY is unset and Xvfb is
+  available, launches Chrome with `headless: false`, and tears Xvfb
+  down on `close()`. The user never sees it — it exists only so Chrome
+  has a real display surface to render against. Falls back to true
+  headless (with a stderr warning) when Xvfb isn't installed.
 - **Anti-bot interstitial handling (0.6.0).** `BrowserController.
-waitForFormReady` now polls for "Just a moment..." / "Verifying
+  waitForFormReady` now polls for "Just a moment..." / "Verifying
   you are human" / "Checking your browser" text patterns and waits
   up to 15s for them to clear, with a `page.reload()` retry when the
   interstitial outlasts the first wait. When it still won't clear
@@ -186,22 +169,20 @@ waitForFormReady` now polls for "Just a moment..." / "Verifying
   Sucuri, DataDome, Imperva.
 
 ### Verified by real signups
-
-| Service    | Result              | Notes                                                                                           |
-| ---------- | ------------------- | ----------------------------------------------------------------------------------------------- |
-| IPInfo     | ✅ full             | API key extracted, verified via live API                                                        |
-| Postmark   | ✅ post-captcha     | Previously blocked by reCAPTCHA v3; passes                                                      |
-| Resend     | ✅ post-captcha     | Previously blocked by Turnstile; passes                                                         |
-| Sentry     | ✅ full             | OAuth + multi-row permission grid (scope_hint)                                                  |
-| OpenRouter | ✅ full             | Copy-button extraction (F10)                                                                    |
-| Render     | ⚠ verification mail | Form-fill OK; inbox revival on `trustysquire.com` 2026-05-20 unlocks                            |
-| Vercel     | ⚠ SMS gate          | OAuth completes, phone verification (F12) — user-relayed SMS pending                            |
-| Cloudflare | ⚠ anti-bot          | Their own dashboard runs maximum Turnstile + IP risk-score; manual signup is the realistic call |
-| MailerSend | ⚠ phone gate        | Signup completes, stops at phone verification (F12)                                             |
-| PostHog    | ⚠ slow SPA          | Form load races our planner; not captcha                                                        |
+| Service     | Result | Notes                                        |
+|-------------|--------|----------------------------------------------|
+| IPInfo      | ✅ full | API key extracted, verified via live API     |
+| Postmark    | ✅ post-captcha | Previously blocked by reCAPTCHA v3; passes  |
+| Resend      | ✅ post-captcha | Previously blocked by Turnstile; passes     |
+| Sentry      | ✅ full | OAuth + multi-row permission grid (scope_hint) |
+| OpenRouter  | ✅ full | Copy-button extraction (F10)                 |
+| Render      | ⚠ verification mail | Form-fill OK; inbox revival on `trustysquire.com` 2026-05-20 unlocks |
+| Vercel      | ⚠ SMS gate | OAuth completes, phone verification (F12) — user-relayed SMS pending |
+| Cloudflare  | ⚠ anti-bot | Their own dashboard runs maximum Turnstile + IP risk-score; manual signup is the realistic call |
+| MailerSend  | ⚠ phone gate | Signup completes, stops at phone verification (F12) |
+| PostHog     | ⚠ slow SPA | Form load races our planner; not captcha    |
 
 ### Persistence
-
 - `vaultAuditStore` is Prisma-backed (`PrismaVaultAuditStore` →
   `VaultAuditEvent`) when `AUTH_DATABASE_URL` is set, in-memory
   otherwise. It is surfaced via `GET /v1/vault/audit` and swept by the
@@ -276,7 +257,7 @@ can be tuned against real data.
    closed-loop work.
 8. **Egress Grants (roadmap, `docs/ARCHITECTURE.md` § Egress Grants).**
    `use_credential` generalized to a standing workload identity: the agent
-   mints a scoped, revocable token so a _deployed app_ can call providers
+   mints a scoped, revocable token so a *deployed app* can call providers
    through the injecting proxy — raw key still never leaves Squire. Reuses
    `HttpProxyExecutor` (`/v1/vault/use`) + the `/v1/llm/chat` token+rate-limit
    pattern; turns the vault into a revoke/rotate/spend-cap control plane.
@@ -293,7 +274,6 @@ can be tuned against real data.
 ## Environment Details
 
 ### Repo structure (where things live)
-
 ```
 trusty-squire/
 ├── apps/
@@ -315,7 +295,6 @@ trusty-squire/
 ```
 
 ### Build / typecheck / test (per package)
-
 ```bash
 pnpm -F @trusty-squire/api build
 pnpm -F @trusty-squire/api typecheck
@@ -327,16 +306,16 @@ pnpm -F @trusty-squire/api prisma:generate
 
 ### Deploy (API only)
 
-**CI-AUTOMATED — the API deploys on push to `main` when `apps/api/**`(or the
+**CI-AUTOMATED — the API deploys on push to `main` when `apps/api/**` (or the
 workspace packages it bundles: vault/skill-schema, or the lockfile)
-changes.**`.github/workflows/release-api.yml`runs typecheck+test as a gate,
-then`flyctl deploy --remote-only`to`trusty-squire-api`(the`release_command`runs`prisma db push`for the api schema). Pushes to`staging` run tests only,
+changes.** `.github/workflows/release-api.yml` runs typecheck+test as a gate,
+then `flyctl deploy --remote-only` to `trusty-squire-api` (the `release_command`
+runs `prisma db push` for the api schema). Pushes to `staging` run tests only,
 no deploy. This exists because a manual-only API deploy let the mcp client ship
 a feature whose server route was never deployed (egress grants 404'd in prod,
 0.9.15). Server + client now ship together.
 
 **Manual deploy = fallback only** (CI down, or deploying an un-merged branch):
-
 ```bash
 # from the repo root — the build context must be the monorepo root
 flyctl deploy --config apps/api/fly.toml --dockerfile apps/api/Dockerfile.fly
@@ -385,11 +364,10 @@ crews or opening PRs for feature work, branch off `origin/staging` and target
 
 The release SOP — `pnpm release:mcp <version>` automates steps 1-2 (bump +
 CHANGELOG seed + branch + PR to the right channel):
-
 1. Bump `apps/mcp/package.json` `version` (the **source of truth**).
-   - `main` → a **stable** semver (e.g. `0.8.17`) → publishes the `latest` tag.
+   - `main`  → a **stable** semver (e.g. `0.8.17`) → publishes the `latest` tag.
    - `staging` → a **prerelease** (e.g. `0.8.18-rc.1`) → publishes the `next` tag.
-     (A branch↔shape mismatch fails the workflow loudly.)
+   (A branch↔shape mismatch fails the workflow loudly.)
 2. Open a `release-<version>` PR → `main` (stable) or `staging` (prerelease).
    **`main` is branch-protected** — no direct pushes; the PR must pass CI
    (`secret-scan` + `typecheck` + `test`) before it can merge (0 approvals
@@ -414,7 +392,6 @@ printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_AUTOMATION_TOKEN" > /tmp/np
 npm publish apps/mcp/trusty-squire-mcp-<ver>.tgz --access public --userconfig /tmp/np
 rm -f /tmp/np
 ```
-
 (The account's passkey-2FA makes plain `npm publish`/`pnpm publish` fail with
 `EOTP` non-interactively, which is why the manual path needs the Automation
 token — but again, prefer the CI path and don't go looking for the token.)
@@ -433,7 +410,7 @@ the source repo locally.
 **MCP package launch model (hardened in 0.1.4 — don't regress it).**
 The package has exactly **one bin**, `mcp` → `dist/bin.js`, matching
 the unscoped package name so `npx @trusty-squire/mcp <subcommand>`
-always resolves. `bin.ts` is the _only_ file with a shebang and
+always resolves. `bin.ts` is the *only* file with a shebang and
 top-level execution; it dispatches `server` → `runServer()` and
 everything else → `runCli()`. `server.ts` and `install/cli.ts` are
 pure modules — no shebang, no `import.meta.url === argv[1]` "am I
@@ -447,37 +424,34 @@ server` only when it is itself running from npx's cache.
 bin symlink and would catch any regression of the above.
 
 ### Ports / local dev
-
 - API: `API_PORT=3000` (default), `node apps/api/dist/server.js`
 - Web app: `pnpm -F @trusty-squire/web dev` (Next.js default 3000 — run
   one or the other, not both)
 - MCP: invoked by the host agent, not a long-running server
 
 ### Fly app names
-
-- `trusty-squire-api` — main API
-- `trustysquire` — web UI / product site (`apps/web`), at
+- `trusty-squire-api`        — main API
+- `trustysquire`             — web UI / product site (`apps/web`), at
   trustysquire.ai. Fly auto-stop/auto-start (idle → machine stops, wakes
   on first request), so it shows "suspended" when idle but still serves.
-- `trusty-squire-registry` — adapter registry
-- `trusty-squire-db` — Postgres-flex cluster. One database:
+- `trusty-squire-registry`   — adapter registry
+- `trusty-squire-db`         — Postgres-flex cluster. One database:
   `trustysquire` (api schema). (The `trustysquire_inbox` db was dropped
   with the inbound-mail retirement in 1.0.1.)
 - The old `trusty-squire-mail` postfix server was deleted 2026-06-02. Its
   `mailserver/` config + the Gmail-forwarding doc were removed with it.
 
 ### Fly secrets (set on `trusty-squire-api`)
-
-| Secret                                          | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `AUTH_DATABASE_URL`                             | Postgres URL — `trustysquire` db (api schema)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `RESEND_API_KEY`                                | Resend outbound notification mail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `UNIVERSAL_BOT_API_KEY`                         | Admin bearer for `/v1/inbox/*` (operator-OTP / workspace-inbox polling)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Secret | Purpose |
+|---|---|
+| `AUTH_DATABASE_URL`  | Postgres URL — `trustysquire` db (api schema) |
+| `RESEND_API_KEY` | Resend outbound notification mail |
+| `UNIVERSAL_BOT_API_KEY` | Admin bearer for `/v1/inbox/*` (operator-OTP / workspace-inbox polling) |
 | `OPERATOR_IMAP_USER` / `OPERATOR_IMAP_PASSWORD` | IMAP creds for the operator's **single** mail identity — the bot's Google account (`lunchbox@trustysquire.ai`, the trustysquire.ai Workspace account, served by imap.gmail.com). Read-only — backs `operator-otp-poller.ts` for the `email_otp_required` gate (Porter, Koyeb, anthropic, other WorkOS-backed services whose OTP goes to the OAuth-bound inbox). The legacy `GMAIL_USER`/`GMAIL_APP_PASSWORD` names are still read as a fallback (un-migrated deploys). One identity, one inbox — do NOT reintroduce a separate personal-gmail credential. A Google account password change silently invalidates app passwords (no revocation notice); if the gate returns `imap_auth_failed`, regenerate the app password and reset the secret. Verify locally with `tools/test-operator-imap.mjs`. |
-| `SESSION_JWT_SECRET`                            | Auth — HS256 secret signing web-session JWTs. **Required in production**: the server throws on boot if unset (no insecure dev fallback).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `STRIPE_SECRET_KEY`                             | Stripe secret key. Server creates Checkout + Billing-Portal sessions for `/v1/billing/*`. **Unset → billing routes register but 503** (`stripeClientFromEnv()` returns null). Use a `sk_test_` key until live billing is verified.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `STRIPE_WEBHOOK_SECRET`                         | `whsec_…` signing secret for `/v1/webhooks/stripe`. The SDK verifies the `Stripe-Signature` over the raw body; a bad/missing signature is rejected 400.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `STRIPE_PRICE_ID`                               | `price_…` of the monthly subscription Checkout uses. Created once against the Stripe Product (via the vault proxy or dashboard).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `SESSION_JWT_SECRET` | Auth — HS256 secret signing web-session JWTs. **Required in production**: the server throws on boot if unset (no insecure dev fallback). |
+| `STRIPE_SECRET_KEY` | Stripe secret key. Server creates Checkout + Billing-Portal sessions for `/v1/billing/*`. **Unset → billing routes register but 503** (`stripeClientFromEnv()` returns null). Use a `sk_test_` key until live billing is verified. |
+| `STRIPE_WEBHOOK_SECRET` | `whsec_…` signing secret for `/v1/webhooks/stripe`. The SDK verifies the `Stripe-Signature` over the raw body; a bad/missing signature is rejected 400. |
+| `STRIPE_PRICE_ID` | `price_…` of the monthly subscription Checkout uses. Created once against the Stripe Product (via the vault proxy or dashboard). |
 
 **Billing (Stripe):** **free during beta** — checkout is kill-switched OFF
 unless `BILLING_ENABLED=true`/`1` (`/v1/billing/checkout` returns `503
@@ -516,7 +490,6 @@ institutional memory shared across users; storing them in the mcp
 package would defeat the whole 0.7.0 thesis).
 
 **Production env vars on `trusty-squire-registry`:**
-
 - `ADAPTER_SIGNING_PRIVATE_KEY` (PKCS8 DER, base64url) — for
   manifest signing.
 - `SKILL_VERIFY_PUBLIC_KEY` (SPKI DER, base64url) — verifies
@@ -527,7 +500,6 @@ package would defeat the whole 0.7.0 thesis).
   fire-and-forget on auto-demotion (3 consecutive failures).
 
 **Client env on user machines:**
-
 - `TRUSTY_SQUIRE_REGISTRY_URL` — base URL. **Auto-wired by `connect`
   as of rc.10**; defaults to `https://registry.trustysquire.ai`.
   The URL is not user-configurable; disable registry participation with
@@ -587,7 +559,6 @@ phase, approved_amount_cents, next:{tool:"operate_payment_status", session_id,
 wait_seconds:15}}` — the friction-audit P0 fix (small models can't tell
 "pending" from "broken" on a silent multi-minute hang, so they panic-retry or
 kill the server).
-
 - **One canonical read-only tool, `operate_payment_status(session_id?, wait_seconds?)`.**
   `wait_seconds` (0-15, default 0) is an instant peek at 0, a bound-wait
   (client-side race in `readApprovalStatus`, `apps/mcp/src/tools/operate-pay.ts`)
@@ -630,72 +601,6 @@ kill the server).
   the main frame or a frame accepted by `recognizedPaymentProviderFrame`,
   preserving split-checkout trust boundaries — `browser.ts`.
 
-### Decoupled/out-of-band 3-D Secure: the real bug was network scope, not wait duration
-
-`#570`/`#572` (2026-08-23) fixed two real defects reproduced live against
-Hibiya Kadan/EbisuMart, but a THIRD one survived them: a decoupled/OOB 3DS
-challenge could still hang indefinitely even though the cardholder approved
-in ~2 seconds — nowhere near either the original single wait or #572's
-resumable 20-minute one. **Root cause, confirmed with a local ACS fixture
-(`browser-decoupled-3ds.test.ts`, both top-level-navigation and iframe/CRes-
-auto-submit topologies): `installHostScopeGuard`'s fail-closed XHR/fetch
-guard (`requestHostInScope`, `browser.ts`) never allow-listed
-`cardinalcommerce.com`** — a host `detectThreeDsChallenge`'s own `urlPattern`
-already treats as a legitimate 3DS authority. So the ACS page's OWN
-decoupled-approval status poll got `route.abort("failed")`ed the instant the
-challenge attached, and its client-side JS could never learn the issuer had
-already approved — no redirect, no CRes auto-submit, independent of how long
-`waitForThreeDsResolution` kept watching. Fix: `THREE_DS_ACS_NETWORK_HOSTS`
-(`browser.ts`, next to `RECOGNIZED_PAYMENT_PROVIDER_FRAME_HOSTS` — kept as a
-SEPARATE list on purpose, so widening 3DS network scope never also widens
-where the raw PAN may be typed). Confirmed by temporarily disabling the fix
-against the same fixture: the hang reproduces byte-for-byte in both
-topologies. `waitForThreeDsResolution` itself needed no change — the
-detection logic was never the bug.
-
-### Positive new-card selection supersedes #572's saved-card refusal
-
-#572 refused (`payment_card_selection_ambiguous`) whenever a checked
-saved-card radio/select-option for a DIFFERENT card competed with the filled
-new-card fields — money-fence-correct (never let the wrong card win) but a
-dead end for the EbisuMart repeat-customer topology, where that competing
-radio is the checkout's OWN default state, not something the user asked for.
-`resolveCompetingSavedCardSelection` (`browser.ts`, replaces the old
-boolean-returning `detectCompetingSavedCardSelection`) now attempts positive
-resolution first, coordinated ACROSS frames (a merchant-owned radio can
-legitimately control card fields living in a recognized hosted-fields
-iframe): a read-only scan of every frame aggregates competing selections and
-sealed-field values globally, then a per-frame resolve pass finds the sole
-unambiguous unchecked sibling in the competing radio's choice group that
-isn't itself saved-card-shaped (a candidate whose container structurally
-owns one of the fields we sealed wins only when it is UNIQUE — i18n-agnostic;
-with no owning candidate it falls back to the sole remaining candidate),
-`.click()`s it (real radio-group semantics — natively unchecks the saved-card
-radio too), then re-identifies the marking target from the LIVE tree (the
-click can synchronously rerender the group, detaching the clicked node — the
-group must now contain exactly one connected, checked, non-saved-shaped
-member, which gets stamped `data-ts-checkout-selection="1"`; zero or several
-is ambiguous), then a global re-scan verifies no competing selection remains
-anywhere AND every sealed field in every frame still holds its snapshotted
-value. That same verification runs a SECOND time at the money-fence boundary
-in `submitFilledCheckoutInScope` — immediately before the charge click, after
-the async pay-button scan AND after `bringToFront()` (whose focus/visibility
-events can themselves trigger a merchant default-selection revert, so nothing
-page-state-changing sits between the re-check and the click) — additionally
-confirming every marked new-card control is still checked; a failure there
-clears the dispatch tracking and refuses. Any failure at any step — no candidate, more than one
-equally-plausible candidate, the click didn't actually deselect the saved
-card, the click reset the fields, the selection drifted before the charge
-click — still refuses with `payment_card_selection_ambiguous`; a competing
-`<select>` OPTION is deliberately never auto-resolved (a synthetic `change`
-commit is far less trustworthy across frameworks than a native radio click)
-and still always refuses. The page-context scan/resolve logic lives in
-module-level named functions (`scanSavedCardSelectionInPage` /
-`resolveSavedCardSelectionInPage`) because Playwright serializes evaluate
-callbacks via `toString()` — outer-scope bindings would be undefined in the
-page. No new tool surface — this lives entirely inside the existing
-checkout-submit path.
-
 ### Goose / local-dev MCP install
 
 `npx @trusty-squire/mcp connect --target=goose` writes the extension to
@@ -715,8 +620,8 @@ extensions:
     type: stdio
     cmd: bash
     args:
-      - -c
-      - cd /home/<you>/trusty-squire/apps/mcp && exec node dist/bin.js server
+    - -c
+    - cd /home/<you>/trusty-squire/apps/mcp && exec node dist/bin.js server
     enabled: true
     bundled: false
     name: trusty-squire
@@ -738,16 +643,14 @@ extension state on launch and won't reload mid-session.
 | Env var | Default | Effect |
 |---|---|---|
 | `TWOCAPTCHA_API_KEY` | — | Optional Tier 3 captcha solver — fallback after the Tier 2 click-and-wait times out on a reCAPTCHA v2 image challenge. ~$0.003/solve. Skipped for Turnstile + reCAPTCHA v3 (those score at the IP layer; solver tokens get rejected). **Preferred path is the VAULT, not this env var:** `connect`/`settings` advanced setup prompts for the key and stores it encrypted as the `2captcha` credential; the captcha gate spends it through the injecting proxy (`use_credential`, `${SECRET}` in the `key` query / `clientKey` body) so the raw key never lives in the bot process or the MCP config. `buildTwoCaptchaSolver` prefers the vaulted cred and falls back to this env var for back-compat. The 2Captcha solve is a back-channel token fetch (the v2 token is injected into the user's real browser session and isn't IP-bound), so routing it through the vault adds no target-side fingerprinting. |
-| `UNIVERSAL_BOT_PROXY_ALWAYS` | `false` | Force a supplied per-session proxy on regardless of detected ASN class — for networks that misclassify as `unknown`. It has no effect when `operate_start.proxy` is omitted. |
+| `UNIVERSAL_BOT_PROXY_URL` | — | Residential proxy (`http://user:pass@host:port` or `socks5://host:port`). Unset → direct connection. Used only for datacenter-class egress (see `shouldRouteThroughProxy`) — residential users pay nothing. (The old operator-housekeeper egress/proxy model was retired with the codex-verify refactor — the housekeeper no longer drives its own browser.) |
+| `UNIVERSAL_BOT_PROXY_ALWAYS` | `false` | Force the proxy on regardless of detected ASN class — for networks that misclassify as `unknown`. |
 | `TRUSTY_SQUIRE_MACHINE_TOKEN` | (from session) | Machine token for the operator inbox-OTP service |
 | `TRUSTY_SQUIRE_ACCOUNT_ID` | (from session) | Operator account ID (auto-promote attribution on provisions). End-user installs read this from session.json. |
 | `TRUSTY_SQUIRE_API_BASE` | `https://trusty-squire-api.fly.dev` | API base URL |
-| `TRUSTY_SQUIRE_SESSION_FILE` | — | `1`/`true`/`yes` forces the durable file session backend (`~/.config/trusty-squire/session.json`) over the OS keychain. Set it **globally** (so `connect` and the spawned server agree) on headless boxes where the keychain is present-but-ephemeral (gnome-keyring "session" collection) — otherwise the session isn't persisted across runs. |
-| `TRUSTY_SQUIRE_OPERATOR_SESSION_IDLE_TIMEOUT_MS` | `600000` (10m) | Closes an operator session that has no active call and has received no operation within this bound. The lifecycle contract lives in `docs/DESIGN-warm-browser-reuse.md`. |
-| `TRUSTY_SQUIRE_OPERATOR_BROWSER_MAX_LIFETIME_MS` | `1800000` (30m) | Cross-platform maximum operator-session lifetime, checked before the active-call guard. An active payment receives only the bounded terminal-transition grace. |
-| `TRUSTY_SQUIRE_OPERATOR_BROWSER_CPU_CEILING_PERCENT` | `200` | Linux marked-Chromium aggregate CPU ceiling. The process watchdog terminates after `TRUSTY_SQUIRE_OPERATOR_BROWSER_CPU_CONSECUTIVE_SAMPLES` (default `3`) consecutive over-budget samples. |
+| `TRUSTY_SQUIRE_SESSION_FILE` | — | `1`/`true`/`yes` forces the durable file session backend (`~/.config/trusty-squire/session.json`) over the OS keychain. Set it **globally** (so `connect` and the spawned server agree) on headless boxes where the keychain is present-but-ephemeral (gnome-keyring "session" collection) — otherwise the session isn't persisted and `connect` re-opens the install/noVNC page every run. |
 | `TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_MS` | `1200000` (20m) | `mcp server`'s idle self-exit bound when it holds **no** open provision session. Backstop for a host that abandons a child process on reconnect without closing its stdio or signaling it (`server.ts`'s `transport.onclose`/EOF/SIGTERM path then never fires). |
-| `TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_WITH_SESSION_MS` | `43200000` (12h) | Process-level idle self-exit bound while a provision session is open. The operator-session watchdog independently closes abandoned browsers after 10 minutes idle and begins bounded terminal teardown at 30 minutes; this wider server bound remains a final host-process backstop. |
+| `TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_WITH_SESSION_MS` | `43200000` (12h) | Same backstop, but the bound used while a provision session is still open. Wider than the no-session bound on purpose: an abandoned session owns a private Chrome until this server exits, then `closeAllProvisionSessions` tears it down through the normal bounded close path. |
 | `TRUSTY_SQUIRE_SERVER_IDLE_CHECK_INTERVAL_MS` | `300000` (5m) | Poll interval for the two idle bounds above. The server detects an expired bound on the next poll, so the default no-session exit occurs after 20–25 minutes of inactivity. Keep this interval well under the no-session timeout. |
 
 ### Housekeeper — extracted to its own repo
@@ -762,26 +665,25 @@ and carries its own README + `docs/` + systemd units.
 Monorepo-side relationship: it talks to the registry's `/admin/verifier/queue`,
 `/skills/by-id/:id`, and `/admin/skills/:id/verifier-outcome` endpoints
 (`apps/registry`), which own the **mechanical rule** — one success promotes
-pending-review → active, the 3rd consecutive _rot_ failure demotes
+pending-review → active, the 3rd consecutive *rot* failure demotes
 (`VERIFIER_PROMOTION_THRESHOLD = 1` / `VERIFIER_FAILURE_THRESHOLD = 3` in
 `apps/registry/src/skill-store.ts`). So changing the promote/demote behavior is a
 **registry** change here; changing how skills are verified is a change in the
 housekeeper repo.
 
 ### Server env knobs (`trusty-squire-api`)
-
-| Env var                         | Default                   | Effect                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| ------------------------------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `API_ACCOUNT_HOURLY_LIMIT`      | `1000`                    | Per-account rolling-hour cap on the authed control plane (every `requireWeb`/`requireAgent`/`requireAny` route — vault store/list/use, grant mint, etc.). DoS backstop; returns `429 {error:rate_limited, scope:account}`. The deployed-app egress PROXY runs on a separate grant-token path with an optional per-grant cap, so this doesn't throttle workloads. `<= 0` disables. In-memory / single-instance.                                                    |
-| `INSTALL_IP_HOURLY_LIMIT`       | `100`                     | Per-IP rolling-hour cap on `POST /v1/install` (machine-token mint). The install route is unauthed/pre-account so the per-account limiter can't cover it, and each mint inserts a DB row — this is the flood backstop (surfaced by the #12 load test). Keyed off Fly's `fly-client-ip` header (req.ip is the proxy). Returns `429 {error:rate_limited, scope:ip}`. Generous so shared-NAT/re-installs don't trip it; `<= 0` disables. In-memory / single-instance. |
-| `VAULT_USE_MAX_RESPONSE_BYTES`  | `2097152` (2MB)           | Max upstream RESPONSE body `use_credential` (`/v1/vault/use`) will buffer + return to the agent. Capped below the egress path's 16MB because this flows into the agent's context. The old 10KB default truncated real API responses / web pages (an agent GETting a Shopify HTML page tripped it). `text/*` + `application/json` only (binary is stringified to UTF-8 — not a file pipe); non-numeric/`<=0` falls back to the 2MB default.                        |
-| `BILLING_ENABLED`               | `false`                   | Free-during-beta kill-switch. Unless `true`/`1`, `/v1/billing/checkout` returns `503 billing_disabled` so no one is charged even with a live Stripe key.                                                                                                                                                                                                                                                                                                          |
-| `SIGNUPS_DISABLED`              | `false` (signups ENABLED) | Global kill switch (checklist #10). When `1`/`true`, `POST /v1/install` returns `503 signups_disabled` AND the OAuth callback refuses to create a BRAND-NEW account (redirects to `/login?error=signups_disabled`). Existing accounts/identities still sign in. Read at build time — flip with `flyctl secrets set SIGNUPS_DISABLED=1` (restarts the machine, ~30s).                                                                                              |
-| `EGRESS_DISABLED`               | `false` (egress ENABLED)  | Global kill switch (checklist #10). When `1`/`true`, both `POST /v1/egress/grants` (mint) and the transparent proxy `ALL /v1/egress/:grant/*` return `503 egress_disabled` — this intentionally kills EXISTING grants too (the point of a panic switch). Flip with `flyctl secrets set EGRESS_DISABLED=1` (restarts the machine, ~30s).                                                                                                                           |
-| `MAINTENANCE_MESSAGE`           | `""` (no maintenance)     | Global maintenance banner string (checklist #10). Non-empty → `GET /v1/status` returns `maintenance:true` + `message:<this>` for a web banner to read. Empty = no maintenance. Read at build time — set with `flyctl secrets set MAINTENANCE_MESSAGE="..."` (restarts the machine, ~30s). `GET /v1/status` (public, no auth) also surfaces `signups_enabled` / `egress_enabled`.                                                                                  |
-| `PAIRING_TOKEN_RETENTION_HOURS` | `1`                       | PairingToken row sweep                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `VAULT_AUDIT_RETENTION_DAYS`    | `365`                     | VaultAuditEvent row sweep (the who-touched-my-keys trail). Kept a year — long enough for a compromise investigation, bounded so it doesn't grow forever.                                                                                                                                                                                                                                                                                                          |
-| `VAULT_ROTATION_STALE_DAYS`     | `90`                      | Age (since last change) past which a credential is flagged `stale` in the list response. Advisory nudge, not enforced.                                                                                                                                                                                                                                                                                                                                            |
+| Env var | Default | Effect |
+|---|---|---|
+| `API_ACCOUNT_HOURLY_LIMIT` | `1000` | Per-account rolling-hour cap on the authed control plane (every `requireWeb`/`requireAgent`/`requireAny` route — vault store/list/use, grant mint, etc.). DoS backstop; returns `429 {error:rate_limited, scope:account}`. The deployed-app egress PROXY runs on a separate grant-token path with an optional per-grant cap, so this doesn't throttle workloads. `<= 0` disables. In-memory / single-instance. |
+| `INSTALL_IP_HOURLY_LIMIT` | `100` | Per-IP rolling-hour cap on `POST /v1/install` (machine-token mint). The install route is unauthed/pre-account so the per-account limiter can't cover it, and each mint inserts a DB row — this is the flood backstop (surfaced by the #12 load test). Keyed off Fly's `fly-client-ip` header (req.ip is the proxy). Returns `429 {error:rate_limited, scope:ip}`. Generous so shared-NAT/re-installs don't trip it; `<= 0` disables. In-memory / single-instance. |
+| `VAULT_USE_MAX_RESPONSE_BYTES` | `2097152` (2MB) | Max upstream RESPONSE body `use_credential` (`/v1/vault/use`) will buffer + return to the agent. Capped below the egress path's 16MB because this flows into the agent's context. The old 10KB default truncated real API responses / web pages (an agent GETting a Shopify HTML page tripped it). `text/*` + `application/json` only (binary is stringified to UTF-8 — not a file pipe); non-numeric/`<=0` falls back to the 2MB default. |
+| `BILLING_ENABLED` | `false` | Free-during-beta kill-switch. Unless `true`/`1`, `/v1/billing/checkout` returns `503 billing_disabled` so no one is charged even with a live Stripe key. |
+| `SIGNUPS_DISABLED` | `false` (signups ENABLED) | Global kill switch (checklist #10). When `1`/`true`, `POST /v1/install` returns `503 signups_disabled` AND the OAuth callback refuses to create a BRAND-NEW account (redirects to `/login?error=signups_disabled`). Existing accounts/identities still sign in. Read at build time — flip with `flyctl secrets set SIGNUPS_DISABLED=1` (restarts the machine, ~30s). |
+| `EGRESS_DISABLED` | `false` (egress ENABLED) | Global kill switch (checklist #10). When `1`/`true`, both `POST /v1/egress/grants` (mint) and the transparent proxy `ALL /v1/egress/:grant/*` return `503 egress_disabled` — this intentionally kills EXISTING grants too (the point of a panic switch). Flip with `flyctl secrets set EGRESS_DISABLED=1` (restarts the machine, ~30s). |
+| `MAINTENANCE_MESSAGE` | `""` (no maintenance) | Global maintenance banner string (checklist #10). Non-empty → `GET /v1/status` returns `maintenance:true` + `message:<this>` for a web banner to read. Empty = no maintenance. Read at build time — set with `flyctl secrets set MAINTENANCE_MESSAGE="..."` (restarts the machine, ~30s). `GET /v1/status` (public, no auth) also surfaces `signups_enabled` / `egress_enabled`. |
+| `PAIRING_TOKEN_RETENTION_HOURS` | `1` | PairingToken row sweep |
+| `VAULT_AUDIT_RETENTION_DAYS` | `365` | VaultAuditEvent row sweep (the who-touched-my-keys trail). Kept a year — long enough for a compromise investigation, bounded so it doesn't grow forever. |
+| `VAULT_ROTATION_STALE_DAYS` | `90` | Age (since last change) past which a credential is flagged `stale` in the list response. Advisory nudge, not enforced. |
 
 ### Vault security + lifecycle surface
 
@@ -795,19 +697,18 @@ retention, and backup/DR posture. Read it before touching the vault.
 Master-key secrets (set on `trusty-squire-api`, **also back up the key
 out-of-band** — a DB restore is useless without it):
 
-| Secret                  | Purpose                                                                                                                        |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `LOCAL_KMS_KEY`         | Current master key (64 hex / 32 bytes). Wraps every credential's KEK. Unset → ephemeral dev key (loud warning, unrecoverable). |
-| `LOCAL_KMS_LEGACY_KEYS` | Comma-separated old keys, tried on decrypt. Set only during a master-key rotation window; unset after `rewrap-kek --apply`.    |
+| Secret | Purpose |
+|---|---|
+| `LOCAL_KMS_KEY` | Current master key (64 hex / 32 bytes). Wraps every credential's KEK. Unset → ephemeral dev key (loud warning, unrecoverable). |
+| `LOCAL_KMS_LEGACY_KEYS` | Comma-separated old keys, tried on decrypt. Set only during a master-key rotation window; unset after `rewrap-kek --apply`. |
 
 ### Conventions in this repo
-
 - **Always read before editing.** Reach for `tree` + `cat` before
   `edit`/`write`.
 - **TypeScript strict.** No `any`; use `unknown` + narrow.
 - **No `as` casts** unless you've exhausted typed alternatives. The
   one place we do it (lazy Prisma client load) is commented.
-- **Comments explain _why_, not _what_.** The code already says what.
+- **Comments explain *why*, not *what*.** The code already says what.
 - **One canonical name per concept.** Prefer renames over coexistence
   when a refactor changes the model.
 - **No backwards-compat shims.** Update all callers when changing
@@ -829,7 +730,6 @@ out-of-band** — a DB restore is useless without it):
 When the user's request matches an available skill, invoke it via the Skill tool. When in doubt, invoke the skill.
 
 Key routing rules:
-
 - Product ideas/brainstorming → invoke /office-hours
 - Strategy/scope → invoke /plan-ceo-review
 - Architecture → invoke /plan-eng-review

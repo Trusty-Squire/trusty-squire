@@ -4,14 +4,44 @@
 // session. This is the one-time interactive login; every signup after
 // it is fully automated.
 //
-// Interactive login requires a user-visible Chrome window; virtual-display and
-// remote-VNC support is intentionally absent.
+// TWO PATHS, by environment — deliberately just two (decided after the
+// 2026-05-17 spike). Tailscale and Codespaces/Replit-native forwarding
+// were considered and dropped: they add environment-detection code for
+// a minority of users, and the cloudflared tunnel covers everyone.
+//
+//   1. A display is available → launch Chrome headed. A window opens,
+//      the user logs in. No virtual display, no noVNC, no tunnel.
+//
+//   2. Headless (no DISPLAY) → run Chrome on a phone-shaped virtual
+//      display (Xvfb), bridge it out with x11vnc + noVNC + a cloudflared
+//      tunnel, and print one URL + a VNC password. The user logs in from
+//      any browser on any network. The per-session stack and public URL
+//      are removed when the flow completes, times out, errors, or is
+//      interrupted; an operator-managed named tunnel remains external.
+//
+// Binaries the headless path needs: Xvfb, x11vnc, websockify
+// (with /usr/share/novnc), cloudflared, and Google Chrome. Missing ones
+// produce a clear, actionable error rather than a cryptic crash.
 
+import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
-import { existsSync } from "node:fs";
+import { createServer } from "node:net";
+import {
+  cpSync,
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
+import boxen from "boxen";
 import chalk from "chalk";
+import { shortenVncUrl } from "../api-client.js";
 import {
   CHROME_PROFILE_DIR,
   closeProfileWithProof,
@@ -26,23 +56,37 @@ import {
   waitForProfileFree,
   withProfileOperationGuard,
 } from "./profile.js";
-import { launchPlainLoginBrowser, resolveChannelBinary } from "./browser.js";
+import {
+  isSelfManagedChromeTerminationSignalExitEnabled,
+  launchPlainLoginBrowser,
+  launchSelfManagedLoginContext,
+  resolveChannelBinary,
+  selfLaunchEnabled,
+  setSelfManagedChromeTerminationSignalExitEnabled,
+} from "./browser.js";
 export { extractGoogleAccountEmail } from "./browser.js";
 import {
   startInstallCompletionListener,
   withInstallCompletionCallback,
 } from "./install-completion.js";
 import { markProviderLoggedIn } from "./login-state.js";
+import { randomBytes } from "node:crypto";
 import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
-import {
-  canPublishOperatorProfileSeed,
-  GOOGLE_LOGIN_COOKIE_MARKERS,
-  publishOperatorProfileSeed,
-} from "./operator-profile-pool.js";
+import { clearSessionState, writeSessionState, type BrowserStorageState } from "./session-state.js";
+
+const GOOGLE_LOGIN_COOKIE_MARKERS = ["__Secure-1PSID", "SAPISID", "SID"] as const;
 
 const require = createRequire(import.meta.url);
 
+// Route the INTERACTIVE login through the same proxy the bot uses, so the
+// provider session is established from the bot's egress IP. Without this,
+// GitHub/Google create the session from the box's (datacenter) IP, then the
+// proxied bot run hits the provider from a residential IP — the big IP jump
+// trips the provider's security and silently kills the session. That is the
+// "logged-in marker lies" failure: the marker records a login whose auth
+// cookie the provider already invalidated. Honors UNIVERSAL_BOT_PROXY_URL;
+// unset (the default for end users) → direct, no change.
 export type LoginProxyDisposition = {
   server: string;
   username?: string;
@@ -50,7 +94,20 @@ export type LoginProxyDisposition = {
 } | null;
 
 function loginProxyOption(): Exclude<LoginProxyDisposition, null> | undefined {
-  return undefined;
+  const raw = process.env.UNIVERSAL_BOT_PROXY_URL;
+  if (raw === undefined || raw.trim().length === 0) return undefined;
+  try {
+    const u = new URL(raw.trim());
+    if (u.hostname.length === 0) return undefined;
+    const opt: { server: string; username?: string; password?: string } = {
+      server: `${u.protocol}//${u.host}`,
+    };
+    if (u.username.length > 0) opt.username = decodeURIComponent(u.username);
+    if (u.password.length > 0) opt.password = decodeURIComponent(u.password);
+    return opt;
+  } catch {
+    return undefined;
+  }
 }
 
 function selfLaunchProxyDisposition(
@@ -118,6 +175,29 @@ const LOGIN_TARGETS: Record<OAuthProviderId, LoginTarget> = {
     cookies: ["user_session", "__Host-user_session_same_site"],
   },
 };
+// Phone-shaped virtual display — portrait so it scales cleanly onto a
+// phone via noVNC (the spike's 1920x1080 was the UX mistake). 720x1280
+// is the smallest size that doesn't look pixel-y on a 1080p+ phone
+// screen, and stays bandwidth-friendly compared to 1080x1920.
+// Overridable via BOT_NOVNC_W/H — a desktop-width display (e.g. 1440x900) is
+// needed when the remote page is a responsive app whose desktop-only controls
+// (hover-revealed row menus in the Workspace Admin console) collapse at phone
+// width. Defaults stay phone-shaped for the common login-from-phone case.
+const HEADLESS_W = Number(process.env.BOT_NOVNC_W) || 720;
+const HEADLESS_H = Number(process.env.BOT_NOVNC_H) || 1280;
+
+// The Debian/Ubuntu `novnc` package installs its web assets here — the
+// `core/` RFB library our branded page reuses (see runHeadlessChrome).
+const NOVNC_INSTALL_DIR = "/usr/share/novnc";
+
+// Resolve a bundled login asset (the branded vnc.html / interstitial).
+// `../../assets/login/` from this module resolves to apps/mcp/assets/
+// whether running from src/ (tsx) or dist/ (compiled) — assets/ sits
+// beside both. Shipped via the package.json `files` allowlist.
+function loginAssetPath(name: string): string {
+  return fileURLToPath(new URL(`../../assets/login/${name}`, import.meta.url));
+}
+
 export interface LoginResult {
   status: "logged_in" | "already_valid" | "timeout" | "error";
   detail?: string;
@@ -131,8 +211,8 @@ async function hasProviderSession(context: BrowserContext, target: LoginTarget):
 
 // Exported for the connect claim loop: does this LIVE context already hold the
 // given provider's session cookies? The force-relogin teardown gates on this so
-// it never closes the visible browser on the bare API claim while the
-// interactive sign-in (e.g. Google's cold-profile second challenge) is in flight.
+// it never closes the noVNC on the bare API claim while the interactive sign-in
+// (e.g. Google's cold-profile second challenge) is still in flight.
 export async function contextHasProviderSession(
   context: BrowserContext,
   provider: OAuthProviderId,
@@ -430,22 +510,304 @@ export function extractGoogleNumberMatch(text: string): string | null {
 }
 
 // --- environment helpers ----------------------------------------------
-export function hasDisplay(
-  platform: NodeJS.Platform = process.platform,
-  env: NodeJS.ProcessEnv = process.env,
-): boolean {
-  // macOS (Aqua) and Windows (Win32) have native windowing; Linux needs
-  // an existing user-visible X display.
-  if (platform === "darwin" || platform === "win32") return true;
-  if (typeof env.DISPLAY !== "string" || env.DISPLAY.trim().length === 0) return false;
+export function hasDisplay(): boolean {
+  if (process.env.TRUSTY_SQUIRE_FORCE_HEADLESS === "true") return false;
+  if (process.env.TRUSTY_SQUIRE_FORCE_DISPLAY === "true") return true;
+  // macOS (Aqua) and Windows (Win32) have native windowing — Chrome
+  // opens a real window without an X server. DISPLAY is a Unix concept
+  // they don't set, so a DISPLAY-only check would have wrongly routed
+  // every Mac/Windows install into the headless+noVNC+cloudflared rig
+  // (which needs Xvfb/x11vnc/etc. that aren't installed on those
+  // platforms).
+  if (process.platform === "darwin" || process.platform === "win32") return true;
+  // Linux: a non-empty DISPLAY means there's an X server we can draw to.
+  // Headless boxes often inherit an automation/Xvfb DISPLAY over SSH, though;
+  // that is NOT a human-visible desktop. Prefer noVNC for SSH/TTY Linux
+  // sessions unless explicitly overridden with TRUSTY_SQUIRE_FORCE_DISPLAY.
   if (
-    (typeof env.SSH_CONNECTION === "string" && env.SSH_CONNECTION.trim().length > 0) ||
-    (typeof env.SSH_TTY === "string" && env.SSH_TTY.trim().length > 0) ||
-    env.XDG_SESSION_TYPE?.trim().toLowerCase() === "tty"
+    process.env.SSH_CONNECTION !== undefined ||
+    process.env.SSH_TTY !== undefined ||
+    process.env.XDG_SESSION_TYPE === "tty"
   ) {
     return false;
   }
-  return true;
+  return typeof process.env.DISPLAY === "string" && process.env.DISPLAY.length > 0;
+}
+
+// First :N (99..120) whose X socket is free.
+function pickFreeDisplay(): string {
+  for (let n = 99; n <= 120; n++) {
+    if (!existsSync(`/tmp/.X11-unix/X${n}`)) return `:${n}`;
+  }
+  throw new Error("no free X display number in :99..:120");
+}
+
+// An OS-assigned free TCP port.
+export function findFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      if (addr === null || typeof addr === "string") {
+        srv.close();
+        reject(new Error("could not resolve a free port"));
+        return;
+      }
+      const { port } = addr;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+// Standard install locations probed IN ADDITION to $PATH. A binary can be
+// installed yet invisible to `binaryOnPath` when the process that spawned
+// this one trimmed PATH — systemd units and agent/MCP spawns routinely drop
+// /usr/local/bin, which is exactly where cloudflared lands. Probing the
+// well-known dirs stops an installed binary from being reported "missing".
+const STANDARD_BIN_DIRS = [
+  "/usr/local/bin",
+  "/usr/bin",
+  "/bin",
+  "/usr/local/sbin",
+  "/usr/sbin",
+  "/sbin",
+] as const;
+
+// Is `bin` an executable on PATH (or in a standard bin dir)? A cheap
+// synchronous `command -v` that also probes well-known locations so an
+// installed-but-off-PATH binary isn't misreported as absent.
+export function binaryOnPath(bin: string): boolean {
+  const dirs = [...(process.env.PATH ?? "").split(":"), ...STANDARD_BIN_DIRS];
+  return dirs.some((p) => p.length > 0 && existsSync(join(p, bin)));
+}
+
+// cloudflared's .deb is published per-arch; pick the suffix matching this
+// machine so the suggested install command actually resolves.
+function cloudflaredDebArch(): string {
+  switch (process.arch) {
+    case "arm64":
+      return "arm64";
+    case "arm":
+      return "arm";
+    case "ia32":
+      return "386";
+    default:
+      return "amd64";
+  }
+}
+
+// Correct remediation for the specific binaries that are missing. cloudflared
+// is NOT in Debian/Ubuntu's default repos, so an apt-get line can never
+// install it — it needs Cloudflare's own package. The rest are plain apt
+// packages (websockify's noVNC assets ship in the `novnc` package, so both).
+export function installHint(missing: readonly string[]): string {
+  const aptPkgs = missing.flatMap((n) => {
+    if (n === "Xvfb") return ["xvfb"];
+    if (n === "x11vnc") return ["x11vnc"];
+    if (n === "websockify") return ["novnc", "websockify"];
+    return [];
+  });
+  const lines: string[] = [];
+  if (aptPkgs.length > 0) {
+    lines.push(`On Debian/Ubuntu: sudo apt-get install -y ${aptPkgs.join(" ")}`);
+  }
+  if (missing.includes("cloudflared")) {
+    const arch = cloudflaredDebArch();
+    lines.push(
+      "cloudflared is not in Debian/Ubuntu repos — install its package: " +
+        `curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}.deb ` +
+        "-o /tmp/cloudflared.deb && sudo dpkg -i /tmp/cloudflared.deb",
+    );
+  }
+  return lines.join("\n");
+}
+
+function requireBinaries(names: readonly string[]): void {
+  const missing = names.filter((n) => !binaryOnPath(n));
+  if (missing.length > 0) {
+    throw new Error(
+      `headless login needs these not-installed binaries: ${missing.join(", ")}.\n` +
+        installHint(missing),
+    );
+  }
+}
+
+// --- path 2: headless — virtual display + noVNC + cloudflared ----------
+export interface HeadlessRig {
+  procs: ChildProcess[];
+  display: string;
+  // Temp dir websockify serves (branded vnc.html + the installed
+  // noVNC core). Removed on teardown.
+  webDir?: string;
+  // G14 — 0600 file holding the VNC password. x11vnc reads it via
+  // `-passwdfile rm:…` (and self-removes), so the secret never appears
+  // on the process command line where `ps` could read it. Tracked here
+  // as a belt-and-suspenders unlink in case x11vnc never started.
+  passFile?: string;
+}
+
+function spawnBg(cmd: string, args: string[], env?: NodeJS.ProcessEnv): ChildProcess {
+  const child = spawn(cmd, args, {
+    stdio: ["ignore", "pipe", "pipe"],
+    env: env ?? process.env,
+  });
+  child.on("error", (e) => console.error(`[login] ${cmd} failed to spawn: ${String(e)}`));
+  return child;
+}
+
+// Read cloudflared's output until it prints its public trycloudflare URL.
+// Accumulates a rolling buffer rather than matching per-chunk — the URL
+// can straddle two `data` events, and a per-chunk match would miss it
+// and hang until the timeout.
+function awaitTunnelUrl(cf: ChildProcess, timeoutMs: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("cloudflared did not produce a URL in time")),
+      timeoutMs,
+    );
+    let acc = "";
+    const scan = (buf: Buffer): void => {
+      acc += buf.toString();
+      const m = acc.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
+      if (m !== null) {
+        clearTimeout(timer);
+        resolve(m[0]);
+      }
+      // Bound memory if cloudflared is chatty before the URL appears.
+      if (acc.length > 65536) acc = acc.slice(-4096);
+    };
+    cf.stdout?.on("data", scan);
+    cf.stderr?.on("data", scan);
+  });
+}
+
+// Width-aware, boxed VNC banner. Replaces the old hardcoded
+// `"=".repeat(64)` lines that looked broken on narrow phone-via-SSH
+// terminals and lost on wide ones. boxen handles the reflow.
+function printBanner(opts: { tunnelUrl: string; vncPassword: string; label: string }): void {
+  const width = Math.max(40, Math.min((process.stdout.columns ?? 80) - 2, 78));
+  // OSC 8 hyperlink: modern terminals render the URL as cmd-clickable
+  // (label = the URL itself so it still copies cleanly). Non-TTY
+  // pipes get the raw URL — no escape garbage in logs. Wine-underlined
+  // text inside the OSC 8 wrapper preserves a visual cue on terminals
+  // that ignore the hyperlink escape.
+  const styledUrl = process.stderr.isTTY
+    ? `\x1b]8;;${opts.tunnelUrl}\x1b\\${chalk.hex("#cf3a52").underline(opts.tunnelUrl)}\x1b]8;;\x1b\\`
+    : opts.tunnelUrl;
+  const body =
+    `Open this on any device, any network:\n\n` +
+    `  ${styledUrl}\n\n` +
+    `If asked for a VNC password:  ${chalk.bold(opts.vncPassword)}\n\n` +
+    opts.label;
+  console.error(
+    "\n" +
+      boxen(body, {
+        title: "Sign in to Trusty Squire",
+        titleAlignment: "left",
+        padding: { top: 0, bottom: 0, left: 1, right: 1 },
+        borderStyle: "single",
+        borderColor: "#cf3a52",
+        width,
+      }) +
+      "\n",
+  );
+}
+
+const headlessRigTeardowns = new WeakMap<HeadlessRig, Promise<void>>();
+
+function childHasExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (childHasExited(child)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const onExit = (): void => finish(true);
+    const timer = setTimeout(() => finish(childHasExited(child)), timeoutMs);
+    const finish = (exited: boolean): void => {
+      clearTimeout(timer);
+      child.removeListener("exit", onExit);
+      resolve(exited);
+    };
+    child.once("exit", onExit);
+  });
+}
+
+function removeHeadlessRigFiles(rig: HeadlessRig): void {
+  if (rig.webDir !== undefined) {
+    try {
+      rmSync(rig.webDir, { recursive: true, force: true });
+    } catch {
+      // best-effort
+    }
+  }
+  if (rig.passFile !== undefined) {
+    try {
+      rmSync(rig.passFile, { force: true });
+    } catch {
+      // best-effort
+    }
+  }
+}
+
+function releaseChildHandles(child: ChildProcess): void {
+  try {
+    child.stdout?.destroy();
+  } catch {
+    // best-effort
+  }
+  try {
+    child.stderr?.destroy();
+  } catch {
+    // best-effort
+  }
+  try {
+    child.unref();
+  } catch {
+    // best-effort
+  }
+}
+
+function forceTeardownHeadlessRig(rig: HeadlessRig): void {
+  for (const child of rig.procs) {
+    try {
+      if (!childHasExited(child)) child.kill("SIGKILL");
+    } catch {
+      // best-effort
+    }
+    releaseChildHandles(child);
+  }
+  removeHeadlessRigFiles(rig);
+}
+
+export function teardownHeadlessRig(rig: HeadlessRig, graceMs = 1_000): Promise<void> {
+  const existing = headlessRigTeardowns.get(rig);
+  if (existing !== undefined) return existing;
+  const teardown = (async (): Promise<void> => {
+    const running = rig.procs.filter((child) => !childHasExited(child));
+    for (const child of running) {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // best-effort
+      }
+    }
+    await Promise.all(running.map((child) => waitForChildExit(child, graceMs)));
+    const resistant = running.filter((child) => !childHasExited(child));
+    for (const child of resistant) {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // best-effort
+      }
+    }
+    await Promise.all(resistant.map((child) => waitForChildExit(child, graceMs)));
+    for (const child of rig.procs) releaseChildHandles(child);
+    removeHeadlessRigFiles(rig);
+  })();
+  headlessRigTeardowns.set(rig, teardown);
+  return teardown;
 }
 
 export async function teardownLoginBrowser(opts: {
@@ -473,7 +835,8 @@ export async function teardownLoginBrowser(opts: {
 // ownership of.
 const activeLoginBrowserCancels = new Set<() => Promise<void>>();
 
-// Returns the unregister disposer for the normal completion path.
+// Exported for tests; runDisplayedChrome/runHeadlessChrome are the real
+// callers. Returns the unregister disposer for the normal completion path.
 export function trackActiveLoginBrowser(cancel: () => Promise<void>): () => void {
   activeLoginBrowserCancels.add(cancel);
   return (): void => {
@@ -481,8 +844,8 @@ export function trackActiveLoginBrowser(cancel: () => Promise<void>): () => void
   };
 }
 
-// Cancel every in-flight login run's browser. Called by the MCP server's
-// shutdown path; idempotent and
+// Cancel every in-flight login run's browser (and headless rig, where one
+// exists). Called by the MCP server's shutdown path; idempotent and
 // best-effort — a failed teardown must not stall the process exit, whose
 // process-level exit hooks still force-kill anything identity-proven.
 export async function cancelActiveLoginBrowsers(): Promise<void> {
@@ -572,7 +935,153 @@ function createTrackedLoginBrowserLifecycle(
   return lifecycle;
 }
 
-// Open the bot's visible Chrome at `url` and run `pollUntilDone`
+type LoginProcessRuntime = Pick<NodeJS.Process, "on" | "once" | "removeListener" | "exit">;
+
+// How registerHeadlessRigCleanup coordinates exit ownership with browser.ts's
+// self-managed Chrome signal handlers. Injectable for tests; the default is
+// the real process-wide flag.
+export interface LoginSignalExitCoordination {
+  enabled(): boolean;
+  set(enabled: boolean): void;
+}
+
+const selfManagedSignalExitCoordination: LoginSignalExitCoordination = {
+  enabled: isSelfManagedChromeTerminationSignalExitEnabled,
+  set: setSelfManagedChromeTerminationSignalExitEnabled,
+};
+
+// Attach the per-login rig to every process termination route. The function
+// returns a disposer for the normal completion path; callers must keep the
+// browser teardown in the getter so an interrupt can also release the Chrome
+// profile lock before Node exits. The hard cap prevents a wedged browser from
+// keeping Xvfb/x11vnc/websockify (or cloudflared) alive indefinitely.
+//
+// Exit ownership is coordinated through `signalExit`, one owner at a time:
+// - When self-managed signal exits are ENABLED (the CLI default), this login
+//   takes sole ownership for its duration — it suspends browser.ts's
+//   SIGKILL-and-exit handlers (which would otherwise preempt the capped
+//   graceful teardown below on the same signal) and restores them on
+//   disposal. The always-on `exit` hooks (here for the rig, browser.ts's for
+//   identity-proven Chromes) stay as the force-kill backstop.
+// - When they are DISABLED, a central shutdown coordinator (the MCP server's
+//   requestShutdown) already owns process exit and drains this login via
+//   cancelActiveLoginBrowsers(); installing exit-calling signal or
+//   uncaughtException handlers here would race it (and would violate the
+//   server's log-and-keep-serving process guards), so only the pure-cleanup
+//   `exit` hook is registered.
+export function registerHeadlessRigCleanup(
+  rig: HeadlessRig,
+  activeBrowserTeardown: () => (() => Promise<void>) | undefined,
+  runtime: LoginProcessRuntime = process,
+  signalExit: LoginSignalExitCoordination = selfManagedSignalExitCoordination,
+): () => void {
+  let finishing = false;
+  let signalExitSuspended = false;
+
+  const restoreSignalExitOwnership = (): void => {
+    if (!signalExitSuspended) return;
+    signalExitSuspended = false;
+    signalExit.set(true);
+  };
+
+  const teardownBrowserWithin = async (): Promise<void> => {
+    const closeBrowser = activeBrowserTeardown();
+    if (closeBrowser === undefined) return;
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 3_000);
+      void closeBrowser()
+        .catch(() => undefined)
+        .finally(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+    });
+  };
+
+  const exitAfterCleanup = (code: number): void => {
+    if (finishing) {
+      forceTeardownHeadlessRig(rig);
+      restoreSignalExitOwnership();
+      runtime.exit(code);
+      return;
+    }
+    finishing = true;
+    void teardownBrowserWithin().finally(async () => {
+      await teardownHeadlessRig(rig);
+      restoreSignalExitOwnership();
+      runtime.exit(code);
+    });
+  };
+
+  const onExit = (): void => forceTeardownHeadlessRig(rig);
+  const onSigterm = (): void => exitAfterCleanup(143);
+  const onSigint = (): void => exitAfterCleanup(130);
+  const onUncaughtException = (error: Error): void => {
+    console.error("[login] uncaught exception; tearing down the login browser", error);
+    exitAfterCleanup(1);
+  };
+  const onUnhandledRejection = (reason: unknown): void => {
+    console.error("[login] unhandled rejection; tearing down the login browser", reason);
+    exitAfterCleanup(1);
+  };
+
+  runtime.once("exit", onExit);
+  const ownsTerminationExit = signalExit.enabled();
+  if (ownsTerminationExit) {
+    signalExit.set(false);
+    signalExitSuspended = true;
+    runtime.on("SIGTERM", onSigterm);
+    runtime.on("SIGINT", onSigint);
+    runtime.once("uncaughtException", onUncaughtException);
+    runtime.once("unhandledRejection", onUnhandledRejection);
+  }
+
+  return (): void => {
+    if (finishing) return;
+    runtime.removeListener("exit", onExit);
+    if (!ownsTerminationExit) return;
+    runtime.removeListener("SIGTERM", onSigterm);
+    runtime.removeListener("SIGINT", onSigint);
+    runtime.removeListener("uncaughtException", onUncaughtException);
+    runtime.removeListener("unhandledRejection", onUnhandledRejection);
+    restoreSignalExitOwnership();
+  };
+}
+
+export function fallbackCloudflaredArgs(webPort: number): string[] {
+  return ["tunnel", "--protocol", "http2", "--url", `http://127.0.0.1:${webPort}`];
+}
+
+// Assemble the directory websockify serves: a copy of the installed
+// noVNC web assets (for the `core/` RFB library) with our branded
+// vnc.html written over the stock one. A temp dir, NOT the package's
+// own assets/ — under `npx` the package runs from a read-only cache,
+// so the noVNC core cannot be copied into it. Torn down with the rig.
+function buildVncWebDir(): string {
+  const webDir = mkdtempSync(join(tmpdir(), "ts-novnc-"));
+  cpSync(NOVNC_INSTALL_DIR, webDir, { recursive: true });
+  // The branded page imports `./core/rfb.js`. If the distro's novnc
+  // package put its core somewhere else, fail loudly here rather than
+  // serving a page that 404s its own script and shows a blank screen.
+  if (!existsSync(join(webDir, "core", "rfb.js"))) {
+    rmSync(webDir, { recursive: true, force: true });
+    throw new Error(
+      `noVNC core not found at ${NOVNC_INSTALL_DIR}/core/rfb.js — the ` +
+        `installed novnc package has an unexpected layout`,
+    );
+  }
+  const branded = readFileSync(loginAssetPath("vnc.html"), "utf8");
+  writeFileSync(join(webDir, "vnc.html"), branded);
+  // Also write index.html so the URL printed to the user's terminal can
+  // drop `/vnc.html` — every saved character matters on a phone, where
+  // line-wrapping the URL across two terminal lines makes copy/paste
+  // hostile. websockify's static server returns index.html for `/`.
+  writeFileSync(join(webDir, "index.html"), branded);
+  return webDir;
+}
+
+// Open the bot's Chrome at `url`, on whichever platform path applies
+// (with-display or headless+noVNC+cloudflared), and run `pollUntilDone`
 // against the live context until it resolves true, the deadline passes,
 // or the browser/status check fails. Returns whether the poll succeeded.
 //
@@ -587,7 +1096,8 @@ export interface RunInBotChromeOpts {
   // Returns true once the desired side effect has happened (cookies
   // present, install claimed, etc.). Re-polled every ~3s.
   pollUntilDone: (context: BrowserContext) => Promise<boolean>;
-  // Short label shown after the local Chrome window opens.
+  // Optional: short label used in the headless VNC banner so the user
+  // knows what they're being asked to do in the remote Chrome window.
   bannerLabel: string;
   // Optional pre-flight check that decides we don't need a browser at
   // all (e.g. an existing session covers it). Returns true to short-
@@ -600,6 +1110,11 @@ export interface RunInBotChromeOpts {
   // profile right after close is racy (profile lock contention) and
   // can silently fail.
   onSuccess?: (context: BrowserContext) => Promise<void>;
+  // G15: API base URL used to shorten the cloudflared tunnel URL
+  // before printing it in the headless banner. When undefined, the
+  // long cloudflared URL is printed verbatim. The headless path is
+  // the only consumer; the display path skips the banner entirely.
+  apiBaseUrl?: string;
   // The install flow has a sign-in phase followed by an explicit Finish
   // step. Resolve this lazily so its heartbeat describes the current phase.
   heartbeatMessage?: string | (() => string);
@@ -607,7 +1122,7 @@ export interface RunInBotChromeOpts {
   // as plain Chrome with NO CDP attach — required because Google's OAuth
   // "secure browser" check rejects a CDP-attached Chrome (see
   // launchPlainLoginBrowser). In this mode the browser is never driven: the
-  // user signs in in the visible browser, and completion is detected via `plainPollUntilDone`
+  // user signs in over noVNC, and completion is detected via `plainPollUntilDone`
   // (which reads the API + the SQLite cookie store, not a live context). The
   // context-taking `pollUntilDone`/`onSuccess`/`preflight` above are IGNORED in
   // this mode. `mcp login` does NOT set this (it stays on the CDP path).
@@ -641,21 +1156,23 @@ export async function runInBotChrome(
 export interface LoginRunResult {
   status: "completed" | "preflight_satisfied" | "timeout";
   closeState: ProfileCloseState;
+  storageState?: BrowserStorageState;
 }
 
 export async function finalizeLoginRun(
-  opts: Pick<RunInBotChromeOpts, "profileDir" | "onConfirmedLogin" | "seedProvider">,
+  opts: Pick<RunInBotChromeOpts, "profileDir" | "onConfirmedLogin">,
   result: LoginRunResult,
-  publishSeed: typeof publishOperatorProfileSeed = publishOperatorProfileSeed,
+  publishState: typeof writeSessionState = writeSessionState,
 ): Promise<void> {
   if (result.status === "completed" || result.status === "preflight_satisfied") {
     await opts.onConfirmedLogin?.();
-  }
-  const provider =
-    typeof opts.seedProvider === "function" ? opts.seedProvider() : (opts.seedProvider ?? null);
-  const proof = { loginStatus: result.status, closeState: result.closeState, provider };
-  if (canPublishOperatorProfileSeed(proof)) {
-    await publishSeed(opts.profileDir, { proof });
+    if (result.closeState === "closed" && result.storageState !== undefined) {
+      publishState(opts.profileDir, result.storageState);
+    } else if (result.storageState === undefined) {
+      // Plain Chrome cannot expose a context snapshot. Never leave an older
+      // context-backed snapshot pretending to describe that new login.
+      clearSessionState(opts.profileDir);
+    }
   }
 }
 
@@ -663,19 +1180,18 @@ async function runInBotChromeWithProfileGuard(opts: RunInBotChromeOpts): Promise
   // `mcp login` runs in a SEPARATE process from the MCP server, so the
   // in-process OAuth mutex can't serialize it against an in-flight signup.
   // Chrome's SingletonLock is the cross-process semaphore: reclaim a stale
-  // holder, but fail immediately for a live one.
+  // holder, but fail immediately for a live one. Waiting here used to leave a
+  // second connect apparently frozen while a duplicate noVNC stack accumulated.
   const free = await waitForProfileFree(opts.profileDir, {
     deadlineMs: 0,
   });
   if (!free) {
     throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
   }
-  if (!hasDisplay()) {
-    throw new Error(
-      "interactive login requires a user-visible display; headless remote login is no longer supported",
-    );
+  if (hasDisplay()) {
+    return await runDisplayedChrome(opts);
   }
-  return await runDisplayedChrome(opts);
+  return await runHeadlessChrome(opts);
 }
 
 export async function runDisplayedChrome(
@@ -754,6 +1270,7 @@ export async function runDisplayedChrome(
   const lifecycle = createTrackedLoginBrowserLifecycle();
   let status: LoginRunResult["status"] = "timeout";
   let closeState: ProfileCloseState = "unknown";
+  let storageState: BrowserStorageState | undefined;
   try {
     const context = await launchWithProfileGate(
       opts.profileDir,
@@ -809,16 +1326,373 @@ export async function runDisplayedChrome(
       }
       status = ok ? "completed" : "timeout";
     }
+    if (status !== "timeout") {
+      storageState = await context.storageState({ indexedDB: true }).catch(() => undefined);
+    }
   } finally {
     closeState = await lifecycle.finish();
   }
-  return { status, closeState };
+  return { status, closeState, ...(storageState === undefined ? {} : { storageState }) };
+}
+
+async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
+  requireBinaries(["Xvfb", "x11vnc", "websockify", "cloudflared"]);
+  if (!existsSync("/usr/share/novnc")) {
+    throw new Error("noVNC web assets not found at /usr/share/novnc — install the `novnc` package");
+  }
+
+  // G16 — named-tunnel mode. When the operator has set up a dedicated
+  // Cloudflare named tunnel pointing at a fixed local port, opt in via
+  // env. The bot then:
+  //   - binds websockify to that fixed local port (so the pre-configured
+  //     tunnel's ingress finds it)
+  //   - skips the per-session `cloudflared tunnel --url` spawn (the
+  //     named tunnel runs as a systemd service outside this process)
+  //   - prints the short branded URL instead of the long random one
+  // Both env vars must be set; absence (default) keeps the existing
+  // random `*.trycloudflare.com` flow.
+  const namedTunnelHost = process.env.TS_LOGIN_PUBLIC_HOSTNAME;
+  const namedTunnelPortStr = process.env.TS_LOGIN_LOCAL_PORT;
+  const usingNamedTunnel =
+    namedTunnelHost !== undefined &&
+    namedTunnelHost.length > 0 &&
+    namedTunnelPortStr !== undefined &&
+    namedTunnelPortStr.length > 0;
+  const display = pickFreeDisplay();
+  const vncPort = await findFreePort();
+  const webPort = usingNamedTunnel ? Number(namedTunnelPortStr) : await findFreePort();
+  if (usingNamedTunnel && (!Number.isFinite(webPort) || webPort <= 0)) {
+    throw new Error(
+      `TS_LOGIN_LOCAL_PORT=${JSON.stringify(namedTunnelPortStr)} is not a valid port number`,
+    );
+  }
+  const vncPassword = randomBytes(4).toString("hex"); // 8 chars — VNC's limit
+  const rig: HeadlessRig = { procs: [], display };
+  // The lifecycle below memoizes browser and rig teardown across normal
+  // completion, CLI signals, and server cancellation. Self-launched Chrome
+  // needs child teardown as well as context.close(); every forced close still
+  // goes through the launch-time process-identity proof.
+  let activeTeardown: (() => Promise<void>) | undefined;
+  let plainBrowserIsRunning: (() => boolean) | undefined;
+
+  // Cover normal cleanup, interrupts, and fatal process errors. The returned
+  // disposer removes process-global listeners once this login finishes.
+  const removeRigCleanup = registerHeadlessRigCleanup(rig, () => activeTeardown);
+  const lifecycle = createTrackedLoginBrowserLifecycle(async () => await teardownHeadlessRig(rig));
+  activeTeardown = lifecycle.cancel;
+
+  try {
+    // 1. Virtual display — phone-shaped.
+    rig.procs.push(
+      spawnBg("Xvfb", [display, "-screen", "0", `${HEADLESS_W}x${HEADLESS_H}x24`, "-ac"]),
+    );
+    await new Promise((r) => setTimeout(r, 1500));
+    lifecycle.throwIfCancelled();
+
+    // 2. Chrome on that display, persistent profile, window filling the display.
+    //    Self-launch + connectOverCDP is the STATE.md 2026-06-12 launcher fix:
+    //    a launchPersistentContext-driven Chrome carries the launch-time
+    //    instrumentation anti-bot (Cloudflare Turnstile, and — the bug this
+    //    ports the fix for — Google's sign-in device-prompt) reads as a bot,
+    //    while a self-launched Chrome attached over CDP does not. The signup
+    //    path (BrowserController) already migrated; the connect login was the
+    //    last consumer of the detectable launcher. Fall back to the old
+    //    launcher when self-launch is opted out (BOT_SELF_LAUNCH=0), Chrome
+    //    isn't resolvable as a real binary, or a credentialed proxy is set
+    //    (self-launch's --proxy-server can't carry proxy auth).
+    const proxyOpt = loginProxyOption();
+    const chromeBinary = resolveChannelBinary("chrome");
+    const useSelfLaunch =
+      selfLaunchEnabled() &&
+      chromeBinary !== null &&
+      (proxyOpt === undefined || proxyOpt.password === undefined);
+    const sharedChromeArgs = [
+      "--disable-blink-features=AutomationControlled",
+      // --test-type suppresses the "unsupported command-line flag:
+      // --no-sandbox" yellow infobar that otherwise eats the top strip of the
+      // phone-shaped framebuffer once handed to noVNC. Standard automation
+      // flag; doesn't affect OAuth/cookies.
+      "--test-type",
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+    ] as const;
+    // PLAIN-BROWSER mode (connect claim): NO CDP at all — a CDP-attached Chrome
+    // fails Google's OAuth "secure browser" check (STATE.md 2026-07-20, fully
+    // bisected). `context` stays undefined; completion is read via
+    // plainPollUntilDone (API + on-disk cookies), never a live context.
+    const plain = opts.plainProfileLogin === true;
+    let context: BrowserContext | undefined;
+    if (plain) {
+      if (opts.plainPollUntilDone === undefined) {
+        throw new Error("plainProfileLogin set without plainPollUntilDone");
+      }
+      if (chromeBinary === null) {
+        throw new Error("no Chrome binary found for the plain login browser");
+      }
+      const proxyDisposition =
+        proxyOpt !== undefined && proxyOpt.password === undefined
+          ? selfLaunchProxyDisposition(proxyOpt)
+          : null;
+      opts.onProxyDisposition?.(proxyDisposition);
+      const browser = await launchPlainLoginBrowser({
+        binary: chromeBinary,
+        profileDir: opts.profileDir,
+        url: opts.url,
+        window: { width: HEADLESS_W, height: HEADLESS_H },
+        env: { ...process.env, DISPLAY: display },
+        proxyServer: proxyDisposition?.server ?? null,
+        extraArgs: sharedChromeArgs,
+      });
+      lifecycle.browserLaunched(
+        async () =>
+          await teardownLoginBrowser({
+            profileDir: opts.profileDir,
+            identity: browser.identity,
+            closeBrowser: browser.teardown,
+            forceClose: browser.forceTeardown,
+          }),
+      );
+      plainBrowserIsRunning = browser.isRunning;
+    } else if (useSelfLaunch && chromeBinary !== null) {
+      const proxyDisposition = selfLaunchProxyDisposition(proxyOpt);
+      opts.onProxyDisposition?.(proxyDisposition);
+      const launched = await launchSelfManagedLoginContext({
+        binary: chromeBinary,
+        profileDir: opts.profileDir,
+        // App mode (--app) strips tabs/URL bar so the install page gets the
+        // full phone-shaped framebuffer under noVNC.
+        initialUrl: opts.url,
+        appMode: true,
+        window: { width: HEADLESS_W, height: HEADLESS_H },
+        env: { ...process.env, DISPLAY: display },
+        proxyServer: proxyDisposition?.server ?? null,
+        extraArgs: sharedChromeArgs,
+      });
+      lifecycle.browserLaunched(
+        async () =>
+          await teardownLoginBrowser({
+            profileDir: opts.profileDir,
+            identity: launched.identity,
+            closeBrowser: launched.teardown,
+            forceClose: launched.forceTeardown,
+          }),
+      );
+      context = launched.context;
+    } else {
+      const chromium = resolveChromium();
+      opts.onProxyDisposition?.(proxyOpt ?? null);
+      const persistent = await launchWithProfileGate(
+        opts.profileDir,
+        () =>
+          launchPersistentLoginContext(chromium, opts.profileDir, {
+            headless: false,
+            viewport: null, // use the real window size
+            env: { ...process.env, DISPLAY: display },
+            // Drop --enable-automation: kills the "controlled by automated test
+            // software" infobar and the matching automation fingerprint.
+            ignoreDefaultArgs: ["--enable-automation"],
+            ...(proxyOpt !== undefined ? { proxy: proxyOpt } : {}),
+            args: [
+              `--window-position=0,0`,
+              `--window-size=${HEADLESS_W},${HEADLESS_H}`,
+              `--app=${opts.url}`,
+              ...sharedChromeArgs,
+            ],
+          }),
+        { failFast: true },
+      );
+      const persistentPid = currentProfileHolderPid(opts.profileDir);
+      const identity =
+        persistentPid === null ? null : profileProcessIdentity(persistentPid, opts.profileDir);
+      lifecycle.browserLaunched(
+        async () =>
+          await teardownLoginBrowser({
+            profileDir: opts.profileDir,
+            identity,
+            closeBrowser: () => persistent.close(),
+            forceClose: () => reapProfileHolderIfOwned(opts.profileDir, identity),
+          }),
+      );
+      context = persistent;
+    }
+    try {
+      // CDP path only: preflight + drive the first page to the URL. The plain
+      // path has no context — plain Chrome's --app already opened opts.url.
+      if (context !== undefined) {
+        if (
+          opts.preflight !== undefined &&
+          (await checkLoginStatusWithin(opts.deadline, () => opts.preflight!(context)))
+        ) {
+          const storageState = await context.storageState({ indexedDB: true }).catch(() => undefined);
+          const closeState = await lifecycle.finish();
+          return {
+            status: "preflight_satisfied",
+            closeState,
+            ...(storageState === undefined ? {} : { storageState }),
+          };
+        }
+        const page = context.pages()[0] ?? (await context.newPage());
+        await page.goto(opts.url, { waitUntil: "domcontentloaded" });
+      }
+
+      // 3. x11vnc on the display — localhost-only, password-gated, -noshm
+      //    (the box's X server lacks the shared-memory extension).
+      //    G14 — pass the password via a 0600 file, NOT `-passwd <plain>`
+      //    on argv (which any `ps` could read). `rm:` makes x11vnc unlink
+      //    the file right after reading it.
+      const passFile = join(tmpdir(), `tsq-vnc-${process.pid}-${vncPort}.pass`);
+      writeFileSync(passFile, vncPassword, { mode: 0o600 });
+      chmodSync(passFile, 0o600); // writeFileSync's mode is honored only on create
+      rig.passFile = passFile;
+      rig.procs.push(
+        spawnBg("x11vnc", [
+          "-display",
+          display,
+          "-rfbport",
+          String(vncPort),
+          "-passwdfile",
+          `rm:${passFile}`,
+          "-localhost",
+          "-forever",
+          "-shared",
+          "-noshm",
+          "-quiet",
+        ]),
+      );
+      await new Promise((r) => setTimeout(r, 1500));
+      lifecycle.throwIfCancelled();
+
+      // 4. noVNC web bridge — serves our branded vnc.html plus the
+      //    installed noVNC core from a temp dir; localhost only,
+      //    cloudflared reaches it.
+      rig.webDir = buildVncWebDir();
+      rig.procs.push(
+        spawnBg("websockify", [
+          `--web=${rig.webDir}`,
+          `127.0.0.1:${webPort}`,
+          `localhost:${vncPort}`,
+        ]),
+      );
+      await new Promise((r) => setTimeout(r, 1500));
+      lifecycle.throwIfCancelled();
+
+      // 5. Outbound tunnel.
+      //
+      // G16 named-tunnel mode (env-gated): the operator pre-provisioned
+      // a dedicated cloudflared tunnel pointed at our fixed webPort
+      // (running as a systemd service outside this process). No per-
+      // session cloudflared spawn — saves ~5-10s of cold-start, and
+      // the URL is short + branded (vnc.trustysquire.ai instead of
+      // shouts-clean-mediawiki-cookies.trycloudflare.com).
+      //
+      // Random-tunnel fallback (default): spawn a fresh trycloudflare
+      // tunnel per session. Works everywhere, no operator setup, but
+      // the URL is ~80 chars and the cold-start hurts.
+      let bannerUrl: string;
+      if (usingNamedTunnel) {
+        // The persistent operator-managed named tunnel lives outside this
+        // process; run that service with `--protocol http2` too, avoiding the
+        // same QUIC datagram-manager drops as the per-session fallback.
+        // No `/vnc.html` — websockify serves the same content as
+        // index.html (buildVncWebDir writes both). Shorter URL fits
+        // one line on a phone terminal.
+        bannerUrl = `https://${namedTunnelHost}/#p=${vncPassword}`;
+      } else {
+        const cf = spawnBg("cloudflared", fallbackCloudflaredArgs(webPort));
+        rig.procs.push(cf);
+        const tunnelUrl = await awaitTunnelUrl(cf, 30000);
+        lifecycle.throwIfCancelled();
+        const longVncUrl = `${tunnelUrl}/#p=${vncPassword}`;
+
+        // G15 (deprecated by G16): shorten the cloudflared URL through
+        // the API when we have an API base — much less transcription-
+        // hostile on a phone than the raw cloudflared subdomain. Still
+        // used on the random-tunnel fallback path; the named-tunnel
+        // path doesn't need it (URL is already short).
+        bannerUrl = longVncUrl;
+        if (opts.apiBaseUrl !== undefined) {
+          bannerUrl = await shortenVncUrl(opts.apiBaseUrl, longVncUrl);
+          lifecycle.throwIfCancelled();
+        }
+      }
+
+      // The VNC password rides in the URL *fragment* (#), not the query
+      // string — a fragment is never sent to the server, so it stays
+      // out of the cloudflared edge logs and any proxy in between. The
+      // branded vnc.html reads it from location.hash and connects with
+      // no prompt.
+      printBanner({
+        tunnelUrl: bannerUrl,
+        vncPassword,
+        label: opts.bannerLabel,
+      });
+
+      // 6. Wait for the side effect, run the success hook against the
+      //    live context (e.g. inspect cookies that the user's sign-in
+      //    set — opening a second context after teardown is racy and
+      //    silently fails on profile lock), then tear the whole stack
+      //    down.
+      const ok = await pollUntil(
+        opts.deadline,
+        () =>
+          context !== undefined
+            ? opts.pollUntilDone(context)
+            : opts.plainPollUntilDone!(opts.profileDir),
+        opts.heartbeatMessage,
+        () => {
+          if (plainBrowserIsRunning !== undefined && !plainBrowserIsRunning()) {
+            throw new Error(LOGIN_BROWSER_CLOSED_ERROR);
+          }
+        },
+      );
+      if (ok) {
+        if (context !== undefined) {
+          if (opts.onSuccess !== undefined) {
+            try {
+              await opts.onSuccess(context);
+            } catch {
+              /* swallow */
+            }
+          }
+        } else if (opts.plainOnSuccess !== undefined) {
+          try {
+            await opts.plainOnSuccess(opts.profileDir);
+          } catch {
+            /* swallow */
+          }
+        }
+      }
+      const storageState =
+        ok && context !== undefined
+          ? await context.storageState({ indexedDB: true }).catch(() => undefined)
+          : undefined;
+      const closeState = await lifecycle.finish();
+      return {
+        status: ok ? "completed" : "timeout",
+        closeState,
+        ...(storageState === undefined ? {} : { storageState }),
+      };
+    } finally {
+      // Shared and memoized with the success and cancellation paths, so this
+      // finally cannot double-tear the browser or rig.
+      await lifecycle.finish();
+      // Torn down — the signal handler must not double-tear it.
+      activeTeardown = undefined;
+    }
+  } finally {
+    try {
+      await lifecycle.finish();
+    } finally {
+      activeTeardown = undefined;
+      removeRigCleanup();
+    }
+  }
 }
 
 // Shared timed-poll helper. `check` is invoked every 3s until it
 // resolves true or the deadline passes.
-// Emits a heartbeat to stderr every ~20s while waiting. After the Chrome window
-// opens, this loop is otherwise silent for up to the full
+// Emits a heartbeat to stderr every ~20s while waiting. After the noVNC banner
+// (or the Chrome window) opens, this loop is otherwise silent for up to the full
 // deadline — which is the connect-hang report: a headless box printed the
 // sign-in URL and then sat on a blank cursor, looking frozen. The heartbeat
 // (with remaining time) makes it obviously alive; quick completions (< 20s,
@@ -898,10 +1772,11 @@ export async function ensureOAuthSession(opts?: {
   provider?: OAuthProviderId;
   profileDir?: string;
   timeoutMinutes?: number;
+  apiBaseUrl?: string;
   // 0.8.3-rc.1 — skip the preflight session-cookie check so the
   // browser opens even when a valid session is already cached. Used
-  // by `login --force-relogin` to surface the browser and let the
-  // operator interactively clear a provider
+  // by `login --force-relogin` to surface the noVNC URL on a
+  // headless box and let the operator interactively clear a provider
   // security challenge (GitHub's "verify it's you" anti-abuse,
   // Google's number-match drift) the cached cookie alone doesn't
   // resolve.
@@ -921,7 +1796,7 @@ export async function ensureOAuthSession(opts?: {
       bannerLabel: `You'll see a Chrome window — log into your ${target.label} account.`,
       // When forceOpen is true, the preflight ALSO clears the
       // provider's session cookies before returning false. Without
-      // this the browser opens but pollUntilDone immediately sees the
+      // this the noVNC opens but pollUntilDone immediately sees the
       // still-valid cached session and exits — the operator never
       // gets a chance to interactively log in or clear a server-side
       // challenge (GitHub "verify it's you"). Clearing the cookies
@@ -941,7 +1816,7 @@ export async function ensureOAuthSession(opts?: {
             }
           } catch {
             // best-effort — if clear fails we still proceed and let
-            // the operator signed out manually in the browser.
+            // the operator hit Sign Out manually in the noVNC.
           }
           return false;
         }
@@ -950,6 +1825,7 @@ export async function ensureOAuthSession(opts?: {
       pollUntilDone: (ctx) => hasProviderSession(ctx, target),
       onConfirmedLogin: async () => markProviderLoggedIn(provider, profileDir),
       seedProvider: provider,
+      ...(opts?.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
     });
     // Map runInBotChrome's status set to ensureOAuthSession's contract.
     let mapped: LoginResult;
@@ -987,6 +1863,10 @@ export async function openInstallConfirmInBotChrome(
     ) => Promise<InstallClaimPollResult>;
     profileDir?: string;
     timeoutMinutes?: number;
+    // G15: API base URL used to shorten the headless cloudflared
+    // tunnel URL before printing it in the banner. Same value the
+    // install handshake calls against; threaded down to the rig.
+    apiBaseUrl?: string;
     // Phase-aware terminal copy supplied by connect.
     heartbeatMessage?: string | (() => string);
   },
@@ -1029,6 +1909,7 @@ export async function openInstallConfirmInBotChrome(
         }
         return installClaimPollCompleted(claim);
       },
+      ...(opts.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
       ...(opts.heartbeatMessage !== undefined ? { heartbeatMessage: opts.heartbeatMessage } : {}),
       // The user's sign-in inside this Chrome leaves a provider session in the
       // persistent profile. We don't know WHICH provider they used, so probe
