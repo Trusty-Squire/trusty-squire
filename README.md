@@ -311,9 +311,10 @@ DOM-diagnostics pair is excluded from that surface; set
   session-start-trust requirement — otherwise a checkout's own out-of-band 3DS
   challenge could never complete its own status poll.
   For a task gated by the user's connected Google account, pass
-  `require_live_identity: true` to `operate_start`. The start fails closed with
-  a connect handoff if that Google session is unavailable; otherwise it uses the
-  signed-in profile directly, with one such session active at a time.
+  `require_live_identity: true` to `operate_start`. The start restores the
+  canonical login snapshot into a fresh private profile, then fails closed with
+  a connect handoff if the existing live-provider detector finds no current
+  Google session. It never opens Chrome on the canonical profile.
   To route only that browser session through a proxy, pass `proxy` to
   `operate_start` as an HTTP or HTTPS URL (credentials are optional), or as an
   unauthenticated SOCKS5 URL. The value is launch-only and sensitive: it is not

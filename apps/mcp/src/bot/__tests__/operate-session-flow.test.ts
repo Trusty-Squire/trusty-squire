@@ -23,7 +23,7 @@ const h = vi.hoisted(() => ({
     browserConnected: boolean;
   },
   oauthRecoveryCalls: 0,
-  typed: [] as Array<{ selector: string; text: string }>,
+  typed: [] as Array<{ selector: string; text: string; sealed?: true }>,
   uploads: [] as Array<{ selector: string; filePath: string }>,
   selected: [] as Array<{ selector: string; matcher: string | undefined }>,
   selectMutation: null as unknown[] | null,
@@ -46,21 +46,24 @@ const h = vi.hoisted(() => ({
   clickCalls: 0,
   frameClicks: [] as string[],
   frameJsClicks: [] as string[],
-  frameTypes: [] as Array<{ frameUrl: string; selector: string; text: string }>,
+  frameTypes: [] as Array<{ frameUrl: string; selector: string; text: string; sealed?: true }>,
   frameSelects: [] as Array<{ frameUrl: string; selector: string; matcher: string | undefined }>,
   gotos: [] as string[],
   started: 0,
   startCalls: 0,
   startGate: null as Promise<void> | null,
   closeCalls: 0,
+  forceCloseCalls: 0,
   closeState: "closed" as "closed" | "force_closed_unproven" | "unknown",
   resetCalls: 0,
   resetFailuresRemaining: 0,
+  resetGate: null as Promise<void> | null,
   profileProbeCalls: 0,
   controllerProviderProbeCalls: 0,
   workerEmail: null as string | null,
   connections: [] as boolean[],
   profileDirs: [] as Array<string | undefined>,
+  proxyUrls: [] as Array<string | undefined>,
   leaseSerial: 0,
   warmLeaseProfileDir: null as string | null,
   nextLeaseProfileDir: null as string | null,
@@ -150,6 +153,7 @@ const h = vi.hoisted(() => ({
     | { ok: false; reason: "none" | "ambiguous"; candidates: string[] },
   locatorClickCalls: 0,
   locatorTypeCalls: [] as Array<{ text: string; sealed: boolean }>,
+  capturedSealedFieldKeys: [] as string[][],
   locatorResolveIntents: [] as string[],
   locatorDisposeCalls: 0,
   isPayPalHostedCheckout: false,
@@ -162,6 +166,18 @@ const h = vi.hoisted(() => ({
   },
   clearSealedPaymentFieldsCalls: 0,
   waitForThreeDsResult: "timeout" as "succeeded" | "failed" | "timeout",
+  waitForThreeDsCalls: [] as number[],
+  paymentInstrumentMismatch: null as null | {
+    kind: "payment_instrument_mismatch";
+    confidence: "high" | "low";
+    evidence_used: Array<"last4" | "issuer" | "network">;
+    expected: { last4: string };
+    observed: { last4: string };
+    provenance: {
+      expected: { last4: "released_card" };
+      observed: "3ds_challenge";
+    };
+  },
 }));
 
 vi.mock("../browser.js", () => ({
@@ -173,6 +189,7 @@ vi.mock("../browser.js", () => ({
       this.opts = opts;
       h.connections.push(true);
       h.profileDirs.push(opts.profileDir);
+      h.proxyUrls.push(opts.proxyUrl);
     }
     async start(): Promise<void> {
       h.started += 1;
@@ -191,6 +208,7 @@ vi.mock("../browser.js", () => ({
     }
     async resetPageForReuse(): Promise<void> {
       h.resetCalls += 1;
+      if (h.resetGate !== null) await h.resetGate;
       if (h.resetFailuresRemaining > 0) {
         h.resetFailuresRemaining -= 1;
         throw new Error("page reset failed");
@@ -326,11 +344,19 @@ vi.mock("../browser.js", () => ({
     async scrollViewport(direction: string): Promise<void> {
       h.scrolls.push(direction);
     }
-    async type(selector: string, text: string): Promise<void> {
-      h.typed.push({ selector, text });
+    async type(selector: string, text: string, sealed = false): Promise<string[]> {
+      h.typed.push({ selector, text, ...(sealed ? { sealed: true as const } : {}) });
       for (const element of h.elements as Array<Record<string, unknown>>) {
         if (element.selector === selector) element.value = text;
       }
+      const element = (h.elements as Array<Record<string, unknown>>).find(
+        (candidate) => candidate.selector === selector,
+      );
+      return sealed
+        ? [element?.screenPath, element?.testId, element?.visibleText].filter(
+            (key): key is string => typeof key === "string" && key.length > 0,
+          )
+        : [];
     }
     async markPreexistingTypeSuggestionPopups(): Promise<void> {}
     async detectTypeSuggestionPopup(_selector: string): Promise<string[]> {
@@ -464,12 +490,30 @@ vi.mock("../browser.js", () => ({
       }
       return "dispatched";
     }
-    async typeInFrame(target: { frameUrl: string }, selector: string, text: string): Promise<void> {
-      h.frameTypes.push({ frameUrl: target.frameUrl, selector, text });
+    async typeInFrame(
+      target: { frameUrl: string },
+      selector: string,
+      text: string,
+      sealed = false,
+    ): Promise<string[]> {
+      h.frameTypes.push({
+        frameUrl: target.frameUrl,
+        selector,
+        text,
+        ...(sealed ? { sealed: true as const } : {}),
+      });
       for (const element of h.elements as Array<Record<string, unknown>>) {
         if (element.selector === selector && element.frameUrl === target.frameUrl)
           element.value = text;
       }
+      const element = (h.elements as Array<Record<string, unknown>>).find(
+        (candidate) => candidate.selector === selector && candidate.frameUrl === target.frameUrl,
+      );
+      return sealed
+        ? [element?.screenPath, element?.testId, element?.visibleText].filter(
+            (key): key is string => typeof key === "string" && key.length > 0,
+          )
+        : [];
     }
     async selectInFrame(
       target: { frameUrl: string },
@@ -545,8 +589,16 @@ vi.mock("../browser.js", () => ({
     async jsClickHandle(): Promise<void> {
       h.locatorClickCalls += 1;
     }
-    async typeHandle(_handle: unknown, text: string, sealed = false): Promise<void> {
+    async typeHandle(_handle: unknown, text: string, sealed = false): Promise<string[]> {
       h.locatorTypeCalls.push({ text, sealed });
+      return sealed ? [h.locatorResolve.ok ? h.locatorResolve.text : ""] : [];
+    }
+    async captureOperatorScreenshot(
+      _opts: unknown,
+      sealedFieldKeys: readonly string[],
+    ): Promise<{ base64: string; frameUrl: null; frameCount: number; redactedCount: number }> {
+      h.capturedSealedFieldKeys.push([...sealedFieldKeys]);
+      return { base64: "jpeg", frameUrl: null, frameCount: 1, redactedCount: 0 };
     }
     async uploadFile(selector: string, filePath: string): Promise<void> {
       h.uploads.push({ selector, filePath });
@@ -610,11 +662,27 @@ vi.mock("../browser.js", () => ({
     async clearSealedPaymentFields(): Promise<void> {
       h.clearSealedPaymentFieldsCalls += 1;
     }
-    async waitForThreeDsResolution(): Promise<"succeeded" | "failed" | "timeout"> {
+    async waitForThreeDsResolution(timeoutMs: number): Promise<"succeeded" | "failed" | "timeout"> {
+      h.waitForThreeDsCalls.push(timeoutMs);
       return h.waitForThreeDsResult;
     }
-    async close(): Promise<"closed" | "force_closed_unproven" | "unknown"> {
+    paymentInstrumentMismatch(): typeof h.paymentInstrumentMismatch {
+      return h.paymentInstrumentMismatch;
+    }
+    operatorBrowserMarker(): string {
+      return `v1:1:mock-${this.index}`;
+    }
+    async close(options?: {
+      cancelStart?: boolean;
+    }): Promise<"closed" | "force_closed_unproven" | "unknown"> {
       h.closeCalls += 1;
+      if (options?.cancelStart === true && h.startGate !== null) await h.startGate;
+      if (h.connections[this.index] === true) h.started -= 1;
+      h.connections[this.index] = false;
+      return h.closeState;
+    }
+    async forceCloseOwnedProcessTree(): Promise<"closed" | "force_closed_unproven" | "unknown"> {
+      h.forceCloseCalls += 1;
       if (h.connections[this.index] === true) h.started -= 1;
       h.connections[this.index] = false;
       return h.closeState;
@@ -691,6 +759,109 @@ vi.mock("../google-login.js", async (importOriginal) => {
   };
 });
 
+vi.mock("../operator-profile-pool.js", () => {
+  class OperatorProfileAcquisitionInterruptedError extends Error {
+    readonly reason: "timeout" | "cancelled";
+    readonly phase: "profile" | "seed_lock";
+    constructor(reason: "timeout" | "cancelled", phase: "profile" | "seed_lock" = "profile") {
+      super(`operator profile acquisition ${reason}`);
+      this.reason = reason;
+      this.phase = phase;
+    }
+  }
+  return {
+    OperatorProfileAcquisitionInterruptedError,
+    acquireOperatorProfile: async (
+      _sessionId: string,
+      opts: { sourceProfileDir?: string } = {},
+    ) => {
+      h.leaseAcquireCalls += 1;
+      if (h.profileAcquisitionInterruption !== null) {
+        throw new OperatorProfileAcquisitionInterruptedError(
+          h.profileAcquisitionInterruption.reason,
+          h.profileAcquisitionInterruption.phase,
+        );
+      }
+      if (h.activeLeaseCount >= 2) {
+        throw new Error(
+          "operate_start capacity reached: 2 operator sessions are active; finish one and retry",
+        );
+      }
+      h.activeLeaseCount += 1;
+      const warm = h.warmLeaseProfileDir;
+      h.warmLeaseProfileDir = null;
+      const profileDir =
+        h.nextLeaseProfileDir ??
+        opts.sourceProfileDir ??
+        warm ??
+        `/tmp/trusty-squire-unit-profile-${process.pid}-${++h.leaseSerial}`;
+      h.nextLeaseProfileDir = null;
+      let finished = false;
+      return {
+        profileDir,
+        profileId: `unit-${h.leaseSerial}`,
+        seedGeneration: "unit-seed",
+        bindWorker: () => undefined,
+        returnWarm: async () => {
+          if (finished) return;
+          finished = true;
+          h.activeLeaseCount -= 1;
+          h.leaseReturnCalls += 1;
+          h.warmLeaseProfileDir = profileDir;
+        },
+        destroy: async () => {
+          if (finished) return;
+          finished = true;
+          h.activeLeaseCount -= 1;
+          h.leaseDestroyCalls += 1;
+        },
+        retain: async (destroyRequired = false) => {
+          if (finished) return;
+          finished = true;
+          h.activeLeaseCount -= 1;
+          h.leaseRetainCalls += 1;
+          h.leaseRetainDestroyRequired.push(destroyRequired);
+        },
+      };
+    },
+  };
+});
+
+// The Google-identity path (require_live_identity) never touches the
+// isolated clone pool above — it acquires the canonical profile directly.
+// A distinct mock (and its own call counters) keeps that boundary visible in
+// tests: a requireLiveIdentity session must NOT bump h.leaseAcquireCalls.
+vi.mock("../operator-direct-identity.js", () => {
+  class OperatorDirectIdentityAcquisitionInterruptedError extends Error {
+    readonly reason: "timeout" | "cancelled";
+    constructor(reason: "timeout" | "cancelled") {
+      super(`operator direct-identity acquisition ${reason}`);
+      this.reason = reason;
+    }
+  }
+  return {
+    OperatorDirectIdentityAcquisitionInterruptedError,
+    acquireDirectIdentityProfile: async (opts: { profileDir?: string } = {}) => {
+      h.directIdentityAcquireCalls += 1;
+      const profileDir = opts.profileDir ?? h.directIdentityProfileDir;
+      let finished = false;
+      const finish = (): void => {
+        if (finished) return;
+        finished = true;
+        h.directIdentityReleaseCalls += 1;
+      };
+      return {
+        profileDir,
+        takeProfileOperationLease: () => ({ release: () => undefined }),
+        bindWorker: () => undefined,
+        returnWarm: async () => finish(),
+        destroy: async () => finish(),
+        retain: async () => finish(),
+      };
+    },
+  };
+});
+
 import { chmodSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -698,8 +869,9 @@ import { createHash, generateKeyPairSync } from "node:crypto";
 import canonicalize from "canonicalize";
 import { exportJWK, SignJWT } from "jose";
 import { sealToRecipient } from "../payment-hpke.js";
-import { operatePayTool } from "../../tools/operate-pay.js";
+import { operatePayTool, operatePaymentStatusTool } from "../../tools/operate-pay.js";
 import { ApiClient } from "../../api-client.js";
+import { dispatchOperatorBrowserProcessTermination } from "../operator-browser-watchdog.js";
 import type { formSelectMany } from "../provision-session.js";
 import {
   startProvisionSession,
@@ -711,6 +883,7 @@ import {
   captchaGate,
   finishProvisionSession,
   finishProvisionSessionWithPreparation,
+  withPaymentSessionCall,
   withProvisionSessionCall,
   paymentSession,
   closeAllProvisionSessions,
@@ -720,7 +893,10 @@ import {
   replayOperatorRecipe,
   activeProvisionBrowserForPayment,
   activeCartCheckoutForOrigin,
+  armPaymentDispatchHandoff,
   cartAdd,
+  coordinatePaymentDispatchAudit,
+  finishPaymentDispatchHandoff,
   recordActivePaymentProvenance,
   setActivePendingCardFill,
   claimActivePaymentForOperatePay,
@@ -735,6 +911,9 @@ import {
   clearActivePendingCardFill,
   recipeTargetFor,
   captureObserved,
+  getActivePendingThreeDs,
+  setActivePendingThreeDs,
+  captureScreenshot,
 } from "../provision-session.js";
 import {
   isRecipeDomainLocked,
@@ -844,14 +1023,17 @@ beforeEach(() => {
   h.startCalls = 0;
   h.startGate = null;
   h.closeCalls = 0;
+  h.forceCloseCalls = 0;
   h.closeState = "closed";
   h.resetCalls = 0;
   h.resetFailuresRemaining = 0;
+  h.resetGate = null;
   h.profileProbeCalls = 0;
   h.controllerProviderProbeCalls = 0;
   h.workerEmail = null;
   h.connections = [];
   h.profileDirs = [];
+  h.proxyUrls = [];
   h.leaseSerial = 0;
   h.warmLeaseProfileDir = null;
   h.nextLeaseProfileDir = null;
@@ -899,6 +1081,7 @@ beforeEach(() => {
   };
   h.locatorClickCalls = 0;
   h.locatorTypeCalls = [];
+  h.capturedSealedFieldKeys = [];
   h.locatorResolveIntents = [];
   h.locatorDisposeCalls = 0;
   h.isPayPalHostedCheckout = false;
@@ -907,6 +1090,8 @@ beforeEach(() => {
   h.fillAndSubmitResult = { three_ds_required: false, order_confirmed: true };
   h.clearSealedPaymentFieldsCalls = 0;
   h.waitForThreeDsResult = "timeout";
+  h.waitForThreeDsCalls = [];
+  h.paymentInstrumentMismatch = null;
 });
 
 const replayRecipe = (overrides: Partial<OperatorRecipe> = {}): OperatorRecipe => ({
@@ -1076,7 +1261,8 @@ describe("prepared-statement replay", () => {
     // (moneyPath && paymentGuard !== "verified"). The manual-card-entry
     // refusal itself stays terminal; the profile is no longer force-destroyed
     // as a side effect of it.
-    expect(h.closeCalls).toBe(1);
+    expect(h.leaseReturnCalls).toBe(1);
+    expect(h.leaseDestroyCalls).toBe(0);
   });
 
   it("rejects fresh, wrong-index, and changed-binding replay continuations", async () => {
@@ -3280,6 +3466,8 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     await act(obs.session_id, { kind: "type_secret", target: "text=Password", slot: "login" });
     expect(h.locatorResolveIntents).toContain("type");
     expect(h.locatorTypeCalls).toEqual([{ text: "s3cr3t", sealed: true }]);
+    await captureScreenshot(obs.session_id);
+    expect(h.capturedSealedFieldKeys).toEqual([["Password"]]);
   });
 
   it("refuses to remember a session that used a locator fallback", async () => {
@@ -3419,7 +3607,7 @@ describe("operate session — manual card-entry guard", () => {
       slot: "sealed_card",
       target: "Sealed field",
     });
-    expect(h.typed).toEqual([{ selector: "#sealed", text: sealedPan }]);
+    expect(h.typed).toEqual([{ selector: "#sealed", text: sealedPan, sealed: true }]);
   });
 });
 
@@ -3638,7 +3826,7 @@ describe("operate_extract — vault-store response", () => {
 });
 
 describe("operate session — Change 5 precondition gate", () => {
-  it("fails closed after probing a fresh seeded profile when no live Google session exists", async () => {
+  it("fails closed after probing the canonical profile when no live Google session exists", async () => {
     h.providers = []; // no live session
     h.oauthStatus = "failed"; // and we cannot establish one
     const obs = await startProvisionSession({
@@ -3647,21 +3835,29 @@ describe("operate session — Change 5 precondition gate", () => {
     });
     expect(obs.needs_user).toBeDefined();
     expect(obs.needs_user?.wall).toBe("google_session");
-    expect(h.startCalls).toBe(1);
+    expect(h.startCalls).toBe(1); // the canonical profile itself was probed
     expect(h.started).toBe(0); // rejected before returning the handoff
     expect(h.gotos).toHaveLength(0);
   });
 
-  it("checks live identity in a fresh seeded profile", async () => {
+  // Regression: a requireLiveIdentity session must reach Google's session via
+  // the canonical profile directly — never a per-session clone from the
+  // isolated pool, which carries the seed's cookies but not whatever Google
+  // actually keys the session on. See operator-direct-identity.ts.
+  it("drives the canonical profile directly, never the isolated clone pool", async () => {
     h.providers = ["google"];
+    h.directIdentityProfileDir = "/tmp/trusty-squire-unit-canonical-profile-marker";
     const obs = await startProvisionSession({
       serviceUrl: "https://app.example.com/",
       requireLiveIdentity: true,
     });
     expect(obs.needs_user).toBeUndefined();
     expect(h.started).toBe(1);
-    expect(h.profileDirs.at(-1)).not.toBe("/tmp/trusty-squire-unit-canonical-profile");
+    expect(h.directIdentityAcquireCalls).toBe(1);
+    expect(h.leaseAcquireCalls).toBe(0); // the isolated pool was never touched
+    expect(h.profileDirs.at(-1)).toBe("/tmp/trusty-squire-unit-canonical-profile-marker");
     await finishProvisionSession(obs.session_id);
+    expect(h.directIdentityReleaseCalls).toBe(1);
   });
 
   it("proceeds normally when a live Google session exists", async () => {
@@ -3675,15 +3871,16 @@ describe("operate session — Change 5 precondition gate", () => {
     await finishProvisionSession(obs.session_id);
   });
 
-  it("uses the same fresh-profile lifecycle for ordinary sessions", async () => {
+  it("leaves the isolated clone pool in charge of ordinary (non-identity) sessions", async () => {
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-    expect(h.profileDirs).toHaveLength(1);
+    expect(h.leaseAcquireCalls).toBe(1);
+    expect(h.directIdentityAcquireCalls).toBe(0);
     await finishProvisionSession(obs.session_id);
   });
 });
 
-describe("operate session — ephemeral profile lifecycle", () => {
-  it("drains an entered session call and rejects new calls before finish", async () => {
+describe("operate session — isolated profile-pool lifecycle", () => {
+  it("drains an entered session call and rejects new calls before pooling", async () => {
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
     let releaseCall: (() => void) | undefined;
     const entered = withProvisionSessionCall(
@@ -3709,7 +3906,147 @@ describe("operate session — ephemeral profile lifecycle", () => {
     releaseCall?.();
     await entered;
     await finishing;
-    expect(h.resetCalls).toBe(0);
+    expect(h.resetCalls).toBe(1);
+  });
+
+  it("forces operate_finish teardown when an entered call never drains", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_DRAIN_TIMEOUT_MS", "50");
+    try {
+      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+      let releaseCall: (() => void) | undefined;
+      const entered = withProvisionSessionCall(
+        started.session_id,
+        async () =>
+          await new Promise<void>((resolve) => {
+            releaseCall = resolve;
+          }),
+      );
+      await vi.waitFor(() => expect(releaseCall).toBeTypeOf("function"));
+
+      const finishing = expect(finishProvisionSession(started.session_id)).rejects.toThrow(
+        /call drain timed out; browser terminated/,
+      );
+      await vi.advanceTimersByTimeAsync(50);
+      await finishing;
+
+      expect(h.closeCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+      expect(activeSessionCount()).toBe(0);
+      releaseCall?.();
+      await entered;
+    } finally {
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    }
+  });
+
+  it("forces disconnect teardown when an entered call never drains", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_DRAIN_TIMEOUT_MS", "50");
+    try {
+      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+      let releaseCall: (() => void) | undefined;
+      const entered = withProvisionSessionCall(
+        started.session_id,
+        async () =>
+          await new Promise<void>((resolve) => {
+            releaseCall = resolve;
+          }),
+      );
+      await vi.waitFor(() => expect(releaseCall).toBeTypeOf("function"));
+
+      const shutdown = closeAllProvisionSessions();
+      await vi.advanceTimersByTimeAsync(50);
+      await shutdown;
+
+      expect(h.closeCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+      expect(activeSessionCount()).toBe(0);
+      releaseCall?.();
+      await entered;
+    } finally {
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds finish preparation and audits pending 3DS before forced teardown", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS", "50");
+    try {
+      const auditPayment = vi.fn().mockResolvedValue({ id: "audit_timeout" });
+      const started = await startProvisionSession({
+        serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+        api: { auditPayment } as unknown as ApiClient,
+      });
+      setActivePendingThreeDs({
+        approval_id: "appr_timeout_3ds",
+        approval_url: "https://web.test/vault/pay/appr_timeout_3ds",
+        checkout: {
+          merchant: "Hibiya Kadan",
+          checkout_origin: "https://hibiyakadan.example.test",
+          amount_cents: 8_800,
+          currency: "JPY",
+        },
+        last4: "9192",
+        mandate_id: "mandate_timeout_3ds",
+        deadline: Date.now() + 60_000,
+      });
+      h.waitForThreeDsResult = "timeout";
+
+      const finishing = expect(
+        finishProvisionSessionWithPreparation(
+          started.session_id,
+          async () => await new Promise<never>(() => undefined),
+        ),
+      ).rejects.toThrow(/terminal transition timed out; browser terminated/);
+      await vi.advanceTimersByTimeAsync(50);
+      await finishing;
+
+      expect(h.waitForThreeDsCalls).toEqual([0]);
+      expect(auditPayment).toHaveBeenCalledWith(
+        expect.objectContaining({ status: "payment_3ds_unresolved" }),
+      );
+      expect(h.forceCloseCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+      expect(activeSessionCount()).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the profile lease reachable while a finishing page reset is forced closed", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS", "50");
+    let releaseReset: (() => void) | undefined;
+    h.resetGate = new Promise<void>((resolve) => {
+      releaseReset = resolve;
+    });
+    try {
+      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+      const finishing = expect(finishProvisionSession(started.session_id)).rejects.toThrow(
+        /terminal transition timed out; browser terminated/,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.resetCalls).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(50);
+      await finishing;
+
+      expect(h.forceCloseCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+    } finally {
+      releaseReset?.();
+      h.resetGate = null;
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    }
   });
 
   it("closes after a submitted confirmation throws and leaves stale confirming state", async () => {
@@ -3737,7 +4074,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
     ).resolves.toMatchObject({ finish: { closed: true }, prepared: "prepared" });
     expect(originalSession.activePayment).toBeNull();
     expect(originalSession.paymentFieldSealActive).toBe(false);
-    expect(h.closeCalls).toBe(1);
+    expect(h.leaseDestroyCalls).toBe(1);
   });
 
   it("closes unconditionally with an approval or filled card still resumable, clearing payment state", async () => {
@@ -3778,7 +4115,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
     });
     expect(originalApprovalSession.activePayment).toBeNull();
     expect(originalApprovalSession.paymentFieldSealActive).toBe(false);
-    expect(h.closeCalls).toBe(1);
+    expect(h.leaseDestroyCalls).toBe(1);
 
     const pendingSession = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
@@ -3802,7 +4139,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
     });
     expect(originalPendingSession.activePayment).toBeNull();
     expect(originalPendingSession.paymentFieldSealActive).toBe(false);
-    expect(h.closeCalls).toBe(2);
+    expect(h.leaseDestroyCalls).toBe(2);
 
     const retried = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
@@ -3814,7 +4151,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
     });
   });
 
-  it("creates a fresh isolated profile for each completed task", async () => {
+  it("reuses the warm isolated profile but cold-boots a fresh controller", async () => {
     const first = await startProvisionSession({
       serviceUrl: "https://app.example.com/one",
       proxyUrl: "http://proxy-a.test:8080",
@@ -3827,10 +4164,10 @@ describe("operate session — ephemeral profile lifecycle", () => {
     });
 
     expect(h.startCalls).toBe(2);
-    expect(h.resetCalls).toBe(0);
+    expect(h.resetCalls).toBeGreaterThanOrEqual(1);
     expect(h.profileProbeCalls).toBe(0);
     expect(h.controllerProviderProbeCalls).toBe(2);
-    expect(h.profileDirs[1]).not.toBe(h.profileDirs[0]);
+    expect(h.profileDirs[1]).toBe(h.profileDirs[0]);
     await finishProvisionSession(second.session_id);
   });
 
@@ -3851,6 +4188,18 @@ describe("operate session — ephemeral profile lifecycle", () => {
     await finishProvisionSession(next.session_id);
   });
 
+  it("passes an authenticated proxy only to the launched controller", async () => {
+    const proxy = "http://user:pass@proxy.test:8080";
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/one",
+      proxyUrl: proxy,
+    });
+
+    expect(h.proxyUrls).toEqual([proxy]);
+    expect(JSON.stringify(started)).not.toContain(proxy);
+    await finishProvisionSession(started.session_id);
+  });
+
   it("never reuses the prior closed controller", async () => {
     const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
     await finishProvisionSession(first.session_id);
@@ -3863,7 +4212,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
     await finishProvisionSession(second.session_id);
   });
 
-  it("does not use a reset step before destroying an isolated profile", async () => {
+  it("discards the isolated profile when its pre-close reset fails", async () => {
     const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
     h.resetFailuresRemaining = 1;
     await finishProvisionSession(first.session_id);
@@ -3876,24 +4225,26 @@ describe("operate session — ephemeral profile lifecycle", () => {
     await finishProvisionSession(second.session_id);
   });
 
-  it("destroys a payment-sealed profile without reusing it", async () => {
+  it("never pools a profile whose payment fields remain sealed", async () => {
     const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
     retainActivePaymentFieldSeal();
     await finishProvisionSession(first.session_id);
 
     const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
     expect(h.profileDirs[1]).not.toBe(h.profileDirs[0]);
-    expect(h.closeCalls).toBeGreaterThanOrEqual(1);
+    expect(h.leaseDestroyCalls).toBe(1);
     await finishProvisionSession(second.session_id);
   });
 
-  it("retains a sealed-payment directory when closure is unproven", async () => {
+  it("durably marks a sealed-payment profile when closure is unproven", async () => {
     h.closeState = "unknown";
     const session = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
     retainActivePaymentFieldSeal();
     await finishProvisionSession(session.session_id);
 
-    expect(h.closeCalls).toBe(1);
+    expect(h.leaseReturnCalls).toBe(0);
+    expect(h.leaseDestroyCalls).toBe(0);
+    expect(h.leaseRetainDestroyRequired).toEqual([true]);
   });
 
   it("uses the claimed worker's live email instead of seed-derived profile metadata", async () => {
@@ -3953,8 +4304,8 @@ describe("operate session — ephemeral profile lifecycle", () => {
     // 1.1.9-rc.27: one agent held an operator session mid-payment (parked on
     // a decoupled 3-D Secure approval wait) and a second agent's operate_start
     // starved behind it. The seed lock is only held for the brief scavenge +
-    // profile creation is private to each session, so a second start succeeds
-    // while the first is still open
+    // clone steps inside acquireOperatorProfile, never for a session's
+    // lifetime, so a second start must succeed while the first is still open
     // and awaiting approval.
     const first = await startProvisionSession({ serviceUrl: "https://shop.example.com/first" });
     const firstSession = paymentSession(first.session_id);
@@ -4057,14 +4408,21 @@ describe("operate session — ephemeral profile lifecycle", () => {
     await finishProvisionSession(second.session_id);
   });
 
-  it("starts a third task immediately without capacity waiting", async () => {
+  it("starts the same pending third task after one active lease finishes", async () => {
     vi.useFakeTimers();
     try {
       const [first, second] = await Promise.all([
         startProvisionSession({ serviceUrl: "https://app.example.com/one" }),
         startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
       ]);
-      const third = await startProvisionSession({ serviceUrl: "https://app.example.com/three" });
+      const thirdStart = startProvisionSession({ serviceUrl: "https://app.example.com/three" });
+      expect(h.leaseAcquireCalls).toBe(3);
+
+      expect(h.startCalls).toBe(2);
+      await finishProvisionSession(first.session_id);
+      await vi.advanceTimersByTimeAsync(50);
+
+      const third = await thirdStart;
       expect(h.startCalls).toBe(3);
       expect(h.profileDirs).toHaveLength(3);
       await finishProvisionSession(second.session_id);
@@ -4074,40 +4432,357 @@ describe("operate session — ephemeral profile lifecycle", () => {
     }
   });
 
-  it("does not serialize a third task behind active sessions", async () => {
+  it("times out a third task without launching another browser", async () => {
     vi.useFakeTimers();
     try {
       const [first, second] = await Promise.all([
         startProvisionSession({ serviceUrl: "https://app.example.com/one" }),
         startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
       ]);
-      const third = await startProvisionSession({ serviceUrl: "https://app.example.com/three" });
-      expect(h.startCalls).toBe(3);
-      expect(h.profileDirs).toHaveLength(3);
+      const thirdStart = startProvisionSession({ serviceUrl: "https://app.example.com/three" });
+      expect(h.leaseAcquireCalls).toBe(3);
+      const rejection = expect(thirdStart).rejects.toThrow("capacity wait timed out");
+
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      await rejection;
+      expect(h.startCalls).toBe(2);
+      expect(h.profileDirs).toHaveLength(2);
       await finishProvisionSession(first.session_id);
       await finishProvisionSession(second.session_id);
-      await finishProvisionSession(third.session_id);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("does not reap an active browser while a session is in flight", async () => {
+  it("reports a shared seed-lock deadline without blaming active capacity", async () => {
+    h.profileAcquisitionInterruption = {
+      reason: "timeout",
+      phase: "seed_lock",
+    };
+
+    await expect(startProvisionSession({ serviceUrl: "https://app.example.com/" })).rejects.toThrow(
+      "operate_start failed: start deadline exceeded while waiting to acquire the shared seed lock",
+    );
+    expect(h.startCalls).toBe(0);
+    expect(h.activeLeaseCount).toBe(0);
+  });
+
+  it("cancels a capacity waiter before shutdown frees an active slot", async () => {
+    vi.useFakeTimers();
+    try {
+      await Promise.all([
+        startProvisionSession({ serviceUrl: "https://app.example.com/one" }),
+        startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
+      ]);
+      const thirdStart = startProvisionSession({ serviceUrl: "https://app.example.com/three" });
+      expect(h.leaseAcquireCalls).toBe(3);
+      const rejection = expect(thirdStart).rejects.toThrow("operator server is shutting down");
+
+      await closeAllProvisionSessions();
+
+      await rejection;
+      expect(h.startCalls).toBe(2);
+      expect(h.profileDirs).toHaveLength(2);
+      expect(activeSessionCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("releases the abandoned session's shared profile lease so the next operate_start is not wedged", async () => {
     vi.useFakeTimers();
     try {
       const session = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+      expect(h.activeLeaseCount).toBe(1);
 
-      await vi.advanceTimersByTimeAsync(6 * 60 * 60 * 1_000);
+      // Regression for a bot-blocked task whose host abandoned the session
+      // while its stdio pipe stayed open. The server-level 12h grace cannot
+      // protect this case; the session watchdog must destroy its browser AND
+      // terminally release the active profile/seed-pool lease. Otherwise a
+      // dead session wedges every later operate_start until manual finish.
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1_000);
 
-      expect(h.closeCalls).toBe(0);
-      await finishProvisionSession(session.session_id);
-      await closeAllProvisionSessions();
+      expect(h.closeCalls).toBe(1);
+      expect(activeSessionCount()).toBe(0);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+      await expect(finishProvisionSession(session.session_id)).rejects.toThrow(
+        "unknown provision session",
+      );
+
+      const recovered = await startProvisionSession({
+        serviceUrl: "https://app.example.com/retry",
+      });
+      expect(h.leaseAcquireCalls).toBe(2);
+      expect(h.activeLeaseCount).toBe(1);
+      await finishProvisionSession(recovered.session_id);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("closes an active session during shutdown", async () => {
+  it("refreshes the idle deadline when the final active call completes", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_SESSION_IDLE_TIMEOUT_MS", "100");
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_BROWSER_WATCHDOG_INTERVAL_MS", "10");
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_BROWSER_MAX_LIFETIME_MS", "10000");
+    try {
+      const session = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+      let releaseCall: (() => void) | undefined;
+      const entered = withProvisionSessionCall(
+        session.session_id,
+        async () =>
+          await new Promise<void>((resolve) => {
+            releaseCall = resolve;
+          }),
+      );
+      await vi.waitFor(() => expect(releaseCall).toBeTypeOf("function"));
+
+      await vi.advanceTimersByTimeAsync(90);
+      releaseCall?.();
+      await entered;
+      await vi.advanceTimersByTimeAsync(90);
+      expect(h.closeCalls).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(10);
+      expect(h.closeCalls).toBe(1);
+      expect(activeSessionCount()).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    [
+      "maximum lifetime",
+      {
+        kind: "max_lifetime",
+        lifetime_ms: 30 * 60 * 1_000,
+        timeout_ms: 30 * 60 * 1_000,
+      },
+    ],
+    [
+      "CPU ceiling",
+      {
+        kind: "cpu_budget_exceeded",
+        cpu_percent: 800,
+        ceiling_percent: 200,
+        consecutive_samples: 3,
+      },
+    ],
+  ] as const)(
+    "defers %s watchdog teardown until an active payment call settles",
+    async (_label, reason) => {
+      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+      let releasePayment: (() => void) | undefined;
+      const payment = withPaymentSessionCall(
+        started.session_id,
+        async () =>
+          await new Promise<void>((resolve) => {
+            releasePayment = resolve;
+          }),
+      );
+      await vi.waitFor(() => expect(releasePayment).toBeTypeOf("function"));
+
+      let terminated = false;
+      const termination = dispatchOperatorBrowserProcessTermination("v1:1:mock-0", reason).then(
+        () => {
+          terminated = true;
+        },
+      );
+      await Promise.resolve();
+
+      expect(terminated).toBe(false);
+      expect(h.closeCalls).toBe(0);
+      expect(activeSessionCount()).toBe(1);
+
+      releasePayment?.();
+      await payment;
+      await termination;
+
+      expect(h.closeCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+      expect(activeSessionCount()).toBe(0);
+    },
+  );
+
+  it("forces the outer deadline while sharing an in-flight payment audit", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS", "50");
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_PENDING_3DS_FINALIZE_TIMEOUT_MS", "10");
+    let releaseAudit: (() => void) | undefined;
+    const auditPayment = vi.fn(
+      async (_input: unknown) =>
+        await new Promise<void>((resolve) => {
+          releaseAudit = resolve;
+        }),
+    );
+    try {
+      const started = await startProvisionSession({
+        serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+        api: { auditPayment } as unknown as ApiClient,
+      });
+      const selectedSession = paymentSession(started.session_id);
+      const state = {
+        approval_id: "appr_outer_deadline",
+        approval_url: "https://web.test/vault/pay/appr_outer_deadline",
+        checkout: {
+          merchant: "Hibiya Kadan",
+          checkout_origin: "https://hibiyakadan.example.test",
+          amount_cents: 8_800,
+          currency: "JPY",
+        },
+        last4: "9192",
+        mandate_id: "mandate_outer_deadline",
+        deadline: Date.now() + 60_000,
+      };
+      const payment = withPaymentSessionCall(started.session_id, async (session) => {
+        armPaymentDispatchHandoff(state, session);
+        setActivePendingThreeDs(state, session);
+        await coordinatePaymentDispatchAudit(
+          state,
+          async () => {
+            await auditPayment({ status: "payment_outcome_unknown" });
+          },
+          session,
+        );
+        finishPaymentDispatchHandoff(state, session);
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(auditPayment).toHaveBeenCalledOnce();
+
+      const termination = dispatchOperatorBrowserProcessTermination("v1:1:mock-0", {
+        kind: "max_lifetime",
+        lifetime_ms: 30 * 60 * 1_000,
+        timeout_ms: 30 * 60 * 1_000,
+      });
+      await vi.advanceTimersByTimeAsync(49);
+      expect(h.closeCalls).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(() =>
+        armPaymentDispatchHandoff(
+          {
+            ...state,
+            approval_id: "appr_after_outer_deadline",
+            approval_url: "https://web.test/vault/pay/appr_after_outer_deadline",
+          },
+          selectedSession,
+        ),
+      ).toThrow("closed before payment dispatch");
+      await vi.advanceTimersByTimeAsync(10);
+      await termination;
+
+      expect(h.waitForThreeDsCalls).toEqual([0]);
+      expect(auditPayment).toHaveBeenCalledOnce();
+      expect(h.closeCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+      expect(activeSessionCount()).toBe(0);
+
+      releaseAudit?.();
+      await payment;
+    } finally {
+      releaseAudit?.();
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds the pending 3DS final audit before watchdog teardown", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_SESSION_IDLE_TIMEOUT_MS", "100");
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_BROWSER_WATCHDOG_INTERVAL_MS", "10");
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_PENDING_3DS_FINALIZE_TIMEOUT_MS", "50");
+    const auditPayment = vi.fn(async () => await new Promise<never>(() => undefined));
+    try {
+      const session = await startProvisionSession({
+        serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+        api: { auditPayment } as unknown as ApiClient,
+      });
+      setActivePendingThreeDs(
+        {
+          approval_id: "appr_watchdog_3ds",
+          approval_url: "https://web.test/vault/pay/appr_watchdog_3ds",
+          checkout: {
+            merchant: "Hibiya Kadan",
+            checkout_origin: "https://hibiyakadan.example.test",
+            amount_cents: 8_800,
+            currency: "JPY",
+          },
+          last4: "9192",
+          mandate_id: "mandate_watchdog_3ds",
+          deadline: Date.now() + 60_000,
+        },
+        paymentSession(session.session_id),
+      );
+
+      await vi.advanceTimersByTimeAsync(150);
+
+      expect(h.waitForThreeDsCalls).toEqual([0]);
+      expect(auditPayment).toHaveBeenCalledOnce();
+      expect(h.closeCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+      expect(activeSessionCount()).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    }
+  });
+
+  it("hands a dispatch racing forced teardown to one terminal audit owner", async () => {
+    const auditPayment = vi.fn().mockResolvedValue({ id: "audit_dispatch_race" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: { auditPayment } as unknown as ApiClient,
+    });
+    const session = paymentSession(started.session_id);
+    const state = {
+      approval_id: "appr_dispatch_race",
+      approval_url: "https://web.test/vault/pay/appr_dispatch_race",
+      checkout: {
+        merchant: "Hibiya Kadan",
+        checkout_origin: "https://hibiyakadan.example.test",
+        amount_cents: 8_800,
+        currency: "JPY",
+      },
+      last4: "9192",
+      mandate_id: "mandate_dispatch_race",
+      deadline: Date.now() + 60_000,
+    };
+    armPaymentDispatchHandoff(state, session);
+
+    const closing = closeAllProvisionSessions();
+    await vi.waitFor(() =>
+      expect((session.terminalTeardownOwner as { forced: boolean } | null)?.forced).toBe(true),
+    );
+    setActivePendingThreeDs(state, session);
+    await closing;
+    await coordinatePaymentDispatchAudit(
+      state,
+      async () => {
+        await auditPayment({ status: "payment_outcome_unknown" });
+      },
+      session,
+    );
+    finishPaymentDispatchHandoff(state, session);
+
+    expect(h.waitForThreeDsCalls).toEqual([0]);
+    expect(auditPayment).toHaveBeenCalledOnce();
+    expect(auditPayment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approval_id: "appr_dispatch_race",
+        status: "payment_3ds_unresolved",
+      }),
+    );
+    expect(session.paymentDispatchHandoff).toBeNull();
+  });
+
+  it("closes an active session and its warm browser during shutdown", async () => {
     await startProvisionSession({ serviceUrl: "https://app.example.com/" });
     expect(activeSessionCount()).toBe(1);
 
@@ -4115,53 +4790,95 @@ describe("operate session — ephemeral profile lifecycle", () => {
 
     expect(activeSessionCount()).toBe(0);
     expect(h.closeCalls).toBe(1);
+    expect(h.leaseDestroyCalls).toBe(1);
+    expect(h.activeLeaseCount).toBe(0);
+
+    const recovered = await startProvisionSession({ serviceUrl: "https://app.example.com/retry" });
+    expect(h.activeLeaseCount).toBe(1);
+    await finishProvisionSession(recovered.session_id);
   });
 
-  it("waits for an in-progress browser launch and closes its controller", async () => {
+  it("force-closes an in-progress browser launch on non-Linux without awaiting startup", async () => {
+    const platform = process.platform;
+    Object.defineProperty(process, "platform", { configurable: true, value: "darwin" });
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_FORCE_CLOSE_TIMEOUT_MS", "25");
     let releaseStart: (() => void) | undefined;
     h.startGate = new Promise<void>((resolve) => {
       releaseStart = resolve;
     });
-    const startResult = startProvisionSession({ serviceUrl: "https://app.example.com/" }).then(
-      () => null,
-      (err: unknown) => err,
-    );
-    await vi.waitFor(() => expect(h.startCalls).toBe(1));
-
-    let shutdownSettled = false;
-    const shutdown = closeAllProvisionSessions().then(() => {
-      shutdownSettled = true;
-    });
-    await vi.waitFor(() => expect(h.closeCalls).toBe(1));
-    expect(shutdownSettled).toBe(false);
-
-    releaseStart?.();
-    await shutdown;
-
-    await expect(startResult).resolves.toEqual(
-      expect.objectContaining({
-        message: "operate_start cancelled: operator server is shutting down",
-      }),
-    );
-    expect(h.closeCalls).toBe(2);
-  });
-
-  it("does not age-reap an active task", async () => {
-    vi.useFakeTimers();
     try {
-      const session = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+      const startResult = startProvisionSession({ serviceUrl: "https://app.example.com/" }).then(
+        () => null,
+        (err: unknown) => err,
+      );
+      await vi.waitFor(() => expect(h.startCalls).toBe(1));
 
-      await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1_000);
-      expect(h.closeCalls).toBe(0);
+      await closeAllProvisionSessions();
 
-      await finishProvisionSession(session.session_id);
+      expect(h.forceCloseCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+
+      releaseStart?.();
+      await expect(startResult).resolves.toEqual(
+        expect.objectContaining({
+          message: "operate_start cancelled: operator server is shutting down",
+        }),
+      );
       expect(h.closeCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
     } finally {
-      vi.useRealTimers();
+      releaseStart?.();
+      vi.unstubAllEnvs();
+      Object.defineProperty(process, "platform", { configurable: true, value: platform });
     }
   });
 
-  it("uses a new profile for each clean completed task", async () => {
+  it("bounds startup timeout cleanup without awaiting a hung launch", async () => {
+    vi.stubEnv("BOT_START_TIMEOUT_MS", "25");
+    let releaseStart: (() => void) | undefined;
+    h.startGate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    try {
+      const startResult = startProvisionSession({ serviceUrl: "https://app.example.com/" }).then(
+        () => null,
+        (err: unknown) => err,
+      );
+      await vi.waitFor(() => expect(h.startCalls).toBe(1));
+
+      await expect(startResult).resolves.toEqual(
+        expect.objectContaining({
+          message: expect.stringContaining("browser did not launch within"),
+        }),
+      );
+      expect(h.forceCloseCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+
+      releaseStart?.();
+      await vi.waitFor(() => expect(h.closeCalls).toBe(1));
+      expect(h.leaseDestroyCalls).toBe(1);
+    } finally {
+      vi.unstubAllEnvs();
+      releaseStart?.();
+    }
+  });
+
+  it("hard-stops a session when the process watchdog reports maximum lifetime", async () => {
+    await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+
+    await dispatchOperatorBrowserProcessTermination("v1:1:mock-0", {
+      kind: "max_lifetime",
+      lifetime_ms: 30 * 60 * 1_000,
+      timeout_ms: 30 * 60 * 1_000,
+    });
+
+    expect(h.closeCalls).toBe(1);
+    expect(activeSessionCount()).toBe(0);
+  });
+
+  it("returns each clean closed profile through the lease boundary", async () => {
     for (let index = 0; index < 3; index += 1) {
       const session = await startProvisionSession({
         serviceUrl: `https://app.example.com/task-${index}`,
@@ -4169,11 +4886,13 @@ describe("operate session — ephemeral profile lifecycle", () => {
       await finishProvisionSession(session.session_id);
     }
 
-    expect(new Set(h.profileDirs).size).toBe(3);
+    expect(h.leaseAcquireCalls).toBe(3);
+    expect(h.leaseReturnCalls).toBe(3);
+    expect(h.leaseDestroyCalls).toBe(0);
   });
 
   it.each(["force_closed_unproven", "unknown"] as const)(
-    "retains a %s profile instead of deleting an unproven close",
+    "quarantines a %s profile instead of warming it",
     async (closeState) => {
       h.closeState = closeState;
       const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
@@ -4181,7 +4900,8 @@ describe("operate session — ephemeral profile lifecycle", () => {
 
       const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
       expect(h.profileDirs[1]).not.toBe(h.profileDirs[0]);
-      expect(h.closeCalls).toBe(1);
+      expect(h.leaseReturnCalls).toBe(0);
+      expect(h.leaseRetainCalls).toBe(1);
       await finishProvisionSession(second.session_id);
     },
   );
@@ -4333,6 +5053,7 @@ describe("operate session — captcha gate", () => {
     expect(res.settled).toBe(false);
     expect(res.needs_user?.gate).toBe("captcha_wall");
     expect(res.needs_user?.remedy).toMatch(/proxy|manual/i);
+    expect(res.needs_user?.remedy).toContain("operate_start");
   });
 
   it("executes invisible reCAPTCHA and waits for a response token", async () => {
@@ -5048,7 +5769,12 @@ describe("frame targets — domain-lock (operator-frame-support)", () => {
     stashSecretSlot(started.session_id, "login", "s3cr3t-value");
     await act(started.session_id, { kind: "type_secret", slot: "login", target: "Password" });
     expect(h.frameTypes).toEqual([
-      { frameUrl: SAME_DOMAIN_FRAME_URL, selector: "#password", text: "s3cr3t-value" },
+      {
+        frameUrl: SAME_DOMAIN_FRAME_URL,
+        selector: "#password",
+        text: "s3cr3t-value",
+        sealed: true,
+      },
     ]);
   });
 
@@ -5227,12 +5953,57 @@ describe("pending card-fill charge guard", () => {
   });
 
   it("serializes fill-card behind every other payment lease", async () => {
-    await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
     const claim = claimActivePaymentForOperatePay(undefined);
     if (claim.kind !== "lease") throw new Error("expected payment lease");
 
     expect(() => claimActivePaymentForOperatePay("fill_card")).toThrow(/already in progress/);
+    await expect(captureScreenshot(started.session_id)).rejects.toThrow(
+      "screenshot_unavailable_sealed_context",
+    );
+    expect(h.capturedSealedFieldKeys).toEqual([]);
     expect(releaseActivePaymentLease(claim.lease)).toBe(true);
+  });
+
+  it("refuses charge clicks while a prior 3DS outcome is unresolved", async () => {
+    h.elements = [
+      elem({ tag: "button", type: null, visibleText: "Place order", selector: "#place-order" }),
+      elem({ tag: "button", type: null, visibleText: "Continue to review", selector: "#next" }),
+    ];
+    h.visibleText = "Checkout";
+    const auditPayment = vi.fn().mockResolvedValue({ id: "audit_close" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+      api: { auditPayment } as unknown as ApiClient,
+    });
+    setActivePendingThreeDs({
+      approval_id: "appr_pending_charge",
+      approval_url: "https://web.test/vault/pay/appr_pending_charge",
+      checkout: pending.checkout,
+      last4: pending.last4,
+      deadline: Date.now() + 60_000,
+    });
+
+    await expect(act(started.session_id, { kind: "click", target: "Place order" })).rejects.toThrow(
+      /call operate_payment_status first/,
+    );
+    h.locatorResolve = {
+      ok: true,
+      text: "Place order",
+      labels: ["Place order"],
+      safetySignals: { billingObject: false, accountSetup: false },
+    };
+    await expect(
+      act(started.session_id, { kind: "js_click", target: "css=#place-order" }),
+    ).rejects.toThrow(/call operate_payment_status first/);
+    expect(h.clickCalls).toBe(0);
+    expect(h.locatorClickCalls).toBe(0);
+
+    await act(started.session_id, { kind: "click", target: "Continue to review" });
+    expect(h.clickCalls).toBe(1);
+    await finishProvisionSession(started.session_id);
   });
 
   it("transitions a successful fill-card lease to pending confirmation", async () => {
@@ -6055,6 +6826,392 @@ describe("operate_pay tool completion — resumes the SAME approval [P0]", () =>
       second.status,
     );
     expect(env.immediateApprovalReads).toEqual([false, true]);
+  });
+});
+
+// Regression coverage for the decoupled/out-of-band 3DS completion gap
+// (companion to pay-operator.test.ts's "a timed-out 3DS wait persists
+// resumable state" unit test): operate_payment_status must actually consume
+// that resumable state — re-checking the SAME live browser rather than
+// leaving it to rot once set.
+describe("operate_payment_status — resumable post-submit 3DS wait", () => {
+  const CHECKOUT = {
+    merchant: "Hibiya Kadan",
+    checkout_origin: "https://hibiyakadan.example.test",
+    amount_cents: 8_800,
+    currency: "JPY",
+  };
+  function buildThreeDsState(
+    deadline = Date.now() + 60_000,
+    payment_instrument_mismatch?: {
+      kind: "payment_instrument_mismatch";
+      confidence: "high" | "low";
+      evidence_used: Array<"last4" | "issuer" | "network">;
+      expected: { last4: string; issuer?: string; network?: string; label?: string };
+      observed: { last4?: string; issuer?: string; network?: string };
+      provenance: {
+        expected: {
+          last4: "released_card";
+          issuer?: "bin_metadata" | "vault_metadata" | "vault_label";
+          network?: "vault_metadata";
+          label?: "vault_label";
+        };
+        observed: "3ds_challenge";
+      };
+    },
+  ) {
+    return {
+      approval_id: "appr_3ds",
+      approval_url: "https://web.test/vault/pay/appr_3ds",
+      checkout: CHECKOUT,
+      last4: "9192",
+      mandate_id: "mandate_3ds",
+      deadline,
+      ...(payment_instrument_mismatch !== undefined ? { payment_instrument_mismatch } : {}),
+    };
+  }
+
+  function buildStatusEnv(): { api: ApiClient; auditBodies: Array<Record<string, unknown>> } {
+    const auditBodies: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/v1/vault/payments/audit") && init?.method === "POST") {
+        auditBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        return Response.json({ id: "audit_3ds" }, { status: 201 });
+      }
+      return Response.json({ error: "not_found" }, { status: 404 });
+    }) as typeof fetch;
+    const api = new ApiClient({
+      apiBaseUrl: "https://api.test",
+      registryBaseUrl: "https://registry.test",
+      agentSessionToken: "synthetic-session-token",
+      fetch: fetchMock,
+    });
+    return { api, auditBodies };
+  }
+
+  it("keeps checking the same live browser and clears state once the OOB challenge resolves", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+    });
+    const threeDsState = buildThreeDsState();
+    setActivePendingThreeDs(threeDsState);
+    expect(getActivePendingThreeDs()).toEqual(threeDsState);
+
+    h.waitForThreeDsResult = "timeout";
+    const pending = (await operatePaymentStatusTool.handler({}, env.api)) as Record<
+      string,
+      unknown
+    >;
+    expect(pending).toMatchObject({
+      status: "payment_3ds_pending",
+      next: { tool: "operate_payment_status", wait_seconds: 15 },
+    });
+    expect(getActivePendingThreeDs()).not.toBeNull();
+    expect(env.auditBodies).toHaveLength(0);
+
+    // The cardholder approves the OOB push between polls; a LATER
+    // operate_payment_status call must observe it via the SAME session's
+    // browser without operate_pay ever being called again.
+    h.waitForThreeDsResult = "succeeded";
+    const resolved = (await operatePaymentStatusTool.handler({}, env.api)) as Record<
+      string,
+      unknown
+    >;
+    expect(resolved).toMatchObject({
+      status: "payment_submitted",
+      audit_recorded: true,
+      merchant: CHECKOUT.merchant,
+      amount_cents: CHECKOUT.amount_cents,
+      currency: CHECKOUT.currency,
+    });
+    expect(getActivePendingThreeDs()).toBeNull();
+    expect(env.auditBodies).toEqual([
+      expect.objectContaining({
+        last4: "9192",
+        status: "payment_submitted",
+        approvalId: "appr_3ds",
+        mandateId: "mandate_3ds",
+      }),
+    ]);
+  });
+
+  it("keeps an ACS instrument-mismatch warning visible across 3DS status waits", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+    });
+    setActivePendingThreeDs(
+      buildThreeDsState(Date.now() + 60_000, {
+        kind: "payment_instrument_mismatch",
+        confidence: "high",
+        evidence_used: ["issuer"],
+        expected: { last4: "9192", issuer: "DBS" },
+        observed: { issuer: "ENBDX" },
+        provenance: {
+          expected: { last4: "released_card", issuer: "bin_metadata" },
+          observed: "3ds_challenge",
+        },
+      }),
+    );
+    h.waitForThreeDsResult = "timeout";
+
+    await expect(operatePaymentStatusTool.handler({}, env.api)).resolves.toMatchObject({
+      status: "payment_3ds_pending",
+      warning: {
+        kind: "payment_instrument_mismatch",
+        expected: { last4: "9192", issuer: "DBS" },
+        observed: { issuer: "ENBDX" },
+        provenance: {
+          expected: { last4: "released_card", issuer: "bin_metadata" },
+          observed: "3ds_challenge",
+        },
+      },
+    });
+    h.waitForThreeDsResult = "failed";
+    await operatePaymentStatusTool.handler({}, env.api);
+  });
+
+  it("persists mismatch evidence first observed by a resumable status poll", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: env.api,
+    });
+    setActivePendingThreeDs(buildThreeDsState());
+    h.paymentInstrumentMismatch = {
+      kind: "payment_instrument_mismatch",
+      confidence: "high",
+      evidence_used: ["last4"],
+      expected: { last4: "9192" },
+      observed: { last4: "0005" },
+      provenance: {
+        expected: { last4: "released_card" },
+        observed: "3ds_challenge",
+      },
+    };
+
+    await expect(operatePaymentStatusTool.handler({}, env.api)).resolves.toMatchObject({
+      status: "payment_3ds_pending",
+      warning: h.paymentInstrumentMismatch,
+    });
+    expect(getActivePendingThreeDs()).toMatchObject({
+      payment_instrument_mismatch: h.paymentInstrumentMismatch,
+    });
+  });
+
+  it("records a declined outcome and clears state when the OOB challenge fails", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+    });
+    setActivePendingThreeDs(buildThreeDsState());
+
+    h.waitForThreeDsResult = "failed";
+    const result = (await operatePaymentStatusTool.handler(
+      { wait_seconds: 15 },
+      env.api,
+    )) as Record<string, unknown>;
+
+    expect(result).toMatchObject({ status: "payment_declined", audit_recorded: true });
+    expect(getActivePendingThreeDs()).toBeNull();
+    expect(env.auditBodies).toEqual([expect.objectContaining({ status: "payment_declined" })]);
+  });
+
+  it("hands back an accurate unresolved status once the resumable deadline passes — never fabricates success", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+    });
+    setActivePendingThreeDs(buildThreeDsState(Date.now() - 1));
+
+    h.waitForThreeDsResult = "timeout";
+    const result = (await operatePaymentStatusTool.handler(
+      { wait_seconds: 15 },
+      env.api,
+    )) as Record<string, unknown>;
+
+    expect(result).toMatchObject({
+      status: "payment_3ds_unresolved",
+      audit_recorded: true,
+      needs_user: { wall: "3ds", resume: "checkout" },
+    });
+    expect(getActivePendingThreeDs()).toBeNull();
+    expect(env.auditBodies).toEqual([
+      expect.objectContaining({ status: "payment_3ds_unresolved" }),
+    ]);
+    expect(h.waitForThreeDsCalls).toEqual([0]);
+  });
+
+  it("retains expired 3DS state when its required terminal audit cannot be written", async () => {
+    const closeAuditPayment = vi.fn().mockResolvedValue({ id: "audit_close" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: { auditPayment: closeAuditPayment } as unknown as ApiClient,
+    });
+    const threeDsState = buildThreeDsState(Date.now() - 1);
+    setActivePendingThreeDs(threeDsState);
+    const auditPayment = vi.fn().mockRejectedValue(new Error("audit unavailable"));
+    h.waitForThreeDsResult = "timeout";
+
+    await expect(
+      operatePaymentStatusTool.handler({}, { auditPayment } as unknown as ApiClient),
+    ).rejects.toThrow("audit unavailable");
+    expect(auditPayment).toHaveBeenCalledTimes(1);
+    expect(getActivePendingThreeDs()).toEqual(threeDsState);
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("does not let a stale status call clear newer pending 3DS state", async () => {
+    const finishAuditPayment = vi.fn().mockResolvedValue({ id: "audit_finish" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: { auditPayment: finishAuditPayment } as unknown as ApiClient,
+    });
+    const oldState = buildThreeDsState(Date.now() - 1);
+    setActivePendingThreeDs(oldState);
+    h.waitForThreeDsResult = "timeout";
+
+    let signalFirstAuditStarted: (() => void) | undefined;
+    const firstAuditStarted = new Promise<void>((resolve) => {
+      signalFirstAuditStarted = resolve;
+    });
+    let releaseFirstAudit: (() => void) | undefined;
+    const firstAuditGate = new Promise<void>((resolve) => {
+      releaseFirstAudit = resolve;
+    });
+    const firstAuditPayment = vi.fn(async () => {
+      signalFirstAuditStarted?.();
+      await firstAuditGate;
+      return { id: "audit_first" };
+    });
+    const firstStatus = operatePaymentStatusTool.handler({}, {
+      auditPayment: firstAuditPayment,
+    } as unknown as ApiClient);
+    await firstAuditStarted;
+
+    const secondAuditPayment = vi.fn().mockResolvedValue({ id: "audit_second" });
+    await operatePaymentStatusTool.handler({}, {
+      auditPayment: secondAuditPayment,
+    } as unknown as ApiClient);
+    expect(getActivePendingThreeDs()).toBeNull();
+
+    const newerState = {
+      ...buildThreeDsState(),
+      approval_id: "appr_newer_3ds",
+      approval_url: "https://web.test/vault/pay/appr_newer_3ds",
+    };
+    setActivePendingThreeDs(newerState);
+    releaseFirstAudit?.();
+    await firstStatus;
+
+    expect(getActivePendingThreeDs()).toBe(newerState);
+    expect(firstAuditPayment).toHaveBeenCalledTimes(1);
+    expect(secondAuditPayment).toHaveBeenCalledTimes(1);
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("refuses a new operate_pay lease while a prior 3DS outcome is unresolved", async () => {
+    const auditPayment = vi.fn().mockResolvedValue({ id: "audit_finish" });
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: { auditPayment } as unknown as ApiClient,
+    });
+    const threeDsState = buildThreeDsState();
+    setActivePendingThreeDs(threeDsState);
+
+    expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(
+      /call operate_payment_status first/,
+    );
+    expect(getActivePendingThreeDs()).toEqual(threeDsState);
+    await finishProvisionSession(paymentSession().id);
+  });
+
+  it("checks and audits an unresolved 3DS charge before operate_finish closes the browser", async () => {
+    const auditPayment = vi.fn().mockResolvedValue({ id: "audit_finish" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: { auditPayment } as unknown as ApiClient,
+    });
+    setActivePendingThreeDs(buildThreeDsState());
+    h.waitForThreeDsResult = "timeout";
+
+    await expect(finishProvisionSession(started.session_id)).resolves.toMatchObject({
+      session_id: started.session_id,
+      closed: true,
+    });
+    expect(h.waitForThreeDsCalls).toEqual([0]);
+    expect(auditPayment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approval_id: "appr_3ds",
+        mandate_id: "mandate_3ds",
+        last4: "9192",
+        status: "payment_3ds_unresolved",
+      }),
+    );
+    expect(h.resetCalls).toBe(0);
+  });
+
+  it("retains the pending 3DS fence when finish preparation fails", async () => {
+    const auditPayment = vi.fn().mockResolvedValue({ id: "audit_finish" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: { auditPayment } as unknown as ApiClient,
+    });
+    const threeDsState = buildThreeDsState();
+    setActivePendingThreeDs(threeDsState);
+
+    await expect(
+      finishProvisionSessionWithPreparation(started.session_id, async () => {
+        throw new Error("preparation failed");
+      }),
+    ).rejects.toThrow("preparation failed");
+    expect(getActivePendingThreeDs()).toEqual(threeDsState);
+    expect(h.waitForThreeDsCalls).toEqual([]);
+    expect(auditPayment).not.toHaveBeenCalled();
+
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("checks and audits every pending 3DS charge during bulk session shutdown", async () => {
+    const firstAudit = vi.fn().mockResolvedValue({ id: "audit_first" });
+    const secondAudit = vi.fn().mockResolvedValue({ id: "audit_second" });
+    const [first, second] = await Promise.all([
+      startProvisionSession({
+        serviceUrl: "https://hibiyakadan.example.test/first",
+        api: { auditPayment: firstAudit } as unknown as ApiClient,
+      }),
+      startProvisionSession({
+        serviceUrl: "https://hibiyakadan.example.test/second",
+        api: { auditPayment: secondAudit } as unknown as ApiClient,
+      }),
+    ]);
+    setActivePendingThreeDs(buildThreeDsState(), paymentSession(first.session_id));
+    setActivePendingThreeDs(buildThreeDsState(), paymentSession(second.session_id));
+    h.waitForThreeDsResult = "timeout";
+
+    await closeAllProvisionSessions();
+
+    expect(h.waitForThreeDsCalls).toEqual([0, 0]);
+    expect(firstAudit).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "payment_3ds_unresolved" }),
+    );
+    expect(secondAudit).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "payment_3ds_unresolved" }),
+    );
+    expect(activeSessionCount()).toBe(0);
+  });
+
+  it("reports no_pending_payment once nothing is outstanding", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+    });
+
+    const result = (await operatePaymentStatusTool.handler({}, env.api)) as Record<string, unknown>;
+
+    expect(result).toMatchObject({ status: "no_pending_payment" });
   });
 });
 

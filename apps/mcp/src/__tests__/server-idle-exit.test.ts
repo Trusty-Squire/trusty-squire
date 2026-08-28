@@ -5,11 +5,12 @@
 // stdio or signaling it. shouldIdleExit is the pure decision function behind
 // the time-bound backstop for that case.
 //
-// A session left open by an abandoned server can only be freed by that server
-// itself exiting. shouldIdleExit therefore
+// An open provision session owns its own Chrome and profile. A session left
+// open by an abandoned server can only be freed by that server itself exiting.
+// shouldIdleExit therefore
 // uses a longer bound when a session is open rather than never exiting, but
 // still applies real teardown (closeAllProvisionSessions, which kills the
-// session-owned Chrome) once that longer bound is crossed.
+// leased Chrome) once that longer bound is crossed.
 
 import { describe, expect, it } from "vitest";
 import { shouldIdleExit } from "../server.js";

@@ -665,9 +665,8 @@ describe("confirmed login finalization", () => {
     expect(() => installClaimPollCompleted("expired")).toThrow(/expired/);
   });
 
-  it("records a confirmed login even when closure cannot publish a seed", async () => {
+  it("records a confirmed login without overwriting a snapshot that was not captured", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
-    const publishSeed = vi.fn();
     try {
       await finalizeLoginRun(
         {
@@ -675,62 +674,43 @@ describe("confirmed login finalization", () => {
           onConfirmedLogin: async () => markProviderLoggedIn("google", profileDir),
         },
         { status: "completed", closeState: "unknown" },
-        publishSeed,
       );
 
       expect(loggedInProviders(profileDir)).toEqual(["google"]);
-      expect(publishSeed).not.toHaveBeenCalled();
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }
   });
 
-  it("does not record or publish a timed-out login", async () => {
+  it("does not record a timed-out login", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
     const onConfirmedLogin = vi.fn();
-    const publishSeed = vi.fn();
     try {
       await finalizeLoginRun(
         { profileDir, onConfirmedLogin },
         { status: "timeout", closeState: "closed" },
-        publishSeed,
       );
 
       expect(onConfirmedLogin).not.toHaveBeenCalled();
-      expect(publishSeed).not.toHaveBeenCalled();
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }
   });
 
-  it("clears a stale snapshot after a plain completed login", async () => {
+  it("writes a full captured storage state for every completed login", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
-    const publishSeed = vi.fn();
     try {
       await finalizeLoginRun(
         { profileDir },
-        { status: "completed", closeState: "closed" },
-        publishSeed,
+        {
+          status: "completed",
+          closeState: "closed",
+          storageState: { cookies: [], origins: [] },
+        },
       );
-
-      expect(publishSeed).not.toHaveBeenCalled();
-    } finally {
-      rmSync(profileDir, { recursive: true, force: true });
-    }
-  });
-
-  it("persists a completed context-backed login snapshot", async () => {
-    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
-    const publishState = vi.fn();
-    const storageState = { cookies: [], origins: [] };
-    try {
-      await finalizeLoginRun(
-        { profileDir },
-        { status: "completed", closeState: "closed", storageState },
-        publishState,
+      expect(readFileSync(join(profileDir, "trusty-squire-session-state.json"), "utf8")).toContain(
+        '"origins":[]',
       );
-
-      expect(publishState).toHaveBeenCalledWith(profileDir, storageState);
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }

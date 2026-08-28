@@ -40,10 +40,8 @@ const DEFAULT_REGISTRY_BASE =
 // event.
 //
 // It also has to cover a server that still holds an open provision session.
-// Each session owns a private profile, so it cannot block another start, but
-// the browser still needs its bounded identity-proven teardown. Only the
-// owning server can run closeAllProvisionSessions and close that browser.
-// Hence two
+// Its browser is owned by that server, so only the owning server's bounded
+// terminal teardown can close Chrome and destroy its private profile. Hence two
 // bounds: a short one when idle with no session (routine), and a longer one
 // when a session is still open — wide enough that no real in-flight flow
 // (operate_pay no longer blocks a call for approval; verification polling is

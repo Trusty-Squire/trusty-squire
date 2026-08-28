@@ -32,13 +32,7 @@ Keep `CHROME_PROFILE_DIR` only as the interactive `connect`/`login` authoring pr
 
 Add a small `apps/mcp/src/bot/session-state.ts`. Its authoritative state file is `<CHROME_PROFILE_DIR>/trusty-squire-session-state.json`, written with mode `0600` by atomic temp-file + rename. It is Playwright storage-state JSON, not a profile copy.
 
-At start, `seedEphemeralProfile(canonical, fresh)` must:
-
-1. Create a unique `0700` directory with a `trusty-squire-operate-` mkdtemp prefix.
-2. Copy only `Local State` and schema-preserving clones of `Default/Cookies` and `Default/Network/Cookies`. Reuse the SQLite schema/table copier in `operator-profile-pool.ts:332-429`, but remove its Google-only filter and copy all cookie rows. Do not copy cache, history, tabs, extensions, GPU cache, or `Singleton*`.
-3. If the JSON snapshot exists, call `BrowserContext.setStorageState()` before the first target navigation. The installed Playwright type exposes restore plus `storageState({ indexedDB: true })` capture (`node_modules/.pnpm/playwright-core@1.59.1/.../types.d.ts:9407-9471`).
-
-The cookie DB bootstrap preserves existing users' login state before JSON exists and supports the plain-Chrome connect path. Apply JSON second so the latest session snapshot wins.
+At start, create a unique `0700` directory with a `trusty-squire-operate-` mkdtemp prefix and, if the JSON snapshot exists, call `BrowserContext.setStorageState()` before the first target navigation. The installed Playwright type exposes restore plus `storageState({ indexedDB: true })` capture (`node_modules/.pnpm/playwright-core@1.59.1/.../types.d.ts:9407-9471`). No Chrome cookie database or profile files are copied.
 
 Required coverage:
 
@@ -73,13 +67,13 @@ Preserve current call-drain, audit, payment, and session-removal ordering (`prov
 
 If the existing `profileRequiresDestroy` condition is true (`activePayment` or `paymentFieldSealActive`, `provision-session.ts:7522-7534`), close and destroy the profile but skip write-back. If close cannot be proved, retain that unique directory and report it; it is a disk leak, never a future-agent lock wedge.
 
-`connect`/`login` keeps editing the canonical authoring profile. On a successful context-backed login, write the JSON state as well. If the successful path is plain Chrome and has no context, delete stale JSON; the fresh canonical cookie DB then bootstraps the next operate session.
+`connect`/`login` keeps editing the canonical authoring profile. On a successful context-backed login, write the full JSON state as well. A plain Chrome path has no context to capture, so it preserves the existing snapshot rather than clearing saved logins.
 
 Write-back is deliberately **last writer wins**. Atomic rename prevents corruption; concurrent logins to the same merchant may lose the earlier update. Do not add a lock, merge protocol, or service to address that edge case.
 
 ## File-level changes
 
-1. Add `session-state.ts`: profile mkdir/seed, cookie-DB schema copy, state read/write, atomic snapshot persistence.
+1. Add `session-state.ts`: profile mkdir, state read/write, atomic snapshot persistence.
 2. In `browser.ts`, add optional input-state application and a narrow capture method; keep self-launch + CDP. Remove operator start's `profileOperationLease`/shared guard (`3110-3136`, `3266-3270`).
 3. In `provision-session.ts`, delete pool/direct lease acquisition, capacity waiters, warm release/reset, and use the ephemeral lifecycle above.
 4. In `google-login.ts`, replace `canPublishOperatorProfileSeed`/`publishOperatorProfileSeed` at `1163-1176` with state snapshot publication.
@@ -98,7 +92,7 @@ Keep only the small process-identity/close-proof helpers needed to kill an owned
 ## Tests and acceptance
 
 1. Three simultaneous `operate_start` calls receive three distinct profile paths and no capacity/seed-lock wait.
-2. A seed contains Google, GitHub, and merchant cookie rows, but no cache/history/Singleton files. JSON round-trips cookies, local storage, and IndexedDB; JSON overrides legacy DB bootstrap.
+2. Storage-state JSON round-trips cookies, local storage, and IndexedDB; no profile, cache, history, or SQLite-cookie bootstrap is used.
 3. A clean finish persists a login to a later fresh task, closes Chrome, and removes its profile. A payment/sealed session destroys without snapshot write-back. Unknown close retains only its unique directory.
 4. Two clean finishes leave one valid state file; the last completed snapshot is visible.
 5. Multiple observe/act calls on one session do not create a second browser/profile.
@@ -121,7 +115,7 @@ Ship the direct replacement, no new flag. `TRUSTY_SQUIRE_PROFILE_DIR` remains un
 ## What could go wrong
 
 - Current direct identity code says Google consoles can reject copied session state (`operator-direct-identity.ts:3-26`). A seeded `require_live_identity` regression plus read-only Firebase/GCP authenticated reachability smoke must pass. If it fails, report the incompatible mechanism; do not quietly restore the shared canonical fallback.
-- A plain successful login can otherwise leave JSON stale; delete it in that path.
+- A plain successful login has no context to capture; retain the prior snapshot rather than deleting saved logins.
 - Concurrent finish can lose one login update by design; it cannot corrupt storage.
 - IndexedDB snapshots can grow; measure their bytes, but never replace this design with cache/history copying.
 - Uncertain teardown can retain a directory; its uniqueness makes it non-blocking.

@@ -1747,8 +1747,8 @@ export const provisionFinishTool: Tool<z.infer<typeof finishSchema>> = {
     "without a reported outcome (and remains the default for compatibility); " +
     "'credentials' extracts and vault-stores a credential using required `store`; " +
     "'result' reports required `summary` or `data` and can verify_recipe before closing. " +
-    "All credential values remain server-side; after Chrome closes, an eligible clean profile " +
-    "may return to the closed warm slot for the next task.",
+    "All credential values remain server-side; after Chrome closes, its private per-session " +
+    "profile is destroyed. A clean session atomically saves portable login state for a later task.",
   inputSchema: finishSchema,
   jsonInputSchema: {
     type: "object",
