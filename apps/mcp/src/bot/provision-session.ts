@@ -493,6 +493,11 @@ interface CartIdentityContext {
   onActionReady?: () => void;
 }
 
+interface SessionTerminalTeardownOwner {
+  forced: boolean;
+  forcePromise: Promise<unknown | undefined> | null;
+}
+
 export interface Session {
   id: string;
   browser: BrowserController;
@@ -627,6 +632,7 @@ export interface Session {
   // exceeds the CPU budget.
   lastActivityAt: number;
   watchdog: OperatorBrowserWatchdog | null;
+  terminalTeardownOwner: SessionTerminalTeardownOwner | null;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -901,6 +907,29 @@ async function releaseWarmBrowserPage(
   }
 }
 
+async function forceReleaseWarmBrowserPage(browser: BrowserController): Promise<void> {
+  const slot = leasedBrowsers.get(browser);
+  if (slot !== undefined) leasedBrowsers.delete(browser);
+  const forceClose = (
+    browser as BrowserController & {
+      forceCloseOwnedProcessTree?: () => Promise<
+        "closed" | "force_closed_unproven" | "unknown"
+      >;
+    }
+  ).forceCloseOwnedProcessTree;
+  const closeState = await withTerminalTimeout(
+    forceClose === undefined ? browser.close() : forceClose.call(browser),
+    positiveTimeout(
+      "TRUSTY_SQUIRE_OPERATOR_FORCE_CLOSE_TIMEOUT_MS",
+      DEFAULT_OPERATOR_FORCE_CLOSE_TIMEOUT_MS,
+    ),
+    "operator browser force-close timed out",
+  ).catch(() => "unknown" as const);
+  if (slot === undefined) return;
+  if (closeState === "closed") await slot.lease.destroy();
+  else await slot.lease.retain(true);
+}
+
 async function closeLeasedBrowser(
   browser: BrowserController,
   lease: OperatorLease,
@@ -922,6 +951,8 @@ function stopSessionWatchdog(session: Session): void {
 
 const DEFAULT_SESSION_TERMINAL_DRAIN_TIMEOUT_MS = 5_000;
 const DEFAULT_PENDING_THREE_DS_FINALIZE_TIMEOUT_MS = 3_000;
+const DEFAULT_SESSION_TERMINAL_TRANSITION_TIMEOUT_MS = 30_000;
+const DEFAULT_OPERATOR_FORCE_CLOSE_TIMEOUT_MS = 3_000;
 
 function positiveTimeout(name: string, fallback: number): number {
   const value = Number(process.env[name]);
@@ -952,6 +983,26 @@ async function forceTerminateProvisionSession(
   detail: unknown,
   auditPendingThreeDs = true,
 ): Promise<unknown | undefined> {
+  const owner =
+    session.terminalTeardownOwner ??
+    (session.terminalTeardownOwner = { forced: false, forcePromise: null });
+  if (owner.forcePromise !== null) return await owner.forcePromise;
+  owner.forced = true;
+  owner.forcePromise = forceTerminateProvisionSessionOwned(
+    session,
+    event,
+    detail,
+    auditPendingThreeDs,
+  );
+  return await owner.forcePromise;
+}
+
+async function forceTerminateProvisionSessionOwned(
+  session: Session,
+  event: string,
+  detail: unknown,
+  auditPendingThreeDs: boolean,
+): Promise<unknown | undefined> {
   session.closing = true;
   if (sessions.get(session.id) === session) sessions.delete(session.id);
   stopSessionWatchdog(session);
@@ -971,7 +1022,7 @@ async function forceTerminateProvisionSession(
   session.activePayment = null;
   session.paymentFieldSealActive = false;
   session.pendingThreeDs = null;
-  await releaseWarmBrowserPage(session.browser, false).catch((error: unknown) => {
+  await forceReleaseWarmBrowserPage(session.browser).catch((error: unknown) => {
     if (terminalError === undefined) terminalError = error;
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(
@@ -2771,6 +2822,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     startedAt: Date.now(),
     lastActivityAt: Date.now(),
     watchdog: null,
+    terminalTeardownOwner: null,
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
     consentInboxRead: opts.consentInboxRead === true,
@@ -2880,6 +2932,7 @@ export async function startHarnessProvisionSession(
     startedAt: Date.now(),
     lastActivityAt: Date.now(),
     watchdog: null,
+    terminalTeardownOwner: null,
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
     consentInboxRead: false,
@@ -7816,10 +7869,16 @@ export async function finishProvisionSessionWithPreparation<T>(
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   if (session.closing) throw new Error(`provision session ${sessionId} is already closing`);
+  const owner: SessionTerminalTeardownOwner = { forced: false, forcePromise: null };
+  session.terminalTeardownOwner = owner;
   session.closing = true;
   stopSessionWatchdog(session);
-  let prepared: T;
-  try {
+  const timeoutMs = positiveTimeout(
+    "TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS",
+    DEFAULT_SESSION_TERMINAL_TRANSITION_TIMEOUT_MS,
+  );
+  let timer: NodeJS.Timeout | undefined;
+  const transition = (async (): Promise<PreparedFinishResult<T>> => {
     const drained = await waitForSessionCallsToDrain(session);
     if (!drained) {
       await forceTerminateProvisionSession(session, "finish_forced_terminate", {
@@ -7827,26 +7886,54 @@ export async function finishProvisionSessionWithPreparation<T>(
       });
       throw new Error(`provision session ${sessionId} call drain timed out; browser terminated`);
     }
-    prepared = await prepare();
+    const prepared = await prepare();
+    if (owner.forced || sessions.get(sessionId) !== session) {
+      throw new Error(`provision session ${sessionId} terminal transition was forced`);
+    }
+    const destroyProfile = profileRequiresDestroy(session);
+    try {
+      const finish = await closeFinishingProvisionSession(session, destroyProfile);
+      return { finish, prepared };
+    } catch (error) {
+      await forceTerminateProvisionSession(
+        session,
+        "finish_forced_terminate",
+        { reason: "terminal_close_failed" },
+        false,
+      );
+      throw error;
+    }
+  })();
+  try {
+    return await Promise.race([
+      transition,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          void forceTerminateProvisionSession(session, "finish_forced_terminate", {
+            reason: "terminal_transition_timeout",
+            timeout_ms: timeoutMs,
+          }).then(
+            () =>
+              reject(
+                new Error(
+                  `provision session ${sessionId} terminal transition timed out; browser terminated`,
+                ),
+              ),
+            reject,
+          );
+        }, timeoutMs);
+        timer.unref();
+      }),
+    ]);
   } catch (error) {
-    if (sessions.get(sessionId) === session) {
+    if (!owner.forced && sessions.get(sessionId) === session) {
       session.closing = false;
+      session.terminalTeardownOwner = null;
       startSessionWatchdog(session);
     }
     throw error;
-  }
-  const destroyProfile = profileRequiresDestroy(session);
-  try {
-    const finish = await closeFinishingProvisionSession(session, destroyProfile);
-    return { finish, prepared };
-  } catch (error) {
-    await forceTerminateProvisionSession(
-      session,
-      "finish_forced_terminate",
-      { reason: "terminal_close_failed" },
-      false,
-    );
-    throw error;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 

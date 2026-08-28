@@ -53,6 +53,7 @@ const h = vi.hoisted(() => ({
   startCalls: 0,
   startGate: null as Promise<void> | null,
   closeCalls: 0,
+  forceCloseCalls: 0,
   closeState: "closed" as "closed" | "force_closed_unproven" | "unknown",
   resetCalls: 0,
   resetFailuresRemaining: 0,
@@ -672,6 +673,12 @@ vi.mock("../browser.js", () => ({
       h.connections[this.index] = false;
       return h.closeState;
     }
+    async forceCloseOwnedProcessTree(): Promise<
+      "closed" | "force_closed_unproven" | "unknown"
+    > {
+      h.forceCloseCalls += 1;
+      return await this.close();
+    }
   },
   // Mirrors the real export — the pending-card-fill charge guard reads it.
   CHECKOUT_SUBMIT_LABEL_RE:
@@ -1003,6 +1010,7 @@ beforeEach(() => {
   h.startCalls = 0;
   h.startGate = null;
   h.closeCalls = 0;
+  h.forceCloseCalls = 0;
   h.closeState = "closed";
   h.resetCalls = 0;
   h.resetFailuresRemaining = 0;
@@ -3945,6 +3953,53 @@ describe("operate session — isolated profile-pool lifecycle", () => {
       expect(activeSessionCount()).toBe(0);
       releaseCall?.();
       await entered;
+    } finally {
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds finish preparation and audits pending 3DS before forced teardown", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS", "50");
+    try {
+      const auditPayment = vi.fn().mockResolvedValue({ id: "audit_timeout" });
+      const started = await startProvisionSession({
+        serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+        api: { auditPayment } as unknown as ApiClient,
+      });
+      setActivePendingThreeDs({
+        approval_id: "appr_timeout_3ds",
+        approval_url: "https://web.test/vault/pay/appr_timeout_3ds",
+        checkout: {
+          merchant: "Hibiya Kadan",
+          checkout_origin: "https://hibiyakadan.example.test",
+          amount_cents: 8_800,
+          currency: "JPY",
+        },
+        last4: "9192",
+        mandate_id: "mandate_timeout_3ds",
+        deadline: Date.now() + 60_000,
+      });
+      h.waitForThreeDsResult = "timeout";
+
+      const finishing = expect(
+        finishProvisionSessionWithPreparation(
+          started.session_id,
+          async () => await new Promise<never>(() => undefined),
+        ),
+      ).rejects.toThrow(/terminal transition timed out; browser terminated/);
+      await vi.advanceTimersByTimeAsync(50);
+      await finishing;
+
+      expect(h.waitForThreeDsCalls).toEqual([0]);
+      expect(auditPayment).toHaveBeenCalledWith(
+        expect.objectContaining({ status: "payment_3ds_unresolved" }),
+      );
+      expect(h.forceCloseCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+      expect(activeSessionCount()).toBe(0);
     } finally {
       vi.unstubAllEnvs();
       vi.useRealTimers();
