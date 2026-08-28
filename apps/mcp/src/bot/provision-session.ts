@@ -640,6 +640,7 @@ export interface Session {
   callDrainWaiters: Set<() => void>;
   paymentCallCount: number;
   paymentCallDrainWaiters: Set<() => void>;
+  paymentDispatchClosed: boolean;
   // Session ownership must be a resource boundary, not merely a convention for
   // cooperative hosts. The watchdog destroys this browser if its client goes
   // away without operate_finish, if it lives too long, or if its Chromium tree
@@ -1040,6 +1041,7 @@ async function forceTerminateProvisionSession(
   detail: unknown,
   auditPendingThreeDs = true,
 ): Promise<unknown | undefined> {
+  session.paymentDispatchClosed = true;
   const owner =
     session.terminalTeardownOwner ??
     (session.terminalTeardownOwner = {
@@ -2958,6 +2960,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     callDrainWaiters: new Set(),
     paymentCallCount: 0,
     paymentCallDrainWaiters: new Set(),
+    paymentDispatchClosed: false,
     startedAt: Date.now(),
     lastActivityAt: Date.now(),
     watchdog: null,
@@ -3071,6 +3074,7 @@ export async function startHarnessProvisionSession(
     callDrainWaiters: new Set(),
     paymentCallCount: 0,
     paymentCallDrainWaiters: new Set(),
+    paymentDispatchClosed: false,
     startedAt: Date.now(),
     lastActivityAt: Date.now(),
     watchdog: null,
@@ -3272,7 +3276,10 @@ export function armPaymentDispatchHandoff(
   selectedSession?: Session,
 ): void {
   const session = selectedSession ?? activeProvisionSession();
-  if (session.closing && session.paymentCallCount === 0) {
+  if (
+    session.paymentDispatchClosed ||
+    (session.closing && session.paymentCallCount === 0)
+  ) {
     throw new Error(`provision session ${session.id} closed before payment dispatch`);
   }
   let resolveSettled = (): void => undefined;

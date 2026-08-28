@@ -6,6 +6,7 @@ import {
   isOperatorChromiumCommand,
   operatorBrowserMarkerStartedAt,
   type OperatorBrowserProcessRecord,
+  type OperatorBrowserWatchdogReason,
 } from "../operator-browser-watchdog.js";
 
 describe("operator browser process watchdog", () => {
@@ -104,6 +105,54 @@ describe("operator browser process watchdog", () => {
     await vi.waitFor(() => expect(killed).toEqual([205]));
   });
 
+  it("lets session teardown own marked processes beyond the old process grace", async () => {
+    vi.useFakeTimers();
+    const marker = createOperatorBrowserMarker(1_000, "active-payment");
+    let processes: OperatorBrowserProcessRecord[] = [
+      { pid: 206, parentPid: 1, startTime: 45, cpuTicks: 0, marker },
+    ];
+    const readProcesses = vi.fn(() => processes);
+    const kill = vi.fn();
+    let releaseSessionTeardown: (() => void) | undefined;
+    const sessionTeardown = vi.fn(
+      async () =>
+        await new Promise<void>((resolve) => {
+          releaseSessionTeardown = resolve;
+        }),
+    );
+    const watchdog = new OperatorBrowserProcessWatchdog({
+      readProcesses,
+      processMatches: (pid, startTime, expectedMarker) =>
+        processes.some(
+          (record) =>
+            record.pid === pid &&
+            record.startTime === startTime &&
+            record.marker === expectedMarker,
+        ),
+      kill,
+      onTerminate: sessionTeardown,
+      maxLifetimeMs: 10_000,
+    });
+
+    try {
+      expect(await watchdog.check(11_000)).toEqual([
+        { kind: "max_lifetime", lifetime_ms: 10_000, timeout_ms: 10_000 },
+      ]);
+      await vi.waitFor(() => expect(releaseSessionTeardown).toBeTypeOf("function"));
+
+      await vi.advanceTimersByTimeAsync(7_001);
+      expect(kill).not.toHaveBeenCalled();
+
+      processes = [];
+      releaseSessionTeardown?.();
+      await vi.waitFor(() => expect(readProcesses).toHaveBeenCalledTimes(2));
+      expect(kill).not.toHaveBeenCalled();
+    } finally {
+      releaseSessionTeardown?.();
+      vi.useRealTimers();
+    }
+  });
+
   it("revalidates process birth and marker identity before signaling", async () => {
     const marker = createOperatorBrowserMarker(1_000, "reused");
     const kill = vi.fn();
@@ -162,6 +211,60 @@ describe("operator browser process watchdog", () => {
     });
     await Promise.resolve();
     expect(terminate).toHaveBeenCalledOnce();
+  });
+
+  it("shares session teardown already started by the session watchdog", async () => {
+    let processTerminate:
+      | ((reason: OperatorBrowserWatchdogReason) => void | Promise<void>)
+      | undefined;
+    let releaseSessionTeardown: (() => void) | undefined;
+    const terminate = vi.fn(
+      async () =>
+        await new Promise<void>((resolve) => {
+          releaseSessionTeardown = resolve;
+        }),
+    );
+    const watchdog = new OperatorBrowserWatchdog({
+      startedAt: 0,
+      lastActivityAt: () => 0,
+      hasActiveCall: () => true,
+      processMarker: () => "v1:1:shared-session",
+      onTerminate: terminate,
+      maxLifetimeMs: 30_000,
+      intervalMs: 60_000,
+      registerProcessWatchdog: (_marker, onTerminate) => {
+        processTerminate = onTerminate;
+        return () => undefined;
+      },
+    });
+    watchdog.start();
+
+    try {
+      expect(watchdog.check(30_000)?.kind).toBe("max_lifetime");
+      await vi.waitFor(() => expect(releaseSessionTeardown).toBeTypeOf("function"));
+
+      let processTerminationSettled = false;
+      const processTermination = Promise.resolve(
+        processTerminate?.({
+          kind: "max_lifetime",
+          lifetime_ms: 30_000,
+          timeout_ms: 30_000,
+        }),
+      ).then(() => {
+        processTerminationSettled = true;
+      });
+      await Promise.resolve();
+
+      expect(processTerminationSettled).toBe(false);
+      expect(terminate).toHaveBeenCalledOnce();
+
+      releaseSessionTeardown?.();
+      await processTermination;
+      expect(processTerminationSettled).toBe(true);
+    } finally {
+      releaseSessionTeardown?.();
+      watchdog.dispose();
+    }
   });
 
   it("encodes a durable launch timestamp in every marker", () => {

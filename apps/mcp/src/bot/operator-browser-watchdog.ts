@@ -73,7 +73,6 @@ export interface OperatorBrowserProcessWatchdogOptions {
   cpuCeilingPercent?: number;
   cpuConsecutiveSamples?: number;
   ticksPerSecond?: number;
-  terminationGraceMs?: number;
 }
 
 function positiveEnvNumber(name: string, fallback: number): number {
@@ -266,7 +265,6 @@ export class OperatorBrowserProcessWatchdog {
   private readonly cpuCeilingPercent: number;
   private readonly cpuConsecutiveSamples: number;
   private readonly ticksPerSecond: number;
-  private readonly terminationGraceMs: number;
   private readonly samples = new Map<string, MarkerCpuState>();
   private readonly terminating = new Set<string>();
   private timer: NodeJS.Timeout | null = null;
@@ -287,7 +285,6 @@ export class OperatorBrowserProcessWatchdog {
     this.cpuCeilingPercent = options.cpuCeilingPercent ?? config.cpuCeilingPercent;
     this.cpuConsecutiveSamples = options.cpuConsecutiveSamples ?? config.cpuConsecutiveSamples;
     this.ticksPerSecond = options.ticksPerSecond ?? LINUX_PROCESS_TICKS_PER_SECOND;
-    this.terminationGraceMs = options.terminationGraceMs ?? 7_000;
   }
 
   start(): void {
@@ -373,20 +370,11 @@ export class OperatorBrowserProcessWatchdog {
       `[operator] process watchdog terminate marker=${marker} reason=${JSON.stringify(reason)}\n`,
     );
     if (this.options.onTerminate !== undefined) {
-      let timer: NodeJS.Timeout | undefined;
       try {
-        await Promise.race([
-          Promise.resolve(this.options.onTerminate(marker, reason)),
-          new Promise<void>((resolve) => {
-            timer = setTimeout(resolve, this.terminationGraceMs);
-            timer.unref();
-          }),
-        ]);
+        await this.options.onTerminate(marker, reason);
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         process.stderr.write(`[operator] process watchdog teardown failed: ${detail}\n`);
-      } finally {
-        if (timer !== undefined) clearTimeout(timer);
       }
     }
     const current = this.readProcesses().filter((record) => record.marker === marker);
@@ -446,6 +434,7 @@ export class OperatorBrowserWatchdog {
   private timer: NodeJS.Timeout | null = null;
   private unregisterProcessWatchdog: (() => void) | null = null;
   private terminated = false;
+  private terminationPromise: Promise<void> | null = null;
 
   constructor(private readonly options: OperatorBrowserWatchdogOptions) {
     const config = operatorBrowserWatchdogConfig();
@@ -504,19 +493,24 @@ export class OperatorBrowserWatchdog {
     reason: OperatorBrowserWatchdogReason,
   ): OperatorBrowserWatchdogReason {
     if (this.terminated) return reason;
-    this.terminated = true;
-    this.stop();
-    void Promise.resolve(this.options.onTerminate(reason)).catch((error: unknown) => {
-      const detail = error instanceof Error ? error.message : String(error);
-      process.stderr.write(`[operator] browser watchdog teardown failed: ${detail}\n`);
-    });
+    void this.beginTermination(reason);
     return reason;
   }
 
   private async terminateAndWait(reason: OperatorBrowserWatchdogReason): Promise<void> {
-    if (this.terminated) return;
+    await this.beginTermination(reason);
+  }
+
+  private beginTermination(reason: OperatorBrowserWatchdogReason): Promise<void> {
+    if (this.terminationPromise !== null) return this.terminationPromise;
     this.terminated = true;
     this.stop();
-    await this.options.onTerminate(reason);
+    this.terminationPromise = (async () => await this.options.onTerminate(reason))().catch(
+      (error: unknown) => {
+        const detail = error instanceof Error ? error.message : String(error);
+        process.stderr.write(`[operator] browser watchdog teardown failed: ${detail}\n`);
+      },
+    );
+    return this.terminationPromise;
   }
 }

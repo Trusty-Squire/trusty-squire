@@ -4624,6 +4624,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
         serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
         api: { auditPayment } as unknown as ApiClient,
       });
+      const selectedSession = paymentSession(started.session_id);
       const state = {
         approval_id: "appr_outer_deadline",
         approval_url: "https://web.test/vault/pay/appr_outer_deadline",
@@ -4661,6 +4662,16 @@ describe("operate session — isolated profile-pool lifecycle", () => {
       expect(h.closeCalls).toBe(0);
 
       await vi.advanceTimersByTimeAsync(1);
+      expect(() =>
+        armPaymentDispatchHandoff(
+          {
+            ...state,
+            approval_id: "appr_after_outer_deadline",
+            approval_url: "https://web.test/vault/pay/appr_after_outer_deadline",
+          },
+          selectedSession,
+        ),
+      ).toThrow("closed before payment dispatch");
       await vi.advanceTimersByTimeAsync(10);
       await termination;
 
