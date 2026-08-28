@@ -698,7 +698,6 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
   const storageState = readSessionState(canonicalProfileDir);
   const controller = new BrowserController({
     profileDir,
-    ephemeralProfile: true,
     ...(storageState === undefined ? {} : { storageState }),
     ...(opts.proxyUrl !== undefined ? { proxyUrl: opts.proxyUrl } : {}),
   });

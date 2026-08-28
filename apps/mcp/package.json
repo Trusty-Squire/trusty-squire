@@ -74,7 +74,7 @@
     "open": "^10.1.0",
     "ora": "^8.1.1",
     "patchright": "^1.60.2",
-    "playwright": "^1.49.0",
+    "playwright": "^1.59.0",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "rebrowser-playwright-core": "^1.52.0",

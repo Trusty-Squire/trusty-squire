@@ -39,18 +39,14 @@ import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import { Socket, createServer } from "node:net";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { isSameRecipeDomain } from "@trusty-squire/recipe-schema";
 import {
-  acquireFreeProfileOperationGuard,
-  CHROME_PROFILE_DIR,
   clearStaleSingletonLock,
   closeProfileWithProof,
   currentProfileHolderPid,
-  launchWithProfileGate,
   processBirthIdentity,
   processBirthIdentityState,
-  profilePathIdentity,
   profileProcessIdentity,
   profileProcessIdentityState,
   profileProcessMatches,
@@ -60,9 +56,7 @@ import {
   signalProfileProcess,
   type ProfileProcessIdentity,
   type ProcessIdentityState,
-  type ProfileOperationLease,
   type ProfileCloseState,
-  waitForProfileFree,
 } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
@@ -2148,13 +2142,8 @@ export interface BrowserControllerOptions {
   // and should be disabled in unit tests so they run fast and
   // deterministically.
   humanize?: boolean;
-  // Persistent Chrome profile directory. Signup runs launch from this
-  // profile so an OAuth signup reuses the Google session google-login.ts
-  // established. Defaults to CHROME_PROFILE_DIR.
+  // Per-session persistent Chrome profile directory. Required by start().
   profileDir?: string;
-  profileOperationLease?: ProfileOperationLease;
-  /** A freshly-created operator profile: never coordinate on its Chrome lock. */
-  ephemeralProfile?: boolean;
   /** Portable login state restored before the first navigation. */
   storageState?: BrowserStorageState;
   // Per-launch egress override. A session may supply its own proxy without
@@ -2621,8 +2610,6 @@ const selfManagedChromes = new Map<number, SelfManagedChrome>();
 const ownedChromeProcessTrees = new Set<OwnedChromeProcessTreeProof>();
 let selfManagedCleanupInstalled = false;
 let selfManagedTerminationSignalExitEnabled = true;
-let orphanVerifierReapRan = false;
-const orphanOperatorProfilesReaped = new Set<string>();
 
 function cleanupSelfManagedChromes(): void {
   for (const proof of ownedChromeProcessTrees) {
@@ -2995,110 +2982,6 @@ export async function terminateTrackedProfileChild(
     }
   }
   return identity;
-}
-
-// Stale verifier/operator browsers are the expensive leak mode: if the MCP process dies
-// mid-verify, self-launched Chrome survives as PPID=1 with a
-// ~/.trusty-squire/profiles/verify-* or ~/.trusty-squire/chrome-profile
-// user-data-dir. It keeps the profile lock,
-// burns memory, and may leave defunct helper children. A live verifier should
-// never be parented to init, so these are safe to reap at the next browser
-// startup. Best-effort and Linux-only; failure must not block signups.
-export function matchesReapableBrowserArgs(
-  args: string,
-  profileDirs: readonly string[],
-  includeVerifier: boolean,
-): boolean {
-  return reapableBrowserProfile(args, profileDirs, includeVerifier) !== null;
-}
-
-function reapableBrowserProfile(
-  args: string,
-  profileDirs: readonly string[],
-  includeVerifier: boolean,
-): string | null {
-  if (!/(?:chrome|chromium)/i.test(args)) return null;
-  const configuredProfiles = new Map(
-    profileDirs.map((profileDir) => [profileDir, profilePathIdentity(profileDir)]),
-  );
-  const match = /--user-data-dir=(?:"([^"]+)"|'([^']+)'|([^\s]+))(?=\s|$)/.exec(args);
-  const candidate = match?.[1] ?? match?.[2] ?? match?.[3];
-  if (candidate !== undefined) {
-    const identity = profilePathIdentity(candidate);
-    if ([...configuredProfiles.values()].includes(identity)) return identity;
-    if (includeVerifier && /[/\\]\.trusty-squire[/\\]profiles[/\\]verify-[^/\\]+$/.test(identity)) {
-      return identity;
-    }
-  }
-  for (const [profileDir, identity] of configuredProfiles) {
-    for (const exactPath of new Set([profileDir, identity])) {
-      const variants = [exactPath, `"${exactPath}"`, `'${exactPath}'`];
-      if (
-        variants.some((variant) => {
-          const option = `--user-data-dir=${variant}`;
-          const offset = args.indexOf(option);
-          return (
-            offset >= 0 &&
-            /\s|$/.test(args.slice(offset + option.length, offset + option.length + 1))
-          );
-        })
-      ) {
-        return identity;
-      }
-    }
-  }
-  return null;
-}
-
-export function claimOrphanBrowserReapScope(profileDir: string): {
-  includeVerifier: boolean;
-  profileDirs: string[];
-} | null {
-  const includeVerifier = !orphanVerifierReapRan;
-  const profileDirs = [...new Set([CHROME_PROFILE_DIR, profileDir])].filter(
-    (candidate) => !orphanOperatorProfilesReaped.has(candidate),
-  );
-  if (!includeVerifier && profileDirs.length === 0) return null;
-  orphanVerifierReapRan = true;
-  for (const candidate of profileDirs) orphanOperatorProfilesReaped.add(candidate);
-  return { includeVerifier, profileDirs };
-}
-
-function reapOrphanedBrowsersOnce(profileDir: string): void {
-  if (process.platform !== "linux") return;
-  const scope = claimOrphanBrowserReapScope(profileDir);
-  if (scope === null) return;
-  let rows = "";
-  try {
-    rows = execFileSync("ps", ["-eo", "pid=,ppid=,args="], {
-      stdio: ["ignore", "pipe", "ignore"],
-    }).toString("utf8");
-  } catch {
-    return;
-  }
-  const identities: ProfileProcessIdentity[] = [];
-  for (const line of rows.split("\n")) {
-    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
-    if (match === null) continue;
-    const pid = Number(match[1]);
-    const ppid = Number(match[2]);
-    const args = match[3] ?? "";
-    const expectedProfile = reapableBrowserProfile(args, scope.profileDirs, scope.includeVerifier);
-    if (Number.isFinite(pid) && ppid === 1 && expectedProfile !== null) {
-      const identity = profileProcessIdentity(pid, expectedProfile);
-      if (identity !== null) identities.push(identity);
-    }
-  }
-  if (identities.length === 0) return;
-  console.error(`[operator] reaping ${identities.length} orphaned Chrome process(es)`);
-  for (const identity of identities) {
-    signalProfileProcess(identity, identity.user_data_dir, "SIGTERM");
-  }
-  setTimeout(() => {
-    for (const identity of identities) {
-      signalProfileProcess(identity, identity.user_data_dir, "SIGKILL");
-    }
-  }, 2_000).unref();
 }
 
 // Classify an anti-bot interstitial page from its (title + body) text.
@@ -3506,7 +3389,6 @@ export class BrowserController {
   // True once a local browser context launched this session.
   private launchedContext = false;
   private launchedProfileHolderIdentity: ProfileProcessIdentity | null = null;
-  private profileOperationLease: ProfileOperationLease | null = null;
   private startPromise: Promise<void> | null = null;
   private closePromise: Promise<ProfileCloseState> | null = null;
   private startCancellationRequested = false;
@@ -3599,7 +3481,6 @@ export class BrowserController {
   }
 
   private readonly profileDir: string;
-  private readonly ephemeralProfile: boolean;
   private readonly storageState: BrowserStorageState | undefined;
 
   // The replay harness owns this context so it can route the storefront from a
@@ -3631,9 +3512,7 @@ export class BrowserController {
 
   constructor(opts: BrowserControllerOptions = {}) {
     this.humanize = opts.humanize ?? true;
-    this.profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
-    this.profileOperationLease = opts.profileOperationLease ?? null;
-    this.ephemeralProfile = opts.ephemeralProfile === true;
+    this.profileDir = opts.profileDir ?? "";
     this.storageState = opts.storageState;
     this.proxyOverride =
       opts.proxyUrl !== undefined && opts.proxyUrl.trim().length > 0 ? opts.proxyUrl.trim() : null;
@@ -3653,16 +3532,6 @@ export class BrowserController {
   // Per-launch egress override. null means direct egress. Explicit overrides
   // are never subject to host-network classification.
   private readonly proxyOverride: string | null;
-
-  // Warm reuse is deliberately narrow: a browser belongs to exactly one
-  // persistent profile and one explicit egress override. Undefined/blank proxy
-  // values both mean direct egress.
-  matchesLaunchOptions(opts: Pick<BrowserControllerOptions, "profileDir" | "proxyUrl">): boolean {
-    const profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
-    const proxyUrl =
-      opts.proxyUrl !== undefined && opts.proxyUrl.trim().length > 0 ? opts.proxyUrl.trim() : null;
-    return this.profileDir === profileDir && this.proxyOverride === proxyUrl;
-  }
 
   operatorBrowserMarker(): string {
     this.operatorProcessMarker ??= createOperatorBrowserMarker();
@@ -3992,6 +3861,9 @@ export class BrowserController {
   }
 
   async start(): Promise<void> {
+    if (this.profileDir.length === 0) {
+      throw new Error("BrowserController.start requires a per-session profile directory");
+    }
     if (this.closePromise !== null) throw new Error("BrowserController is already closing");
     this.startPromise ??= this.startOnce();
     await this.startPromise;
@@ -4000,26 +3872,15 @@ export class BrowserController {
   private async startOnce(): Promise<void> {
     const remoteMode = (process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0;
     if (!remoteMode) startGlobalOperatorBrowserProcessWatchdog();
-    const lease =
-      this.profileOperationLease ??
-      (remoteMode || this.ephemeralProfile ? null : await acquireFreeProfileOperationGuard(this.profileDir));
-    this.profileOperationLease = lease;
     try {
-      await this.startWithProfileGuard();
+      await this.startBrowser();
       if (this.startCancellationRequested) {
-        await this.closeWithProfileGuard();
+        await this.closeBrowser();
         throw new Error("BrowserController start cancelled");
       }
     } catch (err) {
       if (this.startCancellationRequested && this.persistentFallbackCancellationState === null) {
-        await this.closeWithProfileGuard().catch(() => undefined);
-      }
-      if (
-        this.persistentFallbackCancellationState === null ||
-        this.persistentFallbackCancellationState === "closed"
-      ) {
-        this.profileOperationLease = null;
-        lease?.release();
+        await this.closeBrowser().catch(() => undefined);
       }
       throw err;
     } finally {
@@ -4036,9 +3897,8 @@ export class BrowserController {
     this.startLaunchCommitted = true;
   }
 
-  private async startWithProfileGuard(): Promise<void> {
+  private async startBrowser(): Promise<void> {
     this.throwIfStartCancelled();
-    if (!this.ephemeralProfile) reapOrphanedBrowsersOnce(this.profileDir);
     const channel = await detectChromiumChannel();
     this.throwIfStartCancelled();
     this.launchedChannel = channel;
@@ -4088,19 +3948,9 @@ export class BrowserController {
     // narrow for its startup and CPU cost.
     this.launchedMode = "headless";
 
-    if (!this.ephemeralProfile) {
-      const free = await waitForProfileFree(this.profileDir, { deadlineMs: 0 });
-      this.throwIfStartCancelled();
-      if (!free) {
-        throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
-      }
-    }
-
-    // T3: a PERSISTENT context. The profile dir carries the user's
-    // Google session (established by `mcp login` — see google-login.ts),
-    // so the OAuth-first signup path reuses it instead of starting
-    // logged-out. launchPersistentContext takes launch + context
-    // options in one call.
+    // T3: a PERSISTENT context backed by this operator session's unique
+    // profile. launchPersistentContext takes launch + context options in one
+    // call.
     // Resolve the launcher first so activeStealthProfile is set before we
     // decide on executablePath below.
     const launcher = getChromium();
@@ -4160,18 +4010,16 @@ export class BrowserController {
         [OPERATOR_BROWSER_MARKER_ENV]: this.operatorBrowserMarker(),
       };
       const launch = () => {
-          this.throwIfStartCancelled();
-          return this.launchSelfManagedContext({
-            binary: selfLaunchBinary,
-            args: launchArgs,
-            proxy,
-            env: selfEnv,
-            window,
-          });
-        };
-      context = this.ephemeralProfile
-        ? await launch()
-        : await launchWithProfileGate(this.profileDir, launch, { failFast: true });
+        this.throwIfStartCancelled();
+        return this.launchSelfManagedContext({
+          binary: selfLaunchBinary,
+          args: launchArgs,
+          proxy,
+          env: selfEnv,
+          window,
+        });
+      };
+      context = await launch();
       try {
         await context.grantPermissions(grantedPermissions);
         if (geo?.geolocation !== undefined) {
@@ -4226,14 +4074,7 @@ export class BrowserController {
       const outcome = await (async () => {
         try {
           return await launchCancellablePersistentContext({
-            launch: (options) =>
-              this.ephemeralProfile
-                ? launcher.launchPersistentContext(this.profileDir, options)
-                : launchWithProfileGate(
-                    this.profileDir,
-                    () => launcher.launchPersistentContext(this.profileDir, options),
-                    { failFast: true },
-                  ),
+            launch: (options) => launcher.launchPersistentContext(this.profileDir, options),
             options: {
               headless: OPERATOR_BROWSER_HEADLESS,
               env: {
@@ -4308,7 +4149,7 @@ export class BrowserController {
       }
     }
     if (this.startCancellationRequested) {
-      await this.closeWithProfileGuard();
+      await this.closeBrowser();
       throw new Error("BrowserController start cancelled");
     }
     // Speed: optionally abort heavy/irrelevant requests before any navigation.
@@ -16365,37 +16206,19 @@ export class BrowserController {
       if (tracked?.proof === proof) selfManagedChromes.delete(proof.identity.pid);
       if (this.ownedChromeProcessTreeProof === proof) this.ownedChromeProcessTreeProof = null;
     }
-    const lease = this.profileOperationLease;
-    this.profileOperationLease = null;
-    lease?.release();
     return closed ? "closed" : "unknown";
   }
 
   private async closeCancelledStart(): Promise<ProfileCloseState> {
     void this.reapCancelledStartProcess().catch(() => undefined);
     if (this.persistentFallbackCancellationState !== null) {
-      const closeState = this.persistentFallbackCancellationState;
-      if (closeState === "closed") {
-        const lease = this.profileOperationLease;
-        this.profileOperationLease = null;
-        lease?.release();
-      }
-      return closeState;
+      return this.persistentFallbackCancellationState;
     }
     if (!this.startLaunchCommitted) {
-      const closeState = await this.closeWithProfileGuard();
-      const lease = this.profileOperationLease;
-      this.profileOperationLease = null;
-      lease?.release();
+      const closeState = await this.closeBrowser();
       return this.startSettled ? closeState : "unknown";
     }
-    const closeState = await this.closeWithProfileGuard();
-    if (this.startSettled) {
-      const lease = this.profileOperationLease;
-      this.profileOperationLease = null;
-      lease?.release();
-    }
-    return closeState;
+    return await this.closeBrowser();
   }
 
   private async reapCancelledStartProcess(): Promise<void> {
@@ -16427,7 +16250,7 @@ export class BrowserController {
     if (holderPid === null) return null;
     const identity = profileProcessIdentity(holderPid, this.profileDir);
     if (identity === null) return null;
-    if (!this.startCancellationRequested || this.profileOperationLease !== null) return identity;
+    if (!this.startCancellationRequested) return identity;
     return operatorBrowserProcessMatchesMarker(identity.pid, this.operatorBrowserMarker())
       ? identity
       : null;
@@ -16441,7 +16264,6 @@ export class BrowserController {
     if (
       proof.state === "owned" &&
       this.startCancellationRequested &&
-      this.profileOperationLease === null &&
       !operatorBrowserProcessMatchesMarker(proof.identity.pid, this.operatorBrowserMarker())
     ) {
       return { state: "unknown" };
@@ -16460,7 +16282,6 @@ export class BrowserController {
         const controllerOwnsIdentity =
           identity !== null &&
           (!this.startCancellationRequested ||
-            this.profileOperationLease !== null ||
             operatorBrowserProcessMatchesMarker(identity.pid, this.operatorBrowserMarker()));
         if (identity !== null && controllerOwnsIdentity) {
           this.launchedProfileHolderIdentity = identity;
@@ -16510,16 +16331,10 @@ export class BrowserController {
       await Promise.race([this.startPromise.catch(() => undefined), this.startCancellation]);
     }
     if (this.startCancellationRequested) return await this.closeCancelledStart();
-    try {
-      return await this.closeWithProfileGuard();
-    } finally {
-      const lease = this.profileOperationLease;
-      this.profileOperationLease = null;
-      lease?.release();
-    }
+    return await this.closeBrowser();
   }
 
-  private async closeWithProfileGuard(): Promise<ProfileCloseState> {
+  private async closeBrowser(): Promise<ProfileCloseState> {
     if (this.harnessAttachedPage) {
       this.page = null;
       this.primaryPage = null;

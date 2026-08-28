@@ -220,13 +220,6 @@ vi.mock("../browser.js", () => ({
       h.startCalls += 1;
       if (h.startGate !== null) await h.startGate;
     }
-    matchesLaunchOptions(opts: { profileDir?: string; proxyUrl?: string }): boolean {
-      const proxy = (value: string | undefined): string | null => value?.trim() || null;
-      return (
-        this.opts.profileDir === opts.profileDir &&
-        proxy(this.opts.proxyUrl) === proxy(opts.proxyUrl)
-      );
-    }
     isConnected(): boolean {
       return h.connections[this.index] === true;
     }
