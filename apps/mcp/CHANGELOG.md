@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.13-rc.9 (2026-08-28)
+
+- fix(mcp): contain runaway operator browsers (#596)
+
 ## 1.1.13-rc.8 (2026-08-27)
 
 - fix(mcp): Node 26 better-sqlite3 prebuild so @next installs without a source build (#594)
