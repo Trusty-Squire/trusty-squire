@@ -97,7 +97,20 @@ export interface SafeObservationIndexV2 {
  */
 export interface SafeObservationBaselineV2 {
   stage: SafeStageV2;
+  semantics: SafePageSemanticsV2;
   byRef: Map<string, SafeControlV2>;
+}
+
+/**
+ * Semantic essentials are sticky across V2 deltas. A repeat observation only
+ * needs to carry them when their already-sealed representation changed; the
+ * consumer retains the prior title/heading just like it retains safe_table.
+ */
+export function equalSafePageSemanticsV2(
+  left: SafePageSemanticsV2,
+  right: SafePageSemanticsV2,
+): boolean {
+  return left.title === right.title && (left.headings?.[0] ?? "") === (right.headings?.[0] ?? "");
 }
 
 type WireControlV2 = [string, string, string | null, string | null, string?, string?];
@@ -249,7 +262,7 @@ export function diffSafeControlsV2(
  */
 export function encodeV2Delta(args: {
   stage: SafeStageV2;
-  semantics?: SafePageSemanticsV2;
+  semantics?: SafePageSemanticsV2 | undefined;
   delta: SafeObservationDeltaV2;
 }): Record<string, unknown> | null {
   const payload: Record<string, unknown> = {

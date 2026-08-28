@@ -368,7 +368,8 @@ const COMPACT_V2_CONTRACT =
   "call operate_observe_query with those task words; it returns matching actionable refs without revealing " +
   "page labels, values, snapshots, or raw DOM. Use overflow.next_cursor to page. `detail:full` does not bypass this seal while V2 is enabled; " +
   "set TRUSTY_SQUIRE_OBSERVE_V2=off for the legacy format. A delta:true delta retains the preceding V2 table, then upserts tuple rows in safe_table, " +
-  "removes refs in removed, and updates stage only when stage is present. A delta with none of those fields means the safe map is unchanged. ";
+  "removes refs in removed, and updates stage or semantic only when either changed. Omitted semantic title/heading remains from the preceding V2 page. " +
+  "A delta with none of those fields means the sealed view is unchanged. ";
 
 export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   name: "operate_start",

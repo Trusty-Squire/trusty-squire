@@ -43,6 +43,7 @@ import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2c
 import {
   buildSafeControlsV2,
   diffSafeControlsV2,
+  equalSafePageSemanticsV2,
   encodeV2Delta,
   encodeV2Page,
   safePageSemanticsV2,
@@ -4679,17 +4680,24 @@ function compactV2Observation(
   // Only this enum-only index survives to delta/query/action resolution.
   session.compactV2Index = index;
   session.compactV2Refs = safe.byRef;
-  session.compactV2Previous = { stage, byRef: new Map(safe.rows.map((row) => [row.ref, row])) };
+  session.compactV2Previous = {
+    stage,
+    semantics,
+    byRef: new Map(safe.rows.map((row) => [row.ref, row])),
+  };
   session.prevObserve = null;
   if (previous !== null) {
     const delta = encodeV2Delta({
       stage,
-      semantics,
+      // The first V2 page establishes semantic essentials. On a delta they
+      // are sticky, so resend only a sealed semantic change rather than the
+      // same title/heading on every harmless re-observe.
+      semantics: equalSafePageSemanticsV2(previous.semantics, semantics) ? undefined : semantics,
       delta: diffSafeControlsV2(previous, stage, safe.rows),
     });
     // A high-churn delta is less useful than a fresh paged map.  This also
     // guarantees any overflow remains in the MCP cursor protocol.
-    if (delta !== null) return { ...(delta as unknown as Observation), url: "", text: "" };
+    if (delta !== null) return delta as unknown as Observation;
   }
   const page = encodeV2Page({
     sessionId: session.id,
@@ -4698,7 +4706,7 @@ function compactV2Observation(
     rows: index.rows,
     cursorFor: (offset) => compactV2Cursor(session, generation, offset),
   });
-  return { ...(page.payload as unknown as Observation), url: "", text: "" };
+  return page.payload as unknown as Observation;
 }
 
 /**
@@ -4720,10 +4728,10 @@ function compactV2UnavailableObservation(
   if (previous !== null && previous.stage === stage) {
     const delta = encodeV2Delta({
       stage,
-      semantics,
+      semantics: equalSafePageSemanticsV2(previous.semantics, semantics) ? undefined : semantics,
       delta: { added: [], changed: [], removed: [], stageChanged: false },
     });
-    if (delta !== null) return { ...(delta as unknown as Observation), url: "", text: "" };
+    if (delta !== null) return delta as unknown as Observation;
   }
   const index: SafeObservationIndexV2 = {
     generation,
@@ -4735,7 +4743,7 @@ function compactV2UnavailableObservation(
   };
   session.compactV2Index = index;
   session.compactV2Refs = new Map();
-  session.compactV2Previous = { stage, byRef: new Map() };
+  session.compactV2Previous = { stage, semantics, byRef: new Map() };
   const page = encodeV2Page({
     sessionId: session.id,
     stage,
@@ -4743,7 +4751,7 @@ function compactV2UnavailableObservation(
     rows: [],
     cursorFor: (offset) => compactV2Cursor(session, generation, offset),
   });
-  return { ...(page.payload as unknown as Observation), url: "", text: "" };
+  return page.payload as unknown as Observation;
 }
 
 export async function observeQuery(

@@ -5,6 +5,7 @@ import {
   OBSERVE_V2_MAX_WIRE_BYTES,
   buildSafeControlsV2,
   diffSafeControlsV2,
+  equalSafePageSemanticsV2,
   encodeV2Delta,
   encodeV2Page,
   safePageSemanticsV2,
@@ -212,6 +213,19 @@ describe("compact observation v2", () => {
     expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThan(80);
   });
 
+  it("keeps unchanged semantic essentials sticky instead of repeating them in every delta", () => {
+    const semantics = { title: "Example storefront", headings: ["Create your account"] };
+    expect(equalSafePageSemanticsV2(semantics, { ...semantics, headings: ["Create your account"] })).toBe(true);
+    expect(equalSafePageSemanticsV2(semantics, { title: "Different page", headings: ["Create your account"] })).toBe(false);
+    const delta = encodeV2Delta({
+      stage: "form",
+      semantics: undefined,
+      delta: { added: [], changed: [], removed: [], stageChanged: false },
+    });
+    expect(delta).toEqual({ format: "compact-v2", delta: true });
+    expect(Buffer.byteLength(JSON.stringify(delta), "utf8")).toBeLessThan(40);
+  });
+
   it("emits only safe upserts and removed refs for a structural delta", () => {
     const planted = "4111111111111111 CVV=123 merchant=Northwind";
     const before = {
@@ -224,7 +238,7 @@ describe("compact observation v2", () => {
     const changed = { ...before, action: "submit" as const };
     const added = { ...before, ref: "@e:added", field: "email" as const };
     const delta = diffSafeControlsV2(
-      { stage: "form", byRef: new Map([[before.ref, before], ["@e:removed", before]]) },
+      { stage: "form", semantics: {}, byRef: new Map([[before.ref, before], ["@e:removed", before]]) },
       "form",
       [changed, added],
     );
