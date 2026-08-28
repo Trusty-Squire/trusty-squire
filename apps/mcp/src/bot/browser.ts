@@ -565,7 +565,9 @@ function checkoutOutcomeBaselineFromDispatchSnapshot(
   };
 }
 
-function parseCheckoutOutcomeDispatchSnapshot(value: unknown): CheckoutOutcomeDispatchSnapshot | null {
+function parseCheckoutOutcomeDispatchSnapshot(
+  value: unknown,
+): CheckoutOutcomeDispatchSnapshot | null {
   if (value === null || typeof value !== "object") return null;
   const snapshot = value as { url?: unknown; urls?: unknown };
   if (
@@ -3472,8 +3474,7 @@ export class BrowserController {
   private paymentInstrumentExpectation: PaymentInstrumentExpectation | undefined;
   private observedPaymentInstrumentMismatch: PaymentInstrumentMismatch | undefined;
   private checkoutSubmitSequence = 0;
-  private readonly checkoutSubmitDispatchBindingName =
-    `__trustySquirePaymentSubmitDispatch_${randomUUID().replaceAll("-", "")}`;
+  private readonly checkoutSubmitDispatchBindingName = `__trustySquirePaymentSubmitDispatch_${randomUUID().replaceAll("-", "")}`;
   private readonly checkoutSubmitDispatchBindingPages = new WeakSet<Page>();
   private readonly checkoutSubmitDispatchWaiters = new Map<string, CheckoutSubmitDispatchWaiter>();
   private clickDispatchSequence = 0;
@@ -3818,10 +3819,7 @@ export class BrowserController {
           this.childChromeProcessGroup,
         );
         if (this.childChromeIdentity !== null) {
-          this.adoptOwnedChromeProcessTree(
-            this.childChromeIdentity,
-            this.childChromeProcessGroup,
-          );
+          this.adoptOwnedChromeProcessTree(this.childChromeIdentity, this.childChromeProcessGroup);
         }
         let chromeStderr = "";
         let chromeExit = "";
@@ -11600,22 +11598,23 @@ export class BrowserController {
 
   private async ensureCheckoutSubmitDispatchBinding(page: Page): Promise<void> {
     if (this.checkoutSubmitDispatchBindingPages.has(page)) return;
-    await page.exposeBinding(
-      this.checkoutSubmitDispatchBindingName,
-      (source, payload: unknown) => {
-        if (payload === null || typeof payload !== "object") return;
-        const candidate = payload as { token?: unknown; nonce?: unknown; snapshot?: unknown };
-        if (typeof candidate.token !== "string" || typeof candidate.nonce !== "string") return;
-        const waiter = this.checkoutSubmitDispatchWaiters.get(candidate.token);
-        if (waiter === undefined || waiter.frame !== source.frame || waiter.nonce !== candidate.nonce) {
-          return;
-        }
-        const snapshot = parseCheckoutOutcomeDispatchSnapshot(candidate.snapshot);
-        if (snapshot === null) return;
-        waiter.resolve(snapshot);
-        waiter.report();
-      },
-    );
+    await page.exposeBinding(this.checkoutSubmitDispatchBindingName, (source, payload: unknown) => {
+      if (payload === null || typeof payload !== "object") return;
+      const candidate = payload as { token?: unknown; nonce?: unknown; snapshot?: unknown };
+      if (typeof candidate.token !== "string" || typeof candidate.nonce !== "string") return;
+      const waiter = this.checkoutSubmitDispatchWaiters.get(candidate.token);
+      if (
+        waiter === undefined ||
+        waiter.frame !== source.frame ||
+        waiter.nonce !== candidate.nonce
+      ) {
+        return;
+      }
+      const snapshot = parseCheckoutOutcomeDispatchSnapshot(candidate.snapshot);
+      if (snapshot === null) return;
+      waiter.resolve(snapshot);
+      waiter.report();
+    });
     this.checkoutSubmitDispatchBindingPages.add(page);
   }
 
@@ -11751,11 +11750,12 @@ export class BrowserController {
                   const dispatchBinding = (
                     window as unknown as Record<
                       string,
-                      ((payload: {
-                        token: string;
-                        nonce: string;
-                        snapshot: CheckoutOutcomeDispatchSnapshot;
-                      }) => Promise<void>) | undefined
+                      | ((payload: {
+                          token: string;
+                          nonce: string;
+                          snapshot: CheckoutOutcomeDispatchSnapshot;
+                        }) => Promise<void>)
+                      | undefined
                     >
                   )[bindingName];
                   if (typeof dispatchBinding === "function") {
@@ -11834,24 +11834,23 @@ export class BrowserController {
               { baselineStorageKey: dispatchBaselineStorageKey, token: dispatchToken },
             )
             .catch(() => null);
-          if (
-            parseCheckoutOutcomeDispatchSnapshot(snapshot) === null
-          ) {
-            return null;
-          }
-          return checkoutOutcomeBaselineFromDispatchSnapshot(snapshot);
+          const parsedSnapshot = parseCheckoutOutcomeDispatchSnapshot(snapshot);
+          return parsedSnapshot === null
+            ? null
+            : checkoutOutcomeBaselineFromDispatchSnapshot(parsedSnapshot);
         };
-        const readBoundDispatchOutcomeBaseline = async (): Promise<CheckoutOutcomeBaseline | null> => {
-          let timer: ReturnType<typeof setTimeout> | undefined;
-          const snapshot = await Promise.race([
-            boundDispatch,
-            new Promise<null>((resolve) => {
-              timer = setTimeout(() => resolve(null), 250);
-            }),
-          ]);
-          if (timer !== undefined) clearTimeout(timer);
-          return snapshot === null ? null : checkoutOutcomeBaselineFromDispatchSnapshot(snapshot);
-        };
+        const readBoundDispatchOutcomeBaseline =
+          async (): Promise<CheckoutOutcomeBaseline | null> => {
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const snapshot = await Promise.race([
+              boundDispatch,
+              new Promise<null>((resolve) => {
+                timer = setTimeout(() => resolve(null), 250);
+              }),
+            ]);
+            if (timer !== undefined) clearTimeout(timer);
+            return snapshot === null ? null : checkoutOutcomeBaselineFromDispatchSnapshot(snapshot);
+          };
         const readDispatchState = async (): Promise<{
           sameDocument: boolean;
           dispatched: boolean;
@@ -16567,10 +16566,7 @@ export class BrowserController {
   private startPersistentFallbackOwnershipMonitor(): void {
     if (this.persistentFallbackOwnershipMonitor !== null) return;
     this.persistentFallbackOwnershipMonitor = (async () => {
-      while (
-        this.persistentFallbackLaunchInFlight &&
-        this.ownedChromeProcessTreeProof === null
-      ) {
+      while (this.persistentFallbackLaunchInFlight && this.ownedChromeProcessTreeProof === null) {
         const holderPid = currentProfileHolderPid(this.profileDir);
         const identity =
           holderPid === null ? null : profileProcessIdentity(holderPid, this.profileDir);
@@ -16670,11 +16666,11 @@ export class BrowserController {
     const treeProof =
       identity === null
         ? null
-        : this.ownedChromeProcessTreeProof ??
+        : (this.ownedChromeProcessTreeProof ??
           this.adoptOwnedChromeProcessTree(
             identity,
             childIdentity !== null ? childChromeProcessGroup : false,
-          );
+          ));
     this.page = null;
     this.primaryPage = null;
     this.oauthProductPage = null;

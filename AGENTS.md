@@ -419,33 +419,12 @@ Post-submit 3DS tracking remains resumable for 20 minutes without becoming a sec
 
 ### 12. An operator browser is session-scoped: never remove its watchdog or containment
 
-`apps/mcp/src/bot/provision-session.ts` owns a session watchdog, and
-`apps/mcp/src/bot/operator-browser-watchdog.ts` owns its policy: 10 minutes
-without an MCP operation, 30 minutes total lifetime, or sustained aggregate
-Chrome-tree CPU above the configured ceiling terminates the session and destroys
-its profile lease. These caps are intentional backstops for a bot-blocked host
-that abandons `operate_finish` while leaving its stdio pipe open; the server's
-12-hour open-session idle grace is not a substitute.
-
-Each local operator launch injects an inherited Trusty Squire marker. On Linux,
-the process-wide watchdog scans marked Chromium processes independently of
-session state, meters aggregate CPU with per-PID birth-safe deltas, and enforces
-the 30-minute lifetime even after the browser root exits or children are
-reparented. `BrowserController.close()` also performs best-effort clean teardown:
-self-launched Chrome uses a detached process group, while the Playwright fallback
-(including `chrome-headless-shell`) uses an identity-proven profile-root snapshot.
-Never use a root-PID-only signal or broad `pkill`.
-
-On macOS and Windows, bounded Playwright close plus profile-lease release remains
-the ordinary finish, disconnect, abandon, and startup-cancellation guarantee;
-those platforms do not yet have the Linux `/proc` last-resort process sweep.
-
-PID snapshots cannot provide strict zero-orphan containment. A rare renderer that
-reparents after the fallback snapshot may briefly linger idle at 0% CPU, but the
-Linux process-wide watchdog kills it if it spins or reaches its lifetime. Processes
-that fork and exit wholly between watchdog scans remain outside PID sampling.
-`ts-operator-browser-cgroup-containment` tracks that gap, strict Linux ownership,
-and macOS/Windows last-resort containment.
+The authoritative lifecycle, bounded teardown, Linux marker-watchdog, and accepted
+reparented-idle-renderer residual are documented in
+[`docs/DESIGN-warm-browser-reuse.md`](docs/DESIGN-warm-browser-reuse.md#5-ownership-crash-recovery-and-containment).
+Preserve that contract when changing browser startup or shutdown: never replace its
+identity-proven scope with root-PID-only signaling or broad `pkill`. The strict
+containment follow-up is `ts-operator-browser-cgroup-containment` in `TODOS.md`.
 
 ## Final note
 

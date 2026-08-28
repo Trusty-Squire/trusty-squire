@@ -267,10 +267,7 @@ async function harness(
     clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
     fillAndSubmitCheckout: vi.fn(
       checkoutOptions.fillAndSubmitCheckout ??
-        (async (
-          card: CheckoutCard,
-          options?: { onSubmitDispatched?: () => void },
-        ) => {
+        (async (card: CheckoutCard, options?: { onSubmitDispatched?: () => void }) => {
           filledCards.push(card);
           options?.onSubmitDispatched?.();
           pendingAtDispatchCounts.push(pendingThreeDsStates.length);
@@ -991,19 +988,12 @@ describe("operate_pay", () => {
   });
 
   it("records declined when the 3DS challenge fails", async () => {
-    const outcome = await harness(
-      "happy",
-      "customer_test",
-      undefined,
-      { resolution: "failed" },
-    );
+    const outcome = await harness("happy", "customer_test", undefined, { resolution: "failed" });
 
     expect(outcome.result).toMatchObject({ status: "payment_declined" });
     expect(outcome.result).not.toHaveProperty("merchant");
     expect(outcome.notifyCalls).toHaveLength(1);
-    expect(outcome.auditBodies).toEqual([
-      expect.objectContaining({ status: "payment_declined" }),
-    ]);
+    expect(outcome.auditBodies).toEqual([expect.objectContaining({ status: "payment_declined" })]);
     expect(outcome.pendingThreeDsStates).toHaveLength(1);
     expect(outcome.activePendingThreeDs).toBeNull();
   });

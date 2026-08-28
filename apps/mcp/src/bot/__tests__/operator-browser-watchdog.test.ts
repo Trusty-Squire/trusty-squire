@@ -89,9 +89,7 @@ describe("operator browser process watchdog", () => {
     const marker = createOperatorBrowserMarker(1_000, "orphan");
     const killed: number[] = [];
     const watchdog = new OperatorBrowserProcessWatchdog({
-      readProcesses: () => [
-        { pid: 205, parentPid: 1, startTime: 44, cpuTicks: 0, marker },
-      ],
+      readProcesses: () => [{ pid: 205, parentPid: 1, startTime: 44, cpuTicks: 0, marker }],
       processMatches: (pid, startTime, expectedMarker) =>
         pid === 205 && startTime === 44 && expectedMarker === marker,
       kill: (pid) => killed.push(pid),
@@ -157,9 +155,7 @@ describe("operator browser process watchdog", () => {
     const marker = createOperatorBrowserMarker(1_000, "reused");
     const kill = vi.fn();
     const watchdog = new OperatorBrowserProcessWatchdog({
-      readProcesses: () => [
-        { pid: 205, parentPid: 1, startTime: 44, cpuTicks: 0, marker },
-      ],
+      readProcesses: () => [{ pid: 205, parentPid: 1, startTime: 44, cpuTicks: 0, marker }],
       processMatches: () => false,
       kill,
       maxLifetimeMs: 10_000,

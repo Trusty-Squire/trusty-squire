@@ -349,5 +349,4 @@ describe("self-managed Chrome process ownership", () => {
     ).toBe(true);
     expect(killed).toEqual([4_244]);
   });
-
 });

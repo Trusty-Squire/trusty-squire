@@ -681,9 +681,7 @@ vi.mock("../browser.js", () => ({
       h.connections[this.index] = false;
       return h.closeState;
     }
-    async forceCloseOwnedProcessTree(): Promise<
-      "closed" | "force_closed_unproven" | "unknown"
-    > {
+    async forceCloseOwnedProcessTree(): Promise<"closed" | "force_closed_unproven" | "unknown"> {
       h.forceCloseCalls += 1;
       if (h.connections[this.index] === true) h.started -= 1;
       h.connections[this.index] = false;
@@ -4574,39 +4572,42 @@ describe("operate session — isolated profile-pool lifecycle", () => {
         consecutive_samples: 3,
       },
     ],
-  ] as const)("defers %s watchdog teardown until an active payment call settles", async (_label, reason) => {
-    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-    let releasePayment: (() => void) | undefined;
-    const payment = withPaymentSessionCall(
-      started.session_id,
-      async () =>
-        await new Promise<void>((resolve) => {
-          releasePayment = resolve;
-        }),
-    );
-    await vi.waitFor(() => expect(releasePayment).toBeTypeOf("function"));
+  ] as const)(
+    "defers %s watchdog teardown until an active payment call settles",
+    async (_label, reason) => {
+      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+      let releasePayment: (() => void) | undefined;
+      const payment = withPaymentSessionCall(
+        started.session_id,
+        async () =>
+          await new Promise<void>((resolve) => {
+            releasePayment = resolve;
+          }),
+      );
+      await vi.waitFor(() => expect(releasePayment).toBeTypeOf("function"));
 
-    let terminated = false;
-    const termination = dispatchOperatorBrowserProcessTermination("v1:1:mock-0", reason).then(
-      () => {
-        terminated = true;
-      },
-    );
-    await Promise.resolve();
+      let terminated = false;
+      const termination = dispatchOperatorBrowserProcessTermination("v1:1:mock-0", reason).then(
+        () => {
+          terminated = true;
+        },
+      );
+      await Promise.resolve();
 
-    expect(terminated).toBe(false);
-    expect(h.closeCalls).toBe(0);
-    expect(activeSessionCount()).toBe(1);
+      expect(terminated).toBe(false);
+      expect(h.closeCalls).toBe(0);
+      expect(activeSessionCount()).toBe(1);
 
-    releasePayment?.();
-    await payment;
-    await termination;
+      releasePayment?.();
+      await payment;
+      await termination;
 
-    expect(h.closeCalls).toBe(1);
-    expect(h.leaseDestroyCalls).toBe(1);
-    expect(h.activeLeaseCount).toBe(0);
-    expect(activeSessionCount()).toBe(0);
-  });
+      expect(h.closeCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+      expect(activeSessionCount()).toBe(0);
+    },
+  );
 
   it("forces the outer deadline while sharing an in-flight payment audit", async () => {
     vi.useFakeTimers();
@@ -4614,7 +4615,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_PENDING_3DS_FINALIZE_TIMEOUT_MS", "10");
     let releaseAudit: (() => void) | undefined;
     const auditPayment = vi.fn(
-      async () =>
+      async (_input: unknown) =>
         await new Promise<void>((resolve) => {
           releaseAudit = resolve;
         }),
@@ -4757,9 +4758,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
 
     const closing = closeAllProvisionSessions();
     await vi.waitFor(() =>
-      expect(
-        (session.terminalTeardownOwner as { forced: boolean } | null)?.forced,
-      ).toBe(true),
+      expect((session.terminalTeardownOwner as { forced: boolean } | null)?.forced).toBe(true),
     );
     setActivePendingThreeDs(state, session);
     await closing;

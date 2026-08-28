@@ -372,9 +372,13 @@ DOM-diagnostics pair is excluded from that surface; set
   `none` only closes; `credentials` requires `store` and preserves credential
   extraction, vault storage, and auto-promotion; `result` requires `summary` or
   `data` and can run `verify_recipe` before closing. Finish first stops new
-  calls and drains calls already using that session. Payment state never blocks
-  teardown: finish clears any remaining payment state and destroys, rather than
-  pools, a payment-sensitive browser profile.
+  calls and drains calls already using that session within a bounded terminal
+  transition. Payment state never blocks teardown: finish clears any remaining
+  payment state and destroys, rather than pools, a payment-sensitive browser
+  profile. Sessions also close automatically after 10 minutes without an
+  operation and begin terminal teardown at 30 minutes; only an active payment
+  receives the short bounded close grace. Callers should finish promptly instead
+  of treating an open browser as durable background state.
 - `operate_recipe_save` saves a postcondition-verified local recipe under a
   closed task verb plus the service's registrable domain. It records stable target
   attributes and exact provenance for Squire-supplied values, not observed refs

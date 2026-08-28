@@ -63,10 +63,7 @@ export interface OperatorBrowserProcessWatchdogOptions {
   readProcesses?: () => OperatorBrowserProcessRecord[];
   processMatches?: (pid: number, startTime: number, marker: string) => boolean;
   kill?: (pid: number, signal: NodeJS.Signals) => unknown;
-  onTerminate?: (
-    marker: string,
-    reason: OperatorBrowserWatchdogReason,
-  ) => void | Promise<void>;
+  onTerminate?: (marker: string, reason: OperatorBrowserWatchdogReason) => void | Promise<void>;
   now?: () => number;
   intervalMs?: number;
   maxLifetimeMs?: number;
@@ -118,7 +115,7 @@ export function operatorBrowserWatchdogConfig(): {
 
 export function createOperatorBrowserMarker(
   startedAt = Date.now(),
-  nonce = randomUUID(),
+  nonce: string = randomUUID(),
 ): string {
   return `v1:${Math.floor(startedAt)}:${nonce}`;
 }
@@ -489,9 +486,7 @@ export class OperatorBrowserWatchdog {
     });
   }
 
-  private terminate(
-    reason: OperatorBrowserWatchdogReason,
-  ): OperatorBrowserWatchdogReason {
+  private terminate(reason: OperatorBrowserWatchdogReason): OperatorBrowserWatchdogReason {
     if (this.terminated) return reason;
     void this.beginTermination(reason);
     return reason;

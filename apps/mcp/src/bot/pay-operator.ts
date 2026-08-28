@@ -171,10 +171,7 @@ interface PayDependencies {
   // hasn't responded yet) so the session layer can persist resumable state.
   onApprovalPending: (state: PendingApprovalWait) => void;
   onThreeDsHandoffArmed: (state: PendingThreeDsWait) => void;
-  coordinateThreeDsAudit: (
-    state: PendingThreeDsWait,
-    audit: () => Promise<void>,
-  ) => Promise<void>;
+  coordinateThreeDsAudit: (state: PendingThreeDsWait, audit: () => Promise<void>) => Promise<void>;
   // Fired when the submit-time waitForThreeDsResolution wait exhausts its
   // budget with NO terminal signal (genuinely still pending, not declined,
   // not confirmed) so the session layer can persist resumable state for
@@ -1433,9 +1430,7 @@ export async function executeOperatePay(
         ...(submitResult.payment_instrument_mismatch !== undefined
           ? { warning: submitResult.payment_instrument_mismatch }
           : {}),
-        ...(outcomeUnknown && retainedPendingThreeDs !== null
-          ? { next: pendingThreeDsNext }
-          : {}),
+        ...(outcomeUnknown && retainedPendingThreeDs !== null ? { next: pendingThreeDsNext } : {}),
       };
     } finally {
       cardBytes?.fill(0);

@@ -929,7 +929,11 @@ async function releaseWarmBrowserPage(
 
 async function forceReleaseWarmBrowserPage(browser: BrowserController): Promise<void> {
   const slot = leasedBrowsers.get(browser);
-  const closeState = await closeBrowserBounded(browser, false, "operator browser force-close timed out");
+  const closeState = await closeBrowserBounded(
+    browser,
+    false,
+    "operator browser force-close timed out",
+  );
   if (slot === undefined) return;
   if (closeState === "closed") await slot.lease.destroy();
   else await slot.lease.retain(true);
@@ -943,9 +947,7 @@ async function closeBrowserBounded(
 ): Promise<"closed" | "force_closed_unproven" | "unknown"> {
   const forceClose = (
     browser as BrowserController & {
-      forceCloseOwnedProcessTree?: () => Promise<
-        "closed" | "force_closed_unproven" | "unknown"
-      >;
+      forceCloseOwnedProcessTree?: () => Promise<"closed" | "force_closed_unproven" | "unknown">;
     }
   ).forceCloseOwnedProcessTree;
   const ordinaryClose = browser
@@ -1038,7 +1040,7 @@ async function withTerminalTimeout<T>(
 async function forceTerminateProvisionSession(
   session: Session,
   event: string,
-  detail: unknown,
+  detail: Record<string, unknown>,
   auditPendingThreeDs = true,
 ): Promise<unknown | undefined> {
   session.paymentDispatchClosed = true;
@@ -1063,7 +1065,7 @@ async function forceTerminateProvisionSession(
 async function forceTerminateProvisionSessionOwned(
   session: Session,
   event: string,
-  detail: unknown,
+  detail: Record<string, unknown>,
   auditPendingThreeDs: boolean,
 ): Promise<unknown | undefined> {
   session.closing = true;
@@ -1145,7 +1147,7 @@ async function terminateExpiredProvisionSession(
       await owner.forcePromise;
       return;
     }
-    await forceTerminateProvisionSession(session, "browser_watchdog_terminate", reason);
+    await forceTerminateProvisionSession(session, "browser_watchdog_terminate", { ...reason });
   })();
   await owner.routinePromise;
 }
@@ -1324,9 +1326,10 @@ function audit(sessionId: string, event: string, detail: Record<string, unknown>
 // it's broken and never comes back). Cap it so a stuck launch fails LOUDLY with
 // an actionable message. The default is generous (a cold Chromium download is
 // legitimately multi-minute — better to wait than false-fail a slow-but-working
-// launch); tune with BOT_START_TIMEOUT_MS. On timeout we close() the
-// half-launched browser so a wedged Chrome can't keep the profile lock and brick
-// the next attempt.
+// launch); tune with BOT_START_TIMEOUT_MS. Timeout uses the independent bounded
+// cancellation boundary: it releases or quarantines profile custody without
+// awaiting the unresolved launch, and late settlement cleans up only this
+// controller's marked process.
 async function startBrowserBounded(
   browser: BrowserController,
   sessionId: string,
@@ -3276,10 +3279,7 @@ export function armPaymentDispatchHandoff(
   selectedSession?: Session,
 ): void {
   const session = selectedSession ?? activeProvisionSession();
-  if (
-    session.paymentDispatchClosed ||
-    (session.closing && session.paymentCallCount === 0)
-  ) {
+  if (session.paymentDispatchClosed || (session.closing && session.paymentCallCount === 0)) {
     throw new Error(`provision session ${session.id} closed before payment dispatch`);
   }
   let resolveSettled = (): void => undefined;
