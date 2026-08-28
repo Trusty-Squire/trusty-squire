@@ -83,8 +83,9 @@ describe("compact observation v2", () => {
     );
     expect(page.nextOffset).toBeGreaterThan(0);
     expect(page.nextOffset).toBeLessThan(rows.length);
-    expect((page.payload.o as [number, string])[1]).toBe(`cursor-${page.nextOffset}`);
-    expect(page.payload.s).toBe("b");
+    expect((page.payload.overflow as { next_cursor: string }).next_cursor).toBe(`cursor-${page.nextOffset}`);
+    expect(page.payload.session_id).toBe("session");
+    expect(page.payload.stage).toBe("browse");
   });
 
   it("clamps a dense page with long raw labels to a paged, sealed first action map", () => {
@@ -118,9 +119,9 @@ describe("compact observation v2", () => {
     });
     const wire = JSON.stringify(page.payload);
     expect(safe.rows).toHaveLength(94);
-    expect((page.payload.a as unknown[])).toHaveLength(4);
-    expect(page.payload.o).toEqual([90, "cursor-4"]);
-    expect(page.payload.p).toEqual(["Dense sample", "First controls"]);
+    expect((page.payload.safe_table as unknown[])).toHaveLength(4);
+    expect(page.payload.overflow).toEqual({ remaining: 90, next_cursor: "cursor-4" });
+    expect(page.payload.semantic).toEqual({ title: "Dense sample", headings: ["First controls"] });
     expect(Buffer.byteLength(wire, "utf8")).toBeLessThanOrEqual(OBSERVE_V2_MAX_WIRE_BYTES);
     expect(wire).not.toContain(longLabel);
   });
@@ -206,7 +207,7 @@ describe("compact observation v2", () => {
     });
     expect(page).toEqual({
       format: "compact-v2",
-      d: true,
+      delta: true,
     });
     expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThan(80);
   });
@@ -229,7 +230,7 @@ describe("compact observation v2", () => {
     );
     const page = encodeV2Delta({ stage: "form", delta });
     const wire = JSON.stringify(page);
-    expect(wire).toContain("\"a\"");
+    expect(wire).toContain("safe_table");
     expect(wire).toContain("@e:added");
     expect(wire).toContain("@e:removed");
     expect(wire).not.toContain(planted);

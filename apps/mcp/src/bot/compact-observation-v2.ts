@@ -254,28 +254,20 @@ export function encodeV2Delta(args: {
 }): Record<string, unknown> | null {
   const payload: Record<string, unknown> = {
     format: "compact-v2",
-    d: true,
+    delta: true,
     ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
       ? {}
-      : { p: compactSemantics(args.semantics) }),
-    ...(args.delta.stageChanged ? { s: wireStage(args.stage) } : {}),
+      : { semantic: args.semantics }),
+    ...(args.delta.stageChanged ? { stage: args.stage } : {}),
     // `safe_table` follows the established TS delta protocol: rows are
     // upserts, irrespective of whether their ref is new or changed. This keeps
     // existing delta consumers compatible while the @e: map itself stays V2.
     ...(args.delta.added.length + args.delta.changed.length > 0
-      ? { a: [...args.delta.added, ...args.delta.changed].map(wireControl) }
+      ? { safe_table: [...args.delta.added, ...args.delta.changed].map(wireControl) }
       : {}),
-    ...(args.delta.removed.length > 0 ? { r: args.delta.removed } : {}),
+    ...(args.delta.removed.length > 0 ? { removed: args.delta.removed } : {}),
   };
   return Buffer.byteLength(JSON.stringify(payload), "utf8") <= OBSERVE_V2_MAX_WIRE_BYTES ? payload : null;
-}
-
-function wireStage(stage: SafeStageV2): string {
-  return { browse: "b", auth: "a", form: "f", cart: "r", checkout: "k", complete: "z" }[stage];
-}
-
-function compactSemantics(semantics: SafePageSemanticsV2): string[] {
-  return [semantics.title ?? "", semantics.headings?.[0] ?? ""];
 }
 
 const INTENTS: ReadonlyArray<[SafeIntentV2, RegExp]> = [
@@ -467,12 +459,14 @@ export function encodeV2Page(args: {
     return {
       payload: {
         format: "compact-v2",
-        i: args.sessionId,
-        s: wireStage(args.stage),
+        // This is the mandatory MCP continuation handle. Unlike page data it
+        // cannot be abbreviated without breaking operate_observe/act/finish.
+        session_id: args.sessionId,
+        stage: args.stage,
         ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
           ? {}
-          : { p: compactSemantics(args.semantics) }),
-        d: true,
+          : { semantic: args.semantics }),
+        delta: true,
       },
       nextOffset: 0,
     };
@@ -486,13 +480,13 @@ export function encodeV2Page(args: {
     const remainder = args.rows.length - (index + 1);
     const payload: Record<string, unknown> = {
       format: "compact-v2",
-      i: args.sessionId,
-      s: wireStage(args.stage),
+      session_id: args.sessionId,
+      stage: args.stage,
       ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
         ? {}
-        : { p: compactSemantics(args.semantics) }),
-      a: [...visible, wireControl(candidate)],
-      ...(remainder > 0 ? { o: [remainder, args.cursorFor(index + 1)] } : {}),
+        : { semantic: args.semantics }),
+      safe_table: [...visible, wireControl(candidate)],
+      ...(remainder > 0 ? { overflow: { remaining: remainder, next_cursor: args.cursorFor(index + 1) } } : {}),
     };
     if (Buffer.byteLength(JSON.stringify(payload), "utf8") > OBSERVE_V2_MAX_WIRE_BYTES) break;
     visible.push(wireControl(candidate));
@@ -501,13 +495,13 @@ export function encodeV2Page(args: {
   const remaining = args.rows.length - nextOffset;
   const payload: Record<string, unknown> = {
     format: "compact-v2",
-    i: args.sessionId,
-    s: wireStage(args.stage),
+    session_id: args.sessionId,
+    stage: args.stage,
     ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
       ? {}
-      : { p: compactSemantics(args.semantics) }),
-    a: visible,
-    ...(remaining > 0 ? { o: [remaining, args.cursorFor(nextOffset)] } : {}),
+      : { semantic: args.semantics }),
+    safe_table: visible,
+    ...(remaining > 0 ? { overflow: { remaining, next_cursor: args.cursorFor(nextOffset) } } : {}),
   };
   // The fixed fields are deliberately tiny, so failure means a hostilely long
   // session id/cursor. Fail closed rather than exceeding the wire contract.
