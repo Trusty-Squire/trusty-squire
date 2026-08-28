@@ -1657,7 +1657,9 @@ async function handleFinishOutcome(
               await readRecipe(outcome.verify_recipe),
             )));
       successfulOutcome =
-        outcome.verify_recipe === undefined || verified?.confirmed === true;
+        outcome.verify_recipe === undefined
+          ? outcome.data?.confirmed === "true"
+          : verified?.confirmed === true;
       emitProvisionMeasurement(sessionId, successfulOutcome ? "success" : "fail");
       return {
         kind: "result" as const,
@@ -1691,7 +1693,8 @@ export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
     "operate_extract's store), for signups/key-provisioning. kind='result' " +
     "reports a `summary` (+ optional `data` map) for any other task — a design " +
     "review's findings, extracted data, or 'task done' (put confirmed:true in " +
-    "data). Use operate_finish instead to abort without an outcome. For a soft " +
+    "data only after a clean success; false or omitted preserves prior login state). " +
+    "Use operate_finish instead to abort without an outcome. For a soft " +
     "no-match with kind='result' (for example, no exact or authentic item in " +
     "stock), first relay the closest candidates and why they were rejected, then " +
     "let the user choose a substitute, broader search, or another site before " +
@@ -1748,7 +1751,8 @@ export const provisionFinishTool: Tool<z.infer<typeof finishSchema>> = {
     "Finish an operate task and close its session. outcome.kind='none' closes " +
     "without a reported outcome (and remains the default for compatibility); " +
     "'credentials' extracts and vault-stores a credential using required `store`; " +
-    "'result' reports required `summary` or `data` and can verify_recipe before closing. " +
+    "'result' reports required `summary` or `data`; it succeeds only when verify_recipe " +
+    "confirms or data.confirmed is true. " +
     "All credential values remain server-side; after Chrome closes, its private per-session " +
     "profile is destroyed. An explicit successful outcome atomically saves portable login state " +
     "for a later task; no-outcome and failed closes preserve the prior snapshot.",

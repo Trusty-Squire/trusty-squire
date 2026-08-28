@@ -68,6 +68,7 @@ const h = vi.hoisted(() => ({
   storageStateWriteError: null as Error | null,
   storageStateWriteGate: null as Promise<void> | null,
   storageStateWriteAttempts: 0,
+  profileDestroyGate: null as Promise<void> | null,
   ephemeralSerial: 0,
   createdProfiles: [] as string[],
   destroyedProfiles: [] as string[],
@@ -191,6 +192,7 @@ vi.mock("../session-state.js", () => ({
   },
   destroyEphemeralProfile: async (profileDir: string) => {
     h.destroyedProfiles.push(profileDir);
+    if (h.profileDestroyGate !== null) await h.profileDestroyGate;
   },
   readSessionState: (profileDir: string) => {
     h.storageStateReads.push(profileDir);
@@ -961,6 +963,7 @@ beforeEach(() => {
   h.storageStateWriteError = null;
   h.storageStateWriteGate = null;
   h.storageStateWriteAttempts = 0;
+  h.profileDestroyGate = null;
   h.ephemeralSerial = 0;
   h.createdProfiles = [];
   h.destroyedProfiles = [];
@@ -3807,6 +3810,29 @@ describe("operate session — Change 5 precondition gate", () => {
 });
 
 describe("operate session — ephemeral profile lifecycle", () => {
+  it("does not await recursive profile cleanup after releasing browser custody", async () => {
+    let releaseDestroy: (() => void) | undefined;
+    h.profileDestroyGate = new Promise<void>((resolve) => {
+      releaseDestroy = resolve;
+    });
+    try {
+      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+      let settled = false;
+      const finishing = finishProvisionSession(started.session_id).then((result) => {
+        settled = true;
+        return result;
+      });
+
+      await vi.waitFor(() => expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(settled).toBe(true);
+      await expect(finishing).resolves.toMatchObject({ closed: true });
+    } finally {
+      releaseDestroy?.();
+      h.profileDestroyGate = null;
+    }
+  });
+
   it("drains an entered session call and rejects new calls before closing", async () => {
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
     let releaseCall: (() => void) | undefined;
@@ -4743,10 +4769,14 @@ describe("operate session — ephemeral profile lifecycle", () => {
         serviceUrl: `https://app.example.com/task-${index}`,
       });
       await provisionFinishTool.handler(
-        {
+        provisionFinishTool.inputSchema.parse({
           session_id: session.session_id,
-          outcome: { kind: "result", summary: `Task ${index} complete` },
-        },
+          outcome: {
+            kind: "result",
+            summary: `Task ${index} complete`,
+            data: { confirmed: true },
+          },
+        }),
         null,
       );
     }
@@ -5060,6 +5090,41 @@ describe("operate_finish lifecycle consolidation", () => {
 
     expect(result).toMatchObject({ kind: "credentials", stored_credential: null });
     expect(storeCredential).not.toHaveBeenCalled();
+    expect(h.storageStateWrites).toEqual([]);
+    expect(h.storageStates.get(canonical)).toBe(prior);
+  });
+
+  it("preserves prior state for failed or unconfirmed result outcomes", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-failed-result";
+    const prior = { cookies: [{ name: "SID", value: "prior" }], origins: [] };
+    h.storageStates.set(canonical, prior);
+
+    const failedSession = await startProvisionSession({
+      serviceUrl: "https://app.example.com/done",
+      profileDir: canonical,
+    });
+    const failed = await provisionFinishTool.handler(
+      provisionFinishTool.inputSchema.parse({
+        session_id: failedSession.session_id,
+        outcome: { kind: "result", data: { confirmed: false } },
+      }),
+      null,
+    );
+
+    const unconfirmedSession = await startProvisionSession({
+      serviceUrl: "https://app.example.com/done",
+      profileDir: canonical,
+    });
+    const unconfirmed = await provisionFinishTool.handler(
+      provisionFinishTool.inputSchema.parse({
+        session_id: unconfirmedSession.session_id,
+        outcome: { kind: "result", summary: "Task stopped before success" },
+      }),
+      null,
+    );
+
+    expect(failed).toMatchObject({ kind: "result", data: { confirmed: "false" } });
+    expect(unconfirmed).toMatchObject({ kind: "result", summary: "Task stopped before success" });
     expect(h.storageStateWrites).toEqual([]);
     expect(h.storageStates.get(canonical)).toBe(prior);
   });

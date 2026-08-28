@@ -63,9 +63,11 @@ Preserve current call-drain, audit, payment, and session-removal ordering (`prov
 1. Capture `context.storageState({ indexedDB: true })` before close.
 2. Use the rc.9 bounded terminal owner to perform the existing identity-proven browser close.
 3. Only after close is proven, asynchronously replace the canonical state JSON if the terminal owner is still authoritative immediately before the atomic rename.
-4. Asynchronously remove the unique directory.
+4. Release the in-memory browser lease and schedule detached best-effort removal
+   of the unique directory. Normal and forced terminal paths never await the
+   recursive delete.
 
-If the existing `profileRequiresDestroy` condition is true (`activePayment`, `paymentFieldSealActive`, or `pendingThreeDs`, `provision-session.ts:7846-7852`), close and destroy the profile but skip write-back. If close cannot be proved, retain that unique directory and the prior canonical snapshot, and report the retained directory; it is a disk leak, never a future-agent lock wedge.
+If the existing `profileRequiresDestroy` condition is true (`activePayment`, `paymentFieldSealActive`, or `pendingThreeDs`, `provision-session.ts:7846-7852`), close and schedule profile destruction but skip write-back. If close cannot be proved, retain that unique directory and the prior canonical snapshot, and report the retained directory; it is a disk leak, never a future-agent lock wedge. A detached deletion failure is reported and leaves the same harmless unique residual for later lazy reaping.
 
 `connect`/`login` keeps editing the canonical authoring profile. On a successful context-backed login, write the full JSON state as well. A plain Chrome path has no context to capture, so it preserves the existing snapshot rather than clearing saved logins.
 

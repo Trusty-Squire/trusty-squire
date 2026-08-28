@@ -4,8 +4,9 @@ import {
   existsSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
 } from "node:fs";
-import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserContext } from "playwright";
@@ -65,7 +66,7 @@ export async function writeSessionState(
     await writeFile(temporary, JSON.stringify(state), { mode: 0o600 });
     await chmod(temporary, 0o600);
     if (!canPublish()) return false;
-    await rename(temporary, destination);
+    renameSync(temporary, destination);
     published = true;
     return true;
   } finally {

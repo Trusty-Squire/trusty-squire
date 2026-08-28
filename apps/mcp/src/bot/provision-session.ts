@@ -743,6 +743,15 @@ async function releaseWarmBrowserPage(
   await closeEphemeralBrowser(ephemeral, persistState, owner);
 }
 
+function destroyEphemeralProfileDetached(profileDir: string): void {
+  void destroyEphemeralProfile(profileDir).catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(
+      `[operator] retained ephemeral profile after cleanup failure path=${profileDir}: ${message}\n`,
+    );
+  });
+}
+
 async function forceReleaseWarmBrowserPage(browser: BrowserController): Promise<void> {
   const ephemeral = leasedBrowsers.get(browser);
   const closeState = await closeBrowserBounded(
@@ -751,12 +760,12 @@ async function forceReleaseWarmBrowserPage(browser: BrowserController): Promise<
     "operator browser force-close timed out",
   );
   if (ephemeral === undefined) return;
+  if (leasedBrowsers.get(browser) === ephemeral) leasedBrowsers.delete(browser);
   if (closeState === "closed") {
-    await destroyEphemeralProfile(ephemeral.profileDir);
+    destroyEphemeralProfileDetached(ephemeral.profileDir);
   } else {
     console.error(`[operator] retained ephemeral profile after unproven browser close: ${ephemeral.profileDir}`);
   }
-  if (leasedBrowsers.get(browser) === ephemeral) leasedBrowsers.delete(browser);
 }
 
 async function closeBrowserBounded(
@@ -799,7 +808,7 @@ async function cancelStartingBrowser(pending: StartingBrowser): Promise<void> {
       true,
       "operator browser startup cancellation timed out",
     );
-    if (closeState === "closed") await destroyEphemeralProfile(pending.profileDir);
+    if (closeState === "closed") destroyEphemeralProfileDetached(pending.profileDir);
   })();
   return await pending.cleanupPromise;
 }
@@ -841,10 +850,10 @@ async function closeEphemeralBrowser(
     if (owner?.forced) {
       throw new Error("operator browser terminal teardown was forced");
     }
-    await destroyEphemeralProfile(ephemeral.profileDir);
     if (leasedBrowsers.get(ephemeral.controller) === ephemeral) {
       leasedBrowsers.delete(ephemeral.controller);
     }
+    destroyEphemeralProfileDetached(ephemeral.profileDir);
   } else {
     if (leasedBrowsers.get(ephemeral.controller) === ephemeral) {
       leasedBrowsers.delete(ephemeral.controller);
