@@ -885,6 +885,7 @@ import {
   captchaGate,
   finishProvisionSession,
   finishProvisionSessionWithPreparation,
+  withPaymentSessionCall,
   withProvisionSessionCall,
   paymentSession,
   closeAllProvisionSessions,
@@ -4550,6 +4551,130 @@ describe("operate session — isolated profile-pool lifecycle", () => {
       expect(h.closeCalls).toBe(1);
       expect(activeSessionCount()).toBe(0);
     } finally {
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    [
+      "maximum lifetime",
+      {
+        kind: "max_lifetime",
+        lifetime_ms: 30 * 60 * 1_000,
+        timeout_ms: 30 * 60 * 1_000,
+      },
+    ],
+    [
+      "CPU ceiling",
+      {
+        kind: "cpu_budget_exceeded",
+        cpu_percent: 800,
+        ceiling_percent: 200,
+        consecutive_samples: 3,
+      },
+    ],
+  ] as const)("defers %s watchdog teardown until an active payment call settles", async (_label, reason) => {
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    let releasePayment: (() => void) | undefined;
+    const payment = withPaymentSessionCall(
+      started.session_id,
+      async () =>
+        await new Promise<void>((resolve) => {
+          releasePayment = resolve;
+        }),
+    );
+    await vi.waitFor(() => expect(releasePayment).toBeTypeOf("function"));
+
+    let terminated = false;
+    const termination = dispatchOperatorBrowserProcessTermination("v1:1:mock-0", reason).then(
+      () => {
+        terminated = true;
+      },
+    );
+    await Promise.resolve();
+
+    expect(terminated).toBe(false);
+    expect(h.closeCalls).toBe(0);
+    expect(activeSessionCount()).toBe(1);
+
+    releasePayment?.();
+    await payment;
+    await termination;
+
+    expect(h.closeCalls).toBe(1);
+    expect(h.leaseDestroyCalls).toBe(1);
+    expect(h.activeLeaseCount).toBe(0);
+    expect(activeSessionCount()).toBe(0);
+  });
+
+  it("forces the outer deadline while sharing an in-flight payment audit", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS", "50");
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_PENDING_3DS_FINALIZE_TIMEOUT_MS", "10");
+    let releaseAudit: (() => void) | undefined;
+    const auditPayment = vi.fn(
+      async () =>
+        await new Promise<void>((resolve) => {
+          releaseAudit = resolve;
+        }),
+    );
+    try {
+      const started = await startProvisionSession({
+        serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+        api: { auditPayment } as unknown as ApiClient,
+      });
+      const state = {
+        approval_id: "appr_outer_deadline",
+        approval_url: "https://web.test/vault/pay/appr_outer_deadline",
+        checkout: {
+          merchant: "Hibiya Kadan",
+          checkout_origin: "https://hibiyakadan.example.test",
+          amount_cents: 8_800,
+          currency: "JPY",
+        },
+        last4: "9192",
+        mandate_id: "mandate_outer_deadline",
+        deadline: Date.now() + 60_000,
+      };
+      const payment = withPaymentSessionCall(started.session_id, async (session) => {
+        armPaymentDispatchHandoff(state, session);
+        setActivePendingThreeDs(state, session);
+        await coordinatePaymentDispatchAudit(
+          state,
+          async () => {
+            await auditPayment({ status: "payment_outcome_unknown" });
+          },
+          session,
+        );
+        finishPaymentDispatchHandoff(state, session);
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(auditPayment).toHaveBeenCalledOnce();
+
+      const termination = dispatchOperatorBrowserProcessTermination("v1:1:mock-0", {
+        kind: "max_lifetime",
+        lifetime_ms: 30 * 60 * 1_000,
+        timeout_ms: 30 * 60 * 1_000,
+      });
+      await vi.advanceTimersByTimeAsync(49);
+      expect(h.closeCalls).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(10);
+      await termination;
+
+      expect(h.waitForThreeDsCalls).toEqual([0]);
+      expect(auditPayment).toHaveBeenCalledOnce();
+      expect(h.closeCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+      expect(activeSessionCount()).toBe(0);
+
+      releaseAudit?.();
+      await payment;
+    } finally {
+      releaseAudit?.();
       vi.unstubAllEnvs();
       vi.useRealTimers();
     }

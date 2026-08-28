@@ -496,6 +496,7 @@ interface CartIdentityContext {
 interface SessionTerminalTeardownOwner {
   forced: boolean;
   forcePromise: Promise<unknown | undefined> | null;
+  routinePromise: Promise<void> | null;
 }
 
 interface PaymentDispatchHandoff {
@@ -503,8 +504,8 @@ interface PaymentDispatchHandoff {
   settled: Promise<void>;
   resolveSettled: () => void;
   terminalizing: boolean;
-  terminalAuditReady: Promise<void>;
-  resolveTerminalAuditReady: () => void;
+  terminalComplete: boolean;
+  released: boolean;
   auditPromise: Promise<void> | null;
 }
 
@@ -637,6 +638,8 @@ export interface Session {
   closing: boolean;
   callCount: number;
   callDrainWaiters: Set<() => void>;
+  paymentCallCount: number;
+  paymentCallDrainWaiters: Set<() => void>;
   // Session ownership must be a resource boundary, not merely a convention for
   // cooperative hosts. The watchdog destroys this browser if its client goes
   // away without operate_finish, if it lives too long, or if its Chromium tree
@@ -1039,7 +1042,11 @@ async function forceTerminateProvisionSession(
 ): Promise<unknown | undefined> {
   const owner =
     session.terminalTeardownOwner ??
-    (session.terminalTeardownOwner = { forced: false, forcePromise: null });
+    (session.terminalTeardownOwner = {
+      forced: false,
+      forcePromise: null,
+      routinePromise: null,
+    });
   if (owner.forcePromise !== null) return await owner.forcePromise;
   owner.forced = true;
   owner.forcePromise = forceTerminateProvisionSessionOwned(
@@ -1086,7 +1093,12 @@ async function forceTerminateProvisionSessionOwned(
       );
     }
   }
-  handoff?.resolveTerminalAuditReady();
+  if (handoff !== null) {
+    handoff.terminalComplete = true;
+    if (handoff.released && session.paymentDispatchHandoff === handoff) {
+      session.paymentDispatchHandoff = null;
+    }
+  }
   session.activePayment = null;
   session.paymentFieldSealActive = false;
   session.pendingThreeDs = null;
@@ -1105,10 +1117,35 @@ async function terminateExpiredProvisionSession(
   session: Session,
   reason: OperatorBrowserWatchdogReason,
 ): Promise<void> {
-  // A normal finish owns its more careful call-drain transition. A watchdog
-  // eviction is intentionally different: an abandoned or over-budget browser
-  // must be closed immediately even when a stuck CDP call never settles.
-  await forceTerminateProvisionSession(session, "browser_watchdog_terminate", reason);
+  const owner =
+    session.terminalTeardownOwner ??
+    (session.terminalTeardownOwner = {
+      forced: false,
+      forcePromise: null,
+      routinePromise: null,
+    });
+  if (owner.routinePromise !== null) return await owner.routinePromise;
+  session.closing = true;
+  stopSessionWatchdog(session);
+  owner.routinePromise = (async () => {
+    if (reason.kind !== "idle_timeout" && session.paymentCallCount > 0) {
+      const timeoutMs = positiveTimeout(
+        "TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS",
+        DEFAULT_SESSION_TERMINAL_TRANSITION_TIMEOUT_MS,
+      );
+      await withTerminalTimeout(
+        waitForPaymentCallsToDrain(session),
+        timeoutMs,
+        `payment call drain exceeded ${timeoutMs}ms`,
+      ).catch(() => undefined);
+    }
+    if (owner.forcePromise !== null) {
+      await owner.forcePromise;
+      return;
+    }
+    await forceTerminateProvisionSession(session, "browser_watchdog_terminate", reason);
+  })();
+  await owner.routinePromise;
 }
 
 function startSessionWatchdog(session: Session): void {
@@ -1184,6 +1221,27 @@ function acquireSessionCallLease(session: Session): () => void {
   };
 }
 
+function acquirePaymentCallLease(session: Session): () => void {
+  session.paymentCallCount += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    session.paymentCallCount -= 1;
+    if (session.paymentCallCount === 0) {
+      for (const wake of session.paymentCallDrainWaiters) wake();
+      session.paymentCallDrainWaiters.clear();
+    }
+  };
+}
+
+async function waitForPaymentCallsToDrain(session: Session): Promise<void> {
+  if (session.paymentCallCount === 0) return;
+  await new Promise<void>((resolve) => {
+    session.paymentCallDrainWaiters.add(resolve);
+  });
+}
+
 async function waitForSessionCallsToDrain(session: Session): Promise<boolean> {
   if (session.callCount === 0) return true;
   const timeoutMs = positiveTimeout(
@@ -1234,7 +1292,14 @@ export async function withPaymentSessionCall<T>(
   fn: (session: Session) => Promise<T>,
 ): Promise<T> {
   const session = paymentSession(sessionId);
-  return await withSelectedProvisionSessionCall(session, fn);
+  return await withSelectedProvisionSessionCall(session, async (selectedSession) => {
+    const releasePaymentCall = acquirePaymentCallLease(selectedSession);
+    try {
+      return await fn(selectedSession);
+    } finally {
+      releasePaymentCall();
+    }
+  });
 }
 
 const settle = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -2891,6 +2956,8 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     closing: false,
     callCount: 0,
     callDrainWaiters: new Set(),
+    paymentCallCount: 0,
+    paymentCallDrainWaiters: new Set(),
     startedAt: Date.now(),
     lastActivityAt: Date.now(),
     watchdog: null,
@@ -3002,6 +3069,8 @@ export async function startHarnessProvisionSession(
     closing: false,
     callCount: 0,
     callDrainWaiters: new Set(),
+    paymentCallCount: 0,
+    paymentCallDrainWaiters: new Set(),
     startedAt: Date.now(),
     lastActivityAt: Date.now(),
     watchdog: null,
@@ -3203,24 +3272,20 @@ export function armPaymentDispatchHandoff(
   selectedSession?: Session,
 ): void {
   const session = selectedSession ?? activeProvisionSession();
-  if (session.closing) {
+  if (session.closing && session.paymentCallCount === 0) {
     throw new Error(`provision session ${session.id} closed before payment dispatch`);
   }
   let resolveSettled = (): void => undefined;
   const settled = new Promise<void>((resolve) => {
     resolveSettled = resolve;
   });
-  let resolveTerminalAuditReady = (): void => undefined;
-  const terminalAuditReady = new Promise<void>((resolve) => {
-    resolveTerminalAuditReady = resolve;
-  });
   session.paymentDispatchHandoff = {
     state,
     settled,
     resolveSettled,
     terminalizing: false,
-    terminalAuditReady,
-    resolveTerminalAuditReady,
+    terminalComplete: false,
+    released: false,
     auditPromise: null,
   };
 }
@@ -3232,8 +3297,11 @@ export function finishPaymentDispatchHandoff(
   const session = selectedSession ?? activeProvisionSession();
   const handoff = session.paymentDispatchHandoff;
   if (handoff?.state !== state) return;
+  handoff.released = true;
   handoff.resolveSettled();
-  session.paymentDispatchHandoff = null;
+  if (!handoff.terminalizing || handoff.terminalComplete) {
+    session.paymentDispatchHandoff = null;
+  }
 }
 
 export async function coordinatePaymentDispatchAudit(
@@ -3243,13 +3311,9 @@ export async function coordinatePaymentDispatchAudit(
 ): Promise<void> {
   const session = selectedSession ?? activeProvisionSession();
   const handoff = session.paymentDispatchHandoff;
-  if (handoff?.state === state && handoff.terminalizing) {
-    await handoff.terminalAuditReady;
-    if (handoff.auditPromise !== null) await handoff.auditPromise;
-    return;
-  }
-  if (handoff?.state !== state || session.pendingThreeDs !== state) {
-    await recordAudit();
+  if (handoff?.state === state) {
+    handoff.auditPromise ??= recordAudit();
+    await handoff.auditPromise;
     return;
   }
   await recordAudit();
@@ -7957,20 +8021,19 @@ async function auditPendingThreeDsForSessionClose(session: Session): Promise<voi
       "operate_finish refused: pending 3-D Secure outcome cannot be audited without an active API session",
     );
   }
+  const resolution = await session.browser.waitForThreeDsResolution(0);
   const recordAudit = async (): Promise<void> => {
-      const resolution = await session.browser.waitForThreeDsResolution(0);
-      await session.api!.auditPayment({
-        ...pending.checkout,
-        last4: pending.last4,
-        status: pendingThreeDsAuditStatus(resolution),
-        approval_id: pending.approval_id,
-        ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
-      });
+    await session.api!.auditPayment({
+      ...pending.checkout,
+      last4: pending.last4,
+      status: pendingThreeDsAuditStatus(resolution),
+      approval_id: pending.approval_id,
+      ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
+    });
   };
   const handoff = session.paymentDispatchHandoff;
-  if (handoff?.state === pending && handoff.terminalizing) {
+  if (handoff?.state === pending) {
     handoff.auditPromise ??= recordAudit();
-    handoff.resolveTerminalAuditReady();
     await handoff.auditPromise;
     return;
   }
@@ -8014,7 +8077,11 @@ export async function finishProvisionSessionWithPreparation<T>(
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   if (session.closing) throw new Error(`provision session ${sessionId} is already closing`);
-  const owner: SessionTerminalTeardownOwner = { forced: false, forcePromise: null };
+  const owner: SessionTerminalTeardownOwner = {
+    forced: false,
+    forcePromise: null,
+    routinePromise: null,
+  };
   session.terminalTeardownOwner = owner;
   session.closing = true;
   stopSessionWatchdog(session);
