@@ -676,6 +676,7 @@ interface EphemeralBrowser {
 interface AcquiredBrowser {
   controller: BrowserController;
   profileDir: string;
+  shutdownGeneration: number;
 }
 
 interface StartingBrowser {
@@ -689,7 +690,24 @@ interface StartingBrowser {
 
 const leasedBrowsers = new Map<BrowserController, EphemeralBrowser>();
 const startingBrowsers = new Set<StartingBrowser>();
+let shutdownGeneration = 0;
+let shutdownInProgress = 0;
+
+function provisionStartGeneration(): number {
+  if (shutdownInProgress > 0) {
+    throw new Error("operate_start cancelled: operator server is shutting down");
+  }
+  return shutdownGeneration;
+}
+
+function assertProvisionStartAdmitted(generation: number): void {
+  if (shutdownInProgress > 0 || generation !== shutdownGeneration) {
+    throw new Error("operate_start cancelled: operator server is shutting down");
+  }
+}
+
 async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promise<AcquiredBrowser> {
+  const generation = provisionStartGeneration();
   if ((process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0) {
     throw new Error("operate_start does not support remote CDP with ephemeral profiles");
   }
@@ -718,6 +736,7 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
     if (pending.cancelRequested) {
       throw new Error("operate_start cancelled: operator server is shutting down");
     }
+    assertProvisionStartAdmitted(generation);
   } catch (err) {
     if (!pending.cancelRequested) {
       await closeEphemeralBrowser({ controller, profileDir, canonicalProfileDir }, false);
@@ -727,7 +746,7 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
     startingBrowsers.delete(pending);
   }
   leasedBrowsers.set(controller, { controller, profileDir, canonicalProfileDir });
-  return { controller, profileDir };
+  return { controller, profileDir, shutdownGeneration: generation };
 }
 
 async function releaseWarmBrowserPage(
@@ -2766,6 +2785,12 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     typeof browser.detectGoogleAccountEmail === "function"
       ? await browser.detectGoogleAccountEmail().catch(() => null)
       : null;
+  try {
+    assertProvisionStartAdmitted(acquired.shutdownGeneration);
+  } catch (error) {
+    await releaseWarmBrowserPage(browser, false);
+    throw error;
+  }
   // Change 5 — fail-closed identity gate BEFORE driving. If an operate task
   // needs to act as the user and there's no live Google session, hand back now;
   // do not start the browser or the task. No autonomous login is attempted.
@@ -8025,26 +8050,32 @@ export async function finishProvisionSession(sessionId: string): Promise<FinishR
 
 // Test/teardown helper — close every live session (used by the dev shim on exit).
 export async function closeAllProvisionSessions(): Promise<void> {
-  for (const pending of [...startingBrowsers]) {
-    await cancelStartingBrowser(pending).catch(() => undefined);
+  shutdownGeneration += 1;
+  shutdownInProgress += 1;
+  try {
+    for (const pending of [...startingBrowsers]) {
+      await cancelStartingBrowser(pending).catch(() => undefined);
+    }
+    const closingSessions = [...sessions.values()];
+    for (const session of closingSessions) {
+      session.closing = true;
+      stopSessionWatchdog(session);
+    }
+    let closeError: unknown;
+    for (const session of closingSessions) {
+      const drained = await waitForSessionCallsToDrain(session);
+      const error = await forceTerminateProvisionSession(session, "shutdown_terminate", {
+        reason: drained ? "transport_disconnect" : "call_drain_timeout",
+      });
+      if (closeError === undefined && error !== undefined) closeError = error;
+    }
+    for (const ephemeral of [...leasedBrowsers.values()]) {
+      await forceReleaseWarmBrowserPage(ephemeral.controller).catch(() => undefined);
+    }
+    if (closeError !== undefined) throw closeError;
+  } finally {
+    shutdownInProgress -= 1;
   }
-  const closingSessions = [...sessions.values()];
-  for (const session of closingSessions) {
-    session.closing = true;
-    stopSessionWatchdog(session);
-  }
-  let closeError: unknown;
-  for (const session of closingSessions) {
-    const drained = await waitForSessionCallsToDrain(session);
-    const error = await forceTerminateProvisionSession(session, "shutdown_terminate", {
-      reason: drained ? "transport_disconnect" : "call_drain_timeout",
-    });
-    if (closeError === undefined && error !== undefined) closeError = error;
-  }
-  for (const ephemeral of [...leasedBrowsers.values()]) {
-    await forceReleaseWarmBrowserPage(ephemeral.controller).catch(() => undefined);
-  }
-  if (closeError !== undefined) throw closeError;
 }
 
 export function activeSessionCount(): number {

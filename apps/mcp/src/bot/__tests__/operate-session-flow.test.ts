@@ -73,6 +73,7 @@ const h = vi.hoisted(() => ({
   createdProfiles: [] as string[],
   destroyedProfiles: [] as string[],
   captureStorageState: { cookies: [], origins: [] } as unknown,
+  captureStorageStateCalls: 0,
   captureStorageStateGate: null as Promise<void> | null,
   captureStorageStateError: null as Error | null,
   currentUrl: "",
@@ -696,6 +697,7 @@ vi.mock("../browser.js", () => ({
       return `v1:1:mock-${this.index}`;
     }
     async captureStorageState(): Promise<unknown> {
+      h.captureStorageStateCalls += 1;
       if (h.captureStorageStateGate !== null) await h.captureStorageStateGate;
       if (h.captureStorageStateError !== null) throw h.captureStorageStateError;
       return h.captureStorageState;
@@ -968,6 +970,7 @@ beforeEach(() => {
   h.createdProfiles = [];
   h.destroyedProfiles = [];
   h.captureStorageState = { cookies: [], origins: [] };
+  h.captureStorageStateCalls = 0;
   h.captureStorageStateGate = null;
   h.captureStorageStateError = null;
   h.currentUrl = "";
@@ -4216,9 +4219,16 @@ describe("operate session — ephemeral profile lifecycle", () => {
       profileDir: canonical,
     });
 
-    await finishProvisionSession(started.session_id);
+    await provisionFinishTool.handler(
+      provisionFinishTool.inputSchema.parse({
+        session_id: started.session_id,
+        outcome: { kind: "result", data: { confirmed: true } },
+      }),
+      null,
+    );
 
     expect(h.storageStates.get(canonical)).toBe(prior);
+    expect(h.captureStorageStateCalls).toBe(1);
     expect(h.storageStateWrites).toEqual([]);
     expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
   });
@@ -4226,11 +4236,18 @@ describe("operate session — ephemeral profile lifecycle", () => {
   it("destroys without write-back when payment fields remain sealed", async () => {
     const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
     retainActivePaymentFieldSeal();
-    await finishProvisionSession(first.session_id);
+    await provisionFinishTool.handler(
+      provisionFinishTool.inputSchema.parse({
+        session_id: first.session_id,
+        outcome: { kind: "result", data: { confirmed: true } },
+      }),
+      null,
+    );
 
     const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
     expect(h.profileDirs[1]).not.toBe(h.profileDirs[0]);
     expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
+    expect(h.captureStorageStateCalls).toBe(0);
     expect(h.storageStateWrites).toEqual([]);
     await finishProvisionSession(second.session_id);
   });
@@ -4238,9 +4255,16 @@ describe("operate session — ephemeral profile lifecycle", () => {
   it("retains only the unique profile when closure is unproven", async () => {
     h.closeState = "unknown";
     const session = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
-    await finishProvisionSession(session.session_id);
+    await provisionFinishTool.handler(
+      provisionFinishTool.inputSchema.parse({
+        session_id: session.session_id,
+        outcome: { kind: "result", data: { confirmed: true } },
+      }),
+      null,
+    );
 
     expect(h.destroyedProfiles).toEqual([]);
+    expect(h.captureStorageStateCalls).toBe(1);
     expect(h.storageStateWrites).toEqual([]);
     expect(h.createdProfiles).toEqual([h.profileDirs[0]]);
   });
@@ -4685,6 +4709,34 @@ describe("operate session — ephemeral profile lifecycle", () => {
     await finishProvisionSession(recovered.session_id);
   });
 
+  it("rejects starts that overlap a shutdown drain without orphaning a session", async () => {
+    const first = await startProvisionSession({ serviceUrl: "https://app.example.com/first" });
+    const firstSession = paymentSession(first.session_id);
+    let releaseCall: (() => void) | undefined;
+    const entered = withProvisionSessionCall(
+      first.session_id,
+      async () =>
+        await new Promise<void>((resolve) => {
+          releaseCall = resolve;
+        }),
+    );
+    await vi.waitFor(() => expect(releaseCall).toBeTypeOf("function"));
+
+    const shutdown = closeAllProvisionSessions();
+    try {
+      await vi.waitFor(() => expect(firstSession.closing).toBe(true));
+      await expect(
+        startProvisionSession({ serviceUrl: "https://app.example.com/overlap" }),
+      ).rejects.toThrow("operator server is shutting down");
+      expect(h.createdProfiles).toHaveLength(1);
+    } finally {
+      releaseCall?.();
+      await entered;
+      await shutdown;
+    }
+    expect(activeSessionCount()).toBe(0);
+  });
+
   it("force-closes an in-progress browser launch on non-Linux without awaiting startup", async () => {
     const platform = process.platform;
     Object.defineProperty(process, "platform", { configurable: true, value: "darwin" });
@@ -4797,9 +4849,16 @@ describe("operate session — ephemeral profile lifecycle", () => {
         serviceUrl: "https://app.example.com/one",
         profileDir: canonical,
       });
-      await finishProvisionSession(first.session_id);
+      await provisionFinishTool.handler(
+        provisionFinishTool.inputSchema.parse({
+          session_id: first.session_id,
+          outcome: { kind: "result", data: { confirmed: true } },
+        }),
+        null,
+      );
 
       expect(h.destroyedProfiles).toEqual([]);
+      expect(h.captureStorageStateCalls).toBe(1);
       expect(h.storageStateWrites).toEqual([]);
       expect(h.storageStates.get(canonical)).toBe(prior);
     },
@@ -7098,10 +7157,15 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
     setActivePendingThreeDs(buildThreeDsState());
     h.waitForThreeDsResult = "timeout";
 
-    await expect(finishProvisionSession(started.session_id)).resolves.toMatchObject({
-      session_id: started.session_id,
-      closed: true,
-    });
+    await expect(
+      provisionFinishTool.handler(
+        provisionFinishTool.inputSchema.parse({
+          session_id: started.session_id,
+          outcome: { kind: "result", data: { confirmed: true } },
+        }),
+        null,
+      ),
+    ).resolves.toMatchObject({ kind: "result" });
     expect(h.waitForThreeDsCalls).toEqual([0]);
     expect(auditPayment).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -7111,6 +7175,7 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
         status: "payment_3ds_unresolved",
       }),
     );
+    expect(h.captureStorageStateCalls).toBe(0);
     expect(h.storageStateWrites).toEqual([]);
   });
 
