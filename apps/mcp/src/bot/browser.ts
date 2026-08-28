@@ -3498,7 +3498,7 @@ export class BrowserController {
   private childChromeIdentity: ProfileProcessIdentity | null = null;
   private childChromeProcessGroup = false;
   private ownedChromeProcessTreeProof: OwnedChromeProcessTreeProof | null = null;
-  private readonly operatorProcessMarker = createOperatorBrowserMarker();
+  private operatorProcessMarker: string | null = null;
   private cdpBrowser: Browser | null = null;
   // True once a local browser context launched this session.
   private launchedContext = false;
@@ -3672,6 +3672,7 @@ export class BrowserController {
   }
 
   operatorBrowserMarker(): string {
+    this.operatorProcessMarker ??= createOperatorBrowserMarker();
     return this.operatorProcessMarker;
   }
 
@@ -4231,7 +4232,7 @@ export class BrowserController {
       const selfEnv: NodeJS.ProcessEnv = {
         ...(chromeEnv ?? process.env),
         TZ: geo?.timezoneId ?? "America/New_York",
-        [OPERATOR_BROWSER_MARKER_ENV]: this.operatorProcessMarker,
+        [OPERATOR_BROWSER_MARKER_ENV]: this.operatorBrowserMarker(),
       };
       context = await launchWithProfileGate(
         this.profileDir,
@@ -4313,7 +4314,7 @@ export class BrowserController {
               headless: chromeHeadless,
               env: {
                 ...(chromeEnv ?? process.env),
-                [OPERATOR_BROWSER_MARKER_ENV]: this.operatorProcessMarker,
+                [OPERATOR_BROWSER_MARKER_ENV]: this.operatorBrowserMarker(),
               },
               ...(channel !== null ? { channel } : {}),
               ...persistentProxyOptions(proxy),
@@ -16548,7 +16549,7 @@ export class BrowserController {
     const identity = profileProcessIdentity(holderPid, this.profileDir);
     if (identity === null) return null;
     if (!this.startCancellationRequested || this.profileOperationLease !== null) return identity;
-    return operatorBrowserProcessMatchesMarker(identity.pid, this.operatorProcessMarker)
+    return operatorBrowserProcessMatchesMarker(identity.pid, this.operatorBrowserMarker())
       ? identity
       : null;
   }
@@ -16562,7 +16563,7 @@ export class BrowserController {
       proof.state === "owned" &&
       this.startCancellationRequested &&
       this.profileOperationLease === null &&
-      !operatorBrowserProcessMatchesMarker(proof.identity.pid, this.operatorProcessMarker)
+      !operatorBrowserProcessMatchesMarker(proof.identity.pid, this.operatorBrowserMarker())
     ) {
       return { state: "unknown" };
     }
@@ -16581,7 +16582,7 @@ export class BrowserController {
           identity !== null &&
           (!this.startCancellationRequested ||
             this.profileOperationLease !== null ||
-            operatorBrowserProcessMatchesMarker(identity.pid, this.operatorProcessMarker));
+            operatorBrowserProcessMatchesMarker(identity.pid, this.operatorBrowserMarker()));
         if (identity !== null && controllerOwnsIdentity) {
           this.launchedProfileHolderIdentity = identity;
           this.adoptOwnedChromeProcessTree(identity, false);

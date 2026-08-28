@@ -13,6 +13,7 @@ import {
   ownedChromeProcessTreeState,
   signalOwnedChromeProcessTree,
 } from "../browser.js";
+import { operatorBrowserMarkerStartedAt } from "../operator-browser-watchdog.js";
 import { closeProfileWithProof } from "../profile.js";
 
 describe("BrowserController humanize option", () => {
@@ -45,6 +46,21 @@ describe("BrowserController humanize option", () => {
     const browser = new BrowserController();
     expect((browser as unknown as { mouseX: number; mouseY: number }).mouseX).toBe(100);
     expect((browser as unknown as { mouseX: number; mouseY: number }).mouseY).toBe(100);
+  });
+
+  it("starts the operator process lifetime only when its marker is requested", () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    try {
+      const browser = new BrowserController({ humanize: false });
+      now.mockReturnValue(2_000);
+
+      const marker = browser.operatorBrowserMarker();
+
+      expect(operatorBrowserMarkerStartedAt(marker)).toBe(2_000);
+      expect(browser.operatorBrowserMarker()).toBe(marker);
+    } finally {
+      now.mockRestore();
+    }
   });
 });
 
