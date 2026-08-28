@@ -2,7 +2,7 @@
 //  #1 — `connect` must not short-circuit on a present-but-EXPIRED agent
 //       token (agent sessions have a 24h absolute cap). agentTokenStillValid
 //       probes the server; only an auth rejection counts as invalid.
-//  #3 — the confirm browser / headless noVNC tunnel must stay open until
+//  #3 — the confirm browser must stay open until
 //       explicit Finish during normal onboarding.
 
 import {
@@ -152,7 +152,7 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
   it("does NOT tear down force-relogin on a bare claim before the session seeds", () => {
     // The bug: the API flips to `claimed` when the OAuth identity lands, which on
     // a cold profile is BEFORE Google finishes (its second challenge). Tearing
-    // down here killed the noVNC mid-sign-in. Must stay open.
+    // down here killed the browser mid-sign-in. Must stay open.
     expect(
       shouldCompleteInstallClaim(
         true, // claimed
@@ -184,7 +184,7 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
 
   it("keeps plain onboarding open through optional GitHub until explicit Finish", () => {
     // Step 1: Google claimed the install and seeded its provider cookie. This
-    // used to close noVNC before the user could complete optional GitHub.
+    // used to close the browser before the user could complete optional GitHub.
     expect(shouldCompleteInstallClaim(true, false, true, false)).toBe(false);
     // Step 2: another provider cookie landing still is not wizard completion.
     expect(shouldCompleteInstallClaim(true, false, true, false)).toBe(false);

@@ -84,7 +84,7 @@ export function divider(): void {
 }
 
 // Render a hairline-bordered panel. Reserve for at most ONE focal
-// element per command (the noVNC URL, the install-complete summary).
+// element per command (the install-complete summary).
 // Default border is wine; pass color: 'dim' for an inert/contextual
 // panel.
 export interface PanelOpts {

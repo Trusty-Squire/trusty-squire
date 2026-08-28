@@ -1319,8 +1319,8 @@ function audit(sessionId: string, event: string, detail: Record<string, unknown>
 }
 
 // operate_start's browser launch is the one UNBOUNDED step in the session
-// bootstrap: on a fresh box the first launch downloads Chromium and spins up a
-// virtual display (Xvfb), and a wedged profile lock or missing browser deps can
+// bootstrap: on a fresh box the first launch downloads Chromium, and a wedged
+// profile lock or missing browser deps can
 // otherwise hang it indefinitely — a real dogfood run sat on a silent ~30-min
 // hang here with zero feedback (the worst first-run failure: the user assumes
 // it's broken and never comes back). Cap it so a stuck launch fails LOUDLY with
@@ -1337,7 +1337,7 @@ async function startBrowserBounded(
 ): Promise<void> {
   const timeoutMs = Number(process.env.BOT_START_TIMEOUT_MS) || 600_000;
   audit(sessionId, "browser_launch", {
-    note: "first launch may download Chromium + start Xvfb; slow but one-time",
+    note: "first launch may download Chromium; slow but one-time",
     timeout_ms: timeoutMs,
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1351,9 +1351,8 @@ async function startBrowserBounded(
       await cancel().catch(() => undefined);
       throw new Error(
         `operate_start: browser did not launch within ${Math.round(timeoutMs / 1000)}s. ` +
-          "On a fresh machine the first launch downloads Chromium and starts a virtual display " +
-          "(Xvfb) — slow but one-time. A hang this long usually means the browser binaries or Xvfb " +
-          "are missing on this box. Retry once (a partial download resumes and later launches reuse " +
+          "On a fresh machine the first launch downloads Chromium — slow but one-time. A hang this long " +
+          "usually means browser binaries are missing on this box. Retry once (a partial download resumes and later launches reuse " +
           "the cache); if it recurs, run `npx @trusty-squire/mcp connect` here to install the browser " +
           "deps, or raise BOT_START_TIMEOUT_MS to wait longer.",
       );

@@ -636,7 +636,7 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
 
   // Browser confirm: bind this machine + seed the bot's Chrome.
   // The user signs into trustysquire from inside the bot's persistent
-  // Chrome profile (with display, or noVNC on a headless box). That
+  // Chrome profile on a visible display. That
   // single sign-in does TWO things at once: trustysquire claims the
   // install (sets agent_session_token), AND the provider session
   // lands in the bot's Chrome profile so future OAuth-based signups
@@ -851,8 +851,8 @@ async function checkAlreadyProvisioned(): Promise<{ providers: OAuthProviderId[]
     //
     // BUT a BUSY profile (another Chromium already using it — a live operate
     // session, a background heal run, an orphaned Chrome) makes the probe throw.
-    // That must NOT read as "not provisioned": forcing a re-pair (the noVNC
-    // dance) on a transient lock is the connect-loops-forever bug. Fall back to
+    // That must NOT read as "not provisioned": forcing a re-pair on a
+    // transient lock is the connect-loops-forever bug. Fall back to
     // the session's cached connected_providers instead — a busy profile, if
     // anything, means the bot IS wearing its browser session.
     let providers: OAuthProviderId[];
@@ -905,7 +905,6 @@ async function reloginGithubOnly(
   clearProviderLoggedIn("github");
   const result = await ensureOAuthSession({
     provider: "github",
-    apiBaseUrl: args.apiBase,
     forceOpen: true,
   });
   if (result.status === "logged_in" || result.status === "already_valid") {
@@ -1075,8 +1074,8 @@ async function writeAgentConfig(
 // The API flips to `claimed` the moment the OAuth identity lands, which on a
 // cold profile is BEFORE the provider's browser session is fully seeded (Google
 // can still be mid-flow with a second cold-profile challenge). Tearing down on
-// the bare claim killed the noVNC out from under that challenge — the "two
-// number picks with a red-close between them" bug. So force-relogin now waits
+// the bare claim killed the browser before that challenge — the "two number
+// picks with a red-close between them" bug. So force-relogin now waits
 // for the requested provider's post-clear cookie presence before it closes;
 // neither an explicit terminal page nor another provider can substitute. The
 // deadline still bounds the wait.
@@ -1232,22 +1231,17 @@ async function runInstallClaim(
 
   // Default: run the confirm INSIDE the bot's Chrome. The user signs
   // The wizard page reads provider state from /v1/auth/whoami so no
-  // CLI-side hint is needed. apiBaseUrl threads through to the
-  // headless rig so it can shorten the cloudflared tunnel URL to
-  // `trustysquire.ai/g/<slug>` before printing it in the banner (G15).
+  // CLI-side hint is needed.
   const result = await openInstallConfirmInBotChrome({
     confirmUrl: initiate.confirm_url,
     pollUntilClaimed: pollOnce,
-    apiBaseUrl: apiBase,
     heartbeatMessage: () => claimHeartbeatMessage(state.value !== null),
   });
 
   // rc.33 — surface the underlying error instead of letting the outer
   // wrapper print a generic "browser confirm step never finished."
-  // Most common case: a fresh headless box without the noVNC stack
-  // (x11vnc/novnc/websockify/cloudflared) — the runHeadlessChrome
-  // requireBinaries() throw already names the missing binaries and
-  // the apt-get install line, but the message was getting swallowed.
+  // Surface the underlying browser-launch error rather than replacing it
+  // with a generic confirmation timeout.
   if (result.status === "error") {
     ui.fail(`Couldn't open the confirm page: ${result.detail ?? "unknown error"}`);
     process.exit(1);
@@ -1343,14 +1337,13 @@ async function loginWithProfileGuard(args: Argv, profileDir: string): Promise<vo
   if (args.forceRelogin) clearProviderLoggedIn(provider, profileDir);
   const result = await ensureOAuthSession({
     provider,
-    apiBaseUrl: args.apiBase,
     // --profile-dir pins login to an isolated profile (a secondary
     // personal Google identity) instead of the shared bot profile.
     ...(args.profileDir !== undefined ? { profileDir: args.profileDir } : {}),
     // 0.8.3-rc.1 — --force-relogin now also applies to the bare
     // `login` command. Without this, a valid cached session
     // short-circuits the flow and the operator has no way to open
-    // the noVNC URL — even when the actual problem is a service-
+    // the browser — even when the actual problem is a service-
     // side challenge (GitHub's "verify it's you" / Google's device-
     // prompt drift) that only an interactive browser session can
     // clear.

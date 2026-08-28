@@ -723,33 +723,3 @@ export async function issueMachineToken(
     clearTimeout(timer);
   }
 }
-
-// G15: shorten the headless install's cloudflared tunnel URL to a
-// `trustysquire.ai/g/<slug>` redirect. The API stores the long URL
-// (fragment included) with a 15-min TTL; the web app's /g/[slug]
-// route resolves it and 302s the browser to the long URL — preserving
-// the password fragment.
-//
-// Failure path: any error returns the original URL unchanged. The
-// caller prints whatever it gets back; users on a flaky network just
-// see the original cloudflared URL, which still works.
-export async function shortenVncUrl(
-  apiBaseUrl: string,
-  longUrl: string,
-  fetchImpl: typeof fetch = fetch,
-): Promise<string> {
-  try {
-    const res = await fetchImpl(`${apiBaseUrl}/v1/short`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: longUrl }),
-      signal: AbortSignal.timeout(5_000),
-    });
-    if (!res.ok) return longUrl;
-    const body = (await res.json()) as { short_url?: unknown };
-    if (typeof body.short_url !== "string") return longUrl;
-    return body.short_url;
-  } catch {
-    return longUrl;
-  }
-}

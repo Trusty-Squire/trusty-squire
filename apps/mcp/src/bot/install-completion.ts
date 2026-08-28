@@ -32,8 +32,7 @@ export function withInstallCompletionCallback(confirmUrl: string, callbackUrl: s
 /**
  * Listen for the install wizard's explicit Finish action without attaching
  * CDP to Chrome. The browser runs on this same host, so its top-level
- * navigation to 127.0.0.1 reaches this process even when the user is driving
- * it remotely through noVNC.
+ * navigation to 127.0.0.1 reaches this process from the local browser.
  */
 export async function startInstallCompletionListener(
   doneUrl: string,

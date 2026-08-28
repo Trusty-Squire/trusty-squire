@@ -31,11 +31,6 @@ retired `todos.md` (full history in git). None of the below blocks launch.
   setting exists; some services gate signup on an SMS code. This is the
   product-side complement to the AB6 `sms_phone` manual denylist below — a real
   phone setting + fail-fast/relay path, not a UX tweak.
-- **Headless `connect`: auto-set `TRUSTY_SQUIRE_SESSION_FILE=1` when `DISPLAY` is
-  unset.** The heartbeat (no more dead-looking sign-in wait) shipped; this is the
-  other half — a headless box's ephemeral OS keychain doesn't persist the
-  session, so `connect` re-loops the noVNC page every run unless the var is
-  exported globally. Detect headless and default the durable file session.
 - **Web maintenance-banner UI.** `GET /v1/status` already exposes `maintenance` +
   `message` (from the `MAINTENANCE_MESSAGE` kill switch); the frontend just needs
   to read it and render a banner.
@@ -77,6 +72,7 @@ nav/session/product-gate bug; see `STATE.md`.
 **Genuinely still open (the real next frontiers), in priority order:**
 
 ### N1 — Planner-navigation: authenticated but can't reach the key [P1, the dominant open bucket]
+
 The 2026-06-04 sweep was **77% authenticated** — the bottleneck is post-OAuth
 navigation, not auth. ~20 services log in fine but the planner can't reach/
 extract the API key. Three corpus-driven, generalizable prompt themes (NOT
@@ -102,6 +98,7 @@ is layered + audited (operator-handle denylist, neutral high-entropy marker,
 extracted-credential-value scrub).
 
 **Open (N1, what's left):**
+
 - **Grow the regress set** — it gains real teeth as the housekeeper accumulates
   FAILED-run rejects (a purely-successful page is a vacuous regress pass). The
   20-service batch (2026-06-05) is the first feed.
@@ -116,6 +113,7 @@ extracted-credential-value scrub).
   distinct buckets, not the extract wall.
 
 ### N2 — amplitude: clean-identity end-to-end [P2, one run from a credential]
+
 Mechanically conquered (demo-escape → form → multi-step password → account
 created → activation email received → verify link followed). Not a clean
 credential only because ~10 repeated mixed runs left amplitude with TWO
@@ -125,6 +123,7 @@ session. A clean single run on a fresh identity completes; reproducing needs a
 fresh Google identity or deleting the amplitude accounts. Not anti-bot.
 
 ### N3 — Re-run the old "impossible-class" services on residential [P2, SUPERSEDED MECHANISM — re-frame]
+
 > ⚠ The `--mode=discover` housekeeper sweep + the residential proxy this item
 > relies on are both gone (discover removed; proxy retired, direct-first). The
 > services below are no longer re-promoted by a discover run — they ride the
@@ -132,6 +131,7 @@ fresh Google identity or deleting the amplitude accounts. Not anti-bot.
 > drop the discover/proxy/`n3-repromote.yaml` instructions.
 
 Run on residential 2026-06-04 (`~/.trusty-squire/logs/round3-*`). Confirmed:
+
 - **plunk ✅** — signed up, extracted 2 creds (`api_key` + `secret_key`,
   multi-cred), auto-promoted. (Earlier rounds failed `oauth_session_not_persisted`
   / nav timeout; the residential exit cleared it.)
@@ -158,13 +158,15 @@ rotation, so these buried entries never get reached by a small batch). Run:
 ---
 
 ### N4 — kinde: complete onboarding + extract the M2M-app credential [P2, deep build]
+
 UPDATE 2026-06-09: re-measured under the fresh workspace identity. Two walls,
 not one:
+
 1. **Onboarding `business_details`** — FIXED. The operator's prior account took
    "tsagent"; the unique-org-name stall recovery (agent.ts: `pickUniqueNameField`
-   + `pickOnboardingSubmit`, fires on a taken/unavailable signal) now overwrites
-   the business NAME (which re-derives a unique subdomain) and creates a FRESH
-   org (`tsq######.kinde.com`), clearing business_details → business_stage.
+   - `pickOnboardingSubmit`, fires on a taken/unavailable signal) now overwrites
+     the business NAME (which re-derives a unique subdomain) and creates a FRESH
+     org (`tsq######.kinde.com`), clearing business_details → business_stage.
 2. **Tech-stack SDK radio (`p_sdk`)** — HARD WALL (measured 2026-06-09, 8
    iterations). A `kui-util-hide-visually` radio whose `kui-on-change` gates the
    Next button. The bot CANNOT register a selection by ANY method tried: native
@@ -183,17 +185,18 @@ not one:
    it's a **M2M application** created deliberately in Settings → APIs, yielding
    `client_id`+`client_secret` (multi-cred). So even past the radio, the bot must
    navigate the admin SPA to Add-application → M2M → create → reveal both creds.
-**Realistic solve: a HAND-BUILT skill** (like render/imagekit via
-`tools/replay-one.mjs <skill.json>`) encoding the create-M2M-app flow — but the
-radio wall (2) must fall first so the bot can reach `/admin` to probe it. This
-is a bot task; account-modifying. See [[project_discovery_signup_hardening_jun09]],
-[[project_drive_to_green_jun08]].
+   **Realistic solve: a HAND-BUILT skill** (like render/imagekit via
+   `tools/replay-one.mjs <skill.json>`) encoding the create-M2M-app flow — but the
+   radio wall (2) must fall first so the bot can reach `/admin` to probe it. This
+   is a bot task; account-modifying. See [[project_discovery_signup_hardening_jun09]],
+   [[project_drive_to_green_jun08]].
 
 ---
 
 ## Tier 2 — known good, no time pressure
 
 ### Harvester subagent Phase 3 — dry-run [from `docs/DESIGN-harvester-subagent.md`]
+
 Build `tools/harvester-subagent/`: Claude Code headless + PreToolUse hook
 gating Edit/Write/Bash; reads structured `failure-report.json`; proposes fixes
 as markdown diffs to disk (NOT real PRs). Eval suite (~10 fixtures + reference
@@ -201,14 +204,17 @@ diffs) grades each prompt iteration. Gated on Phase 1+2 having accumulated real
 failure data for a few days.
 
 ### Harvester subagent Phase 4 — real draft PRs [strategic]
+
 After Phase 3 hits ≥70% acceptance over 4 weeks: promote to real draft PRs
 against staging, cap of 3 open, rejected-fix memory, auto-resume after fix-rc.
 
 ### Harvester subagent Phase 5 — scale + multi-machine [strategic]
+
 services.yaml 15 → 200. Route Cloudflare-protected services to a Mac-based
 harvester (real GPU). Central queue coordination via the registry (not FS state).
 
 ### ipdata — re-test email-gated signup [P3, carried from todos.md]
+
 A live run reaches the real `dashboard.ipdata.co/sign-up.html` form and submits
 it, but ipdata gates on email verification and the mail never arrived in 180s
 (`verification_not_sent`) on the old fresh-MX domain. Email deliverability is now
@@ -217,6 +223,7 @@ the original blocker should be gone — re-run and inspect the success-page
 extraction. Single-service data point, low urgency.
 
 ### services.yaml curation pass [~1 hour data curation]
+
 The queue is ~101 services (`tools/housekeeper-services.yaml`). Remaining work:
 confirm `oauth_provider` / `signup_url` accuracy for the long tail as failure
 data accumulates (the resolver now self-heals most stale URLs, so this is lower
@@ -224,6 +231,7 @@ urgency than before); prune entries with genuinely no API key (stackblitz,
 zeabur — online IDEs).
 
 ### AB6 — Pick battles: route unwinnable signups to manual [SHIPPED — denylist grows]
+
 Mechanism shipped (`unwinnable-services.ts` + `runSession()` short-circuit to
 `manual_signup_required` before launching Chrome; B1 stage `manual`). Initial
 denylist: clerk (spa_broken), cloudflare (max_antibot), vercel/mailersend/
@@ -236,6 +244,7 @@ re-test with `UNIVERSAL_BOT_FORCE_UNWINNABLE=1`. (AB2 real-GPU/WebGL tell is clo
 renderer spoof; AB3–AB5 deprioritized at score 1.0.)
 
 ### F7 — Multi-step / inline-code flows [P2, mostly shipped — verify]
+
 The single-page→submit→email-link assumption is broken by multi-step (Mistral)
 and inline-code (DeepSeek) flows. 0.8.17 shipped the multi-step continuation +
 email-code entry + verify-wall routing; re-test Mistral/DeepSeek to confirm the
@@ -246,10 +255,12 @@ state-machine handles both shapes, and close or scope the residual.
 ## Tier 3 — eventually
 
 ### T3.4 — reCAPTCHA v2 static-grid solver [large, deprioritized]
+
 Per the rejected-spike design. Heavy LLM cost; the proxy + 0.8.17 combo handles
 the captcha cases we hit (invisible v3, visible v2 via 2Captcha) without it.
 
 ### G2 — API-side identity model (Tier 0 → Tier 1 funnel) [deferred]
+
 Replace the anonymous machine token with an OAuth identity; build an identified
 conversion funnel. Fast-follow per the original plan.
 
@@ -284,6 +295,7 @@ One-liner each; detailed plans in older TODOS history.
 ## Blocked / waiting
 
 ### G4 — Residential-capture for handshake-needed services [UNBLOCKED — now runnable]
+
 Was blocked on lacking a residential IP. We now HAVE one (SK-Broadband SOCKS) +
 a 1.0 score, so this is no longer blocked — it folds into **N3** (re-run the
 old impossible-class on residential). The remaining genuine human-gates
@@ -291,10 +303,12 @@ old impossible-class on residential). The remaining genuine human-gates
 — SMS-relay automation (former F12) was dropped, so these stay manual.
 
 ### VOUCHFLOW_READ_KEY env on `trusty-squire-api` [GATED]
+
 Wait until the revocation/introspection feature lands (no current caller). Set
 with a rotated key at that point.
 
 ### H1 / H2 / H3 — Concurrency [DEFERRED until concurrency is real]
+
 Bot is single-flight. Known races: `recordPrewarmSuccess` shared-file write,
 MACHINE_TOKEN_QUOTA + LLM rate-limit check-then-act. Fix when concurrency is a
 real product surface.

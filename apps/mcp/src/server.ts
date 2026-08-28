@@ -333,9 +333,7 @@ export async function runServer(): Promise<void> {
       try {
         // The OAuth-bootstrap login Chrome (google-login) is tracked apart
         // from provision sessions — drain it too so it cannot outlive the
-        // server. Its own signal handlers stand down in server mode (see
-        // registerHeadlessRigCleanup), leaving this coordinator as the one
-        // exit owner.
+        // server.
         await cancelActiveLoginBrowsers();
         await closeAllProvisionSessions();
         await server.close();
