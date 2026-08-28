@@ -13,6 +13,7 @@ import {
   withProfileOperationGuard,
 } from "./profile.js";
 import { isOAuthProviderId, type OAuthProviderId } from "./oauth-providers.js";
+import { SESSION_STATE_FILE } from "./session-state.js";
 
 interface ProviderCookieContext {
   cookies(): Promise<Array<{ name: string; domain: string; path: string }>>;
@@ -197,6 +198,7 @@ export function clearBrowserProfile(profileDir: string = CHROME_PROFILE_DIR): vo
   try {
     mkdirSync(profileDir, { recursive: true });
     for (const entry of readdirSync(profileDir)) {
+      if (entry === SESSION_STATE_FILE) continue;
       rmSync(join(profileDir, entry), { recursive: true, force: true });
     }
   } catch {

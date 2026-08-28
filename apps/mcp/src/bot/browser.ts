@@ -65,7 +65,10 @@ import {
   waitForProfileFree,
 } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
-import type { BrowserStorageState } from "./session-state.js";
+import {
+  GOOGLE_LOGIN_COOKIE_MARKERS,
+  type BrowserStorageState,
+} from "./session-state.js";
 import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
 import {
   createOperatorBrowserMarker,
@@ -79,8 +82,6 @@ import {
 // the CJS modules lazily (the stealth toolchain only ships CJS) and treat
 // stealth as best-effort — a missing dep should never crash the bot.
 const require = createRequire(import.meta.url);
-const GOOGLE_LOGIN_COOKIE_MARKERS = ["SID", "HSID", "SSID", "APISID", "SAPISID"] as const;
-
 export type StealthProfile = "baseline" | "cdp_hardened";
 
 const OPERATOR_BROWSER_HEADLESS = true;

@@ -1,7 +1,14 @@
 // Covers deterministic Google-login helpers and lifecycle boundaries.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readFileSync, mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import {
+  readFileSync,
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
@@ -711,6 +718,26 @@ describe("confirmed login finalization", () => {
       expect(readFileSync(join(profileDir, "trusty-squire-session-state.json"), "utf8")).toContain(
         '"origins":[]',
       );
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not replace the prior snapshot when browser closure is unproven", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
+    const path = join(profileDir, "trusty-squire-session-state.json");
+    const prior = '{"cookies":[{"name":"SID"}],"origins":[]}';
+    writeFileSync(path, prior, { mode: 0o600 });
+    try {
+      await finalizeLoginRun(
+        { profileDir },
+        {
+          status: "completed",
+          closeState: "unknown",
+          storageState: { cookies: [], origins: [] },
+        },
+      );
+      expect(readFileSync(path, "utf8")).toBe(prior);
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }

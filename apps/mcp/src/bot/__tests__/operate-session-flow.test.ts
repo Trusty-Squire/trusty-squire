@@ -12,7 +12,7 @@ import { constants, publicEncrypt } from "node:crypto";
 import type * as GoogleLoginModule from "../google-login.js";
 
 const h = vi.hoisted(() => ({
-  providers: ["google"] as string[],
+  providers: ["google"] as string[] | null,
   oauthStatus: "already_valid" as string,
   oauthLoginCalls: [] as string[],
   oauthReadError: null as string | null,
@@ -55,31 +55,23 @@ const h = vi.hoisted(() => ({
   closeCalls: 0,
   forceCloseCalls: 0,
   closeState: "closed" as "closed" | "force_closed_unproven" | "unknown",
-  resetCalls: 0,
-  resetFailuresRemaining: 0,
-  resetGate: null as Promise<void> | null,
   profileProbeCalls: 0,
   controllerProviderProbeCalls: 0,
   workerEmail: null as string | null,
   connections: [] as boolean[],
   profileDirs: [] as Array<string | undefined>,
   proxyUrls: [] as Array<string | undefined>,
-  leaseSerial: 0,
-  warmLeaseProfileDir: null as string | null,
-  nextLeaseProfileDir: null as string | null,
-  profileAcquisitionInterruption: null as null | {
-    reason: "timeout" | "cancelled";
-    phase: "profile" | "seed_lock";
-  },
-  leaseAcquireCalls: 0,
-  activeLeaseCount: 0,
-  leaseReturnCalls: 0,
-  leaseDestroyCalls: 0,
-  leaseRetainCalls: 0,
-  leaseRetainDestroyRequired: [] as boolean[],
-  directIdentityAcquireCalls: 0,
-  directIdentityReleaseCalls: 0,
-  directIdentityProfileDir: "/tmp/trusty-squire-unit-canonical-profile",
+  seededStorageStates: [] as unknown[],
+  storageStates: new Map<string, unknown>(),
+  storageStateReads: [] as string[],
+  storageStateWrites: [] as Array<{ profileDir: string; state: unknown }>,
+  storageStateWriteError: null as Error | null,
+  ephemeralSerial: 0,
+  createdProfiles: [] as string[],
+  destroyedProfiles: [] as string[],
+  captureStorageState: { cookies: [], origins: [] } as unknown,
+  captureStorageStateGate: null as Promise<void> | null,
+  captureStorageStateError: null as Error | null,
   currentUrl: "",
   elements: [] as unknown[],
   extractInteractiveElementsCalls: 0,
@@ -180,16 +172,48 @@ const h = vi.hoisted(() => ({
   },
 }));
 
+vi.mock("../session-state.js", () => ({
+  SESSION_STATE_FILE: "trusty-squire-session-state.json",
+  GOOGLE_LOGIN_COOKIE_MARKERS: [
+    "__Secure-1PSID",
+    "SID",
+    "HSID",
+    "SSID",
+    "APISID",
+    "SAPISID",
+  ],
+  createEphemeralProfile: () => {
+    const profileDir = `/tmp/trusty-squire-unit-ephemeral-${++h.ephemeralSerial}`;
+    h.createdProfiles.push(profileDir);
+    return profileDir;
+  },
+  destroyEphemeralProfile: (profileDir: string) => {
+    h.destroyedProfiles.push(profileDir);
+  },
+  readSessionState: (profileDir: string) => {
+    h.storageStateReads.push(profileDir);
+    return h.storageStates.get(profileDir);
+  },
+  writeSessionState: (profileDir: string, state: unknown) => {
+    if (h.storageStateWriteError !== null) throw h.storageStateWriteError;
+    h.storageStateWrites.push({ profileDir, state });
+    h.storageStates.set(profileDir, state);
+  },
+}));
+
 vi.mock("../browser.js", () => ({
   BrowserController: class {
     private readonly index: number;
-    private readonly opts: { profileDir?: string; proxyUrl?: string };
-    constructor(opts: { profileDir?: string; proxyUrl?: string } = {}) {
+    private readonly opts: { profileDir?: string; proxyUrl?: string; storageState?: unknown };
+    constructor(
+      opts: { profileDir?: string; proxyUrl?: string; storageState?: unknown } = {},
+    ) {
       this.index = h.connections.length;
       this.opts = opts;
       h.connections.push(true);
       h.profileDirs.push(opts.profileDir);
       h.proxyUrls.push(opts.proxyUrl);
+      h.seededStorageStates.push(opts.storageState);
     }
     async start(): Promise<void> {
       h.started += 1;
@@ -206,18 +230,12 @@ vi.mock("../browser.js", () => ({
     isConnected(): boolean {
       return h.connections[this.index] === true;
     }
-    async resetPageForReuse(): Promise<void> {
-      h.resetCalls += 1;
-      if (h.resetGate !== null) await h.resetGate;
-      if (h.resetFailuresRemaining > 0) {
-        h.resetFailuresRemaining -= 1;
-        throw new Error("page reset failed");
-      }
-      h.currentUrl = "about:blank";
-    }
     async detectSessionProviders(): Promise<string[]> {
       h.controllerProviderProbeCalls += 1;
-      return h.providers;
+      if (h.providers !== null) return h.providers;
+      const cookies = (this.opts.storageState as { cookies?: Array<{ name: string }> } | undefined)
+        ?.cookies;
+      return cookies?.some((cookie) => cookie.name === "__Secure-1PSID") ? ["google"] : [];
     }
     async detectGoogleAccountEmail(): Promise<string | null> {
       return h.workerEmail;
@@ -672,6 +690,11 @@ vi.mock("../browser.js", () => ({
     operatorBrowserMarker(): string {
       return `v1:1:mock-${this.index}`;
     }
+    async captureStorageState(): Promise<unknown> {
+      if (h.captureStorageStateGate !== null) await h.captureStorageStateGate;
+      if (h.captureStorageStateError !== null) throw h.captureStorageStateError;
+      return h.captureStorageState;
+    }
     async close(options?: {
       cancelStart?: boolean;
     }): Promise<"closed" | "force_closed_unproven" | "unknown"> {
@@ -756,109 +779,6 @@ vi.mock("../google-login.js", async (importOriginal) => {
       return h.providers;
     },
     ensureOAuthSession: async () => ({ status: h.oauthStatus }),
-  };
-});
-
-vi.mock("../operator-profile-pool.js", () => {
-  class OperatorProfileAcquisitionInterruptedError extends Error {
-    readonly reason: "timeout" | "cancelled";
-    readonly phase: "profile" | "seed_lock";
-    constructor(reason: "timeout" | "cancelled", phase: "profile" | "seed_lock" = "profile") {
-      super(`operator profile acquisition ${reason}`);
-      this.reason = reason;
-      this.phase = phase;
-    }
-  }
-  return {
-    OperatorProfileAcquisitionInterruptedError,
-    acquireOperatorProfile: async (
-      _sessionId: string,
-      opts: { sourceProfileDir?: string } = {},
-    ) => {
-      h.leaseAcquireCalls += 1;
-      if (h.profileAcquisitionInterruption !== null) {
-        throw new OperatorProfileAcquisitionInterruptedError(
-          h.profileAcquisitionInterruption.reason,
-          h.profileAcquisitionInterruption.phase,
-        );
-      }
-      if (h.activeLeaseCount >= 2) {
-        throw new Error(
-          "operate_start capacity reached: 2 operator sessions are active; finish one and retry",
-        );
-      }
-      h.activeLeaseCount += 1;
-      const warm = h.warmLeaseProfileDir;
-      h.warmLeaseProfileDir = null;
-      const profileDir =
-        h.nextLeaseProfileDir ??
-        opts.sourceProfileDir ??
-        warm ??
-        `/tmp/trusty-squire-unit-profile-${process.pid}-${++h.leaseSerial}`;
-      h.nextLeaseProfileDir = null;
-      let finished = false;
-      return {
-        profileDir,
-        profileId: `unit-${h.leaseSerial}`,
-        seedGeneration: "unit-seed",
-        bindWorker: () => undefined,
-        returnWarm: async () => {
-          if (finished) return;
-          finished = true;
-          h.activeLeaseCount -= 1;
-          h.leaseReturnCalls += 1;
-          h.warmLeaseProfileDir = profileDir;
-        },
-        destroy: async () => {
-          if (finished) return;
-          finished = true;
-          h.activeLeaseCount -= 1;
-          h.leaseDestroyCalls += 1;
-        },
-        retain: async (destroyRequired = false) => {
-          if (finished) return;
-          finished = true;
-          h.activeLeaseCount -= 1;
-          h.leaseRetainCalls += 1;
-          h.leaseRetainDestroyRequired.push(destroyRequired);
-        },
-      };
-    },
-  };
-});
-
-// The Google-identity path (require_live_identity) never touches the
-// isolated clone pool above — it acquires the canonical profile directly.
-// A distinct mock (and its own call counters) keeps that boundary visible in
-// tests: a requireLiveIdentity session must NOT bump h.leaseAcquireCalls.
-vi.mock("../operator-direct-identity.js", () => {
-  class OperatorDirectIdentityAcquisitionInterruptedError extends Error {
-    readonly reason: "timeout" | "cancelled";
-    constructor(reason: "timeout" | "cancelled") {
-      super(`operator direct-identity acquisition ${reason}`);
-      this.reason = reason;
-    }
-  }
-  return {
-    OperatorDirectIdentityAcquisitionInterruptedError,
-    acquireDirectIdentityProfile: async (opts: { profileDir?: string } = {}) => {
-      h.directIdentityAcquireCalls += 1;
-      const profileDir = opts.profileDir ?? h.directIdentityProfileDir;
-      let finished = false;
-      const finish = (): void => {
-        if (finished) return;
-        finished = true;
-        h.directIdentityReleaseCalls += 1;
-      };
-      return {
-        profileDir,
-        takeProfileOperationLease: () => ({ release: () => undefined }),
-        bindWorker: () => undefined,
-        returnWarm: async () => finish(),
-        destroy: async () => finish(),
-        retain: async () => finish(),
-      };
-    },
   };
 });
 
@@ -1025,28 +945,23 @@ beforeEach(() => {
   h.closeCalls = 0;
   h.forceCloseCalls = 0;
   h.closeState = "closed";
-  h.resetCalls = 0;
-  h.resetFailuresRemaining = 0;
-  h.resetGate = null;
   h.profileProbeCalls = 0;
   h.controllerProviderProbeCalls = 0;
   h.workerEmail = null;
   h.connections = [];
   h.profileDirs = [];
   h.proxyUrls = [];
-  h.leaseSerial = 0;
-  h.warmLeaseProfileDir = null;
-  h.nextLeaseProfileDir = null;
-  h.profileAcquisitionInterruption = null;
-  h.leaseAcquireCalls = 0;
-  h.activeLeaseCount = 0;
-  h.leaseReturnCalls = 0;
-  h.leaseDestroyCalls = 0;
-  h.leaseRetainCalls = 0;
-  h.leaseRetainDestroyRequired = [];
-  h.directIdentityAcquireCalls = 0;
-  h.directIdentityReleaseCalls = 0;
-  h.directIdentityProfileDir = "/tmp/trusty-squire-unit-canonical-profile";
+  h.seededStorageStates = [];
+  h.storageStates = new Map();
+  h.storageStateReads = [];
+  h.storageStateWrites = [];
+  h.storageStateWriteError = null;
+  h.ephemeralSerial = 0;
+  h.createdProfiles = [];
+  h.destroyedProfiles = [];
+  h.captureStorageState = { cookies: [], origins: [] };
+  h.captureStorageStateGate = null;
+  h.captureStorageStateError = null;
   h.currentUrl = "";
   h.elements = [];
   h.extractInteractiveElementsCalls = 0;
@@ -1256,13 +1171,7 @@ describe("prepared-statement replay", () => {
       /invalid replay continuation/i,
     );
     await finishProvisionSession(started.session_id);
-    // Money rule simplification (2026-08-16): profile-destroy hygiene was
-    // previously tied to the deleted software field-verification guard
-    // (moneyPath && paymentGuard !== "verified"). The manual-card-entry
-    // refusal itself stays terminal; the profile is no longer force-destroyed
-    // as a side effect of it.
-    expect(h.leaseReturnCalls).toBe(1);
-    expect(h.leaseDestroyCalls).toBe(0);
+    expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
   });
 
   it("rejects fresh, wrong-index, and changed-binding replay continuations", async () => {
@@ -3826,38 +3735,51 @@ describe("operate_extract — vault-store response", () => {
 });
 
 describe("operate session — Change 5 precondition gate", () => {
-  it("fails closed after probing the canonical profile when no live Google session exists", async () => {
+  it("fails closed after probing a fresh seeded profile with no live Google session", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-empty";
     h.providers = []; // no live session
-    h.oauthStatus = "failed"; // and we cannot establish one
     const obs = await startProvisionSession({
       serviceUrl: "https://app.example.com/",
+      profileDir: canonical,
       requireLiveIdentity: true,
     });
     expect(obs.needs_user).toBeDefined();
     expect(obs.needs_user?.wall).toBe("google_session");
-    expect(h.startCalls).toBe(1); // the canonical profile itself was probed
+    expect(h.startCalls).toBe(1);
     expect(h.started).toBe(0); // rejected before returning the handoff
     expect(h.gotos).toHaveLength(0);
+    expect(h.storageStateReads).toEqual([canonical]);
+    expect(h.profileDirs[0]).not.toBe(canonical);
+    expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
+    expect(h.storageStateWrites).toEqual([]);
   });
 
-  // Regression: a requireLiveIdentity session must reach Google's session via
-  // the canonical profile directly — never a per-session clone from the
-  // isolated pool, which carries the seed's cookies but not whatever Google
-  // actually keys the session on. See operator-direct-identity.ts.
-  it("drives the canonical profile directly, never the isolated clone pool", async () => {
-    h.providers = ["google"];
-    h.directIdentityProfileDir = "/tmp/trusty-squire-unit-canonical-profile-marker";
+  it("accepts require_live_identity from storageState in a distinct ephemeral profile", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-seeded";
+    const state = {
+      cookies: [
+        {
+          name: "__Secure-1PSID",
+          value: "opaque-google-session-cookie",
+          domain: ".google.com",
+          path: "/",
+        },
+      ],
+      origins: [],
+    };
+    h.providers = null;
+    h.storageStates.set(canonical, state);
     const obs = await startProvisionSession({
       serviceUrl: "https://app.example.com/",
+      profileDir: canonical,
       requireLiveIdentity: true,
     });
     expect(obs.needs_user).toBeUndefined();
     expect(h.started).toBe(1);
-    expect(h.directIdentityAcquireCalls).toBe(1);
-    expect(h.leaseAcquireCalls).toBe(0); // the isolated pool was never touched
-    expect(h.profileDirs.at(-1)).toBe("/tmp/trusty-squire-unit-canonical-profile-marker");
+    expect(h.seededStorageStates).toEqual([state]);
+    expect(h.profileDirs[0]).not.toBe(canonical);
     await finishProvisionSession(obs.session_id);
-    expect(h.directIdentityReleaseCalls).toBe(1);
+    expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
   });
 
   it("proceeds normally when a live Google session exists", async () => {
@@ -3871,16 +3793,16 @@ describe("operate session — Change 5 precondition gate", () => {
     await finishProvisionSession(obs.session_id);
   });
 
-  it("leaves the isolated clone pool in charge of ordinary (non-identity) sessions", async () => {
+  it("uses the same ephemeral lifecycle for ordinary sessions", async () => {
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-    expect(h.leaseAcquireCalls).toBe(1);
-    expect(h.directIdentityAcquireCalls).toBe(0);
+    expect(h.createdProfiles).toEqual([h.profileDirs[0]]);
     await finishProvisionSession(obs.session_id);
+    expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
   });
 });
 
-describe("operate session — isolated profile-pool lifecycle", () => {
-  it("drains an entered session call and rejects new calls before pooling", async () => {
+describe("operate session — ephemeral profile lifecycle", () => {
+  it("drains an entered session call and rejects new calls before closing", async () => {
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
     let releaseCall: (() => void) | undefined;
     const entered = withProvisionSessionCall(
@@ -3901,12 +3823,13 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     await expect(
       withProvisionSessionCall(started.session_id, async () => undefined),
     ).rejects.toThrow(/closing/);
-    expect(h.resetCalls).toBe(0);
+    expect(h.closeCalls).toBe(0);
 
     releaseCall?.();
     await entered;
     await finishing;
-    expect(h.resetCalls).toBe(1);
+    expect(h.closeCalls).toBe(1);
+    expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
   });
 
   it("forces operate_finish teardown when an entered call never drains", async () => {
@@ -3931,8 +3854,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
       await finishing;
 
       expect(h.closeCalls).toBe(1);
-      expect(h.leaseDestroyCalls).toBe(1);
-      expect(h.activeLeaseCount).toBe(0);
+      expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
       expect(activeSessionCount()).toBe(0);
       releaseCall?.();
       await entered;
@@ -3962,8 +3884,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
       await shutdown;
 
       expect(h.closeCalls).toBe(1);
-      expect(h.leaseDestroyCalls).toBe(1);
-      expect(h.activeLeaseCount).toBe(0);
+      expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
       expect(activeSessionCount()).toBe(0);
       releaseCall?.();
       await entered;
@@ -4011,8 +3932,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
         expect.objectContaining({ status: "payment_3ds_unresolved" }),
       );
       expect(h.forceCloseCalls).toBe(1);
-      expect(h.leaseDestroyCalls).toBe(1);
-      expect(h.activeLeaseCount).toBe(0);
+      expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
       expect(activeSessionCount()).toBe(0);
     } finally {
       vi.unstubAllEnvs();
@@ -4020,12 +3940,12 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     }
   });
 
-  it("keeps the profile lease reachable while a finishing page reset is forced closed", async () => {
+  it("keeps ephemeral custody while storage capture is forced closed", async () => {
     vi.useFakeTimers();
     vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS", "50");
-    let releaseReset: (() => void) | undefined;
-    h.resetGate = new Promise<void>((resolve) => {
-      releaseReset = resolve;
+    let releaseCapture: (() => void) | undefined;
+    h.captureStorageStateGate = new Promise<void>((resolve) => {
+      releaseCapture = resolve;
     });
     try {
       const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
@@ -4033,17 +3953,21 @@ describe("operate session — isolated profile-pool lifecycle", () => {
         /terminal transition timed out; browser terminated/,
       );
       await vi.advanceTimersByTimeAsync(0);
-      expect(h.resetCalls).toBe(1);
+      expect(h.storageStateWrites).toEqual([]);
 
       await vi.advanceTimersByTimeAsync(50);
       await finishing;
 
       expect(h.forceCloseCalls).toBe(1);
-      expect(h.leaseDestroyCalls).toBe(1);
-      expect(h.activeLeaseCount).toBe(0);
+      expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
+      expect(h.storageStateWrites).toEqual([]);
+
+      releaseCapture?.();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.storageStateWrites).toEqual([]);
     } finally {
-      releaseReset?.();
-      h.resetGate = null;
+      releaseCapture?.();
+      h.captureStorageStateGate = null;
       vi.unstubAllEnvs();
       vi.useRealTimers();
     }
@@ -4074,7 +3998,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     ).resolves.toMatchObject({ finish: { closed: true }, prepared: "prepared" });
     expect(originalSession.activePayment).toBeNull();
     expect(originalSession.paymentFieldSealActive).toBe(false);
-    expect(h.leaseDestroyCalls).toBe(1);
+    expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
   });
 
   it("closes unconditionally with an approval or filled card still resumable, clearing payment state", async () => {
@@ -4115,7 +4039,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     });
     expect(originalApprovalSession.activePayment).toBeNull();
     expect(originalApprovalSession.paymentFieldSealActive).toBe(false);
-    expect(h.leaseDestroyCalls).toBe(1);
+    expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
 
     const pendingSession = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
@@ -4139,7 +4063,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     });
     expect(originalPendingSession.activePayment).toBeNull();
     expect(originalPendingSession.paymentFieldSealActive).toBe(false);
-    expect(h.leaseDestroyCalls).toBe(2);
+    expect(h.destroyedProfiles).toEqual([h.profileDirs[0], h.profileDirs[1]]);
 
     const retried = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
@@ -4151,7 +4075,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     });
   });
 
-  it("reuses the warm isolated profile but cold-boots a fresh controller", async () => {
+  it("always cold-boots a distinct ephemeral profile", async () => {
     const first = await startProvisionSession({
       serviceUrl: "https://app.example.com/one",
       proxyUrl: "http://proxy-a.test:8080",
@@ -4164,10 +4088,9 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     });
 
     expect(h.startCalls).toBe(2);
-    expect(h.resetCalls).toBeGreaterThanOrEqual(1);
     expect(h.profileProbeCalls).toBe(0);
     expect(h.controllerProviderProbeCalls).toBe(2);
-    expect(h.profileDirs[1]).toBe(h.profileDirs[0]);
+    expect(h.profileDirs[1]).not.toBe(h.profileDirs[0]);
     await finishProvisionSession(second.session_id);
   });
 
@@ -4212,101 +4135,83 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     await finishProvisionSession(second.session_id);
   });
 
-  it("discards the isolated profile when its pre-close reset fails", async () => {
-    const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
-    h.resetFailuresRemaining = 1;
-    await finishProvisionSession(first.session_id);
+  it("retains the prior snapshot when capture fails", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-capture-failure";
+    const prior = { cookies: [{ name: "SID" }], origins: [] };
+    h.storageStates.set(canonical, prior);
+    h.captureStorageStateError = new Error("capture failed");
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/one",
+      profileDir: canonical,
+    });
 
-    const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
+    await finishProvisionSession(started.session_id);
 
-    expect(h.startCalls).toBe(2);
-    expect(h.closeCalls).toBe(1);
-    expect(h.profileDirs[1]).not.toBe(h.profileDirs[0]);
-    await finishProvisionSession(second.session_id);
+    expect(h.storageStates.get(canonical)).toBe(prior);
+    expect(h.storageStateWrites).toEqual([]);
+    expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
   });
 
-  it("never pools a profile whose payment fields remain sealed", async () => {
+  it("destroys without write-back when payment fields remain sealed", async () => {
     const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
     retainActivePaymentFieldSeal();
     await finishProvisionSession(first.session_id);
 
     const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
     expect(h.profileDirs[1]).not.toBe(h.profileDirs[0]);
-    expect(h.leaseDestroyCalls).toBe(1);
+    expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
+    expect(h.storageStateWrites).toEqual([]);
     await finishProvisionSession(second.session_id);
   });
 
-  it("durably marks a sealed-payment profile when closure is unproven", async () => {
+  it("retains only the unique profile when closure is unproven", async () => {
     h.closeState = "unknown";
     const session = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
-    retainActivePaymentFieldSeal();
     await finishProvisionSession(session.session_id);
 
-    expect(h.leaseReturnCalls).toBe(0);
-    expect(h.leaseDestroyCalls).toBe(0);
-    expect(h.leaseRetainDestroyRequired).toEqual([true]);
+    expect(h.destroyedProfiles).toEqual([]);
+    expect(h.storageStateWrites).toEqual([]);
+    expect(h.createdProfiles).toEqual([h.profileDirs[0]]);
   });
 
   it("uses the claimed worker's live email instead of seed-derived profile metadata", async () => {
-    const canonical = mkdtempSync(join(tmpdir(), "operator-canonical-email-"));
-    const worker = mkdtempSync(join(tmpdir(), "operator-worker-email-"));
-    writeFileSync(
-      join(canonical, "provider-emails.json"),
-      JSON.stringify({ google: "canonical@example.com" }),
-    );
-    writeFileSync(
-      join(worker, "provider-emails.json"),
-      JSON.stringify({ google: "seed@example.com" }),
-    );
-    h.nextLeaseProfileDir = worker;
+    const canonical = "/tmp/trusty-squire-unit-canonical-email";
     h.workerEmail = "live-worker@example.com";
-    try {
-      const session = await startProvisionSession({
-        serviceUrl: "https://app.example.com/",
-        profileDir: canonical,
-      });
-      expect(getSessionUserEmail(session.session_id)).toBe("live-worker@example.com");
-      await finishProvisionSession(session.session_id);
-    } finally {
-      rmSync(canonical, { recursive: true, force: true });
-      rmSync(worker, { recursive: true, force: true });
-    }
+    const session = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      profileDir: canonical,
+    });
+    expect(getSessionUserEmail(session.session_id)).toBe("live-worker@example.com");
+    await finishProvisionSession(session.session_id);
   });
 
-  it("rejects remote CDP before acquiring an isolated profile", async () => {
+  it("rejects remote CDP before creating an ephemeral profile", async () => {
     vi.stubEnv("BOT_CDP_ENDPOINT", "http://remote.example.test:9222");
     try {
       await expect(
         startProvisionSession({ serviceUrl: "https://app.example.com/" }),
       ).rejects.toThrow("does not support remote CDP");
-      expect(h.leaseAcquireCalls).toBe(0);
+      expect(h.createdProfiles).toEqual([]);
     } finally {
       vi.unstubAllEnvs();
     }
   });
 
-  it("runs two tasks concurrently on distinct isolated profile leases", async () => {
-    const [first, second] = await Promise.all([
+  it("runs three tasks concurrently on distinct ephemeral profiles", async () => {
+    const [first, second, third] = await Promise.all([
       startProvisionSession({ serviceUrl: "https://app.example.com/one" }),
       startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
+      startProvisionSession({ serviceUrl: "https://app.example.com/three" }),
     ]);
 
-    expect(h.startCalls).toBe(2);
-    expect(h.profileDirs).toHaveLength(2);
-    expect(h.profileDirs[0]).not.toBe(h.profileDirs[1]);
+    expect(h.startCalls).toBe(3);
+    expect(new Set(h.profileDirs).size).toBe(3);
     await finishProvisionSession(first.session_id);
     await finishProvisionSession(second.session_id);
+    await finishProvisionSession(third.session_id);
   });
 
   it("starts a second session while the first sits parked on a decoupled payment wait", async () => {
-    // Regression for a real user hitting "start deadline exceeded while
-    // waiting to acquire the shared seed lock" on @trusty-squire/mcp
-    // 1.1.9-rc.27: one agent held an operator session mid-payment (parked on
-    // a decoupled 3-D Secure approval wait) and a second agent's operate_start
-    // starved behind it. The seed lock is only held for the brief scavenge +
-    // clone steps inside acquireOperatorProfile, never for a session's
-    // lifetime, so a second start must succeed while the first is still open
-    // and awaiting approval.
     const first = await startProvisionSession({ serviceUrl: "https://shop.example.com/first" });
     const firstSession = paymentSession(first.session_id);
     const parkedClaim = claimActivePaymentForOperatePay(undefined, firstSession);
@@ -4408,105 +4313,21 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     await finishProvisionSession(second.session_id);
   });
 
-  it("starts the same pending third task after one active lease finishes", async () => {
-    vi.useFakeTimers();
-    try {
-      const [first, second] = await Promise.all([
-        startProvisionSession({ serviceUrl: "https://app.example.com/one" }),
-        startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
-      ]);
-      const thirdStart = startProvisionSession({ serviceUrl: "https://app.example.com/three" });
-      expect(h.leaseAcquireCalls).toBe(3);
-
-      expect(h.startCalls).toBe(2);
-      await finishProvisionSession(first.session_id);
-      await vi.advanceTimersByTimeAsync(50);
-
-      const third = await thirdStart;
-      expect(h.startCalls).toBe(3);
-      expect(h.profileDirs).toHaveLength(3);
-      await finishProvisionSession(second.session_id);
-      await finishProvisionSession(third.session_id);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("times out a third task without launching another browser", async () => {
-    vi.useFakeTimers();
-    try {
-      const [first, second] = await Promise.all([
-        startProvisionSession({ serviceUrl: "https://app.example.com/one" }),
-        startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
-      ]);
-      const thirdStart = startProvisionSession({ serviceUrl: "https://app.example.com/three" });
-      expect(h.leaseAcquireCalls).toBe(3);
-      const rejection = expect(thirdStart).rejects.toThrow("capacity wait timed out");
-
-      await vi.advanceTimersByTimeAsync(30_000);
-
-      await rejection;
-      expect(h.startCalls).toBe(2);
-      expect(h.profileDirs).toHaveLength(2);
-      await finishProvisionSession(first.session_id);
-      await finishProvisionSession(second.session_id);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("reports a shared seed-lock deadline without blaming active capacity", async () => {
-    h.profileAcquisitionInterruption = {
-      reason: "timeout",
-      phase: "seed_lock",
-    };
-
-    await expect(startProvisionSession({ serviceUrl: "https://app.example.com/" })).rejects.toThrow(
-      "operate_start failed: start deadline exceeded while waiting to acquire the shared seed lock",
-    );
-    expect(h.startCalls).toBe(0);
-    expect(h.activeLeaseCount).toBe(0);
-  });
-
-  it("cancels a capacity waiter before shutdown frees an active slot", async () => {
-    vi.useFakeTimers();
-    try {
-      await Promise.all([
-        startProvisionSession({ serviceUrl: "https://app.example.com/one" }),
-        startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
-      ]);
-      const thirdStart = startProvisionSession({ serviceUrl: "https://app.example.com/three" });
-      expect(h.leaseAcquireCalls).toBe(3);
-      const rejection = expect(thirdStart).rejects.toThrow("operator server is shutting down");
-
-      await closeAllProvisionSessions();
-
-      await rejection;
-      expect(h.startCalls).toBe(2);
-      expect(h.profileDirs).toHaveLength(2);
-      expect(activeSessionCount()).toBe(0);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("releases the abandoned session's shared profile lease so the next operate_start is not wedged", async () => {
+  it("destroys an abandoned ephemeral profile so the next operate_start is not wedged", async () => {
     vi.useFakeTimers();
     try {
       const session = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-      expect(h.activeLeaseCount).toBe(1);
+      expect(h.createdProfiles).toHaveLength(1);
 
       // Regression for a bot-blocked task whose host abandoned the session
       // while its stdio pipe stayed open. The server-level 12h grace cannot
       // protect this case; the session watchdog must destroy its browser AND
-      // terminally release the active profile/seed-pool lease. Otherwise a
-      // dead session wedges every later operate_start until manual finish.
+      // destroy its unique profile. Otherwise a dead session can leak browser state.
       await vi.advanceTimersByTimeAsync(10 * 60 * 1_000);
 
       expect(h.closeCalls).toBe(1);
       expect(activeSessionCount()).toBe(0);
-      expect(h.leaseDestroyCalls).toBe(1);
-      expect(h.activeLeaseCount).toBe(0);
+      expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
       await expect(finishProvisionSession(session.session_id)).rejects.toThrow(
         "unknown provision session",
       );
@@ -4514,8 +4335,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
       const recovered = await startProvisionSession({
         serviceUrl: "https://app.example.com/retry",
       });
-      expect(h.leaseAcquireCalls).toBe(2);
-      expect(h.activeLeaseCount).toBe(1);
+      expect(h.createdProfiles).toHaveLength(2);
       await finishProvisionSession(recovered.session_id);
     } finally {
       vi.useRealTimers();
@@ -4603,8 +4423,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
       await termination;
 
       expect(h.closeCalls).toBe(1);
-      expect(h.leaseDestroyCalls).toBe(1);
-      expect(h.activeLeaseCount).toBe(0);
+      expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
       expect(activeSessionCount()).toBe(0);
     },
   );
@@ -4679,8 +4498,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
       expect(h.waitForThreeDsCalls).toEqual([0]);
       expect(auditPayment).toHaveBeenCalledOnce();
       expect(h.closeCalls).toBe(1);
-      expect(h.leaseDestroyCalls).toBe(1);
-      expect(h.activeLeaseCount).toBe(0);
+      expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
       expect(activeSessionCount()).toBe(0);
 
       releaseAudit?.();
@@ -4725,8 +4543,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
       expect(h.waitForThreeDsCalls).toEqual([0]);
       expect(auditPayment).toHaveBeenCalledOnce();
       expect(h.closeCalls).toBe(1);
-      expect(h.leaseDestroyCalls).toBe(1);
-      expect(h.activeLeaseCount).toBe(0);
+      expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
       expect(activeSessionCount()).toBe(0);
     } finally {
       vi.unstubAllEnvs();
@@ -4782,7 +4599,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     expect(session.paymentDispatchHandoff).toBeNull();
   });
 
-  it("closes an active session and its warm browser during shutdown", async () => {
+  it("closes an active session and destroys its ephemeral profile during shutdown", async () => {
     await startProvisionSession({ serviceUrl: "https://app.example.com/" });
     expect(activeSessionCount()).toBe(1);
 
@@ -4790,11 +4607,10 @@ describe("operate session — isolated profile-pool lifecycle", () => {
 
     expect(activeSessionCount()).toBe(0);
     expect(h.closeCalls).toBe(1);
-    expect(h.leaseDestroyCalls).toBe(1);
-    expect(h.activeLeaseCount).toBe(0);
+    expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
 
     const recovered = await startProvisionSession({ serviceUrl: "https://app.example.com/retry" });
-    expect(h.activeLeaseCount).toBe(1);
+    expect(h.createdProfiles).toHaveLength(2);
     await finishProvisionSession(recovered.session_id);
   });
 
@@ -4816,8 +4632,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
       await closeAllProvisionSessions();
 
       expect(h.forceCloseCalls).toBe(1);
-      expect(h.leaseDestroyCalls).toBe(1);
-      expect(h.activeLeaseCount).toBe(0);
+      expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
 
       releaseStart?.();
       await expect(startResult).resolves.toEqual(
@@ -4826,7 +4641,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
         }),
       );
       expect(h.closeCalls).toBe(1);
-      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
     } finally {
       releaseStart?.();
       vi.unstubAllEnvs();
@@ -4853,12 +4668,11 @@ describe("operate session — isolated profile-pool lifecycle", () => {
         }),
       );
       expect(h.forceCloseCalls).toBe(1);
-      expect(h.leaseDestroyCalls).toBe(1);
-      expect(h.activeLeaseCount).toBe(0);
+      expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
 
       releaseStart?.();
       await vi.waitFor(() => expect(h.closeCalls).toBe(1));
-      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
     } finally {
       vi.unstubAllEnvs();
       releaseStart?.();
@@ -4878,7 +4692,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     expect(activeSessionCount()).toBe(0);
   });
 
-  it("returns each clean closed profile through the lease boundary", async () => {
+  it("writes and destroys each clean closed profile", async () => {
     for (let index = 0; index < 3; index += 1) {
       const session = await startProvisionSession({
         serviceUrl: `https://app.example.com/task-${index}`,
@@ -4886,23 +4700,27 @@ describe("operate session — isolated profile-pool lifecycle", () => {
       await finishProvisionSession(session.session_id);
     }
 
-    expect(h.leaseAcquireCalls).toBe(3);
-    expect(h.leaseReturnCalls).toBe(3);
-    expect(h.leaseDestroyCalls).toBe(0);
+    expect(h.createdProfiles).toHaveLength(3);
+    expect(h.destroyedProfiles).toEqual(h.profileDirs);
+    expect(h.storageStateWrites).toHaveLength(3);
   });
 
   it.each(["force_closed_unproven", "unknown"] as const)(
-    "quarantines a %s profile instead of warming it",
+    "retains a %s profile without replacing prior state",
     async (closeState) => {
+      const canonical = `/tmp/trusty-squire-unit-canonical-${closeState}`;
+      const prior = { cookies: [{ name: "SID" }], origins: [] };
+      h.storageStates.set(canonical, prior);
       h.closeState = closeState;
-      const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+      const first = await startProvisionSession({
+        serviceUrl: "https://app.example.com/one",
+        profileDir: canonical,
+      });
       await finishProvisionSession(first.session_id);
 
-      const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
-      expect(h.profileDirs[1]).not.toBe(h.profileDirs[0]);
-      expect(h.leaseReturnCalls).toBe(0);
-      expect(h.leaseRetainCalls).toBe(1);
-      await finishProvisionSession(second.session_id);
+      expect(h.destroyedProfiles).toEqual([]);
+      expect(h.storageStateWrites).toEqual([]);
+      expect(h.storageStates.get(canonical)).toBe(prior);
     },
   );
 });
@@ -5127,14 +4945,14 @@ describe("operate_finish lifecycle consolidation", () => {
       await expect(
         provisionFinishTool.handler({ session_id: started.session_id }, null),
       ).rejects.toThrow(/already closing/);
-      expect(h.resetCalls).toBe(0);
+      expect(h.closeCalls).toBe(0);
 
       releaseExtraction?.();
       await expect(finishing).resolves.toMatchObject({
         kind: "credentials",
         stored_credential: { reference: "vault://acct/finish-exclusive" },
       });
-      expect(h.resetCalls).toBe(1);
+      expect(h.closeCalls).toBe(1);
     } finally {
       releaseExtraction?.();
       if (previousAutoPromote === undefined) delete process.env.TRUSTY_SQUIRE_AUTO_PROMOTE;
@@ -7150,7 +6968,7 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
         status: "payment_3ds_unresolved",
       }),
     );
-    expect(h.resetCalls).toBe(0);
+    expect(h.storageStateWrites).toEqual([]);
   });
 
   it("retains the pending 3DS fence when finish preparation fails", async () => {

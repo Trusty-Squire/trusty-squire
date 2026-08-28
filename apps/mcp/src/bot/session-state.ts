@@ -1,4 +1,13 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserContext } from "playwright";
@@ -6,6 +15,14 @@ import type { BrowserContext } from "playwright";
 export type BrowserStorageState = Awaited<ReturnType<BrowserContext["storageState"]>>;
 
 export const SESSION_STATE_FILE = "trusty-squire-session-state.json";
+export const GOOGLE_LOGIN_COOKIE_MARKERS = [
+  "__Secure-1PSID",
+  "SID",
+  "HSID",
+  "SSID",
+  "APISID",
+  "SAPISID",
+] as const;
 
 export function sessionStatePath(profileDir: string): string {
   return join(profileDir, SESSION_STATE_FILE);
@@ -45,12 +62,4 @@ export function writeSessionState(profileDir: string, state: BrowserStorageState
   chmodSync(temporary, 0o600);
   renameSync(temporary, destination);
   chmodSync(destination, 0o600);
-}
-
-export function clearSessionState(profileDir: string): void {
-  try {
-    unlinkSync(sessionStatePath(profileDir));
-  } catch {
-    // No snapshot is the desired end state for a plain-Chrome login.
-  }
 }

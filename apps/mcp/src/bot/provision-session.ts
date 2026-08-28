@@ -684,6 +684,7 @@ interface StartingBrowser {
   canonicalProfileDir: string;
   launch: Promise<void>;
   cancelRequested: boolean;
+  cleanupPromise: Promise<void> | null;
 }
 
 const leasedBrowsers = new Map<BrowserController, EphemeralBrowser>();
@@ -707,6 +708,7 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
     canonicalProfileDir,
     launch: Promise.resolve(),
     cancelRequested: false,
+    cleanupPromise: null,
   };
   pending.launch = startBrowserBounded(controller, sessionId, async () => {
     await cancelStartingBrowser(pending);
@@ -714,6 +716,9 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
   startingBrowsers.add(pending);
   try {
     await pending.launch;
+    if (pending.cancelRequested) {
+      throw new Error("operate_start cancelled: operator server is shutting down");
+    }
   } catch (err) {
     if (!pending.cancelRequested) {
       await closeEphemeralBrowser({ controller, profileDir, canonicalProfileDir }, false);
@@ -729,14 +734,14 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
 async function releaseWarmBrowserPage(
   browser: BrowserController,
   persistState: boolean,
+  owner?: SessionTerminalTeardownOwner,
 ): Promise<void> {
   const ephemeral = leasedBrowsers.get(browser);
   if (ephemeral === undefined) {
     await browser.close().catch(() => undefined);
     return;
   }
-  leasedBrowsers.delete(browser);
-  await closeEphemeralBrowser(ephemeral, persistState);
+  await closeEphemeralBrowser(ephemeral, persistState, owner);
 }
 
 async function forceReleaseWarmBrowserPage(browser: BrowserController): Promise<void> {
@@ -747,7 +752,7 @@ async function forceReleaseWarmBrowserPage(browser: BrowserController): Promise<
     "operator browser force-close timed out",
   );
   if (ephemeral === undefined) return;
-  leasedBrowsers.delete(browser);
+  if (leasedBrowsers.get(browser) === ephemeral) leasedBrowsers.delete(browser);
   if (closeState === "closed") destroyEphemeralProfile(ephemeral.profileDir);
   else console.error(`[operator] retained ephemeral profile after unproven browser close: ${ephemeral.profileDir}`);
 }
@@ -785,29 +790,56 @@ async function closeBrowserBounded(
 
 async function cancelStartingBrowser(pending: StartingBrowser): Promise<void> {
   pending.cancelRequested = true;
-  const closeState = await closeBrowserBounded(
-    pending.controller,
-    true,
-    "operator browser startup cancellation timed out",
-  );
-  if (closeState === "closed") destroyEphemeralProfile(pending.profileDir);
+  if (pending.cleanupPromise !== null) return await pending.cleanupPromise;
+  pending.cleanupPromise = (async () => {
+    const closeState = await closeBrowserBounded(
+      pending.controller,
+      true,
+      "operator browser startup cancellation timed out",
+    );
+    if (closeState === "closed") destroyEphemeralProfile(pending.profileDir);
+  })();
+  return await pending.cleanupPromise;
 }
 
-async function closeEphemeralBrowser(ephemeral: EphemeralBrowser, persistState: boolean): Promise<void> {
+async function closeEphemeralBrowser(
+  ephemeral: EphemeralBrowser,
+  persistState: boolean,
+  owner?: SessionTerminalTeardownOwner,
+): Promise<void> {
+  let state: Awaited<ReturnType<BrowserController["captureStorageState"]>> | undefined;
   if (persistState && typeof ephemeral.controller.captureStorageState === "function") {
-    const state = await ephemeral.controller.captureStorageState().catch((error: unknown) => {
+    state = await ephemeral.controller.captureStorageState().catch((error: unknown) => {
       console.error(`[operator] storageState capture failed; retaining prior snapshot: ${error instanceof Error ? error.message : String(error)}`);
       return undefined;
     });
-    if (state !== undefined) writeSessionState(ephemeral.canonicalProfileDir, state);
+  }
+  if (owner?.forced) {
+    throw new Error("operator browser terminal teardown was forced");
   }
   const closeState = await closeBrowserBounded(
     ephemeral.controller,
     false,
     "operator browser close timed out",
   );
-  if (closeState === "closed") destroyEphemeralProfile(ephemeral.profileDir);
-  else console.error(`[operator] retained ephemeral profile after unproven browser close: ${ephemeral.profileDir}`);
+  if (owner?.forced) {
+    throw new Error("operator browser terminal teardown was forced");
+  }
+  if (closeState === "closed") {
+    try {
+      if (state !== undefined) writeSessionState(ephemeral.canonicalProfileDir, state);
+    } finally {
+      if (leasedBrowsers.get(ephemeral.controller) === ephemeral) {
+        leasedBrowsers.delete(ephemeral.controller);
+      }
+      destroyEphemeralProfile(ephemeral.profileDir);
+    }
+  } else {
+    if (leasedBrowsers.get(ephemeral.controller) === ephemeral) {
+      leasedBrowsers.delete(ephemeral.controller);
+    }
+    console.error(`[operator] retained ephemeral profile after unproven browser close: ${ephemeral.profileDir}`);
+  }
 }
 
 function stopSessionWatchdog(session: Session): void {
@@ -2685,9 +2717,8 @@ export function googleSessionGate(
       wall: "google_session",
       message:
         "No live Google session in the bot profile, so the operator cannot act " +
-        "as you yet. Refresh it with `npx @trusty-squire/mcp connect --force-relogin` " +
-        "— plain `connect` may report 'already connected' from a cached marker and " +
-        "skip the sign-in, so it will NOT fix a stale/expired session. Then retry " +
+        "as you yet. Refresh it with `npx @trusty-squire/mcp login --provider=google --force-relogin` " +
+        "so the interactive context captures a fresh portable session snapshot. Then retry " +
         "— the task has NOT started and nothing was changed.",
       resume: "connect",
     },
@@ -7879,7 +7910,11 @@ async function closeFinishingProvisionSession(
   session.pendingThreeDs = null;
   sessions.delete(sessionId);
   stopSessionWatchdog(session);
-  await releaseWarmBrowserPage(session.browser, !destroyProfile);
+  await releaseWarmBrowserPage(
+    session.browser,
+    !destroyProfile,
+    session.terminalTeardownOwner ?? undefined,
+  );
   disposeSessionWatchdog(session);
   return { session_id: sessionId, url, closed: true };
 }

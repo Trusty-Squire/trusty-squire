@@ -35,9 +35,11 @@ import {
 import { markProviderLoggedIn } from "./login-state.js";
 import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
-import { writeSessionState, type BrowserStorageState } from "./session-state.js";
-
-const GOOGLE_LOGIN_COOKIE_MARKERS = ["SID", "HSID", "SSID", "APISID", "SAPISID"] as const;
+import {
+  GOOGLE_LOGIN_COOKIE_MARKERS,
+  writeSessionState,
+  type BrowserStorageState,
+} from "./session-state.js";
 
 const require = createRequire(import.meta.url);
 
@@ -651,7 +653,7 @@ export async function finalizeLoginRun(
   }
   // Plain Chrome has no context to capture. Leave the existing snapshot alone;
   // it is safer than erasing every saved login after an interactive connect.
-  if (result.storageState !== undefined) {
+  if (result.closeState === "closed" && result.storageState !== undefined) {
     writeSessionState(opts.profileDir, result.storageState);
   }
 }
