@@ -862,10 +862,13 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
   const pending: StartingBrowser = {
     controller,
     lease,
-    launch: startBrowserBounded(controller, sessionId),
+    launch: Promise.resolve(),
     cancelRequested: false,
     cleanupPromise: null,
   };
+  pending.launch = startBrowserBounded(controller, sessionId, async () => {
+    await cancelStartingBrowser(pending);
+  });
   startingBrowsers.add(pending);
   try {
     await pending.launch;
@@ -1232,25 +1235,27 @@ function audit(sessionId: string, event: string, detail: Record<string, unknown>
 // launch); tune with BOT_START_TIMEOUT_MS. On timeout we close() the
 // half-launched browser so a wedged Chrome can't keep the profile lock and brick
 // the next attempt.
-const START_TIMEOUT_MS = Number(process.env.BOT_START_TIMEOUT_MS) || 600_000;
-
-async function startBrowserBounded(browser: BrowserController, sessionId: string): Promise<void> {
+async function startBrowserBounded(
+  browser: BrowserController,
+  sessionId: string,
+  cancel: () => Promise<void>,
+): Promise<void> {
+  const timeoutMs = Number(process.env.BOT_START_TIMEOUT_MS) || 600_000;
   audit(sessionId, "browser_launch", {
     note: "first launch may download Chromium + start Xvfb; slow but one-time",
-    timeout_ms: START_TIMEOUT_MS,
+    timeout_ms: timeoutMs,
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error("__browser_start_timeout__")), START_TIMEOUT_MS);
+    timer = setTimeout(() => reject(new Error("__browser_start_timeout__")), timeoutMs);
   });
   try {
     await Promise.race([browser.start(), timeout]);
   } catch (err) {
     if (err instanceof Error && err.message === "__browser_start_timeout__") {
-      // Release the wedged Chrome/profile lock so the next operate_start isn't bricked.
-      await browser.close({ cancelStart: true }).catch(() => undefined);
+      await cancel().catch(() => undefined);
       throw new Error(
-        `operate_start: browser did not launch within ${Math.round(START_TIMEOUT_MS / 1000)}s. ` +
+        `operate_start: browser did not launch within ${Math.round(timeoutMs / 1000)}s. ` +
           "On a fresh machine the first launch downloads Chromium and starts a virtual display " +
           "(Xvfb) — slow but one-time. A hang this long usually means the browser binaries or Xvfb " +
           "are missing on this box. Retry once (a partial download resumes and later launches reuse " +

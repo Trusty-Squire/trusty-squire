@@ -4605,6 +4605,37 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     expect(h.leaseDestroyCalls).toBe(1);
   });
 
+  it("bounds startup timeout cleanup without awaiting a hung launch", async () => {
+    vi.stubEnv("BOT_START_TIMEOUT_MS", "25");
+    let releaseStart: (() => void) | undefined;
+    h.startGate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    try {
+      const startResult = startProvisionSession({ serviceUrl: "https://app.example.com/" }).then(
+        () => null,
+        (err: unknown) => err,
+      );
+      await vi.waitFor(() => expect(h.startCalls).toBe(1));
+
+      await expect(startResult).resolves.toEqual(
+        expect.objectContaining({
+          message: expect.stringContaining("browser did not launch within"),
+        }),
+      );
+      expect(h.forceCloseCalls).toBe(1);
+      expect(h.leaseDestroyCalls).toBe(1);
+      expect(h.activeLeaseCount).toBe(0);
+
+      releaseStart?.();
+      await vi.waitFor(() => expect(h.closeCalls).toBe(1));
+      expect(h.leaseDestroyCalls).toBe(1);
+    } finally {
+      vi.unstubAllEnvs();
+      releaseStart?.();
+    }
+  });
+
   it("hard-stops a session when the process watchdog reports maximum lifetime", async () => {
     await startProvisionSession({ serviceUrl: "https://app.example.com/" });
 

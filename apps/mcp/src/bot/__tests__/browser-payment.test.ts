@@ -542,6 +542,67 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "preserves captured dispatch across immediate cross-origin navigation",
+    async () => {
+      const merchantUrl = "https://merchant.test/checkout";
+      const paymentUrl = "https://checkout.pci.shopifyinc.test/pay";
+      const challengeUrl = "https://issuer.test/acs/challenge";
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.route("**/*", async (route) => {
+          const url = route.request().url();
+          if (url.startsWith(challengeUrl)) {
+            return route.fulfill({
+              contentType: "text/html",
+              body: "<title>3D Secure Authentication</title><h1>Verify your payment</h1>",
+            });
+          }
+          if (url === paymentUrl) {
+            return route.fulfill({
+              contentType: "text/html",
+              body: `
+                <button type="button">Pay now</button>
+                <script>
+                  document.querySelector("button").addEventListener("click", () => {
+                    window.location.replace("${challengeUrl}");
+                  });
+                </script>`,
+            });
+          }
+          if (url !== merchantUrl) return route.fulfill({ status: 404, body: "not found" });
+          return route.fulfill({
+            contentType: "text/html",
+            body: `<iframe src="${paymentUrl}"></iframe>`,
+          });
+        });
+        await page.goto(merchantUrl);
+        await page.waitForLoadState("networkidle");
+        page.setDefaultTimeout(1_000);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+        const onSubmitDispatched = vi.fn();
+
+        await expect(
+          (
+            controller as unknown as {
+              submitFilledCheckoutInScope: (
+                cardGroup: undefined,
+                onDispatched: () => void,
+              ) => Promise<CheckoutSubmitResult>;
+            }
+          ).submitFilledCheckoutInScope(undefined, onSubmitDispatched),
+        ).resolves.toMatchObject({ three_ds_required: true });
+        expect(onSubmitDispatched).toHaveBeenCalledOnce();
+        expect(page.frames().some((frame) => frame.url().startsWith(challengeUrl))).toBe(true);
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "types digits into a combined numeric expiry field and lets the site format MM/YY",
     async () => {
       const browser = await chromium.launch({ headless: true });
