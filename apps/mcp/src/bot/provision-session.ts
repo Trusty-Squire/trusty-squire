@@ -261,28 +261,32 @@ export interface ScreenOutline {
 
 export interface Observation {
   session_id: string;
+  // V1 page location. Compact V2 deliberately emits an empty string and keeps
+  // the live URL on the private side of its sealed page identity.
   url: string;
   // Registry route guidance, present ONLY on the first (start) observation when
   // a skill exists for the service. The host agent reads it before driving.
   hint?: string;
-  // Layout-aware page prose (innerText) so the agent can read passages,
-  // questions, masked-key hints, etc. Capped to keep tool payloads bounded.
+  // V1 layout-aware page prose (innerText), capped to keep tool payloads
+  // bounded. Compact V2 deliberately emits an empty string.
   text: string;
   // Domain-aware steering for the host planner. This is not a script; it is
   // guardrail context for states the raw page text routinely misleads agents on.
   guidance?: string;
-  // Compact relational view of interactive DOM regions. This is intentionally
-  // smaller than raw DOM but preserves hierarchy/occlusion that flat text loses.
+  // V1 full-mode relational view of interactive DOM regions. This is
+  // intentionally smaller than raw DOM but preserves hierarchy/occlusion that
+  // flat text loses.
   screen?: ScreenOutline;
-  // AXI-style planner scan surface. Additive in full mode: the rich `elements`
-  // inventory remains the source of truth for actionability/state.
+  // V1 AXI-style planner scan surface. Additive in full mode: the rich
+  // `elements` inventory remains the source of truth for actionability/state.
   accessibility?: AccessibilitySnapshot;
-  // FULL-mode element inventory (the legacy escape hatch): one JSON object per
-  // element with every field. In COMPACT mode `elements` is absent and the
-  // element set rides on `el_table` instead (see below).
+  // V1 FULL-mode element inventory (the legacy escape hatch): one JSON object
+  // per element with every field. In V1 COMPACT mode `elements` is absent and
+  // the element set rides on `el_table` instead (see below).
   elements?: ObservedElement[];
-  // COMPACT-mode element inventory as a tab-delimited table (docs/DESIGN-observe-
-  // compact.md § Phase 4). The first line is a tab-joined HEADER naming the
+  // V1 COMPACT-mode element inventory as a tab-delimited table
+  // (docs/DESIGN-observe-compact.md § Legacy V1 Phase 4). The first line is a
+  // tab-joined HEADER naming the
   // columns present in this emit (a subset of ref,label,tag,role,type,value_len,
   // checked,href,testId,topmost,occluded_by,frame_origin, always starting
   // ref,label,tag);
@@ -296,9 +300,9 @@ export interface Observation {
   // chrome links, which stay in snapshot_file). `detail:"full"` uses `elements`
   // (JSON), never this.
   el_table?: string;
-  // Compact-mode bookkeeping so omission is never silent: the complete current
-  // element count (including delta/collapsed omissions), and whether page text
-  // was capped at 4000 characters. Absent in full mode.
+  // V1 compact-mode bookkeeping so omission is never silent: the complete
+  // current element count (including delta/collapsed omissions), and whether
+  // page text was capped at 4000 characters. Absent in full mode.
   elements_total?: number;
   text_truncated?: boolean;
   // True when a dialog/modal region (role="dialog", <dialog>, aria-modal="true")
@@ -306,7 +310,8 @@ export interface Observation {
   // open and interactable. Omitted (never `false`) when no modal is active, so
   // its presence alone is the signal.
   modal_active?: boolean;
-  // Per-session observe delta (docs/DESIGN-observe-compact.md). On a DELTA emit,
+  // V1 per-session observe delta (docs/DESIGN-observe-compact.md). On a DELTA
+  // emit,
   // `el_table` carries ONLY the rows whose compact form changed vs the previous
   // observation; `delta` is true and `unchanged` counts the elements that were
   // identical and therefore omitted (present in the persisted snapshot_file).
@@ -316,24 +321,26 @@ export interface Observation {
   // collapsed chrome links that remain in snapshot_file. If persistence fails,
   // snapshot_file is absent and `el_table` is instead complete and uncollapsed.
   // A full snapshot is emitted on the first observe, a URL change, or high churn
-  // (SPA re-render).
+  // (SPA re-render). Compact V2 also uses `delta:true`, but only for its sealed
+  // safe map; it never exposes the V1 snapshot or inventory recovery fields.
   delta?: boolean;
   unchanged?: number;
   removed?: string[];
-  // Set on a DELTA emit when the (normalized, same-cap) page text is identical to
-  // the previous observation's — the `text` field is then emitted EMPTY and the
-  // host reuses the prior text (recoverable in full from snapshot_file).
+  // V1-only: set on a DELTA emit when the (normalized, same-cap) page text is
+  // identical to the previous observation's — the `text` field is then emitted
+  // EMPTY and the host reuses the prior text (recoverable in full from
+  // snapshot_file).
   // Corpus-measured: 38% of re-observes have byte-identical text, and the text
   // blob is a large share of each observe.
   text_unchanged?: boolean;
-  // FULL compact emit only: count of plain chrome-region <a> links collapsed out
-  // of `el_table` (a site-dependent bonus). The collapsed links stay in
+  // V1 FULL compact emit only: count of plain chrome-region <a> links collapsed
+  // out of `el_table` (a site-dependent bonus). The collapsed links stay in
   // snapshot_file. Buttons/inputs/dismiss controls are never collapsed.
   chrome_links_collapsed?: number;
-  // Every observe writes the COMPLETE current snapshot (all elements, WITH the
-  // verbose `path` field) to this session-scoped file, so the host can re-expand
-  // the full inventory after ITS own context compacts, or grep for an element the
-  // delta didn't re-show. The delta's safety net — without it, delta is unsafe.
+  // Every V1 observe writes the COMPLETE current snapshot (all elements, WITH
+  // the verbose `path` field) to this session-scoped file, so the host can
+  // re-expand the full inventory after ITS own context compacts, or grep for an
+  // element the delta didn't re-show. Compact V2 never writes or emits this path.
   snapshot_file?: string;
   // Phase 2 — set to "none" on the minimal ack returned by
   // operate_act{observe:"none"} (action ran; no perception emitted — call

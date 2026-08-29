@@ -103,9 +103,7 @@ export function looksLikeCredentialToken(token: string): boolean {
   // separates a real key from a word-word-word-date slug
   // (trusty-squire-dogfood-20260625), whose segments are dictionary words or a
   // pure-digit date — neither is a long letter+digit run.
-  return token
-    .split("-")
-    .some((s) => s.length >= 10 && /[A-Za-z]/.test(s) && /[0-9]/.test(s));
+  return token.split("-").some((s) => s.length >= 10 && /[A-Za-z]/.test(s) && /[0-9]/.test(s));
 }
 
 // The vendor FAMILY of a key = the leading letters before its first separator.

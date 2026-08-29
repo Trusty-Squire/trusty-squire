@@ -265,13 +265,14 @@ for the system and data flows.
 
 ## MCP tools
 
-The default MCP registry exposes 19 tools. The essential operator surface
-is `operate_start`, `operate_observe`, `operate_act`, `operate_pay`,
-`operate_payment_status`, `operate_finish`, `operate_recipe_run`, and
-`operate_recipe_save` — every former standalone workflow/lifecycle/login tool
-name was dropped and its behavior folded into `operate_act` as a `kind` (or into
-`operate_finish`'s `outcome`); no delegating aliases remain. Poll payment status
-via `operate_payment_status(wait_seconds)`. `operate_screenshot(session_id,
+The default MCP registry exposes 20 tools. The essential operator surface is
+`operate_start`, `operate_observe`, `operate_observe_query`, `operate_act`,
+`operate_pay`, `operate_payment_status`, `operate_finish`,
+`operate_recipe_run`, and `operate_recipe_save` — every former standalone
+workflow/lifecycle/login tool name was dropped and its behavior folded into
+`operate_act` as a `kind` (or into `operate_finish`'s `outcome`); no delegating
+aliases remain. Poll payment status via
+`operate_payment_status(wait_seconds)`. `operate_screenshot(session_id,
 frame_index?, frame_url_contains?, full_page?)` is a read-only debugging capture
 (page or one isolated frame, e.g. a cross-origin 3-D Secure/captcha challenge)
 returned as an actual MCP image. It refuses during an active card fill, when the
@@ -281,26 +282,40 @@ safety fence.
 The maintainer-only `list_extract_failures` → `get_extract_failure`
 DOM-diagnostics pair is excluded from that surface; set
 `TRUSTY_SQUIRE_DIAGNOSTICS=1` in the MCP server environment to opt into the
-21-tool diagnostics profile.
+22-tool diagnostics profile.
+
+Operate sessions default to Compact V2 observations: a screened
+`format:"compact-v2"` response with a finite stage, safe title/heading
+semantics, and opaque generation-bound controls in `safe_table`. Raw page text,
+URLs, DOM values, and snapshot files are not part of that format. Use
+`operate_observe_query` with task words or `overflow.next_cursor` to retrieve a
+named or paged control while matching stays inside the live browser. A browser
+action invalidates the current handles; on `reobserve_required`, observe again
+and select a new handle. `detail:"full"` remains inside the V2 seal. Maintainers
+can select the legacy V1 `el_table`/snapshot contract with
+`TRUSTY_SQUIRE_OBSERVE_V2=off`, or exercise V2 without emitting it with
+`shadow`; the detailed wire and migration contract lives in
+[DESIGN-observe-compact.md](docs/DESIGN-observe-compact.md).
 
 - Rejected tool calls return a JSON `error` envelope with a stable `code` and
   message. Malformed and unknown calls fail only that request; they do not stop
   the shared stdio process or discard its active in-memory operator session.
   `server_unavailable` includes `retry.max_attempts: 1`: retry once, and never
   kill or restart the shared operator process.
-- `operate_start`, `operate_observe`, and `operate_act` open a website, inspect
-  the current state, and perform one browser action at a time. Ordinary controls
-  inside same- and cross-origin frames are included in observations with a
-  `frame_origin`; known captcha challenge frames stay behind the dedicated
-  captcha flow. Frame refs and live `text=…`/`css=…` locators preserve that
-  boundary: same-registrable-domain frames are reachable, cross-domain frames
+- `operate_start`, `operate_observe`, `operate_observe_query`, and `operate_act`
+  open a website, inspect the current state, and perform one browser action at a time. Ordinary controls
+  inside same- and cross-origin frames are included in observations (as finite
+  frame facts in Compact V2 and `frame_origin` in V1); known captcha challenge
+  frames stay behind the dedicated captcha flow. Same-registrable-domain frames
+  are reachable, cross-domain frames
   must pass the same domain scope as `goto`/`allow_host`, opaque frames are
   refused, and `type_secret` never targets any cross-domain frame. Frame refs
   currently support `click`, `js_click`, `type`, `type_secret`, and `select`;
   `upload`, `oauth_click`, and `oauth_login` fail closed. If a visible control
-  has no observed ref, the four locator-capable actions (`click`, `js_click`,
-  `type`, and `type_secret`) can use a live locator; that one-off fallback is not
-  replayable.
+  has no observed ref, explicitly selected V1 sessions let the four
+  locator-capable actions (`click`, `js_click`, `type`, and `type_secret`) use a
+  live `text=…`/`css=…` locator; that one-off fallback is not replayable.
+  Compact V2 accepts only a handle from its current sealed action map.
   In a live operator session, in-page XHR/fetch calls to merchant API sibling
   subdomains are automatically in scope only when they share the registrable
   domain of a host trusted at session start. Calls outside the session scope fail
@@ -320,10 +335,11 @@ DOM-diagnostics pair is excluded from that surface; set
   unauthenticated SOCKS5 URL. The value is launch-only and sensitive: it is not
   returned in session status, action traces, or saved recipes. Omitting it uses
   direct egress.
-  When DOM churn invalidates an `@e:` ref, `operate_act` returns `target_stale`
-  with the last observation generation, `reobserve_required: true`, best-effort
-  label-keyed `replacement_candidates`, and
-  `retry_policy: "do_not_retry_old_ref"`; re-observe and choose a current ref.
+  Under Compact V2, an expired, forged, wrong-generation, cross-page, or drifted
+  `@e:` handle fails opaquely with `reobserve_required`; re-observe and choose a
+  current handle. Under V1, DOM churn returns `target_stale` with the last
+  observation generation, `reobserve_required: true`, best-effort label-keyed
+  `replacement_candidates`, and `retry_policy: "do_not_retry_old_ref"`.
   Malformed `operate_act` calls return `error.code: "invalid_arguments"` and an
   `error.guidance` repair object with the allowed kinds, missing fields, a valid
   example, and a safe alternative instead of only a validation string.

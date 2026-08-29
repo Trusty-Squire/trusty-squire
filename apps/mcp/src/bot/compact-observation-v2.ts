@@ -548,7 +548,9 @@ export function sealRetainedInteractiveElementsV2(
         ? element.containerId
         : null,
     formId:
-      typeof element.formId === "number" && Number.isSafeInteger(element.formId) && element.formId > 0
+      typeof element.formId === "number" &&
+      Number.isSafeInteger(element.formId) &&
+      element.formId > 0
         ? element.formId
         : null,
     topmost: element.topmost ?? null,
