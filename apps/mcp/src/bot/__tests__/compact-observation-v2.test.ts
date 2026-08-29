@@ -152,6 +152,55 @@ describe("compact observation v2", () => {
     expect(JSON.stringify(safe.rows)).not.toContain("private@example.test");
   });
 
+  it("keeps native submit inputs actionable and screens their value as a label", () => {
+    const submit = element({
+      tag: "input",
+      type: "submit",
+      role: null,
+      value: "Create account",
+      selector: "#create-account",
+    });
+    const safe = buildSafeControlsV2({
+      elements: [submit],
+      legacyRefs: new Map([[submit, "@e:submit"]]),
+      generation: 1,
+      pageOrigin: "https://merchant.invalid",
+    });
+    expect(safe.rows).toEqual([
+      expect.objectContaining({ role: "button", name: "Create account", action: "signup" }),
+    ]);
+  });
+
+  it("classifies only quantity-signaled number inputs as quantity fields", () => {
+    const otp = element({
+      tag: "input",
+      type: "number",
+      role: "textbox",
+      ariaLabel: "Verification code",
+      selector: "#otp",
+    });
+    const quantity = element({
+      tag: "input",
+      type: "number",
+      role: "textbox",
+      ariaLabel: "Quantity",
+      selector: "#quantity",
+    });
+    const safe = buildSafeControlsV2({
+      elements: [otp, quantity],
+      legacyRefs: new Map([
+        [otp, "@e:otp"],
+        [quantity, "@e:quantity"],
+      ]),
+      generation: 1,
+      pageOrigin: "https://merchant.invalid",
+    });
+    const otpRow = safe.rows.find((row) => row.name === "Verification code");
+    const quantityRow = safe.rows.find((row) => row.name === "Quantity");
+    expect(otpRow?.field).toBeUndefined();
+    expect(quantityRow?.field).toBe("quantity");
+  });
+
   it("issues short generation-bound indices in table order", () => {
     const button = element({ visibleText: "private merchant copy" });
     const refs = new Map<InteractiveElement, string>([[button, "@e:stable_button"]]);
@@ -230,6 +279,11 @@ describe("compact observation v2", () => {
       safeStageV2("https://merchant.invalid/order", [element({ visibleText: "Checkout", role: "button" })]),
     ).toBe("checkout");
     expect(safeStageV2("https://merchant.invalid/products/checkout-tote", [])).toBe("browse");
+    expect(
+      safeStageV2("https://merchant.invalid/products/checkout-tote", [
+        element({ visibleText: "Checkout Tote", role: "link" }),
+      ]),
+    ).toBe("browse");
   });
 
   it("parses tokenized autocomplete fields and required state", () => {

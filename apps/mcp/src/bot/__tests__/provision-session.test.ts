@@ -319,6 +319,21 @@ describe("resolveTarget", () => {
     expect(stableElementId(modal)).not.toBe(stableElementId(background));
   });
 
+  it("keeps unlabeled field identities stable when their values change", () => {
+    const before = [
+      el({ tag: "input", type: "text", value: "alpha", selector: "#first" }),
+      el({ tag: "input", type: "text", value: "beta", selector: "#second" }),
+    ];
+    const after = [
+      el({ tag: "input", type: "text", value: "beta", selector: "#first" }),
+      el({ tag: "input", type: "text", value: "alpha", selector: "#second" }),
+    ];
+    const beforeRefs = provisionElementRefs(before);
+    const afterRefs = provisionElementRefs(after);
+    expect(afterRefs.get(after[0]!)).toBe(beforeRefs.get(before[0]!));
+    expect(afterRefs.get(after[1]!)).toBe(beforeRefs.get(before[1]!));
+  });
+
   it("distinguishes same-label siblings by their selector (no ordinal collision)", () => {
     // A realistic list: two "Remove" buttons, same label/path/role but DIFFERENT
     // selectors. The selector is folded into stableElementId, so they get distinct

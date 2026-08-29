@@ -3367,6 +3367,29 @@ describe("Compact V2 action-map boundary", () => {
     expect(h.clickCalls).toBe(0);
   });
 
+  it("verifies text and URL postconditions from private live evidence in V2", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.visibleText = "Review order";
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout/review",
+    });
+    expect(started).toMatchObject({ format: "compact-v2", url: "", text: "" });
+    await expect(
+      verifyPostcondition(started.session_id, {
+        kind: "execute_capability",
+        describe: "Review page is visible",
+        success_signal: { text_present: "Review order" },
+      }),
+    ).resolves.toMatchObject({ confirmed: true });
+    await expect(
+      verifyPostcondition(started.session_id, {
+        kind: "execute_capability",
+        describe: "Checkout review route is active",
+        success_signal: { url_contains: "/checkout/review" },
+      }),
+    ).resolves.toMatchObject({ confirmed: true });
+  });
+
   it("keeps trusted start metadata inside the hard wire budget", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.workerEmail = "operator@example.test";
@@ -3516,7 +3539,7 @@ describe("Compact V2 action-map boundary", () => {
     );
   });
 
-  it("keeps bulk selection private while V2 remains the public boundary", async () => {
+  it("requires sealed V2 handles before bulk selection enters the private executor", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
@@ -3528,7 +3551,17 @@ describe("Compact V2 action-map boundary", () => {
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
-    const result = await formSelectMany(started.session_id, { Country: "Korea" });
+    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+    await expect(formSelectMany(started.session_id, { Country: "Korea" })).rejects.toThrow(
+      "reobserve_required",
+    );
+    expect(h.selected).toEqual([]);
+    await expect(
+      formSelectMany(started.session_id, { "@e:legacy_country_1": "Korea" }),
+    ).rejects.toThrow("reobserve_required");
+    expect(h.selected).toEqual([]);
+    const result = await formSelectMany(started.session_id, { [handle]: "Korea" });
     expect(result.fields).toEqual([
       expect.objectContaining({ status: "selected", selected_option: "South Korea" }),
     ]);
@@ -4063,6 +4096,7 @@ describe("operate_extract — vault-store response", () => {
 describe("operate session — Change 5 precondition gate", () => {
   it("fails closed after probing a fresh seeded profile with no live Google session", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-empty";
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.providers = []; // no live session
     const obs = await startProvisionSession({
       serviceUrl: "https://app.example.com/",
@@ -4071,7 +4105,9 @@ describe("operate session — Change 5 precondition gate", () => {
     });
     expect(obs.needs_user).toBeDefined();
     expect(obs.needs_user?.wall).toBe("google_session");
-    expect(h.startCalls).toBe(1);
+    expect(obs).toMatchObject({ format: "compact-v2", stage: "auth", url: "", text: "" });
+    expect(obs.elements).toBeUndefined();
+    expect(h.startCalls).toBe(1); // the fresh seeded profile itself was probed
     expect(h.started).toBe(0); // rejected before returning the handoff
     expect(h.gotos).toHaveLength(0);
     expect(h.storageStateReads).toEqual([canonical]);

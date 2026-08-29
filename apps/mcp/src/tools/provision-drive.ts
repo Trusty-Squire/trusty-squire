@@ -872,10 +872,10 @@ const ACTION_REPAIR_BY_KIND: Partial<Record<ActionKind, ActionRepair>> = {
     example: {
       session_id: "<session_id>",
       kind: "select_many",
-      selections: { "Observed field label": "Visible option label" },
+      selections: { "Observed field target": "Visible option label" },
     },
     safe_alternative:
-      "Retry select_many with selections in the intended order. It selects sequentially, re-observes after each success, and returns partial results; do not replace it with parallel select calls." +
+      "Retry select_many with selections in the intended order. Compact V2 requires current @e: handles; V1 accepts observed labels or refs. It selects sequentially, re-observes after each success, and returns partial results; do not replace it with parallel select calls." +
       manualCardRecovery,
   },
   extract: {
@@ -1429,15 +1429,14 @@ export const operateCartAddTool: Tool<z.infer<typeof cartAddSchema>> = {
 
 const formSelectManySchema = z.object({
   session_id: z.string().min(1),
-  // A label/ref → visible option map. Labels deliberately match the existing
-  // select targeting grammar, while refs remain useful when labels collide.
   selections: formSelectionsSchema,
 });
 
 export const operateFormSelectManyTool: Tool<z.infer<typeof formSelectManySchema>> = {
   name: "operate_form_select_many",
   description:
-    "Select several related form options sequentially from a label/ref-to-option map. " +
+    "Select several related form options sequentially from a target-to-option map. " +
+    "Compact V2 requires current @e: handles; V1 accepts observed labels or refs. " +
     "Selections run in order; after every successful selection the browser is re-observed " +
     "before the next one resolves, so variant changes cannot poison later refs. Each field " +
     "reports selected or failed independently; successful selections are not rolled back when " +
@@ -1454,7 +1453,8 @@ export const operateFormSelectManyTool: Tool<z.infer<typeof formSelectManySchema
         minProperties: 1,
         maxProperties: 12,
         additionalProperties: { type: "string" },
-        description: "Map each observed field label or @e: ref to its visible option text.",
+        description:
+          "Map each current Compact V2 @e: handle, or V1 observed label/ref, to its visible option text.",
       },
     },
   },

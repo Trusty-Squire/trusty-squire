@@ -295,7 +295,7 @@ export function encodeV2Delta(args: {
 const INTENTS: ReadonlyArray<[SafeIntentV2, RegExp]> = [
   ["add_to_cart", /add\s+(?:to\s+)?(?:cart|bag|basket)/i],
   ["view_cart", /view\s+(?:cart|bag|basket)/i],
-  ["checkout", /\bcheckout\b/i],
+  ["checkout", /^(?:(?:go|proceed|continue)(?:\s+to)?\s+)?(?:secure\s+)?checkout(?:\s+now)?$/i],
   ["payment", /\b(?:pay(?:ment)?|card)\b/i],
   ["signup", /sign\s*up|create\s+(?:account|workspace)|register/i],
   ["login", /log\s*in|sign\s*in|continue\s+with/i],
@@ -307,7 +307,13 @@ const INTENTS: ReadonlyArray<[SafeIntentV2, RegExp]> = [
   ["continue", /continue|proceed|start|accept|allow/i],
 ];
 
-function candidateText(el: InteractiveElement): string {
+const BUTTON_INPUT_TYPES = new Set(["button", "submit", "reset", "image"]);
+
+function isButtonInput(el: InteractiveElement): boolean {
+  return el.tag === "input" && BUTTON_INPUT_TYPES.has((el.type ?? "").toLowerCase());
+}
+
+function candidateTexts(el: InteractiveElement): string[] {
   return [
     el.visibleText,
     el.labelText,
@@ -317,21 +323,36 @@ function candidateText(el: InteractiveElement): string {
     el.placeholder,
     el.name,
     el.id,
+    ...(isButtonInput(el) ? [el.value] : []),
   ]
     .filter((part): part is string => typeof part === "string")
-    .join(" ");
+    .map((part) => part.replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+}
+
+function candidateText(el: InteractiveElement): string {
+  return candidateTexts(el).join(" ");
 }
 
 function controlDescription(el: InteractiveElement): string | undefined {
-  // Labels are chosen from visible/accessibility naming sources only. `value`,
-  // `name`, and `id` deliberately remain outside this allowlist.
-  return safeDescriptionV2(el.visibleText ?? el.labelText ?? el.ariaLabel ?? el.iconLabel ?? el.title ?? el.placeholder);
+  // Labels are chosen from visible/accessibility naming sources only. Native
+  // button values are names; field values, `name`, and `id` stay excluded.
+  return safeDescriptionV2(
+    el.visibleText ??
+      el.labelText ??
+      el.ariaLabel ??
+      el.iconLabel ??
+      el.title ??
+      el.placeholder ??
+      (isButtonInput(el) ? el.value : undefined),
+  );
 }
 
 function roleOf(el: InteractiveElement): SafeRoleV2 | null {
   const role = (el.role ?? "").toLowerCase();
   const type = (el.type ?? "").toLowerCase();
   if (type === "file") return "file";
+  if (isButtonInput(el)) return "button";
   if (type === "checkbox" || role === "checkbox") return "checkbox";
   if (type === "radio" || role === "radio") return "radio";
   if (el.tag === "select" || role === "combobox" || role === "listbox") return "select";
@@ -357,8 +378,8 @@ function stateOf(el: InteractiveElement): string | undefined {
 }
 
 function intentOf(el: InteractiveElement): SafeIntentV2 | undefined {
-  const text = candidateText(el);
-  return INTENTS.find(([, expression]) => expression.test(text))?.[0];
+  const texts = candidateTexts(el);
+  return INTENTS.find(([, expression]) => texts.some((text) => expression.test(text)))?.[0];
 }
 
 function fieldOf(el: InteractiveElement): SafeFieldV2 | undefined {
@@ -384,7 +405,7 @@ function fieldOf(el: InteractiveElement): SafeFieldV2 | undefined {
     /\b(address|street)\b/.test(text)
   ) return "address";
   if (type === "date" || [...autocompleteTokens].some((token) => token.startsWith("bday")) || /\bdate\b/.test(text)) return "date";
-  if (/\b(quantity|qty)\b/.test(text) || type === "number") return "quantity";
+  if (/\b(quantity|qty)\b/.test(text)) return "quantity";
   if (/\b(promo|coupon|discount)\b/.test(text)) return "promo";
   if ([...autocompleteTokens].some((token) => token === "name" || token.endsWith("-name")) || /\b(full )?name\b/.test(text)) return "name";
   return undefined;

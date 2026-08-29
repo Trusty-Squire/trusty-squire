@@ -1356,7 +1356,7 @@ function baseIdentityFields(el: InteractiveElement): string[] {
     el.container ?? "",
     el.role ?? "",
     el.tag,
-    elementRef(el),
+    elementRef({ ...el, value: null }),
     el.href ?? "",
     el.type ?? "",
     // Frame origin — WITHOUT this, an element's `selector` (folded into
@@ -2858,6 +2858,7 @@ async function ensureProvisionPrimaryProviderSession(
 
 export async function startProvisionSession(opts: StartOptions): Promise<Observation> {
   const id = randomUUID();
+  const compactV2Mode = configuredCompactV2Mode();
   let browser: BrowserController;
   let liveProviders: OAuthProviderId[];
   let workerEmail: string | null;
@@ -2884,7 +2885,16 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     if (!gate.ok) {
       audit(id, "connect_gate", { ok: false, wall: "google_session" });
       await releaseWarmBrowserPage(browser, false);
-      return { session_id: id, url: "", text: "", elements: [], needs_user: gate.needs_user };
+      return compactV2Mode === "on"
+        ? {
+            session_id: id,
+            format: "compact-v2",
+            stage: "auth",
+            url: "",
+            text: "",
+            needs_user: gate.needs_user,
+          }
+        : { session_id: id, url: "", text: "", elements: [], needs_user: gate.needs_user };
     }
   }
   const targetHost = registrableHost(opts.serviceUrl);
@@ -2909,7 +2919,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     prevObserve: null,
     observeSnapshotFile: null,
     compactV2Secret: randomBytes(32),
-    compactV2Mode: configuredCompactV2Mode(),
+    compactV2Mode,
     compactV2HintPages: [],
     compactV2Active: false,
     compactV2Refs: new Map(),
@@ -6026,16 +6036,35 @@ export async function formSelectMany(
   selections: Record<string, string>,
 ): Promise<{ session_id: string; fields: FormSelectManyFieldResult[]; observation: Observation }> {
   const fields: FormSelectManyFieldResult[] = [];
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const resolvedSelections: Array<{ label: string; target: string; option: string }> = [];
+  for (const [label, option] of Object.entries(selections)) {
+    if (!session.compactV2Active) {
+      resolvedSelections.push({ label, target: label, option });
+      continue;
+    }
+    try {
+      resolvedSelections.push({
+        label,
+        target: currentCompactV2LegacyTarget(session, label),
+        option,
+      });
+    } catch (error) {
+      audit(sessionId, "act", { kind: "select_many", target: "<rejected-v2-target>" });
+      throw error;
+    }
+  }
 
   // Keep variant changes in one host call. Each successful select is followed
   // by a real observe before the next target resolves: variant widgets commonly
   // replace all dependent selects, so continuing from an old inventory is worse
   // than reporting a partial result.
-  for (const [label, option] of Object.entries(selections)) {
+  for (const { label, target, option } of resolvedSelections) {
     try {
       const actionResult = await actInternally(
         sessionId,
-        { kind: "select", target: label, text: option },
+        { kind: "select", target, text: option },
         "none",
       );
       const selectedOption = actionResult.outcome.selectedOption;
@@ -6947,7 +6976,14 @@ async function snapshotForPostcondition(session: Session): Promise<Postcondition
   const fields = session.lastElements
     .filter((e) => typeof e.value === "string" && e.value.length > 0)
     .map((e) => ({ label: elementRef(e), value_len: (e.value ?? "").length }));
-  return { url: obs.url, text: session.prevObserve?.text ?? obs.text, fields };
+  return {
+    url: obs.format === "compact-v2" ? session.browser.currentUrl() : obs.url,
+    text:
+      obs.format === "compact-v2"
+        ? await session.browser.extractVisibleText()
+        : (session.prevObserve?.text ?? obs.text),
+    fields,
+  };
 }
 
 // Verify a recipe's postcondition against the live session — the anti-false-
