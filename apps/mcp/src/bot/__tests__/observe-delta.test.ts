@@ -45,14 +45,8 @@ vi.mock("../browser.js", () => ({
   BrowserController: class {
     constructor(_opts?: unknown) {}
     async start(): Promise<void> {}
-    matchesLaunchOptions(): boolean {
-      return true;
-    }
     isConnected(): boolean {
       return true;
-    }
-    async resetPageForReuse(): Promise<void> {
-      h.currentUrl = "about:blank";
     }
     async goto(url: string): Promise<void> {
       h.currentUrl = url;

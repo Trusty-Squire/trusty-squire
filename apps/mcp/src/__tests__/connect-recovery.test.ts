@@ -10,6 +10,7 @@ import {
   lstatSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -124,6 +125,7 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
     const alias = join(base, "profile-alias");
     mkdirSync(target);
     writeFileSync(join(target, "stale-state"), "stale");
+    writeFileSync(join(target, "trusty-squire-session-state.json"), "portable-state");
     symlinkSync(target, alias, "dir");
     try {
       await withConnectProfileGuard(alias, async (canonicalProfileDir) => {
@@ -131,6 +133,9 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
         clearBrowserProfile(canonicalProfileDir);
         expect(realpathSync(alias)).toBe(target);
         expect(existsSync(join(target, "stale-state"))).toBe(false);
+        expect(readFileSync(join(target, "trusty-squire-session-state.json"), "utf8")).toBe(
+          "portable-state",
+        );
         await withProfileOperationGuard(alias, async () => undefined);
       });
       expect(lstatSync(alias).isSymbolicLink()).toBe(true);

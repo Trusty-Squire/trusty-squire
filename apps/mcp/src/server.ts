@@ -39,15 +39,9 @@ const DEFAULT_REGISTRY_BASE =
 // from a host like that will ever arrive, so this is a time bound, not an
 // event.
 //
-// It also has to cover a server that still holds an open provision session:
-// the operator-profile-pool ACTIVE-slot reclaim (operator-profile-pool.ts,
-// scavengeActiveSlots) only ever reclaims a slot once its *owning process* is
-// provably dead — a live-but-abandoned zombie server is, by that design, a
-// "genuine concurrent run" the pool must never touch. So a background
-// pool-level reaper cannot free an active session's Chrome on its own; only
-// the owning server exiting (which runs closeAllProvisionSessions, which
-// calls browser.close() on the leased Chrome — already timeout-capped down
-// to a SIGKILL reap, see browser.ts's closeWithProfileGuard) can. Hence two
+// It also has to cover a server that still holds an open provision session.
+// Its browser is owned by that server, so only the owning server's bounded
+// terminal teardown can close Chrome and destroy its private profile. Hence two
 // bounds: a short one when idle with no session (routine), and a longer one
 // when a session is still open — wide enough that no real in-flight flow
 // (operate_pay no longer blocks a call for approval; verification polling is
@@ -181,8 +175,8 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
           },
         });
       // Tool handlers await independently.  A finish must therefore close the
-      // admission gate and drain calls that already entered before it resets or
-      // pools a browser.  `operate_finish*` owns that transition itself.
+      // admission gate and drain calls that already entered before it snapshots
+      // eligible state and closes the browser. `operate_finish*` owns that transition.
       const sessionId =
         typeof parsed.data.session_id === "string" ? parsed.data.session_id : undefined;
       const result =
@@ -263,8 +257,8 @@ function errorContent(code: string, message: string, guidance?: Record<string, u
 // kill the process, which turns one bad operate_* call into "MCP server
 // unreachable" for the host agent. Log the escape and keep serving: the
 // in-flight call fails on its own (its awaited promise threw or timed out),
-// session/browser state is self-contained and recycled by the warm-browser
-// health checks, and no security gate depends on process death — a crash
+// session/browser state is self-contained and bounded by its watchdog and
+// terminal teardown, and no security gate depends on process death — a crash
 // leaves any half-done page action in exactly the same state, minus the
 // transport. Installed only for `mcp server`; the CLI keeps fail-fast.
 export function installServerProcessGuards(): void {

@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync } from "node:fs";
-import { resolveChannelBinary, selfLaunchEnabled } from "../browser.js";
+import type { ChildProcess } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  resolveChannelBinary,
+  selfLaunchEnabled,
+  waitForOwnedDevtoolsEndpoint,
+} from "../browser.js";
 
 // The self-launch path (spawn Chrome ourselves + connectOverCDP) is the
 // Turnstile-safe launch. These cover the two pure decision helpers that gate
@@ -60,5 +67,23 @@ describe("resolveChannelBinary", () => {
     const resolved = resolveChannelBinary("chrome");
     // Environment-dependent: assert consistency rather than presence.
     if (resolved !== null) expect(existsSync(resolved)).toBe(true);
+  });
+});
+
+describe("owned self-launch DevTools endpoint", () => {
+  it("waits for the browser endpoint published inside its own profile", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-owned-devtools-"));
+    const browserPath = "/devtools/browser/owned-browser";
+    const child = { exitCode: null, signalCode: null } as ChildProcess;
+    try {
+      writeFileSync(join(profileDir, "DevToolsActivePort"), "9222\ninvalid-browser-path\n");
+      const endpoint = waitForOwnedDevtoolsEndpoint(profileDir, 1_000, child);
+      setTimeout(() => {
+        writeFileSync(join(profileDir, "DevToolsActivePort"), `39123\n${browserPath}\n`);
+      }, 25);
+      await expect(endpoint).resolves.toBe(`ws://127.0.0.1:39123${browserPath}`);
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
   });
 });

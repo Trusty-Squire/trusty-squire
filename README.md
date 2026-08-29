@@ -188,7 +188,7 @@ remote CDP, macOS, and Windows operator sessions are not supported in this migra
 
 1. Your coding agent names the website and the outcome it needs: an account,
    authenticated setup, app publishing, a purchase, a gift, or a booking.
-2. Trusty Squire works through the service flow one step at a time. Ordinary tasks open an isolated browser profile; tasks that must act as your connected Google identity use the signed-in profile directly and run one at a time.
+2. Trusty Squire works through the service flow one step at a time. Every task opens its own fresh browser profile and restores portable signed-in storage state whenever a snapshot is available, so independent sessions can run concurrently without opening the canonical login profile.
 3. If the flow produces an API key or client secret, Trusty Squire captures it
    into the vault without returning the raw value through its credential tools.
 4. The agent can make an authenticated request, create a host-scoped app grant,
@@ -311,9 +311,10 @@ DOM-diagnostics pair is excluded from that surface; set
   session-start-trust requirement — otherwise a checkout's own out-of-band 3DS
   challenge could never complete its own status poll.
   For a task gated by the user's connected Google account, pass
-  `require_live_identity: true` to `operate_start`. The start fails closed with
-  a connect handoff if that Google session is unavailable; otherwise it uses the
-  signed-in profile directly, with one such session active at a time.
+  `require_live_identity: true` to `operate_start`. The start restores the
+  saved portable login snapshot into a fresh private profile, then fails closed with
+  a context-backed login handoff if the existing live-provider detector finds
+  no current Google session. It never opens Chrome on the canonical profile.
   To route only that browser session through a proxy, pass `proxy` to
   `operate_start` as an HTTP or HTTPS URL (credentials are optional), or as an
   unauthenticated SOCKS5 URL. The value is launch-only and sensitive: it is not
@@ -372,11 +373,13 @@ DOM-diagnostics pair is excluded from that surface; set
 - `operate_finish` closes the session and optionally accepts a nested `outcome`.
   `none` only closes; `credentials` requires `store` and preserves credential
   extraction, vault storage, and auto-promotion; `result` requires `summary` or
-  `data` and can run `verify_recipe` before closing. Finish first stops new
-  calls and drains calls already using that session within a bounded terminal
-  transition. Payment state never blocks teardown: finish clears any remaining
-  payment state and destroys, rather than pools, a payment-sensitive browser
-  profile. Sessions also close automatically after 10 minutes without an
+  `data`. A result is eligible to save portable login state only when
+  `verify_recipe` confirms it or `data.confirmed` is `true`; credential outcomes
+  qualify only after unblocked extraction and vault storage. `none`, failed or
+  unconfirmed outcomes, and payment-sensitive sessions preserve the prior saved
+  snapshot. Finish first stops new calls and drains calls already using that
+  session within a bounded terminal transition, then closes its browser and
+  schedules private-profile removal. Sessions also close automatically after 10 minutes without an
   operation and begin terminal teardown at 30 minutes; only an active payment
   receives the short bounded close grace. Callers should finish promptly instead
   of treating an open browser as durable background state.

@@ -1,7 +1,7 @@
 // Covers deterministic Google-login helpers and lifecycle boundaries.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readFileSync, mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
@@ -256,21 +256,17 @@ describe("login browser lifecycle guards", () => {
     expect(clearStaleLock).toHaveBeenCalled();
   });
 
-  it("returns an unproven pre-launch close for quarantine and releases its lease", async () => {
+  it("returns an unproven pre-launch close for quarantine", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-browser-cancel-"));
-    const releaseLease = vi.fn();
-    const controller = new BrowserController({
-      profileDir,
-      profileOperationLease: { release: releaseLease },
-    });
+    const controller = new BrowserController({ profileDir });
     const internals = controller as unknown as {
-      startWithProfileGuard: () => Promise<void>;
-      closeWithProfileGuard: () => Promise<"closed" | "force_closed_unproven" | "unknown">;
+      startBrowser: () => Promise<void>;
+      closeBrowser: () => Promise<"closed" | "force_closed_unproven" | "unknown">;
     };
     const startImpl = vi.fn(() => new Promise<void>(() => undefined));
     const closeImpl = vi.fn(async () => "unknown" as const);
-    internals.startWithProfileGuard = startImpl;
-    internals.closeWithProfileGuard = closeImpl;
+    internals.startBrowser = startImpl;
+    internals.closeBrowser = closeImpl;
 
     try {
       void controller.start().catch(() => undefined);
@@ -278,13 +274,12 @@ describe("login browser lifecycle guards", () => {
       await expect(controller.close({ cancelStart: true })).resolves.toBe("unknown");
       await expect(controller.close()).resolves.toBe("unknown");
       expect(closeImpl).toHaveBeenCalledOnce();
-      expect(releaseLease).toHaveBeenCalledOnce();
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }
   });
 
-  it("never adopts a replacement profile holder after cancellation releases custody", async () => {
+  it("never adopts a replacement profile holder after cancellation", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-browser-replacement-"));
     const replacement = spawn(
       process.execPath,
@@ -307,10 +302,8 @@ describe("login browser lifecycle guards", () => {
       const controller = new BrowserController({ profileDir });
       const internals = controller as unknown as {
         startCancellationRequested: boolean;
-        profileOperationLease: null;
       };
       internals.startCancellationRequested = true;
-      internals.profileOperationLease = null;
 
       await expect(controller.forceCloseOwnedProcessTree()).resolves.toBe("unknown");
       expect(() => process.kill(replacement.pid!, 0)).not.toThrow();
@@ -327,20 +320,16 @@ describe("login browser lifecycle guards", () => {
     const startGate = new Promise<void>((resolve) => {
       releaseStart = resolve;
     });
-    const releaseLease = vi.fn();
-    const controller = new BrowserController({
-      profileDir,
-      profileOperationLease: { release: releaseLease },
-    });
+    const controller = new BrowserController({ profileDir });
     const internals = controller as unknown as {
       startLaunchCommitted: boolean;
-      startWithProfileGuard: () => Promise<void>;
-      closeWithProfileGuard: () => Promise<"closed" | "force_closed_unproven" | "unknown">;
+      startBrowser: () => Promise<void>;
+      closeBrowser: () => Promise<"closed" | "force_closed_unproven" | "unknown">;
     };
     const startImpl = vi.fn(() => startGate);
     const closeImpl = vi.fn(async () => "closed" as const);
-    internals.startWithProfileGuard = startImpl;
-    internals.closeWithProfileGuard = closeImpl;
+    internals.startBrowser = startImpl;
+    internals.closeBrowser = closeImpl;
 
     try {
       const starting = controller.start().catch((error: unknown) => error);
@@ -349,7 +338,6 @@ describe("login browser lifecycle guards", () => {
       const closing = controller.close({ cancelStart: true });
       await expect(closing).resolves.toBe("closed");
       await expect(controller.close()).resolves.toBe("closed");
-      expect(releaseLease).not.toHaveBeenCalled();
 
       releaseStart?.();
       await vi.advanceTimersByTimeAsync(25);
@@ -357,7 +345,6 @@ describe("login browser lifecycle guards", () => {
         expect.objectContaining({ message: "BrowserController start cancelled" }),
       );
       await expect(controller.close()).resolves.toBe("closed");
-      expect(releaseLease).toHaveBeenCalledOnce();
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }
@@ -371,13 +358,13 @@ describe("login browser lifecycle guards", () => {
     });
     const controller = new BrowserController({ profileDir });
     const internals = controller as unknown as {
-      startWithProfileGuard: () => Promise<void>;
-      closeWithProfileGuard: () => Promise<"closed" | "force_closed_unproven" | "unknown">;
+      startBrowser: () => Promise<void>;
+      closeBrowser: () => Promise<"closed" | "force_closed_unproven" | "unknown">;
     };
     const startImpl = vi.fn(() => startGate);
     const closeImpl = vi.fn(async () => "closed" as const);
-    internals.startWithProfileGuard = startImpl;
-    internals.closeWithProfileGuard = closeImpl;
+    internals.startBrowser = startImpl;
+    internals.closeBrowser = closeImpl;
 
     try {
       const starting = controller.start();
@@ -665,9 +652,8 @@ describe("confirmed login finalization", () => {
     expect(() => installClaimPollCompleted("expired")).toThrow(/expired/);
   });
 
-  it("records a confirmed login even when closure cannot publish a seed", async () => {
+  it("records a confirmed login without overwriting a snapshot that was not captured", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
-    const publishSeed = vi.fn();
     try {
       await finalizeLoginRun(
         {
@@ -675,63 +661,63 @@ describe("confirmed login finalization", () => {
           onConfirmedLogin: async () => markProviderLoggedIn("google", profileDir),
         },
         { status: "completed", closeState: "unknown" },
-        publishSeed,
       );
 
       expect(loggedInProviders(profileDir)).toEqual(["google"]);
-      expect(publishSeed).not.toHaveBeenCalled();
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }
   });
 
-  it("does not record or publish a timed-out login", async () => {
+  it("does not record a timed-out login", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
     const onConfirmedLogin = vi.fn();
-    const publishSeed = vi.fn();
     try {
       await finalizeLoginRun(
         { profileDir, onConfirmedLogin },
         { status: "timeout", closeState: "closed" },
-        publishSeed,
       );
 
       expect(onConfirmedLogin).not.toHaveBeenCalled();
-      expect(publishSeed).not.toHaveBeenCalled();
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }
   });
 
-  it("does not replace the Google seed after a completed GitHub login", async () => {
+  it("writes a full captured storage state for every completed login", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
-    const publishSeed = vi.fn();
     try {
       await finalizeLoginRun(
-        { profileDir, seedProvider: "github" },
-        { status: "completed", closeState: "closed" },
-        publishSeed,
+        { profileDir },
+        {
+          status: "completed",
+          closeState: "closed",
+          storageState: { cookies: [], origins: [] },
+        },
       );
-
-      expect(publishSeed).not.toHaveBeenCalled();
+      expect(readFileSync(join(profileDir, "trusty-squire-session-state.json"), "utf8")).toContain(
+        '"origins":[]',
+      );
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }
   });
 
-  it("publishes on completed closed Google login provenance alone — no re-validation", async () => {
+  it("does not replace the prior snapshot when browser closure is unproven", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
-    const publishSeed = vi.fn(async () => "generation");
+    const path = join(profileDir, "trusty-squire-session-state.json");
+    const prior = '{"cookies":[{"name":"SID"}],"origins":[]}';
+    writeFileSync(path, prior, { mode: 0o600 });
     try {
       await finalizeLoginRun(
-        { profileDir, seedProvider: "google" },
-        { status: "completed", closeState: "closed" },
-        publishSeed,
+        { profileDir },
+        {
+          status: "completed",
+          closeState: "unknown",
+          storageState: { cookies: [], origins: [] },
+        },
       );
-
-      expect(publishSeed).toHaveBeenCalledWith(profileDir, {
-        proof: { loginStatus: "completed", closeState: "closed", provider: "google" },
-      });
+      expect(readFileSync(path, "utf8")).toBe(prior);
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }

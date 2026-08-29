@@ -1,19 +1,41 @@
 // Tests for the OAuth login-state marker — the signup bot reads this
 // to decide which providers it can auto-prefer for OAuth-first signup.
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   clearProviderCookies,
   clearProviderCookiesFromContext,
+  clearBrowserProfile,
   loggedInProviders,
   markProviderLoggedIn,
   loggedInEmail,
   recordProviderEmail,
 } from "../login-state.js";
 import { acquireProfileOperationGuard, ProfileBusyError } from "../profile.js";
+import { SESSION_STATE_FILE } from "../session-state.js";
+
+describe("full profile clearing", () => {
+  it("preserves the canonical snapshot and an in-flight snapshot temporary", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ts-login-profile-clear-"));
+    const snapshot = join(dir, SESSION_STATE_FILE);
+    const temporary = join(dir, `${SESSION_STATE_FILE}.123.writer.tmp`);
+    const stale = join(dir, "Default");
+    writeFileSync(snapshot, "prior");
+    writeFileSync(temporary, "replacement");
+    writeFileSync(stale, "chrome-state");
+    try {
+      clearBrowserProfile(dir);
+      expect(readFileSync(snapshot, "utf8")).toBe("prior");
+      expect(readFileSync(temporary, "utf8")).toBe("replacement");
+      expect(existsSync(stale)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("provider cookie clearing", () => {
   it("removes and verifies only the requested provider's actual cookie rows", async () => {

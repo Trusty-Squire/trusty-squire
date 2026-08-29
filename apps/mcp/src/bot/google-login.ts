@@ -36,10 +36,10 @@ import { markProviderLoggedIn } from "./login-state.js";
 import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
-  canPublishOperatorProfileSeed,
   GOOGLE_LOGIN_COOKIE_MARKERS,
-  publishOperatorProfileSeed,
-} from "./operator-profile-pool.js";
+  writeSessionState,
+  type BrowserStorageState,
+} from "./session-state.js";
 
 const require = createRequire(import.meta.url);
 
@@ -641,21 +641,20 @@ export async function runInBotChrome(
 export interface LoginRunResult {
   status: "completed" | "preflight_satisfied" | "timeout";
   closeState: ProfileCloseState;
+  storageState?: BrowserStorageState;
 }
 
 export async function finalizeLoginRun(
   opts: Pick<RunInBotChromeOpts, "profileDir" | "onConfirmedLogin" | "seedProvider">,
   result: LoginRunResult,
-  publishSeed: typeof publishOperatorProfileSeed = publishOperatorProfileSeed,
 ): Promise<void> {
   if (result.status === "completed" || result.status === "preflight_satisfied") {
     await opts.onConfirmedLogin?.();
   }
-  const provider =
-    typeof opts.seedProvider === "function" ? opts.seedProvider() : (opts.seedProvider ?? null);
-  const proof = { loginStatus: result.status, closeState: result.closeState, provider };
-  if (canPublishOperatorProfileSeed(proof)) {
-    await publishSeed(opts.profileDir, { proof });
+  // Plain Chrome has no context to capture. Leave the existing snapshot alone;
+  // it is safer than erasing every saved login after an interactive connect.
+  if (result.closeState === "closed" && result.storageState !== undefined) {
+    await writeSessionState(opts.profileDir, result.storageState);
   }
 }
 
@@ -754,6 +753,7 @@ export async function runDisplayedChrome(
   const lifecycle = createTrackedLoginBrowserLifecycle();
   let status: LoginRunResult["status"] = "timeout";
   let closeState: ProfileCloseState = "unknown";
+  let storageState: BrowserStorageState | undefined;
   try {
     const context = await launchWithProfileGate(
       opts.profileDir,
@@ -809,10 +809,13 @@ export async function runDisplayedChrome(
       }
       status = ok ? "completed" : "timeout";
     }
+    if (status === "completed" || status === "preflight_satisfied") {
+      storageState = await context.storageState({ indexedDB: true });
+    }
   } finally {
     closeState = await lifecycle.finish();
   }
-  return { status, closeState };
+  return { status, closeState, ...(storageState === undefined ? {} : { storageState }) };
 }
 
 // Shared timed-poll helper. `check` is invoked every 3s until it

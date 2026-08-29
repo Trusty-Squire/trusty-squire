@@ -224,9 +224,9 @@ termination defer only an active payment, and only until that same hard deadline
 captured dispatch evidence shares one metadata-only audit, and teardown performs the bounded
 pending-3DS live check before clearing payment state. Remaining payment state never makes the
 browser immortal: close records that the profile is payment-sensitive, clears the active payment
-and payment-field seal, and destroys or quarantines the profile instead of returning it to the
-warm pool. No payment state or card-bearing browser profile can therefore carry into a later
-session.
+and payment-field seal, and destroys or quarantines that session's unique ephemeral profile without
+publishing its browser state. No payment state or card-bearing browser profile can therefore update
+the saved login snapshot or carry into a later session.
 
 The phone decrypts the saved card locally, then HPKE-seals it directly to that
 ephemeral X25519 key using HKDF-SHA256 and AES-256-GCM. Each signed payload hash
@@ -313,6 +313,12 @@ back at all.
 - OAuth sign-in (Google / GitHub) happens in the **user's own real browser
   session** that they explicitly connect. Trusty Squire does not ask the agent to
   type those passwords.
+- A context-backed login and an explicitly confirmed, non-payment operator result
+  may save a private (`0600`) Playwright storage-state snapshot containing all
+  cookies, local storage, and IndexedDB in the canonical profile namespace. Each
+  operator session restores that sensitive auth material into a fresh private
+  profile instead of opening the canonical profile. Plain-Chrome login, failed or
+  unconfirmed results, and payment-sensitive sessions preserve the prior snapshot.
 - Learned automation ("skills") are **Ed25519-signed** replayable recipes.
   Captures used to synthesize them record post-verify state with **secrets
   redacted**, and skill promotion is deterministic — it must not depend on clocks,
