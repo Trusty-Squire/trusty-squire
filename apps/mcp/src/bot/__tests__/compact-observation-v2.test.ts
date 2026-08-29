@@ -251,7 +251,7 @@ describe("compact observation v2", () => {
       cursorFor: (offset) => `cursor-${offset}`,
     });
     expect(first.payload.safe_table).toEqual([
-      ["@e:first-control", "b", null, null, "", "Continue"],
+      ["@e:first-control", "b", "Continue"],
     ]);
     const repeat = encodeV2Delta({
       stage: "browse",

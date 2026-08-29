@@ -4858,7 +4858,11 @@ async function observeSession(
     // V1: that would turn a transient upstream outage into an unbounded raw
     // observation and breach the allowlist-before-any-sink rule.
     if (compactV2Mode() !== "off") {
-      const selected = await observeWithBrowserUse(session.browser.browserUseObservationEndpoint());
+      const browserUseEndpoint =
+        typeof session.browser.browserUseObservationEndpoint === "function"
+          ? session.browser.browserUseObservationEndpoint()
+          : null;
+      const selected = await observeWithBrowserUse(browserUseEndpoint);
       if (selected !== null) {
         const v2 = compactV2Observation(session, generation, elements, selected, semanticSource);
         if (compactV2Mode() === "on") return v2;

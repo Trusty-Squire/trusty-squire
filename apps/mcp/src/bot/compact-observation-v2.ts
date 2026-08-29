@@ -115,47 +115,13 @@ export function equalSafePageSemanticsV2(
   return left.title === right.title && (left.headings?.[0] ?? "") === (right.headings?.[0] ?? "");
 }
 
-type WireControlV2 = [string, string, string | null, string | null, string?, string?];
-
-// These codes are protocol literals, not page text. Keeping this mapping here
-// (rather than deriving it from a label) makes the short wire representation
-// deterministic and preserves the closed allowlist boundary.
-const WIRE_INTENT: Record<SafeIntentV2, string> = {
-  search: "q",
-  close: "x",
-  next: "n",
-  previous: "p",
-  submit: "u",
-  continue: "c",
-  login: "i",
-  signup: "g",
-  add_to_cart: "a",
-  checkout: "k",
-  payment: "y",
-};
-
-const WIRE_FIELD: Record<SafeFieldV2, string> = {
-  email: "e",
-  password: "p",
-  username: "u",
-  name: "n",
-  phone: "h",
-  search: "q",
-  address: "a",
-  city: "c",
-  region: "r",
-  postal: "z",
-  country: "o",
-  date: "d",
-  quantity: "t",
-  promo: "m",
-  payment: "y",
-};
+type WireControlV2 = [string, string, string?];
 
 // The protocol is intentionally positional to keep repeated observes small.
-// Tuple schema: [ref, role(b/l/t/s/c/r/tb/m/f), action|null, field|null,
-// optional state/choice]. Every value is either a sealed HMAC ref or a
-// code-owned finite token.
+// Tuple schema: [ref, role(b/l/t/s/c/r/tb/m/f), optional short label]. The
+// ref is the action capability; role and label are all the model needs to
+// choose it. Internal action/field/state classification stays server-side, so
+// a control never pays for null/empty placeholder columns on the wire.
 function wireControl(row: SafeControlV2): WireControlV2 {
   const role: Record<SafeRoleV2, string> = {
     button: "b",
@@ -168,20 +134,7 @@ function wireControl(row: SafeControlV2): WireControlV2 {
     menuitem: "m",
     file: "f",
   };
-  const signal = row.choice ?? row.state;
-  if (row.name === undefined) {
-    return signal === undefined
-      ? [row.ref, role[row.role], row.action === undefined ? null : WIRE_INTENT[row.action], row.field === undefined ? null : WIRE_FIELD[row.field]]
-      : [row.ref, role[row.role], row.action === undefined ? null : WIRE_INTENT[row.action], row.field === undefined ? null : WIRE_FIELD[row.field], signal];
-  }
-  return [
-    row.ref,
-    role[row.role],
-    row.action === undefined ? null : WIRE_INTENT[row.action],
-    row.field === undefined ? null : WIRE_FIELD[row.field],
-    signal ?? "",
-    row.name,
-  ];
+  return row.name === undefined ? [row.ref, role[row.role]] : [row.ref, role[row.role], row.name];
 }
 
 const SAFE_DESCRIPTION_MAX_CHARS = 40;

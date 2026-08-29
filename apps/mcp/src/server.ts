@@ -227,14 +227,27 @@ function toolResultContent(result: unknown) {
     const { image, ...meta } = result;
     return {
       content: [
-        { type: "text" as const, text: JSON.stringify(meta, null, 2) },
+        { type: "text" as const, text: compactToolResultText(meta) },
         { type: "image" as const, data: image.data_base64, mimeType: image.mime_type },
       ],
     };
   }
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+    content: [{ type: "text" as const, text: compactToolResultText(result) }],
   };
+}
+
+/** Compact V2 is a model wire protocol; indentation adds no information. */
+export function compactToolResultText(result: unknown): string {
+  if (
+    typeof result === "object" &&
+    result !== null &&
+    "format" in result &&
+    (result as { format?: unknown }).format === "compact-v2"
+  ) {
+    return JSON.stringify(result);
+  }
+  return JSON.stringify(result, null, 2);
 }
 
 function errorContent(code: string, message: string, guidance?: Record<string, unknown>) {
