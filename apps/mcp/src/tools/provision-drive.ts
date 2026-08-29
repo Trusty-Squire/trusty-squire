@@ -522,7 +522,8 @@ export const provisionObserveQueryTool: Tool<z.infer<typeof observeQuerySchema>>
   description:
     "Page compact-v2 overflow or named-control lookup. Supply the product/control words already in the task; " +
     "matching happens only inside the live browser and returns actionable opaque refs plus finite role/state/action " +
-    "enums. Use overflow.next_cursor to page; never read a snapshot file.",
+    "enums. Use overflow.next_cursor to page controls, or hint_overflow.next_cursor with an empty query to page " +
+    "trusted start routing metadata; never read a snapshot file.",
   inputSchema: observeQuerySchema,
   jsonInputSchema: {
     type: "object",

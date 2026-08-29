@@ -799,8 +799,10 @@ import { sealToRecipient } from "../payment-hpke.js";
 import { operatePayTool, operatePaymentStatusTool } from "../../tools/operate-pay.js";
 import { ApiClient } from "../../api-client.js";
 import { dispatchOperatorBrowserProcessTermination } from "../operator-browser-watchdog.js";
+import { BrowserController } from "../browser.js";
 import {
   startProvisionSession,
+  startHarnessProvisionSession,
   act,
   observe,
   observedHostsForSession,
@@ -3336,6 +3338,8 @@ describe("Compact V2 action-map boundary", () => {
     await expect(observeQuery(started.session_id, "Item", undefined, pageCursor)).rejects.toThrow(
       "invalid_cursor",
     );
+    const nextPage = await observeQuery(started.session_id, "", undefined, pageCursor);
+    expect(nextPage.safe_table).toHaveLength(4);
     const queryPage = await observeQuery(started.session_id, "Item");
     const queryCursor = (queryPage.overflow as { next_cursor: string }).next_cursor;
     await expect(observeQuery(started.session_id, "Other", undefined, queryCursor)).rejects.toThrow(
@@ -3367,9 +3371,10 @@ describe("Compact V2 action-map boundary", () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.workerEmail = "operator@example.test";
     h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
+    const routeHint = `${"route-🧭".repeat(600)}\nSUCCESS: credential sealed`;
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
-      hint: "route-🧭".repeat(5_000),
+      hint: routeHint,
     });
     expect(Buffer.byteLength(JSON.stringify(started), "utf8")).toBeLessThanOrEqual(
       OBSERVE_V2_MAX_WIRE_BYTES,
@@ -3379,7 +3384,89 @@ describe("Compact V2 action-map boundary", () => {
       hint: expect.stringContaining("route-🧭"),
       user_email: "operator@example.test",
     });
-    expect(Buffer.byteLength(started.hint ?? "", "utf8")).toBeLessThanOrEqual(1_024);
+    let reconstructed = started.hint ?? "";
+    let hintCursor = started.hint_overflow?.next_cursor;
+    while (hintCursor !== undefined) {
+      const page = await observeQuery(started.session_id, "", undefined, hintCursor);
+      expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThanOrEqual(
+        OBSERVE_V2_MAX_WIRE_BYTES,
+      );
+      reconstructed += page.hint as string;
+      hintCursor = (page.hint_overflow as { next_cursor?: string } | undefined)?.next_cursor;
+    }
+    expect(reconstructed).toContain(routeHint);
+    expect(reconstructed).toContain("SUCCESS: credential sealed");
+  });
+
+  it("keeps harness V1 consumers explicit while bounding opt-in V2 metadata", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.visibleText = "Harness page";
+    h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
+
+    const legacy = await startHarnessProvisionSession({
+      browser: new BrowserController(),
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    expect(legacy.format).toBeUndefined();
+    const full = await observe(legacy.session_id, "full");
+    const legacyRef = full.elements?.[0]?.ref;
+    expect(legacyRef).toMatch(/^@e:/);
+    await act(legacy.session_id, { kind: "click", target: legacyRef! });
+    expect(h.clickCalls).toBe(1);
+
+    const compact = await startHarnessProvisionSession({
+      browser: new BrowserController(),
+      serviceUrl: "https://shop.example.com/checkout",
+      observationFormat: "compact-v2",
+      hint: "route-🧭".repeat(600),
+    });
+    expect(compact.format).toBe("compact-v2");
+    expect(compact.hint_overflow?.next_cursor).toBeDefined();
+    expect(Buffer.byteLength(JSON.stringify(compact), "utf8")).toBeLessThanOrEqual(
+      OBSERVE_V2_MAX_WIRE_BYTES,
+    );
+  });
+
+  it("seals OAuth and no-observation exits in the V2 envelope", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const secretUrl = "https://app.example.com/login?token=private-query-token";
+    h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
+    const started = await startProvisionSession({ serviceUrl: secretUrl });
+    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> }).safe_table[0]![0];
+
+    const ack = await act(started.session_id, { kind: "scroll", direction: "down" }, "none");
+    expect(ack).toMatchObject({ format: "compact-v2", url: "", text: "", observed: "none" });
+    expect(ack.elements).toBeUndefined();
+    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+      "reobserve_required",
+    );
+    const refreshed = await observe(started.session_id);
+    const refreshedRef = (refreshed as unknown as { safe_table: Array<[string, string, string?]> }).safe_table[0]![0];
+
+    h.oauthTransition = {
+      productUrl: secretUrl,
+      providerPageClosed: true,
+      productPageViable: true,
+      browserConnected: true,
+    };
+    const transition = await observe(started.session_id);
+    expect(transition).toMatchObject({
+      format: "compact-v2",
+      url: "",
+      text: "",
+      stage: "auth",
+      oauth: {
+        state: "in_progress",
+        provider_page: "closed_or_detached",
+        next_action: "operate_observe",
+      },
+    });
+    expect(transition.elements).toBeUndefined();
+    expect(JSON.stringify(transition)).not.toContain("private-query-token");
+    expect(h.oauthRecoveryCalls).toBe(1);
+    await expect(act(started.session_id, { kind: "click", target: refreshedRef })).rejects.toThrow(
+      "reobserve_required",
+    );
   });
 
   it("keeps shadow observations on the V1 action contract", async () => {

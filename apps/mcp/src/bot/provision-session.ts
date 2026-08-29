@@ -48,6 +48,7 @@ import {
   equalSafePageSemanticsV2,
   encodeV2Delta,
   encodeV2Page,
+  OBSERVE_V2_MAX_WIRE_BYTES,
   safePageSemanticsV2,
   safeStageV2,
   type SafeControlV2,
@@ -55,6 +56,7 @@ import {
   type SafePageSemanticsV2,
   type SafeObservationBaselineV2,
   type SafeObservationIndexV2,
+  type SafeStageV2,
 } from "./compact-observation-v2.js";
 import type { ApiClient } from "../api-client.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
@@ -361,10 +363,12 @@ export interface Observation {
   // compact-v2's closed action map. It is intentionally value-free and does
   // not use the V1 snapshot-file recovery protocol.
   format?: "compact-v2";
+  stage?: SafeStageV2;
   generation?: number;
   safe_table?: SafeControlV2[];
   semantic?: SafePageSemanticsV2;
   overflow?: { remaining: number; next_cursor: string };
+  hint_overflow?: { remaining: number; next_cursor: string };
 }
 
 export interface AccessibilitySnapshot {
@@ -555,6 +559,8 @@ export interface Session {
   prevObserve: ObserveDeltaState | null;
   observeSnapshotFile: string | null;
   compactV2Secret: Buffer;
+  compactV2Mode: "off" | "shadow" | "on";
+  compactV2HintPages: string[];
   /** True once this session has emitted V2; target resolution stays sealed until finish. */
   compactV2Active: boolean;
   compactV2Refs: Map<string, string>;
@@ -2812,6 +2818,7 @@ export interface StartOptions {
 
 export interface HarnessStartOptions extends Omit<StartOptions, "profileDir" | "proxyUrl"> {
   browser: BrowserController;
+  observationFormat?: "v1" | "compact-v2";
 }
 
 // Fail-closed precondition GATE — NOT autonomous recovery. An operate task that
@@ -2902,6 +2909,8 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     prevObserve: null,
     observeSnapshotFile: null,
     compactV2Secret: randomBytes(32),
+    compactV2Mode: configuredCompactV2Mode(),
+    compactV2HintPages: [],
     compactV2Active: false,
     compactV2Refs: new Map(),
     compactV2Index: null,
@@ -3027,6 +3036,8 @@ export async function startHarnessProvisionSession(
     prevObserve: null,
     observeSnapshotFile: null,
     compactV2Secret: randomBytes(32),
+    compactV2Mode: opts.observationFormat === "compact-v2" ? "on" : "off",
+    compactV2HintPages: [],
     compactV2Active: false,
     compactV2Refs: new Map(),
     compactV2Index: null,
@@ -3073,9 +3084,12 @@ export async function startHarnessProvisionSession(
       allowed_hosts: hostStrings(session),
     });
     await opts.browser.goto(opts.serviceUrl);
-    const observation = await observeSession(session);
-    // The action map remains sealed, while this trusted start metadata stays
-    // available to both wire formats for the initial routing decision.
+    const observation = await observeSession(
+      session,
+      "compact",
+      compactV2StartMetadata(opts.hint, "", null),
+    );
+    if (observation.format === "compact-v2") return observation;
     return { ...observation, hint: opts.hint ?? "" };
   } catch (error) {
     sessions.delete(id);
@@ -4634,30 +4648,34 @@ function isCartAffectingAction(
   );
 }
 
-function compactV2Mode(): "off" | "shadow" | "on" {
+function configuredCompactV2Mode(): "off" | "shadow" | "on" {
   const configured = (process.env.TRUSTY_SQUIRE_OBSERVE_V2 ?? "on").toLowerCase();
   if (configured === "off" || configured === "0") return "off";
   return configured === "shadow" ? "shadow" : "on";
 }
 
 interface CompactV2StartMetadata {
-  hint?: string;
+  hintPages?: string[];
   userEmail?: string;
 }
 
-function truncateUtf8(value: string, maxBytes: number): string {
-  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
-  const ellipsis = "…";
-  const contentLimit = Math.max(0, maxBytes - Buffer.byteLength(ellipsis, "utf8"));
-  let result = "";
+function splitUtf8Pages(value: string, maxBytes: number): string[] {
+  if (value.length === 0) return [];
+  const pages: string[] = [];
+  let page = "";
   let bytes = 0;
   for (const character of value) {
     const characterBytes = Buffer.byteLength(character, "utf8");
-    if (bytes + characterBytes > contentLimit) break;
-    result += character;
+    if (bytes + characterBytes > maxBytes && page.length > 0) {
+      pages.push(page);
+      page = "";
+      bytes = 0;
+    }
+    page += character;
     bytes += characterBytes;
   }
-  return `${result}${ellipsis}`;
+  if (page.length > 0) pages.push(page);
+  return pages;
 }
 
 function compactV2StartMetadata(
@@ -4665,10 +4683,7 @@ function compactV2StartMetadata(
   loginHint: string,
   userEmail: string | null,
 ): CompactV2StartMetadata {
-  const hint = [
-    truncateUtf8(loginHint, 252),
-    ...(registryHint === undefined ? [] : [truncateUtf8(registryHint, 768)]),
-  ].join("\n");
+  const hint = [loginHint, registryHint].filter((part): part is string => part !== undefined && part.length > 0).join("\n");
   const validEmail =
     userEmail !== null &&
     Buffer.byteLength(userEmail, "utf8") <= 254 &&
@@ -4676,12 +4691,10 @@ function compactV2StartMetadata(
       ? userEmail
       : undefined;
   return {
-    ...(hint.length === 0 ? {} : { hint: truncateUtf8(hint, 1_024) }),
+    ...(hint.length === 0 ? {} : { hintPages: splitUtf8Pages(hint, 768) }),
     ...(validEmail === undefined ? {} : { userEmail: validEmail }),
   };
 }
-
-const COMPACT_V2_PAGE_CURSOR_SCOPE = "p";
 
 function compactV2QueryCursorScope(
   session: Session,
@@ -4690,6 +4703,13 @@ function compactV2QueryCursorScope(
 ): string {
   return createHmac("sha256", session.compactV2Secret)
     .update(JSON.stringify([query, role ?? null]))
+    .digest("base64url")
+    .slice(0, 10);
+}
+
+function compactV2HintCursorScope(session: Session): string {
+  return createHmac("sha256", session.compactV2Secret)
+    .update("start-metadata")
     .digest("base64url")
     .slice(0, 10);
 }
@@ -4750,6 +4770,70 @@ function parseCompactV2Cursor(
   return { generation, offset };
 }
 
+function compactV2HintPage(
+  session: Session,
+  index: SafeObservationIndexV2,
+  offset: number,
+): Record<string, unknown> {
+  const hint = session.compactV2HintPages[offset];
+  if (hint === undefined) throw new Error("invalid_cursor");
+  const nextOffset = offset + 1;
+  const remaining = session.compactV2HintPages.length - nextOffset;
+  const payload = {
+    format: "compact-v2",
+    url: "",
+    text: "",
+    session_id: session.id,
+    stage: index.stage,
+    hint,
+    ...(remaining > 0
+      ? {
+          hint_overflow: {
+            remaining,
+            next_cursor: compactV2Cursor(
+              session,
+              index.generation,
+              nextOffset,
+              compactV2HintCursorScope(session),
+            ),
+          },
+        }
+      : {}),
+  };
+  if (Buffer.byteLength(JSON.stringify(payload), "utf8") > OBSERVE_V2_MAX_WIRE_BYTES) {
+    throw new Error("compact-v2 budget metadata exceeded");
+  }
+  return payload;
+}
+
+function compactV2PublicObservation(
+  session: Session,
+  legacy: () => Observation,
+  fields: {
+    stage: SafeStageV2;
+    guidance?: string;
+    oauth?: Observation["oauth"];
+    observed?: ObserveDetail;
+  },
+): Observation {
+  if (session.compactV2Mode !== "on") return legacy();
+  session.compactV2Active = true;
+  const payload: Observation = {
+    format: "compact-v2",
+    session_id: session.id,
+    url: "",
+    text: "",
+    stage: fields.stage,
+    ...(fields.guidance === undefined ? {} : { guidance: fields.guidance }),
+    ...(fields.oauth === undefined ? {} : { oauth: fields.oauth }),
+    ...(fields.observed === undefined ? {} : { observed: fields.observed }),
+  };
+  if (Buffer.byteLength(JSON.stringify(payload), "utf8") > OBSERVE_V2_MAX_WIRE_BYTES) {
+    throw new Error("compact-v2 budget metadata exceeded");
+  }
+  return payload;
+}
+
 function compactV2Observation(
   session: Session,
   generation: number,
@@ -4757,6 +4841,9 @@ function compactV2Observation(
   semanticSource: ObservationSemanticSourceV2,
   startMetadata?: CompactV2StartMetadata,
 ): Observation {
+  if (startMetadata?.hintPages !== undefined) {
+    session.compactV2HintPages = [...startMetadata.hintPages];
+  }
   const legacyRefs = provisionElementRefs(elements);
   let pageOrigin = "";
   try {
@@ -4837,8 +4924,37 @@ function compactV2Observation(
     semantics,
     rows: index.rows,
     cursorFor: (offset) =>
-      compactV2Cursor(session, snapshotGeneration, offset, COMPACT_V2_PAGE_CURSOR_SCOPE),
-    ...(startMetadata === undefined ? {} : { startMetadata }),
+      compactV2Cursor(
+        session,
+        snapshotGeneration,
+        offset,
+        compactV2QueryCursorScope(session, "", undefined),
+      ),
+    ...(startMetadata === undefined
+      ? {}
+      : {
+          startMetadata: {
+            ...(session.compactV2HintPages[0] === undefined
+              ? {}
+              : { hint: session.compactV2HintPages[0] }),
+            ...(startMetadata.userEmail === undefined
+              ? {}
+              : { userEmail: startMetadata.userEmail }),
+            ...(session.compactV2HintPages.length <= 1
+              ? {}
+              : {
+                  hintOverflow: {
+                    remaining: session.compactV2HintPages.length - 1,
+                    next_cursor: compactV2Cursor(
+                      session,
+                      snapshotGeneration,
+                      1,
+                      compactV2HintCursorScope(session),
+                    ),
+                  },
+                }),
+          },
+        }),
   });
   return page.payload as unknown as Observation;
 }
@@ -4889,6 +5005,19 @@ export async function observeQuery(
   const cursorScope = compactV2QueryCursorScope(session, needle, role);
   let offset = 0;
   if (cursor !== undefined) {
+    if (needle.length === 0 && role === undefined && session.compactV2HintPages.length > 0) {
+      try {
+        const parsed = parseCompactV2Cursor(
+          session,
+          cursor,
+          compactV2HintCursorScope(session),
+        );
+        if (parsed.generation !== index.generation) throw new Error("stale_cursor");
+        return compactV2HintPage(session, index, parsed.offset);
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== "invalid_cursor") throw error;
+      }
+    }
     const parsed = parseCompactV2Cursor(session, cursor, cursorScope);
     if (parsed.generation !== index.generation) throw new Error("stale_cursor");
     offset = parsed.offset;
@@ -4920,23 +5049,29 @@ async function observeSession(
 ): Promise<Observation> {
   const oauthInProgress = (): Observation => {
     session.prevObserve = null;
+    invalidateCompactV2Snapshot(session);
     const oauth = session.browser.oauthTransitionStatus?.();
-    const observation: Observation = {
-      session_id: session.id,
-      url: oauth?.productUrl ?? session.startUrl,
-      text: "",
-      guidance:
-        "OAuth in progress: the provider detached or closed its page as expected. " +
-        "Do not switch login methods or close the session; call operate_observe again to read the retained product page.",
-      elements: [],
-      oauth: {
-        state: "in_progress",
-        provider_page: "closed_or_detached",
-        next_action: "operate_observe",
-      },
+    const guidance =
+      "OAuth in progress: the provider detached or closed its page as expected. " +
+      "Do not switch login methods or close the session; call operate_observe again to read the retained product page.";
+    const state: NonNullable<Observation["oauth"]> = {
+      state: "in_progress",
+      provider_page: "closed_or_detached",
+      next_action: "operate_observe",
     };
     session.browser.completeOAuthTransitionRecovery();
-    return observation;
+    return compactV2PublicObservation(
+      session,
+      () => ({
+        session_id: session.id,
+        url: oauth?.productUrl ?? session.startUrl,
+        text: "",
+        guidance,
+        elements: [],
+        oauth: state,
+      }),
+      { stage: "auth", guidance, oauth: state },
+    );
   };
   try {
     session.browser.recoverActivePage();
@@ -4963,7 +5098,7 @@ async function observeSession(
     // Native TypeScript compact serializer over TS's own CDP-derived DOM
     // inventory. Its allowlist seal runs before any retained/emitted view; no
     // Python subprocess or externally provisioned runtime participates.
-    const v2Mode = compactV2Mode();
+    const v2Mode = session.compactV2Mode;
     if (v2Mode === "on") {
       return compactV2Observation(session, generation, elements, semanticSource, startMetadata);
     }
@@ -5850,13 +5985,20 @@ async function executeAct(
     internalAccess && collectCheckoutState ? await capturePrivateCheckoutState(session) : undefined;
   const observation =
     detail === "none" && !cartAffecting && action.kind !== "oauth_login"
-      ? {
-          session_id: session.id,
-          url: browser.currentUrl(),
-          text: "",
-          elements: [],
-          observed: "none" as const,
-        }
+      ? compactV2PublicObservation(
+          session,
+          () => ({
+            session_id: session.id,
+            url: browser.currentUrl(),
+            text: "",
+            elements: [],
+            observed: "none" as const,
+          }),
+          {
+            stage: safeStageV2(browser.currentUrl(), session.lastElements),
+            observed: "none",
+          },
+        )
       : await observeSession(session, detail === "none" ? "compact" : detail);
   return {
     observation:

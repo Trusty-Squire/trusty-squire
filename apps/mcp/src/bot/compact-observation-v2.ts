@@ -492,7 +492,11 @@ export function encodeV2Page(args: {
   cursorFor: (offset: number) => string;
   offset?: number;
   unchanged?: boolean;
-  startMetadata?: { hint?: string; userEmail?: string };
+  startMetadata?: {
+    hint?: string;
+    userEmail?: string;
+    hintOverflow?: { remaining: number; next_cursor: string };
+  };
 }): { payload: Record<string, unknown>; nextOffset: number } {
   const offset = args.offset ?? 0;
   if (args.unchanged === true && offset === 0) {
@@ -507,6 +511,9 @@ export function encodeV2Page(args: {
         stage: args.stage,
         ...(args.startMetadata?.hint === undefined ? {} : { hint: args.startMetadata.hint }),
         ...(args.startMetadata?.userEmail === undefined ? {} : { user_email: args.startMetadata.userEmail }),
+        ...(args.startMetadata?.hintOverflow === undefined
+          ? {}
+          : { hint_overflow: args.startMetadata.hintOverflow }),
         ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
           ? {}
           : { semantic: args.semantics }),
@@ -530,6 +537,9 @@ export function encodeV2Page(args: {
       stage: args.stage,
       ...(args.startMetadata?.hint === undefined ? {} : { hint: args.startMetadata.hint }),
       ...(args.startMetadata?.userEmail === undefined ? {} : { user_email: args.startMetadata.userEmail }),
+      ...(args.startMetadata?.hintOverflow === undefined
+        ? {}
+        : { hint_overflow: args.startMetadata.hintOverflow }),
       ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
         ? {}
         : { semantic: args.semantics }),
@@ -549,6 +559,9 @@ export function encodeV2Page(args: {
     stage: args.stage,
     ...(args.startMetadata?.hint === undefined ? {} : { hint: args.startMetadata.hint }),
     ...(args.startMetadata?.userEmail === undefined ? {} : { user_email: args.startMetadata.userEmail }),
+    ...(args.startMetadata?.hintOverflow === undefined
+      ? {}
+      : { hint_overflow: args.startMetadata.hintOverflow }),
     ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
       ? {}
       : { semantic: args.semantics }),
