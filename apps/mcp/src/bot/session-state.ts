@@ -62,6 +62,25 @@ export async function readSessionState(
   }
 }
 
+export function stripGoogleIdentityFromSessionState(
+  state: BrowserStorageState,
+): BrowserStorageState {
+  const isGoogleHost = (host: unknown): boolean =>
+    typeof host === "string" &&
+    /(^|\.)google\.com$/i.test(host.replace(/^\./, ""));
+  return {
+    ...state,
+    cookies: state.cookies.filter((cookie) => !isGoogleHost(cookie.domain)),
+    origins: state.origins.filter((origin) => {
+      try {
+        return !isGoogleHost(new URL(origin.origin).hostname);
+      } catch {
+        return true;
+      }
+    }),
+  };
+}
+
 /** Last completed snapshot wins. Rename keeps concurrent writers from corrupting it. */
 export async function writeSessionState(
   profileDir: string,

@@ -28,16 +28,18 @@ context, captures the same portable state, closes the context, and publishes the
 snapshot. Snapshots larger than 4 MiB are ignored on read and skipped on write,
 also preserving the prior snapshot.
 
-Every operator browser restores that snapshot before its first target
-navigation. `require_live_identity` runs the shared live-provider detector in
-the fresh seeded browser. A stale identity fails closed with the context-backed
-login handoff and cannot overwrite canonical state.
+Ordinary operator startup restores the snapshot without Google identity, so two
+parallel profiles cannot hold the same rotating Google session. A Google
+`oauth_login` action waits on the process-local handoff, restores the latest full
+snapshot, completes OAuth, captures the rotated state, proves bounded close,
+publishes it, and restarts the same private profile before releasing the next
+waiter. `require_live_identity` still runs the shared live-provider detector in
+its fresh seeded browser.
 
-An explicitly successful result has either `data.confirmed: true` or a
-confirmed `verify_recipe`. Credential outcomes succeed only after extraction
-and vault storage complete without a blocker. No-outcome, failed, unconfirmed,
-payment-active, payment-field-sealed, and pending-3DS sessions never publish a
-snapshot.
+Google OAuth publishes at the serialized handoff boundary. A session seeded for
+`require_live_identity` may also publish after an explicitly successful result.
+No-outcome, failed, unconfirmed, payment-active, payment-field-sealed, and
+pending-3DS sessions never publish at finish.
 
 ## 3. Start and active ownership
 

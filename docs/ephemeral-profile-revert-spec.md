@@ -38,7 +38,7 @@ Keep `CHROME_PROFILE_DIR` only as the interactive `connect`/`login` authoring pr
 
 Add a small `apps/mcp/src/bot/session-state.ts`. Its authoritative state file is `<CHROME_PROFILE_DIR>/trusty-squire-session-state.json`, written with mode `0600` by atomic temp-file + rename. It is Playwright storage-state JSON, not a profile copy.
 
-At start, create a unique `0700` directory with a `trusty-squire-operate-` mkdtemp prefix and, if the JSON snapshot exists, call `BrowserContext.setStorageState()` before the first target navigation. The installed Playwright type exposes restore plus `storageState({ indexedDB: true })` capture (`node_modules/.pnpm/playwright-core@1.59.1/.../types.d.ts:9407-9471`). No Chrome cookie database or profile files are copied.
+At start, create a unique `0700` directory with a `trusty-squire-operate-` mkdtemp prefix and restore the JSON snapshot without Google identity. At a Google `oauth_login`, restore the latest full snapshot inside the process-local handoff. The installed Playwright type exposes restore plus `storageState({ indexedDB: true })` capture (`node_modules/.pnpm/playwright-core@1.59.1/.../types.d.ts:9407-9471`). No Chrome cookie database or profile files are copied.
 
 Required coverage:
 
@@ -56,18 +56,23 @@ Replace pool/direct acquisition through the retained `acquireWarmBrowser` intern
 
 - make and seed the unique directory;
 - read state JSON;
-- construct `BrowserController({ profileDir: fresh, storageState })`;
+- construct `BrowserController({ profileDir: fresh, storageState: nonGoogleState })`;
 - after its context exists, restore state before creating/navigating the primary page (the placement is `browser.ts:3446-3601`);
 - retain controller-to-profile and canonical-namespace custody in the in-memory
   browser record associated with the session.
 
 Remove the `requireLiveIdentity` direct-canonical exception. Preserve the existing live-provider pre-navigation gate, but evaluate it against the seeded fresh browser. Existing multi-step reuse already works: a session owns one browser in `sessions` (`provision-session.ts:624, 2598-2634`) until finish removes it.
 
+### Google OAuth handoff
+
+Serialize only the Google-authenticated `oauth_login` moment. The waiter restores the latest full snapshot, completes OAuth, captures the rotated state, proves bounded browser close, atomically publishes, restarts the same private profile, and then releases the next waiter. Ordinary browsing, payments, and non-Google OAuth remain parallel.
+
 ### Finish
 
 Preserve the rc.9 call-drain, audit, and payment ordering. Keep the session and
 terminal owner discoverable through capture and atomic write-back so shutdown
-revocation reaches the final rename fence. On an explicit successful finish:
+revocation reaches the final rename fence. On an explicit successful
+`requireLiveIdentity` finish:
 
 1. Capture `context.storageState({ indexedDB: true })` before close.
 2. Use the rc.9 bounded terminal owner to perform the existing identity-proven browser close.
@@ -78,9 +83,9 @@ revocation reaches the final rename fence. On an explicit successful finish:
 
 If the existing `profileRequiresDestroy` condition is true (`activePayment`, `paymentFieldSealActive`, or `pendingThreeDs`, `provision-session.ts:7846-7852`), close and schedule profile destruction but skip write-back. If close cannot be proved, retain that unique directory and the prior canonical snapshot, and report the retained directory; it is a disk leak, never a future-agent lock wedge. A detached deletion failure is reported and leaves the same harmless unique residual until OS or manual cleanup.
 
-`connect`/`login` keeps editing the canonical authoring profile. On a successful context-backed login, write the full JSON state as well. A plain Chrome path has no context to capture, so it preserves the existing snapshot rather than clearing saved logins.
+`connect`/`login` keeps editing the canonical authoring profile. On a successful context-backed login, write the full JSON state as well. After a successful plain-Chrome login closes with proof, briefly reopen the canonical profile headlessly, capture the full state, close with proof, and publish it.
 
-Write-back is deliberately **last writer wins**. Atomic rename prevents corruption; concurrent logins to the same merchant may lose the earlier update. Do not add a lock, merge protocol, or service to address that edge case.
+Google identity write-back is ordered by the process-local OAuth handoff. Atomic rename prevents file corruption.
 
 ## File-level changes
 
@@ -160,20 +165,14 @@ reflected in the sections above:
    decrypt in a fresh profile dir, and hot-copying the live `Cookies` SQLite risks a WAL torn read.
    Removing it is simpler AND more robust. No cookie-DB seed path, no Google cookie-marker filter.
 
-2. **Persist ALL session logins, not just the Google anchor — with a best-effort re-login guardrail.**
-   Capture the full `storageState` on explicit successful finish, restore it into every fresh profile. Persist every
-   site's session, not a filtered identity anchor. GUARDRAIL (required, keeps it safe): a restored
-   session is best-effort — at session start / before an authenticated action, verify logged-in state
-   using the EXISTING live-provider detector (`browser.ts:2198-2211`, cookie families `user_session`
-   for GitHub / `__Secure-1PSID`/`SAPISID`/`SID` for Google, generalized) and re-login when the stored
-   session is stale. Never trust a restored session blindly into a half-logged-in checkout. Reuse the
-   existing login-state detection; do NOT build a new session-freshness subsystem.
-   Accepted cost: a modestly larger local secret surface (session tokens on disk). The card seal,
-   one-human-approval, host-scoped egress, and payment audit are unchanged and orthogonal.
+2. **Restore Google identity only at the serialized OAuth moment.**
+   Ordinary startup restores non-Google state. Google OAuth reads the latest full snapshot only after
+   its predecessor publishes and releases, then publishes its own rotated state after proven close.
+   Reuse the existing live-provider detector; do not add a session-freshness service.
 
 Everything else in the spec remains: remove the pool + shared seed lock + `operator-direct-identity.ts`,
 per-instance mkdtemp profile per `operate_start`, detached best-effort destruction after finish, destruction without write-back on
-`activePayment`/`paymentFieldSealActive`/`pendingThreeDs`, last-writer-wins atomic JSON write-back,
+`activePayment`/`paymentFieldSealActive`/`pendingThreeDs`, atomic JSON write-back,
 retain rc.9 watchdog.
 The implementation deletes `google-login.ts`'s `publishOperatorProfileSeed` path and writes full
 `storageState` on any clean context-backed login, not a Google-gated seed.

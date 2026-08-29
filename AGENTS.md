@@ -461,9 +461,12 @@ The supported plain-Chrome login path cannot expose a Playwright context during
 Google OAuth. After the plain browser closes with proven ownership, reopen the
 canonical authoring profile under the existing login guard only long enough to
 capture `storageState({ indexedDB: true })`, close it, and publish the snapshot.
-Operator startup must restore that snapshot into its private profile; it must never
-open the canonical profile or copy Chrome cookie databases. Parallel isolated
-operator sessions remain the contract.
+Operator startup restores non-Google state only. The `oauth_login` Google moment
+is process-serialized: restore the latest snapshot, complete OAuth, capture the
+rotated state, prove bounded browser close, publish, restart the same private
+profile, then release the next waiter. Ordinary and non-Google operator work stays
+parallel. Operators must never open the canonical profile or copy Chrome cookie
+databases.
 
 ### 14. Payment mandate expiry has separate acceptance and relay semantics
 

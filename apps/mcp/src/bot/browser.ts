@@ -15708,6 +15708,11 @@ export class BrowserController {
     return await this.context.storageState({ indexedDB: true });
   }
 
+  async restoreStorageState(state: BrowserStorageState): Promise<void> {
+    if (this.context === null) throw new Error("Browser not started");
+    await this.context.setStorageState(state);
+  }
+
   recoverActivePage(): boolean {
     return this.adoptLivePage();
   }

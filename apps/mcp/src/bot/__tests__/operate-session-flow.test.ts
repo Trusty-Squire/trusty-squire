@@ -15,6 +15,8 @@ const h = vi.hoisted(() => ({
   providers: ["google"] as string[] | null,
   oauthStatus: "already_valid" as string,
   oauthLoginCalls: [] as string[],
+  oauthLoginGates: new Map<number, Promise<void>>(),
+  restoredStorageStates: [] as Array<{ browserIndex: number; state: unknown }>,
   oauthReadError: null as string | null,
   oauthTransition: null as null | {
     productUrl: string | null;
@@ -76,6 +78,7 @@ const h = vi.hoisted(() => ({
   createdProfiles: [] as string[],
   destroyedProfiles: [] as string[],
   captureStorageState: { cookies: [], origins: [] } as unknown,
+  captureStorageStates: new Map<number, unknown>(),
   captureStorageStateCalls: 0,
   captureStorageStateGate: null as Promise<void> | null,
   captureStorageStateError: null as Error | null,
@@ -182,37 +185,39 @@ const h = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("../session-state.js", () => ({
-  SESSION_STATE_FILE: "trusty-squire-session-state.json",
-  GOOGLE_LOGIN_COOKIE_MARKERS: ["__Secure-1PSID", "SID", "HSID", "SSID", "APISID", "SAPISID"],
-  createEphemeralProfile: () => {
-    const profileDir = `/tmp/trusty-squire-unit-ephemeral-${++h.ephemeralSerial}`;
-    h.createdProfiles.push(profileDir);
-    return profileDir;
-  },
-  destroyEphemeralProfile: async (profileDir: string) => {
-    h.destroyedProfiles.push(profileDir);
-    if (h.profileDestroyGate !== null) await h.profileDestroyGate;
-  },
-  readSessionState: async (profileDir: string) => {
-    h.storageStateReads.push(profileDir);
-    if (h.storageStateReadGate !== null) await h.storageStateReadGate;
-    return h.storageStates.get(profileDir);
-  },
-  writeSessionState: async (
-    profileDir: string,
-    state: unknown,
-    canPublish: () => boolean = () => true,
-  ) => {
-    h.storageStateWriteAttempts += 1;
-    if (h.storageStateWriteGate !== null) await h.storageStateWriteGate;
-    if (!canPublish()) return false;
-    if (h.storageStateWriteError !== null) throw h.storageStateWriteError;
-    h.storageStateWrites.push({ profileDir, state });
-    h.storageStates.set(profileDir, state);
-    return true;
-  },
-}));
+vi.mock("../session-state.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../session-state.js")>();
+  return {
+    ...actual,
+    createEphemeralProfile: () => {
+      const profileDir = `/tmp/trusty-squire-unit-ephemeral-${++h.ephemeralSerial}`;
+      h.createdProfiles.push(profileDir);
+      return profileDir;
+    },
+    destroyEphemeralProfile: async (profileDir: string) => {
+      h.destroyedProfiles.push(profileDir);
+      if (h.profileDestroyGate !== null) await h.profileDestroyGate;
+    },
+    readSessionState: async (profileDir: string) => {
+      h.storageStateReads.push(profileDir);
+      if (h.storageStateReadGate !== null) await h.storageStateReadGate;
+      return h.storageStates.get(profileDir);
+    },
+    writeSessionState: async (
+      profileDir: string,
+      state: unknown,
+      canPublish: () => boolean = () => true,
+    ) => {
+      h.storageStateWriteAttempts += 1;
+      if (h.storageStateWriteGate !== null) await h.storageStateWriteGate;
+      if (!canPublish()) return false;
+      if (h.storageStateWriteError !== null) throw h.storageStateWriteError;
+      h.storageStateWrites.push({ profileDir, state });
+      h.storageStates.set(profileDir, state);
+      return true;
+    },
+  };
+});
 
 // This suite is the V1 contract suite. Individual Compact V2 tests opt in
 // explicitly below, which keeps the feature-flagged V1 and V2 action
@@ -642,6 +647,8 @@ vi.mock("../browser.js", () => ({
     async startOAuth(): Promise<void> {}
     async loginWithOAuth(selector: string): Promise<void> {
       h.oauthLoginCalls.push(selector);
+      const gate = h.oauthLoginGates.get(this.index);
+      if (gate !== undefined) await gate;
       h.currentUrl = "https://app.example.com/dashboard";
       h.visibleText = "Signed in";
     }
@@ -712,7 +719,13 @@ vi.mock("../browser.js", () => ({
       h.captureStorageStateCalls += 1;
       if (h.captureStorageStateGate !== null) await h.captureStorageStateGate;
       if (h.captureStorageStateError !== null) throw h.captureStorageStateError;
-      return h.captureStorageState;
+      return h.captureStorageStates.get(this.index) ?? h.captureStorageState;
+    }
+    async restoreStorageState(state: unknown): Promise<void> {
+      h.restoredStorageStates.push({ browserIndex: this.index, state });
+    }
+    async setHostScopeAllowedHosts(): Promise<void> {
+      return undefined;
     }
     async close(options?: {
       cancelStart?: boolean;
@@ -939,6 +952,8 @@ beforeEach(() => {
   h.providers = ["google"];
   h.oauthStatus = "already_valid";
   h.oauthLoginCalls = [];
+  h.oauthLoginGates = new Map();
+  h.restoredStorageStates = [];
   h.oauthReadError = null;
   h.oauthTransition = null;
   h.oauthRecoveryCalls = 0;
@@ -994,6 +1009,7 @@ beforeEach(() => {
   h.createdProfiles = [];
   h.destroyedProfiles = [];
   h.captureStorageState = { cookies: [], origins: [] };
+  h.captureStorageStates = new Map();
   h.captureStorageStateCalls = 0;
   h.captureStorageStateGate = null;
   h.captureStorageStateError = null;
@@ -3206,6 +3222,100 @@ describe("3.1 — autocomplete-aware type fill", () => {
 });
 
 describe("operate session — OAuth lifecycle", () => {
+  it("serializes Google OAuth handoffs and restores the freshly published state", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-google-handoff";
+    const state0 = {
+      cookies: [
+        {
+          name: "SID",
+          value: "google-session-state-zero",
+          domain: ".google.com",
+          path: "/",
+        },
+        {
+          name: "user_session",
+          value: "github-session-state",
+          domain: ".github.com",
+          path: "/",
+        },
+      ],
+      origins: [
+        { origin: "https://accounts.google.com", localStorage: [] },
+        { origin: "https://github.com", localStorage: [] },
+      ],
+    };
+    const state1 = {
+      cookies: state0.cookies.map((cookie) =>
+        cookie.name === "SID" ? { ...cookie, value: "google-session-state-one" } : cookie,
+      ),
+      origins: state0.origins,
+    };
+    const state2 = {
+      cookies: state0.cookies.map((cookie) =>
+        cookie.name === "SID" ? { ...cookie, value: "google-session-state-two" } : cookie,
+      ),
+      origins: state0.origins,
+    };
+    h.storageStates.set(canonical, state0);
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    let releaseFirst!: () => void;
+    h.oauthLoginGates.set(
+      0,
+      new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      }),
+    );
+    h.captureStorageStates.set(0, state1);
+    h.captureStorageStates.set(1, state2);
+    const first = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+    const second = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+    expect(h.seededStorageStates).toEqual([
+      { cookies: [state0.cookies[1]], origins: [state0.origins[1]] },
+      { cookies: [state0.cookies[1]], origins: [state0.origins[1]] },
+    ]);
+
+    const firstAct = act(first.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+    });
+    await vi.waitFor(() => expect(h.restoredStorageStates).toHaveLength(1));
+    const secondAct = act(second.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.restoredStorageStates).toEqual([{ browserIndex: 0, state: state0 }]);
+    expect(h.oauthLoginCalls).toHaveLength(1);
+
+    releaseFirst();
+    await firstAct;
+    await vi.waitFor(() => expect(h.restoredStorageStates).toHaveLength(2));
+    expect(h.restoredStorageStates[1]).toEqual({ browserIndex: 1, state: state1 });
+    await secondAct;
+    expect(h.storageStateWrites).toEqual([
+      { profileDir: canonical, state: state1 },
+      { profileDir: canonical, state: state2 },
+    ]);
+
+    await finishProvisionSession(first.session_id);
+    await finishProvisionSession(second.session_id);
+  });
+
   it("completes oauth_login in one action and returns the settled product observation", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verified-recipe-atomic-oauth-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
@@ -5350,7 +5460,10 @@ describe("operate session — ephemeral profile lifecycle", () => {
       releaseCapture = resolve;
     });
     try {
-      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+      const started = await startProvisionSession({
+        serviceUrl: "https://app.example.com/one",
+        requireLiveIdentity: true,
+      });
       const finishing = expect(
         finishProvisionSessionWithPreparation(
           started.session_id,
@@ -5385,7 +5498,10 @@ describe("operate session — ephemeral profile lifecycle", () => {
       releaseCapture = resolve;
     });
     try {
-      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+      const started = await startProvisionSession({
+        serviceUrl: "https://app.example.com/one",
+        requireLiveIdentity: true,
+      });
       const session = paymentSession(started.session_id);
       const finishing = finishProvisionSessionWithPreparation(
         started.session_id,
@@ -5425,7 +5541,10 @@ describe("operate session — ephemeral profile lifecycle", () => {
       releaseWrite = resolve;
     });
     try {
-      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+      const started = await startProvisionSession({
+        serviceUrl: "https://app.example.com/one",
+        requireLiveIdentity: true,
+      });
       const finishing = expect(
         finishProvisionSessionWithPreparation(
           started.session_id,
@@ -5623,6 +5742,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://app.example.com/one",
       profileDir: canonical,
+      requireLiveIdentity: true,
     });
 
     await provisionFinishTool.handler(
@@ -5660,7 +5780,10 @@ describe("operate session — ephemeral profile lifecycle", () => {
 
   it("retains only the unique profile when closure is unproven", async () => {
     h.closeState = "unknown";
-    const session = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+    const session = await startProvisionSession({
+      serviceUrl: "https://app.example.com/one",
+      requireLiveIdentity: true,
+    });
     await provisionFinishTool.handler(
       provisionFinishTool.inputSchema.parse({
         session_id: session.session_id,
@@ -6305,6 +6428,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
     for (let index = 0; index < 3; index += 1) {
       const session = await startProvisionSession({
         serviceUrl: `https://app.example.com/task-${index}`,
+        requireLiveIdentity: true,
       });
       await provisionFinishTool.handler(
         provisionFinishTool.inputSchema.parse({
@@ -6334,6 +6458,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
       const first = await startProvisionSession({
         serviceUrl: "https://app.example.com/one",
         profileDir: canonical,
+        requireLiveIdentity: true,
       });
       await provisionFinishTool.handler(
         provisionFinishTool.inputSchema.parse({
