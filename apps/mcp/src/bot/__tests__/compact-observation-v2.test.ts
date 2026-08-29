@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { describe, expect, it } from "vitest";
 import {
   OBSERVE_V2_MAX_WIRE_BYTES,
+  OBSERVE_V2_MAX_TOKENS,
   buildSafeControlsV2,
   compactV2LegacyRefForHandle,
   diffSafeControlsV2,
@@ -9,6 +10,7 @@ import {
   encodeV2Delta,
   encodeV2Page,
   safePageSemanticsV2,
+  safeDescriptionV2,
   safeStageV2,
 } from "../compact-observation-v2.js";
 import type { InteractiveElement } from "../browser.js";
@@ -60,7 +62,11 @@ describe("compact observation v2", () => {
     expect(wire).not.toContain("swordfish");
     expect(wire).not.toContain("Northwind");
     expect(safe.rows).toEqual([
-      expect.objectContaining({ ref: expect.stringMatching(/^@e:/), role: "button", visibility: "viewport" }),
+      expect.objectContaining({
+        ref: expect.stringMatching(/^@e:/),
+        role: "button",
+        visibility: "viewport",
+      }),
     ]);
   });
 
@@ -72,10 +78,26 @@ describe("compact observation v2", () => {
       generation: 1,
       pageOrigin: "https://merchant.invalid",
     });
-    expect(safe.rows).toEqual([
-      expect.objectContaining({ ref: "@e:1.1", role: "button" }),
-    ]);
+    expect(safe.rows).toEqual([expect.objectContaining({ ref: "@e:1.1", role: "button" })]);
     expect(JSON.stringify(safe.rows)).not.toContain("api_1234567890123");
+  });
+
+  it("rejects arbitrary standalone strings outside the semantic-safe grammar", () => {
+    expect(safeDescriptionV2("correcthorsebattery")).toBeUndefined();
+    expect(
+      safePageSemanticsV2({
+        title: "correcthorsebattery",
+        headings: ["Create your account"],
+      }),
+    ).toEqual({ headings: ["Create your account"] });
+    const button = element({ visibleText: "correcthorsebattery" });
+    const safe = buildSafeControlsV2({
+      elements: [button],
+      legacyRefs: new Map([[button, "@e:standalone-secret"]]),
+      generation: 1,
+      pageOrigin: "https://merchant.invalid",
+    });
+    expect(safe.rows[0]?.name).toBeUndefined();
   });
 
   it("returns an intact first page and signed cursor below the final wire cap", () => {
@@ -97,9 +119,27 @@ describe("compact observation v2", () => {
     );
     expect(page.nextOffset).toBeGreaterThan(0);
     expect(page.nextOffset).toBeLessThan(rows.length);
-    expect((page.payload.overflow as { next_cursor: string }).next_cursor).toBe(`cursor-${page.nextOffset}`);
+    expect((page.payload.overflow as { next_cursor: string }).next_cursor).toBe(
+      `cursor-${page.nextOffset}`,
+    );
     expect(page.payload.session_id).toBe("session");
     expect(page.payload.stage).toBe("browse");
+  });
+
+  it("rejects token-dense metadata below the byte ceiling but above the token cap", () => {
+    const denseHint = "!".repeat(OBSERVE_V2_MAX_TOKENS + 64);
+    expect(Buffer.byteLength(JSON.stringify({ hint: denseHint }), "utf8")).toBeLessThan(
+      OBSERVE_V2_MAX_WIRE_BYTES,
+    );
+    expect(() =>
+      encodeV2Page({
+        sessionId: "session",
+        stage: "browse",
+        rows: [],
+        cursorFor: (offset) => `cursor-${offset}`,
+        startMetadata: { hint: denseHint },
+      }),
+    ).toThrow("compact-v2 budget metadata exceeded");
   });
 
   it("clamps a dense page with long raw labels to a paged, sealed first action map", () => {
@@ -127,7 +167,7 @@ describe("compact observation v2", () => {
     });
     const wire = JSON.stringify(page.payload);
     expect(safe.rows).toHaveLength(94);
-    expect((page.payload.safe_table as unknown[])).toHaveLength(4);
+    expect(page.payload.safe_table as unknown[]).toHaveLength(4);
     expect(page.payload.overflow).toEqual({ remaining: 90, next_cursor: "cursor-4" });
     expect(page.payload.semantic).toEqual({ title: "Dense sample", headings: ["First controls"] });
     expect(Buffer.byteLength(wire, "utf8")).toBeLessThanOrEqual(OBSERVE_V2_MAX_WIRE_BYTES);
@@ -216,7 +256,9 @@ describe("compact observation v2", () => {
       generation: 2,
       pageOrigin: "https://merchant.invalid",
     });
-    expect(initial.rows[0]).toEqual(expect.objectContaining({ ref: "@e:1.1", name: "private merchant copy" }));
+    expect(initial.rows[0]).toEqual(
+      expect.objectContaining({ ref: "@e:1.1", name: "private merchant copy" }),
+    );
     expect(repeated.rows[0]).toEqual(expect.objectContaining({ ref: "@e:2.1" }));
   });
 
@@ -238,7 +280,10 @@ describe("compact observation v2", () => {
       pageOrigin: "https://merchant.invalid",
     });
     expect(safe.rows).toEqual([
-      expect.objectContaining({ ref: expect.stringMatching(/^@e:/), name: "Native serialized control" }),
+      expect.objectContaining({
+        ref: expect.stringMatching(/^@e:/),
+        name: "Native serialized control",
+      }),
     ]);
   });
 
@@ -246,7 +291,11 @@ describe("compact observation v2", () => {
     expect(
       safePageSemanticsV2({
         title: "Example storefront",
-        headings: ["Create your account", "4111111111111111", "API key: abcdefghijklmnopqrstuvwxyz"],
+        headings: [
+          "Create your account",
+          "4111111111111111",
+          "API key: abcdefghijklmnopqrstuvwxyz",
+        ],
       }),
     ).toEqual({ title: "Example storefront", headings: ["Create your account"] });
     const button = element({ visibleText: "Continue to registration" });
@@ -268,7 +317,9 @@ describe("compact observation v2", () => {
     expect(safeStageV2("https://merchant.invalid/thank-you", [])).toBe("complete");
     expect(safeStageV2("https://merchant.invalid/incomplete", [])).toBe("browse");
     expect(
-      safeStageV2("https://merchant.invalid/cart", [element({ visibleText: "Checkout", role: "button" })]),
+      safeStageV2("https://merchant.invalid/cart", [
+        element({ visibleText: "Checkout", role: "button" }),
+      ]),
     ).toBe("cart");
     expect(
       safeStageV2("https://merchant.invalid/products/widget", [
@@ -295,8 +346,33 @@ describe("compact observation v2", () => {
     ).toBe("browse");
     expect(
       safeStageV2("https://merchant.invalid/account", [
-        element({ visibleText: "Log in", role: "button" }),
-        element({ tag: "input", type: "email", role: "textbox" }),
+        element({ visibleText: "Log in", role: "button", formId: 1 }),
+        element({ tag: "input", type: "email", role: "textbox", formId: 1 }),
+      ]),
+    ).toBe("auth");
+    expect(
+      safeStageV2("https://merchant.invalid/products/widget", [
+        element({ visibleText: "Add to cart", role: "button", topmost: false }),
+        element({
+          tag: "input",
+          type: "password",
+          role: "textbox",
+          visible: true,
+          topmost: true,
+          formId: 4,
+        }),
+      ]),
+    ).toBe("auth");
+    expect(
+      safeStageV2("https://merchant.invalid/account", [
+        element({ visibleText: "Log in", role: "button", containerId: 8, formId: 7 }),
+        element({
+          tag: "input",
+          type: "email",
+          role: "textbox",
+          containerId: 7,
+          formId: 7,
+        }),
       ]),
     ).toBe("auth");
   });
@@ -385,9 +461,7 @@ describe("compact observation v2", () => {
       ],
       cursorFor: (offset) => `cursor-${offset}`,
     });
-    expect(first.payload.safe_table).toEqual([
-      ["@e:first-control", "b", "Continue"],
-    ]);
+    expect(first.payload.safe_table).toEqual([["@e:first-control", "b", "Continue"]]);
     const repeat = encodeV2Delta({
       sessionId: "session",
       stage: "browse",
@@ -405,8 +479,15 @@ describe("compact observation v2", () => {
 
   it("keeps unchanged semantic essentials sticky instead of repeating them in every delta", () => {
     const semantics = { title: "Example storefront", headings: ["Create your account"] };
-    expect(equalSafePageSemanticsV2(semantics, { ...semantics, headings: ["Create your account"] })).toBe(true);
-    expect(equalSafePageSemanticsV2(semantics, { title: "Different page", headings: ["Create your account"] })).toBe(false);
+    expect(
+      equalSafePageSemanticsV2(semantics, { ...semantics, headings: ["Create your account"] }),
+    ).toBe(true);
+    expect(
+      equalSafePageSemanticsV2(semantics, {
+        title: "Different page",
+        headings: ["Create your account"],
+      }),
+    ).toBe(false);
     const delta = encodeV2Delta({
       sessionId: "session",
       stage: "form",
@@ -440,7 +521,10 @@ describe("compact observation v2", () => {
         snapshotGeneration: 1,
         stage: "form",
         semantics: {},
-        byRef: new Map([[before.ref, before], ["@e:removed", before]]),
+        byRef: new Map([
+          [before.ref, before],
+          ["@e:removed", before],
+        ]),
       },
       "form",
       [changed, added],

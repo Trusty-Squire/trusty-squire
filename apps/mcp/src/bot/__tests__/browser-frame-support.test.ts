@@ -112,19 +112,24 @@ describe("extractInteractiveElements — frame support (real Chromium, real HTTP
     try {
       await page.setContent(
         page_(
-          `<form aria-label="Account"><button data-testid="login">Log in</button></form>` +
+          `<form aria-label="Account"><input data-testid="account-email" type="email" aria-label="Email">` +
+            `<section aria-label="Actions"><button data-testid="login">Log in</button></section></form>` +
             `<form aria-label="Account"><input data-testid="newsletter" type="email" aria-label="Email"></form>`,
         ),
       );
       const elements = await ctrl.extractInteractiveElements();
       const login = elements.find((element) => element.testId === "login");
+      const accountEmail = elements.find((element) => element.testId === "account-email");
       const newsletter = elements.find((element) => element.testId === "newsletter");
 
-      expect(login?.container).toBe("form:account");
+      expect(login?.container).toBe("section:actions");
+      expect(accountEmail?.container).toBe("form:account");
       expect(newsletter?.container).toBe("form:account");
       expect(login?.containerId).toEqual(expect.any(Number));
       expect(newsletter?.containerId).toEqual(expect.any(Number));
       expect(login?.containerId).not.toBe(newsletter?.containerId);
+      expect(login?.formId).toBe(accountEmail?.formId);
+      expect(login?.formId).not.toBe(newsletter?.formId);
     } finally {
       await page.close();
     }

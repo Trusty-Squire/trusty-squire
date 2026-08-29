@@ -374,8 +374,8 @@ const COMPACT_V2_CONTRACT =
   "continue,login,signup,add_to_cart,view_cart,checkout,payment; fields are email,password,username,name,phone,search,address," +
   "city,region,postal,country,date,quantity,promo,payment. Short labels are included for viewport-prioritized controls; " +
   "card/secret-shaped text and field values are never emitted. For a named product/control from the task, " +
-  "call operate_observe_query with those task words; it returns matching actionable refs without revealing " +
-  "page labels, values, snapshots, or raw DOM. Use overflow.next_cursor to page. `detail:full` does not bypass this seal while V2 is enabled; " +
+  "call operate_observe_query with those task words; it returns matching actionable refs with screened labels " +
+  "and code-owned facts, but never field values, snapshots, or raw DOM. Use overflow.next_cursor to page. `detail:full` does not bypass this seal while V2 is enabled; " +
   "set TRUSTY_SQUIRE_OBSERVE_V2=off for the legacy format. A delta:true delta retains the preceding V2 table, then upserts tuple rows in safe_table, " +
   "removes refs in removed, and updates stage or semantic only when either changed. Omitted semantic title/heading remains from the preceding V2 page. " +
   "A delta with none of those fields means the sealed view is unchanged. ";

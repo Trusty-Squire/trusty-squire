@@ -3260,6 +3260,43 @@ describe("Compact V2 action-map boundary", () => {
     expect(provisionObserveTool.description).toContain(
       "encoded as n=<label>, with `%` encoded as `%25` and `|` as `%7C`",
     );
+    expect(provisionObserveTool.description).toContain(
+      "matching actionable refs with screened labels and code-owned facts",
+    );
+  });
+
+  it("retains only sealed inventory after a V2 observation", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        role: "textbox",
+        selector: "#card-number",
+        autocomplete: "cc-number",
+        value: "4111111111111111",
+        visibleText: "correcthorsebattery",
+        sealed: true,
+      }),
+      elem({
+        index: 1,
+        tag: "input",
+        role: "textbox",
+        selector: "#security-code",
+        autocomplete: "cc-csc",
+        value: "123",
+        sealed: true,
+      }),
+    ];
+
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const retained = paymentSession(started.session_id).lastElements;
+    const serialized = JSON.stringify(retained);
+    expect(serialized).not.toContain("4111111111111111");
+    expect(serialized).not.toContain("correcthorsebattery");
+    expect(serialized).not.toContain("#card-number");
+    expect(retained[0]).toMatchObject({ value: null, selector: "", autocomplete: "cc-number" });
   });
 
   it("keeps start metadata, rejects locators, and binds a handle to its current page snapshot", async () => {
@@ -3518,6 +3555,7 @@ describe("Compact V2 action-map boundary", () => {
         visibleText: "Log in",
         container: "form:account",
         containerId: 1,
+        formId: 1,
       }),
       elem({
         index: 1,
@@ -3527,6 +3565,7 @@ describe("Compact V2 action-map boundary", () => {
         labelText: "Email",
         container: "form:account",
         containerId: 2,
+        formId: 2,
       }),
     ];
     const started = await startProvisionSession({
@@ -3536,7 +3575,7 @@ describe("Compact V2 action-map boundary", () => {
 
     h.elements = (h.elements as Array<Record<string, unknown>>).map((element) => ({
       ...element,
-      containerId: 1,
+      formId: 1,
     }));
     await expect(observe(started.session_id)).resolves.toMatchObject({ stage: "auth" });
   });

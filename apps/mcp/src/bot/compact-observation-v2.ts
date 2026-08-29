@@ -11,6 +11,11 @@ export const OBSERVE_V2_MAX_WIRE_BYTES = 4_096;
 export const OBSERVE_V2_MAX_TOKENS = 1_024;
 const FIRST_PAGE_ROW_LIMIT = 4;
 
+export function compactV2PayloadWithinBudget(payload: unknown): boolean {
+  const bytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
+  return bytes <= OBSERVE_V2_MAX_WIRE_BYTES && bytes <= OBSERVE_V2_MAX_TOKENS;
+}
+
 export type SafeRoleV2 =
   | "button"
   | "link"
@@ -194,6 +199,54 @@ const EMAIL_VALUE_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
 const SECRET_ASSIGNMENT_RE = /\b(?:password|passcode|token|api[_ -]?key|secret)\b\s*[:=]\s*\S{4,}/i;
 const HIGH_ENTROPY_TOKEN_RE = /\b[A-Za-z0-9_-]{24,}\b/;
 const CARD_SECURITY_VALUE_RE = /\b(?:cvv|cvc|security\s*code)\s*[:#-]?\s*\d{3,4}\b/i;
+const SAFE_DESCRIPTION_GRAMMAR_RE = /^[\p{L}\p{N}][\p{L}\p{N}\s&'’+,.!?():=/@_|-]*$/u;
+const SAFE_SINGLE_WORD_DESCRIPTIONS = new Set([
+  "account",
+  "address",
+  "back",
+  "cancel",
+  "cart",
+  "checkout",
+  "city",
+  "close",
+  "continue",
+  "country",
+  "date",
+  "delivery",
+  "dismiss",
+  "done",
+  "email",
+  "finish",
+  "login",
+  "name",
+  "next",
+  "password",
+  "pay",
+  "payment",
+  "phone",
+  "postal",
+  "previous",
+  "promo",
+  "quantity",
+  "region",
+  "register",
+  "save",
+  "search",
+  "shipping",
+  "signup",
+  "size",
+  "style",
+  "submit",
+  "terms",
+  "username",
+  "variant",
+]);
+
+function hasSafeDescriptionGrammar(value: string): boolean {
+  if (!SAFE_DESCRIPTION_GRAMMAR_RE.test(value)) return false;
+  const words = value.match(/[\p{L}\p{N}]+/gu) ?? [];
+  return words.length >= 2 || SAFE_SINGLE_WORD_DESCRIPTIONS.has((words[0] ?? "").toLowerCase());
+}
 
 function containsCredentialShape(value: string): boolean {
   if (findCredentialTokens(value).length > 0) return true;
@@ -218,6 +271,7 @@ export function safeDescriptionV2(value: string | null | undefined): string | un
   const normalized = value.replace(/\s+/g, " ").trim();
   if (
     normalized.length === 0 ||
+    !hasSafeDescriptionGrammar(normalized) ||
     hasPanLikeDigits(normalized) ||
     EMAIL_VALUE_RE.test(normalized) ||
     SECRET_ASSIGNMENT_RE.test(normalized) ||
@@ -232,6 +286,143 @@ export function safeDescriptionV2(value: string | null | undefined): string | un
   return normalized.length <= SAFE_DESCRIPTION_MAX_CHARS
     ? normalized
     : `${normalized.slice(0, SAFE_DESCRIPTION_MAX_CHARS - 1)}…`;
+}
+
+const SAFE_AUTOCOMPLETE_TOKENS = new Set([
+  "address-level1",
+  "address-level2",
+  "address-line1",
+  "address-line2",
+  "address-line3",
+  "bday",
+  "bday-day",
+  "bday-month",
+  "bday-year",
+  "cc-csc",
+  "cc-exp",
+  "cc-exp-month",
+  "cc-exp-year",
+  "cc-name",
+  "cc-number",
+  "country",
+  "country-name",
+  "current-password",
+  "email",
+  "family-name",
+  "given-name",
+  "honorific-prefix",
+  "honorific-suffix",
+  "name",
+  "new-password",
+  "nickname",
+  "one-time-code",
+  "organization",
+  "organization-title",
+  "postal-code",
+  "shipping",
+  "street-address",
+  "tel",
+  "tel-area-code",
+  "tel-country-code",
+  "tel-extension",
+  "tel-local",
+  "tel-local-prefix",
+  "tel-local-suffix",
+  "tel-national",
+  "transaction-amount",
+  "transaction-currency",
+  "username",
+]);
+
+function safeAutocompleteV2(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const tokens = value.toLowerCase().trim().split(/\s+/).filter(Boolean);
+  return tokens.length > 0 && tokens.every((token) => SAFE_AUTOCOMPLETE_TOKENS.has(token))
+    ? tokens.join(" ")
+    : null;
+}
+
+function safeOriginV2(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = new URL(value);
+    return parsed.origin === value ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+export function sealRetainedInteractiveElementsV2(
+  elements: readonly InteractiveElement[],
+): InteractiveElement[] {
+  const description = (value: string | null | undefined): string | null =>
+    safeDescriptionV2(value) ?? null;
+  const token = (value: string | null | undefined): string | null =>
+    typeof value === "string" && /^[a-z][a-z0-9-]{0,31}$/i.test(value) ? value : null;
+  return elements.map((element) => ({
+    index: element.index,
+    tag: token(element.tag) ?? "unknown",
+    type: token(element.type),
+    id: description(element.id),
+    name: description(element.name),
+    placeholder: description(element.placeholder),
+    ariaLabel: description(element.ariaLabel),
+    role: token(element.role),
+    labelText: description(element.labelText),
+    visibleText: description(element.visibleText),
+    selector: "",
+    visible: element.visible === true,
+    inViewport: element.inViewport === true,
+    inConsentWidget: element.inConsentWidget === true,
+    sealed: element.sealed === true,
+    href: null,
+    iconLabel: description(element.iconLabel),
+    title: description(element.title),
+    testId: description(element.testId),
+    autocomplete: safeAutocompleteV2(element.autocomplete),
+    dataRole: null,
+    landmark:
+      typeof element.landmark === "string" &&
+      /^(?:header|main|footer|nav|aside|article|section)$/.test(element.landmark)
+        ? element.landmark
+        : null,
+    value: null,
+    checked: element.checked ?? null,
+    disabled: element.disabled ?? null,
+    required: element.required ?? null,
+    selectOptions: null,
+    selectedOptionText: null,
+    interactedThisRun: element.interactedThisRun === true,
+    screenPath: null,
+    container: null,
+    containerId:
+      Number.isSafeInteger(element.containerId) && (element.containerId ?? 0) > 0
+        ? element.containerId
+        : null,
+    formId:
+      Number.isSafeInteger(element.formId) && (element.formId ?? 0) > 0 ? element.formId : null,
+    topmost: element.topmost ?? null,
+    occludedBy: null,
+    cardRadioGroup:
+      element.cardRadioGroup !== null &&
+      element.cardRadioGroup !== undefined &&
+      Number.isSafeInteger(element.cardRadioGroup.id) &&
+      Number.isSafeInteger(element.cardRadioGroup.position) &&
+      Number.isSafeInteger(element.cardRadioGroup.total)
+        ? {
+            id: element.cardRadioGroup.id,
+            position: element.cardRadioGroup.position,
+            total: element.cardRadioGroup.total,
+          }
+        : null,
+    frameOrigin: safeOriginV2(element.frameOrigin),
+    frameUrl: null,
+    framePath:
+      typeof element.framePath === "string" && /^\d+(?:\/\d+)*$/.test(element.framePath)
+        ? element.framePath
+        : null,
+    frameOpaque: element.frameOpaque === true,
+  }));
 }
 
 export function safePageSemanticsV2(source: ObservationSemanticSourceV2): SafePageSemanticsV2 {
@@ -305,9 +496,7 @@ export function encodeV2Delta(args: {
       : {}),
     ...(args.delta.removed.length > 0 ? { removed: args.delta.removed } : {}),
   };
-  return Buffer.byteLength(JSON.stringify(payload), "utf8") <= OBSERVE_V2_MAX_WIRE_BYTES
-    ? payload
-    : null;
+  return compactV2PayloadWithinBudget(payload) ? payload : null;
 }
 
 const INTENTS: ReadonlyArray<[SafeIntentV2, RegExp]> = [
@@ -465,6 +654,9 @@ export function safeStageV2(url: string, elements: readonly InteractiveElement[]
   }
   const routeStage = checkoutStageFromUrlV2(url);
   if (routeStage !== null) return routeStage;
+  const actionableElements = elements.filter(
+    (element) => element.visible === true && element.topmost !== false,
+  );
   const checkoutFields = new Set<SafeFieldV2>([
     "address",
     "city",
@@ -473,45 +665,48 @@ export function safeStageV2(url: string, elements: readonly InteractiveElement[]
     "country",
     "payment",
   ]);
-  const hasCheckoutField = elements.some((el) => {
+  const hasCheckoutField = actionableElements.some((el) => {
     const role = roleOf(el);
     const field = fieldOf(el);
     return (
       (role === "textbox" || role === "select") && field !== undefined && checkoutFields.has(field)
     );
   });
-  const hasPaymentField = elements.some((el) => {
+  const hasPaymentField = actionableElements.some((el) => {
     const role = roleOf(el);
     return (role === "textbox" || role === "select") && fieldOf(el) === "payment";
   });
-  const hasCheckoutAction = elements.some(
+  const hasCheckoutAction = actionableElements.some(
     (el) => roleOf(el) === "button" && intentOf(el) === "checkout",
   );
   if (hasPaymentField || (hasCheckoutAction && hasCheckoutField)) return "checkout";
-  if (elements.some((el) => intentOf(el) === "add_to_cart")) return "browse";
-  const authFields = elements.filter((el) => {
+  const authFields = actionableElements.filter((el) => {
     const role = roleOf(el);
     if (role !== "textbox" && role !== "select") return false;
     const field = fieldOf(el);
     return field === "email" || field === "username" || field === "password";
   });
   const hasPasswordField = authFields.some((el) => fieldOf(el) === "password");
-  const hasScopedAuthForm = elements.some((el) => {
+  const hasScopedAuthForm = actionableElements.some((el) => {
     if (roleOf(el) !== "button" || (intentOf(el) !== "login" && intentOf(el) !== "signup")) {
       return false;
     }
-    const containerId = el.containerId;
+    const ownerId = el.formId ?? el.containerId;
     const framePath = el.framePath ?? null;
     return (
-      containerId !== undefined &&
-      containerId !== null &&
+      ownerId !== undefined &&
+      ownerId !== null &&
       authFields.some(
-        (field) => field.containerId === containerId && (field.framePath ?? null) === framePath,
+        (field) =>
+          (field.formId ?? field.containerId) === ownerId &&
+          (field.framePath ?? null) === framePath,
       )
     );
   });
   if (hasPasswordField || hasScopedAuthForm) return "auth";
-  if (elements.some((el) => roleOf(el) === "textbox" || roleOf(el) === "select")) return "form";
+  if (actionableElements.some((el) => intentOf(el) === "add_to_cart")) return "browse";
+  if (actionableElements.some((el) => roleOf(el) === "textbox" || roleOf(el) === "select"))
+    return "form";
   return "browse";
 }
 
@@ -607,27 +802,29 @@ export function encodeV2Page(args: {
 }): { payload: Record<string, unknown>; nextOffset: number } {
   const offset = args.offset ?? 0;
   if (args.unchanged === true && offset === 0) {
+    const payload: Record<string, unknown> = {
+      format: "compact-v2",
+      url: "",
+      text: "",
+      session_id: args.sessionId,
+      stage: args.stage,
+      ...(args.startMetadata?.hint === undefined ? {} : { hint: args.startMetadata.hint }),
+      ...(args.startMetadata?.userEmail === undefined
+        ? {}
+        : { user_email: args.startMetadata.userEmail }),
+      ...(args.startMetadata?.hintOverflow === undefined
+        ? {}
+        : { hint_overflow: args.startMetadata.hintOverflow }),
+      ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
+        ? {}
+        : { semantic: args.semantics }),
+      delta: true,
+    };
+    if (!compactV2PayloadWithinBudget(payload)) {
+      throw new Error("compact-v2 budget metadata exceeded");
+    }
     return {
-      payload: {
-        format: "compact-v2",
-        url: "",
-        text: "",
-        // This is the mandatory MCP continuation handle. Unlike page data it
-        // cannot be abbreviated without breaking operate_observe/act/finish.
-        session_id: args.sessionId,
-        stage: args.stage,
-        ...(args.startMetadata?.hint === undefined ? {} : { hint: args.startMetadata.hint }),
-        ...(args.startMetadata?.userEmail === undefined
-          ? {}
-          : { user_email: args.startMetadata.userEmail }),
-        ...(args.startMetadata?.hintOverflow === undefined
-          ? {}
-          : { hint_overflow: args.startMetadata.hintOverflow }),
-        ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
-          ? {}
-          : { semantic: args.semantics }),
-        delta: true,
-      },
+      payload,
       nextOffset: 0,
     };
   }
@@ -660,7 +857,7 @@ export function encodeV2Page(args: {
         ? { overflow: { remaining: remainder, next_cursor: args.cursorFor(index + 1) } }
         : {}),
     };
-    if (Buffer.byteLength(JSON.stringify(payload), "utf8") > OBSERVE_V2_MAX_WIRE_BYTES) break;
+    if (!compactV2PayloadWithinBudget(payload)) break;
     visible.push(wireControl(candidate));
   }
   const nextOffset = offset + visible.length;
@@ -686,7 +883,7 @@ export function encodeV2Page(args: {
   };
   // The fixed fields are deliberately tiny, so failure means a hostilely long
   // session id/cursor. Fail closed rather than exceeding the wire contract.
-  if (Buffer.byteLength(JSON.stringify(payload), "utf8") > OBSERVE_V2_MAX_WIRE_BYTES) {
+  if (!compactV2PayloadWithinBudget(payload)) {
     throw new Error("compact-v2 budget metadata exceeded");
   }
   return { payload, nextOffset };

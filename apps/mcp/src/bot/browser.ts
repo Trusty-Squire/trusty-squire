@@ -14353,6 +14353,7 @@ export class BrowserController {
         container: string | null;
         inDialog: boolean;
         containerId: number | null;
+        formId: number | null;
         topmost: boolean | null;
         occludedBy: string | null;
         autocomplete: string | null;
@@ -14407,6 +14408,7 @@ export class BrowserController {
         const container = regionName(region);
         const containerId = regionId(region);
         const inDialog = nearestModalRegion(el) !== null;
+        const formId = regionId(el.closest("form"));
         const status = topmostStatus(el);
         const pathLabel = isGoogleGSIIframe
           ? "Continue with Google"
@@ -14518,6 +14520,7 @@ export class BrowserController {
           container,
           inDialog,
           containerId,
+          formId,
           topmost: status.topmost,
           occludedBy: status.occludedBy,
         });
@@ -17017,6 +17020,7 @@ export interface InteractiveElement {
   // Dedicated dialog-role/aria-modal ancestry via composed tree (pierces open shadows).
   inDialog?: boolean;
   containerId?: number | null;
+  formId?: number | null;
   topmost?: boolean | null;
   occludedBy?: string | null;
   // T38 — card-radio cluster membership. Set on elements that are
