@@ -373,7 +373,7 @@ const COMPACT_V2_CONTRACT =
   "f=<field>, q=<choice position>/<choice total>, and x=<frame> segments. Fact-only rows begin with a keyed segment. " +
   "State bitset codes are c=checked,u=unchecked,d=disabled,r=required; frame codes are x=s for a same-origin child " +
   "and x=x for a cross-origin child, while an omitted x means the main frame. Actions are search,close,next,previous,submit," +
-  "continue,login,signup,add_to_cart,view_cart,checkout,payment; fields are email,password,username,name,phone,search,address," +
+  "continue,login,signup,add_to_cart,view_cart,checkout,payment,destructive; fields are email,password,username,name,phone,search,address," +
   "city,region,postal,country,date,quantity,promo,payment. Short labels are included for viewport-prioritized controls; " +
   "card/secret-shaped text and field values are never emitted. For a named product/control from the task, " +
   "call operate_observe_query with those task words; it returns matching actionable refs with screened labels " +
@@ -1117,15 +1117,112 @@ async function handleFormSelectMany(args: FormSelectManyArgs) {
   return await formSelectMany(args.session_id, args.selections);
 }
 
-function compactV2ThickResult<T extends object>(compactV2: boolean, result: T): T {
-  if (!compactV2) return result;
-  const sealed: Record<string, unknown> = { ...result };
-  if ("url" in sealed) sealed.url = "";
-  if ("credentials" in sealed) sealed.credentials = {};
-  if (typeof sealed.blocked_reason === "string") {
-    sealed.blocked_reason = safeDescriptionV2(sealed.blocked_reason) ?? "credential_unavailable";
+const COMPACT_V2_PUBLIC_CODE_VALUES = new Set([
+  "+1",
+  "0",
+  "added",
+  "already_in_cart",
+  "best_effort",
+  "cart",
+  "checkout",
+  "click",
+  "code",
+  "compact-v2",
+  "credential_unavailable",
+  "false",
+  "fill_card",
+  "informational_only",
+  "interaction_required",
+  "manual_card_entry_refused",
+  "operate_act",
+  "operate_observe",
+  "operate_pay",
+  "product",
+  "proceed_to_checkout",
+  "true",
+  "unknown",
+  "verification_code",
+]);
+
+const COMPACT_V2_PUBLIC_CORRELATION_KEYS = new Set(["reference", "session_id", "slot"]);
+
+const COMPACT_V2_PUBLIC_CODE_KEYS = new Set([
+  "authority",
+  "cart_delta",
+  "completeness",
+  "gate",
+  "intent",
+  "kind",
+  "missing_prerequisite",
+  "phase",
+  "retry_policy",
+  "resume",
+  "safe_alternative",
+  "stage",
+  "status",
+  "tool",
+  "variant",
+  "wall",
+]);
+
+const COMPACT_V2_OBSERVATION_OWNED_KEYS = new Set([
+  "delta",
+  "format",
+  "generation",
+  "guidance",
+  "hint",
+  "hint_overflow",
+  "oauth",
+  "observed",
+  "overflow",
+  "removed",
+  "safe_table",
+  "semantic",
+  "session_id",
+  "stage",
+  "text",
+  "unchanged",
+  "url",
+  "user_email",
+]);
+
+function compactV2PublicValue(key: string, value: unknown): unknown {
+  if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+  if (key === "credentials") return {};
+  if (key === "code" || key === "link" || key === "source_from") return null;
+  if (key === "preview") return "<sealed>";
+  if (key === "product_identity" || key === "options_hash") return "<requested>";
+  if (
+    (key === "url" || key.endsWith("_url") || key.endsWith("_origin")) &&
+    typeof value === "string"
+  ) {
+    return "";
   }
-  return sealed as T;
+  if (Array.isArray(value)) return value.map((item) => compactV2PublicValue(key, item));
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const observation = (key === "" || key === "observation") && record.format === "compact-v2";
+    return Object.fromEntries(
+      Object.entries(record).map(([nestedKey, nestedValue]) => [
+        nestedKey,
+        observation && COMPACT_V2_OBSERVATION_OWNED_KEYS.has(nestedKey)
+          ? nestedValue
+          : compactV2PublicValue(nestedKey, nestedValue),
+      ]),
+    );
+  }
+  if (typeof value !== "string") return value;
+  if (key === "currency") return /^[A-Z]{3}$/.test(value) ? value : null;
+  if (COMPACT_V2_PUBLIC_CODE_KEYS.has(key) && /^(?:[a-z][a-z0-9_]{0,63}|\+?[0-9]+)$/.test(value)) {
+    return value;
+  }
+  if (COMPACT_V2_PUBLIC_CODE_VALUES.has(value)) return value;
+  if (COMPACT_V2_PUBLIC_CORRELATION_KEYS.has(key)) return value;
+  return safeDescriptionV2(value) ?? "<sealed>";
+}
+
+function compactV2ThickResult<T extends object>(compactV2: boolean, result: T): T {
+  return (compactV2 ? compactV2PublicValue("", result) : result) as T;
 }
 
 async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
@@ -1265,7 +1362,7 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "needs_user{gate,message,remedy} — FAIL FAST and relay it to the user), " +
     "await_verification (sender/into_slot/grant_inbox_consent — read the user's OWN inbox " +
     "through their signed-in browser session for an email verification code/link, sealed " +
-    "into a slot with into_slot). Sealed username/password login lifecycle, never exposing raw " +
+    "into a slot with into_slot; Compact V2 never emits the raw code, link, or sender). Sealed username/password login lifecycle, never exposing raw " +
     "values: login_prepare_signup (login_slot/password_slot/password_length — seal the user's " +
     "captured email and a generated strong password into session slots; fill the signup form " +
     "with type_secret using the returned slots), login_store_signup (service + login_hosts, " +
@@ -1376,58 +1473,58 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
   },
   schemaRepair: actionSchemaRepair,
   async handler(args, api) {
-    switch (args.kind) {
-      case "cart_add":
-        return await handleCartAdd(args as CartAddArgs);
-      case "select_many":
-        return await handleFormSelectMany(args as FormSelectManyArgs);
-      case "extract":
-        return await handleExtract(args, api);
-      case "solve_captcha":
-        return await handleCaptcha(args);
-      case "await_verification":
-        return await handleAwaitVerification(args);
-      case "login_prepare_signup":
-        return await handlePrepareLogin(args as LoginPrepareSignupArgs);
-      case "login_store_signup":
-        return await handleStoreLogin(args as LoginStoreSignupArgs, api);
-      case "login_load_saved":
-        return await handleSealVaultCredential(
-          {
-            ...(args as LoginLoadSavedArgs),
-            fields: args.fields ?? ["login", "password"],
-            slot_prefix: args.slot_prefix ?? "vault",
-          },
-          api,
-        );
-    }
-    // Keep the defense-in-depth guard in act() for internal/replay callers,
-    // while this public tool surface makes the safe recovery explicit at the
-    // exact point a small model tried a forbidden manual PAN entry.
-    if (args.kind === "type") {
-      const reason = manualCardEntryBlockReason(args.text ?? "");
-      if (reason !== null) {
-        return {
-          status: "manual_card_entry_refused",
-          reason,
-          safe_alternative: "operate_pay",
-          missing_prerequisite: "verified_cart_total",
-        };
+    const result = await (async () => {
+      switch (args.kind) {
+        case "cart_add":
+          return await handleCartAdd(args as CartAddArgs);
+        case "select_many":
+          return await handleFormSelectMany(args as FormSelectManyArgs);
+        case "extract":
+          return await handleExtract(args, api);
+        case "solve_captcha":
+          return await handleCaptcha(args);
+        case "await_verification":
+          return await handleAwaitVerification(args);
+        case "login_prepare_signup":
+          return await handlePrepareLogin(args as LoginPrepareSignupArgs);
+        case "login_store_signup":
+          return await handleStoreLogin(args as LoginStoreSignupArgs, api);
+        case "login_load_saved":
+          return await handleSealVaultCredential(
+            {
+              ...(args as LoginLoadSavedArgs),
+              fields: args.fields ?? ["login", "password"],
+              slot_prefix: args.slot_prefix ?? "vault",
+            },
+            api,
+          );
       }
-    }
-    try {
-      return await act(
-        args.session_id,
-        buildAction(args),
-        args.detail ?? "compact",
-        args.product_identity !== undefined && args.options_hash !== undefined
-          ? { productIdentity: args.product_identity, optionsHash: args.options_hash }
-          : undefined,
-      );
-    } catch (err) {
-      if (err instanceof TargetStaleError) return err.result;
-      throw err;
-    }
+      if (args.kind === "type") {
+        const reason = manualCardEntryBlockReason(args.text ?? "");
+        if (reason !== null) {
+          return {
+            status: "manual_card_entry_refused",
+            reason,
+            safe_alternative: "operate_pay",
+            missing_prerequisite: "verified_cart_total",
+          };
+        }
+      }
+      try {
+        return await act(
+          args.session_id,
+          buildAction(args),
+          args.detail ?? "compact",
+          args.product_identity !== undefined && args.options_hash !== undefined
+            ? { productIdentity: args.product_identity, optionsHash: args.options_hash }
+            : undefined,
+        );
+      } catch (err) {
+        if (err instanceof TargetStaleError) return err.result;
+        throw err;
+      }
+    })();
+    return compactV2ThickResult(isCompactV2ProvisionSession(args.session_id), result);
   },
 };
 

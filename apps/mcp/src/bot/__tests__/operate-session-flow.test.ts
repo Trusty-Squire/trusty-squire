@@ -80,6 +80,7 @@ const h = vi.hoisted(() => ({
   captureStorageStateGate: null as Promise<void> | null,
   captureStorageStateError: null as Error | null,
   currentUrl: "",
+  mainDocumentEpoch: 0,
   elements: [] as unknown[],
   extractInteractiveElementsCalls: 0,
   checkoutFieldNames: [] as string[],
@@ -251,9 +252,13 @@ vi.mock("../browser.js", () => ({
     async goto(url: string): Promise<void> {
       h.gotos.push(url);
       h.currentUrl = url;
+      h.mainDocumentEpoch += 1;
     }
     currentUrl(): string {
       return h.currentUrl;
+    }
+    mainDocumentIdentity(): string {
+      return String(h.mainDocumentEpoch);
     }
     recoverActivePage(): void {}
     async extractInteractiveElements(): Promise<unknown[]> {
@@ -993,6 +998,7 @@ beforeEach(() => {
   h.captureStorageStateGate = null;
   h.captureStorageStateError = null;
   h.currentUrl = "";
+  h.mainDocumentEpoch = 0;
   h.elements = [];
   h.extractInteractiveElementsCalls = 0;
   h.checkoutFieldNames = [];
@@ -3639,7 +3645,7 @@ describe("Compact V2 action-map boundary", () => {
         "reobserve_required",
       );
       const auditText = writes.join("");
-      expect(auditText).toContain("<rejected-v2-target>");
+      expect(auditText).toContain('"target":"<sealed>"');
       expect(auditText).not.toContain(forged);
     } finally {
       spy.mockRestore();
@@ -3829,6 +3835,44 @@ describe("Compact V2 action-map boundary", () => {
       act(started.session_id, { kind: "type", target: handle, text: "buyer@example.com" }),
     ).rejects.toThrow("reobserve_required");
     expect(h.typed).toEqual([]);
+  });
+
+  it("rejects a handle after a same-URL main-document replacement", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    const handle = (started as unknown as { safe_table: Array<[string]> }).safe_table[0]![0];
+
+    h.mainDocumentEpoch += 1;
+
+    await expect(act(started.session_id, { kind: "click", target: handle })).rejects.toThrow(
+      "reobserve_required",
+    );
+    expect(h.clickCalls).toBe(0);
+  });
+
+  it("distinguishes destructive and affirmative controls with code-owned semantics", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Delete account", selector: "#delete" }),
+      elem({
+        index: 1,
+        tag: "button",
+        role: "button",
+        visibleText: "Keep account",
+        selector: "#keep",
+      }),
+    ];
+
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/account" });
+    const serialized = JSON.stringify(started);
+
+    expect(serialized).toContain("a=destructive");
+    expect(serialized).toContain("a=continue");
+    expect(serialized).not.toContain("Delete account");
+    expect(serialized).not.toContain("Keep account");
   });
 
   it("reissues handles when a private live binding changes", async () => {
@@ -6346,6 +6390,59 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     expect(res.sealed).toBeUndefined();
   });
 
+  it("recursively seals delegated verification results in Compact V2 only", async () => {
+    const rawCode = "481920";
+    const rawSender = "private.sender@example.com";
+    const rawLink = "https://app.example.com/verify?token=private-link-token-123456789";
+
+    const legacy = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      consentInboxRead: true,
+    });
+    h.visibleText = `From: Sender <${rawSender}>\nYour verification code is ${rawCode}.`;
+    h.elements = [elem({ tag: "a", role: "link", href: rawLink, visibleText: "Confirm" })];
+    h.openFirstMailResult = true;
+    const legacyResult = (await provisionActTool.handler(
+      provisionActTool.inputSchema.parse({
+        session_id: legacy.session_id,
+        kind: "await_verification",
+      }),
+      null,
+    )) as Record<string, unknown>;
+
+    expect(legacyResult).toMatchObject({
+      code: rawCode,
+      link: rawLink,
+      source_from: rawSender,
+    });
+
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const compact = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      consentInboxRead: true,
+    });
+    h.visibleText = `From: Sender <${rawSender}>\nYour verification code is ${rawCode}.`;
+    h.elements = [elem({ tag: "a", role: "link", href: rawLink, visibleText: "Confirm" })];
+    h.openFirstMailResult = true;
+    const compactResult = (await provisionActTool.handler(
+      provisionActTool.inputSchema.parse({
+        session_id: compact.session_id,
+        kind: "await_verification",
+      }),
+      null,
+    )) as Record<string, unknown>;
+
+    expect(compactResult).toMatchObject({
+      found: true,
+      code: null,
+      link: null,
+      source_from: null,
+    });
+    expect(JSON.stringify(compactResult)).not.toContain(rawCode);
+    expect(JSON.stringify(compactResult)).not.toContain(rawSender);
+    expect(JSON.stringify(compactResult)).not.toContain("private-link-token");
+  });
+
   it("PR2: refuses the inbox read without consent and hands the code request back", async () => {
     // No consentInboxRead → default OFF → must NOT read the (mocked) inbox.
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
@@ -6674,6 +6771,32 @@ describe("operate_finish lifecycle consolidation", () => {
       closed: true,
     });
     expect(JSON.stringify(result)).not.toContain(urlToken);
+  });
+
+  it("seals Compact V2 measurement service labels before stderr emission", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const panHost = "4111-1111-1111-1111.com";
+    const started = await startProvisionSession({ serviceUrl: `https://${panHost}/done` });
+    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    try {
+      await provisionFinishTool.handler(
+        {
+          session_id: started.session_id,
+          outcome: { kind: "result", summary: "Done" },
+        },
+        null,
+      );
+      const measurement = stderrWrite.mock.calls
+        .map(([line]) => String(line))
+        .find((line) => line.includes('"marker":"provision-measurement"'));
+
+      expect(measurement).toBeDefined();
+      expect(measurement).not.toContain(panHost);
+      expect(measurement).toContain('"service":"<sealed>"');
+    } finally {
+      stderrWrite.mockRestore();
+    }
   });
 
   it("returns the legacy result shape from outcome=result, including scalar data coercion", async () => {
@@ -8795,21 +8918,30 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
     expect(added).toMatchObject({
       status: "added",
       cart_delta: "+1",
-      cart_url: "https://shop.example.com/cart",
+      cart_url: "",
       checkout_state: {
         authority: "informational_only",
         completeness: "best_effort",
         authoritative_for_payment: false,
         stage: "cart",
-        product_identity: "sku:tiara",
-        options_hash: "size=M",
+        product_identity: "<requested>",
+        options_hash: "<requested>",
         quantity: 1,
         subtotal: { amount_cents: 968, currency: "JPY" },
         shipping: { amount_cents: 0, currency: "JPY" },
         payable_total: { amount_cents: 968, currency: "JPY" },
+        cart_url: "",
         next_action: { tool: "operate_act", kind: "click", intent: "proceed_to_checkout" },
       },
+      postcondition: {
+        product_identity: "<requested>",
+        options_hash: "<requested>",
+        quantity: 1,
+      },
     });
+    expect(JSON.stringify(added)).not.toContain("https://shop.example.com/cart");
+    expect(JSON.stringify(added)).not.toContain("sku:tiara");
+    expect(JSON.stringify(added)).not.toContain("size=M");
     expect(h.locatorClickCalls).toBe(1);
 
     const retried = (await provisionActTool.handler(

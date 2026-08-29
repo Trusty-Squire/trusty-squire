@@ -3409,6 +3409,9 @@ export class BrowserController {
     Frame,
     { handle: JSHandle<Document>; identity: string }
   >();
+  private mainDocumentSequence = 0;
+  private readonly mainDocumentIdentities = new WeakMap<Page, number>();
+  private readonly trackedMainDocumentPages = new WeakSet<Page>();
   // The page start() configured with the controller's navigation/captcha
   // handlers. OAuth may temporarily switch `this.page` to a popup, but session
   // reuse must always restore this original page rather than adopting a popup
@@ -3555,12 +3558,31 @@ export class BrowserController {
       opts.proxyUrl !== undefined && opts.proxyUrl.trim().length > 0 ? opts.proxyUrl.trim() : null;
   }
 
+  private trackMainDocument(page: Page): void {
+    if (this.trackedMainDocumentPages.has(page)) return;
+    this.trackedMainDocumentPages.add(page);
+    this.mainDocumentIdentities.set(page, ++this.mainDocumentSequence);
+    page.on("framenavigated", (frame) => {
+      if (frame === page.mainFrame()) {
+        this.mainDocumentIdentities.set(page, ++this.mainDocumentSequence);
+      }
+    });
+  }
+
+  mainDocumentIdentity(): string {
+    const page = this.page;
+    if (page === null) return "none";
+    this.trackMainDocument(page);
+    return String(this.mainDocumentIdentities.get(page));
+  }
+
   /** Attach normal controller behavior to a harness-owned Playwright page. */
   static fromHarnessPage(page: Page): BrowserController {
     const controller = new BrowserController({ humanize: false });
     controller.context = page.context();
     controller.page = page;
     controller.primaryPage = page;
+    controller.trackMainDocument(page);
     controller.harnessAttachedPage = true;
     controller.launchedMode = "headless";
     return controller;
@@ -4314,7 +4336,10 @@ export class BrowserController {
     if (contextInitScripts.includes("webgl-spoof")) {
       await context.addInitScript({ content: installWebglSpoofScript });
     }
+    for (const page of context.pages()) this.trackMainDocument(page);
+    context.on("page", (page) => this.trackMainDocument(page));
     this.page = context.pages()[0] ?? (await context.newPage());
+    this.trackMainDocument(this.page);
     this.primaryPage = this.page;
     // In baseline mode addInitScript covers document-start page JS, but
     // Playwright's page.evaluate utility execution can run in a separate realm.

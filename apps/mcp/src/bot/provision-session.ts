@@ -4922,7 +4922,7 @@ function compactV2Cursor(
 // whether a subsequent observe may reuse the preceding safe action map.
 function compactV2PageKey(session: Session): string {
   return createHmac("sha256", session.compactV2Secret)
-    .update(session.browser.currentUrl())
+    .update(`${session.browser.mainDocumentIdentity()}\u0000${session.browser.currentUrl()}`)
     .digest("base64url");
 }
 
@@ -7130,7 +7130,11 @@ export function emitProvisionMeasurement(
     now: Date.now(),
     turns: session.actionTrace.length,
   });
-  process.stderr.write(`${JSON.stringify({ marker: "provision-measurement", ...m })}\n`);
+  const emitted =
+    session.compactV2Mode === "on"
+      ? { ...m, service: compactV2AuditValue("service", m.service) }
+      : m;
+  process.stderr.write(`${JSON.stringify({ marker: "provision-measurement", ...emitted })}\n`);
   return m;
 }
 
