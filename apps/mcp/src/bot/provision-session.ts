@@ -680,7 +680,7 @@ interface AcquiredBrowser {
 }
 
 interface StartingBrowser {
-  controller: BrowserController;
+  controller: BrowserController | null;
   profileDir: string;
   canonicalProfileDir: string;
   launch: Promise<void>;
@@ -713,25 +713,30 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
   }
   const profileDir = createEphemeralProfile();
   const canonicalProfileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
-  const storageState = await readSessionState(canonicalProfileDir);
-  const controller = new BrowserController({
-    profileDir,
-    ...(storageState === undefined ? {} : { storageState }),
-    ...(opts.proxyUrl !== undefined ? { proxyUrl: opts.proxyUrl } : {}),
-  });
   const pending: StartingBrowser = {
-    controller,
+    controller: null,
     profileDir,
     canonicalProfileDir,
     launch: Promise.resolve(),
     cancelRequested: false,
     cleanupPromise: null,
   };
-  pending.launch = startBrowserBounded(controller, sessionId, async () => {
-    await cancelStartingBrowser(pending);
-  });
   startingBrowsers.add(pending);
+  let controller: BrowserController | null = null;
   try {
+    const storageState = await readSessionState(canonicalProfileDir);
+    if (pending.cancelRequested) {
+      throw new Error("operate_start cancelled: operator server is shutting down");
+    }
+    controller = new BrowserController({
+      profileDir,
+      ...(storageState === undefined ? {} : { storageState }),
+      ...(opts.proxyUrl !== undefined ? { proxyUrl: opts.proxyUrl } : {}),
+    });
+    pending.controller = controller;
+    pending.launch = startBrowserBounded(controller, sessionId, async () => {
+      await cancelStartingBrowser(pending);
+    });
     await pending.launch;
     if (pending.cancelRequested) {
       throw new Error("operate_start cancelled: operator server is shutting down");
@@ -739,11 +744,18 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
     assertProvisionStartAdmitted(generation);
   } catch (err) {
     if (!pending.cancelRequested) {
-      await closeEphemeralBrowser({ controller, profileDir, canonicalProfileDir }, false);
+      if (controller === null) {
+        destroyEphemeralProfileDetached(profileDir);
+      } else {
+        await closeEphemeralBrowser({ controller, profileDir, canonicalProfileDir }, false);
+      }
     }
     throw err;
   } finally {
     startingBrowsers.delete(pending);
+  }
+  if (controller === null) {
+    throw new Error("operate_start cancelled before browser initialization");
   }
   leasedBrowsers.set(controller, { controller, profileDir, canonicalProfileDir });
   return { controller, profileDir, shutdownGeneration: generation };
@@ -822,6 +834,10 @@ async function cancelStartingBrowser(pending: StartingBrowser): Promise<void> {
   pending.cancelRequested = true;
   if (pending.cleanupPromise !== null) return await pending.cleanupPromise;
   pending.cleanupPromise = (async () => {
+    if (pending.controller === null) {
+      destroyEphemeralProfileDetached(pending.profileDir);
+      return;
+    }
     const closeState = await closeBrowserBounded(
       pending.controller,
       true,

@@ -66,7 +66,7 @@ Preserve current call-drain, audit, payment, and session-removal ordering (`prov
    of the unique directory. Normal and forced terminal paths never await the
    recursive delete.
 
-If the existing `profileRequiresDestroy` condition is true (`activePayment`, `paymentFieldSealActive`, or `pendingThreeDs`, `provision-session.ts:7846-7852`), close and schedule profile destruction but skip write-back. If close cannot be proved, retain that unique directory and the prior canonical snapshot, and report the retained directory; it is a disk leak, never a future-agent lock wedge. A detached deletion failure is reported and leaves the same harmless unique residual for later lazy reaping.
+If the existing `profileRequiresDestroy` condition is true (`activePayment`, `paymentFieldSealActive`, or `pendingThreeDs`, `provision-session.ts:7846-7852`), close and schedule profile destruction but skip write-back. If close cannot be proved, retain that unique directory and the prior canonical snapshot, and report the retained directory; it is a disk leak, never a future-agent lock wedge. A detached deletion failure is reported and leaves the same harmless unique residual until OS or manual cleanup.
 
 `connect`/`login` keeps editing the canonical authoring profile. On a successful context-backed login, write the full JSON state as well. A plain Chrome path has no context to capture, so it preserves the existing snapshot rather than clearing saved logins.
 

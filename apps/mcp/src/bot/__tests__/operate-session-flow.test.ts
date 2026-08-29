@@ -64,6 +64,7 @@ const h = vi.hoisted(() => ({
   seededStorageStates: [] as unknown[],
   storageStates: new Map<string, unknown>(),
   storageStateReads: [] as string[],
+  storageStateReadGate: null as Promise<void> | null,
   storageStateWrites: [] as Array<{ profileDir: string; state: unknown }>,
   storageStateWriteError: null as Error | null,
   storageStateWriteGate: null as Promise<void> | null,
@@ -197,6 +198,7 @@ vi.mock("../session-state.js", () => ({
   },
   readSessionState: async (profileDir: string) => {
     h.storageStateReads.push(profileDir);
+    if (h.storageStateReadGate !== null) await h.storageStateReadGate;
     return h.storageStates.get(profileDir);
   },
   writeSessionState: async (
@@ -961,6 +963,7 @@ beforeEach(() => {
   h.seededStorageStates = [];
   h.storageStates = new Map();
   h.storageStateReads = [];
+  h.storageStateReadGate = null;
   h.storageStateWrites = [];
   h.storageStateWriteError = null;
   h.storageStateWriteGate = null;
@@ -4808,6 +4811,35 @@ describe("operate session — ephemeral profile lifecycle", () => {
       await shutdown;
     }
     expect(activeSessionCount()).toBe(0);
+  });
+
+  it("drains a start blocked on canonical state before browser initialization", async () => {
+    let releaseStateRead: (() => void) | undefined;
+    h.storageStateReadGate = new Promise<void>((resolve) => {
+      releaseStateRead = resolve;
+    });
+    const startResult = startProvisionSession({ serviceUrl: "https://app.example.com/" }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    await vi.waitFor(() => expect(h.storageStateReads).toHaveLength(1));
+
+    try {
+      await closeAllProvisionSessions();
+      expect(h.startCalls).toBe(0);
+      expect(h.destroyedProfiles).toEqual([h.createdProfiles[0]]);
+
+      releaseStateRead?.();
+      await expect(startResult).resolves.toEqual(
+        expect.objectContaining({
+          message: "operate_start cancelled: operator server is shutting down",
+        }),
+      );
+      expect(activeSessionCount()).toBe(0);
+    } finally {
+      releaseStateRead?.();
+      h.storageStateReadGate = null;
+    }
   });
 
   it("force-closes an in-progress browser launch on non-Linux without awaiting startup", async () => {

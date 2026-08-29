@@ -66,7 +66,7 @@ write, close-proof, or ownership failure preserves the prior snapshot.
 After proven close, the in-memory browser lease is released and recursive
 profile deletion is scheduled as detached best-effort cleanup. Neither normal
 nor forced terminal completion awaits directory deletion. A failed deletion is
-reported and leaves a harmless unique disk-leak residual for later lazy reaping.
+reported and leaves a harmless unique disk-leak residual until OS or manual cleanup.
 An unproven close does not schedule deletion and retains that unique directory
 for inspection.
 
