@@ -485,7 +485,8 @@ export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
     "the whole page (default: viewport; full_page:true for the whole scrollable page) or ONE specific " +
     "frame in isolation via frame_index or frame_url_contains, so a cross-origin challenge iframe (a " +
     "3-D Secure ACS frame, a captcha) can be captured on its own even when it won't show clearly inside " +
-    "a full-page shot. Use this when text/el_table from operate_observe isn't enough to tell what state " +
+    "a full-page shot. Use this when safe_table from Compact V2, or text/el_table from an explicitly " +
+    "selected V1 session, isn't enough to tell what state " +
     "a stuck page is actually in — a challenge that never advances, an unexpected layout, a captcha you " +
     "need to SEE. Read-only: never navigates, clicks, types, submits, or steals focus; it only reads " +
     "pixels. Money-fence: refuses (screenshot_unavailable_sealed_context) during an active card fill or " +
@@ -1310,8 +1311,8 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "type (target + text; model-supplied card-number-shaped text is refused — card payment " +
     "must use operate_pay, which fills a vaulted card without exposing it to the model), " +
     "" +
-    "TARGET FALLBACK (clicking or typing only) — when a control you can SEE (in the " +
-    "observation text or screenshot) has NO ref in el_table (a bare click-handler " +
+    "V1-ONLY TARGET FALLBACK (clicking or typing only) — when a control you can SEE (in the " +
+    "V1 observation text or screenshot) has NO ref in el_table (a bare click-handler " +
     '<div> with no role/label, e.g. a SPA "Add To Cart"), pass target as a locator ' +
     'instead of a ref: `text="Add To Cart"` (a matching clickable or typeable ' +
     "element, case-insensitive, hidden descendants ignored, open shadow roots " +
@@ -1322,8 +1323,9 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "exact text= or a css= selector). `click` is actionability-checked and throws " +
     "if an overlay intercepts; dismiss the overlay or deliberately use `js_click`, " +
     "the explicit direct DOM dispatch that fires through a transparent overlay. " +
-    "Prefer a real ref when one exists; reach for " +
-    "text=/css= only when none does. " +
+    "Prefer a real ref when one exists; reach for text=/css= only when none does. Compact V2 never " +
+    "accepts locator fallback: it requires an opaque handle from the current snapshot/page/generation-" +
+    "scoped action map, with membership as the sole action boundary. " +
     "Observed child-frame refs and locator matches retain their frame origin. " +
     "Same-registrable-domain frames are reachable; other frame actions must pass " +
     "the goto/allow_host domain scope, opaque frames are refused, and type_secret " +
