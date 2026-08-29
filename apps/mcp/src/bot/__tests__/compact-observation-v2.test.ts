@@ -54,7 +54,6 @@ describe("compact observation v2", () => {
       legacyRefs: refs,
       generation: 1,
       pageOrigin: "https://merchant.invalid",
-      selected: [{ backend_node_id: 1, tag: "button", role: "button", name: planted }],
     });
     const wire = JSON.stringify(safe.rows);
     expect(wire).not.toContain("4111111111111111");
@@ -104,12 +103,6 @@ describe("compact observation v2", () => {
       legacyRefs: new Map(dense.map((control, index) => [control, `@e:legacy_${index}`])),
       generation: 1,
       pageOrigin: "https://merchant.invalid",
-      selected: dense.map((_, index) => ({
-        backend_node_id: index + 1,
-        tag: "button",
-        role: "button",
-        name: `${longLabel}${index}`,
-      })),
     });
     const page = encodeV2Page({
       sessionId: "session",
@@ -140,7 +133,6 @@ describe("compact observation v2", () => {
       legacyRefs: new Map([[input, "@e:email_1"]]),
       generation: 1,
       pageOrigin: "https://merchant.invalid",
-      selected: [{ backend_node_id: 1, tag: "input", role: "textbox", name: "anything" }],
     });
     expect(safe.rows).toEqual([expect.objectContaining({ role: "textbox", field: "email" })]);
     expect(JSON.stringify(safe.rows)).not.toContain("private@example.test");
@@ -154,14 +146,12 @@ describe("compact observation v2", () => {
       legacyRefs: refs,
       generation: 1,
       pageOrigin: "https://merchant.invalid",
-      selected: [{ backend_node_id: 1, tag: "button", role: "button", name: "private merchant copy" }],
     });
     const repeated = buildSafeControlsV2({
       elements: [button],
       legacyRefs: refs,
       generation: 2,
       pageOrigin: "https://merchant.invalid",
-      selected: [{ backend_node_id: 1, tag: "button", role: "button", name: "private merchant copy" }],
     });
     expect(initial.rows[0]).toEqual(expect.objectContaining({ ref: "@e:1.1", name: "private merchant copy" }));
     expect(repeated.rows[0]).toEqual(expect.objectContaining({ ref: "@e:2.1" }));
@@ -176,24 +166,16 @@ describe("compact observation v2", () => {
     expect(compactV2LegacyRefForHandle(current, 3, "@e:2.1")).toBeNull(); // page-change snapshot
   });
 
-  it("uses the browser-use serializer label while retaining TS's local action ref", () => {
-    const button = element({ visibleText: "TS inventory fallback" });
+  it("uses the native DOM label while retaining TS's local action ref", () => {
+    const button = element({ visibleText: "Native serialized control" });
     const safe = buildSafeControlsV2({
       elements: [button],
       legacyRefs: new Map([[button, "@e:continue"]]),
       generation: 1,
       pageOrigin: "https://merchant.invalid",
-      selected: [
-        {
-          backend_node_id: 1,
-          tag: "button",
-          role: "button",
-          name: "Browse-use serialized control",
-        },
-      ],
     });
     expect(safe.rows).toEqual([
-      expect.objectContaining({ ref: expect.stringMatching(/^@e:/), name: "Browse-use serialized control" }),
+      expect.objectContaining({ ref: expect.stringMatching(/^@e:/), name: "Native serialized control" }),
     ]);
   });
 
@@ -214,10 +196,6 @@ describe("compact observation v2", () => {
       ]),
       generation: 1,
       pageOrigin: "https://merchant.invalid",
-      selected: [
-        { backend_node_id: 1, tag: "button", role: "button", name: "Continue to registration" },
-        { backend_node_id: 2, tag: "button", role: "button", name: "4111111111111111" },
-      ],
     });
     expect(safe.rows).toContainEqual(expect.objectContaining({ name: "Continue to registration" }));
     expect(JSON.stringify(safe.rows)).not.toContain("4111111111111111");
@@ -225,9 +203,34 @@ describe("compact observation v2", () => {
 
   it("reduces completion and checkout signals to a finite page-stage enum", () => {
     expect(safeStageV2("https://merchant.invalid/thank-you", [])).toBe("complete");
+    expect(safeStageV2("https://merchant.invalid/incomplete", [])).toBe("browse");
     expect(
       safeStageV2("https://merchant.invalid/order", [element({ visibleText: "Checkout", role: "button" })]),
     ).toBe("checkout");
+  });
+
+  it("keeps compact control state and finite action semantics on the wire", () => {
+    const page = encodeV2Page({
+      sessionId: "session",
+      stage: "form",
+      rows: [
+        {
+          ref: "@e:1.1",
+          role: "checkbox",
+          visibility: "viewport",
+          frame: "same_origin",
+          name: "Terms",
+          state: "u",
+          action: "continue",
+          field: "email",
+          choice: "1/2",
+        },
+      ],
+      cursorFor: (offset) => `cursor-${offset}`,
+    });
+    expect(page.payload.safe_table).toEqual([
+      ["@e:1.1", "c", "Terms|s=u|a=continue|f=email|q=1/2|x=s"],
+    ]);
   });
 
   it("uses a tiny sealed delta when the safe map is unchanged", () => {

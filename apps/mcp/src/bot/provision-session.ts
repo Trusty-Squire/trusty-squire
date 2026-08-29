@@ -55,7 +55,6 @@ import {
   type SafeObservationBaselineV2,
   type SafeObservationIndexV2,
 } from "./compact-observation-v2.js";
-import { closeBrowserUseObserver, observeWithBrowserUse } from "./browser-use-observer.js";
 import type { ApiClient } from "../api-client.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
 import { pickVerificationLink } from "./email-verification.js";
@@ -555,10 +554,12 @@ export interface Session {
   prevObserve: ObserveDeltaState | null;
   observeSnapshotFile: string | null;
   compactV2Secret: Buffer;
+  /** True once this session has emitted V2; target resolution stays sealed until finish. */
+  compactV2Active: boolean;
   compactV2Refs: Map<string, string>;
   compactV2Index: SafeObservationIndexV2 | null;
   // Safe enum-only prior map. Repeat observes diff this representation, never
-  // raw DOM/browser-use output, so every delta remains inside the allowlist
+  // raw DOM output, so every delta remains inside the allowlist
   // seal even when a page mutates confidential values or live regions.
   compactV2Previous: SafeObservationBaselineV2 | null;
   // Phase A operator-recipe capture (docs/ARCHITECTURE.md): the
@@ -1938,16 +1939,42 @@ export function resolveTarget(
   return best?.el ?? null;
 }
 
+function invalidateCompactV2Snapshot(session: Pick<Session, "compactV2Refs" | "compactV2Index" | "compactV2Previous">): void {
+  session.compactV2Refs = new Map();
+  session.compactV2Index = null;
+  session.compactV2Previous = null;
+}
+
+function throwCompactV2ReobserveRequired(): never {
+  // Deliberately opaque: stale V2 errors must not construct V1 replacement
+  // candidates or reveal raw labels/legacy identities outside the safe view.
+  throw new Error("reobserve_required");
+}
+
+function assertCurrentCompactV2Target(session: Session, target: string): void {
+  if (!session.compactV2Active) return;
+  const index = session.compactV2Index;
+  if (index === null) throwCompactV2ReobserveRequired();
+  if (index.pageKey !== compactV2PageKey(session)) {
+    invalidateCompactV2Snapshot(session);
+    throwCompactV2ReobserveRequired();
+  }
+  if (compactV2LegacyRefForHandle(session.compactV2Refs, index.generation, target) === null) {
+    throwCompactV2ReobserveRequired();
+  }
+}
+
 // V2 refs are generation-bound snapshot indices. They are accepted only from
 // the CURRENT sealed action map; a missing/stale/forged @e: handle never falls
-// back to label or legacy-ref resolution.
+// back to label, locator, or legacy-ref resolution.
 function resolveSessionTarget(
-  session: Pick<Session, "compactV2Refs" | "compactV2Index">,
+  session: Pick<Session, "compactV2Active" | "compactV2Refs" | "compactV2Index">,
   elements: readonly InteractiveElement[],
   target: string,
 ): InteractiveElement | null {
   const index = session.compactV2Index;
-  if (target.startsWith("@e:") && index !== null) {
+  if (session.compactV2Active) {
+    if (index === null) return null;
     const legacy = compactV2LegacyRefForHandle(session.compactV2Refs, index.generation, target);
     return legacy === null ? null : resolveTarget(elements, legacy);
   }
@@ -2895,6 +2922,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     prevObserve: null,
     observeSnapshotFile: null,
     compactV2Secret: randomBytes(32),
+    compactV2Active: false,
     compactV2Refs: new Map(),
     compactV2Index: null,
     compactV2Previous: null,
@@ -2971,7 +2999,13 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
       loginSessionGuidance(liveProviders),
       ...(opts.hint !== undefined ? [opts.hint] : []),
     ];
-    if (observation.format === "compact-v2") return observation;
+    if (observation.format === "compact-v2") {
+      return {
+        ...observation,
+        hint: hintParts.join("\n"),
+        ...(session.userEmail !== null ? { user_email: session.userEmail } : {}),
+      };
+    }
     return {
       ...observation,
       hint: hintParts.join("\n"),
@@ -3014,6 +3048,7 @@ export async function startHarnessProvisionSession(
     prevObserve: null,
     observeSnapshotFile: null,
     compactV2Secret: randomBytes(32),
+    compactV2Active: false,
     compactV2Refs: new Map(),
     compactV2Index: null,
     compactV2Previous: null,
@@ -3060,9 +3095,9 @@ export async function startHarnessProvisionSession(
     });
     await opts.browser.goto(opts.serviceUrl);
     const observation = await observeSession(session);
-    // A registry hint can contain service-authored route prose. Compact V2 is
-    // a closed safe view, so it never mixes that prose into its action map.
-    return observation.format === "compact-v2" ? observation : { ...observation, hint: opts.hint ?? "" };
+    // The action map remains sealed, while this trusted start metadata stays
+    // available to both wire formats for the initial routing decision.
+    return { ...observation, hint: opts.hint ?? "" };
   } catch (error) {
     sessions.delete(id);
     disposeSessionWatchdog(session);
@@ -4666,7 +4701,6 @@ function compactV2Observation(
   session: Session,
   generation: number,
   elements: readonly InteractiveElement[],
-  selected: Parameters<typeof buildSafeControlsV2>[0]["selected"],
   semanticSource: ObservationSemanticSourceV2,
 ): Observation {
   const legacyRefs = provisionElementRefs(elements);
@@ -4685,7 +4719,6 @@ function compactV2Observation(
     legacyRefs,
     generation: snapshotGeneration,
     pageOrigin,
-    selected,
   });
   let delta = samePage ? diffSafeControlsV2(previous, stage, safe.rows) : null;
   // An index belongs to exactly one action-map snapshot. If structural state
@@ -4705,20 +4738,21 @@ function compactV2Observation(
       legacyRefs,
       generation: snapshotGeneration,
       pageOrigin,
-      selected,
     });
     delta = null;
   }
   const index: SafeObservationIndexV2 = {
     generation: snapshotGeneration,
+    pageKey,
     stage,
     semantics,
     rows: safe.rows,
     byRef: safe.byRef,
     expiresAt: Date.now() + 5 * 60_000,
   };
-  // The raw browser-use selector-map and raw DOM values fall out of scope here.
+  // Raw DOM values fall out of scope here.
   // Only this enum-only index survives to delta/query/action resolution.
+  session.compactV2Active = true;
   session.compactV2Index = index;
   session.compactV2Refs = safe.byRef;
   session.compactV2Previous = {
@@ -4752,58 +4786,6 @@ function compactV2Observation(
   return { ...(page.payload as unknown as Observation), url: "", text: "" };
 }
 
-/**
- * Browser-use/CDP is an upstream dependency, so it can be temporarily
- * unavailable.  V2 must nevertheless remain sealed: do not fall through to
- * the legacy text/inventory path, which would bypass the allowlist and its
- * hard payload cap.  A prior sealed map is safe to retain for one retry; on a
- * new stage we send an explicit empty sealed resync instead.
- */
-function compactV2UnavailableObservation(
-  session: Session,
-  generation: number,
-  elements: readonly InteractiveElement[],
-  semanticSource: ObservationSemanticSourceV2,
-): Observation {
-  const stage = safeStageV2(session.browser.currentUrl(), elements);
-  const semantics = safePageSemanticsV2(semanticSource);
-  const pageKey = compactV2PageKey(session);
-  const previous = session.compactV2Previous;
-  if (previous !== null && previous.pageKey === pageKey && previous.stage === stage) {
-    const delta = encodeV2Delta({
-      stage,
-      semantics: equalSafePageSemanticsV2(previous.semantics, semantics) ? undefined : semantics,
-      delta: { added: [], changed: [], removed: [], stageChanged: false },
-    });
-    if (delta !== null) return { ...(delta as unknown as Observation), url: "", text: "" };
-  }
-  const index: SafeObservationIndexV2 = {
-    generation,
-    stage,
-    semantics,
-    rows: [],
-    byRef: new Map(),
-    expiresAt: Date.now() + 5 * 60_000,
-  };
-  session.compactV2Index = index;
-  session.compactV2Refs = new Map();
-  session.compactV2Previous = {
-    pageKey,
-    snapshotGeneration: generation,
-    stage,
-    semantics,
-    byRef: new Map(),
-  };
-  const page = encodeV2Page({
-    sessionId: session.id,
-    stage,
-    semantics,
-    rows: [],
-    cursorFor: (offset) => compactV2Cursor(session, generation, offset),
-  });
-  return { ...(page.payload as unknown as Observation), url: "", text: "" };
-}
-
 export async function observeQuery(
   sessionId: string,
   query: string,
@@ -4815,6 +4797,12 @@ export async function observeQuery(
   if (session.paymentFieldSealActive) throw new Error("sealed_observation_query_rejected");
   const index = session.compactV2Index;
   if (index === null || index.expiresAt < Date.now()) throw new Error("stale_cursor");
+  // Query/paging is part of the same sealed action-map protocol: never return
+  // rows from a page whose private binding no longer matches the live page.
+  if (index.pageKey !== compactV2PageKey(session)) {
+    invalidateCompactV2Snapshot(session);
+    throw new Error("stale_cursor");
+  }
   let offset = 0;
   if (cursor !== undefined) {
     const parsed = parseCompactV2Cursor(session, cursor);
@@ -4888,26 +4876,12 @@ async function observeSession(
       // Semantic context is optional availability-wise; it is independently
       // sealed below and never changes action-map safety.
     }
-    // Browser-use is the maintained DOM selection engine for V2.  Its raw
-    // serializer output remains within this short-lived call; TS immediately
-    // seals it into code-owned enums before a delta, snapshot, audit, or MCP
-    // response can observe it. If the pinned Python dependency/CDP endpoint is
-    // unavailable, retain only an already-sealed V2 map. Never fall through to
-    // V1: that would turn a transient upstream outage into an unbounded raw
-    // observation and breach the allowlist-before-any-sink rule.
-    if (compactV2Mode() !== "off") {
-      const browserUseEndpoint =
-        typeof session.browser.browserUseObservationEndpoint === "function"
-          ? session.browser.browserUseObservationEndpoint()
-          : null;
-      const selected = await observeWithBrowserUse(browserUseEndpoint);
-      if (selected !== null) {
-        const v2 = compactV2Observation(session, generation, elements, selected, semanticSource);
-        if (compactV2Mode() === "on") return v2;
-      } else if (compactV2Mode() === "on") {
-        return compactV2UnavailableObservation(session, generation, elements, semanticSource);
-      }
-    }
+    // Native TypeScript compact serializer over TS's own CDP-derived DOM
+    // inventory. Its allowlist seal runs before any retained/emitted view; no
+    // Python subprocess or externally provisioned runtime participates. Shadow
+    // mode intentionally leaves V2 session state untouched because it returns
+    // the V1 action protocol.
+    if (compactV2Mode() === "on") return compactV2Observation(session, generation, elements, semanticSource);
     const sealedFieldKeys = observationSealedFieldKeys(session, elements);
     const text = redactPaymentObservationText(
       await session.browser.extractVisibleText(),
@@ -5337,6 +5311,7 @@ export async function act(
         hole: `credential.${action.slot}`,
         literal: value,
       };
+      assertCurrentCompactV2Target(session, action.target);
       const locator = parseLocatorTarget(action.target);
       if (locator !== null) {
         const resolved = await browser.resolvePageTarget(locator.mode, locator.value, "type");
@@ -5370,6 +5345,7 @@ export async function act(
       // changed since the last observe resolves to null, not a survivor (#399).
       const el = resolveSessionTarget(session, fresh, action.target);
       if (el === null) {
+        if (session.compactV2Active) throwCompactV2ReobserveRequired();
         const stale = staleTargetError(session, action.target, fresh);
         if (stale !== null) throw stale;
         throw new Error(`type_secret: no element matched target "${action.target}".`);
@@ -5399,10 +5375,12 @@ export async function act(
       // Re-resolve against FRESH elements — the target may be the <select> or
       // its <label>. Main-frame execution uses selectOption; frame execution
       // uses selectInFrame. text is the fuzzy option matcher in both paths.
+      assertCurrentCompactV2Target(session, action.target);
       const fresh = await browser.extractInteractiveElements();
       session.lastElements = fresh;
       const el = resolveSessionTarget(session, fresh, action.target);
       if (el === null) {
+        if (session.compactV2Active) throwCompactV2ReobserveRequired();
         const stale = staleTargetError(session, action.target, fresh);
         if (stale !== null) throw stale;
         throw new Error(
@@ -5446,6 +5424,7 @@ export async function act(
       const pageText = await browser.extractVisibleText();
       const blockReason = shouldBlockUnsafeProvisionAction(pageText, action);
       if (blockReason !== null) throw new Error(blockReason);
+      assertCurrentCompactV2Target(session, action.target);
       // Locator-form target (`text=…` / `css=…`): the host is pointing at a
       // control that has NO `@e:` ref because the inventory never emitted it (a
       // bare click-handler <div> with no role/label, e.g. a SPA "Add To Cart"
@@ -5528,6 +5507,7 @@ export async function act(
       // changed since the last observe resolves to null, not a survivor (#399).
       const el = resolveSessionTarget(session, fresh, action.target);
       if (el === null) {
+        if (session.compactV2Active) throwCompactV2ReobserveRequired();
         const stale = staleTargetError(session, action.target, fresh);
         if (stale !== null) throw stale;
         throw new Error(
@@ -5683,6 +5663,7 @@ export async function act(
       const pageText = await browser.extractVisibleText();
       const blockReason = shouldBlockUnsafeProvisionAction(pageText, action);
       if (blockReason !== null) throw new Error(blockReason);
+      assertCurrentCompactV2Target(session, action.target);
       // Atomic OAuth deliberately accepts only the observed stable ref. A raw
       // locator would lose the same stale-reference guarantees as every other
       // action before the provider transition begins.
@@ -5690,6 +5671,7 @@ export async function act(
       session.lastElements = fresh;
       const el = resolveSessionTarget(session, fresh, action.target);
       if (el === null) {
+        if (session.compactV2Active) throwCompactV2ReobserveRequired();
         throw new Error(
           `oauth_login: no element matched target "${action.target}". Re-observe and use the OAuth button ref.`,
         );
@@ -5701,6 +5683,11 @@ export async function act(
       break;
     }
   }
+  // Every browser-driving action can replace a SPA control, change viewport
+  // eligibility, or navigate without returning a fresh observation. Never let
+  // an old short index resolve across that boundary; the next observe mints a
+  // new sealed snapshot. Host-scope bookkeeping is the only non-DOM action.
+  if (action.kind !== "allow_host") invalidateCompactV2Snapshot(session);
   await verifyRecordedFieldsAfterTransition(session, action, recordingTransitionFields);
   // Don't fold inbox-provider steps into the replayable recipe (see
   // INBOX_READ_HOSTS): replay re-reads the code via awaitVerification, and a
@@ -8426,7 +8413,6 @@ export async function closeAllProvisionSessions(): Promise<void> {
   } finally {
     shutdownInProgress -= 1;
   }
-  closeBrowserUseObserver();
 }
 
 export function activeSessionCount(): number {

@@ -1,4 +1,0 @@
-# Pinned upstream observation serializer.  Keep this as a dependency, not a
-# copied implementation; the bridge in browser-use-observe.py is intentionally
-# thin and contains no DOM selection rules.
-browser-use==0.13.8

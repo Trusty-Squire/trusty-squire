@@ -3423,10 +3423,6 @@ export class BrowserController {
   private ownedChromeProcessTreeProof: OwnedChromeProcessTreeProof | null = null;
   private operatorProcessMarker: string | null = null;
   private cdpBrowser: Browser | null = null;
-  // The read-only browser-use observation bridge attaches to this same endpoint.
-  // It is populated only for explicit CDP connections; ordinary Playwright
-  // contexts intentionally expose no new debugging surface.
-  private browserUseCdpEndpoint: string | null = null;
   // True once a local browser context launched this session.
   private launchedContext = false;
   private launchedProfileHolderIdentity: ProfileProcessIdentity | null = null;
@@ -3616,11 +3612,6 @@ export class BrowserController {
     return browser?.isConnected() === true;
   }
 
-  /** Read-only endpoint for the pinned browser-use serializer, if available. */
-  browserUseObservationEndpoint(): string | null {
-    return this.browserUseCdpEndpoint;
-  }
-
   // Which browser channel the most recent .start() actually used.
   // `null` means bundled Chromium; a string like "chrome" means a
   // real installed browser of that channel. Throws if .start() hasn't
@@ -3684,7 +3675,6 @@ export class BrowserController {
       const launcher = getChromium();
       const browser = await launcher.connectOverCDP(remoteEndpoint);
       this.cdpBrowser = browser;
-      this.browserUseCdpEndpoint = remoteEndpoint;
       this.launchedMode = "remote";
       const ctx = browser.contexts()[0];
       if (ctx === undefined) {
@@ -3797,7 +3787,6 @@ export class BrowserController {
     const launcher = getChromium();
     const browser = await launcher.connectOverCDP(endpoint);
     this.cdpBrowser = browser;
-    this.browserUseCdpEndpoint = endpoint;
     const ctx = browser.contexts()[0];
     if (ctx === undefined) {
       throw new Error("self-launched Chrome exposed no default browser context");
@@ -4037,16 +4026,6 @@ export class BrowserController {
       : null;
     const useSelfLaunch =
       selfLaunchBinary !== null && existsSync(selfLaunchBinary) && canSelfLaunchWithProxy(proxy);
-    // The authenticated-proxy path has to use Playwright's persistent-context
-    // launcher.  Give that already-owned Chrome a loopback-only CDP endpoint so
-    // the pinned browser-use serializer can observe the *same* browser.  This
-    // is intentionally opt-out with Compact V2: it is not a general debugging
-    // surface and is never bound beyond localhost.
-    const compactV2Enabled = !["off", "0"].includes(
-      (process.env.TRUSTY_SQUIRE_OBSERVE_V2 ?? "on").toLowerCase(),
-    );
-    const persistentBrowserUseCdpPort = !useSelfLaunch && compactV2Enabled ? await findFreePort() : null;
-
     let context: BrowserContext;
     this.throwIfStartCancelled();
     if (useSelfLaunch && selfLaunchBinary !== null) {
@@ -4135,12 +4114,6 @@ export class BrowserController {
               ...persistentProxyOptions(proxy),
               args: [
                 ...launchArgs,
-                ...(persistentBrowserUseCdpPort === null
-                  ? []
-                  : [
-                      "--remote-debugging-address=127.0.0.1",
-                      `--remote-debugging-port=${persistentBrowserUseCdpPort}`,
-                    ]),
               ],
               viewport: null,
               locale: "en-US",
@@ -4186,13 +4159,6 @@ export class BrowserController {
         this.adoptOwnedChromeProcessTree(this.launchedProfileHolderIdentity, false);
       }
       this.commitProfileLaunch();
-      if (persistentBrowserUseCdpPort !== null) {
-        // A failed attach degrades only the optional compact serializer; normal
-        // browser operation remains on its established persistent path.
-        this.browserUseCdpEndpoint = await waitForDevtools(persistentBrowserUseCdpPort, 10_000).catch(
-          () => null,
-        );
-      }
       this.persistentFallbackLaunchInFlight = false;
     }
     this.context = context;
@@ -14362,6 +14328,7 @@ export class BrowserController {
         landmark: string | null;
         value: string | null;
         checked: boolean | null;
+        disabled: boolean | null;
         selectOptions: Array<{ value: string; text: string }> | null;
         selectedOptionText: string | null;
         interactedThisRun: boolean;
@@ -14492,6 +14459,7 @@ export class BrowserController {
             el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio")
               ? el.checked
               : null,
+          disabled: el.matches(":disabled") || el.getAttribute("aria-disabled") === "true" ? true : null,
           // For <select>: the currently-selected option's visible text
           // and a short list of available option labels. The combination
           // is how the planner detects the "React-defaulted dropdown"
@@ -16998,6 +16966,8 @@ export interface InteractiveElement {
   // Null for everything else. Use this (not `value`) to identify
   // unticked checkboxes — checkbox `value` is the static attribute.
   checked?: boolean | null;
+  /** Native or ARIA disabled state captured with the interactive DOM record. */
+  disabled?: boolean | null;
   // <select>-only: the visible text of the currently-selected option
   // and a short list of available option labels (capped to 8 — long
   // pickers like countries blow the inventory rendering). Lets the

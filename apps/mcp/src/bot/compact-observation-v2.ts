@@ -72,16 +72,10 @@ export interface SafePageSemanticsV2 {
   headings?: string[];
 }
 
-export interface BrowserUseSelectedNode {
-  backend_node_id: number;
-  tag: string;
-  role: string | null;
-  /** Process-internal only. Never copy this into a safe row or a log. */
-  name: string;
-}
-
 export interface SafeObservationIndexV2 {
   generation: number;
+  /** Internal HMAC page identity for the snapshot this index was minted from. */
+  pageKey: string;
   stage: SafeStageV2;
   semantics: SafePageSemanticsV2;
   rows: SafeControlV2[];
@@ -92,8 +86,7 @@ export interface SafeObservationIndexV2 {
 /**
  * The only V2 state retained between observations.  These rows have already
  * crossed the allowlist seal: they contain generation-bound index refs and
- * code-owned enums,
- * never browser-use names, DOM values, or page copy.
+ * code-owned enums, never DOM values or arbitrary page copy.
  */
 export interface SafeObservationBaselineV2 {
   /** Internal HMAC page identity; never emitted or persisted outside the session. */
@@ -152,10 +145,12 @@ export function compactV2LegacyRefForHandle(
 type WireControlV2 = [string, string, string?];
 
 // The protocol is intentionally positional to keep repeated observes small.
-// Tuple schema: [ref, role(b/l/t/s/c/r/tb/m/f), optional short label]. The
-// ref is the action capability; role and label are all the model needs to
-// choose it. Internal action/field/state classification stays server-side, so
-// a control never pays for null/empty placeholder columns on the wire.
+// Tuple schema: [ref, role(b/l/t/s/c/r/tb/m/f), optional compact description].
+// The description starts with the short safe label and appends only present
+// code-owned facts (`s=`, `a=`, `f=`, `q=`, `x=`). It is deliberately one
+// sparse string rather than nullable columns: checked/unchecked, disabled,
+// action, field, card choice, and frame context remain distinguishable without
+// paying for empty slots on every row.
 function wireControl(row: SafeControlV2): WireControlV2 {
   const role: Record<SafeRoleV2, string> = {
     button: "b",
@@ -168,13 +163,22 @@ function wireControl(row: SafeControlV2): WireControlV2 {
     menuitem: "m",
     file: "f",
   };
-  return row.name === undefined ? [row.ref, role[row.role]] : [row.ref, role[row.role], row.name];
+  const facts = [
+    row.name,
+    ...(row.state === undefined ? [] : [`s=${row.state}`]),
+    ...(row.action === undefined ? [] : [`a=${row.action}`]),
+    ...(row.field === undefined ? [] : [`f=${row.field}`]),
+    ...(row.choice === undefined ? [] : [`q=${row.choice}`]),
+    ...(row.frame === "main" ? [] : [`x=${row.frame === "same_origin" ? "s" : "x"}`]),
+  ].filter((value): value is string => value !== undefined);
+  return facts.length === 0 ? [row.ref, role[row.role]] : [row.ref, role[row.role], facts.join("|")];
 }
 
 const SAFE_DESCRIPTION_MAX_CHARS = 40;
 const EMAIL_VALUE_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
 const SECRET_ASSIGNMENT_RE = /\b(?:password|passcode|token|api[_ -]?key|secret)\b\s*[:=]\s*\S{4,}/i;
 const HIGH_ENTROPY_TOKEN_RE = /\b[A-Za-z0-9_-]{24,}\b/;
+const CARD_SECURITY_VALUE_RE = /\b(?:cvv|cvc|security\s*code)\s*[:#-]?\s*\d{3,4}\b/i;
 
 function hasPanLikeDigits(value: string): boolean {
   return value.replace(/\D/g, "").length >= 13;
@@ -194,6 +198,7 @@ export function safeDescriptionV2(value: string | null | undefined): string | un
     hasPanLikeDigits(normalized) ||
     EMAIL_VALUE_RE.test(normalized) ||
     SECRET_ASSIGNMENT_RE.test(normalized) ||
+    CARD_SECURITY_VALUE_RE.test(normalized) ||
     HIGH_ENTROPY_TOKEN_RE.test(normalized)
   ) {
     return undefined;
@@ -275,7 +280,7 @@ export function encodeV2Delta(args: {
 const INTENTS: ReadonlyArray<[SafeIntentV2, RegExp]> = [
   ["add_to_cart", /add\s+(?:to\s+)?(?:cart|bag|basket)/i],
   ["checkout", /checkout|view\s+(?:cart|bag|basket)/i],
-  ["payment", /pay(?:ment)?|card/i],
+  ["payment", /\b(?:pay(?:ment)?|card)\b/i],
   ["signup", /sign\s*up|create\s+(?:account|workspace)|register/i],
   ["login", /log\s*in|sign\s*in|continue\s+with/i],
   ["search", /search|find/i],
@@ -325,12 +330,12 @@ function roleOf(el: InteractiveElement): SafeRoleV2 | null {
 }
 
 function stateOf(el: InteractiveElement): string | undefined {
-  // A compact code-owned bitset: c=checked, u=unchecked, d=disabled-ish,
+  // A compact code-owned bitset: c=checked, u=unchecked, d=disabled,
   // r=required.  It is deliberately not a page-provided string.
   let state = "";
   if (el.checked === true) state += "c";
   else if (el.checked === false) state += "u";
-  if (el.sealed === true) state += "d";
+  if (el.disabled === true) state += "d";
   return state || undefined;
 }
 
@@ -366,7 +371,7 @@ function fieldOf(el: InteractiveElement): SafeFieldV2 | undefined {
 /** A code-owned page-stage enum; it never forwards the URL or page copy. */
 export function safeStageV2(url: string, elements: readonly InteractiveElement[]): SafeStageV2 {
   const internalUrl = url.toLowerCase();
-  if (/(?:success|complete|confirm|thank-you|thank_you|finished|done)(?:[/?#-]|$)/.test(internalUrl)) {
+  if (/(?:^|[/?#-])(?:success|complete|confirm|thank-you|thank_you|finished|done)(?:[/?#-]|$)/.test(internalUrl)) {
     return "complete";
   }
   if (elements.some((el) => intentOf(el) === "payment" || intentOf(el) === "checkout")) return "checkout";
@@ -382,52 +387,27 @@ function frameOf(el: InteractiveElement, pageOrigin: string): SafeControlV2["fra
   return el.frameOrigin === pageOrigin ? "same_origin" : "cross_origin";
 }
 
-function browserUseNodeFor(
-  el: InteractiveElement,
-  selected: readonly BrowserUseSelectedNode[],
-  claimed: ReadonlySet<BrowserUseSelectedNode>,
-): BrowserUseSelectedNode | null {
-  const tag = el.tag.toLowerCase();
-  const role = (el.role ?? "").toLowerCase();
-  const candidates = selected.filter((node) => {
-    if (claimed.has(node)) return false;
-    if (node.tag.toLowerCase() !== tag) return false;
-    if (role.length > 0 && node.role !== null && node.role.toLowerCase() !== role) return false;
-    return true;
-  });
-  if (candidates.length === 0) return null;
-  // The browser-use serializer owns the rendered label. Use a sealed equality
-  // only to pair its node with TS's live action handle; never retain the raw
-  // comparison text beyond this local call.
-  const localName = controlDescription(el);
-  return candidates.find((node) => safeDescriptionV2(node.name) === localName) ?? candidates[0] ?? null;
-}
-
 export function buildSafeControlsV2(args: {
   elements: readonly InteractiveElement[];
   legacyRefs: ReadonlyMap<InteractiveElement, string>;
   generation: number;
   pageOrigin: string;
-  selected: readonly BrowserUseSelectedNode[];
 }): { rows: SafeControlV2[]; byRef: Map<string, string> } {
   const rows: Array<{ legacy: string; row: Omit<SafeControlV2, "ref">; priority: number }> = [];
-  const claimed = new Set<BrowserUseSelectedNode>();
   for (const el of args.elements) {
     if (el.visible !== true || el.topmost === false) continue;
     const role = roleOf(el);
     const legacy = args.legacyRefs.get(el);
     if (role === null || legacy === undefined) continue;
-    const selectedNode = browserUseNodeFor(el, args.selected, claimed);
-    if (selectedNode === null) continue;
-    claimed.add(selectedNode);
     const state = stateOf(el);
     const action = intentOf(el);
     const field = fieldOf(el);
     const cardChoice = el.cardRadioGroup;
-    // Browser-use is the observation source. The action inventory contributes
-    // only the local @e: binding and finite state/action enums; its own labels
-    // are never emitted when an upstream control is present.
-    const name = safeDescriptionV2(selectedNode.name);
+    // Native TypeScript port of browse-use's compact DOM formatting: the
+    // already CDP-derived interactive inventory supplies each visible control's
+    // descendant/accessibility name. This pass binds that name to its own live
+    // element, so no cross-serializer tag/role fallback can swap labels.
+    const name = controlDescription(el);
     const row: Omit<SafeControlV2, "ref"> = {
       role,
       visibility: el.inViewport ? "viewport" : "near",

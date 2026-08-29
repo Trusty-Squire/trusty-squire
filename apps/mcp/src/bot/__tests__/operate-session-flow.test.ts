@@ -209,6 +209,11 @@ vi.mock("../session-state.js", () => ({
   },
 }));
 
+// This suite is the V1 contract suite. Individual Compact V2 tests opt in
+// explicitly below, which keeps the feature-flagged V1 and V2 action
+// protocols independently testable while V2 is the production default.
+let compactV2ModeBeforeTest: string | undefined;
+
 vi.mock("../browser.js", () => ({
   BrowserController: class {
     private readonly index: number;
@@ -908,6 +913,8 @@ function elem(partial: Record<string, unknown>): unknown {
 }
 
 beforeEach(() => {
+  compactV2ModeBeforeTest = process.env.TRUSTY_SQUIRE_OBSERVE_V2;
+  process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "off";
   h.providers = ["google"];
   h.oauthStatus = "already_valid";
   h.oauthLoginCalls = [];
@@ -2771,6 +2778,8 @@ describe("verified recipe recording", () => {
 afterEach(async () => {
   vi.useRealTimers();
   await closeAllProvisionSessions();
+  if (compactV2ModeBeforeTest === undefined) delete process.env.TRUSTY_SQUIRE_OBSERVE_V2;
+  else process.env.TRUSTY_SQUIRE_OBSERVE_V2 = compactV2ModeBeforeTest;
 });
 
 describe("3.1 — autocomplete-aware type fill", () => {
@@ -3212,6 +3221,56 @@ describe("operate_start — consent-overlay auto-dismiss", () => {
     await startProvisionSession({ serviceUrl: "https://faucet.example.com/" });
     // Dismissed on the first attempt → the second (retry) attempt is skipped.
     expect(h.consentDismissCalls).toBe(1);
+  });
+});
+
+describe("Compact V2 action-map boundary", () => {
+  it("keeps start metadata, rejects locators, and binds a handle to its current page snapshot", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.workerEmail = "operator@example.test";
+    h.elements = [
+      elem({
+        tag: "button",
+        type: "button",
+        role: "button",
+        selector: "#continue",
+        visibleText: "Continue",
+      }),
+    ];
+
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+      hint: "Complete the storefront form.",
+    });
+    expect(started).toMatchObject({
+      format: "compact-v2",
+      hint: expect.stringContaining("Complete the storefront form."),
+      user_email: "operator@example.test",
+    });
+    const firstRef = (started as unknown as { safe_table: Array<[string, string, string?]> }).safe_table[0]?.[0];
+    expect(firstRef).toMatch(/^@e:/);
+
+    // V2's sealed membership check runs before locator parsing, so a CSS/text
+    // fallback cannot escape the action map.
+    await expect(act(started.session_id, { kind: "click", target: "css=#continue" })).rejects.toThrow(
+      "reobserve_required",
+    );
+    expect(h.locatorClickCalls).toBe(0);
+
+    // A page transition invalidates all handles issued from the old map.
+    const afterGoto = await act(started.session_id, {
+      kind: "goto",
+      url: "https://shop.example.com/next",
+    });
+    await expect(act(started.session_id, { kind: "click", target: firstRef! })).rejects.toThrow(
+      "reobserve_required",
+    );
+    expect(h.clickCalls).toBe(0);
+
+    const freshRef = (afterGoto as unknown as { safe_table: Array<[string, string, string?]> }).safe_table[0]?.[0];
+    expect(freshRef).toMatch(/^@e:/);
+    await act(started.session_id, { kind: "click", target: freshRef! });
+    expect(h.clickCalls).toBe(1);
   });
 });
 
