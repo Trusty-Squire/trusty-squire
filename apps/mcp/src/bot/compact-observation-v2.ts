@@ -635,6 +635,18 @@ function isButtonInput(el: InteractiveElement): boolean {
   return el.tag === "input" && BUTTON_INPUT_TYPES.has((el.type ?? "").toLowerCase());
 }
 
+function controlNamingTexts(el: InteractiveElement): Array<string | null | undefined> {
+  return [
+    el.visibleText,
+    el.labelText,
+    el.ariaLabel,
+    el.iconLabel,
+    el.title,
+    el.placeholder,
+    isButtonInput(el) ? el.value : undefined,
+  ];
+}
+
 function candidateTexts(el: InteractiveElement): string[] {
   return [
     el.visibleText,
@@ -659,17 +671,39 @@ function candidateText(el: InteractiveElement): string {
 function controlDescription(el: InteractiveElement): string | undefined {
   // Labels are chosen from visible/accessibility naming sources only. Native
   // button values are names; field values, `name`, and `id` stay excluded.
-  return [
-    el.visibleText,
-    el.labelText,
-    el.ariaLabel,
-    el.iconLabel,
-    el.title,
-    el.placeholder,
-    isButtonInput(el) ? el.value : undefined,
-  ]
+  return controlNamingTexts(el)
     .map((candidate) => safeDescriptionV2(candidate))
     .find((candidate) => candidate !== undefined);
+}
+
+function privateQueryTokenV2(value: string): string | null {
+  const normalized = value.normalize("NFKC").trim().toLowerCase();
+  if (
+    normalized.length < 2 ||
+    normalized.length > 48 ||
+    !/^[\p{L}\p{M}][\p{L}\p{M}\p{N}]{1,47}$/u.test(normalized) ||
+    hasPanLikeDigits(normalized) ||
+    EMAIL_VALUE_RE.test(normalized) ||
+    SECRET_ASSIGNMENT_RE.test(normalized) ||
+    CARD_SECURITY_VALUE_RE.test(normalized) ||
+    HIGH_ENTROPY_TOKEN_RE.test(normalized) ||
+    findOtpCredential(normalized) !== null ||
+    isStandaloneOtpCredential(normalized) ||
+    containsCredentialShape(normalized)
+  ) {
+    return null;
+  }
+  return normalized;
+}
+
+export function controlMatchesPrivateQueryV2(el: InteractiveElement, query: string): boolean {
+  const needle = privateQueryTokenV2(query);
+  if (needle === null) return false;
+  return controlNamingTexts(el).some((candidate) => {
+    if (typeof candidate !== "string") return false;
+    const tokens = candidate.normalize("NFKC").match(/[\p{L}\p{M}][\p{L}\p{M}\p{N}]{1,47}/gu);
+    return tokens?.some((token) => privateQueryTokenV2(token) === needle) === true;
+  });
 }
 
 function roleOf(el: InteractiveElement): SafeRoleV2 | null {
@@ -717,7 +751,12 @@ function fieldOf(el: InteractiveElement): SafeFieldV2 | undefined {
     tokens.some((token) => autocompleteTokens.has(token));
   const type = (el.type ?? "").toLowerCase();
   const text = candidateText(el).toLowerCase();
-  if ([...autocompleteTokens].some((token) => token.startsWith("cc-"))) return "payment";
+  if (
+    [...autocompleteTokens].some((token) => token.startsWith("cc-")) ||
+    /\b(?:cvc|cvv|csc|card verification(?: value)?|card security code)\b/.test(text)
+  ) {
+    return "payment";
+  }
   if (type === "password" || hasAutocomplete("current-password", "new-password")) {
     return "password";
   }

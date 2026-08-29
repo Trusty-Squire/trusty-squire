@@ -3364,7 +3364,7 @@ describe("Compact V2 action-map boundary", () => {
     }
   });
 
-  it("omits raw action values and token URLs from V2 retention and audit sinks", async () => {
+  it("fails V2 recording closed when an action value cannot cross the seal", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
@@ -3386,7 +3386,12 @@ describe("Compact V2 action-map boundary", () => {
       const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
         .safe_table[0]![0];
       const rawValue = "correct horse battery staple";
-      await act(started.session_id, { kind: "type", target: handle, text: rawValue });
+      await act(started.session_id, {
+        kind: "type",
+        target: handle,
+        text: rawValue,
+        provenance: { hole: "address.line1" },
+      });
 
       const token = "ab12cd34ef56gh78ij90kl";
       const magicUrl = `https://shop.example.com/magic?code=${token}`;
@@ -3402,6 +3407,90 @@ describe("Compact V2 action-map boundary", () => {
       expect(retained).not.toContain(rawValue);
       expect(retained).not.toContain(token);
       expect(writes.join("")).not.toContain(token);
+      expect(session.recipeRejectionReason).toBe("compact_v2_unrepresentable_value_action");
+      await expect(captureAndPromoteSession(started.session_id)).resolves.toEqual({
+        kind: "skipped",
+        reason: "compact_v2_unrepresentable_value_action",
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("marks unsupported select and phone-country values non-recordable", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Country",
+        selector: "#country",
+        selectOptions: [{ value: "kr", text: "South Korea" }],
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const handle = (started as unknown as { safe_table: Array<[string]> }).safe_table[0]![0];
+
+    await act(started.session_id, {
+      kind: "select",
+      target: handle,
+      text: "South Korea",
+      provenance: { hole: "address.country" },
+    });
+    await act(started.session_id, {
+      kind: "set_phone_country",
+      country: "Japan",
+      provenance: { hole: "contact.phone_country" },
+    });
+
+    const session = paymentSession(started.session_id);
+    expect(h.selected).toContainEqual({ selector: "#country", matcher: "South Korea" });
+    expect(h.phoneCountries).toContain("Japan");
+    expect(JSON.stringify(session.actionTrace)).not.toContain("South Korea");
+    expect(JSON.stringify(session.actionTrace)).not.toContain("Japan");
+    expect(session.recipeRejectionReason).toBe("compact_v2_unrepresentable_value_action");
+    await expect(captureAndPromoteSession(started.session_id)).resolves.toEqual({
+      kind: "skipped",
+      reason: "compact_v2_unrepresentable_value_action",
+    });
+  });
+
+  it("refuses V2 replay recording for unsafe URL paths and query-dependent navigation", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      const pathSession = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/signup",
+      });
+      const secretPath = "https://shop.example.com/keys/sk_live_1234567890abcdef";
+      await act(pathSession.session_id, { kind: "goto", url: secretPath });
+      expect(h.gotos).toContain(secretPath);
+      expect(JSON.stringify(paymentSession(pathSession.session_id).actionTrace)).not.toContain(
+        "sk_live_1234567890abcdef",
+      );
+      await expect(captureAndPromoteSession(pathSession.session_id)).resolves.toEqual({
+        kind: "skipped",
+        reason: "compact_v2_unrepresentable_goto",
+      });
+
+      const querySession = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/signup",
+      });
+      const queryUrl = "https://shop.example.com/settings?tab=api-keys";
+      await act(querySession.session_id, { kind: "goto", url: queryUrl });
+      expect(h.gotos).toContain(queryUrl);
+      await expect(captureAndPromoteSession(querySession.session_id)).resolves.toEqual({
+        kind: "skipped",
+        reason: "compact_v2_unrepresentable_goto",
+      });
+      expect(writes.join("")).not.toContain("sk_live_1234567890abcdef");
+      expect(writes.join("")).not.toContain("tab=api-keys");
     } finally {
       spy.mockRestore();
     }
@@ -3562,6 +3651,41 @@ describe("Compact V2 action-map boundary", () => {
         expect.stringContaining("Continue"),
       ]),
     ]);
+  });
+
+  it("matches private merchant labels while returning only sealed rows", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Buy Acme", selector: "#acme" }),
+      elem({
+        index: 1,
+        tag: "button",
+        role: "button",
+        visibleText: "Buy Beta",
+        selector: "#beta",
+      }),
+      elem({
+        index: 2,
+        tag: "button",
+        role: "button",
+        visibleText: "購入する",
+        selector: "#purchase-ja",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/products",
+    });
+
+    const acme = await observeQuery(started.session_id, "Acme");
+    const japanese = await observeQuery(started.session_id, "購入する");
+
+    expect(acme.safe_table).toHaveLength(1);
+    expect(japanese.safe_table).toHaveLength(1);
+    expect(JSON.stringify(acme)).not.toContain("Acme");
+    expect(JSON.stringify(japanese)).not.toContain("購入する");
+    expect((acme.safe_table as Array<[string]>)[0]![0]).not.toBe(
+      (japanese.safe_table as Array<[string]>)[0]![0],
+    );
   });
 
   it("reissues handles when a private live binding changes", async () => {
@@ -4141,7 +4265,7 @@ describe("Compact V2 action-map boundary", () => {
         tag: "select",
         role: "combobox",
         labelText: "Variant",
-        selector: "#private-direct-selector",
+        selector: "#shipping-frame",
         selectOptions: [{ value: "blue", text: "Ocean Blue" }],
       }),
     ];
@@ -4151,7 +4275,7 @@ describe("Compact V2 action-map boundary", () => {
     const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
       .safe_table[0]![0];
     h.selectError = new Error(
-      'select <select> #private-direct-selector: option "Private option" was not found',
+      'select <select> #shipping-frame: option "Private option" was not found',
     );
 
     const error = await act(started.session_id, {
@@ -4162,7 +4286,7 @@ describe("Compact V2 action-map boundary", () => {
 
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toBe("selection_failed");
-    expect((error as Error).message).not.toContain("private-direct-selector");
+    expect((error as Error).message).not.toContain("shipping-frame");
     expect((error as Error).message).not.toContain("Private option");
   });
 

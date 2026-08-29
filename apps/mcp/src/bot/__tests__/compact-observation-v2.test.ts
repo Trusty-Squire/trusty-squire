@@ -365,6 +365,23 @@ describe("compact observation v2", () => {
     expect(safeStageV2("https://merchant.invalid/checkout", [cvc])).toBe("checkout");
   });
 
+  it("recognizes a labeled CVC field without autocomplete as payment", () => {
+    const cvc = element({
+      tag: "input",
+      type: "password",
+      role: "textbox",
+      ariaLabel: "CVC",
+    });
+    const safe = buildSafeControlsV2({
+      elements: [cvc],
+      legacyRefs: new Map([[cvc, "@e:cvc"]]),
+      generation: 1,
+      pageOrigin: "https://merchant.invalid",
+    });
+    expect(safe.rows).toEqual([expect.objectContaining({ field: "payment" })]);
+    expect(safeStageV2("https://merchant.invalid/checkout", [cvc])).toBe("checkout");
+  });
+
   it("reduces completion and checkout signals to a finite page-stage enum", () => {
     expect(safeStageV2("https://merchant.invalid/thank-you", [])).toBe("complete");
     expect(safeStageV2("https://merchant.invalid/incomplete", [])).toBe("browse");

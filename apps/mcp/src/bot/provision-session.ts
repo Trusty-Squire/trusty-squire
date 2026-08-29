@@ -45,6 +45,7 @@ import {
   checkoutStageFromUrlV2,
   compactV2LegacyRefForHandle,
   compactV2PayloadWithinBudget,
+  controlMatchesPrivateQueryV2,
   diffSafeControlsV2,
   equalSafePageSemanticsV2,
   encodeV2Delta,
@@ -1633,6 +1634,9 @@ export class TargetStaleError extends Error {
   }
 }
 
+class CompactV2ReobserveRequiredError extends Error {}
+class ProvisionTargetNotAllowedError extends Error {}
+
 function replacementCandidates(elements: readonly InteractiveElement[]): Record<string, string[]> {
   const refs = provisionElementRefs(elements);
   const candidates: Record<string, string[]> = {};
@@ -1960,7 +1964,7 @@ function invalidateCompactV2Snapshot(
 function throwCompactV2ReobserveRequired(): never {
   // Deliberately opaque: stale V2 errors must not construct V1 replacement
   // candidates or reveal raw labels/legacy identities outside the safe view.
-  throw new Error("reobserve_required");
+  throw new CompactV2ReobserveRequiredError("reobserve_required");
 }
 
 interface CompactV2TargetAuthorization {
@@ -2093,7 +2097,7 @@ type FrameScopedTarget = Pick<
 function frameTargetFor(el: FrameScopedTarget): FrameTarget | null {
   if (el.framePath === undefined || el.framePath === null) return null;
   if (el.frameOrigin === undefined || el.frameOrigin === null) {
-    throw new Error("frame target lacks an origin");
+    throw new ProvisionTargetNotAllowedError("frame target lacks an origin");
   }
   return {
     framePath: el.framePath,
@@ -2118,14 +2122,14 @@ function assertFrameTargetAllowed(session: Session, el: FrameScopedTarget, kind:
   // message below suggests allow_host, which can never succeed for a null
   // origin — a remedy the model would loop on forever.
   if (el.frameOpaque === true || el.frameOrigin === "null") {
-    throw new Error(
+    throw new ProvisionTargetNotAllowedError(
       `${kind} refused: the target lives in an opaque (null-origin) frame — a sandboxed ` +
         `iframe without allow-same-origin, or an unconfirmed about:blank/srcdoc document. ` +
         `No host declaration can ever permit a null origin; this control is not reachable ` +
         `through operate_act. Drive the page's own controls instead.`,
     );
   }
-  throw new Error(
+  throw new ProvisionTargetNotAllowedError(
     `${kind} blocked by domain-scope: the target lives in a cross-domain frame ` +
       `(${el.frameOrigin ?? el.frameUrl}) outside the allowed hosts ` +
       `[${hostStrings(session).join(", ")}] + auth providers. ` +
@@ -2143,14 +2147,14 @@ function assertSecretFrameTargetAllowed(session: Session, el: FrameScopedTarget)
   const target = frameTargetFor(el);
   if (target === null) return;
   if (target.frameOpaque === true) {
-    throw new Error(
+    throw new ProvisionTargetNotAllowedError(
       "type_secret refused: the target lives in an opaque frame. Secrets may only be " +
         "typed into the main frame or a frame on the page's own domain.",
     );
   }
   const pageUrl = session.browser.currentUrl();
   if (isSameRecipeDomain(target.frameOrigin, pageUrl)) return;
-  throw new Error(
+  throw new ProvisionTargetNotAllowedError(
     `type_secret refused: the target lives in a cross-domain frame ` +
       `(${target.frameOrigin}), not the page's own domain. Secrets may only be ` +
       `typed into the main frame or a frame on the page's own domain.`,
@@ -2167,7 +2171,7 @@ function assertSecretFrameTargetAllowed(session: Session, el: FrameScopedTarget)
 // feature. Refuse explicitly instead.
 function assertNoFrameTarget(el: InteractiveElement, kind: string): void {
   if (el.framePath === undefined || el.framePath === null) return;
-  throw new Error(
+  throw new ProvisionTargetNotAllowedError(
     `operate_act kind="${kind}" does not yet support a target inside an <iframe> ` +
       `(frame ${el.frameOrigin ?? "unknown"}). Use click/js_click/type/type_secret/select ` +
       `for frame targets.`,
@@ -5133,6 +5137,38 @@ export async function observeQuery(
     if (parsed.generation !== index.generation) throw new Error("stale_cursor");
     offset = parsed.offset;
   }
+  const liveElements = await session.browser.extractInteractiveElements();
+  let pageOrigin = "";
+  try {
+    pageOrigin = new URL(session.browser.currentUrl()).origin;
+  } catch {}
+  const liveRefs = provisionElementRefs(liveElements);
+  const liveSafe = buildSafeControlsV2({
+    elements: liveElements,
+    legacyRefs: liveRefs,
+    generation: index.generation,
+    pageOrigin,
+  });
+  if (
+    liveSafe.rows.length !== index.rows.length ||
+    liveSafe.byRef.size !== session.compactV2Refs.size ||
+    liveSafe.rows.some((row, rowIndex) => !sameCompactV2Control(row, index.rows[rowIndex]!)) ||
+    [...liveSafe.byRef].some(([ref, legacy]) => session.compactV2Refs.get(ref) !== legacy)
+  ) {
+    invalidateCompactV2Snapshot(session);
+    throw new Error("stale_cursor");
+  }
+  const liveByLegacy = new Map<string, InteractiveElement>();
+  for (const [element, legacy] of liveRefs) liveByLegacy.set(legacy, element);
+  const privateMatches = new Set<string>();
+  if (needle.length > 0) {
+    for (const [ref, legacy] of session.compactV2Refs) {
+      const element = liveByLegacy.get(legacy);
+      if (element !== undefined && controlMatchesPrivateQueryV2(element, query)) {
+        privateMatches.add(ref);
+      }
+    }
+  }
   const rows = index.rows.filter((row) => {
     const searchable = [
       row.name,
@@ -5147,7 +5183,9 @@ export async function observeQuery(
       .filter((value): value is string => value !== undefined)
       .map(norm);
     return (
-      (needle.length === 0 || searchable.some((value) => value.includes(needle))) &&
+      (needle.length === 0 ||
+        searchable.some((value) => value.includes(needle)) ||
+        privateMatches.has(row.ref)) &&
       (role === undefined || row.role === role)
     );
   });
@@ -5635,7 +5673,7 @@ async function executeAct(
     kind: action.kind,
     ...(auditTarget !== undefined ? { target: auditTarget } : {}),
     ...("url" in action
-      ? { url: session.compactV2Active ? compactV2SafeUrl(action.url) : action.url }
+      ? { url: session.compactV2Active ? compactV2AuditUrl(action.url) : action.url }
       : {}),
   });
 
@@ -5659,7 +5697,7 @@ async function executeAct(
       curHost = null;
     }
     if (curHost !== null && isSquireControlPlaneHost(curHost)) {
-      throw new Error(
+      throw new ProvisionTargetNotAllowedError(
         `action refused: the browser is on Squire's own control plane (${curHost}). ` +
           `The operator may not act on the Trusty Squire vault/app — navigate away with goto.`,
       );
@@ -5675,7 +5713,7 @@ async function executeAct(
     switch (action.kind) {
       case "goto": {
         if (!hostAllowed(action.url, hostStrings(session))) {
-          throw new Error(
+          throw new ProvisionTargetNotAllowedError(
             `goto blocked by domain-scope: ${action.url} is outside the allowed hosts ` +
               `[${hostStrings(session).join(", ")}] + auth providers. ` +
               `Declare it first with an allow_host action if this task spans it.`,
@@ -5687,7 +5725,9 @@ async function executeAct(
       case "allow_host": {
         const checked = validateAllowHost(action.host);
         if ("error" in checked) {
-          throw new Error(`allow_host rejected "${action.host}": ${checked.error}`);
+          throw new ProvisionTargetNotAllowedError(
+            `allow_host rejected "${action.host}": ${checked.error}`,
+          );
         }
         if (!session.allowedHosts.some((e) => e.host === checked.host)) {
           session.allowedHosts.push({ host: checked.host, source: "mid_session" });
@@ -6286,11 +6326,10 @@ function compactV2SelectionFailureReason(error: unknown): string {
 }
 
 function compactV2ActionFailureReason(error: unknown, kind: ProvisionAction["kind"]): string {
-  const message = error instanceof Error ? error.message : String(error);
-  if (error instanceof TargetStaleError || message === "reobserve_required") {
+  if (error instanceof TargetStaleError || error instanceof CompactV2ReobserveRequiredError) {
     return "reobserve_required";
   }
-  if (/domain-scope|frame|cross-origin|not allowed|control plane/i.test(message)) {
+  if (error instanceof ProvisionTargetNotAllowedError) {
     return "target_not_allowed";
   }
   return kind === "select" ? "selection_failed" : "action_failed";
@@ -6389,15 +6428,83 @@ function looksLikeEmailValue(v: string): boolean {
   return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v.trim());
 }
 
-function compactV2SafeUrl(rawUrl: string): string {
+function compactV2AuditUrl(rawUrl: string): string {
   try {
-    const parsed = new URL(rawUrl);
-    if (isSingleUseUrl(rawUrl)) return parsed.origin;
-    parsed.search = "";
-    parsed.hash = "";
-    return parsed.toString();
+    return new URL(rawUrl).origin;
   } catch {
     return "";
+  }
+}
+
+const COMPACT_V2_REPLAY_ROUTE_SEGMENTS = new Set([
+  "account",
+  "accounts",
+  "api",
+  "app",
+  "apps",
+  "auth",
+  "basket",
+  "billing",
+  "callback",
+  "cart",
+  "checkout",
+  "complete",
+  "console",
+  "create",
+  "credential",
+  "credentials",
+  "dashboard",
+  "developer",
+  "developers",
+  "key",
+  "keys",
+  "login",
+  "new",
+  "oauth",
+  "payment",
+  "profile",
+  "project",
+  "projects",
+  "register",
+  "security",
+  "settings",
+  "sign-in",
+  "sign-up",
+  "signin",
+  "signup",
+  "success",
+  "token",
+  "tokens",
+  "verification",
+  "verify",
+  "workspace",
+  "workspaces",
+]);
+
+function compactV2ReplaySafeUrl(rawUrl: string): string | null {
+  try {
+    const parsed = new URL(rawUrl);
+    if (
+      parsed.username.length > 0 ||
+      parsed.password.length > 0 ||
+      parsed.search.length > 0 ||
+      parsed.hash.length > 0 ||
+      isSingleUseUrl(rawUrl)
+    ) {
+      return null;
+    }
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    if (
+      segments.some(
+        (segment) =>
+          segment !== segment.toLowerCase() || !COMPACT_V2_REPLAY_ROUTE_SEGMENTS.has(segment),
+      )
+    ) {
+      return null;
+    }
+    return parsed.toString();
+  } catch {
+    return null;
   }
 }
 
@@ -6407,22 +6514,28 @@ function compactV2RecordedAction(
 ): ProvisionAction | null {
   if (session.compactV2Mode !== "on") return action;
   if (action.kind === "goto") {
-    if (isSingleUseUrl(action.url)) return null;
-    const url = compactV2SafeUrl(action.url);
-    return url.length === 0 ? null : { ...action, url };
+    const url = compactV2ReplaySafeUrl(action.url);
+    if (url !== null) return { ...action, url };
+    rejectRecipeRecording(session, "compact_v2_unrepresentable_goto");
+    return null;
   }
   if (action.kind === "type") {
     if (looksLikeEmailValue(action.text)) return { ...action, text: EMAIL_SLOT_TEMPLATE };
+    rejectRecipeRecording(session, "compact_v2_unrepresentable_value_action");
     return null;
   }
   if (action.kind === "select") {
     const text = safeDescriptionV2(action.text);
-    return text === undefined ? null : { ...action, text };
+    if (text !== undefined) return { ...action, text };
+    rejectRecipeRecording(session, "compact_v2_unrepresentable_value_action");
+    return null;
   }
   if (action.kind === "set_phone_country") {
-    return /^[a-z]{2}$/i.test(action.country)
-      ? { ...action, country: action.country.toUpperCase() }
-      : null;
+    if (/^[a-z]{2}$/i.test(action.country)) {
+      return { ...action, country: action.country.toUpperCase() };
+    }
+    rejectRecipeRecording(session, "compact_v2_unrepresentable_value_action");
+    return null;
   }
   return action;
 }
@@ -6758,6 +6871,12 @@ function recordCaptureRound(
   if (recordedAction === null) return;
   const observed = captureObserved(recordedAction, el);
   if (observed === null) return;
+  const stateUrl =
+    session.compactV2Mode === "on" ? compactV2ReplaySafeUrl(urlAtObservation) : urlAtObservation;
+  if (stateUrl === null) {
+    rejectRecipeRecording(session, "compact_v2_unrepresentable_page_url");
+    return;
+  }
   session.captureRounds.push({
     service: captureService(session),
     round: session.captureRounds.length,
@@ -6765,7 +6884,7 @@ function recordCaptureRound(
     // The URL the inventory + action belong to (pre-action), NOT the post-
     // navigation URL — see urlBeforeAction in act().
     state: {
-      url: session.compactV2Mode === "on" ? compactV2SafeUrl(urlAtObservation) : urlAtObservation,
+      url: stateUrl,
       title: "",
       html: "",
       screenshot: "",
@@ -6777,7 +6896,7 @@ function recordCaptureRound(
 
 // The EXTRACT round is the one round that keeps raw html — the key-extraction
 // step is synthesized from the page where the credential is shown.
-async function recordExtractRound(session: Session): Promise<void> {
+async function recordExtractRound(session: Session): Promise<boolean> {
   let html = "";
   if (session.compactV2Mode !== "on") {
     try {
@@ -6786,15 +6905,20 @@ async function recordExtractRound(session: Session): Promise<void> {
       /* best-effort — the copy-button/inventory extract path still works */
     }
   }
+  const stateUrl =
+    session.compactV2Mode === "on"
+      ? compactV2ReplaySafeUrl(session.browser.currentUrl())
+      : session.browser.currentUrl();
+  if (stateUrl === null) {
+    rejectRecipeRecording(session, "compact_v2_unrepresentable_page_url");
+    return false;
+  }
   session.captureRounds.push({
     service: captureService(session),
     round: session.captureRounds.length,
     oauth: false,
     state: {
-      url:
-        session.compactV2Mode === "on"
-          ? compactV2SafeUrl(session.browser.currentUrl())
-          : session.browser.currentUrl(),
+      url: stateUrl,
       title: "",
       html,
       screenshot: "",
@@ -6802,6 +6926,7 @@ async function recordExtractRound(session: Session): Promise<void> {
     inventory: session.lastElements,
     observed: { kind: "extract", reason: "extract the credential shown on the page" },
   });
+  return true;
 }
 
 // Record the extract round from the live page, then write the accumulated medium
@@ -6819,10 +6944,16 @@ export async function captureAndPromoteSession(
   if (session.usedLocatorFallback) {
     return { kind: "skipped", reason: "locator_fallback_unrepresentable" };
   }
+  if (session.recipeRejectionReason !== null) {
+    return { kind: "skipped", reason: session.recipeRejectionReason };
+  }
   const dir = resolveCaptureDir();
   if (dir === null) return { kind: "skipped", reason: "capture_disabled" };
   if (!session.captureRounds.some((r) => r.observed.kind === "extract")) {
     await recordExtractRound(session);
+  }
+  if (session.recipeRejectionReason !== null) {
+    return { kind: "skipped", reason: session.recipeRejectionReason };
   }
   const hasExtract = session.captureRounds.some((r) => r.observed.kind === "extract");
   if (!hasExtract || session.captureRounds.length < 2) {
