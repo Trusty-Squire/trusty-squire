@@ -38,6 +38,7 @@ import {
   hasDisplay,
   pollUntil,
   profileHasProviderCookies,
+  runLoginBrowserForEnvironment,
   runDisplayedChrome,
   scopesAreBasic,
   scrapeGoogleScopePhrases,
@@ -106,6 +107,44 @@ describe("interactive login display detection", () => {
   it("rejects Linux sessions without a display", () => {
     expect(hasDisplay("linux", {})).toBe(false);
     expect(hasDisplay("linux", { DISPLAY: "  " })).toBe(false);
+  });
+});
+
+describe("interactive login display routing", () => {
+  const opts: RunInBotChromeOpts = {
+    profileDir: "/unused/profile",
+    url: "https://example.test/login",
+    deadline: Date.now() + 60_000,
+    pollUntilDone: async () => false,
+    bannerLabel: "Complete sign-in.",
+  };
+
+  it("routes a headless login to the remote noVNC path", async () => {
+    const displayed = vi.fn(async () => ({ status: "timeout", closeState: "closed" }) as const);
+    const remote = vi.fn(async () => ({ status: "completed", closeState: "closed" }) as const);
+
+    await expect(
+      runLoginBrowserForEnvironment(opts, {
+        hasDisplay: () => false,
+        runDisplayedChrome: displayed,
+        runRemoteLoginChrome: remote,
+      }),
+    ).resolves.toMatchObject({ status: "completed" });
+    expect(remote).toHaveBeenCalledOnce();
+    expect(displayed).not.toHaveBeenCalled();
+  });
+
+  it("keeps a user-visible desktop on the local headed path", async () => {
+    const displayed = vi.fn(async () => ({ status: "completed", closeState: "closed" }) as const);
+    const remote = vi.fn(async () => ({ status: "timeout", closeState: "closed" }) as const);
+
+    await runLoginBrowserForEnvironment(opts, {
+      hasDisplay: () => true,
+      runDisplayedChrome: displayed,
+      runRemoteLoginChrome: remote,
+    });
+    expect(displayed).toHaveBeenCalledOnce();
+    expect(remote).not.toHaveBeenCalled();
   });
 });
 
