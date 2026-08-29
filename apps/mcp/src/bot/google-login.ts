@@ -110,22 +110,53 @@ function resolveChromium(): PersistentLauncher {
 export async function captureProfileStorageState(
   profileDir: string,
   launcher: PersistentLauncher = resolveChromium(),
+  runtime: {
+    currentProfileHolderPid: typeof currentProfileHolderPid;
+    profileProcessIdentity: typeof profileProcessIdentity;
+    reapProfileHolderIfOwned: typeof reapProfileHolderIfOwned;
+    teardownLoginBrowser: typeof teardownLoginBrowser;
+  } = {
+    currentProfileHolderPid,
+    profileProcessIdentity,
+    reapProfileHolderIfOwned,
+    teardownLoginBrowser,
+  },
 ): Promise<BrowserStorageState> {
-  const context = await launchWithProfileGate(
-    profileDir,
-    () =>
-      launchPersistentLoginContext(launcher, profileDir, {
-        headless: true,
-        ignoreDefaultArgs: ["--enable-automation"],
-        args: ["--no-sandbox", "--disable-dev-shm-usage"],
-      }),
-    { failFast: true },
-  );
+  const lifecycle = createTrackedLoginBrowserLifecycle();
+  let state: BrowserStorageState | undefined;
+  let closeState: ProfileCloseState = "unknown";
   try {
-    return await context.storageState({ indexedDB: true });
+    const context = await launchWithProfileGate(
+      profileDir,
+      () =>
+        launchPersistentLoginContext(launcher, profileDir, {
+          headless: true,
+          ignoreDefaultArgs: ["--enable-automation"],
+          args: ["--no-sandbox", "--disable-dev-shm-usage"],
+        }),
+      { failFast: true },
+    );
+    const holderPid = runtime.currentProfileHolderPid(profileDir);
+    const identity =
+      holderPid === null ? null : runtime.profileProcessIdentity(holderPid, profileDir);
+    lifecycle.browserLaunched(
+      async () =>
+        await runtime.teardownLoginBrowser({
+          profileDir,
+          identity,
+          closeBrowser: () => context.close(),
+          forceClose: () => runtime.reapProfileHolderIfOwned(profileDir, identity),
+        }),
+    );
+    state = await context.storageState({ indexedDB: true });
   } finally {
-    await context.close();
+    closeState = await lifecycle.finish();
   }
+  lifecycle.throwIfCancelled();
+  if (closeState !== "closed") {
+    throw new Error(`login identity capture closed without proof (${closeState})`);
+  }
+  return state!;
 }
 
 // --- config ------------------------------------------------------------

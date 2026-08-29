@@ -720,14 +720,92 @@ describe("bot Chrome launch consistency", () => {
     const launcher = {
       launchPersistentContext: vi.fn(async () => ({ storageState, close }) as never),
     };
+    const identity = {
+      host: hostname(),
+      pid: 2_147_483_001,
+      start_time: "capture-browser",
+      user_data_dir: "/isolated-profile",
+    };
 
-    await expect(captureProfileStorageState("/isolated-profile", launcher)).resolves.toEqual(state);
+    await expect(
+      captureProfileStorageState("/isolated-profile", launcher, {
+        currentProfileHolderPid: () => identity.pid,
+        profileProcessIdentity: () => identity,
+        reapProfileHolderIfOwned: vi.fn(() => true),
+        teardownLoginBrowser: async (options) => {
+          await options.closeBrowser();
+          return "closed";
+        },
+      }),
+    ).resolves.toEqual(state);
     expect(storageState).toHaveBeenCalledWith({ indexedDB: true });
     expect(close).toHaveBeenCalledOnce();
     expect(launcher.launchPersistentContext).toHaveBeenCalledWith(
       "/isolated-profile",
       expect.objectContaining({ headless: true, channel: "chrome" }),
     );
+  });
+
+  it("lets operator shutdown reach an in-flight identity capture", async () => {
+    let rejectStorageState: ((error: Error) => void) | undefined;
+    const storageState = vi.fn(
+      async () =>
+        await new Promise<never>((_resolve, reject) => {
+          rejectStorageState = reject;
+        }),
+    );
+    const close = vi.fn(async () => {
+      rejectStorageState?.(new Error("capture context closed"));
+    });
+    const launcher = {
+      launchPersistentContext: vi.fn(async () => ({ storageState, close }) as never),
+    };
+    const identity = {
+      host: hostname(),
+      pid: 2_147_483_002,
+      start_time: "capture-browser",
+      user_data_dir: "/isolated-profile",
+    };
+    const capturing = captureProfileStorageState("/isolated-profile", launcher, {
+      currentProfileHolderPid: () => identity.pid,
+      profileProcessIdentity: () => identity,
+      reapProfileHolderIfOwned: vi.fn(() => true),
+      teardownLoginBrowser: async (options) => {
+        await options.closeBrowser();
+        return "closed";
+      },
+    }).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(storageState).toHaveBeenCalledOnce());
+
+    await cancelActiveLoginBrowsers();
+
+    await expect(capturing).resolves.toEqual(
+      expect.objectContaining({ message: "capture context closed" }),
+    );
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("does not return captured identity after an unproven close", async () => {
+    const state = { cookies: [], origins: [] };
+    const close = vi.fn(async () => undefined);
+    const launcher = {
+      launchPersistentContext: vi.fn(
+        async () => ({ storageState: async () => state, close }) as never,
+      ),
+    };
+
+    await expect(
+      captureProfileStorageState("/isolated-profile", launcher, {
+        currentProfileHolderPid: () => null,
+        profileProcessIdentity: () => null,
+        reapProfileHolderIfOwned: vi.fn(() => false),
+        teardownLoginBrowser: async (options) => {
+          await options.closeBrowser();
+          return "unknown";
+        },
+      }),
+    ).rejects.toThrow("login identity capture closed without proof (unknown)");
+    expect(close).toHaveBeenCalledOnce();
   });
 
   it("publishes plain-login identity after closing Chrome and capturing through a context", async () => {
