@@ -422,9 +422,39 @@ export function safeStageV2(url: string, elements: readonly InteractiveElement[]
   }
   const routeStage = checkoutStageFromUrlV2(url);
   if (routeStage !== null) return routeStage;
-  if (elements.some((el) => intentOf(el) === "payment" || intentOf(el) === "checkout")) return "checkout";
   if (elements.some((el) => intentOf(el) === "add_to_cart")) return "browse";
-  if (elements.some((el) => intentOf(el) === "login" || intentOf(el) === "signup")) return "auth";
+  const hasAuthAction = elements.some(
+    (el) =>
+      roleOf(el) === "button" &&
+      (intentOf(el) === "login" || intentOf(el) === "signup"),
+  );
+  const hasAuthField = elements.some((el) => {
+    const field = fieldOf(el);
+    return field === "email" || field === "username";
+  });
+  const hasPasswordField = elements.some((el) => fieldOf(el) === "password");
+  if (hasPasswordField || (hasAuthAction && hasAuthField)) return "auth";
+  const checkoutFields = new Set<SafeFieldV2>([
+    "address",
+    "city",
+    "region",
+    "postal",
+    "country",
+    "payment",
+  ]);
+  const hasCheckoutField = elements.some((el) => {
+    const role = roleOf(el);
+    const field = fieldOf(el);
+    return (role === "textbox" || role === "select") && field !== undefined && checkoutFields.has(field);
+  });
+  const hasPaymentField = elements.some((el) => {
+    const role = roleOf(el);
+    return (role === "textbox" || role === "select") && fieldOf(el) === "payment";
+  });
+  const hasCheckoutAction = elements.some(
+    (el) => roleOf(el) === "button" && intentOf(el) === "checkout",
+  );
+  if (hasPaymentField || (hasCheckoutAction && hasCheckoutField)) return "checkout";
   if (elements.some((el) => roleOf(el) === "textbox" || roleOf(el) === "select")) return "form";
   return "browse";
 }

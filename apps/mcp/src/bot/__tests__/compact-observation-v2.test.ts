@@ -276,7 +276,10 @@ describe("compact observation v2", () => {
       ]),
     ).toBe("browse");
     expect(
-      safeStageV2("https://merchant.invalid/order", [element({ visibleText: "Checkout", role: "button" })]),
+      safeStageV2("https://merchant.invalid/order", [
+        element({ visibleText: "Checkout", role: "button" }),
+        element({ tag: "input", role: "textbox", autocomplete: "shipping address-line1" }),
+      ]),
     ).toBe("checkout");
     expect(safeStageV2("https://merchant.invalid/products/checkout-tote", [])).toBe("browse");
     expect(
@@ -284,6 +287,18 @@ describe("compact observation v2", () => {
         element({ visibleText: "Checkout Tote", role: "link" }),
       ]),
     ).toBe("browse");
+    expect(
+      safeStageV2("https://merchant.invalid/products/widget", [
+        element({ visibleText: "Log in", role: "link" }),
+        element({ visibleText: "Gift card", role: "link" }),
+      ]),
+    ).toBe("browse");
+    expect(
+      safeStageV2("https://merchant.invalid/account", [
+        element({ visibleText: "Log in", role: "button" }),
+        element({ tag: "input", type: "email", role: "textbox" }),
+      ]),
+    ).toBe("auth");
   });
 
   it("parses tokenized autocomplete fields and required state", () => {

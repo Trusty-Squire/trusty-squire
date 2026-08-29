@@ -41,22 +41,29 @@ Inside `elements`:
    `accessibility` flat-tree are not needed to choose an action.
    `occluded_by`/`topmost`/`href` ARE load-bearing — keep them (per-element).
 
-## The one knob — `detail`
+## Observation mode and detail
 
-There is a single ordered control, set **per call**, no env/global flag:
+The session observation format is selected once at start by
+`TRUSTY_SQUIRE_OBSERVE_V2=on|shadow|off` and defaults to `on`:
+
+- `on` emits Compact V2. Every detail level remains inside the V2 seal;
+  `detail:"full"` does not expose the V1 inventory.
+- `shadow` runs the native Compact V2 serializer without retaining or emitting
+  its result, while callers continue to receive and target V1 observations.
+- `off` keeps the V1 observation and action contract.
+
+Within V1, `detail` is the ordered per-call payload control:
 
 ```
 detail:  none  <  compact  <  full
-         ack       default     legacy (compact + screen + accessibility + raw fields)
+         ack       default     rich V1 (compact + screen + accessibility + raw fields)
 ```
 
 `operate_observe({ detail })` accepts `compact|full`; `operate_act({ detail })`
-also accepts `none` (a bare ack). Default everywhere is **compact**. There is no
-deploy-time override: unlike the server kill-switches (signups/egress/billing),
-`detail` only shapes the payload returned to the host on the user's own machine —
-it has no server-side blast radius, so there's nothing for an operator to revert.
-If a step is genuinely ambiguous the planner escalates to `detail:"full"` for
-that one call.
+also accepts `none` (a bare ack). Default everywhere is **compact**. In V1, a
+genuinely ambiguous step can escalate to `detail:"full"` for that one call. In
+V2, ambiguity is resolved through its sealed paging/query protocol instead of
+restoring legacy fields.
 
 ## Phase 1 — compact encoder ✅ shipped, DEFAULT
 

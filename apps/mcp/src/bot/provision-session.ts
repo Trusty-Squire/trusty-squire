@@ -4872,6 +4872,10 @@ function compactV2Observation(
     pageOrigin,
   });
   let delta = samePage ? diffSafeControlsV2(previous, stage, safe.rows) : null;
+  const privateBindingsChanged =
+    samePage &&
+    (session.compactV2Refs.size !== safe.byRef.size ||
+      [...safe.byRef].some(([ref, legacy]) => session.compactV2Refs.get(ref) !== legacy));
   // An index belongs to exactly one action-map snapshot. If structural state
   // changed, publish a complete fresh map with a new generation rather than
   // letting a prior short index drift onto a new control.
@@ -4879,6 +4883,7 @@ function compactV2Observation(
     !samePage ||
     delta === null ||
     delta.stageChanged ||
+    privateBindingsChanged ||
     delta.added.length > 0 ||
     delta.changed.length > 0 ||
     delta.removed.length > 0;
@@ -5002,7 +5007,6 @@ export async function observeQuery(
 ): Promise<Record<string, unknown>> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  if (session.paymentFieldSealActive) throw new Error("sealed_observation_query_rejected");
   const index = session.compactV2Index;
   if (index === null || index.expiresAt < Date.now()) throw new Error("stale_cursor");
   // Query/paging is part of the same sealed action-map protocol: never return
@@ -5032,15 +5036,24 @@ export async function observeQuery(
     if (parsed.generation !== index.generation) throw new Error("stale_cursor");
     offset = parsed.offset;
   }
-  const currentRefs = provisionElementRefs(session.lastElements);
-  const allowed = new Set<string>();
-  for (const el of session.lastElements) {
-    const legacy = currentRefs.get(el);
-    if (legacy === undefined) continue;
-    const safeRef = [...index.byRef.entries()].find(([, value]) => value === legacy)?.[0];
-    if (safeRef !== undefined && (needle.length === 0 || norm(elementRef(el)).includes(needle))) allowed.add(safeRef);
-  }
-  const rows = index.rows.filter((row) => allowed.has(row.ref) && (role === undefined || row.role === role));
+  const rows = index.rows.filter((row) => {
+    const searchable = [
+      row.name,
+      row.role,
+      row.state,
+      row.visibility,
+      row.action,
+      row.field,
+      row.choice,
+      row.frame,
+    ]
+      .filter((value): value is string => value !== undefined)
+      .map(norm);
+    return (
+      (needle.length === 0 || searchable.some((value) => value.includes(needle))) &&
+      (role === undefined || row.role === role)
+    );
+  });
   const page = encodeV2Page({
     sessionId: session.id,
     stage: index.stage,
@@ -6038,30 +6051,27 @@ export async function formSelectMany(
   const fields: FormSelectManyFieldResult[] = [];
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const resolvedSelections: Array<{ label: string; target: string; option: string }> = [];
-  for (const [label, option] of Object.entries(selections)) {
-    if (!session.compactV2Active) {
-      resolvedSelections.push({ label, target: label, option });
-      continue;
-    }
+  const selectionEntries = Object.entries(selections);
+  const resolveTarget = (label: string): string => {
+    if (!session.compactV2Active) return label;
     try {
-      resolvedSelections.push({
-        label,
-        target: currentCompactV2LegacyTarget(session, label),
-        option,
-      });
+      return currentCompactV2LegacyTarget(session, label);
     } catch (error) {
       audit(sessionId, "act", { kind: "select_many", target: "<rejected-v2-target>" });
       throw error;
     }
+  };
+  for (const [label] of selectionEntries) {
+    resolveTarget(label);
   }
 
   // Keep variant changes in one host call. Each successful select is followed
   // by a real observe before the next target resolves: variant widgets commonly
   // replace all dependent selects, so continuing from an old inventory is worse
   // than reporting a partial result.
-  for (const { label, target, option } of resolvedSelections) {
+  for (const [label, option] of selectionEntries) {
     try {
+      const target = resolveTarget(label);
       const actionResult = await actInternally(
         sessionId,
         { kind: "select", target, text: option },

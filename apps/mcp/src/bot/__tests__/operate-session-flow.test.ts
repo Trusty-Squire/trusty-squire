@@ -3338,6 +3338,7 @@ describe("Compact V2 action-map boundary", () => {
     await expect(observeQuery(started.session_id, "Item", undefined, pageCursor)).rejects.toThrow(
       "invalid_cursor",
     );
+    retainActivePaymentFieldSeal();
     const nextPage = await observeQuery(started.session_id, "", undefined, pageCursor);
     expect(nextPage.safe_table).toHaveLength(4);
     const queryPage = await observeQuery(started.session_id, "Item");
@@ -3348,6 +3349,50 @@ describe("Compact V2 action-map boundary", () => {
     await expect(observeQuery(started.session_id, "Item", "link", queryCursor)).rejects.toThrow(
       "invalid_cursor",
     );
+  });
+
+  it("searches only the sealed action map", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        role: "textbox",
+        value: "private-query-token",
+        selector: "#secret-bearing-field",
+      }),
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/products" });
+
+    const secretGuess = await observeQuery(started.session_id, "private-query-token");
+    expect(secretGuess.safe_table).toEqual([]);
+    const safeLabel = await observeQuery(started.session_id, "continue");
+    expect(safeLabel.safe_table).toEqual([
+      expect.arrayContaining([expect.stringMatching(/^@e:/), "b", expect.stringContaining("Continue")]),
+    ]);
+  });
+
+  it("reissues handles when a private live binding changes", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#step-one" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    const oldHandle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#step-two" }),
+    ];
+    const refreshed = await observe(started.session_id);
+    const newHandle = (refreshed as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+    expect(newHandle).not.toBe(oldHandle);
+    await expect(act(started.session_id, { kind: "click", target: oldHandle })).rejects.toThrow(
+      "reobserve_required",
+    );
+    await act(started.session_id, { kind: "click", target: newHandle });
+    expect(h.clickCalls).toBe(1);
   });
 
   it("invalidates handles before postcondition probe navigation", async () => {
@@ -3566,6 +3611,53 @@ describe("Compact V2 action-map boundary", () => {
       expect.objectContaining({ status: "selected", selected_option: "South Korea" }),
     ]);
     expect(result.observation.format).toBe("compact-v2");
+  });
+
+  it("reauthorizes each bulk selection after the preceding mutation", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Variant",
+        selector: "#variant",
+        selectOptions: [{ value: "blue", text: "Ocean Blue" }],
+      }),
+      elem({
+        index: 1,
+        tag: "select",
+        role: "combobox",
+        labelText: "Size",
+        selector: "#size",
+        selectOptions: [{ value: "large", text: "Large" }],
+      }),
+    ];
+    h.selectMutation = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Size",
+        selector: "#size",
+        selectOptions: [{ value: "large", text: "Large" }],
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> }).safe_table;
+    const variantHandle = rows.find(([, , description]) => description?.startsWith("Variant"))?.[0];
+    const sizeHandle = rows.find(([, , description]) => description?.startsWith("Size"))?.[0];
+    expect(variantHandle).toMatch(/^@e:/);
+    expect(sizeHandle).toMatch(/^@e:/);
+
+    const result = await formSelectMany(started.session_id, {
+      [variantHandle!]: "Blue",
+      [sizeHandle!]: "Large",
+    });
+
+    expect(h.selected).toEqual([{ selector: "#variant", matcher: "Blue" }]);
+    expect(result.fields).toEqual([
+      expect.objectContaining({ status: "selected", selected_option: "Ocean Blue" }),
+      expect.objectContaining({ status: "failed", reason: "reobserve_required" }),
+    ]);
   });
 });
 
