@@ -45,12 +45,23 @@ async def observe(cdp_url: str) -> dict[str, Any]:
             # These raw fields are *process-internal matching hints*.  They are
             # never logged, persisted, or returned by TS; the TS allowlist seal
             # turns matching candidates into finite enums before any sink.
+            # Match browser-use's own MCP listing: descendant text first, then
+            # accessible naming attributes for otherwise textless controls.
+            # Deliberately never use `value` here: it can be card, credential,
+            # or merchant-entered data rather than a control label.
+            text = node.get_all_children_text(max_depth=2)
+            if not text:
+                for attribute in ("aria-label", "title", "placeholder", "alt"):
+                    value = node.attributes.get(attribute)
+                    if value:
+                        text = value
+                        break
             selected.append(
                 {
                     "backend_node_id": node.backend_node_id,
                     "tag": node.tag_name,
                     "role": node.ax_node.role if node.ax_node else None,
-                    "name": node.get_meaningful_text_for_llm()[:160],
+                    "name": text[:160],
                 }
             )
         return {"ok": True, "selected": selected}

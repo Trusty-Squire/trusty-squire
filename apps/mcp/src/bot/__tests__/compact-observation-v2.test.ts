@@ -168,6 +168,27 @@ describe("compact observation v2", () => {
     expect(repeated.rows[0]).toEqual(expect.objectContaining({ name: "private merchant copy" }));
   });
 
+  it("uses the browser-use serializer label while retaining TS's local action ref", () => {
+    const button = element({ visibleText: "TS inventory fallback" });
+    const safe = buildSafeControlsV2({
+      elements: [button],
+      legacyRefs: new Map([[button, "@e:continue"]]),
+      secret: Buffer.alloc(32, 7),
+      pageOrigin: "https://merchant.invalid",
+      selected: [
+        {
+          backend_node_id: 1,
+          tag: "button",
+          role: "button",
+          name: "Browse-use serialized control",
+        },
+      ],
+    });
+    expect(safe.rows).toEqual([
+      expect.objectContaining({ ref: expect.stringMatching(/^@e:/), name: "Browse-use serialized control" }),
+    ]);
+  });
+
   it("preserves short semantic essentials while rejecting card and secret-shaped text", () => {
     expect(
       safePageSemanticsV2({

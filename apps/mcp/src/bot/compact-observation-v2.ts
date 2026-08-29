@@ -395,17 +395,25 @@ function frameOf(el: InteractiveElement, pageOrigin: string): SafeControlV2["fra
   return el.frameOrigin === pageOrigin ? "same_origin" : "cross_origin";
 }
 
-function upstreamSelected(el: InteractiveElement, selected: readonly BrowserUseSelectedNode[]): boolean {
+function browserUseNodeFor(
+  el: InteractiveElement,
+  selected: readonly BrowserUseSelectedNode[],
+  claimed: ReadonlySet<BrowserUseSelectedNode>,
+): BrowserUseSelectedNode | null {
   const tag = el.tag.toLowerCase();
   const role = (el.role ?? "").toLowerCase();
-  return selected.some((node) => {
+  const candidates = selected.filter((node) => {
+    if (claimed.has(node)) return false;
     if (node.tag.toLowerCase() !== tag) return false;
     if (role.length > 0 && node.role !== null && node.role.toLowerCase() !== role) return false;
-    // Browser-use owns the selection. Its backend node ids are not available
-    // in TS's action inventory, so matching is structural; raw names are never
-    // copied, compared, logged, or retained on this side of the seal.
     return true;
   });
+  if (candidates.length === 0) return null;
+  // The browser-use serializer owns the rendered label. Use a sealed equality
+  // only to pair its node with TS's live action handle; never retain the raw
+  // comparison text beyond this local call.
+  const localName = controlDescription(el);
+  return candidates.find((node) => safeDescriptionV2(node.name) === localName) ?? candidates[0] ?? null;
 }
 
 export function safeV2Ref(secret: Buffer, legacyRef: string): string {
@@ -423,6 +431,7 @@ export function buildSafeControlsV2(args: {
 }): { rows: SafeControlV2[]; byRef: Map<string, string> } {
   const rows: Array<{ row: SafeControlV2; priority: number }> = [];
   const byRef = new Map<string, string>();
+  const claimed = new Set<BrowserUseSelectedNode>();
   for (const el of args.elements) {
     if (el.visible !== true || el.topmost === false) continue;
     const role = roleOf(el);
@@ -434,13 +443,18 @@ export function buildSafeControlsV2(args: {
     // stream. Browser-use's serializer can legitimately vary its viewport
     // shortlist between identical snapshots; without this tiny safe cache that
     // variation looks like DOM churn and defeats the delta protocol.
-    if (!upstreamSelected(el, args.selected) && !args.previouslySelected?.has(ref)) continue;
+    const selectedNode = browserUseNodeFor(el, args.selected, claimed);
+    if (selectedNode === null && !args.previouslySelected?.has(ref)) continue;
+    if (selectedNode !== null) claimed.add(selectedNode);
     byRef.set(ref, legacy);
     const state = stateOf(el);
     const action = intentOf(el);
     const field = fieldOf(el);
     const cardChoice = el.cardRadioGroup;
-    const name = controlDescription(el);
+    // Browser-use is the observation source. The action inventory contributes
+    // only the local @e: binding and finite state/action enums; its own labels
+    // are never emitted when an upstream control is present.
+    const name = selectedNode === null ? controlDescription(el) : safeDescriptionV2(selectedNode.name);
     const row: SafeControlV2 = {
       ref,
       role,

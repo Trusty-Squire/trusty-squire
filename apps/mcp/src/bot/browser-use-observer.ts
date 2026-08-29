@@ -2,8 +2,10 @@
 // Browser-use owns DOM candidate selection; this module only manages a single
 // JSONL subprocess and returns its process-internal selector-map hints.
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type { BrowserUseSelectedNode } from "./compact-observation-v2.js";
 
 interface BridgeResponse {
@@ -17,6 +19,16 @@ interface BridgeResponse {
 // not a response budget: the sealed V2 result remains capped independently.
 const SERIALIZER_TIMEOUT_MS = 30_000;
 
+function browserUsePython(): string {
+  const configured = process.env.TRUSTY_SQUIRE_BROWSER_USE_PYTHON;
+  if (configured !== undefined && configured.trim().length > 0) return configured;
+  // `uv tool install browser-use` is the supported local installation for the
+  // pinned requirements asset. Prefer its isolated interpreter over the
+  // system Python, which normally has no browser_use module at all.
+  const uvToolPython = join(homedir(), ".local", "share", "uv", "tools", "browser-use", "bin", "python3");
+  return existsSync(uvToolPython) ? uvToolPython : "python3";
+}
+
 class BrowserUseObserver {
   private child: ChildProcess | null = null;
   private pending: Array<(response: BridgeResponse) => void> = [];
@@ -29,7 +41,7 @@ class BrowserUseObserver {
 
   private ensureStarted(): ChildProcess | null {
     if (this.child !== null && this.child.exitCode === null) return this.child;
-    const python = process.env.TRUSTY_SQUIRE_BROWSER_USE_PYTHON ?? "python3";
+    const python = browserUsePython();
     try {
       const child = spawn(python, [this.scriptPath()], {
         stdio: ["pipe", "pipe", "ignore"],
