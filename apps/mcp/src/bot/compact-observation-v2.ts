@@ -1,6 +1,10 @@
 import { Buffer } from "node:buffer";
 import type { InteractiveElement } from "./browser.js";
-import { findCredentialTokens, looksLikeCredentialValue } from "./credential-shape.js";
+import {
+  findCredentialTokens,
+  findOtpCredential,
+  looksLikeCredentialValue,
+} from "./credential-shape.js";
 
 export const OBSERVE_V2_MAX_WIRE_BYTES = 4_096;
 export const OBSERVE_V2_MAX_TOKENS = 1_024;
@@ -210,6 +214,7 @@ export function safeDescriptionV2(value: string | null | undefined): string | un
     SECRET_ASSIGNMENT_RE.test(normalized) ||
     CARD_SECURITY_VALUE_RE.test(normalized) ||
     HIGH_ENTROPY_TOKEN_RE.test(normalized) ||
+    findOtpCredential(normalized) !== null ||
     containsCredentialShape(normalized)
   ) {
     return undefined;
@@ -417,7 +422,7 @@ export function safeStageV2(url: string, elements: readonly InteractiveElement[]
   try {
     pathname = decodeURIComponent(new URL(url).pathname).toLowerCase();
   } catch {}
-  if (/(?:^|\/)(?:success|complete|confirm|thank-you|thank_you|finished|done)(?:\.(?:php|html?))?(?:\/|$)/.test(pathname)) {
+  if (/(?:^|\/)(?:success|complete|thank-you|thank_you|finished|done)(?:\.(?:php|html?))?(?:\/|$)/.test(pathname)) {
     return "complete";
   }
   const routeStage = checkoutStageFromUrlV2(url);
@@ -429,6 +434,8 @@ export function safeStageV2(url: string, elements: readonly InteractiveElement[]
       (intentOf(el) === "login" || intentOf(el) === "signup"),
   );
   const hasAuthField = elements.some((el) => {
+    const role = roleOf(el);
+    if (role !== "textbox" && role !== "select") return false;
     const field = fieldOf(el);
     return field === "email" || field === "username";
   });

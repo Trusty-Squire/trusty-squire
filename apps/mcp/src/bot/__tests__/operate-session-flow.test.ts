@@ -2013,6 +2013,9 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
     expect(provisionActTool.description).toContain(
       'operate_act { kind: "extract", into_slot: "<slot>" }',
     );
+    expect(provisionActTool.description).toContain("Under default compact-v2");
+    expect(provisionActTool.description).toContain("opaque `reobserve_required`");
+    expect(provisionActTool.description).toContain("In V1, stable target refs remain reusable");
 
     const dir = mkdtempSync(join(tmpdir(), "recipe-guidance-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
@@ -3395,6 +3398,79 @@ describe("Compact V2 action-map boundary", () => {
     expect(h.clickCalls).toBe(1);
   });
 
+  it("rejects a handle when its live sealed semantics change before dispatch", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        type: "submit",
+        id: "action",
+        selector: "#action",
+        value: "Continue",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+
+    h.elements = [
+      elem({
+        tag: "input",
+        type: "submit",
+        id: "action",
+        selector: "#action",
+        value: "Delete account",
+      }),
+    ];
+    await expect(act(started.session_id, { kind: "click", target: handle })).rejects.toThrow(
+      "reobserve_required",
+    );
+    expect(h.clickCalls).toBe(0);
+  });
+
+  it("seals OTP-shaped control descriptions from output and query", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "button",
+        role: "button",
+        selector: "#verification",
+        visibleText: "Your verification code is 481920",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    expect(JSON.stringify(started)).not.toContain("481920");
+    await expect(observeQuery(started.session_id, "481920")).resolves.toMatchObject({
+      safe_table: [],
+    });
+  });
+
+  it("keeps checkout confirmation routes in checkout until positive completion", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout/confirm",
+    });
+    expect(started).toMatchObject({ format: "compact-v2", stage: "checkout" });
+  });
+
+  it("does not promote incidental auth-labeled buttons to an auth stage", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", selector: "#signup", visibleText: "Sign up" }),
+      elem({
+        index: 1,
+        tag: "button",
+        role: "button",
+        selector: "#email-us",
+        visibleText: "Email us",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/products",
+    });
+    expect(started).toMatchObject({ format: "compact-v2", stage: "browse" });
+  });
+
   it("invalidates handles before postcondition probe navigation", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
@@ -3613,7 +3689,7 @@ describe("Compact V2 action-map boundary", () => {
     expect(result.observation.format).toBe("compact-v2");
   });
 
-  it("reauthorizes each bulk selection after the preceding mutation", async () => {
+  it("revalidates unchanged bulk targets after the preceding mutation", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
@@ -3647,6 +3723,54 @@ describe("Compact V2 action-map boundary", () => {
     const sizeHandle = rows.find(([, , description]) => description?.startsWith("Size"))?.[0];
     expect(variantHandle).toMatch(/^@e:/);
     expect(sizeHandle).toMatch(/^@e:/);
+
+    const result = await formSelectMany(started.session_id, {
+      [variantHandle!]: "Blue",
+      [sizeHandle!]: "Large",
+    });
+
+    expect(h.selected).toEqual([
+      { selector: "#variant", matcher: "Blue" },
+      { selector: "#size", matcher: "Large" },
+    ]);
+    expect(result.fields).toEqual([
+      expect.objectContaining({ status: "selected", selected_option: "Ocean Blue" }),
+      expect.objectContaining({ status: "selected", selected_option: "Large" }),
+    ]);
+  });
+
+  it("rejects a changed bulk target after the preceding mutation", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Variant",
+        selector: "#variant",
+        selectOptions: [{ value: "blue", text: "Ocean Blue" }],
+      }),
+      elem({
+        index: 1,
+        tag: "select",
+        role: "combobox",
+        labelText: "Size",
+        selector: "#size",
+        selectOptions: [{ value: "large", text: "Large" }],
+      }),
+    ];
+    h.selectMutation = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Size",
+        selector: "#replacement-size",
+        selectOptions: [{ value: "large", text: "Large" }],
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> }).safe_table;
+    const variantHandle = rows.find(([, , description]) => description?.startsWith("Variant"))?.[0];
+    const sizeHandle = rows.find(([, , description]) => description?.startsWith("Size"))?.[0];
 
     const result = await formSelectMany(started.session_id, {
       [variantHandle!]: "Blue",

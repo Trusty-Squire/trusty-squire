@@ -126,6 +126,7 @@ import {
   looksLikeCredentialValue,
   isCredentialNoise,
   findCredentialTokens,
+  findOtpCredential,
   keyFamilyPrefix,
   pickRelaxedNearCopyCredential,
 } from "./credential-shape.js";
@@ -1958,7 +1959,28 @@ function throwCompactV2ReobserveRequired(): never {
   throw new Error("reobserve_required");
 }
 
-function currentCompactV2LegacyTarget(session: Session, target: string): string {
+interface CompactV2TargetAuthorization {
+  legacyRef: string;
+  row: SafeControlV2;
+}
+
+function sameCompactV2Control(left: SafeControlV2, right: SafeControlV2): boolean {
+  return (
+    left.role === right.role &&
+    left.state === right.state &&
+    left.visibility === right.visibility &&
+    left.action === right.action &&
+    left.field === right.field &&
+    left.name === right.name &&
+    left.choice === right.choice &&
+    left.frame === right.frame
+  );
+}
+
+function compactV2AuthorizationForHandle(
+  session: Session,
+  target: string,
+): CompactV2TargetAuthorization {
   const index = session.compactV2Index;
   if (index === null) throwCompactV2ReobserveRequired();
   if (index.expiresAt < Date.now() || index.pageKey !== compactV2PageKey(session)) {
@@ -1967,7 +1989,67 @@ function currentCompactV2LegacyTarget(session: Session, target: string): string 
   }
   const legacy = compactV2LegacyRefForHandle(session.compactV2Refs, index.generation, target);
   if (legacy === null) throwCompactV2ReobserveRequired();
-  return legacy;
+  const row = index.rows.find((candidate) => candidate.ref === target);
+  if (row === undefined) throwCompactV2ReobserveRequired();
+  return { legacyRef: legacy, row };
+}
+
+function revalidateCompactV2Authorization(
+  session: Session,
+  authorization: CompactV2TargetAuthorization,
+): CompactV2TargetAuthorization {
+  const index = session.compactV2Index;
+  if (
+    index === null ||
+    index.expiresAt < Date.now() ||
+    index.pageKey !== compactV2PageKey(session)
+  ) {
+    invalidateCompactV2Snapshot(session);
+    throwCompactV2ReobserveRequired();
+  }
+  for (const [ref, legacyRef] of session.compactV2Refs) {
+    if (legacyRef !== authorization.legacyRef) continue;
+    const row = index.rows.find((candidate) => candidate.ref === ref);
+    if (row !== undefined && sameCompactV2Control(authorization.row, row)) {
+      return { legacyRef, row };
+    }
+  }
+  invalidateCompactV2Snapshot(session);
+  throwCompactV2ReobserveRequired();
+}
+
+function resolveAuthorizedCompactV2Target(
+  session: Session,
+  elements: readonly InteractiveElement[],
+  authorization: CompactV2TargetAuthorization,
+): InteractiveElement {
+  let pageOrigin = "";
+  try {
+    pageOrigin = new URL(session.browser.currentUrl()).origin;
+  } catch {}
+  const safe = buildSafeControlsV2({
+    elements,
+    legacyRefs: provisionElementRefs(elements),
+    generation: session.compactV2Index?.generation ?? 0,
+    pageOrigin,
+  });
+  let liveRow: SafeControlV2 | undefined;
+  for (const [ref, legacyRef] of safe.byRef) {
+    if (legacyRef === authorization.legacyRef) {
+      liveRow = safe.rows.find((candidate) => candidate.ref === ref);
+      break;
+    }
+  }
+  const resolved = resolveTarget(elements, authorization.legacyRef);
+  if (
+    liveRow === undefined ||
+    !sameCompactV2Control(authorization.row, liveRow) ||
+    resolved === null
+  ) {
+    invalidateCompactV2Snapshot(session);
+    throwCompactV2ReobserveRequired();
+  }
+  return resolved;
 }
 
 // Squire's OWN control plane. The operator browser runs in the connect-seeded
@@ -5443,8 +5525,17 @@ async function actInternally(
   detail: ObserveDetail = "compact",
   cartIdentity?: CartIdentityContext,
   collectCheckoutState = false,
+  compactV2Authorization?: CompactV2TargetAuthorization,
 ): Promise<InternalActResult> {
-  return await executeAct(sessionId, action, detail, cartIdentity, true, collectCheckoutState);
+  return await executeAct(
+    sessionId,
+    action,
+    detail,
+    cartIdentity,
+    true,
+    collectCheckoutState,
+    compactV2Authorization,
+  );
 }
 
 export async function act(
@@ -5463,6 +5554,7 @@ async function executeAct(
   cartIdentity: CartIdentityContext | undefined,
   internalAccess: boolean,
   collectCheckoutState: boolean,
+  internalAuthorization?: CompactV2TargetAuthorization,
 ): Promise<InternalActResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
@@ -5495,10 +5587,12 @@ async function executeAct(
   };
   let resolutionTarget: string | undefined;
   let auditTarget: string | undefined;
+  let compactV2Authorization = internalAuthorization;
   if ("target" in action) {
     if (session.compactV2Active && !internalAccess) {
       try {
-        resolutionTarget = currentCompactV2LegacyTarget(session, action.target);
+        compactV2Authorization = compactV2AuthorizationForHandle(session, action.target);
+        resolutionTarget = compactV2Authorization.legacyRef;
         auditTarget = action.target;
       } catch (error) {
         audit(sessionId, "act", { kind: action.kind, target: "<rejected-v2-target>" });
@@ -5633,7 +5727,10 @@ async function executeAct(
       // resolveTarget recomputes identities (incl. volatile positional-group
       // fingerprints) from these FRESH elements, so a ref whose group fingerprint
       // changed since the last observe resolves to null, not a survivor (#399).
-      const el = resolveTarget(fresh, resolutionTarget!);
+      const el =
+        compactV2Authorization === undefined
+          ? resolveTarget(fresh, resolutionTarget!)
+          : resolveAuthorizedCompactV2Target(session, fresh, compactV2Authorization);
       if (el === null) {
         if (session.compactV2Active) {
           if (!internalAccess) throwCompactV2ReobserveRequired();
@@ -5670,7 +5767,10 @@ async function executeAct(
       // uses selectInFrame. text is the fuzzy option matcher in both paths.
       const fresh = await browser.extractInteractiveElements();
       session.lastElements = fresh;
-      const el = resolveTarget(fresh, resolutionTarget!);
+      const el =
+        compactV2Authorization === undefined
+          ? resolveTarget(fresh, resolutionTarget!)
+          : resolveAuthorizedCompactV2Target(session, fresh, compactV2Authorization);
       if (el === null) {
         if (session.compactV2Active) {
           if (!internalAccess) throwCompactV2ReobserveRequired();
@@ -5799,7 +5899,10 @@ async function executeAct(
       // resolveTarget recomputes identities (incl. volatile positional-group
       // fingerprints) from these FRESH elements, so a ref whose group fingerprint
       // changed since the last observe resolves to null, not a survivor (#399).
-      const el = resolveTarget(fresh, resolutionTarget!);
+      const el =
+        compactV2Authorization === undefined
+          ? resolveTarget(fresh, resolutionTarget!)
+          : resolveAuthorizedCompactV2Target(session, fresh, compactV2Authorization);
       if (el === null) {
         if (session.compactV2Active) {
           if (!internalAccess) throwCompactV2ReobserveRequired();
@@ -5965,7 +6068,10 @@ async function executeAct(
       // action before the provider transition begins.
       const fresh = await browser.extractInteractiveElements();
       session.lastElements = fresh;
-      const el = resolveTarget(fresh, resolutionTarget!);
+      const el =
+        compactV2Authorization === undefined
+          ? resolveTarget(fresh, resolutionTarget!)
+          : resolveAuthorizedCompactV2Target(session, fresh, compactV2Authorization);
       if (el === null) {
         if (session.compactV2Active) {
           if (!internalAccess) throwCompactV2ReobserveRequired();
@@ -6052,30 +6158,38 @@ export async function formSelectMany(
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const selectionEntries = Object.entries(selections);
-  const resolveTarget = (label: string): string => {
-    if (!session.compactV2Active) return label;
+  const authorizedSelections = selectionEntries.map(([label, option]) => {
+    if (!session.compactV2Active) return { label, option };
     try {
-      return currentCompactV2LegacyTarget(session, label);
+      return {
+        label,
+        option,
+        authorization: compactV2AuthorizationForHandle(session, label),
+      };
     } catch (error) {
       audit(sessionId, "act", { kind: "select_many", target: "<rejected-v2-target>" });
       throw error;
     }
-  };
-  for (const [label] of selectionEntries) {
-    resolveTarget(label);
-  }
+  });
 
   // Keep variant changes in one host call. Each successful select is followed
   // by a real observe before the next target resolves: variant widgets commonly
   // replace all dependent selects, so continuing from an old inventory is worse
   // than reporting a partial result.
-  for (const [label, option] of selectionEntries) {
+  for (const { label, option, authorization } of authorizedSelections) {
     try {
-      const target = resolveTarget(label);
+      const currentAuthorization =
+        authorization === undefined
+          ? undefined
+          : revalidateCompactV2Authorization(session, authorization);
+      const target = currentAuthorization?.legacyRef ?? label;
       const actionResult = await actInternally(
         sessionId,
         { kind: "select", target, text: option },
         "none",
+        undefined,
+        false,
+        currentAuthorization,
       );
       const selectedOption = actionResult.outcome.selectedOption;
       if (selectedOption === undefined) {
@@ -8356,19 +8470,14 @@ export interface AwaitVerificationOptions {
 // number elsewhere in the mail doesn't win; falls back to the first standalone
 // 4-8 digit run. The link uses the bot's pickVerificationLink heuristic.
 const OTP_ANY_RE = /(?:^|[^0-9])(\d{4,8})(?:[^0-9]|$)/g;
-const OTP_KEYWORD_RE =
-  /(?:code|verification|verify|otp|passcode|one[- ]time)\D{0,40}?(\d{4,8})|(\d{4,8})\D{0,8}?(?:code|verification|verify|otp|passcode)/i;
 
 export function parseVerification(
   text: string,
   links: readonly string[],
 ): { code: string | null; link: string | null } {
   const link = pickVerificationLink([...links]);
-  const kw = OTP_KEYWORD_RE.exec(text);
-  let code: string | null = null;
-  if (kw !== null) {
-    code = kw[1] ?? kw[2] ?? null;
-  } else {
+  let code = findOtpCredential(text);
+  if (code === null) {
     const m = OTP_ANY_RE.exec(text);
     code = m !== null ? (m[1] ?? null) : null;
   }

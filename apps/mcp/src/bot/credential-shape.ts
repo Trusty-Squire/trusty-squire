@@ -22,6 +22,14 @@ export function isMaskedDisplay(value: string): boolean {
   return MASKED_DISPLAY_RE.test(value);
 }
 
+const OTP_KEYWORD_RE =
+  /(?:code|verification|verify|otp|passcode|one[- ]time)\D{0,40}?(\d{4,8})|(\d{4,8})\D{0,8}?(?:code|verification|verify|otp|passcode)/i;
+
+export function findOtpCredential(value: string): string | null {
+  const match = OTP_KEYWORD_RE.exec(value);
+  return match?.[1] ?? match?.[2] ?? null;
+}
+
 // A real credential never looks like a code identifier. X's anti-bot tombstone
 // ("JavaScript is not available…") leaked `loader.tweetUnavailableTombstoneHandler`
 // (a JS function name) into the extractor, which wrote it to the vault as a key

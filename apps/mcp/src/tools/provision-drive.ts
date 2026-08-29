@@ -336,13 +336,13 @@ const startSchema = z.object({
 });
 
 const OBSERVE_DELTA_CONTRACT =
-  "Compact observations carry their elements in `el_table`: a TAB-delimited table whose FIRST line is the " +
+  "In V1 compact observations, elements are carried in `el_table`: a TAB-delimited table whose FIRST line is the " +
   "header (tab-joined column names, a subset of ref,label,tag,role,type,value_len,checked,href,testId," +
   "topmost,occluded_by, always starting ref,label,tag) and each following line is ONE element (tab-joined " +
   "cells in header order). An empty cell = that field is absent for that element; value_len is a number, " +
   "checked/topmost are true/false; a tab, newline, carriage-return or backslash inside a cell is " +
   "backslash-escaped (\\t \\n \\r \\\\). el_table is absent when the emit has no element rows. " +
-  "stable refs remain reusable across observes while their controls still exist. " +
+  "In V1, stable refs remain reusable across observes while their controls still exist. " +
   "The first observe, a URL change, or high churn returns delta:false as a full resync: discard the prior " +
   "element map and rebuild it from this el_table (or from snapshot_file — the table may omit collapsed " +
   "chrome links, which the file keeps); a delta:false with NO snapshot_file already has the complete, " +
@@ -351,12 +351,14 @@ const OBSERVE_DELTA_CONTRACT =
   "in removed, and retain the remaining elements counted by unchanged. text_unchanged:true means reuse the " +
   "prior text because text is empty. snapshot_file points to the complete current snapshot (all elements, " +
   "with path). An empty delta (no el_table) means nothing changed, not an empty page. " +
-  'detail:"full" instead returns the legacy `elements` JSON array (every field), never el_table. ' +
+  'In V1, detail:"full" instead returns the legacy `elements` JSON array (every field), never el_table. ' +
   "If a control you can see in `text`/the screenshot has NO row in el_table (a bare unlabeled clickable " +
   'div — e.g. some SPA "Add To Cart" buttons), it has no ref: click it with operate_act click/js_click ' +
   'target=`text="…"` or `css=…` (see operate_act). `click` respects actionability and throws if an overlay ' +
   "intercepts; dismiss the overlay or deliberately use `js_click`, which directly dispatches through a " +
-  "transparent overlay. ";
+  "transparent overlay. Under default compact-v2, only handles from the current sealed action map are accepted; " +
+  "browser-driving actions invalidate them. On opaque `reobserve_required`, call operate_observe and choose a new " +
+  "handle; do not retry the old handle or use V1 replacement candidates or locator fallback. ";
 
 const COMPACT_V2_CONTRACT =
   "When format is `compact-v2`, use its sealed map: session_id is the continuation handle; `stage` is a finite enum; " +
@@ -1241,12 +1243,13 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "Squire-known address, contact, product_query, or quantity input; type_secret and " +
     "operate_pay record credential and card provenance from their sealed sources. " +
     "When repairing a replay fallback field, pass its replay_step_index and replay_hole. " +
-    "Stable target refs remain reusable while their element exists. If an @e: ref is stale, " +
-    "the response is {status:target_stale, replacement_candidates, retry_policy:do_not_retry_old_ref}; " +
-    "call operate_observe and choose a new ref instead of retrying the old one. " +
+    "Under default compact-v2, each target handle belongs only to the current sealed action map and browser-driving " +
+    "actions invalidate that map. On opaque `reobserve_required`, call operate_observe and choose a new handle; do " +
+    "not retry the old handle. In V1, stable target refs remain reusable while their element exists; a stale @e: " +
+    "ref returns {status:target_stale, replacement_candidates, retry_policy:do_not_retry_old_ref}. " +
     'detail (default "compact") controls the returned payload: "none" skips it ' +
     "entirely for chained fills (then operate_observe before the next ref action), " +
-    '"full" returns the legacy screen+accessibility payload. ' +
+    'in V1, "full" returns the legacy screen+accessibility payload. ' +
     "For legible product/variant hints on a cart-affecting action, pass product_identity and options_hash together; returned checkout_state is best-effort informational state and never a payment charge input. " +
     OBSERVE_DELTA_CONTRACT,
   inputSchema: actSchema,
