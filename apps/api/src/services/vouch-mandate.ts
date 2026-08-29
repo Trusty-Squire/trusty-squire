@@ -5,7 +5,7 @@
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import canonicalize from "canonicalize";
-import { createLocalJWKSet, jwtVerify, type JSONWebKeySet, type JWTPayload } from "jose";
+import { createLocalJWKSet, decodeJwt, jwtVerify, type JSONWebKeySet, type JWTPayload } from "jose";
 
 export const PAYMENT_VOUCH_CONTEXT = "purchase";
 export const CREDENTIAL_MUTATION_VOUCH_CONTEXT = "vault_credential_mutation";
@@ -20,6 +20,7 @@ export type VouchMandateFailureCode =
   | "payload_hash_mismatch"
   | "invalid_mandate_context"
   | "insufficient_mandate_confidence"
+  | "mandate_assertion_expired"
   | "mandate_verification_failed";
 
 export class VouchMandateVerificationError extends Error {
@@ -34,9 +35,63 @@ export interface VouchMandateVerificationInput {
   expectedPayloadHash: Uint8Array;
   expectedContext: string;
   expectedAudience: string;
+  /** The API already verified this exact, nonce-bound candidate at submission. */
+  previouslyVerifiedRelay?: boolean;
 }
 
 export type VouchMandateVerifier = (input: VouchMandateVerificationInput) => Promise<JWTPayload>;
+
+// The longest approval is the JIT card flow (18 minutes). A Vouchflow web
+// assertion is intentionally much shorter-lived, so an assertion verified at
+// submission may expire while it waits in the authenticated relay for the
+// operator to resume. This window never applies to first acceptance.
+export const MAX_PREVERIFIED_MANDATE_RELAY_MS = 18 * 60 * 1_000;
+
+function isJwtExpired(error: unknown): boolean {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "ERR_JWT_EXPIRED"
+  );
+}
+
+async function verifySignedAssertion(
+  input: VouchMandateVerificationInput,
+  jwks: ReturnType<typeof createLocalJWKSet>,
+): Promise<JWTPayload> {
+  const options = {
+    issuer: "https://vouchflow.dev",
+    audience: input.expectedAudience,
+  } as const;
+  try {
+    return (await jwtVerify(input.jws, jwks, options)).payload;
+  } catch (error) {
+    if (!input.previouslyVerifiedRelay || !isJwtExpired(error)) throw error;
+
+    // Decoding chooses a point inside the signed validity interval only. The
+    // second jwtVerify still validates signature, issuer, audience, nbf, and
+    // every binding below. Bad or excessively old assertions remain rejected.
+    const decoded = decodeJwt(input.jws);
+    const issuedAt = decoded.iat;
+    const expiresAt = decoded.exp;
+    const now = Date.now();
+    if (
+      !Number.isSafeInteger(issuedAt) ||
+      !Number.isSafeInteger(expiresAt) ||
+      expiresAt! <= issuedAt! ||
+      now - expiresAt! * 1_000 > MAX_PREVERIFIED_MANDATE_RELAY_MS
+    ) {
+      throw new VouchMandateVerificationError("mandate_assertion_expired");
+    }
+    return (
+      await jwtVerify(input.jws, jwks, {
+        ...options,
+        currentDate: new Date((expiresAt! - 1) * 1_000),
+      })
+    ).payload;
+  }
+}
 
 function decodePayloadHash(claim: unknown): Uint8Array {
   if (typeof claim !== "string") {
@@ -104,10 +159,7 @@ export function createVouchMandateVerifier(
     }
 
     try {
-      const { payload } = await jwtVerify(input.jws, createLocalJWKSet(body as JSONWebKeySet), {
-        issuer: "https://vouchflow.dev",
-        audience: input.expectedAudience,
-      });
+      const payload = await verifySignedAssertion(input, createLocalJWKSet(body as JSONWebKeySet));
       const signedHash = decodePayloadHash(payload.payload_sha256);
       if (
         input.expectedPayloadHash.byteLength !== signedHash.byteLength ||

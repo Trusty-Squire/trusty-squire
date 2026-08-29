@@ -358,6 +358,51 @@ function confidenceAtLeastLow(value: unknown): boolean {
   return value === "low" || value === "medium" || value === "high";
 }
 
+const MAX_PREVERIFIED_MANDATE_RELAY_MS = 18 * 60 * 1_000;
+
+function isJwtExpired(error: unknown): boolean {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "ERR_JWT_EXPIRED"
+  );
+}
+
+async function verifyRelayedAssertion(
+  jws: string,
+  jwks: ReturnType<typeof createLocalJWKSet>,
+  expectedAudience: string,
+): Promise<JWTPayload> {
+  const options = {
+    issuer: "https://vouchflow.dev",
+    audience: expectedAudience,
+  } as const;
+  try {
+    return (await jwtVerify(jws, jwks, options)).payload;
+  } catch (error) {
+    if (!isJwtExpired(error)) throw error;
+    const decoded = decodeJwt(jws);
+    const issuedAt = decoded.iat;
+    const expiresAt = decoded.exp;
+    const now = Date.now();
+    if (
+      !Number.isSafeInteger(issuedAt) ||
+      !Number.isSafeInteger(expiresAt) ||
+      expiresAt! <= issuedAt! ||
+      now - expiresAt! * 1_000 > MAX_PREVERIFIED_MANDATE_RELAY_MS
+    ) {
+      throw new Error("mandate_assertion_expired");
+    }
+    return (
+      await jwtVerify(jws, jwks, {
+        ...options,
+        currentDate: new Date((expiresAt! - 1) * 1_000),
+      })
+    ).payload;
+  }
+}
+
 async function verifyMandate(
   jws: string,
   expectedHash: Uint8Array,
@@ -387,10 +432,15 @@ async function verifyMandate(
   ) {
     throw new Error("invalid_jwks");
   }
-  const { payload } = await jwtVerify(jws, createLocalJWKSet(body as JSONWebKeySet), {
-    issuer: "https://vouchflow.dev",
-    audience: expectedAudience,
-  });
+  // Every candidate returned by this authenticated relay was already checked
+  // at phone submission. Re-check all cryptographic and binding properties,
+  // while allowing only that exact candidate's short-lived assertion to age
+  // within the still-live approval window.
+  const payload = await verifyRelayedAssertion(
+    jws,
+    createLocalJWKSet(body as JSONWebKeySet),
+    expectedAudience,
+  );
   const signedHash = decodePayloadHash(payload.payload_sha256);
   if (!timingSafeEqual(Buffer.from(expectedHash), Buffer.from(signedHash))) {
     throw new Error("payload_hash_mismatch");
@@ -414,6 +464,7 @@ function safeFailureReason(error: unknown): string {
     "payload_hash_mismatch",
     "invalid_mandate_context",
     "insufficient_mandate_confidence",
+    "mandate_assertion_expired",
     "invalid_card_pan",
     "invalid_card_expiry",
   ];

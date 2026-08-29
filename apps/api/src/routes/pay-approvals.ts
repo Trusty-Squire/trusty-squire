@@ -676,6 +676,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
           expectedPayloadHash: payloadHash,
           expectedContext: PAYMENT_VOUCH_CONTEXT,
           expectedAudience: vouchflowAudience,
+          previouslyVerifiedRelay: true,
         });
       } catch (error) {
         const code =

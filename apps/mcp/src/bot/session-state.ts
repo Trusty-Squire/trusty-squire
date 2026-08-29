@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdtempSync, renameSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, renameSync } from "node:fs";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserContext } from "playwright";
+import { seedOperatorIdentityProfile } from "./operator-profile-pool.js";
 
 export type BrowserStorageState = Awaited<ReturnType<BrowserContext["storageState"]>>;
 
@@ -38,6 +39,44 @@ export function createEphemeralProfile(): string {
 
 export async function destroyEphemeralProfile(profileDir: string): Promise<void> {
   await rm(profileDir, { recursive: true, force: true });
+}
+
+/**
+ * Bootstrap an ephemeral profile from a legacy canonical Chrome login.
+ *
+ * Plain-Chrome login intentionally has no Playwright context, so older and
+ * newly connected installations may have Google cookies but no portable
+ * storageState file. The seed helper copies only identity metadata and the
+ * allowlisted Google cookies into this session's private profile; it never
+ * opens the shared profile in Chrome and therefore does not restore the old
+ * cross-session profile lock.
+ */
+export function seedEphemeralIdentityFromCanonical(
+  canonicalProfileDir: string,
+  ephemeralProfileDir: string,
+): boolean {
+  if (!existsSync(canonicalProfileDir)) return false;
+  try {
+    return seedOperatorIdentityProfile(canonicalProfileDir, ephemeralProfileDir);
+  } catch (error) {
+    console.error(
+      `[operator] failed to seed canonical login into private profile: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return false;
+  }
+}
+
+export function sessionStateHasGoogleIdentity(state: BrowserStorageState | undefined): boolean {
+  return (
+    state?.cookies.some(
+      (cookie) =>
+        /(^|\.)google\.com$/i.test(cookie.domain.replace(/^\./, "")) &&
+        GOOGLE_LOGIN_COOKIE_MARKERS.includes(
+          cookie.name as (typeof GOOGLE_LOGIN_COOKIE_MARKERS)[number],
+        ) &&
+        cookie.value.length > 10,
+    ) === true
+  );
 }
 
 /**

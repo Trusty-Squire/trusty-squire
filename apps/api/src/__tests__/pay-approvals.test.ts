@@ -540,6 +540,33 @@ describe("payment approval relay", () => {
     });
   });
 
+  it("marks only a previously accepted relay candidate for bounded expiry handling", async () => {
+    await server.close();
+    const verifier = vi.fn(async () => ({}));
+    server = await buildServer({ deps, vouchVerifier: verifier });
+    const created = await createApproval();
+    const submission = makeSubmission(created);
+
+    const relayed = await relaySubmission(created.id, submission);
+    expect(relayed.approvalStatus).toBe(202);
+    expect(verifier).toHaveBeenNthCalledWith(
+      1,
+      expect.not.objectContaining({ previouslyVerifiedRelay: true }),
+    );
+
+    const confirm = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: submission,
+    });
+    expect(confirm.statusCode).toBe(200);
+    expect(verifier).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ previouslyVerifiedRelay: true }),
+    );
+  });
+
   it("refuses confirmation when approval expires during vouch verification", async () => {
     const created = await createApproval();
     const submission = makeSubmission(created);

@@ -69,6 +69,8 @@ import {
   createEphemeralProfile,
   destroyEphemeralProfile,
   readSessionState,
+  seedEphemeralIdentityFromCanonical,
+  sessionStateHasGoogleIdentity,
   writeSessionState,
 } from "./session-state.js";
 import { CHROME_PROFILE_DIR } from "./profile.js";
@@ -774,7 +776,15 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
   startingBrowsers.add(pending);
   let controller: BrowserController | null = null;
   try {
-    const storageState = await readSessionState(canonicalProfileDir);
+    const savedStorageState = await readSessionState(canonicalProfileDir);
+    // setStorageState clears profile cookies before restoring its snapshot. If
+    // a blank/partial snapshot was published after the ephemeral migration,
+    // prefer the canonical profile's allowlisted Google seed so it survives
+    // launch. Keep the snapshot when no canonical Google identity exists.
+    const seededCanonicalIdentity = sessionStateHasGoogleIdentity(savedStorageState)
+      ? false
+      : seedEphemeralIdentityFromCanonical(canonicalProfileDir, profileDir);
+    const storageState = seededCanonicalIdentity ? undefined : savedStorageState;
     if (pending.cancelRequested) {
       throw new Error("operate_start cancelled: operator server is shutting down");
     }

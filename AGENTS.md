@@ -455,6 +455,28 @@ Preserve that contract when changing browser startup or shutdown: never replace 
 identity-proven scope with root-PID-only signaling or broad `pkill`. The strict
 containment follow-up is `ts-operator-browser-cgroup-containment` in `TODOS.md`.
 
+### 13. Ephemeral operator profiles need a legacy Google-identity bridge
+
+The supported plain-Chrome login path cannot produce Playwright `storageState`, and
+`BrowserContext.setStorageState()` clears cookies already present in a persistent
+profile. When starting a private operator profile, preserve the fallback in
+`apps/mcp/src/bot/session-state.ts`: if the saved snapshot has no Google identity,
+copy only the allowlisted canonical Google cookies plus Chrome `Local State`, and do
+not subsequently apply the partial snapshot. Never solve this by reopening the
+canonical profile or restoring a shared-profile lock; parallel isolated sessions are
+the contract.
+
+### 14. Payment mandate expiry has separate acceptance and relay semantics
+
+Vouchflow assertions can expire while an already-verified, nonce-bound payment
+candidate waits for the operator to resume. `POST /approve` must always verify at
+the current time. Only `/confirm` and the MCP consumer of that authenticated relay
+may use the bounded previously-verified path in
+`apps/api/src/services/vouch-mandate.ts` and `apps/mcp/src/bot/pay-operator.ts`.
+That path must still verify signature, issuer, audience, context, payload binding,
+confidence, and the outer approval lifetime; never turn the relay exception into a
+first-acceptance clock tolerance.
+
 ## Final note
 
 You are reading this file because a prior agent burned four version numbers, confused users, and forced a human to intervene. The agent was not malicious. It was not lazy. It was pattern-matching on its own prose instead of on tool output.

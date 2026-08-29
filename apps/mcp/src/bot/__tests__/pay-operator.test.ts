@@ -59,6 +59,8 @@ type Mode =
   | "wrong_recipient"
   | "wrong_issuer"
   | "wrong_audience"
+  | "expired_relay"
+  | "stale_expired_relay"
   | "audit_failure"
   | "low_confidence";
 
@@ -175,7 +177,7 @@ async function harness(
       })!;
       const reviewAad = createHash("sha256").update(reviewCanonical, "utf8").digest();
       const candidateAad = reviewCandidate ? reviewAad : aad;
-      const assertion = await new SignJWT({
+      let assertionBuilder = new SignJWT({
         payload_sha256: candidateAad.toString("base64url"),
         context: "purchase",
         confidence: mode === "low_confidence" ? "low" : "high",
@@ -187,8 +189,17 @@ async function harness(
             ? "https://other-issuer.example"
             : "https://vouchflow.dev",
         )
-        .setAudience(mode === "wrong_audience" ? "other-customer" : "customer_test")
-        .sign(privateKey);
+        .setAudience(mode === "wrong_audience" ? "other-customer" : "customer_test");
+      if (mode === "expired_relay" || mode === "stale_expired_relay") {
+        assertionBuilder = assertionBuilder
+          .setIssuedAt(
+            Math.floor(Date.now() / 1_000) - (mode === "stale_expired_relay" ? 1_260 : 120),
+          )
+          .setExpirationTime(
+            Math.floor(Date.now() / 1_000) - (mode === "stale_expired_relay" ? 1_140 : 60),
+          );
+      }
+      const assertion = await assertionBuilder.sign(privateKey);
       const recipient =
         mode === "wrong_recipient"
           ? (await generateOperatorKeypair()).publicKey
@@ -205,7 +216,9 @@ async function harness(
           mode === "review_then_happy" ||
           mode === "confirm_response_lost" ||
           mode === "confirm_response_lost_changed" ||
-          mode === "junk_then_happy"
+          mode === "junk_then_happy" ||
+          mode === "expired_relay" ||
+          mode === "stale_expired_relay"
             ? "pending"
             : "approved",
         ...checkout,
@@ -766,6 +779,24 @@ describe("operate_pay", () => {
     expect(result).toMatchObject({
       status: "payment_mandate_rejected",
       reason: "mandate_verification_failed",
+    });
+    expect(filledCards).toHaveLength(0);
+    expect(auditBodies).toHaveLength(0);
+  });
+
+  it("accepts a recently expired assertion already verified by the approval relay", async () => {
+    const { result, filledCards } = await harness("expired_relay");
+
+    expect(result).toMatchObject({ status: "payment_submitted" });
+    expect(filledCards).toEqual([SYNTHETIC_CARD]);
+  });
+
+  it("rejects an expired relayed assertion outside the approval lifetime", async () => {
+    const { result, auditBodies, filledCards } = await harness("stale_expired_relay");
+
+    expect(result).toMatchObject({
+      status: "payment_mandate_verification_failed",
+      reason: "mandate_assertion_expired",
     });
     expect(filledCards).toHaveLength(0);
     expect(auditBodies).toHaveLength(0);
