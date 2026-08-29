@@ -1,4 +1,3 @@
-import { createHmac } from "node:crypto";
 import { Buffer } from "node:buffer";
 import type { InteractiveElement } from "./browser.js";
 
@@ -92,12 +91,15 @@ export interface SafeObservationIndexV2 {
 
 /**
  * The only V2 state retained between observations.  These rows have already
- * crossed the allowlist seal: they contain HMAC refs and code-owned enums,
+ * crossed the allowlist seal: they contain generation-bound index refs and
+ * code-owned enums,
  * never browser-use names, DOM values, or page copy.
  */
 export interface SafeObservationBaselineV2 {
   /** Internal HMAC page identity; never emitted or persisted outside the session. */
   pageKey: string;
+  /** The generation encoded into every current short action index. */
+  snapshotGeneration: number;
   stage: SafeStageV2;
   semantics: SafePageSemanticsV2;
   byRef: Map<string, SafeControlV2>;
@@ -113,6 +115,38 @@ export function equalSafePageSemanticsV2(
   right: SafePageSemanticsV2,
 ): boolean {
   return left.title === right.title && (left.headings?.[0] ?? "") === (right.headings?.[0] ?? "");
+}
+
+const COMPACT_V2_HANDLE_RE = /^@e:([0-9a-z]+)\.([0-9a-z]+)$/i;
+
+/**
+ * Resolve a compact index only when it is a canonical handle for the current
+ * snapshot generation AND a member of that snapshot's sealed map. This is the
+ * complete authorization boundary for short indices: callers must never turn
+ * an unknown @e: value into a label or legacy-ref lookup.
+ */
+export function compactV2LegacyRefForHandle(
+  handles: ReadonlyMap<string, string>,
+  generation: number,
+  target: string,
+): string | null {
+  const match = COMPACT_V2_HANDLE_RE.exec(target);
+  if (match === null) return null;
+  const generationRaw = match[1]!.toLowerCase();
+  const indexRaw = match[2]!.toLowerCase();
+  const parsedGeneration = Number.parseInt(generationRaw, 36);
+  const parsedIndex = Number.parseInt(indexRaw, 36);
+  if (
+    !Number.isSafeInteger(parsedGeneration) ||
+    !Number.isSafeInteger(parsedIndex) ||
+    parsedIndex < 1 ||
+    parsedGeneration !== generation ||
+    parsedGeneration.toString(36) !== generationRaw ||
+    parsedIndex.toString(36) !== indexRaw
+  ) {
+    return null;
+  }
+  return handles.get(target) ?? null;
 }
 
 type WireControlV2 = [string, string, string?];
@@ -369,37 +403,23 @@ function browserUseNodeFor(
   return candidates.find((node) => safeDescriptionV2(node.name) === localName) ?? candidates[0] ?? null;
 }
 
-export function safeV2Ref(secret: Buffer, legacyRef: string): string {
-  return `@e:${createHmac("sha256", secret).update(legacyRef).digest("base64url").slice(0, 12)}`;
-}
-
 export function buildSafeControlsV2(args: {
   elements: readonly InteractiveElement[];
   legacyRefs: ReadonlyMap<InteractiveElement, string>;
-  secret: Buffer;
+  generation: number;
   pageOrigin: string;
   selected: readonly BrowserUseSelectedNode[];
-  /** Safe refs selected by browser-use on the preceding observation. */
-  previouslySelected?: ReadonlySet<string>;
 }): { rows: SafeControlV2[]; byRef: Map<string, string> } {
-  const rows: Array<{ row: SafeControlV2; priority: number }> = [];
-  const byRef = new Map<string, string>();
+  const rows: Array<{ legacy: string; row: Omit<SafeControlV2, "ref">; priority: number }> = [];
   const claimed = new Set<BrowserUseSelectedNode>();
   for (const el of args.elements) {
     if (el.visible !== true || el.topmost === false) continue;
     const role = roleOf(el);
     const legacy = args.legacyRefs.get(el);
     if (role === null || legacy === undefined) continue;
-    const ref = safeV2Ref(args.secret, legacy);
-    // Browser-use is authoritative for a NEW candidate. Once it has selected a
-    // candidate, retain only its sealed HMAC ref through this page's delta
-    // stream. Browser-use's serializer can legitimately vary its viewport
-    // shortlist between identical snapshots; without this tiny safe cache that
-    // variation looks like DOM churn and defeats the delta protocol.
     const selectedNode = browserUseNodeFor(el, args.selected, claimed);
-    if (selectedNode === null && !args.previouslySelected?.has(ref)) continue;
-    if (selectedNode !== null) claimed.add(selectedNode);
-    byRef.set(ref, legacy);
+    if (selectedNode === null) continue;
+    claimed.add(selectedNode);
     const state = stateOf(el);
     const action = intentOf(el);
     const field = fieldOf(el);
@@ -407,9 +427,8 @@ export function buildSafeControlsV2(args: {
     // Browser-use is the observation source. The action inventory contributes
     // only the local @e: binding and finite state/action enums; its own labels
     // are never emitted when an upstream control is present.
-    const name = selectedNode === null ? controlDescription(el) : safeDescriptionV2(selectedNode.name);
-    const row: SafeControlV2 = {
-      ref,
+    const name = safeDescriptionV2(selectedNode.name);
+    const row: Omit<SafeControlV2, "ref"> = {
       role,
       visibility: el.inViewport ? "viewport" : "near",
       frame: frameOf(el, args.pageOrigin),
@@ -421,10 +440,18 @@ export function buildSafeControlsV2(args: {
         ? {}
         : { choice: `${cardChoice.position}/${cardChoice.total}` }),
     };
-    rows.push({ row, priority: (el.inViewport ? 0 : 10) + (role === "button" ? 0 : 1) });
+    rows.push({ legacy, row, priority: (el.inViewport ? 0 : 10) + (role === "button" ? 0 : 1) });
   }
-  rows.sort((a, b) => a.priority - b.priority || a.row.ref.localeCompare(b.row.ref));
-  return { rows: rows.map(({ row }) => row), byRef };
+  rows.sort((a, b) => a.priority - b.priority || a.legacy.localeCompare(b.legacy));
+  const byRef = new Map<string, string>();
+  const safeRows = rows.map(({ legacy, row }, index) => {
+    // Per-snapshot compact index. Generation binding is checked before the
+    // legacy live-ref is ever resolved (see resolveSessionTarget).
+    const ref = `@e:${args.generation.toString(36)}.${(index + 1).toString(36)}`;
+    byRef.set(ref, legacy);
+    return { ref, ...row };
+  });
+  return { rows: safeRows, byRef };
 }
 
 export function encodeV2Page(args: {

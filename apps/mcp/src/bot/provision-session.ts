@@ -42,6 +42,7 @@ import type {
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import {
   buildSafeControlsV2,
+  compactV2LegacyRefForHandle,
   diffSafeControlsV2,
   equalSafePageSemanticsV2,
   encodeV2Delta,
@@ -1937,14 +1938,23 @@ export function resolveTarget(
   return best?.el ?? null;
 }
 
-// V2 refs are HMACs of the legacy stable identity.  Translate only inside the
-// owning session, then retain the existing live re-resolution/stale semantics.
+// V2 refs are generation-bound snapshot indices. They are accepted only from
+// the CURRENT sealed action map; a missing/stale/forged @e: handle never falls
+// back to label or legacy-ref resolution.
 function resolveSessionTarget(
-  session: Pick<Session, "compactV2Refs">,
+  session: Pick<Session, "compactV2Refs" | "compactV2Index">,
   elements: readonly InteractiveElement[],
   target: string,
 ): InteractiveElement | null {
-  return resolveTarget(elements, session.compactV2Refs.get(target) ?? target);
+  const index = session.compactV2Index;
+  if (target.startsWith("@e:") && index !== null) {
+    const legacy = compactV2LegacyRefForHandle(session.compactV2Refs, index.generation, target);
+    return legacy === null ? null : resolveTarget(elements, legacy);
+  }
+  // V1's feature-flagged consumers still issue legacy stable refs. A V2
+  // session, by contrast, rejects *every* @e: target outside its sealed map,
+  // including malformed generation/index strings, before legacy resolution.
+  return resolveTarget(elements, target);
 }
 
 // Squire's OWN control plane. The operator browser runs in the connect-seeded
@@ -4664,22 +4674,43 @@ function compactV2Observation(
   try {
     pageOrigin = new URL(session.browser.currentUrl()).origin;
   } catch {}
-  const safe = buildSafeControlsV2({
-    elements,
-    legacyRefs,
-    secret: session.compactV2Secret,
-    pageOrigin,
-    selected,
-    ...(session.compactV2Previous === null
-      ? {}
-      : { previouslySelected: new Set(session.compactV2Previous.byRef.keys()) }),
-  });
   const stage = safeStageV2(session.browser.currentUrl(), elements);
   const semantics = safePageSemanticsV2(semanticSource);
   const pageKey = compactV2PageKey(session);
   const previous = session.compactV2Previous;
+  const samePage = previous !== null && previous.pageKey === pageKey;
+  let snapshotGeneration = samePage ? previous.snapshotGeneration : generation;
+  let safe = buildSafeControlsV2({
+    elements,
+    legacyRefs,
+    generation: snapshotGeneration,
+    pageOrigin,
+    selected,
+  });
+  let delta = samePage ? diffSafeControlsV2(previous, stage, safe.rows) : null;
+  // An index belongs to exactly one action-map snapshot. If structural state
+  // changed, publish a complete fresh map with a new generation rather than
+  // letting a prior short index drift onto a new control.
+  const requiresResync =
+    !samePage ||
+    delta === null ||
+    delta.stageChanged ||
+    delta.added.length > 0 ||
+    delta.changed.length > 0 ||
+    delta.removed.length > 0;
+  if (requiresResync && snapshotGeneration !== generation) {
+    snapshotGeneration = generation;
+    safe = buildSafeControlsV2({
+      elements,
+      legacyRefs,
+      generation: snapshotGeneration,
+      pageOrigin,
+      selected,
+    });
+    delta = null;
+  }
   const index: SafeObservationIndexV2 = {
-    generation,
+    generation: snapshotGeneration,
     stage,
     semantics,
     rows: safe.rows,
@@ -4692,30 +4723,31 @@ function compactV2Observation(
   session.compactV2Refs = safe.byRef;
   session.compactV2Previous = {
     pageKey,
+    snapshotGeneration,
     stage,
     semantics,
     byRef: new Map(safe.rows.map((row) => [row.ref, row])),
   };
   session.prevObserve = null;
-  if (previous !== null && previous.pageKey === pageKey) {
-    const delta = encodeV2Delta({
+  if (previous !== null && !requiresResync && delta !== null) {
+    const encodedDelta = encodeV2Delta({
       stage,
       // The first V2 page establishes semantic essentials. On a delta they
       // are sticky, so resend only a sealed semantic change rather than the
       // same title/heading on every harmless re-observe.
       semantics: equalSafePageSemanticsV2(previous.semantics, semantics) ? undefined : semantics,
-      delta: diffSafeControlsV2(previous, stage, safe.rows),
+      delta,
     });
     // A high-churn delta is less useful than a fresh paged map.  This also
     // guarantees any overflow remains in the MCP cursor protocol.
-    if (delta !== null) return { ...(delta as unknown as Observation), url: "", text: "" };
+    if (encodedDelta !== null) return { ...(encodedDelta as unknown as Observation), url: "", text: "" };
   }
   const page = encodeV2Page({
     sessionId: session.id,
     stage: index.stage,
     semantics,
     rows: index.rows,
-    cursorFor: (offset) => compactV2Cursor(session, generation, offset),
+    cursorFor: (offset) => compactV2Cursor(session, snapshotGeneration, offset),
   });
   return { ...(page.payload as unknown as Observation), url: "", text: "" };
 }
@@ -4755,7 +4787,13 @@ function compactV2UnavailableObservation(
   };
   session.compactV2Index = index;
   session.compactV2Refs = new Map();
-  session.compactV2Previous = { pageKey, stage, semantics, byRef: new Map() };
+  session.compactV2Previous = {
+    pageKey,
+    snapshotGeneration: generation,
+    stage,
+    semantics,
+    byRef: new Map(),
+  };
   const page = encodeV2Page({
     sessionId: session.id,
     stage,

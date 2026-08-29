@@ -1,9 +1,9 @@
-import { randomBytes } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { describe, expect, it } from "vitest";
 import {
   OBSERVE_V2_MAX_WIRE_BYTES,
   buildSafeControlsV2,
+  compactV2LegacyRefForHandle,
   diffSafeControlsV2,
   equalSafePageSemanticsV2,
   encodeV2Delta,
@@ -52,7 +52,7 @@ describe("compact observation v2", () => {
     const safe = buildSafeControlsV2({
       elements: [input],
       legacyRefs: refs,
-      secret: randomBytes(32),
+      generation: 1,
       pageOrigin: "https://merchant.invalid",
       selected: [{ backend_node_id: 1, tag: "button", role: "button", name: planted }],
     });
@@ -102,7 +102,7 @@ describe("compact observation v2", () => {
     const safe = buildSafeControlsV2({
       elements: dense,
       legacyRefs: new Map(dense.map((control, index) => [control, `@e:legacy_${index}`])),
-      secret: randomBytes(32),
+      generation: 1,
       pageOrigin: "https://merchant.invalid",
       selected: dense.map((_, index) => ({
         backend_node_id: index + 1,
@@ -138,7 +138,7 @@ describe("compact observation v2", () => {
     const safe = buildSafeControlsV2({
       elements: [input],
       legacyRefs: new Map([[input, "@e:email_1"]]),
-      secret: randomBytes(32),
+      generation: 1,
       pageOrigin: "https://merchant.invalid",
       selected: [{ backend_node_id: 1, tag: "input", role: "textbox", name: "anything" }],
     });
@@ -146,26 +146,34 @@ describe("compact observation v2", () => {
     expect(JSON.stringify(safe.rows)).not.toContain("private@example.test");
   });
 
-  it("keeps only an already browser-use-authorized sealed ref across a transient shortlist change", () => {
+  it("issues short generation-bound indices in table order", () => {
     const button = element({ visibleText: "private merchant copy" });
     const refs = new Map<InteractiveElement, string>([[button, "@e:stable_button"]]);
     const initial = buildSafeControlsV2({
       elements: [button],
       legacyRefs: refs,
-      secret: Buffer.alloc(32, 7),
+      generation: 1,
       pageOrigin: "https://merchant.invalid",
       selected: [{ backend_node_id: 1, tag: "button", role: "button", name: "private merchant copy" }],
     });
     const repeated = buildSafeControlsV2({
       elements: [button],
       legacyRefs: refs,
-      secret: Buffer.alloc(32, 7),
+      generation: 2,
       pageOrigin: "https://merchant.invalid",
-      selected: [],
-      previouslySelected: new Set(initial.rows.map((row) => row.ref)),
+      selected: [{ backend_node_id: 1, tag: "button", role: "button", name: "private merchant copy" }],
     });
-    expect(repeated.rows).toEqual(initial.rows);
-    expect(repeated.rows[0]).toEqual(expect.objectContaining({ name: "private merchant copy" }));
+    expect(initial.rows[0]).toEqual(expect.objectContaining({ ref: "@e:1.1", name: "private merchant copy" }));
+    expect(repeated.rows[0]).toEqual(expect.objectContaining({ ref: "@e:2.1" }));
+  });
+
+  it("accepts only current snapshot index members", () => {
+    const current = new Map([["@e:2.1", "@e:legacy_current"]]);
+    expect(compactV2LegacyRefForHandle(current, 2, "@e:2.1")).toBe("@e:legacy_current");
+    expect(compactV2LegacyRefForHandle(current, 2, "@e:1.1")).toBeNull(); // stale generation
+    expect(compactV2LegacyRefForHandle(current, 2, "@e:2.2")).toBeNull(); // out of range
+    expect(compactV2LegacyRefForHandle(current, 2, "@e:2.01")).toBeNull(); // non-canonical forgery
+    expect(compactV2LegacyRefForHandle(current, 3, "@e:2.1")).toBeNull(); // page-change snapshot
   });
 
   it("uses the browser-use serializer label while retaining TS's local action ref", () => {
@@ -173,7 +181,7 @@ describe("compact observation v2", () => {
     const safe = buildSafeControlsV2({
       elements: [button],
       legacyRefs: new Map([[button, "@e:continue"]]),
-      secret: Buffer.alloc(32, 7),
+      generation: 1,
       pageOrigin: "https://merchant.invalid",
       selected: [
         {
@@ -204,7 +212,7 @@ describe("compact observation v2", () => {
         [button, "@e:continue"],
         [cardLike, "@e:card"],
       ]),
-      secret: randomBytes(32),
+      generation: 1,
       pageOrigin: "https://merchant.invalid",
       selected: [
         { backend_node_id: 1, tag: "button", role: "button", name: "Continue to registration" },
@@ -288,6 +296,7 @@ describe("compact observation v2", () => {
     const delta = diffSafeControlsV2(
       {
         pageKey: "same-page",
+        snapshotGeneration: 1,
         stage: "form",
         semantics: {},
         byRef: new Map([[before.ref, before], ["@e:removed", before]]),
