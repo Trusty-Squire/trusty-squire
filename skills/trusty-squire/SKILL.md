@@ -83,6 +83,11 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
 
 - `operate_start`, `operate_observe`, `operate_act` — open the real website and
   drive it one step at a time (signup, sign-in, form fill), clearing bot gates.
+- When a Compact V2 observation returns `overflow.next_cursor`, or the task
+  names a control that is not on the first page, use `operate_observe_query`.
+  Matching stays inside the browser and returns only screened opaque handles;
+  follow the [README tool guide](https://github.com/Trusty-Squire/trusty-squire#mcp-tools)
+  instead of reading a V1 snapshot file.
 - For shopping, use `operate_act { kind: "cart_add" }` instead of clicking an
   add-to-cart control directly. Keep its idempotency key stable across retries
   and bind the canonical product identity plus selected-variant options hash.
@@ -161,8 +166,9 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   use `operate_act` for split-checkout navigation and order placement after a
   successful card fill as described above; do not guess or claim a signup
   finished when it did not.
-- Card controls marked `interaction: "vaulted_card_only"` must be handled with
-  their recommended `operate_pay { phase: "fill_card" }` action. Never type a
+- Compact V2 card controls carry the code-owned `f=payment` fact; legacy V1
+  controls use `payment_field` and `interaction: "vaulted_card_only"`. Handle
+  either form with the recommended `operate_pay { phase: "fill_card" }` action. Never type a
   PAN or Luhn-valid card number through `operate_act`; a refusal points back to
   `operate_pay`. Follow the
   [README payment guide](https://github.com/Trusty-Squire/trusty-squire#one-prompt)

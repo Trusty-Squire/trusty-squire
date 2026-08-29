@@ -13,6 +13,7 @@ import {
   startProvisionSession,
   observe,
   captureScreenshot,
+  observeQuery,
   act,
   cartAdd,
   formSelectMany,
@@ -24,6 +25,7 @@ import {
   finishProvisionSessionWithPreparation,
   observedHostsForSession,
   currentProvisionUrl,
+  isCompactV2ProvisionSession,
   stashSecretSlot,
   readSecretSlotValue,
   getSessionUserEmail,
@@ -39,6 +41,7 @@ import {
   type ExtractResult,
   manualCardEntryBlockReason,
 } from "../bot/provision-session.js";
+import { safeDescriptionV2 } from "../bot/compact-observation-v2.js";
 import { signSkillForPublish } from "../skill-cli/signing.js";
 import {
   readRecipe,
@@ -335,13 +338,14 @@ const startSchema = z.object({
 });
 
 const OBSERVE_DELTA_CONTRACT =
-  "Compact observations carry their elements in `el_table`: a TAB-delimited table whose FIRST line is the " +
+  "The following observation rules are V1-only (TRUSTY_SQUIRE_OBSERVE_V2=off or shadow). " +
+  "In V1 compact observations, elements are carried in `el_table`: a TAB-delimited table whose FIRST line is the " +
   "header (tab-joined column names, a subset of ref,label,tag,role,type,value_len,checked,href,testId," +
   "topmost,occluded_by, always starting ref,label,tag) and each following line is ONE element (tab-joined " +
   "cells in header order). An empty cell = that field is absent for that element; value_len is a number, " +
   "checked/topmost are true/false; a tab, newline, carriage-return or backslash inside a cell is " +
   "backslash-escaped (\\t \\n \\r \\\\). el_table is absent when the emit has no element rows. " +
-  "stable refs remain reusable across observes while their controls still exist. " +
+  "In V1, stable refs remain reusable across observes while their controls still exist. " +
   "The first observe, a URL change, or high churn returns delta:false as a full resync: discard the prior " +
   "element map and rebuild it from this el_table (or from snapshot_file — the table may omit collapsed " +
   "chrome links, which the file keeps); a delta:false with NO snapshot_file already has the complete, " +
@@ -350,19 +354,41 @@ const OBSERVE_DELTA_CONTRACT =
   "in removed, and retain the remaining elements counted by unchanged. text_unchanged:true means reuse the " +
   "prior text because text is empty. snapshot_file points to the complete current snapshot (all elements, " +
   "with path). An empty delta (no el_table) means nothing changed, not an empty page. " +
-  'detail:"full" instead returns the legacy `elements` JSON array (every field), never el_table. ' +
+  'In V1, detail:"full" instead returns the legacy `elements` JSON array (every field), never el_table. ' +
   "If a control you can see in `text`/the screenshot has NO row in el_table (a bare unlabeled clickable " +
   'div — e.g. some SPA "Add To Cart" buttons), it has no ref: click it with operate_act click/js_click ' +
   'target=`text="…"` or `css=…` (see operate_act). `click` respects actionability and throws if an overlay ' +
   "intercepts; dismiss the overlay or deliberately use `js_click`, which directly dispatches through a " +
-  "transparent overlay. ";
+  "transparent overlay. Under default compact-v2, only handles from the current sealed action map are accepted; " +
+  "browser-driving actions invalidate them. On opaque `reobserve_required`, call operate_observe and choose a new " +
+  "handle; do not retry the old handle or use V1 replacement candidates or locator fallback. ";
+
+const COMPACT_V2_CONTRACT =
+  "When format is `compact-v2`, use its sealed map: session_id is the continuation handle; `stage` is a finite enum; " +
+  "semantic carries the screened title and primary visible heading; safe_table rows use [ref,role,facts?], where role is " +
+  "b=button,l=link,t=textbox,s=select,c=checkbox,r=radio,tb=tab,m=menuitem,f=file. facts is a pipe-delimited string: " +
+  "an optional first unkeyed segment is the screened short label; labels containing `|` or beginning like a keyed fact " +
+  "are instead encoded as n=<label>, with `%` encoded as `%25` and `|` as `%7C` (decode `%7C` before `%25`). " +
+  "The label is followed by any present s=<state bitset>, a=<action>, " +
+  "f=<field>, q=<choice position>/<choice total>, and x=<frame> segments. Fact-only rows begin with a keyed segment. " +
+  "State bitset codes are c=checked,u=unchecked,d=disabled,r=required; frame codes are x=s for a same-origin child " +
+  "and x=x for a cross-origin child, while an omitted x means the main frame. Actions are search,close,next,previous,submit," +
+  "continue,login,signup,add_to_cart,view_cart,checkout,payment,destructive; fields are email,password,username,name,phone,search,address," +
+  "city,region,postal,country,date,quantity,promo,payment. Short labels are included for viewport-prioritized controls; " +
+  "card/secret-shaped text and field values are never emitted. For a named product/control from the task, " +
+  "call operate_observe_query with those task words; it returns matching actionable refs with screened labels " +
+  "and code-owned facts, but never field values, snapshots, or raw DOM. Use overflow.next_cursor to page. `detail:full` does not bypass this seal while V2 is enabled; " +
+  "set TRUSTY_SQUIRE_OBSERVE_V2=off for the legacy format. A delta:true delta retains the preceding V2 table, then upserts tuple rows in safe_table, " +
+  "removes refs in removed, and updates stage or semantic only when either changed. Omitted semantic title/heading remains from the preceding V2 page. " +
+  "A delta with none of those fields means the sealed view is unchanged. ";
 
 export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   name: "operate_start",
   description:
     "Begin an interactive website task: opens a scoped browser on the " +
     "user's machine at service_url and returns the initial compact observation " +
-    "{session_id, url, text, el_table, delta, snapshot_file}. " +
+    "(legacy el_table/delta or compact-v2 safe_table). " +
+    COMPACT_V2_CONTRACT +
     OBSERVE_DELTA_CONTRACT +
     "YOU are the planner — read the observation, then drive the signup, setup, or " +
     "checkout with operate_act (and operate_pay for a purchase), re-read with " +
@@ -407,26 +433,21 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
 
 const observeSchema = z.object({
   session_id: z.string().min(1),
-  // Payload verbosity. Default "compact" (stable-ref element/text deltas plus a
-  // complete snapshot pointer). Pass "full" for the legacy
-  // screen+accessibility+full-field payload on a genuinely ambiguous step.
+  // Payload verbosity within the selected observation mode. In V2 both values
+  // remain sealed; in V1, full requests the legacy expanded payload.
   detail: z.enum(["compact", "full"]).optional(),
 });
 
 export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
   name: "operate_observe",
   description:
-    "Re-read the current page of an operate session. DEFAULT is a COMPACT " +
-    "payload whose elements ride in `el_table` (a tab-delimited table; each row's " +
-    "stable `ref` is the operate_act.target) with compact label/role/href/value_len " +
-    "columns and `frame_origin` on child-frame controls; ordinary same- and " +
-    "cross-origin frames are included, while known captcha challenge frames stay " +
-    "behind the dedicated captcha flow. Path is retained only in snapshot_file, " +
-    "and redundant screen/accessibility trees are omitted. " +
+    "Re-read the current page of an operate session. The default compact-v2 mode returns the sealed " +
+    'safe_table action map; `detail:"full"` remains sealed and does not restore legacy fields. ' +
+    COMPACT_V2_CONTRACT +
+    "Only explicitly selected V1 modes use el_table, reusable stable refs, locator fallbacks, snapshot_file, " +
+    "or the legacy expanded elements payload. " +
     OBSERVE_DELTA_CONTRACT +
-    "Pass " +
-    'detail:"full" for the legacy screen+accessibility+full-field payload on a ' +
-    "genuinely ambiguous step.",
+    'In V1 only, pass detail:"full" for the legacy screen+accessibility+full-field payload on a genuinely ambiguous step.',
   inputSchema: observeSchema,
   jsonInputSchema: {
     type: "object",
@@ -464,7 +485,8 @@ export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
     "the whole page (default: viewport; full_page:true for the whole scrollable page) or ONE specific " +
     "frame in isolation via frame_index or frame_url_contains, so a cross-origin challenge iframe (a " +
     "3-D Secure ACS frame, a captcha) can be captured on its own even when it won't show clearly inside " +
-    "a full-page shot. Use this when text/el_table from operate_observe isn't enough to tell what state " +
+    "a full-page shot. Use this when safe_table from Compact V2, or text/el_table from an explicitly " +
+    "selected V1 session, isn't enough to tell what state " +
     "a stuck page is actually in — a challenge that never advances, an unexpected layout, a captcha you " +
     "need to SEE. Read-only: never navigates, clicks, types, submits, or steals focus; it only reads " +
     "pixels. Money-fence: refuses (screenshot_unavailable_sealed_context) during an active card fill or " +
@@ -491,6 +513,53 @@ export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
         : {}),
       ...(args.full_page !== undefined ? { fullPage: args.full_page } : {}),
     });
+  },
+};
+
+const observeQuerySchema = z.object({
+  session_id: z.string().min(1),
+  // This string is matched only inside the live session; returned rows remain
+  // the compact-v2 enum-only action map.
+  query: z.string().max(160).default(""),
+  role: z
+    .enum(["button", "link", "textbox", "select", "checkbox", "radio", "tab", "menuitem", "file"])
+    .optional(),
+  cursor: z.string().max(1_024).optional(),
+});
+
+export const provisionObserveQueryTool: Tool<z.infer<typeof observeQuerySchema>> = {
+  name: "operate_observe_query",
+  description:
+    "Page compact-v2 overflow or named-control lookup. Supply the product/control words already in the task; " +
+    "matching happens only inside the live browser and returns actionable opaque refs plus finite role/state/action " +
+    "enums. Use overflow.next_cursor to page controls, or hint_overflow.next_cursor with an empty query to page " +
+    "trusted start routing metadata; never read a snapshot file.",
+  inputSchema: observeQuerySchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id"],
+    properties: {
+      session_id: { type: "string" },
+      query: { type: "string" },
+      role: {
+        type: "string",
+        enum: [
+          "button",
+          "link",
+          "textbox",
+          "select",
+          "checkbox",
+          "radio",
+          "tab",
+          "menuitem",
+          "file",
+        ],
+      },
+      cursor: { type: "string" },
+    },
+  },
+  async handler(args) {
+    return await observeQuery(args.session_id, args.query, args.role, args.cursor);
   },
 };
 
@@ -527,7 +596,10 @@ const storeJsonProps = {
 const formSelectionsSchema = z
   .record(z.string().min(1).max(200), z.string().min(1).max(4096))
   .refine((value) => Object.keys(value).length > 0, "Provide at least one selection")
-  .refine((value) => Object.keys(value).length <= 12, "At most 12 selections per call");
+  .refine((value) => Object.keys(value).length <= 12, "At most 12 selections per call")
+  .describe(
+    "Map each current Compact V2 @e: handle, or V1 observed label/ref, to its visible option text.",
+  );
 
 interface CartAddArgs {
   session_id: string;
@@ -826,10 +898,10 @@ const ACTION_REPAIR_BY_KIND: Partial<Record<ActionKind, ActionRepair>> = {
     example: {
       session_id: "<session_id>",
       kind: "select_many",
-      selections: { "Observed field label": "Visible option label" },
+      selections: { "@e:<current-handle>": "Visible option label" },
     },
     safe_alternative:
-      "Retry select_many with selections in the intended order. It selects sequentially, re-observes after each success, and returns partial results; do not replace it with parallel select calls." +
+      "Retry select_many with selections in the intended order. Compact V2 requires current @e: handles; V1 accepts observed labels or refs. It selects sequentially, re-observes after each success, and returns partial results; do not replace it with parallel select calls." +
       manualCardRecovery,
   },
   extract: {
@@ -1046,7 +1118,116 @@ async function handleFormSelectMany(args: FormSelectManyArgs) {
   return await formSelectMany(args.session_id, args.selections);
 }
 
+const COMPACT_V2_PUBLIC_CODE_VALUES = new Set([
+  "+1",
+  "0",
+  "added",
+  "already_in_cart",
+  "best_effort",
+  "cart",
+  "checkout",
+  "click",
+  "code",
+  "compact-v2",
+  "credential_unavailable",
+  "false",
+  "fill_card",
+  "informational_only",
+  "interaction_required",
+  "manual_card_entry_refused",
+  "operate_act",
+  "operate_observe",
+  "operate_pay",
+  "product",
+  "proceed_to_checkout",
+  "true",
+  "unknown",
+  "verification_code",
+]);
+
+const COMPACT_V2_PUBLIC_CORRELATION_KEYS = new Set(["reference", "session_id", "slot"]);
+
+const COMPACT_V2_PUBLIC_CODE_KEYS = new Set([
+  "authority",
+  "cart_delta",
+  "completeness",
+  "gate",
+  "intent",
+  "kind",
+  "missing_prerequisite",
+  "phase",
+  "retry_policy",
+  "resume",
+  "safe_alternative",
+  "stage",
+  "status",
+  "tool",
+  "variant",
+  "wall",
+]);
+
+const COMPACT_V2_OBSERVATION_OWNED_KEYS = new Set([
+  "delta",
+  "format",
+  "generation",
+  "guidance",
+  "hint",
+  "hint_overflow",
+  "oauth",
+  "observed",
+  "overflow",
+  "removed",
+  "safe_table",
+  "semantic",
+  "session_id",
+  "stage",
+  "text",
+  "unchanged",
+  "url",
+  "user_email",
+]);
+
+function compactV2PublicValue(key: string, value: unknown): unknown {
+  if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+  if (key === "credentials") return {};
+  if (key === "code" || key === "link" || key === "source_from") return null;
+  if (key === "preview") return "<sealed>";
+  if (key === "product_identity" || key === "options_hash") return "<requested>";
+  if (
+    (key === "url" || key.endsWith("_url") || key.endsWith("_origin")) &&
+    typeof value === "string"
+  ) {
+    return "";
+  }
+  if (Array.isArray(value)) return value.map((item) => compactV2PublicValue(key, item));
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const observation = (key === "" || key === "observation") && record.format === "compact-v2";
+    return Object.fromEntries(
+      Object.entries(record).map(([nestedKey, nestedValue]) => [
+        nestedKey,
+        observation && COMPACT_V2_OBSERVATION_OWNED_KEYS.has(nestedKey)
+          ? nestedValue
+          : compactV2PublicValue(nestedKey, nestedValue),
+      ]),
+    );
+  }
+  if (typeof value !== "string") return value;
+  if (key === "currency") return /^[A-Z]{3}$/.test(value) ? value : null;
+  if (COMPACT_V2_PUBLIC_CODE_KEYS.has(key) && /^(?:[a-z][a-z0-9_]{0,63}|\+?[0-9]+)$/.test(value)) {
+    return value;
+  }
+  if (COMPACT_V2_PUBLIC_CODE_VALUES.has(value)) return value;
+  if (COMPACT_V2_PUBLIC_CORRELATION_KEYS.has(key)) return value;
+  return safeDescriptionV2(value) ?? "<sealed>";
+}
+
+function compactV2ThickResult<T extends object>(compactV2: boolean, result: T): T {
+  return (compactV2 ? compactV2PublicValue("", result) : result) as T;
+}
+
 async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
+  const compactV2 = isCompactV2ProvisionSession(args.session_id);
   const extracted = await extractCredentials(args.session_id);
 
   // Sealed transfer: capture the primary secret into a session-local slot and
@@ -1072,7 +1253,7 @@ async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
       wantKey !== null ? candidates.find(([k]) => norm(k).includes(wantKey)) : undefined;
     const full = (matched ?? candidates[0])?.[1];
     if (typeof full !== "string" || full.length === 0) {
-      return {
+      return compactV2ThickResult(compactV2, {
         session_id: extracted.session_id,
         url: extracted.url,
         candidate_count: extracted.candidate_count,
@@ -1081,11 +1262,11 @@ async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
         blocked_reason:
           "the secret is still masked/hidden — reveal it first (click the " +
           'show/reveal/copy control near the key), then operate_act { kind: "extract" } again',
-      };
+      });
     }
     const handle = stashSecretSlot(args.session_id, args.into_slot, full);
     // Strip raw credential VALUES from the response — host gets the handle only.
-    return {
+    return compactV2ThickResult(compactV2, {
       session_id: extracted.session_id,
       url: extracted.url,
       candidate_count: extracted.candidate_count,
@@ -1094,11 +1275,11 @@ async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
       ...(extracted.blocked_reason !== undefined
         ? { blocked_reason: extracted.blocked_reason }
         : {}),
-    };
+    });
   }
 
   if (args.store === undefined || Object.keys(extracted.credentials).length === 0) {
-    return extracted;
+    return compactV2ThickResult(compactV2, extracted);
   }
   if (api === null) {
     throw new Error(
@@ -1106,7 +1287,7 @@ async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
     );
   }
   const stored = await persistExtracted(args.session_id, extracted.credentials, args.store, api);
-  return storedExtractResult(extracted, stored);
+  return compactV2ThickResult(compactV2, storedExtractResult(extracted, stored));
 }
 
 async function handleCaptcha(args: CaptchaArgs) {
@@ -1124,13 +1305,14 @@ async function handleAwaitVerification(args: AwaitVerificationArgs) {
 export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
   name: "operate_act",
   description:
-    "Take one action in an operate session, then return the resulting " +
-    "observation. kinds: click (target=element ref, preferably an el_table row's ref), " +
+    "Take one action in an operate session. Under compact-v2 the default follow-up is a sealed delta " +
+    "when its action map is unchanged; call operate_observe or operate_observe_query when you need a new map. " +
+    "kinds: click (target=element ref, preferably a safe_table row's ref), " +
     "type (target + text; model-supplied card-number-shaped text is refused — card payment " +
     "must use operate_pay, which fills a vaulted card without exposing it to the model), " +
     "" +
-    "TARGET FALLBACK (clicking or typing only) — when a control you can SEE (in the " +
-    "observation text or screenshot) has NO ref in el_table (a bare click-handler " +
+    "V1-ONLY TARGET FALLBACK (clicking or typing only) — when a control you can SEE (in the " +
+    "V1 observation text or screenshot) has NO ref in el_table (a bare click-handler " +
     '<div> with no role/label, e.g. a SPA "Add To Cart"), pass target as a locator ' +
     'instead of a ref: `text="Add To Cart"` (a matching clickable or typeable ' +
     "element, case-insensitive, hidden descendants ignored, open shadow roots " +
@@ -1141,8 +1323,9 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "exact text= or a css= selector). `click` is actionability-checked and throws " +
     "if an overlay intercepts; dismiss the overlay or deliberately use `js_click`, " +
     "the explicit direct DOM dispatch that fires through a transparent overlay. " +
-    "Prefer a real ref when one exists; reach for " +
-    "text=/css= only when none does. " +
+    "Prefer a real ref when one exists; reach for text=/css= only when none does. Compact V2 never " +
+    "accepts locator fallback: it requires an opaque handle from the current snapshot/page/generation-" +
+    "scoped action map, with membership as the sole action boundary. " +
     "Observed child-frame refs and locator matches retain their frame origin. " +
     "Same-registrable-domain frames are reachable; other frame actions must pass " +
     "the goto/allow_host domain scope, opaque frames are refused, and type_secret " +
@@ -1174,13 +1357,14 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "cart_add (product_identity + options_hash + idempotency_key — reserve an " +
     "idempotent cart mutation, exact-line post-verify it, and return its postcondition), " +
     "select_many (ordered selections map — select sequentially, re-observe after " +
-    "each success, and retain partial results), extract (into_slot/secret_label/store — " +
+    "each success, and retain partial results; Compact V2 keys are current safe_table @e: handles, " +
+    "while V1 keys may be observed labels or refs), extract (into_slot/secret_label/store — " +
     "reveal masked keys and extract credentials from the current page, sealed slot or vaulted), " +
     "solve_captcha (detect and drive the in-session captcha gate; settled=false carries a " +
     "needs_user{gate,message,remedy} — FAIL FAST and relay it to the user), " +
     "await_verification (sender/into_slot/grant_inbox_consent — read the user's OWN inbox " +
     "through their signed-in browser session for an email verification code/link, sealed " +
-    "into a slot with into_slot). Sealed username/password login lifecycle, never exposing raw " +
+    "into a slot with into_slot; Compact V2 never emits the raw code, link, or sender). Sealed username/password login lifecycle, never exposing raw " +
     "values: login_prepare_signup (login_slot/password_slot/password_length — seal the user's " +
     "captured email and a generated strong password into session slots; fill the signup form " +
     "with type_secret using the returned slots), login_store_signup (service + login_hosts, " +
@@ -1194,12 +1378,13 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "Squire-known address, contact, product_query, or quantity input; type_secret and " +
     "operate_pay record credential and card provenance from their sealed sources. " +
     "When repairing a replay fallback field, pass its replay_step_index and replay_hole. " +
-    "Stable target refs remain reusable while their element exists. If an @e: ref is stale, " +
-    "the response is {status:target_stale, replacement_candidates, retry_policy:do_not_retry_old_ref}; " +
-    "call operate_observe and choose a new ref instead of retrying the old one. " +
+    "Under default compact-v2, each target handle belongs only to the current sealed action map and browser-driving " +
+    "actions invalidate that map. On opaque `reobserve_required`, call operate_observe and choose a new handle; do " +
+    "not retry the old handle. In V1, stable target refs remain reusable while their element exists; a stale @e: " +
+    "ref returns {status:target_stale, replacement_candidates, retry_policy:do_not_retry_old_ref}. " +
     'detail (default "compact") controls the returned payload: "none" skips it ' +
     "entirely for chained fills (then operate_observe before the next ref action), " +
-    '"full" returns the legacy screen+accessibility payload. ' +
+    'in V1, "full" returns the legacy screen+accessibility payload. ' +
     "For legible product/variant hints on a cart-affecting action, pass product_identity and options_hash together; returned checkout_state is best-effort informational state and never a payment charge input. " +
     OBSERVE_DELTA_CONTRACT,
   inputSchema: actSchema,
@@ -1251,7 +1436,8 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
         minProperties: 1,
         maxProperties: 12,
         additionalProperties: { type: "string" },
-        description: "Map each observed field label or @e: ref to its visible option text.",
+        description:
+          "Map each current Compact V2 @e: handle, or V1 observed label/ref, to its visible option text.",
       },
       into_slot: { type: "string" },
       secret_label: { type: "string" },
@@ -1289,58 +1475,58 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
   },
   schemaRepair: actionSchemaRepair,
   async handler(args, api) {
-    switch (args.kind) {
-      case "cart_add":
-        return await handleCartAdd(args as CartAddArgs);
-      case "select_many":
-        return await handleFormSelectMany(args as FormSelectManyArgs);
-      case "extract":
-        return await handleExtract(args, api);
-      case "solve_captcha":
-        return await handleCaptcha(args);
-      case "await_verification":
-        return await handleAwaitVerification(args);
-      case "login_prepare_signup":
-        return await handlePrepareLogin(args as LoginPrepareSignupArgs);
-      case "login_store_signup":
-        return await handleStoreLogin(args as LoginStoreSignupArgs, api);
-      case "login_load_saved":
-        return await handleSealVaultCredential(
-          {
-            ...(args as LoginLoadSavedArgs),
-            fields: args.fields ?? ["login", "password"],
-            slot_prefix: args.slot_prefix ?? "vault",
-          },
-          api,
-        );
-    }
-    // Keep the defense-in-depth guard in act() for internal/replay callers,
-    // while this public tool surface makes the safe recovery explicit at the
-    // exact point a small model tried a forbidden manual PAN entry.
-    if (args.kind === "type") {
-      const reason = manualCardEntryBlockReason(args.text ?? "");
-      if (reason !== null) {
-        return {
-          status: "manual_card_entry_refused",
-          reason,
-          safe_alternative: "operate_pay",
-          missing_prerequisite: "verified_cart_total",
-        };
+    const result = await (async () => {
+      switch (args.kind) {
+        case "cart_add":
+          return await handleCartAdd(args as CartAddArgs);
+        case "select_many":
+          return await handleFormSelectMany(args as FormSelectManyArgs);
+        case "extract":
+          return await handleExtract(args, api);
+        case "solve_captcha":
+          return await handleCaptcha(args);
+        case "await_verification":
+          return await handleAwaitVerification(args);
+        case "login_prepare_signup":
+          return await handlePrepareLogin(args as LoginPrepareSignupArgs);
+        case "login_store_signup":
+          return await handleStoreLogin(args as LoginStoreSignupArgs, api);
+        case "login_load_saved":
+          return await handleSealVaultCredential(
+            {
+              ...(args as LoginLoadSavedArgs),
+              fields: args.fields ?? ["login", "password"],
+              slot_prefix: args.slot_prefix ?? "vault",
+            },
+            api,
+          );
       }
-    }
-    try {
-      return await act(
-        args.session_id,
-        buildAction(args),
-        args.detail ?? "compact",
-        args.product_identity !== undefined && args.options_hash !== undefined
-          ? { productIdentity: args.product_identity, optionsHash: args.options_hash }
-          : undefined,
-      );
-    } catch (err) {
-      if (err instanceof TargetStaleError) return err.result;
-      throw err;
-    }
+      if (args.kind === "type") {
+        const reason = manualCardEntryBlockReason(args.text ?? "");
+        if (reason !== null) {
+          return {
+            status: "manual_card_entry_refused",
+            reason,
+            safe_alternative: "operate_pay",
+            missing_prerequisite: "verified_cart_total",
+          };
+        }
+      }
+      try {
+        return await act(
+          args.session_id,
+          buildAction(args),
+          args.detail ?? "compact",
+          args.product_identity !== undefined && args.options_hash !== undefined
+            ? { productIdentity: args.product_identity, optionsHash: args.options_hash }
+            : undefined,
+        );
+      } catch (err) {
+        if (err instanceof TargetStaleError) return err.result;
+        throw err;
+      }
+    })();
+    return compactV2ThickResult(isCompactV2ProvisionSession(args.session_id), result);
   },
 };
 
@@ -1382,15 +1568,14 @@ export const operateCartAddTool: Tool<z.infer<typeof cartAddSchema>> = {
 
 const formSelectManySchema = z.object({
   session_id: z.string().min(1),
-  // A label/ref → visible option map. Labels deliberately match the existing
-  // select targeting grammar, while refs remain useful when labels collide.
   selections: formSelectionsSchema,
 });
 
 export const operateFormSelectManyTool: Tool<z.infer<typeof formSelectManySchema>> = {
   name: "operate_form_select_many",
   description:
-    "Select several related form options sequentially from a label/ref-to-option map. " +
+    "Select several related form options sequentially from a target-to-option map. " +
+    "Compact V2 requires current @e: handles; V1 accepts observed labels or refs. " +
     "Selections run in order; after every successful selection the browser is re-observed " +
     "before the next one resolves, so variant changes cannot poison later refs. Each field " +
     "reports selected or failed independently; successful selections are not rolled back when " +
@@ -1407,7 +1592,8 @@ export const operateFormSelectManyTool: Tool<z.infer<typeof formSelectManySchema
         minProperties: 1,
         maxProperties: 12,
         additionalProperties: { type: "string" },
-        description: "Map each observed field label or @e: ref to its visible option text.",
+        description:
+          "Map each current Compact V2 @e: handle, or V1 observed label/ref, to its visible option text.",
       },
     },
   },
@@ -1623,6 +1809,7 @@ async function handleFinishOutcome(
   outcome: Exclude<FinishOutcome, { kind: "none" }>,
   api: ApiClient,
 ) {
+  const compactV2 = isCompactV2ProvisionSession(sessionId);
   let successfulOutcome = false;
   const { finish, prepared } = await finishProvisionSessionWithPreparation(
     sessionId,
@@ -1670,7 +1857,7 @@ async function handleFinishOutcome(
     },
     () => successfulOutcome,
   );
-  return { ...prepared, url: finish.url };
+  return compactV2ThickResult(compactV2, { ...prepared, url: finish.url });
 }
 
 // Not part of the default MCP tool surface (dropped from OPERATE_TOOLS). Kept
@@ -1798,7 +1985,8 @@ export const provisionFinishTool: Tool<z.infer<typeof finishSchema>> = {
   async handler(args, api) {
     const outcome = args.outcome ?? { kind: "none" as const };
     if (outcome.kind === "none") {
-      return await finishProvisionSession(args.session_id);
+      const compactV2 = isCompactV2ProvisionSession(args.session_id);
+      return compactV2ThickResult(compactV2, await finishProvisionSession(args.session_id));
     }
     if (outcome.kind === "credentials" && api === null) {
       throw new Error("operate_finish credentials requires an active Trusty Squire session");
@@ -2470,6 +2658,7 @@ export const OPERATE_TOOLS: Tool[] = [
   provisionStartTool,
   provisionObserveTool,
   provisionScreenshotTool,
+  provisionObserveQueryTool,
   provisionActTool,
   operateRecipeSaveTool,
   operateRecipeRunTool,

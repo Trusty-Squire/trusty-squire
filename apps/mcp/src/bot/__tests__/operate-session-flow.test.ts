@@ -26,6 +26,7 @@ const h = vi.hoisted(() => ({
   typed: [] as Array<{ selector: string; text: string; sealed?: true }>,
   uploads: [] as Array<{ selector: string; filePath: string }>,
   selected: [] as Array<{ selector: string; matcher: string | undefined }>,
+  selectError: null as Error | null,
   selectMutation: null as unknown[] | null,
   phoneCountries: [] as string[],
   phoneCountry: null as string | null,
@@ -44,6 +45,7 @@ const h = vi.hoisted(() => ({
   autocompleteDiscardCalls: 0,
   autocompleteDiscardEscapeCalls: [] as boolean[],
   clickCalls: 0,
+  clickError: null as Error | null,
   frameClicks: [] as string[],
   frameJsClicks: [] as string[],
   frameTypes: [] as Array<{ frameUrl: string; selector: string; text: string; sealed?: true }>,
@@ -78,12 +80,14 @@ const h = vi.hoisted(() => ({
   captureStorageStateGate: null as Promise<void> | null,
   captureStorageStateError: null as Error | null,
   currentUrl: "",
+  mainDocumentEpoch: 0,
   elements: [] as unknown[],
   extractInteractiveElementsCalls: 0,
   checkoutFieldNames: [] as string[],
   visibleText: "",
   visibleTextGate: null as Promise<void> | null,
   extractVisibleTextCalls: 0,
+  openFirstMailResult: false,
   // fill_card cart-total-carry-forward (Session.lastCartCheckout): null means
   // "no total on this page" (readCheckoutSummary rejects, the common case).
   checkoutSummary: null as {
@@ -148,6 +152,7 @@ const h = vi.hoisted(() => ({
         } | null;
       }
     | { ok: false; reason: "none" | "ambiguous"; candidates: string[] },
+  locatorResolveMissValues: [] as string[],
   locatorClickCalls: 0,
   locatorTypeCalls: [] as Array<{ text: string; sealed: boolean }>,
   capturedSealedFieldKeys: [] as string[][],
@@ -209,6 +214,11 @@ vi.mock("../session-state.js", () => ({
   },
 }));
 
+// This suite is the V1 contract suite. Individual Compact V2 tests opt in
+// explicitly below, which keeps the feature-flagged V1 and V2 action
+// protocols independently testable while V2 is the production default.
+let compactV2ModeBeforeTest: string | undefined;
+
 vi.mock("../browser.js", () => ({
   BrowserController: class {
     private readonly index: number;
@@ -242,9 +252,13 @@ vi.mock("../browser.js", () => ({
     async goto(url: string): Promise<void> {
       h.gotos.push(url);
       h.currentUrl = url;
+      h.mainDocumentEpoch += 1;
     }
     currentUrl(): string {
       return h.currentUrl;
+    }
+    mainDocumentIdentity(): string {
+      return String(h.mainDocumentEpoch);
     }
     recoverActivePage(): void {}
     async extractInteractiveElements(): Promise<unknown[]> {
@@ -300,7 +314,7 @@ vi.mock("../browser.js", () => ({
       return h.cartLineItems.map((line) => ({ ...line, details: line.details ?? line.title }));
     }
     async openFirstMailResult(): Promise<boolean> {
-      return false;
+      return h.openFirstMailResult;
     }
     async waitForInteractiveDom(): Promise<void> {}
     async waitForCaptchaChallengeToSettle(): Promise<boolean> {
@@ -404,6 +418,7 @@ vi.mock("../browser.js", () => ({
     }
     async selectOption(selector: string, matcher?: string): Promise<string> {
       h.selected.push({ selector, matcher });
+      if (h.selectError !== null) throw h.selectError;
       let committed = matcher ?? "";
       for (const element of h.elements as Array<Record<string, unknown>>) {
         if (element.selector !== selector) continue;
@@ -457,6 +472,7 @@ vi.mock("../browser.js", () => ({
         h.phoneCountry = h.clickPhoneCountryMutation;
       }
       if (h.clearElementsOnClick) h.elements = [];
+      if (h.clickError !== null) throw h.clickError;
     }
     async clickViaJs(): Promise<void> {}
     async clickInFrame(target: { frameUrl: string }, selector: string): Promise<void> {
@@ -553,7 +569,7 @@ vi.mock("../browser.js", () => ({
     }
     async resolvePageTarget(
       _mode: string,
-      _value: string,
+      value: string,
       intent = "click",
     ): Promise<
       | {
@@ -572,6 +588,9 @@ vi.mock("../browser.js", () => ({
       | { ok: false; reason: "none" | "ambiguous"; candidates: string[] }
     > {
       h.locatorResolveIntents.push(intent);
+      if (h.locatorResolveMissValues.includes(value)) {
+        return { ok: false, reason: "none", candidates: [] };
+      }
       if (h.locatorResolve.ok) {
         return {
           ok: true,
@@ -792,9 +811,10 @@ import { sealToRecipient } from "../payment-hpke.js";
 import { operatePayTool, operatePaymentStatusTool } from "../../tools/operate-pay.js";
 import { ApiClient } from "../../api-client.js";
 import { dispatchOperatorBrowserProcessTermination } from "../operator-browser-watchdog.js";
-import type { formSelectMany } from "../provision-session.js";
+import { BrowserController } from "../browser.js";
 import {
   startProvisionSession,
+  startHarnessProvisionSession,
   act,
   observe,
   observedHostsForSession,
@@ -817,6 +837,7 @@ import {
   cartAdd,
   coordinatePaymentDispatchAudit,
   finishPaymentDispatchHandoff,
+  formSelectMany,
   recordActivePaymentProvenance,
   setActivePendingCardFill,
   claimActivePaymentForOperatePay,
@@ -834,7 +855,11 @@ import {
   getActivePendingThreeDs,
   setActivePendingThreeDs,
   captureScreenshot,
+  captureAndPromoteSession,
+  observeQuery,
+  verifyPostcondition,
 } from "../provision-session.js";
+import { OBSERVE_V2_MAX_WIRE_BYTES } from "../compact-observation-v2.js";
 import {
   isRecipeDomainLocked,
   isRecipeShareEligible,
@@ -857,6 +882,7 @@ import {
   operateRecipeRunTool,
   operateRecipeSaveTool,
   provisionActTool,
+  provisionObserveTool,
   storedExtractResult,
   withSigninHost,
 } from "../../tools/provision-drive.js";
@@ -908,6 +934,8 @@ function elem(partial: Record<string, unknown>): unknown {
 }
 
 beforeEach(() => {
+  compactV2ModeBeforeTest = process.env.TRUSTY_SQUIRE_OBSERVE_V2;
+  process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "off";
   h.providers = ["google"];
   h.oauthStatus = "already_valid";
   h.oauthLoginCalls = [];
@@ -917,6 +945,7 @@ beforeEach(() => {
   h.typed = [];
   h.uploads = [];
   h.selected = [];
+  h.selectError = null;
   h.selectMutation = null;
   h.phoneCountries = [];
   h.phoneCountry = null;
@@ -932,6 +961,7 @@ beforeEach(() => {
   h.autocompleteDiscardCalls = 0;
   h.autocompleteDiscardEscapeCalls = [];
   h.clickCalls = 0;
+  h.clickError = null;
   h.frameClicks = [];
   h.frameJsClicks = [];
   h.frameTypes = [];
@@ -968,12 +998,14 @@ beforeEach(() => {
   h.captureStorageStateGate = null;
   h.captureStorageStateError = null;
   h.currentUrl = "";
+  h.mainDocumentEpoch = 0;
   h.elements = [];
   h.extractInteractiveElementsCalls = 0;
   h.checkoutFieldNames = [];
   h.visibleText = "";
   h.visibleTextGate = null;
   h.extractVisibleTextCalls = 0;
+  h.openFirstMailResult = false;
   h.checkoutSummary = null;
   h.cartLineItems = [];
   h.cartLineItemsAfterClick = null;
@@ -999,6 +1031,7 @@ beforeEach(() => {
     text: "Control",
     safetySignals: { billingObject: false, accountSetup: false },
   };
+  h.locatorResolveMissValues = [];
   h.locatorClickCalls = 0;
   h.locatorTypeCalls = [];
   h.capturedSealedFieldKeys = [];
@@ -1034,6 +1067,7 @@ const replayRecipe = (overrides: Partial<OperatorRecipe> = {}): OperatorRecipe =
 
 describe("prepared-statement replay", () => {
   it("resolves, binds, and acts without putting the host in the hot path", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
         testId: "shipping-city",
@@ -1097,6 +1131,46 @@ describe("prepared-statement replay", () => {
     expect(result.status).toBe("fallback_required");
     expect(result.status === "fallback_required" && result.step_index).toBe(0);
     expect(result.status === "fallback_required" && result.next_index).toBe(1);
+  });
+
+  it("normalizes private browser failures during V2 recipe replay", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        testId: "variant",
+        labelText: "Variant",
+        selector: "#private-variant-selector",
+        selectOptions: [{ value: "blue", text: "Ocean Blue" }],
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    h.selectError = new Error(
+      'select <select> #private-variant-selector: option "Private option" was not found',
+    );
+
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [
+          {
+            action: {
+              kind: "select",
+              target: { dom_hint: { testid: "variant" }, accessible_name: "Variant" },
+              value: "Blue",
+            },
+          },
+        ],
+      }),
+      {},
+    );
+
+    expect(result).toMatchObject({ status: "fallback_required", reason: "selection_failed" });
+    expect(JSON.stringify(result)).not.toContain("private-variant-selector");
+    expect(JSON.stringify(result)).not.toContain("Private option");
   });
 
   it("never replays operate_pay and hands the charge to the fresh approval flow", async () => {
@@ -1997,6 +2071,18 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
     expect(provisionActTool.description).toContain(
       'operate_act { kind: "extract", into_slot: "<slot>" }',
     );
+    expect(provisionActTool.description).toContain("Under default compact-v2");
+    expect(provisionActTool.description).toContain("opaque `reobserve_required`");
+    expect(provisionActTool.description).toContain("In V1, stable target refs remain reusable");
+    expect(provisionObserveTool.description).toContain("default compact-v2 mode");
+    expect(provisionObserveTool.description).toContain("[ref,role,facts?]");
+    expect(provisionObserveTool.description).toContain("s=<state bitset>");
+    expect(provisionObserveTool.description).toContain(
+      "c=checked,u=unchecked,d=disabled,r=required",
+    );
+    expect(provisionObserveTool.description).toContain("x=s for a same-origin child");
+    expect(provisionObserveTool.description).toContain("Fact-only rows begin with a keyed segment");
+    expect(provisionObserveTool.description).toContain("In V1 only, pass detail");
 
     const dir = mkdtempSync(join(tmpdir(), "recipe-guidance-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
@@ -2771,6 +2857,8 @@ describe("verified recipe recording", () => {
 afterEach(async () => {
   vi.useRealTimers();
   await closeAllProvisionSessions();
+  if (compactV2ModeBeforeTest === undefined) delete process.env.TRUSTY_SQUIRE_OBSERVE_V2;
+  else process.env.TRUSTY_SQUIRE_OBSERVE_V2 = compactV2ModeBeforeTest;
 });
 
 describe("3.1 — autocomplete-aware type fill", () => {
@@ -3212,6 +3300,1228 @@ describe("operate_start — consent-overlay auto-dismiss", () => {
     await startProvisionSession({ serviceUrl: "https://faucet.example.com/" });
     // Dismissed on the first attempt → the second (retry) attempt is skipped.
     expect(h.consentDismissCalls).toBe(1);
+  });
+});
+
+describe("Compact V2 action-map boundary", () => {
+  it("publishes mode-correct selection and wire contracts", () => {
+    const properties = provisionActTool.jsonInputSchema.properties as Record<string, unknown>;
+    const selectionDescription = (properties.selections as { description: string }).description;
+
+    expect(selectionDescription).toBe(
+      "Map each current Compact V2 @e: handle, or V1 observed label/ref, to its visible option text.",
+    );
+    expect(provisionActTool.description).toContain(
+      "Compact V2 keys are current safe_table @e: handles, while V1 keys may be observed labels or refs",
+    );
+    expect(provisionObserveTool.description).toContain(
+      "encoded as n=<label>, with `%` encoded as `%25` and `|` as `%7C`",
+    );
+    expect(provisionObserveTool.description).toContain(
+      "matching actionable refs with screened labels and code-owned facts",
+    );
+  });
+
+  it("retains only sealed inventory after a V2 observation", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        role: "textbox",
+        selector: "#card-number",
+        autocomplete: "cc-number",
+        value: "4111111111111111",
+        visibleText: "correcthorsebattery",
+        sealed: true,
+      }),
+      elem({
+        index: 1,
+        tag: "input",
+        role: "textbox",
+        selector: "#security-code",
+        autocomplete: "cc-csc",
+        value: "123",
+        sealed: true,
+      }),
+    ];
+
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const retained = paymentSession(started.session_id).lastElements;
+    const serialized = JSON.stringify(retained);
+    expect(serialized).not.toContain("4111111111111111");
+    expect(serialized).not.toContain("correcthorsebattery");
+    expect(serialized).not.toContain("#card-number");
+    expect(retained[0]).toMatchObject({
+      value: null,
+      selector: expect.stringMatching(/^@c:/),
+      autocomplete: "cc-number",
+    });
+  });
+
+  it("uses opaque correlation for sealed trace capture and promotion", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const captureDir = mkdtempSync(join(tmpdir(), "compact-v2-promotion-"));
+    const previousCaptureDir = process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
+    process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE = captureDir;
+    try {
+      h.elements = [
+        elem({
+          tag: "button",
+          role: "button",
+          id: "correcthorsebattery",
+          name: "correcthorsebattery",
+          selector: "#private-action-selector",
+          visibleText: "Create account",
+        }),
+      ];
+      const started = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/signup",
+      });
+      const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+        .safe_table[0]![0];
+      await act(started.session_id, { kind: "click", target: handle });
+
+      const session = paymentSession(started.session_id);
+      const actionRound = session.captureRounds[0]!;
+      const observedSelector = (actionRound.observed as { selector: string }).selector;
+      expect(observedSelector).toMatch(/^@c:/);
+      expect(actionRound.inventory.some((element) => element.selector === observedSelector)).toBe(
+        true,
+      );
+      expect(JSON.stringify(session.actionTrace)).not.toContain("private-action-selector");
+      expect(JSON.stringify(session.actionTrace)).not.toContain("correcthorsebattery");
+      expect(session.actionTrace[0]?.action).not.toHaveProperty("target.css");
+
+      h.elements = [
+        elem({
+          tag: "button",
+          role: "button",
+          selector: "#private-copy-selector",
+          visibleText: "Copy API key",
+        }),
+      ];
+      await observe(started.session_id);
+      const promoted = await captureAndPromoteSession(started.session_id);
+      expect(promoted).toMatchObject({ kind: "ok" });
+      expect(JSON.stringify(session.captureRounds)).not.toContain("private-action-selector");
+      expect(JSON.stringify(session.captureRounds)).not.toContain("private-copy-selector");
+    } finally {
+      if (previousCaptureDir === undefined) {
+        delete process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
+      } else {
+        process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE = previousCaptureDir;
+      }
+      rmSync(captureDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails V2 recording closed when an action value cannot cross the seal", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        role: "textbox",
+        labelText: "Name",
+        selector: "#private-name",
+      }),
+    ];
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      const started = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/signup",
+      });
+      const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+        .safe_table[0]![0];
+      const rawValue = "correct horse battery staple";
+      await act(started.session_id, {
+        kind: "type",
+        target: handle,
+        text: rawValue,
+        provenance: { hole: "address.line1" },
+      });
+
+      const token = "ab12cd34ef56gh78ij90kl";
+      const magicUrl = `https://shop.example.com/magic?code=${token}`;
+      await act(started.session_id, { kind: "goto", url: magicUrl });
+
+      const session = paymentSession(started.session_id);
+      const retained = JSON.stringify({
+        trace: session.actionTrace,
+        capture: session.captureRounds,
+      });
+      expect(h.typed).toContainEqual({ selector: "#private-name", text: rawValue });
+      expect(h.gotos).toContain(magicUrl);
+      expect(retained).not.toContain(rawValue);
+      expect(retained).not.toContain(token);
+      expect(writes.join("")).not.toContain(token);
+      expect(session.recipeRejectionReason).toBe("compact_v2_unrepresentable_value_action");
+      await expect(captureAndPromoteSession(started.session_id)).resolves.toEqual({
+        kind: "skipped",
+        reason: "compact_v2_unrepresentable_value_action",
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("marks unsupported select and phone-country values non-recordable", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Country",
+        selector: "#country",
+        selectOptions: [{ value: "kr", text: "South Korea" }],
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const handle = (started as unknown as { safe_table: Array<[string]> }).safe_table[0]![0];
+
+    await act(started.session_id, {
+      kind: "select",
+      target: handle,
+      text: "South Korea",
+      provenance: { hole: "address.country" },
+    });
+    await act(started.session_id, {
+      kind: "set_phone_country",
+      country: "Japan",
+      provenance: { hole: "contact.phone_country" },
+    });
+
+    const session = paymentSession(started.session_id);
+    expect(h.selected).toContainEqual({ selector: "#country", matcher: "South Korea" });
+    expect(h.phoneCountries).toContain("Japan");
+    expect(JSON.stringify(session.actionTrace)).not.toContain("South Korea");
+    expect(JSON.stringify(session.actionTrace)).not.toContain("Japan");
+    expect(session.recipeRejectionReason).toBe("compact_v2_unrepresentable_value_action");
+    await expect(captureAndPromoteSession(started.session_id)).resolves.toEqual({
+      kind: "skipped",
+      reason: "compact_v2_unrepresentable_value_action",
+    });
+  });
+
+  it("refuses V2 replay recording for unsafe URL paths and query-dependent navigation", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      const pathSession = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/signup",
+      });
+      const secretPath = "https://shop.example.com/keys/sk_live_1234567890abcdef";
+      await act(pathSession.session_id, { kind: "goto", url: secretPath });
+      expect(h.gotos).toContain(secretPath);
+      expect(JSON.stringify(paymentSession(pathSession.session_id).actionTrace)).not.toContain(
+        "sk_live_1234567890abcdef",
+      );
+      await expect(captureAndPromoteSession(pathSession.session_id)).resolves.toEqual({
+        kind: "skipped",
+        reason: "compact_v2_unrepresentable_goto",
+      });
+
+      const querySession = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/signup",
+      });
+      const queryUrl = "https://shop.example.com/settings?tab=api-keys";
+      await act(querySession.session_id, { kind: "goto", url: queryUrl });
+      expect(h.gotos).toContain(queryUrl);
+      await expect(captureAndPromoteSession(querySession.session_id)).resolves.toEqual({
+        kind: "skipped",
+        reason: "compact_v2_unrepresentable_goto",
+      });
+      expect(writes.join("")).not.toContain("sk_live_1234567890abcdef");
+      expect(writes.join("")).not.toContain("tab=api-keys");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("screens host metadata before V2 audit and replay retention", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const secretHost = "4111-1111-1111-1111.attacker.test";
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      const started = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/signup",
+      });
+      await expect(
+        act(started.session_id, { kind: "goto", url: `https://${secretHost}/checkout` }),
+      ).rejects.toThrow("target_not_allowed");
+      await act(started.session_id, { kind: "allow_host", host: secretHost });
+
+      const session = paymentSession(started.session_id);
+      expect(session.recipeRejectionReason).toBe("compact_v2_unrepresentable_host");
+      expect(JSON.stringify(session.actionTrace)).not.toContain(secretHost);
+      expect(writes.join("")).not.toContain(secretHost);
+      expect(writes.join("")).toContain("<sealed-host>");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("keeps start metadata, rejects locators, and binds a handle to its current page snapshot", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.workerEmail = "operator@example.test";
+    h.elements = [
+      elem({
+        tag: "button",
+        type: "button",
+        role: "button",
+        selector: "#continue",
+        visibleText: "Continue",
+      }),
+    ];
+
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+      hint: "Complete the storefront form.",
+    });
+    expect(started).toMatchObject({
+      format: "compact-v2",
+      hint: expect.stringContaining("Complete the storefront form."),
+      user_email: "operator@example.test",
+    });
+    const firstRef = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]?.[0];
+    expect(firstRef).toMatch(/^@e:/);
+
+    // V2's sealed membership check runs before locator parsing, so a CSS/text
+    // fallback cannot escape the action map.
+    await expect(
+      act(started.session_id, { kind: "click", target: "css=#continue" }),
+    ).rejects.toThrow("reobserve_required");
+    expect(h.locatorClickCalls).toBe(0);
+
+    // A page transition invalidates all handles issued from the old map.
+    const afterGoto = await act(started.session_id, {
+      kind: "goto",
+      url: "https://shop.example.com/next",
+    });
+    await expect(act(started.session_id, { kind: "click", target: firstRef! })).rejects.toThrow(
+      "reobserve_required",
+    );
+    expect(h.clickCalls).toBe(0);
+
+    const freshRef = (afterGoto as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]?.[0];
+    expect(freshRef).toMatch(/^@e:/);
+    await act(started.session_id, { kind: "click", target: freshRef! });
+    expect(h.clickCalls).toBe(1);
+  });
+
+  it("audits forged targets opaquely before rejecting them", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      const started = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/checkout",
+      });
+      const forged = "4111111111111111";
+      await expect(act(started.session_id, { kind: "click", target: forged })).rejects.toThrow(
+        "reobserve_required",
+      );
+      const auditText = writes.join("");
+      expect(auditText).toContain('"target":"<sealed>"');
+      expect(auditText).not.toContain(forged);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("rejects a handle after its snapshot lifetime expires", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    let now = 1_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const started = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/checkout",
+      });
+      const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
+        .safe_table[0]![0];
+      now += 5 * 60_000 + 1;
+      await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+        "reobserve_required",
+      );
+      expect(h.clickCalls).toBe(0);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("binds paging cursors to the normalized query and role", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = Array.from({ length: 8 }, (_, index) =>
+      elem({
+        index,
+        tag: "button",
+        role: "button",
+        visibleText: `Item ${index}`,
+        selector: `#item-${index}`,
+      }),
+    );
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/products",
+    });
+    const pageCursor = (started.overflow as { next_cursor: string }).next_cursor;
+    await expect(observeQuery(started.session_id, "Item", undefined, pageCursor)).rejects.toThrow(
+      "invalid_cursor",
+    );
+    retainActivePaymentFieldSeal();
+    const nextPage = await observeQuery(started.session_id, "", undefined, pageCursor);
+    expect(nextPage.safe_table).toHaveLength(4);
+    const queryPage = await observeQuery(started.session_id, "Item");
+    const queryCursor = (queryPage.overflow as { next_cursor: string }).next_cursor;
+    await expect(observeQuery(started.session_id, "Other", undefined, queryCursor)).rejects.toThrow(
+      "invalid_cursor",
+    );
+    await expect(observeQuery(started.session_id, "Item", "link", queryCursor)).rejects.toThrow(
+      "invalid_cursor",
+    );
+  });
+
+  it("searches only the sealed action map", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        role: "textbox",
+        value: "private-query-token",
+        selector: "#secret-bearing-field",
+      }),
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/products",
+    });
+
+    const secretGuess = await observeQuery(started.session_id, "private-query-token");
+    expect(secretGuess.safe_table).toEqual([]);
+    const safeLabel = await observeQuery(started.session_id, "continue");
+    expect(safeLabel.safe_table).toEqual([
+      expect.arrayContaining([
+        expect.stringMatching(/^@e:/),
+        "b",
+        expect.stringContaining("Continue"),
+      ]),
+    ]);
+  });
+
+  it("matches private merchant labels while returning only sealed rows", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Buy Acme", selector: "#acme" }),
+      elem({
+        index: 1,
+        tag: "button",
+        role: "button",
+        visibleText: "Buy Beta",
+        selector: "#beta",
+      }),
+      elem({
+        index: 2,
+        tag: "button",
+        role: "button",
+        visibleText: "購入する",
+        selector: "#purchase-ja",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/products",
+    });
+
+    const acme = await observeQuery(started.session_id, "Acme");
+    const japanese = await observeQuery(started.session_id, "購入する");
+
+    expect(acme.safe_table).toHaveLength(1);
+    expect(japanese.safe_table).toHaveLength(1);
+    expect(JSON.stringify(acme)).not.toContain("Acme");
+    expect(JSON.stringify(japanese)).not.toContain("購入する");
+    expect((acme.safe_table as Array<[string]>)[0]![0]).not.toBe(
+      (japanese.safe_table as Array<[string]>)[0]![0],
+    );
+  });
+
+  it("requires every private query term to match one naming source", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Buy Acme Basic", selector: "#basic" }),
+      elem({
+        index: 1,
+        tag: "button",
+        role: "button",
+        visibleText: "Buy Acme Pro",
+        selector: "#pro",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/products",
+    });
+
+    const result = await observeQuery(started.session_id, "Acme Pro");
+
+    expect(result.safe_table).toHaveLength(1);
+    expect(JSON.stringify(result)).not.toContain("Acme");
+    expect(JSON.stringify(result)).not.toContain("Pro");
+  });
+
+  it("uses four-digit private query terms to distinguish sealed controls", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Buy Model 2023", selector: "#2023" }),
+      elem({
+        index: 1,
+        tag: "button",
+        role: "button",
+        visibleText: "Buy Model 2024",
+        selector: "#2024",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/products",
+    });
+
+    const result = await observeQuery(started.session_id, "Model 2024");
+
+    expect(result.safe_table).toHaveLength(1);
+    expect(JSON.stringify(result)).not.toContain("Model");
+  });
+
+  it("rejects a handle when the complete live action map remints its index", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const email = elem({
+      tag: "input",
+      type: "email",
+      role: "textbox",
+      labelText: "Email",
+      selector: "#email",
+    });
+    h.elements = [email];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    const handle = (started as unknown as { safe_table: Array<[string]> }).safe_table[0]![0];
+
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+      email,
+    ];
+
+    await expect(
+      act(started.session_id, { kind: "type", target: handle, text: "buyer@example.com" }),
+    ).rejects.toThrow("reobserve_required");
+    expect(h.typed).toEqual([]);
+  });
+
+  it("rejects a handle after a same-URL main-document replacement", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    const handle = (started as unknown as { safe_table: Array<[string]> }).safe_table[0]![0];
+
+    h.mainDocumentEpoch += 1;
+
+    await expect(act(started.session_id, { kind: "click", target: handle })).rejects.toThrow(
+      "reobserve_required",
+    );
+    expect(h.clickCalls).toBe(0);
+  });
+
+  it("distinguishes destructive and affirmative controls with code-owned semantics", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Delete account", selector: "#delete" }),
+      elem({
+        index: 1,
+        tag: "button",
+        role: "button",
+        visibleText: "Keep account",
+        selector: "#keep",
+      }),
+    ];
+
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/account" });
+    const serialized = JSON.stringify(started);
+
+    expect(serialized).toContain("a=destructive");
+    expect(serialized).toContain("a=continue");
+    expect(serialized).not.toContain("Delete account");
+    expect(serialized).not.toContain("Keep account");
+  });
+
+  it("reissues handles when a private live binding changes", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#step-one" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    const oldHandle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#step-two" }),
+    ];
+    const refreshed = await observe(started.session_id);
+    const newHandle = (refreshed as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+    expect(newHandle).not.toBe(oldHandle);
+    await expect(act(started.session_id, { kind: "click", target: oldHandle })).rejects.toThrow(
+      "reobserve_required",
+    );
+    await act(started.session_id, { kind: "click", target: newHandle });
+    expect(h.clickCalls).toBe(1);
+  });
+
+  it("rejects a handle when its live sealed semantics change before dispatch", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        type: "submit",
+        id: "action",
+        selector: "#action",
+        value: "Continue",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+
+    h.elements = [
+      elem({
+        tag: "input",
+        type: "submit",
+        id: "action",
+        selector: "#action",
+        value: "Delete account",
+      }),
+    ];
+    await expect(act(started.session_id, { kind: "click", target: handle })).rejects.toThrow(
+      "reobserve_required",
+    );
+    expect(h.clickCalls).toBe(0);
+  });
+
+  it("seals OTP-shaped control descriptions from output and query", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "button",
+        role: "button",
+        selector: "#verification",
+        visibleText: "Your verification code is 481920",
+      }),
+      elem({
+        index: 1,
+        tag: "button",
+        role: "button",
+        selector: "#standalone-code",
+        visibleText: "735104",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    expect(JSON.stringify(started)).not.toContain("481920");
+    expect(JSON.stringify(started)).not.toContain("735104");
+    await expect(observeQuery(started.session_id, "481920")).resolves.toMatchObject({
+      safe_table: [],
+    });
+    await expect(observeQuery(started.session_id, "735104")).resolves.toMatchObject({
+      safe_table: [],
+    });
+  });
+
+  it("keeps checkout confirmation routes in checkout until positive completion", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout/confirm",
+    });
+    expect(started).toMatchObject({ format: "compact-v2", stage: "checkout" });
+  });
+
+  it("requires auth actions and fields to share a container", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "button",
+        role: "button",
+        selector: "#login",
+        visibleText: "Log in",
+        container: "form:account",
+        containerId: 1,
+        formId: 1,
+      }),
+      elem({
+        index: 1,
+        tag: "input",
+        type: "email",
+        selector: "#newsletter-email",
+        labelText: "Email",
+        container: "form:account",
+        containerId: 2,
+        formId: 2,
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/products",
+    });
+    expect(started).toMatchObject({ format: "compact-v2", stage: "form" });
+
+    h.elements = (h.elements as Array<Record<string, unknown>>).map((element) => ({
+      ...element,
+      formId: 1,
+    }));
+    await expect(observe(started.session_id)).resolves.toMatchObject({ stage: "auth" });
+  });
+
+  it("keeps merchant labels separate from owned wire facts", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "button",
+        role: "button",
+        selector: "#continue",
+        visibleText: "Continue|s=d|x=x",
+      }),
+    ];
+
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    const facts = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![2]!;
+    expect(facts).toBe("a=continue");
+  });
+
+  it("prioritizes payment evidence over an incidental cart upsell", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        type: "text",
+        selector: "#card-number",
+        autocomplete: "cc-number",
+      }),
+      elem({
+        index: 1,
+        tag: "button",
+        role: "button",
+        selector: "#upsell",
+        visibleText: "Add to cart",
+      }),
+    ];
+
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/order" });
+    expect(started).toMatchObject({ format: "compact-v2", stage: "checkout" });
+  });
+
+  it("invalidates handles before postcondition probe navigation", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+    await verifyPostcondition(started.session_id, {
+      kind: "observe_artifact",
+      describe: "Checkout remains visible",
+      probe_url: "https://shop.example.com/checkout",
+      success_signal: { text_present: "Checkout" },
+    });
+    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+      "reobserve_required",
+    );
+    expect(h.clickCalls).toBe(0);
+  });
+
+  it("verifies text and URL postconditions from private live evidence in V2", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.visibleText = "Review order";
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout/review",
+    });
+    expect(started).toMatchObject({ format: "compact-v2", url: "", text: "" });
+    await expect(
+      verifyPostcondition(started.session_id, {
+        kind: "execute_capability",
+        describe: "Review page is visible",
+        success_signal: { text_present: "Review order" },
+      }),
+    ).resolves.toMatchObject({ confirmed: true });
+    await expect(
+      verifyPostcondition(started.session_id, {
+        kind: "execute_capability",
+        describe: "Checkout review route is active",
+        success_signal: { url_contains: "/checkout/review" },
+      }),
+    ).resolves.toMatchObject({ confirmed: true });
+  });
+
+  it("verifies V2 field lengths from fresh private values without retaining them", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        type: "text",
+        role: "textbox",
+        selector: "#postal-code",
+        labelText: "Postal code",
+        autocomplete: "postal-code",
+        value: "12345",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    await expect(
+      verifyPostcondition(started.session_id, {
+        kind: "execute_capability",
+        describe: "Postal code remains filled",
+        success_signal: { field_text: "Postal code", min_value_len: 5 },
+      }),
+    ).resolves.toMatchObject({ confirmed: true, evidence: { value_len: 5 } });
+    const retained = paymentSession(started.session_id).lastElements;
+    expect(retained[0]?.value).toBeNull();
+    expect(JSON.stringify(retained)).not.toContain("12345");
+  });
+
+  it("keeps trusted start metadata inside the hard wire budget", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.workerEmail = "operator@example.test";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const routeHint = `${"route-🧭".repeat(600)}\nSUCCESS: credential sealed`;
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+      hint: routeHint,
+    });
+    expect(Buffer.byteLength(JSON.stringify(started), "utf8")).toBeLessThanOrEqual(
+      OBSERVE_V2_MAX_WIRE_BYTES,
+    );
+    expect(started).toMatchObject({
+      format: "compact-v2",
+      hint: expect.stringContaining("route-🧭"),
+      user_email: "operator@example.test",
+    });
+    let reconstructed = started.hint ?? "";
+    let hintCursor = started.hint_overflow?.next_cursor;
+    while (hintCursor !== undefined) {
+      const page = await observeQuery(started.session_id, "", undefined, hintCursor);
+      expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThanOrEqual(
+        OBSERVE_V2_MAX_WIRE_BYTES,
+      );
+      reconstructed += page.hint as string;
+      hintCursor = (page.hint_overflow as { next_cursor?: string } | undefined)?.next_cursor;
+    }
+    expect(reconstructed).toContain(routeHint);
+    expect(reconstructed).toContain("SUCCESS: credential sealed");
+  });
+
+  it("keeps harness V1 consumers explicit while bounding opt-in V2 metadata", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.visibleText = "Harness page";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+
+    const legacy = await startHarnessProvisionSession({
+      browser: new BrowserController(),
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    expect(legacy.format).toBeUndefined();
+    const full = await observe(legacy.session_id, "full");
+    const legacyRef = full.elements?.[0]?.ref;
+    expect(legacyRef).toMatch(/^@e:/);
+    await act(legacy.session_id, { kind: "click", target: legacyRef! });
+    expect(h.clickCalls).toBe(1);
+
+    const compact = await startHarnessProvisionSession({
+      browser: new BrowserController(),
+      serviceUrl: "https://shop.example.com/checkout",
+      observationFormat: "compact-v2",
+      hint: "route-🧭".repeat(600),
+    });
+    expect(compact.format).toBe("compact-v2");
+    expect(compact.hint_overflow?.next_cursor).toBeDefined();
+    expect(Buffer.byteLength(JSON.stringify(compact), "utf8")).toBeLessThanOrEqual(
+      OBSERVE_V2_MAX_WIRE_BYTES,
+    );
+  });
+
+  it("seals OAuth and no-observation exits in the V2 envelope", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const secretUrl = "https://app.example.com/login?token=private-query-token";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: secretUrl });
+    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+
+    const ack = await act(started.session_id, { kind: "scroll", direction: "down" }, "none");
+    expect(ack).toMatchObject({ format: "compact-v2", url: "", text: "", observed: "none" });
+    expect(ack.elements).toBeUndefined();
+    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+      "reobserve_required",
+    );
+    const refreshed = await observe(started.session_id);
+    const refreshedRef = (refreshed as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+
+    h.oauthTransition = {
+      productUrl: secretUrl,
+      providerPageClosed: true,
+      productPageViable: true,
+      browserConnected: true,
+    };
+    const transition = await observe(started.session_id);
+    expect(transition).toMatchObject({
+      format: "compact-v2",
+      url: "",
+      text: "",
+      stage: "auth",
+      oauth: {
+        state: "in_progress",
+        provider_page: "closed_or_detached",
+        next_action: "operate_observe",
+      },
+    });
+    expect(transition.elements).toBeUndefined();
+    expect(JSON.stringify(transition)).not.toContain("private-query-token");
+    expect(h.oauthRecoveryCalls).toBe(1);
+    await expect(act(started.session_id, { kind: "click", target: refreshedRef })).rejects.toThrow(
+      "reobserve_required",
+    );
+  });
+
+  it("keeps shadow observations on the V1 action contract", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "shadow";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    expect(started.format).toBeUndefined();
+    await act(started.session_id, { kind: "click", target: "Continue" });
+    expect(h.clickCalls).toBe(1);
+  });
+
+  it("invalidates a handle when a dispatched action throws", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+    h.clickError = new Error("dispatch failed after click");
+    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+      "action_failed",
+    );
+    h.clickError = null;
+    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+      "reobserve_required",
+    );
+    expect(h.clickCalls).toBe(1);
+  });
+
+  it("invalidates a handle before the captcha driver receives the browser", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+    await expect(captchaGate(started.session_id)).resolves.toMatchObject({ found: false });
+    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+      "reobserve_required",
+    );
+  });
+
+  it("invalidates a handle before the payment driver receives the browser", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+    await activeProvisionBrowserForPayment(paymentSession(started.session_id));
+    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+      "reobserve_required",
+    );
+  });
+
+  it("requires sealed V2 handles before bulk selection enters the private executor", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Country",
+        selector: "#country",
+        selectOptions: [{ value: "kr", text: "South Korea" }],
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+    await expect(formSelectMany(started.session_id, { Country: "Korea" })).rejects.toThrow(
+      "reobserve_required",
+    );
+    expect(h.selected).toEqual([]);
+    await expect(
+      formSelectMany(started.session_id, { "@e:legacy_country_1": "Korea" }),
+    ).rejects.toThrow("reobserve_required");
+    expect(h.selected).toEqual([]);
+    const result = await formSelectMany(started.session_id, { [handle]: "Korea" });
+    expect(result.fields).toEqual([expect.objectContaining({ status: "selected" })]);
+    expect(JSON.stringify(result.fields)).not.toContain("South Korea");
+    expect(
+      JSON.stringify([...paymentSession(started.session_id).committedSelectValues]),
+    ).not.toContain("#country");
+    expect(result.observation.format).toBe("compact-v2");
+  });
+
+  it("rejects old-generation bulk targets after the preceding mutation", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Variant",
+        selector: "#variant",
+        selectOptions: [{ value: "blue", text: "Ocean Blue" }],
+      }),
+      elem({
+        index: 1,
+        tag: "select",
+        role: "combobox",
+        labelText: "Size",
+        selector: "#size",
+        selectOptions: [{ value: "large", text: "Large" }],
+      }),
+    ];
+    h.selectMutation = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Size",
+        selector: "#size",
+        selectOptions: [{ value: "large", text: "Large" }],
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table;
+    const variantHandle = rows.find(([, , description]) => description?.startsWith("Variant"))?.[0];
+    const sizeHandle = rows.find(([, , description]) => description?.startsWith("Size"))?.[0];
+    expect(variantHandle).toMatch(/^@e:/);
+    expect(sizeHandle).toMatch(/^@e:/);
+
+    const result = await formSelectMany(started.session_id, {
+      [variantHandle!]: "Blue",
+      [sizeHandle!]: "Large",
+    });
+
+    expect(h.selected).toEqual([{ selector: "#variant", matcher: "Blue" }]);
+    expect(result.fields).toEqual([
+      expect.objectContaining({ status: "selected" }),
+      expect.objectContaining({ status: "failed", reason: "reobserve_required" }),
+    ]);
+    expect(JSON.stringify(result.fields)).not.toContain("Ocean Blue");
+  });
+
+  it("rejects a changed bulk target after the preceding mutation", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Variant",
+        selector: "#variant",
+        selectOptions: [{ value: "blue", text: "Ocean Blue" }],
+      }),
+      elem({
+        index: 1,
+        tag: "select",
+        role: "combobox",
+        labelText: "Size",
+        selector: "#size",
+        selectOptions: [{ value: "large", text: "Large" }],
+      }),
+    ];
+    h.selectMutation = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Size",
+        selector: "#replacement-size",
+        selectOptions: [{ value: "large", text: "Large" }],
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table;
+    const variantHandle = rows.find(([, , description]) => description?.startsWith("Variant"))?.[0];
+    const sizeHandle = rows.find(([, , description]) => description?.startsWith("Size"))?.[0];
+
+    const result = await formSelectMany(started.session_id, {
+      [variantHandle!]: "Blue",
+      [sizeHandle!]: "Large",
+    });
+
+    expect(h.selected).toEqual([{ selector: "#variant", matcher: "Blue" }]);
+    expect(result.fields).toEqual([
+      expect.objectContaining({ status: "selected" }),
+      expect.objectContaining({ status: "failed", reason: "reobserve_required" }),
+    ]);
+  });
+
+  it("normalizes private browser selection failures in V2 results", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Variant",
+        selector: "#private-variant-selector",
+        selectOptions: [{ value: "blue", text: "Ocean Blue" }],
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+    h.selectError = new Error(
+      'select <select> #private-variant-selector: option "Private option" was not found',
+    );
+
+    const result = await formSelectMany(started.session_id, { [handle]: "Missing" });
+
+    expect(result.fields).toEqual([
+      expect.objectContaining({ status: "failed", reason: "selection_failed" }),
+    ]);
+    expect(JSON.stringify(result)).not.toContain("private-variant-selector");
+    expect(JSON.stringify(result)).not.toContain("Private option");
+  });
+
+  it("normalizes private browser selection failures from direct V2 actions", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Variant",
+        selector: "#shipping-frame",
+        selectOptions: [{ value: "blue", text: "Ocean Blue" }],
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+    h.selectError = new Error(
+      'select <select> #shipping-frame: option "Private option" was not found',
+    );
+
+    const error = await act(started.session_id, {
+      kind: "select",
+      target: handle,
+      text: "Missing",
+    }).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("selection_failed");
+    expect((error as Error).message).not.toContain("shipping-frame");
+    expect((error as Error).message).not.toContain("Private option");
+  });
+
+  it("does not authorize later old-generation handles after a failed selection", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "External variant",
+        selector: "#external-variant",
+        frameOrigin: "https://untrusted.example",
+        frameUrl: "https://untrusted.example/variant",
+        selectOptions: [{ value: "blue", text: "Ocean Blue" }],
+      }),
+      elem({
+        index: 1,
+        tag: "select",
+        role: "combobox",
+        labelText: "Size",
+        selector: "#size",
+        selectOptions: [{ value: "large", text: "Large" }],
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table;
+    const externalHandle = rows.find(([, , facts]) => facts?.startsWith("External variant"))?.[0];
+    const sizeHandle = rows.find(([, , facts]) => facts?.startsWith("Size"))?.[0];
+
+    const result = await formSelectMany(started.session_id, {
+      [externalHandle!]: "Blue",
+      [sizeHandle!]: "Large",
+    });
+
+    expect(h.selected).toEqual([]);
+    expect(result.fields).toEqual([
+      expect.objectContaining({
+        status: "failed",
+        reason: "target_not_allowed",
+      }),
+      expect.objectContaining({ status: "failed", reason: "reobserve_required" }),
+    ]);
   });
 });
 
@@ -3737,11 +5047,38 @@ describe("operate_extract — vault-store response", () => {
     });
     expect(JSON.stringify(result)).not.toContain(rawSecret);
   });
+
+  it("seals raw Compact V2 extraction results at the public tool boundary", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const rawSecret = "sk-live-public-extract-secret-123456789";
+    const urlToken = "private-url-token-123456789";
+    h.visibleText = `API key ${rawSecret}`;
+    const started = await startProvisionSession({
+      serviceUrl: `https://app.example.com/api-keys?token=${urlToken}`,
+    });
+
+    const result = (await provisionActTool.handler(
+      provisionActTool.inputSchema.parse({
+        session_id: started.session_id,
+        kind: "extract",
+      }),
+      null,
+    )) as Record<string, unknown>;
+
+    expect(result).toMatchObject({
+      session_id: started.session_id,
+      url: "",
+      credentials: {},
+    });
+    expect(JSON.stringify(result)).not.toContain(rawSecret);
+    expect(JSON.stringify(result)).not.toContain(urlToken);
+  });
 });
 
 describe("operate session — Change 5 precondition gate", () => {
   it("fails closed after probing a fresh seeded profile with no live Google session", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-empty";
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.providers = []; // no live session
     const obs = await startProvisionSession({
       serviceUrl: "https://app.example.com/",
@@ -3750,7 +5087,9 @@ describe("operate session — Change 5 precondition gate", () => {
     });
     expect(obs.needs_user).toBeDefined();
     expect(obs.needs_user?.wall).toBe("google_session");
-    expect(h.startCalls).toBe(1);
+    expect(obs).toMatchObject({ format: "compact-v2", stage: "auth", url: "", text: "" });
+    expect(obs.elements).toBeUndefined();
+    expect(h.startCalls).toBe(1); // the fresh seeded profile itself was probed
     expect(h.started).toBe(0); // rejected before returning the handoff
     expect(h.gotos).toHaveLength(0);
     expect(h.storageStateReads).toEqual([canonical]);
@@ -4416,6 +5755,57 @@ describe("operate session — ephemeral profile lifecycle", () => {
     await finishProvisionSession(first.session_id);
   });
 
+  it("starts a second session while the first sits parked on a decoupled payment wait", async () => {
+    // Regression for a real user hitting "start deadline exceeded while
+    // waiting to acquire the shared seed lock" on @trusty-squire/mcp
+    // 1.1.9-rc.27: one agent held an operator session mid-payment (parked on
+    // a decoupled 3-D Secure approval wait) and a second agent's operate_start
+    // starved behind it. The seed lock is only held for the brief scavenge +
+    // clone steps inside acquireOperatorProfile, never for a session's
+    // lifetime, so a second start must succeed while the first is still open
+    // and awaiting approval.
+    const first = await startProvisionSession({ serviceUrl: "https://shop.example.com/first" });
+    const firstSession = paymentSession(first.session_id);
+    const parkedClaim = claimActivePaymentForOperatePay(undefined, firstSession);
+    if (parkedClaim.kind !== "lease") throw new Error("expected first payment lease");
+    completeActivePaymentLeaseWithPendingApproval(
+      parkedClaim.lease,
+      {
+        approval_id: "appr_parked_3ds",
+        approval_url: "https://web.test/vault/pay/appr_parked_3ds",
+        nonce: "nonce_parked_3ds",
+        agent: "agent_parked_3ds",
+        checkout: {
+          merchant: "First shop",
+          checkout_origin: "https://shop.example.com",
+          amount_cents: 100,
+          currency: "USD",
+        },
+        jit: false,
+        boundCardRef: "card_parked_3ds",
+        deadline: Date.now() + 60_000,
+        rejectedCandidates: [],
+        keypair: { publicKey: "public-parked", privateKey: "private-parked" },
+        item: "Widget",
+        reason: "Parked purchase",
+        cardRef: "card_parked_3ds",
+      },
+      firstSession,
+    );
+    expect(getActivePendingApproval(firstSession)).not.toBeNull();
+
+    const second = await startProvisionSession({ serviceUrl: "https://app.example.com/second" });
+
+    expect(h.startCalls).toBe(2);
+    expect(h.profileDirs).toHaveLength(2);
+    expect(h.profileDirs[0]).not.toBe(h.profileDirs[1]);
+    // The first session's parked approval survives the second session's start.
+    expect(getActivePendingApproval(firstSession)).not.toBeNull();
+
+    await finishProvisionSession(second.session_id);
+    await finishProvisionSession(first.session_id);
+  });
+
   it("never lets one session's approval authorize another session's charge", async () => {
     const [first, second] = await Promise.all([
       startProvisionSession({ serviceUrl: "https://shop.example.com/first" }),
@@ -5000,6 +6390,59 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     expect(res.sealed).toBeUndefined();
   });
 
+  it("recursively seals delegated verification results in Compact V2 only", async () => {
+    const rawCode = "481920";
+    const rawSender = "private.sender@example.com";
+    const rawLink = "https://app.example.com/verify?token=private-link-token-123456789";
+
+    const legacy = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      consentInboxRead: true,
+    });
+    h.visibleText = `From: Sender <${rawSender}>\nYour verification code is ${rawCode}.`;
+    h.elements = [elem({ tag: "a", role: "link", href: rawLink, visibleText: "Confirm" })];
+    h.openFirstMailResult = true;
+    const legacyResult = (await provisionActTool.handler(
+      provisionActTool.inputSchema.parse({
+        session_id: legacy.session_id,
+        kind: "await_verification",
+      }),
+      null,
+    )) as Record<string, unknown>;
+
+    expect(legacyResult).toMatchObject({
+      code: rawCode,
+      link: rawLink,
+      source_from: rawSender,
+    });
+
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const compact = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      consentInboxRead: true,
+    });
+    h.visibleText = `From: Sender <${rawSender}>\nYour verification code is ${rawCode}.`;
+    h.elements = [elem({ tag: "a", role: "link", href: rawLink, visibleText: "Confirm" })];
+    h.openFirstMailResult = true;
+    const compactResult = (await provisionActTool.handler(
+      provisionActTool.inputSchema.parse({
+        session_id: compact.session_id,
+        kind: "await_verification",
+      }),
+      null,
+    )) as Record<string, unknown>;
+
+    expect(compactResult).toMatchObject({
+      found: true,
+      code: null,
+      link: null,
+      source_from: null,
+    });
+    expect(JSON.stringify(compactResult)).not.toContain(rawCode);
+    expect(JSON.stringify(compactResult)).not.toContain(rawSender);
+    expect(JSON.stringify(compactResult)).not.toContain("private-link-token");
+  });
+
   it("PR2: refuses the inbox read without consent and hands the code request back", async () => {
     // No consentInboxRead → default OFF → must NOT read the (mocked) inbox.
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
@@ -5023,6 +6466,32 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     expect(granted.code).toBe("481920");
     // Remembered for the session: a later await needs no re-grant.
     expect((await awaitVerification(sid, {})).found).toBe(true);
+  });
+
+  it("seals sender text before writing a Compact V2 verification audit", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const privateSender = "private.sender@example.com";
+    const obs = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      consentInboxRead: true,
+    });
+    h.visibleText = `From: Sender <${privateSender}>\nYour verification code is 481920.`;
+    h.openFirstMailResult = true;
+    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    try {
+      const result = await awaitVerification(obs.session_id, {});
+      const auditLine = stderrWrite.mock.calls
+        .map(([line]) => String(line))
+        .find((line) => line.includes('"event":"await_verification"'));
+
+      expect(result.source_from).toBe(privateSender);
+      expect(auditLine).toBeDefined();
+      expect(auditLine).not.toContain(privateSender);
+      expect(auditLine).toContain('"source_from":"<sealed>"');
+    } finally {
+      stderrWrite.mockRestore();
+    }
   });
 });
 
@@ -5282,6 +6751,52 @@ describe("operate_finish lifecycle consolidation", () => {
     expect(unconfirmed).toMatchObject({ kind: "result", summary: "Task stopped before success" });
     expect(h.storageStateWrites).toEqual([]);
     expect(h.storageStates.get(canonical)).toBe(prior);
+  });
+
+  it("seals the current URL from Compact V2 finish results", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const urlToken = "private-finish-token-123456789";
+    const started = await startProvisionSession({
+      serviceUrl: `https://app.example.com/done?token=${urlToken}`,
+    });
+
+    const result = (await provisionFinishTool.handler(
+      { session_id: started.session_id },
+      null,
+    )) as Record<string, unknown>;
+
+    expect(result).toMatchObject({
+      session_id: started.session_id,
+      url: "",
+      closed: true,
+    });
+    expect(JSON.stringify(result)).not.toContain(urlToken);
+  });
+
+  it("seals Compact V2 measurement service labels before stderr emission", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const panHost = "4111-1111-1111-1111.com";
+    const started = await startProvisionSession({ serviceUrl: `https://${panHost}/done` });
+    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    try {
+      await provisionFinishTool.handler(
+        {
+          session_id: started.session_id,
+          outcome: { kind: "result", summary: "Done" },
+        },
+        null,
+      );
+      const measurement = stderrWrite.mock.calls
+        .map(([line]) => String(line))
+        .find((line) => line.includes('"marker":"provision-measurement"'));
+
+      expect(measurement).toBeDefined();
+      expect(measurement).not.toContain(panHost);
+      expect(measurement).toContain('"service":"<sealed>"');
+    } finally {
+      stderrWrite.mockRestore();
+    }
   });
 
   it("returns the legacy result shape from outcome=result, including scalar data coercion", async () => {
@@ -7338,7 +8853,37 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
 });
 
 describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => {
+  it("tries the next code-owned cart locator after a V2 target miss", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.currentUrl = "https://shop.example.com/cart";
+    h.visibleText = "Cart Quantity: 0 Total 968円";
+    h.elements = [elem({ name: "quantity", labelText: "Quantity", selector: "#qty", value: "0" })];
+    h.checkoutSummary = {
+      merchant: "Synthetic Shop",
+      checkout_origin: "https://shop.example.com",
+      amount_cents: 968,
+      currency: "JPY",
+    };
+    h.locatorResolveMissValues = ["Add to Cart"];
+    h.cartLineItemsAfterClick = [
+      {
+        title: "Tiara",
+        quantity: 1,
+        product_identities: ["sku:tiara"],
+        option_signatures: ["size=M"],
+      },
+    ];
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    await expect(
+      cartAdd(started.session_id, "sku:tiara", "size=M", "cart-add-bag-fallback"),
+    ).resolves.toMatchObject({ status: "added", cart_delta: "+1" });
+    expect(h.locatorResolveIntents).toEqual(["click", "click"]);
+    expect(h.locatorClickCalls).toBe(1);
+  });
+
   it("returns legible post-add cart state and suppresses a retry for the same line", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.currentUrl = "https://shop.example.com/cart";
     h.visibleText = "Cart Quantity: 0 Subtotal 968円 Shipping Free Total 968円";
     h.elements = [elem({ name: "quantity", labelText: "Quantity", selector: "#qty", value: "0" })];
@@ -7373,21 +8918,30 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
     expect(added).toMatchObject({
       status: "added",
       cart_delta: "+1",
-      cart_url: "https://shop.example.com/cart",
+      cart_url: "",
       checkout_state: {
         authority: "informational_only",
         completeness: "best_effort",
         authoritative_for_payment: false,
         stage: "cart",
-        product_identity: "sku:tiara",
-        options_hash: "size=M",
+        product_identity: "<requested>",
+        options_hash: "<requested>",
         quantity: 1,
         subtotal: { amount_cents: 968, currency: "JPY" },
         shipping: { amount_cents: 0, currency: "JPY" },
         payable_total: { amount_cents: 968, currency: "JPY" },
+        cart_url: "",
         next_action: { tool: "operate_act", kind: "click", intent: "proceed_to_checkout" },
       },
+      postcondition: {
+        product_identity: "<requested>",
+        options_hash: "<requested>",
+        quantity: 1,
+      },
     });
+    expect(JSON.stringify(added)).not.toContain("https://shop.example.com/cart");
+    expect(JSON.stringify(added)).not.toContain("sku:tiara");
+    expect(JSON.stringify(added)).not.toContain("size=M");
     expect(h.locatorClickCalls).toBe(1);
 
     const retried = (await provisionActTool.handler(

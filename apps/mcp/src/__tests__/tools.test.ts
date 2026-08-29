@@ -1676,7 +1676,7 @@ describe("TOOLS registry", () => {
     }
   });
 
-  it("exposes the essential 9-operator, 19-tool default surface without maintainer diagnostics", () => {
+  it("exposes the essential 10-operator, 20-tool default surface without maintainer diagnostics", () => {
     // Credential read/write tools (write-only sink; rotation = re-store,
     // metadata edit/delete = passkey-vouched) + grant_app_access
     // (egress grants: a deployed app uses a vaulted credential via the proxy).
@@ -1693,7 +1693,7 @@ describe("TOOLS registry", () => {
     // operate_screenshot added (2026-08-23): a read-only debugging capture
     // with no alias/kind to fold into — operate_act's kinds all DO something;
     // this only looks.
-    expect(TOOLS).toHaveLength(19);
+    expect(TOOLS).toHaveLength(20);
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
       "audit_log",
       "delete_credential",
@@ -1705,6 +1705,7 @@ describe("TOOLS registry", () => {
       "operate_act",
       "operate_finish",
       "operate_observe",
+      "operate_observe_query",
       "operate_pay",
       "operate_payment_status",
       "operate_recipe_run",
@@ -1728,14 +1729,14 @@ describe("TOOLS registry", () => {
       const tools = buildToolRegistry(
         disabled === undefined ? {} : { TRUSTY_SQUIRE_DIAGNOSTICS: disabled },
       );
-      expect(tools).toHaveLength(19);
+      expect(tools).toHaveLength(20);
       expect(tools.map((tool) => tool.name)).not.toEqual(
         expect.arrayContaining(["list_extract_failures", "get_extract_failure"]),
       );
     }
 
     const tools = buildToolRegistry({ TRUSTY_SQUIRE_DIAGNOSTICS: "1" });
-    expect(tools).toHaveLength(21);
+    expect(tools).toHaveLength(22);
     expect(tools.map((tool) => tool.name)).toEqual(
       expect.arrayContaining(["list_extract_failures", "get_extract_failure"]),
     );

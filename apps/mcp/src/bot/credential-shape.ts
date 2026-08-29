@@ -22,6 +22,18 @@ export function isMaskedDisplay(value: string): boolean {
   return MASKED_DISPLAY_RE.test(value);
 }
 
+const OTP_KEYWORD_RE =
+  /(?:code|verification|verify|otp|passcode|one[- ]time)\D{0,40}?(\d{4,8})|(\d{4,8})\D{0,8}?(?:code|verification|verify|otp|passcode)/i;
+
+export function findOtpCredential(value: string): string | null {
+  const match = OTP_KEYWORD_RE.exec(value);
+  return match?.[1] ?? match?.[2] ?? null;
+}
+
+export function isStandaloneOtpCredential(value: string): boolean {
+  return /^\d{4,8}$/.test(value.trim());
+}
+
 // A real credential never looks like a code identifier. X's anti-bot tombstone
 // ("JavaScript is not available…") leaked `loader.tweetUnavailableTombstoneHandler`
 // (a JS function name) into the extractor, which wrote it to the vault as a key
@@ -91,9 +103,7 @@ export function looksLikeCredentialToken(token: string): boolean {
   // separates a real key from a word-word-word-date slug
   // (trusty-squire-dogfood-20260625), whose segments are dictionary words or a
   // pure-digit date — neither is a long letter+digit run.
-  return token
-    .split("-")
-    .some((s) => s.length >= 10 && /[A-Za-z]/.test(s) && /[0-9]/.test(s));
+  return token.split("-").some((s) => s.length >= 10 && /[A-Za-z]/.test(s) && /[0-9]/.test(s));
 }
 
 // The vendor FAMILY of a key = the leading letters before its first separator.

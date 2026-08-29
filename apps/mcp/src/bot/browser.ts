@@ -3409,6 +3409,9 @@ export class BrowserController {
     Frame,
     { handle: JSHandle<Document>; identity: string }
   >();
+  private mainDocumentSequence = 0;
+  private readonly mainDocumentIdentities = new WeakMap<Page, number>();
+  private readonly trackedMainDocumentPages = new WeakSet<Page>();
   // The page start() configured with the controller's navigation/captcha
   // handlers. OAuth may temporarily switch `this.page` to a popup, but session
   // reuse must always restore this original page rather than adopting a popup
@@ -3555,12 +3558,31 @@ export class BrowserController {
       opts.proxyUrl !== undefined && opts.proxyUrl.trim().length > 0 ? opts.proxyUrl.trim() : null;
   }
 
+  private trackMainDocument(page: Page): void {
+    if (this.trackedMainDocumentPages.has(page)) return;
+    this.trackedMainDocumentPages.add(page);
+    this.mainDocumentIdentities.set(page, ++this.mainDocumentSequence);
+    page.on("framenavigated", (frame) => {
+      if (frame === page.mainFrame()) {
+        this.mainDocumentIdentities.set(page, ++this.mainDocumentSequence);
+      }
+    });
+  }
+
+  mainDocumentIdentity(): string {
+    const page = this.page;
+    if (page === null) return "none";
+    this.trackMainDocument(page);
+    return String(this.mainDocumentIdentities.get(page));
+  }
+
   /** Attach normal controller behavior to a harness-owned Playwright page. */
   static fromHarnessPage(page: Page): BrowserController {
     const controller = new BrowserController({ humanize: false });
     controller.context = page.context();
     controller.page = page;
     controller.primaryPage = page;
+    controller.trackMainDocument(page);
     controller.harnessAttachedPage = true;
     controller.launchedMode = "headless";
     return controller;
@@ -4026,7 +4048,6 @@ export class BrowserController {
       : null;
     const useSelfLaunch =
       selfLaunchBinary !== null && existsSync(selfLaunchBinary) && canSelfLaunchWithProxy(proxy);
-
     let context: BrowserContext;
     this.throwIfStartCancelled();
     if (useSelfLaunch && selfLaunchBinary !== null) {
@@ -4315,7 +4336,10 @@ export class BrowserController {
     if (contextInitScripts.includes("webgl-spoof")) {
       await context.addInitScript({ content: installWebglSpoofScript });
     }
+    for (const page of context.pages()) this.trackMainDocument(page);
+    context.on("page", (page) => this.trackMainDocument(page));
     this.page = context.pages()[0] ?? (await context.newPage());
+    this.trackMainDocument(this.page);
     this.primaryPage = this.page;
     // In baseline mode addInitScript covers document-start page JS, but
     // Playwright's page.evaluate utility execution can run in a separate realm.
@@ -9486,6 +9510,34 @@ export class BrowserController {
     return await this.page.evaluate(extractObservationVisibleText);
   }
 
+  /**
+   * Tiny structural source for compact V2. The raw values never leave the
+   * provision session: compact-observation-v2 applies its allowlist seal
+   * before the result is stored, delta'd, or emitted.
+   */
+  async extractObservationSemantics(): Promise<{ title: string; headings: string[] }> {
+    if (!this.page) throw new Error("Browser not started");
+    return await this.page.evaluate(() => {
+      const visible = (element: Element): boolean => {
+        const html = element as HTMLElement;
+        const style = window.getComputedStyle(html);
+        const rect = html.getBoundingClientRect();
+        return (
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          rect.width > 0 &&
+          rect.height > 0
+        );
+      };
+      const headings = Array.from(document.querySelectorAll("h1,h2"))
+        .filter(visible)
+        .map((element) => (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 160))
+        .filter(Boolean)
+        .slice(0, 2);
+      return { title: document.title.slice(0, 160), headings };
+    });
+  }
+
   async readCheckoutSummary(fallbackCurrency?: string): Promise<CheckoutSummary> {
     if (!this.page) throw new Error("Browser not started");
     const page = this.page;
@@ -14053,6 +14105,17 @@ export class BrowserController {
           '[role="dialog"],dialog,[aria-modal="true"],nav,main,header,footer,aside,form,section,article',
         );
 
+      const regionIds = new Map<Element, number>();
+      let nextRegionId = 1;
+      const regionId = (region: Element | null): number | null => {
+        if (region === null) return null;
+        const existing = regionIds.get(region);
+        if (existing !== undefined) return existing;
+        const id = nextRegionId++;
+        regionIds.set(region, id);
+        return id;
+      };
+
       const regionName = (region: Element | null): string | null => {
         if (region === null) return null;
         const role = region.getAttribute("role");
@@ -14304,6 +14367,8 @@ export class BrowserController {
         landmark: string | null;
         value: string | null;
         checked: boolean | null;
+        disabled: boolean | null;
+        required: boolean | null;
         selectOptions: Array<{ value: string; text: string }> | null;
         selectedOptionText: string | null;
         interactedThisRun: boolean;
@@ -14312,6 +14377,8 @@ export class BrowserController {
         screenPath: string | null;
         container: string | null;
         inDialog: boolean;
+        containerId: number | null;
+        formId: number | null;
         topmost: boolean | null;
         occludedBy: string | null;
         autocomplete: string | null;
@@ -14362,8 +14429,11 @@ export class BrowserController {
         const isGoogleGSIIframe =
           el instanceof HTMLIFrameElement &&
           (el.getAttribute("src") ?? "").includes("accounts.google.com/gsi/button");
-        const container = regionName(regionFor(el));
+        const region = regionFor(el);
+        const container = regionName(region);
+        const containerId = regionId(region);
         const inDialog = nearestModalRegion(el) !== null;
+        const formId = regionId(el.closest("form"));
         const status = topmostStatus(el);
         const pathLabel = isGoogleGSIIframe
           ? "Continue with Google"
@@ -14434,6 +14504,10 @@ export class BrowserController {
             el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio")
               ? el.checked
               : null,
+          disabled:
+            el.matches(":disabled") || el.getAttribute("aria-disabled") === "true" ? true : null,
+          required:
+            el.matches(":required") || el.getAttribute("aria-required") === "true" ? true : null,
           // For <select>: the currently-selected option's visible text
           // and a short list of available option labels. The combination
           // is how the planner detects the "React-defaulted dropdown"
@@ -14470,6 +14544,8 @@ export class BrowserController {
             slug(pathLabel, `${elementKind(el)}-${out.length}`),
           container,
           inDialog,
+          containerId,
+          formId,
           topmost: status.topmost,
           occludedBy: status.occludedBy,
         });
@@ -16940,6 +17016,10 @@ export interface InteractiveElement {
   // Null for everything else. Use this (not `value`) to identify
   // unticked checkboxes — checkbox `value` is the static attribute.
   checked?: boolean | null;
+  /** Native or ARIA disabled state captured with the interactive DOM record. */
+  disabled?: boolean | null;
+  /** Native or ARIA required state captured with the interactive DOM record. */
+  required?: boolean | null;
   // <select>-only: the visible text of the currently-selected option
   // and a short list of available option labels (capped to 8 — long
   // pickers like countries blow the inventory rendering). Lets the
@@ -16964,6 +17044,8 @@ export interface InteractiveElement {
   container?: string | null;
   // Dedicated dialog-role/aria-modal ancestry via composed tree (pierces open shadows).
   inDialog?: boolean;
+  containerId?: number | null;
+  formId?: number | null;
   topmost?: boolean | null;
   occludedBy?: string | null;
   // T38 — card-radio cluster membership. Set on elements that are

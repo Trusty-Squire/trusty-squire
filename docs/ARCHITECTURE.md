@@ -57,6 +57,14 @@ A live browser session held by the MCP server. The host agent observes pages and
 chooses actions, while the MCP process owns the browser, sealed secret slots,
 captcha handling, and extraction.
 
+The default observation boundary is Compact V2. The MCP builds a screened,
+finite action map before any audit, retention, delta, or public result; raw page
+text, URLs, values, and snapshot files stay private. Its opaque controls are
+bound to one observation generation, main-document identity, page, and exact
+live map. The detailed wire format, private query/paging protocol, and V1
+rollout switch are owned by
+[`DESIGN-observe-compact.md`](DESIGN-observe-compact.md).
+
 **Payment approval**
 
 A short-lived handoff from an active operate session to the user's phone. The
@@ -284,8 +292,9 @@ capture -> synthesize -> sign -> publish -> verify -> active
 
 DOM-target actions are promotable into registry Skills only when they are
 main-frame and inventory-backed; modeled navigation retains its existing domain
-lock. A session can still complete by using `operate_act` with a live `text=…`
-or `css=…` locator when a visible control has no observed ref, but an
+lock. An explicitly selected V1 session can still complete by using
+`operate_act` with a live `text=…` or `css=…` locator when a visible control has
+no observed ref, but an
 off-inventory action cannot be synthesized into a portable step. Such a session
 is skipped by auto-promotion and cannot be saved as an operator recipe.
 Inventory-backed frame actions can be saved in an operator recipe with their

@@ -28,7 +28,7 @@
 // exact gap the fix closes).
 import { existsSync } from "node:fs";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BrowserController, requestHostInScope, isFailFastScopeAbort } from "../browser.js";
 
 // See browser-payment.test.ts's identical guard: the lean mcp-only
@@ -39,6 +39,16 @@ try {
 } catch {
   chromiumAvailable = false;
 }
+
+let sharedBrowser: Browser | undefined;
+
+beforeAll(async () => {
+  if (chromiumAvailable) sharedBrowser = await chromium.launch({ headless: true });
+});
+
+afterAll(async () => {
+  await sharedBrowser?.close();
+});
 
 const MERCHANT_ORIGIN = "https://checkout.hibiyakadan.test";
 const ACS_ORIGIN = "https://authentication.cardinalcommerce.com";
@@ -95,12 +105,11 @@ const IFRAME_ACS_PAGE = `
   ${ACS_POLL_SCRIPT('document.getElementById("cres-form").submit();')}`;
 
 async function serveFixture(pages: Record<string, string>): Promise<{
-  browser: Browser;
   context: BrowserContext;
   page: Page;
 }> {
-  const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext();
+  if (sharedBrowser === undefined) throw new Error("Chromium test browser was not started");
+  const context = await sharedBrowser.newContext();
   // Content-serving route, registered BEFORE the guard below — Playwright
   // runs same-scope (context) routes LIFO, so the guard (installed after,
   // via setHostScopeAllowedHosts) is checked FIRST on every request, exactly
@@ -115,14 +124,14 @@ async function serveFixture(pages: Record<string, string>): Promise<{
     return route.fulfill({ contentType: "text/html", body });
   });
   const page = await context.newPage();
-  return { browser, context, page };
+  return { context, page };
 }
 
 describe("decoupled 3-D Secure — Hibiya Kadan/EbisuMart hang reproduction + fix", () => {
   it.skipIf(!chromiumAvailable)(
     "resolves a top-level decoupled challenge approved at t+2s, with only the merchant host allowed",
     async () => {
-      const { browser, context, page } = await serveFixture({
+      const { context, page } = await serveFixture({
         [`${MERCHANT_ORIGIN}/checkout`]: TOP_LEVEL_MERCHANT_PAGE,
         [ACS_CHALLENGE_URL]: TOP_LEVEL_ACS_PAGE,
         [RECEIPT_URL]: "<p>Thank you for your order.</p>",
@@ -147,7 +156,6 @@ describe("decoupled 3-D Secure — Hibiya Kadan/EbisuMart hang reproduction + fi
         expect(new URL(page.url()).origin).toBe(MERCHANT_ORIGIN);
       } finally {
         await context.close();
-        await browser.close();
       }
     },
     20_000,
@@ -156,7 +164,7 @@ describe("decoupled 3-D Secure — Hibiya Kadan/EbisuMart hang reproduction + fi
   it.skipIf(!chromiumAvailable)(
     "resolves an iframe-embedded decoupled challenge that CRes-auto-submits target=_top at t+2s",
     async () => {
-      const { browser, context, page } = await serveFixture({
+      const { context, page } = await serveFixture({
         [`${MERCHANT_ORIGIN}/checkout`]: IFRAME_MERCHANT_PAGE,
         [ACS_CHALLENGE_URL]: IFRAME_ACS_PAGE,
         [RECEIPT_URL]: "<p>Thank you for your order.</p>",
@@ -177,7 +185,6 @@ describe("decoupled 3-D Secure — Hibiya Kadan/EbisuMart hang reproduction + fi
         expect(page.url()).toBe(RECEIPT_URL);
       } finally {
         await context.close();
-        await browser.close();
       }
     },
     20_000,
