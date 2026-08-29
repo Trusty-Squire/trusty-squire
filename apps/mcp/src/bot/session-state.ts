@@ -18,6 +18,13 @@ export const GOOGLE_LOGIN_COOKIE_MARKERS = [
   "SAPISID",
 ] as const;
 
+export function isSessionStateArtifact(entry: string): boolean {
+  return (
+    entry === SESSION_STATE_FILE ||
+    (entry.startsWith(`${SESSION_STATE_FILE}.`) && entry.endsWith(".tmp"))
+  );
+}
+
 export function sessionStatePath(profileDir: string): string {
   return join(profileDir, SESSION_STATE_FILE);
 }

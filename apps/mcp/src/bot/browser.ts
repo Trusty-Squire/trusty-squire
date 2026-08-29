@@ -39,6 +39,8 @@ import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import { Socket, createServer } from "node:net";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { isSameRecipeDomain } from "@trusty-squire/recipe-schema";
 import {
@@ -2551,6 +2553,44 @@ async function waitForDevtools(
   throw new Error(`Chrome DevTools endpoint never came up on ${base} (${lastErr})`);
 }
 
+const DEVTOOLS_ACTIVE_PORT_FILE = "DevToolsActivePort";
+
+export async function waitForOwnedDevtoolsEndpoint(
+  profileDir: string,
+  deadlineMs: number,
+  child: ChildProcess,
+): Promise<string> {
+  const activePortPath = join(profileDir, DEVTOOLS_ACTIVE_PORT_FILE);
+  const deadline = Date.now() + deadlineMs;
+  let lastErr = "";
+  while (Date.now() < deadline) {
+    if (!childProcessIsRunning(child)) {
+      throw new Error("Chrome exited before its owned DevTools endpoint became available");
+    }
+    try {
+      const [portText, browserPath] = (await readFile(activePortPath, "utf8")).split(/\r?\n/);
+      const port = Number(portText);
+      if (
+        !Number.isInteger(port) ||
+        port < 1 ||
+        port > 65_535 ||
+        browserPath === undefined ||
+        !/^\/devtools\/browser\/[A-Za-z0-9-]+$/.test(browserPath)
+      ) {
+        throw new Error("invalid DevToolsActivePort contents");
+      }
+      return `ws://127.0.0.1:${port}${browserPath}`;
+    } catch (error) {
+      lastErr = error instanceof Error ? error.message : String(error);
+    }
+    await new Promise<void>((resolveWait) => {
+      const timer = setTimeout(resolveWait, 200);
+      timer.unref();
+    });
+  }
+  throw new Error(`Owned Chrome DevTools endpoint was not published (${lastErr})`);
+}
+
 export async function withChromeStartupLock<T>(
   fn: () => Promise<T>,
   opts: { deadlineMs?: number; lockDir?: string } = {},
@@ -3649,11 +3689,10 @@ export class BrowserController {
     }
     const endpoint = await (async () => {
       this.throwIfStartCancelled();
-      const port = await findFreePort();
-      this.throwIfStartCancelled();
       clearStaleSingletonLock(this.profileDir);
+      rmSync(join(this.profileDir, DEVTOOLS_ACTIVE_PORT_FILE), { force: true });
       const argv = [
-        `--remote-debugging-port=${port}`,
+        "--remote-debugging-port=0",
         "--remote-debugging-address=127.0.0.1",
         `--user-data-dir=${this.profileDir}`,
         "--no-first-run",
@@ -3698,7 +3737,7 @@ export class BrowserController {
         throw new Error("BrowserController start cancelled");
       }
       try {
-        const endpoint = await waitForDevtools(port, 30_000);
+        const endpoint = await waitForOwnedDevtoolsEndpoint(this.profileDir, 30_000, child);
         this.childChromeIdentity = await resolveAttachedProfileChildIdentity(
           child,
           this.profileDir,
