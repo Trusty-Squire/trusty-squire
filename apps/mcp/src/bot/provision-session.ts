@@ -68,8 +68,10 @@ import { pickVerificationLink } from "./email-verification.js";
 import {
   createEphemeralProfile,
   destroyEphemeralProfile,
+  GOOGLE_LOGIN_COOKIE_MARKERS,
   readSessionState,
   stripGoogleIdentityFromSessionState,
+  type BrowserStorageState,
   writeSessionState,
 } from "./session-state.js";
 import { CHROME_PROFILE_DIR } from "./profile.js";
@@ -730,6 +732,7 @@ interface AcquiredBrowser {
   controller: BrowserController;
   profileDir: string;
   shutdownGeneration: number;
+  googleIdentityAvailable: boolean;
 }
 
 interface StartingBrowser {
@@ -759,6 +762,58 @@ async function withGoogleOAuthHandoff<T>(run: () => Promise<T>): Promise<T> {
   } finally {
     release();
   }
+}
+
+function isGoogleStorageHost(host: unknown): boolean {
+  return typeof host === "string" && /(^|\.)google\.com$/i.test(host.replace(/^\./, ""));
+}
+
+function hasUsableGoogleIdentity(state: BrowserStorageState | undefined): boolean {
+  if (state === undefined) return false;
+  const nowSeconds = Date.now() / 1_000;
+  return state.cookies.some((cookie) => {
+    const value = (cookie as { value?: unknown }).value;
+    const expires = (cookie as { expires?: unknown }).expires;
+    return (
+      isGoogleStorageHost(cookie.domain) &&
+      GOOGLE_LOGIN_COOKIE_MARKERS.includes(
+        cookie.name as (typeof GOOGLE_LOGIN_COOKIE_MARKERS)[number],
+      ) &&
+      typeof value === "string" &&
+      value.length > 10 &&
+      (expires === undefined ||
+        (typeof expires === "number" && (expires <= 0 || expires > nowSeconds)))
+    );
+  });
+}
+
+export function mergeGoogleIdentityStorageState(
+  current: BrowserStorageState,
+  latest: BrowserStorageState,
+): BrowserStorageState {
+  return {
+    ...current,
+    cookies: [
+      ...current.cookies.filter((cookie) => !isGoogleStorageHost(cookie.domain)),
+      ...latest.cookies.filter((cookie) => isGoogleStorageHost(cookie.domain)),
+    ],
+    origins: [
+      ...current.origins.filter((origin) => {
+        try {
+          return !isGoogleStorageHost(new URL(origin.origin).hostname);
+        } catch {
+          return true;
+        }
+      }),
+      ...latest.origins.filter((origin) => {
+        try {
+          return isGoogleStorageHost(new URL(origin.origin).hostname);
+        } catch {
+          return false;
+        }
+      }),
+    ],
+  };
 }
 
 function provisionStartGeneration(): number {
@@ -791,14 +846,14 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
   };
   startingBrowsers.add(pending);
   let controller: BrowserController | null = null;
+  let googleIdentityAvailable = false;
   try {
     const savedStorageState = await readSessionState(canonicalProfileDir);
+    googleIdentityAvailable = hasUsableGoogleIdentity(savedStorageState);
     const storageState =
       savedStorageState === undefined
         ? undefined
-        : opts.requireLiveIdentity === true
-          ? savedStorageState
-          : stripGoogleIdentityFromSessionState(savedStorageState);
+        : stripGoogleIdentityFromSessionState(savedStorageState);
     if (pending.cancelRequested) {
       throw new Error("operate_start cancelled: operator server is shutting down");
     }
@@ -837,7 +892,7 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
     canonicalProfileDir,
     ...(opts.proxyUrl === undefined ? {} : { proxyUrl: opts.proxyUrl }),
   });
-  return { controller, profileDir, shutdownGeneration: generation };
+  return { controller, profileDir, shutdownGeneration: generation, googleIdentityAvailable };
 }
 
 async function releaseWarmBrowserPage(
@@ -956,11 +1011,17 @@ async function closeEphemeralBrowser(
   }
   if (closeState === "closed") {
     if (state !== undefined) {
-      const published = await writeSessionState(
-        ephemeral.canonicalProfileDir,
-        state,
-        () => owner?.forced !== true,
-      );
+      const capturedState = state;
+      const published = await withGoogleOAuthHandoff(async () => {
+        const latest = await readSessionState(ephemeral.canonicalProfileDir);
+        return await writeSessionState(
+          ephemeral.canonicalProfileDir,
+          latest === undefined
+            ? capturedState
+            : mergeGoogleIdentityStorageState(capturedState, latest),
+          () => owner?.forced !== true,
+        );
+      });
       if (!published && owner?.forced) {
         throw new Error("operator browser terminal teardown was forced");
       }
@@ -1012,7 +1073,10 @@ async function runSerializedGoogleOAuth(
       return browser;
     }
     const latestState = await readSessionState(ephemeral.canonicalProfileDir);
-    if (latestState !== undefined) await browser.restoreStorageState(latestState);
+    if (latestState !== undefined) {
+      const currentState = await browser.captureStorageState();
+      await browser.restoreStorageState(mergeGoogleIdentityStorageState(currentState, latestState));
+    }
     let oauthFailed = false;
     let oauthError: unknown;
     try {
@@ -1040,7 +1104,8 @@ async function runSerializedGoogleOAuth(
     }
     if (rotatedState === undefined) throw captureError;
     const published = await writeSessionState(ephemeral.canonicalProfileDir, rotatedState);
-    if (!published) throw new Error("Google OAuth identity handoff could not publish session state");
+    if (!published)
+      throw new Error("Google OAuth identity handoff could not publish session state");
 
     const replacement = new BrowserController({
       profileDir: ephemeral.profileDir,
@@ -3045,9 +3110,9 @@ export interface StartOptions {
   // Registry route guidance the tool layer resolved (renderSkillHint). Attached
   // to the start observation so the agent reads the map before driving.
   hint?: string;
-  // Change 5 — operate tasks that act AS the user require a live Google session
-  // in the fresh seeded profile before driving. When true and no live session exists,
-  // start hands back (needs_user.login) BEFORE touching the task.
+  // Change 5 — operate tasks that act AS the user require portable Google identity
+  // in the canonical snapshot before driving. The private profile receives it only
+  // inside the serialized OAuth handoff.
   requireLiveIdentity?: boolean;
   // PR2 — may the operator read the inbox for email verification? Sourced from
   // the install-time `consent_operator_inbox_otp` flag. Default-OFF: when false,
@@ -3066,7 +3131,7 @@ export interface HarnessStartOptions extends Omit<StartOptions, "profileDir" | "
 }
 
 // Fail-closed precondition GATE — NOT autonomous recovery. An operate task that
-// acts as the user needs a LIVE Google session before it drives; absent /
+// acts as the user needs a usable Google session snapshot before it drives; absent /
 // expired / 2FA-challenged → hand back BEFORE the task starts, so the
 // human-in-the-loop dependency is explicit, never hidden (Codex). Pairs with the
 // install-time gate (install/cli.ts) that already requires a Google session.
@@ -3108,9 +3173,12 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
   let workerEmail: string | null;
   const acquired = await acquireWarmBrowser(opts, id);
   browser = acquired.controller;
-  // Probe the fresh seeded profile. A snapshot is best-effort: never assume it
-  // remains authenticated without the established live-provider detector.
-  liveProviders = await ensureProvisionPrimaryProviderSession(browser);
+  // Probe only non-Google providers in the fresh profile. Google availability
+  // comes from the canonical snapshot and is consumed later under its handoff.
+  liveProviders = (await ensureProvisionPrimaryProviderSession(browser)).filter(
+    (provider) => provider !== "google",
+  );
+  if (acquired.googleIdentityAvailable) liveProviders.push("google");
   workerEmail =
     typeof browser.detectGoogleAccountEmail === "function"
       ? await browser.detectGoogleAccountEmail().catch(() => null)
@@ -3122,7 +3190,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     throw error;
   }
   // Change 5 — fail-closed identity gate BEFORE driving. If an operate task
-  // needs to act as the user and there's no live Google session, hand back now;
+  // needs to act as the user and there's no usable Google snapshot, hand back now;
   // do not start the browser or the task. No autonomous login is attempted.
   if (opts.requireLiveIdentity === true) {
     const gate = googleSessionGate(liveProviders);
@@ -6365,7 +6433,11 @@ async function executeAct(
           });
         } else {
           assertNoFrameTarget(el, "oauth_click");
-          await browser.startOAuth(el.selector);
+          if (isGoogleOAuthElement(el)) {
+            browser = await runSerializedGoogleOAuth(session, el.selector);
+          } else {
+            await browser.startOAuth(el.selector);
+          }
         }
         if (action.kind !== "type") await settleAfterStateChange(browser);
         break;

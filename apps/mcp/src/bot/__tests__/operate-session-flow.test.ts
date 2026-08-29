@@ -79,6 +79,7 @@ const h = vi.hoisted(() => ({
   destroyedProfiles: [] as string[],
   captureStorageState: { cookies: [], origins: [] } as unknown,
   captureStorageStates: new Map<number, unknown>(),
+  captureStorageStateSequences: new Map<number, unknown[]>(),
   captureStorageStateCalls: 0,
   captureStorageStateGate: null as Promise<void> | null,
   captureStorageStateError: null as Error | null,
@@ -201,7 +202,20 @@ vi.mock("../session-state.js", async (importOriginal) => {
     readSessionState: async (profileDir: string) => {
       h.storageStateReads.push(profileDir);
       if (h.storageStateReadGate !== null) await h.storageStateReadGate;
-      return h.storageStates.get(profileDir);
+      if (h.storageStates.has(profileDir)) return h.storageStates.get(profileDir);
+      return h.providers?.includes("google")
+        ? {
+            cookies: [
+              {
+                name: "SID",
+                value: "default-google-session-state",
+                domain: ".google.com",
+                path: "/",
+              },
+            ],
+            origins: [],
+          }
+        : undefined;
     },
     writeSessionState: async (
       profileDir: string,
@@ -719,6 +733,8 @@ vi.mock("../browser.js", () => ({
       h.captureStorageStateCalls += 1;
       if (h.captureStorageStateGate !== null) await h.captureStorageStateGate;
       if (h.captureStorageStateError !== null) throw h.captureStorageStateError;
+      const sequence = h.captureStorageStateSequences.get(this.index);
+      if (sequence !== undefined && sequence.length > 0) return sequence.shift();
       return h.captureStorageStates.get(this.index) ?? h.captureStorageState;
     }
     async restoreStorageState(state: unknown): Promise<void> {
@@ -1010,6 +1026,7 @@ beforeEach(() => {
   h.destroyedProfiles = [];
   h.captureStorageState = { cookies: [], origins: [] };
   h.captureStorageStates = new Map();
+  h.captureStorageStateSequences = new Map();
   h.captureStorageStateCalls = 0;
   h.captureStorageStateGate = null;
   h.captureStorageStateError = null;
@@ -3245,16 +3262,52 @@ describe("operate session — OAuth lifecycle", () => {
       ],
     };
     const state1 = {
-      cookies: state0.cookies.map((cookie) =>
-        cookie.name === "SID" ? { ...cookie, value: "google-session-state-one" } : cookie,
-      ),
-      origins: state0.origins,
+      cookies: [
+        {
+          name: "rp_session",
+          value: "first-relying-party-session",
+          domain: ".app.example.com",
+          path: "/",
+        },
+        { ...state0.cookies[0]!, value: "google-session-state-one" },
+      ],
+      origins: [
+        {
+          origin: "https://app.example.com",
+          localStorage: [{ name: "oauth_pkce", value: "first-pkce" }],
+          indexedDB: [{ name: "first-rp-db", version: 1, stores: [] }],
+        },
+        state0.origins[0]!,
+      ],
     };
     const state2 = {
-      cookies: state0.cookies.map((cookie) =>
-        cookie.name === "SID" ? { ...cookie, value: "google-session-state-two" } : cookie,
-      ),
-      origins: state0.origins,
+      cookies: [
+        {
+          name: "rp_session",
+          value: "second-relying-party-session",
+          domain: ".app.example.com",
+          path: "/",
+        },
+        { ...state0.cookies[0]!, value: "google-session-state-two" },
+      ],
+      origins: [
+        {
+          origin: "https://app.example.com",
+          localStorage: [{ name: "oauth_pkce", value: "second-pkce" }],
+          indexedDB: [{ name: "second-rp-db", version: 1, stores: [] }],
+        },
+        state0.origins[0]!,
+      ],
+    };
+    const current0 = { cookies: [state1.cookies[0]!], origins: [state1.origins[0]!] };
+    const current1 = { cookies: [state2.cookies[0]!], origins: [state2.origins[0]!] };
+    const merged0 = {
+      cookies: [state1.cookies[0]!, state0.cookies[0]!],
+      origins: [state1.origins[0]!, state0.origins[0]!],
+    };
+    const merged1 = {
+      cookies: [state2.cookies[0]!, state1.cookies[1]!],
+      origins: [state2.origins[0]!, state1.origins[1]!],
     };
     h.storageStates.set(canonical, state0);
     h.visibleText = "Continue with Google";
@@ -3273,8 +3326,8 @@ describe("operate session — OAuth lifecycle", () => {
         releaseFirst = resolve;
       }),
     );
-    h.captureStorageStates.set(0, state1);
-    h.captureStorageStates.set(1, state2);
+    h.captureStorageStateSequences.set(0, [current0, state1]);
+    h.captureStorageStateSequences.set(1, [current1, state2]);
     const first = await startProvisionSession({
       serviceUrl: "https://app.example.com/login",
       profileDir: canonical,
@@ -3294,18 +3347,18 @@ describe("operate session — OAuth lifecycle", () => {
     });
     await vi.waitFor(() => expect(h.restoredStorageStates).toHaveLength(1));
     const secondAct = act(second.session_id, {
-      kind: "oauth_login",
+      kind: "oauth_click",
       target: "Continue with Google",
     });
     await Promise.resolve();
     await Promise.resolve();
-    expect(h.restoredStorageStates).toEqual([{ browserIndex: 0, state: state0 }]);
+    expect(h.restoredStorageStates).toEqual([{ browserIndex: 0, state: merged0 }]);
     expect(h.oauthLoginCalls).toHaveLength(1);
 
     releaseFirst();
     await firstAct;
     await vi.waitFor(() => expect(h.restoredStorageStates).toHaveLength(2));
-    expect(h.restoredStorageStates[1]).toEqual({ browserIndex: 1, state: state1 });
+    expect(h.restoredStorageStates[1]).toEqual({ browserIndex: 1, state: merged1 });
     await secondAct;
     expect(h.storageStateWrites).toEqual([
       { profileDir: canonical, state: state1 },
@@ -3314,6 +3367,87 @@ describe("operate session — OAuth lifecycle", () => {
 
     await finishProvisionSession(first.session_id);
     await finishProvisionSession(second.session_id);
+  });
+
+  it("routes legacy Google OAuth replay through the identity handoff", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-google-replay";
+    const google = {
+      cookies: [
+        {
+          name: "SID",
+          value: "google-session-before-replay",
+          domain: ".google.com",
+          path: "/",
+        },
+      ],
+      origins: [{ origin: "https://accounts.google.com", localStorage: [] }],
+    };
+    const relyingParty = {
+      cookies: [
+        {
+          name: "rp_session",
+          value: "replay-relying-party-session",
+          domain: ".app.example.com",
+          path: "/",
+        },
+      ],
+      origins: [
+        {
+          origin: "https://app.example.com",
+          localStorage: [{ name: "oauth_pkce", value: "replay-pkce" }],
+          indexedDB: [{ name: "replay-rp-db", version: 1, stores: [] }],
+        },
+      ],
+    };
+    const merged = {
+      cookies: [...relyingParty.cookies, ...google.cookies],
+      origins: [...relyingParty.origins, ...google.origins],
+    };
+    const rotated = {
+      cookies: [relyingParty.cookies[0]!, { ...google.cookies[0]!, value: "google-after-replay" }],
+      origins: merged.origins,
+    };
+    h.storageStates.set(canonical, google);
+    h.captureStorageStateSequences.set(0, [relyingParty, rotated]);
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [
+          {
+            action: {
+              kind: "oauth_click",
+              target: {
+                visible_text: "Continue with Google",
+                accessible_name: "Continue with Google",
+                css: "#google-oauth",
+              },
+            },
+          },
+          { action: { kind: "oauth_settle" } },
+        ],
+      }),
+      {},
+    );
+
+    expect(result.status).toBe("complete");
+    expect(h.oauthLoginCalls).toEqual(["#google-oauth"]);
+    expect(h.restoredStorageStates).toEqual([{ browserIndex: 0, state: merged }]);
+    expect(h.storageStateWrites).toEqual([{ profileDir: canonical, state: rotated }]);
+    await finishProvisionSession(started.session_id);
   });
 
   it("completes oauth_login in one action and returns the settled product observation", async () => {
@@ -5208,7 +5342,7 @@ describe("operate session — Change 5 precondition gate", () => {
     expect(h.storageStateWrites).toEqual([]);
   });
 
-  it("accepts require_live_identity from storageState in a distinct ephemeral profile", async () => {
+  it("accepts require_live_identity without preloading Google state", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-seeded";
     const state = {
       cookies: [
@@ -5230,21 +5364,23 @@ describe("operate session — Change 5 precondition gate", () => {
     });
     expect(obs.needs_user).toBeUndefined();
     expect(h.started).toBe(1);
-    expect(h.seededStorageStates).toEqual([state]);
+    expect(h.seededStorageStates).toEqual([{ cookies: [], origins: [] }]);
     expect(h.profileDirs[0]).not.toBe(canonical);
     await finishProvisionSession(obs.session_id);
     expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
   });
 
-  it("proceeds normally when a live Google session exists", async () => {
+  it("does not trust an impossible Google probe without canonical identity", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-probe-only";
     h.providers = ["google"];
+    h.storageStates.set(canonical, { cookies: [], origins: [] });
     const obs = await startProvisionSession({
       serviceUrl: "https://app.example.com/",
+      profileDir: canonical,
       requireLiveIdentity: true,
     });
-    expect(obs.needs_user).toBeUndefined();
-    expect(h.started).toBe(1);
-    await finishProvisionSession(obs.session_id);
+    expect(obs.needs_user?.wall).toBe("google_session");
+    expect(h.started).toBe(0);
   });
 
   it("uses the same ephemeral lifecycle for ordinary sessions", async () => {
@@ -5736,7 +5872,17 @@ describe("operate session — ephemeral profile lifecycle", () => {
 
   it("retains the prior snapshot when capture fails", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-capture-failure";
-    const prior = { cookies: [{ name: "SID" }], origins: [] };
+    const prior = {
+      cookies: [
+        {
+          name: "SID",
+          value: "valid-google-session-before-capture-failure",
+          domain: ".google.com",
+          path: "/",
+        },
+      ],
+      origins: [],
+    };
     h.storageStates.set(canonical, prior);
     h.captureStorageStateError = new Error("capture failed");
     const started = await startProvisionSession({
@@ -6452,7 +6598,17 @@ describe("operate session — ephemeral profile lifecycle", () => {
     "retains a %s profile without replacing prior state",
     async (closeState) => {
       const canonical = `/tmp/trusty-squire-unit-canonical-${closeState}`;
-      const prior = { cookies: [{ name: "SID" }], origins: [] };
+      const prior = {
+        cookies: [
+          {
+            name: "SID",
+            value: "valid-google-session-before-unproven-close",
+            domain: ".google.com",
+            path: "/",
+          },
+        ],
+        origins: [],
+      };
       h.storageStates.set(canonical, prior);
       h.closeState = closeState;
       const first = await startProvisionSession({

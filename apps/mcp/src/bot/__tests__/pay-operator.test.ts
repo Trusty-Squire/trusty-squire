@@ -82,6 +82,9 @@ async function harness(
       options?: { onSubmitDispatched?: () => void },
     ) => Promise<CheckoutSubmitResult>;
     paymentInstrumentMismatch?: () => CheckoutSubmitResult["payment_instrument_mismatch"];
+    now?: () => number;
+    approvalExpiresAt?: () => string;
+    onJwksFetch?: () => void;
   } = {},
 ) {
   const checkout = checkoutOptions.checkout ?? CHECKOUT;
@@ -104,10 +107,13 @@ async function harness(
   const agent = "synthetic-payment-test-agent";
   let approvalPolls = 0;
   let confirmedCandidate: Record<string, unknown> | undefined;
+  const approvalExpiresAt = (): string =>
+    checkoutOptions.approvalExpiresAt?.() ?? new Date(Date.now() + 60_000).toISOString();
 
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     if (url === "https://vouchflow.test/.well-known/jwks.json") {
+      checkoutOptions.onJwksFetch?.();
       return Response.json({ keys: [{ ...jwk, alg: "RS256", use: "sig", kid: "test-key" }] });
     }
     if (url.endsWith("/v1/pay/config") && init?.method === "GET") {
@@ -121,7 +127,7 @@ async function harness(
           id: "approval_test",
           nonce,
           agent,
-          expires_at: new Date(Date.now() + 60_000).toISOString(),
+          expires_at: approvalExpiresAt(),
         },
         { status: 201 },
       );
@@ -144,7 +150,7 @@ async function harness(
           operator_pubkey: operatorPublicKey,
           jws: confirmedCandidate.jws,
           sealed_card: confirmedCandidate.sealed_card,
-          expires_at: new Date(Date.now() + 60_000).toISOString(),
+          expires_at: approvalExpiresAt(),
         });
       }
       const recipientHash = createHash("sha256")
@@ -227,7 +233,7 @@ async function harness(
         operator_pubkey: operatorPublicKey,
         jws: assertion,
         sealed_card: mode === "junk_then_happy" && approvalPolls === 1 ? "junk" : sealedCard,
-        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        expires_at: approvalExpiresAt(),
       });
     }
     if (url.endsWith("/v1/pay/approvals/approval_test/confirm") && init?.method === "POST") {
@@ -319,6 +325,7 @@ async function harness(
     browser,
     {
       fetch: fetchMock,
+      ...(checkoutOptions.now === undefined ? {} : { now: checkoutOptions.now }),
       sleep: async () => undefined,
       vouchflowApiBase: "https://vouchflow.test",
       vouchflowExpectedAudience: expectedAudience ?? undefined,
@@ -800,6 +807,28 @@ describe("operate_pay", () => {
     });
     expect(filledCards).toHaveLength(0);
     expect(auditBodies).toHaveLength(0);
+  });
+
+  it("refuses card release when mandate verification crosses approval expiry", async () => {
+    let clock = 0;
+    const deadline = 1_000;
+    const { result, filledCards, resolvedCardRefs } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      undefined,
+      {
+        now: () => clock,
+        approvalExpiresAt: () => new Date(deadline).toISOString(),
+        onJwksFetch: () => {
+          clock = deadline;
+        },
+      },
+    );
+
+    expect(result).toMatchObject({ status: "payment_approval_timeout" });
+    expect(resolvedCardRefs).toHaveLength(0);
+    expect(filledCards).toHaveLength(0);
   });
 
   it("fails closed when the expected Vouchflow audience is not configured", async () => {

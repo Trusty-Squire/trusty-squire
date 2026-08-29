@@ -913,6 +913,12 @@ export async function executeOperatePay(
       // stays in the vault, so the retry is a fast has-card approval.
       return jit ? { ...base, card_persisted: true } : base;
     };
+    const approvalExpired = (): boolean => deps.now() >= deadline;
+    const expiredApprovalResult = (): Record<string, unknown> => {
+      resumableState = undefined;
+      keypairHandedOff = false;
+      return timeoutResult();
+    };
 
     let approved: { jws: string; sealed_card: string; card_ref: string | null } | undefined;
     let claims: JWTPayload | undefined;
@@ -936,11 +942,11 @@ export async function executeOperatePay(
         approvalId,
         deps.now() < callDeadline ? true : "immediate",
       );
+      const liveDeadline = Date.parse(approval.expires_at);
+      if (Number.isFinite(liveDeadline)) deadline = Math.min(deadline, liveDeadline);
       boundCardRef = approval.card_ref;
-      if (approval.status === "expired") {
-        resumableState = undefined;
-        keypairHandedOff = false;
-        return timeoutResult();
+      if (approval.status === "expired" || approvalExpired()) {
+        return expiredApprovalResult();
       }
       const hasCandidate =
         typeof approval.jws === "string" && typeof approval.sealed_card === "string";
@@ -1054,6 +1060,7 @@ export async function executeOperatePay(
                 approval_url: approvalUrl,
               };
             }
+            if (approvalExpired()) return expiredApprovalResult();
 
             let candidateCardBytes: Uint8Array | undefined;
             let candidateCard: CheckoutCard;
@@ -1176,6 +1183,10 @@ export async function executeOperatePay(
                 }
               }
             }
+            if (approvalExpired()) {
+              candidateCardBytes.fill(0);
+              return expiredApprovalResult();
+            }
             logPaymentCandidateLifecycle(approvalId, "approval", "ready_to_charge");
             cardBytes = candidateCardBytes;
             card = candidateCard;
@@ -1258,8 +1269,6 @@ export async function executeOperatePay(
         approval_url: approvalUrl,
       };
     }
-    deps.onCardResolved(cardRef);
-
     const last4 = card.pan.slice(-4);
     const mandateId =
       typeof claims.mandate_id === "string"
@@ -1327,6 +1336,8 @@ export async function executeOperatePay(
           ...(liveOrigin !== null ? { live_checkout_origin: liveOrigin } : {}),
         };
       }
+      if (approvalExpired()) return expiredApprovalResult();
+      deps.onCardResolved(cardRef);
       try {
         await browser.fillCheckoutCardFields(card);
       } catch (error) {
@@ -1394,6 +1405,8 @@ export async function executeOperatePay(
       };
     }
 
+    if (approvalExpired()) return expiredApprovalResult();
+    deps.onCardResolved(cardRef);
     const pendingThreeDsHandoff: PendingThreeDsWait = {
       approval_id: approvalId,
       approval_url: approvalUrl,
