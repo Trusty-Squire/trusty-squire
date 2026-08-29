@@ -4,8 +4,8 @@
 // browser-payment.test.ts's harness pattern — a screenshot is inherently about
 // actual rendering, not something a mocked page can meaningfully stand in for.
 import { existsSync } from "node:fs";
-import { chromium, type Browser, type Page } from "playwright";
-import { describe, expect, it } from "vitest";
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BrowserController } from "../browser.js";
 
 let chromiumAvailable = false;
@@ -13,6 +13,36 @@ try {
   chromiumAvailable = existsSync(chromium.executablePath());
 } catch {
   chromiumAvailable = false;
+}
+
+let sharedBrowser: Browser | undefined;
+
+beforeAll(async () => {
+  if (chromiumAvailable) sharedBrowser = await chromium.launch({ headless: true });
+});
+
+afterAll(async () => {
+  await sharedBrowser?.close();
+});
+
+type IsolatedTestBrowser = {
+  newPage(): Promise<Page>;
+  close(): Promise<void>;
+};
+
+async function launchIsolatedTestBrowser(): Promise<IsolatedTestBrowser> {
+  if (sharedBrowser === undefined) throw new Error("Chromium test browser was not started");
+  const contexts: BrowserContext[] = [];
+  return {
+    async newPage() {
+      const context = await sharedBrowser!.newContext();
+      contexts.push(context);
+      return await context.newPage();
+    },
+    async close() {
+      await Promise.all(contexts.map(async (context) => await context.close()));
+    },
+  };
 }
 
 function isValidJpegBase64(base64: string): boolean {
@@ -62,7 +92,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "redacts a filled card PAN/expiry/CVV/name at capture time without mutating the DOM",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         const page = await browser.newPage();
         await page.setContent(`
@@ -113,7 +143,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "redacts a password field and a non-input element sealed via data-ts-sealed-payment",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         const page = await browser.newPage();
         await page.setContent(`
@@ -137,7 +167,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)("redacts a sealed field inside an open shadow root", async () => {
-    const browser = await chromium.launch({ headless: true });
+    const browser = await launchIsolatedTestBrowser();
     try {
       const page = await browser.newPage();
       await page.setContent(`<div id="host"></div>`);
@@ -162,7 +192,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "includes session-supplied extra redaction selectors in the mask set",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         const page = await browser.newPage();
         await page.setContent(`
@@ -185,7 +215,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "fails closed — an unqueryable redaction selector aborts the capture entirely",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         const page = await browser.newPage();
         await page.setContent(`<input autocomplete="cc-number" value="4242424242424242">`);
@@ -201,7 +231,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)("allows a proven hidden empty secret control", async () => {
-    const browser = await chromium.launch({ headless: true });
+    const browser = await launchIsolatedTestBrowser();
     try {
       const page = await browser.newPage();
       await page.setContent(`<input type="password" value="" style="display:none">`);
@@ -218,7 +248,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "masks an input whose VALUE is a Luhn-valid PAN even without card attributes",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         const page = await browser.newPage();
         await page.setContent(`
@@ -245,7 +275,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "refuses populated sealed, password, PAN, expiry, CVV, and select fields",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         const sensitiveFields = [
           '<input data-ts-sealed-payment="1" value="still-secret">',
@@ -276,7 +306,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "preserves type_secret identity across a controlled-input rerender",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         const page = await browser.newPage();
         await page.setContent("<nav><input></nav>");
@@ -300,7 +330,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "returns durable sealed identity from locator typing across a controlled rerender",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         const page = await browser.newPage();
         await page.setContent('<nav><input id="secret"></nav>');
@@ -327,7 +357,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)("refuses a rendered separator-formatted PAN", async () => {
-    const browser = await chromium.launch({ headless: true });
+    const browser = await launchIsolatedTestBrowser();
     try {
       const page = await browser.newPage();
       await page.setContent("<div>Card on file: 4242-4242 4242-4242</div>");
@@ -344,7 +374,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "never passes raw screenshot bytes through merchant page APIs",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         const page = await browser.newPage();
         await page.setContent('<input autocomplete="cc-number" value="4242424242424242">');
@@ -386,7 +416,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "rejects redaction geometry and element identity changes during capture",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         for (const mutation of ["move", "replace"] as const) {
           const page = await browser.newPage();
@@ -427,7 +457,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "re-verifies sealed content immediately before pixel capture",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         const page = await browser.newPage();
         await page.setContent("<div id=card></div>");
@@ -461,7 +491,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "retries one observed capture mutation against fresh geometry",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         const page = await browser.newPage();
         await page.setContent('<input id="secret" autocomplete="cc-number" value="">');
@@ -500,7 +530,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "allows empty ACS secret controls without mutating the document",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         const page = await browser.newPage();
         await page.setContent(`
@@ -534,7 +564,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "captures with no redaction when no card/sealed fields exist",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         const page = await browser.newPage();
         await page.setContent("<h1>Nothing sensitive here</h1>");
@@ -552,7 +582,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "full_page passes through without redacting anything extra",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         const page = await browser.newPage();
         await page.setContent(`
@@ -572,7 +602,10 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
 });
 
 describe("operate_screenshot frame targeting (real browser)", () => {
-  async function servePages(browser: Browser, pages: Record<string, string>): Promise<Page> {
+  async function servePages(
+    browser: IsolatedTestBrowser,
+    pages: Record<string, string>,
+  ): Promise<Page> {
     const page = await browser.newPage();
     await page.route("**/*", async (route) => {
       const url = route.request().url();
@@ -586,7 +619,7 @@ describe("operate_screenshot frame targeting (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "captures ONE cross-origin frame by index, redacting only that frame's card fields",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         const pageUrl = "https://shop.example.test/checkout";
         const frameUrl = "https://checkout.pci.shopifyinc.com/card-fields";
@@ -613,7 +646,7 @@ describe("operate_screenshot frame targeting (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "allows an isolated clean ACS frame even while the parent checkout still has a sealed field",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         const pageUrl = "https://shop.example.test/checkout";
         const frameUrl = "https://authentication.cardinalcommerce.com/challenge/CReq";
@@ -642,7 +675,7 @@ describe("operate_screenshot frame targeting (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "verifies parent compositor overlays included in a targeted capture",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         const pageUrl = "https://shop.example.test/checkout";
         const frameUrl = "https://authentication.cardinalcommerce.com/challenge/overlay";
@@ -671,7 +704,7 @@ describe("operate_screenshot frame targeting (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "verifies descendant documents included by a targeted frame",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         const pageUrl = "https://shop.example.test/checkout";
         const frameUrl = "https://authentication.cardinalcommerce.com/challenge/nested";
@@ -697,7 +730,7 @@ describe("operate_screenshot frame targeting (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "fails closed on an unreadable included frame but allows a separate verified target",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         const pageUrl = "https://shop.example.test/checkout";
         const badFrameUrl = "https://broken.example.test/frame";
@@ -726,7 +759,7 @@ describe("operate_screenshot frame targeting (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "discards a targeted capture when its verified document navigates",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         const pageUrl = "https://shop.example.test/checkout";
         const frameUrl = "https://authentication.cardinalcommerce.com/challenge";
@@ -750,7 +783,7 @@ describe("operate_screenshot frame targeting (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)("resolves a frame by a URL substring", async () => {
-    const browser = await chromium.launch({ headless: true });
+    const browser = await launchIsolatedTestBrowser();
     try {
       const pageUrl = "https://shop.example.test/checkout";
       const frameUrl = "https://checkout.pci.shopifyinc.com/card-fields";
@@ -774,7 +807,7 @@ describe("operate_screenshot frame targeting (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "throws screenshot_frame_not_found for an out-of-range frame_index",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         const page = await browser.newPage();
         await page.setContent("<p>no frames here</p>");
@@ -792,7 +825,7 @@ describe("operate_screenshot frame targeting (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "throws screenshot_frame_not_found for a frame_url_contains with no match",
     async () => {
-      const browser = await chromium.launch({ headless: true });
+      const browser = await launchIsolatedTestBrowser();
       try {
         const page = await browser.newPage();
         await page.setContent("<p>no frames here</p>");
