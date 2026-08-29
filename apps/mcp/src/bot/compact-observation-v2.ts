@@ -170,15 +170,23 @@ function wireControl(row: SafeControlV2): WireControlV2 {
     menuitem: "m",
     file: "f",
   };
+  const wireName =
+    row.name === undefined
+      ? undefined
+      : row.name.includes("|") || /^[nsafqx]=/.test(row.name)
+        ? `n=${row.name.replace(/%/g, "%25").replace(/\|/g, "%7C")}`
+        : row.name;
   const facts = [
-    row.name,
+    wireName,
     ...(row.state === undefined ? [] : [`s=${row.state}`]),
     ...(row.action === undefined ? [] : [`a=${row.action}`]),
     ...(row.field === undefined ? [] : [`f=${row.field}`]),
     ...(row.choice === undefined ? [] : [`q=${row.choice}`]),
     ...(row.frame === "main" ? [] : [`x=${row.frame === "same_origin" ? "s" : "x"}`]),
   ].filter((value): value is string => value !== undefined);
-  return facts.length === 0 ? [row.ref, role[row.role]] : [row.ref, role[row.role], facts.join("|")];
+  return facts.length === 0
+    ? [row.ref, role[row.role]]
+    : [row.ref, role[row.role], facts.join("|")];
 }
 
 const SAFE_DESCRIPTION_MAX_CHARS = 40;
@@ -262,7 +270,8 @@ export function diffSafeControlsV2(
   for (const row of rows) {
     const before = previous.byRef.get(row.ref);
     if (before === undefined) added.push(row);
-    else if (JSON.stringify(wireControl(before)) !== JSON.stringify(wireControl(row))) changed.push(row);
+    else if (JSON.stringify(wireControl(before)) !== JSON.stringify(wireControl(row)))
+      changed.push(row);
   }
   const removed = [...previous.byRef.keys()].filter((ref) => !current.has(ref));
   return { added, changed, removed, stageChanged: previous.stage !== stage };
@@ -296,7 +305,9 @@ export function encodeV2Delta(args: {
       : {}),
     ...(args.delta.removed.length > 0 ? { removed: args.delta.removed } : {}),
   };
-  return Buffer.byteLength(JSON.stringify(payload), "utf8") <= OBSERVE_V2_MAX_WIRE_BYTES ? payload : null;
+  return Buffer.byteLength(JSON.stringify(payload), "utf8") <= OBSERVE_V2_MAX_WIRE_BYTES
+    ? payload
+    : null;
 }
 
 const INTENTS: ReadonlyArray<[SafeIntentV2, RegExp]> = [
@@ -367,7 +378,11 @@ function roleOf(el: InteractiveElement): SafeRoleV2 | null {
   if (el.tag === "a" || role === "link") return "link";
   if (role === "tab") return "tab";
   if (role === "menuitem" || role === "option") return "menuitem";
-  if (el.tag === "button" || role === "button" || (el.topmost !== null && el.topmost !== undefined)) {
+  if (
+    el.tag === "button" ||
+    role === "button" ||
+    (el.topmost !== null && el.topmost !== undefined)
+  ) {
     return "button";
   }
   return null;
@@ -392,29 +407,46 @@ function intentOf(el: InteractiveElement): SafeIntentV2 | undefined {
 function fieldOf(el: InteractiveElement): SafeFieldV2 | undefined {
   const autocomplete = (el.autocomplete ?? "").toLowerCase();
   const autocompleteTokens = new Set(autocomplete.trim().split(/\s+/).filter(Boolean));
-  const hasAutocomplete = (...tokens: string[]): boolean => tokens.some((token) => autocompleteTokens.has(token));
+  const hasAutocomplete = (...tokens: string[]): boolean =>
+    tokens.some((token) => autocompleteTokens.has(token));
   const type = (el.type ?? "").toLowerCase();
   const text = candidateText(el).toLowerCase();
   if (type === "password" || hasAutocomplete("current-password", "new-password")) {
     return "password";
   }
   if (type === "email" || hasAutocomplete("email") || /\be-?mail\b/.test(text)) return "email";
-  if (type === "tel" || [...autocompleteTokens].some((token) => token === "tel" || token.startsWith("tel-")) || /\b(phone|mobile|telephone)\b/.test(text)) return "phone";
+  if (
+    type === "tel" ||
+    [...autocompleteTokens].some((token) => token === "tel" || token.startsWith("tel-")) ||
+    /\b(phone|mobile|telephone)\b/.test(text)
+  )
+    return "phone";
   if (type === "search" || /\bsearch\b/.test(text)) return "search";
   if (hasAutocomplete("username") || /\b(user ?name|handle)\b/.test(text)) return "username";
   if (/\b(card|payment|cc-)/.test(`${autocomplete} ${text}`)) return "payment";
   if (hasAutocomplete("address-level2") || /\b(city|town)\b/.test(text)) return "city";
-  if (hasAutocomplete("address-level1") || /\b(state|province|region)\b/.test(text)) return "region";
+  if (hasAutocomplete("address-level1") || /\b(state|province|region)\b/.test(text))
+    return "region";
   if (hasAutocomplete("postal-code") || /\b(zip|postal)\b/.test(text)) return "postal";
   if (hasAutocomplete("country", "country-name") || /\bcountry\b/.test(text)) return "country";
   if (
     hasAutocomplete("street-address", "address-line1", "address-line2", "address-line3") ||
     /\b(address|street)\b/.test(text)
-  ) return "address";
-  if (type === "date" || [...autocompleteTokens].some((token) => token.startsWith("bday")) || /\bdate\b/.test(text)) return "date";
+  )
+    return "address";
+  if (
+    type === "date" ||
+    [...autocompleteTokens].some((token) => token.startsWith("bday")) ||
+    /\bdate\b/.test(text)
+  )
+    return "date";
   if (/\b(quantity|qty)\b/.test(text)) return "quantity";
   if (/\b(promo|coupon|discount)\b/.test(text)) return "promo";
-  if ([...autocompleteTokens].some((token) => token === "name" || token.endsWith("-name")) || /\b(full )?name\b/.test(text)) return "name";
+  if (
+    [...autocompleteTokens].some((token) => token === "name" || token.endsWith("-name")) ||
+    /\b(full )?name\b/.test(text)
+  )
+    return "name";
   return undefined;
 }
 
@@ -424,34 +456,15 @@ export function safeStageV2(url: string, elements: readonly InteractiveElement[]
   try {
     pathname = decodeURIComponent(new URL(url).pathname).toLowerCase();
   } catch {}
-  if (/(?:^|\/)(?:success|complete|thank-you|thank_you|finished|done)(?:\.(?:php|html?))?(?:\/|$)/.test(pathname)) {
+  if (
+    /(?:^|\/)(?:success|complete|thank-you|thank_you|finished|done)(?:\.(?:php|html?))?(?:\/|$)/.test(
+      pathname,
+    )
+  ) {
     return "complete";
   }
   const routeStage = checkoutStageFromUrlV2(url);
   if (routeStage !== null) return routeStage;
-  if (elements.some((el) => intentOf(el) === "add_to_cart")) return "browse";
-  const authFields = elements.filter((el) => {
-    const role = roleOf(el);
-    if (role !== "textbox" && role !== "select") return false;
-    const field = fieldOf(el);
-    return field === "email" || field === "username" || field === "password";
-  });
-  const hasPasswordField = authFields.some((el) => fieldOf(el) === "password");
-  const hasScopedAuthForm = elements.some((el) => {
-    if (
-      roleOf(el) !== "button" ||
-      (intentOf(el) !== "login" && intentOf(el) !== "signup")
-    ) {
-      return false;
-    }
-    const container = el.container?.trim();
-    return (
-      container !== undefined &&
-      container.length > 0 &&
-      authFields.some((field) => field.container?.trim() === container)
-    );
-  });
-  if (hasPasswordField || hasScopedAuthForm) return "auth";
   const checkoutFields = new Set<SafeFieldV2>([
     "address",
     "city",
@@ -463,7 +476,9 @@ export function safeStageV2(url: string, elements: readonly InteractiveElement[]
   const hasCheckoutField = elements.some((el) => {
     const role = roleOf(el);
     const field = fieldOf(el);
-    return (role === "textbox" || role === "select") && field !== undefined && checkoutFields.has(field);
+    return (
+      (role === "textbox" || role === "select") && field !== undefined && checkoutFields.has(field)
+    );
   });
   const hasPaymentField = elements.some((el) => {
     const role = roleOf(el);
@@ -473,6 +488,29 @@ export function safeStageV2(url: string, elements: readonly InteractiveElement[]
     (el) => roleOf(el) === "button" && intentOf(el) === "checkout",
   );
   if (hasPaymentField || (hasCheckoutAction && hasCheckoutField)) return "checkout";
+  if (elements.some((el) => intentOf(el) === "add_to_cart")) return "browse";
+  const authFields = elements.filter((el) => {
+    const role = roleOf(el);
+    if (role !== "textbox" && role !== "select") return false;
+    const field = fieldOf(el);
+    return field === "email" || field === "username" || field === "password";
+  });
+  const hasPasswordField = authFields.some((el) => fieldOf(el) === "password");
+  const hasScopedAuthForm = elements.some((el) => {
+    if (roleOf(el) !== "button" || (intentOf(el) !== "login" && intentOf(el) !== "signup")) {
+      return false;
+    }
+    const containerId = el.containerId;
+    const framePath = el.framePath ?? null;
+    return (
+      containerId !== undefined &&
+      containerId !== null &&
+      authFields.some(
+        (field) => field.containerId === containerId && (field.framePath ?? null) === framePath,
+      )
+    );
+  });
+  if (hasPasswordField || hasScopedAuthForm) return "auth";
   if (elements.some((el) => roleOf(el) === "textbox" || roleOf(el) === "select")) return "form";
   return "browse";
 }
@@ -579,7 +617,9 @@ export function encodeV2Page(args: {
         session_id: args.sessionId,
         stage: args.stage,
         ...(args.startMetadata?.hint === undefined ? {} : { hint: args.startMetadata.hint }),
-        ...(args.startMetadata?.userEmail === undefined ? {} : { user_email: args.startMetadata.userEmail }),
+        ...(args.startMetadata?.userEmail === undefined
+          ? {}
+          : { user_email: args.startMetadata.userEmail }),
         ...(args.startMetadata?.hintOverflow === undefined
           ? {}
           : { hint_overflow: args.startMetadata.hintOverflow }),
@@ -594,7 +634,8 @@ export function encodeV2Page(args: {
   const visible: WireControlV2[] = [];
   // Initial observations stay decisively small. Overflow is retrieved through
   // the in-MCP query cursor, never a shell-readable snapshot file.
-  const pageEnd = offset === 0 ? Math.min(args.rows.length, FIRST_PAGE_ROW_LIMIT) : args.rows.length;
+  const pageEnd =
+    offset === 0 ? Math.min(args.rows.length, FIRST_PAGE_ROW_LIMIT) : args.rows.length;
   for (let index = offset; index < pageEnd; index += 1) {
     const candidate = args.rows[index]!;
     const remainder = args.rows.length - (index + 1);
@@ -605,7 +646,9 @@ export function encodeV2Page(args: {
       session_id: args.sessionId,
       stage: args.stage,
       ...(args.startMetadata?.hint === undefined ? {} : { hint: args.startMetadata.hint }),
-      ...(args.startMetadata?.userEmail === undefined ? {} : { user_email: args.startMetadata.userEmail }),
+      ...(args.startMetadata?.userEmail === undefined
+        ? {}
+        : { user_email: args.startMetadata.userEmail }),
       ...(args.startMetadata?.hintOverflow === undefined
         ? {}
         : { hint_overflow: args.startMetadata.hintOverflow }),
@@ -613,7 +656,9 @@ export function encodeV2Page(args: {
         ? {}
         : { semantic: args.semantics }),
       safe_table: [...visible, wireControl(candidate)],
-      ...(remainder > 0 ? { overflow: { remaining: remainder, next_cursor: args.cursorFor(index + 1) } } : {}),
+      ...(remainder > 0
+        ? { overflow: { remaining: remainder, next_cursor: args.cursorFor(index + 1) } }
+        : {}),
     };
     if (Buffer.byteLength(JSON.stringify(payload), "utf8") > OBSERVE_V2_MAX_WIRE_BYTES) break;
     visible.push(wireControl(candidate));
@@ -627,7 +672,9 @@ export function encodeV2Page(args: {
     session_id: args.sessionId,
     stage: args.stage,
     ...(args.startMetadata?.hint === undefined ? {} : { hint: args.startMetadata.hint }),
-    ...(args.startMetadata?.userEmail === undefined ? {} : { user_email: args.startMetadata.userEmail }),
+    ...(args.startMetadata?.userEmail === undefined
+      ? {}
+      : { user_email: args.startMetadata.userEmail }),
     ...(args.startMetadata?.hintOverflow === undefined
       ? {}
       : { hint_overflow: args.startMetadata.hintOverflow }),

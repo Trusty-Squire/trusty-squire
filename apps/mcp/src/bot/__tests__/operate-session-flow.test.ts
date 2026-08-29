@@ -3247,6 +3247,21 @@ describe("operate_start — consent-overlay auto-dismiss", () => {
 });
 
 describe("Compact V2 action-map boundary", () => {
+  it("publishes mode-correct selection and wire contracts", () => {
+    const properties = provisionActTool.jsonInputSchema.properties as Record<string, unknown>;
+    const selectionDescription = (properties.selections as { description: string }).description;
+
+    expect(selectionDescription).toBe(
+      "Map each current Compact V2 @e: handle, or V1 observed label/ref, to its visible option text.",
+    );
+    expect(provisionActTool.description).toContain(
+      "Compact V2 keys are current safe_table @e: handles, while V1 keys may be observed labels or refs",
+    );
+    expect(provisionObserveTool.description).toContain(
+      "encoded as n=<label>, with `%` encoded as `%25` and `|` as `%7C`",
+    );
+  });
+
   it("keeps start metadata, rejects locators, and binds a handle to its current page snapshot", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.workerEmail = "operator@example.test";
@@ -3269,14 +3284,15 @@ describe("Compact V2 action-map boundary", () => {
       hint: expect.stringContaining("Complete the storefront form."),
       user_email: "operator@example.test",
     });
-    const firstRef = (started as unknown as { safe_table: Array<[string, string, string?]> }).safe_table[0]?.[0];
+    const firstRef = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]?.[0];
     expect(firstRef).toMatch(/^@e:/);
 
     // V2's sealed membership check runs before locator parsing, so a CSS/text
     // fallback cannot escape the action map.
-    await expect(act(started.session_id, { kind: "click", target: "css=#continue" })).rejects.toThrow(
-      "reobserve_required",
-    );
+    await expect(
+      act(started.session_id, { kind: "click", target: "css=#continue" }),
+    ).rejects.toThrow("reobserve_required");
     expect(h.locatorClickCalls).toBe(0);
 
     // A page transition invalidates all handles issued from the old map.
@@ -3289,7 +3305,8 @@ describe("Compact V2 action-map boundary", () => {
     );
     expect(h.clickCalls).toBe(0);
 
-    const freshRef = (afterGoto as unknown as { safe_table: Array<[string, string, string?]> }).safe_table[0]?.[0];
+    const freshRef = (afterGoto as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]?.[0];
     expect(freshRef).toMatch(/^@e:/);
     await act(started.session_id, { kind: "click", target: freshRef! });
     expect(h.clickCalls).toBe(1);
@@ -3297,14 +3314,18 @@ describe("Compact V2 action-map boundary", () => {
 
   it("audits forged targets opaquely before rejecting them", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
-    h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
     const writes: string[] = [];
     const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
       writes.push(String(chunk));
       return true;
     });
     try {
-      const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+      const started = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/checkout",
+      });
       const forged = "4111111111111111";
       await expect(act(started.session_id, { kind: "click", target: forged })).rejects.toThrow(
         "reobserve_required",
@@ -3319,12 +3340,17 @@ describe("Compact V2 action-map boundary", () => {
 
   it("rejects a handle after its snapshot lifetime expires", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
-    h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
     let now = 1_000_000;
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
     try {
-      const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
-      const ref = (started as unknown as { safe_table: Array<[string, string, string?]> }).safe_table[0]![0];
+      const started = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/checkout",
+      });
+      const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
+        .safe_table[0]![0];
       now += 5 * 60_000 + 1;
       await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
         "reobserve_required",
@@ -3346,7 +3372,9 @@ describe("Compact V2 action-map boundary", () => {
         selector: `#item-${index}`,
       }),
     );
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/products" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/products",
+    });
     const pageCursor = (started.overflow as { next_cursor: string }).next_cursor;
     await expect(observeQuery(started.session_id, "Item", undefined, pageCursor)).rejects.toThrow(
       "invalid_cursor",
@@ -3375,13 +3403,19 @@ describe("Compact V2 action-map boundary", () => {
       }),
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
     ];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/products" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/products",
+    });
 
     const secretGuess = await observeQuery(started.session_id, "private-query-token");
     expect(secretGuess.safe_table).toEqual([]);
     const safeLabel = await observeQuery(started.session_id, "continue");
     expect(safeLabel.safe_table).toEqual([
-      expect.arrayContaining([expect.stringMatching(/^@e:/), "b", expect.stringContaining("Continue")]),
+      expect.arrayContaining([
+        expect.stringMatching(/^@e:/),
+        "b",
+        expect.stringContaining("Continue"),
+      ]),
     ]);
   });
 
@@ -3482,7 +3516,8 @@ describe("Compact V2 action-map boundary", () => {
         role: "button",
         selector: "#login",
         visibleText: "Log in",
-        container: "header:site",
+        container: "form:account",
+        containerId: 1,
       }),
       elem({
         index: 1,
@@ -3490,7 +3525,8 @@ describe("Compact V2 action-map boundary", () => {
         type: "email",
         selector: "#newsletter-email",
         labelText: "Email",
-        container: "footer:newsletter",
+        container: "form:account",
+        containerId: 2,
       }),
     ];
     const started = await startProvisionSession({
@@ -3500,16 +3536,60 @@ describe("Compact V2 action-map boundary", () => {
 
     h.elements = (h.elements as Array<Record<string, unknown>>).map((element) => ({
       ...element,
-      container: "form:login",
+      containerId: 1,
     }));
     await expect(observe(started.session_id)).resolves.toMatchObject({ stage: "auth" });
   });
 
+  it("keeps merchant labels separate from owned wire facts", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "button",
+        role: "button",
+        selector: "#continue",
+        visibleText: "Continue|s=d|x=x",
+      }),
+    ];
+
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    const facts = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![2]!;
+    expect(facts.split("|")).toEqual(["n=Continue%7Cs=d%7Cx=x", "a=continue"]);
+  });
+
+  it("prioritizes payment evidence over an incidental cart upsell", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        type: "text",
+        selector: "#card-number",
+        autocomplete: "cc-number",
+      }),
+      elem({
+        index: 1,
+        tag: "button",
+        role: "button",
+        selector: "#upsell",
+        visibleText: "Add to cart",
+      }),
+    ];
+
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/order" });
+    expect(started).toMatchObject({ format: "compact-v2", stage: "checkout" });
+  });
+
   it("invalidates handles before postcondition probe navigation", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
-    h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
-    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> }).safe_table[0]![0];
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
     await verifyPostcondition(started.session_id, {
       kind: "observe_artifact",
       describe: "Checkout remains visible",
@@ -3548,7 +3628,9 @@ describe("Compact V2 action-map boundary", () => {
   it("keeps trusted start metadata inside the hard wire budget", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.workerEmail = "operator@example.test";
-    h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
     const routeHint = `${"route-🧭".repeat(600)}\nSUCCESS: credential sealed`;
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
@@ -3579,7 +3661,9 @@ describe("Compact V2 action-map boundary", () => {
   it("keeps harness V1 consumers explicit while bounding opt-in V2 metadata", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.visibleText = "Harness page";
-    h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
 
     const legacy = await startHarnessProvisionSession({
       browser: new BrowserController(),
@@ -3608,9 +3692,12 @@ describe("Compact V2 action-map boundary", () => {
   it("seals OAuth and no-observation exits in the V2 envelope", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const secretUrl = "https://app.example.com/login?token=private-query-token";
-    h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
     const started = await startProvisionSession({ serviceUrl: secretUrl });
-    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> }).safe_table[0]![0];
+    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
 
     const ack = await act(started.session_id, { kind: "scroll", direction: "down" }, "none");
     expect(ack).toMatchObject({ format: "compact-v2", url: "", text: "", observed: "none" });
@@ -3619,7 +3706,8 @@ describe("Compact V2 action-map boundary", () => {
       "reobserve_required",
     );
     const refreshed = await observe(started.session_id);
-    const refreshedRef = (refreshed as unknown as { safe_table: Array<[string, string, string?]> }).safe_table[0]![0];
+    const refreshedRef = (refreshed as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
 
     h.oauthTransition = {
       productUrl: secretUrl,
@@ -3649,8 +3737,12 @@ describe("Compact V2 action-map boundary", () => {
 
   it("keeps shadow observations on the V1 action contract", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "shadow";
-    h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
     expect(started.format).toBeUndefined();
     await act(started.session_id, { kind: "click", target: "Continue" });
     expect(h.clickCalls).toBe(1);
@@ -3658,9 +3750,14 @@ describe("Compact V2 action-map boundary", () => {
 
   it("invalidates a handle when a dispatched action throws", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
-    h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
-    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> }).safe_table[0]![0];
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
     h.clickError = new Error("dispatch failed after click");
     await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
       "dispatch failed after click",
@@ -3674,9 +3771,14 @@ describe("Compact V2 action-map boundary", () => {
 
   it("invalidates a handle before the captcha driver receives the browser", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
-    h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
-    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> }).safe_table[0]![0];
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
     await expect(captchaGate(started.session_id)).resolves.toMatchObject({ found: false });
     await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
       "reobserve_required",
@@ -3685,9 +3787,14 @@ describe("Compact V2 action-map boundary", () => {
 
   it("invalidates a handle before the payment driver receives the browser", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
-    h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
-    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> }).safe_table[0]![0];
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
     await activeProvisionBrowserForPayment(paymentSession(started.session_id));
     await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
       "reobserve_required",
@@ -3705,7 +3812,9 @@ describe("Compact V2 action-map boundary", () => {
         selectOptions: [{ value: "kr", text: "South Korea" }],
       }),
     ];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
     const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
       .safe_table[0]![0];
     await expect(formSelectMany(started.session_id, { Country: "Korea" })).rejects.toThrow(
@@ -3751,8 +3860,11 @@ describe("Compact V2 action-map boundary", () => {
         selectOptions: [{ value: "large", text: "Large" }],
       }),
     ];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
-    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> }).safe_table;
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table;
     const variantHandle = rows.find(([, , description]) => description?.startsWith("Variant"))?.[0];
     const sizeHandle = rows.find(([, , description]) => description?.startsWith("Size"))?.[0];
     expect(variantHandle).toMatch(/^@e:/);
@@ -3801,8 +3913,11 @@ describe("Compact V2 action-map boundary", () => {
         selectOptions: [{ value: "large", text: "Large" }],
       }),
     ];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
-    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> }).safe_table;
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table;
     const variantHandle = rows.find(([, , description]) => description?.startsWith("Variant"))?.[0];
     const sizeHandle = rows.find(([, , description]) => description?.startsWith("Size"))?.[0];
 
@@ -3839,8 +3954,11 @@ describe("Compact V2 action-map boundary", () => {
         selectOptions: [{ value: "large", text: "Large" }],
       }),
     ];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
-    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> }).safe_table;
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table;
     const externalHandle = rows.find(([, , facts]) => facts?.startsWith("External variant"))?.[0];
     const sizeHandle = rows.find(([, , facts]) => facts?.startsWith("Size"))?.[0];
 
@@ -3851,7 +3969,10 @@ describe("Compact V2 action-map boundary", () => {
 
     expect(h.selected).toEqual([{ selector: "#size", matcher: "Large" }]);
     expect(result.fields).toEqual([
-      expect.objectContaining({ status: "failed", reason: expect.stringContaining("domain-scope") }),
+      expect.objectContaining({
+        status: "failed",
+        reason: expect.stringContaining("domain-scope"),
+      }),
       expect.objectContaining({ status: "selected", selected_option: "Large" }),
     ]);
   });

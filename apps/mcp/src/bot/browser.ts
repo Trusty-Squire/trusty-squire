@@ -4112,9 +4112,7 @@ export class BrowserController {
               },
               ...(channel !== null ? { channel } : {}),
               ...persistentProxyOptions(proxy),
-              args: [
-                ...launchArgs,
-              ],
+              args: [...launchArgs],
               viewport: null,
               locale: "en-US",
               timezoneId: geo?.timezoneId ?? "America/New_York",
@@ -9499,7 +9497,12 @@ export class BrowserController {
         const html = element as HTMLElement;
         const style = window.getComputedStyle(html);
         const rect = html.getBoundingClientRect();
-        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+        return (
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          rect.width > 0 &&
+          rect.height > 0
+        );
       };
       const headings = Array.from(document.querySelectorAll("h1,h2"))
         .filter(visible)
@@ -14077,6 +14080,17 @@ export class BrowserController {
           '[role="dialog"],dialog,[aria-modal="true"],nav,main,header,footer,aside,form,section,article',
         );
 
+      const regionIds = new Map<Element, number>();
+      let nextRegionId = 1;
+      const regionId = (region: Element | null): number | null => {
+        if (region === null) return null;
+        const existing = regionIds.get(region);
+        if (existing !== undefined) return existing;
+        const id = nextRegionId++;
+        regionIds.set(region, id);
+        return id;
+      };
+
       const regionName = (region: Element | null): string | null => {
         if (region === null) return null;
         const role = region.getAttribute("role");
@@ -14338,6 +14352,7 @@ export class BrowserController {
         screenPath: string | null;
         container: string | null;
         inDialog: boolean;
+        containerId: number | null;
         topmost: boolean | null;
         occludedBy: string | null;
         autocomplete: string | null;
@@ -14388,7 +14403,9 @@ export class BrowserController {
         const isGoogleGSIIframe =
           el instanceof HTMLIFrameElement &&
           (el.getAttribute("src") ?? "").includes("accounts.google.com/gsi/button");
-        const container = regionName(regionFor(el));
+        const region = regionFor(el);
+        const container = regionName(region);
+        const containerId = regionId(region);
         const inDialog = nearestModalRegion(el) !== null;
         const status = topmostStatus(el);
         const pathLabel = isGoogleGSIIframe
@@ -14460,8 +14477,10 @@ export class BrowserController {
             el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio")
               ? el.checked
               : null,
-          disabled: el.matches(":disabled") || el.getAttribute("aria-disabled") === "true" ? true : null,
-          required: el.matches(":required") || el.getAttribute("aria-required") === "true" ? true : null,
+          disabled:
+            el.matches(":disabled") || el.getAttribute("aria-disabled") === "true" ? true : null,
+          required:
+            el.matches(":required") || el.getAttribute("aria-required") === "true" ? true : null,
           // For <select>: the currently-selected option's visible text
           // and a short list of available option labels. The combination
           // is how the planner detects the "React-defaulted dropdown"
@@ -14498,6 +14517,7 @@ export class BrowserController {
             slug(pathLabel, `${elementKind(el)}-${out.length}`),
           container,
           inDialog,
+          containerId,
           topmost: status.topmost,
           occludedBy: status.occludedBy,
         });
@@ -16996,6 +17016,7 @@ export interface InteractiveElement {
   container?: string | null;
   // Dedicated dialog-role/aria-modal ancestry via composed tree (pierces open shadows).
   inDialog?: boolean;
+  containerId?: number | null;
   topmost?: boolean | null;
   occludedBy?: string | null;
   // T38 — card-radio cluster membership. Set on elements that are

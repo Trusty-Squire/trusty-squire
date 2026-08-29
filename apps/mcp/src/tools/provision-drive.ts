@@ -365,7 +365,9 @@ const COMPACT_V2_CONTRACT =
   "When format is `compact-v2`, use its sealed map: session_id is the continuation handle; `stage` is a finite enum; " +
   "semantic carries the screened title and primary visible heading; safe_table rows use [ref,role,facts?], where role is " +
   "b=button,l=link,t=textbox,s=select,c=checkbox,r=radio,tb=tab,m=menuitem,f=file. facts is a pipe-delimited string: " +
-  "an optional first unkeyed segment is the screened short label, followed by any present s=<state bitset>, a=<action>, " +
+  "an optional first unkeyed segment is the screened short label; labels containing `|` or beginning like a keyed fact " +
+  "are instead encoded as n=<label>, with `%` encoded as `%25` and `|` as `%7C` (decode `%7C` before `%25`). " +
+  "The label is followed by any present s=<state bitset>, a=<action>, " +
   "f=<field>, q=<choice position>/<choice total>, and x=<frame> segments. Fact-only rows begin with a keyed segment. " +
   "State bitset codes are c=checked,u=unchecked,d=disabled,r=required; frame codes are x=s for a same-origin child " +
   "and x=x for a cross-origin child, while an omitted x means the main frame. Actions are search,close,next,previous,submit," +
@@ -438,7 +440,7 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
   name: "operate_observe",
   description:
     "Re-read the current page of an operate session. The default compact-v2 mode returns the sealed " +
-    "safe_table action map; `detail:\"full\"` remains sealed and does not restore legacy fields. " +
+    'safe_table action map; `detail:"full"` remains sealed and does not restore legacy fields. ' +
     COMPACT_V2_CONTRACT +
     "Only explicitly selected V1 modes use el_table, reusable stable refs, locator fallbacks, snapshot_file, " +
     "or the legacy expanded elements payload. " +
@@ -516,7 +518,9 @@ const observeQuerySchema = z.object({
   // This string is matched only inside the live session; returned rows remain
   // the compact-v2 enum-only action map.
   query: z.string().max(160).default(""),
-  role: z.enum(["button", "link", "textbox", "select", "checkbox", "radio", "tab", "menuitem", "file"]).optional(),
+  role: z
+    .enum(["button", "link", "textbox", "select", "checkbox", "radio", "tab", "menuitem", "file"])
+    .optional(),
   cursor: z.string().max(1_024).optional(),
 });
 
@@ -534,7 +538,20 @@ export const provisionObserveQueryTool: Tool<z.infer<typeof observeQuerySchema>>
     properties: {
       session_id: { type: "string" },
       query: { type: "string" },
-      role: { type: "string", enum: ["button", "link", "textbox", "select", "checkbox", "radio", "tab", "menuitem", "file"] },
+      role: {
+        type: "string",
+        enum: [
+          "button",
+          "link",
+          "textbox",
+          "select",
+          "checkbox",
+          "radio",
+          "tab",
+          "menuitem",
+          "file",
+        ],
+      },
       cursor: { type: "string" },
     },
   },
@@ -576,7 +593,10 @@ const storeJsonProps = {
 const formSelectionsSchema = z
   .record(z.string().min(1).max(200), z.string().min(1).max(4096))
   .refine((value) => Object.keys(value).length > 0, "Provide at least one selection")
-  .refine((value) => Object.keys(value).length <= 12, "At most 12 selections per call");
+  .refine((value) => Object.keys(value).length <= 12, "At most 12 selections per call")
+  .describe(
+    "Map each current Compact V2 @e: handle, or V1 observed label/ref, to its visible option text.",
+  );
 
 interface CartAddArgs {
   session_id: string;
@@ -875,7 +895,7 @@ const ACTION_REPAIR_BY_KIND: Partial<Record<ActionKind, ActionRepair>> = {
     example: {
       session_id: "<session_id>",
       kind: "select_many",
-      selections: { "Observed field target": "Visible option label" },
+      selections: { "@e:<current-handle>": "Visible option label" },
     },
     safe_alternative:
       "Retry select_many with selections in the intended order. Compact V2 requires current @e: handles; V1 accepts observed labels or refs. It selects sequentially, re-observes after each success, and returns partial results; do not replace it with parallel select calls." +
@@ -1224,7 +1244,8 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "cart_add (product_identity + options_hash + idempotency_key — reserve an " +
     "idempotent cart mutation, exact-line post-verify it, and return its postcondition), " +
     "select_many (ordered selections map — select sequentially, re-observe after " +
-    "each success, and retain partial results), extract (into_slot/secret_label/store — " +
+    "each success, and retain partial results; Compact V2 keys are current safe_table @e: handles, " +
+    "while V1 keys may be observed labels or refs), extract (into_slot/secret_label/store — " +
     "reveal masked keys and extract credentials from the current page, sealed slot or vaulted), " +
     "solve_captcha (detect and drive the in-session captcha gate; settled=false carries a " +
     "needs_user{gate,message,remedy} — FAIL FAST and relay it to the user), " +
@@ -1302,7 +1323,8 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
         minProperties: 1,
         maxProperties: 12,
         additionalProperties: { type: "string" },
-        description: "Map each observed field label or @e: ref to its visible option text.",
+        description:
+          "Map each current Compact V2 @e: handle, or V1 observed label/ref, to its visible option text.",
       },
       into_slot: { type: "string" },
       secret_label: { type: "string" },
