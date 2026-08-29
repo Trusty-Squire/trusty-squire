@@ -179,14 +179,7 @@ const h = vi.hoisted(() => ({
 
 vi.mock("../session-state.js", () => ({
   SESSION_STATE_FILE: "trusty-squire-session-state.json",
-  GOOGLE_LOGIN_COOKIE_MARKERS: [
-    "__Secure-1PSID",
-    "SID",
-    "HSID",
-    "SSID",
-    "APISID",
-    "SAPISID",
-  ],
+  GOOGLE_LOGIN_COOKIE_MARKERS: ["__Secure-1PSID", "SID", "HSID", "SSID", "APISID", "SAPISID"],
   createEphemeralProfile: () => {
     const profileDir = `/tmp/trusty-squire-unit-ephemeral-${++h.ephemeralSerial}`;
     h.createdProfiles.push(profileDir);
@@ -220,9 +213,7 @@ vi.mock("../browser.js", () => ({
   BrowserController: class {
     private readonly index: number;
     private readonly opts: { profileDir?: string; proxyUrl?: string; storageState?: unknown };
-    constructor(
-      opts: { profileDir?: string; proxyUrl?: string; storageState?: unknown } = {},
-    ) {
+    constructor(opts: { profileDir?: string; proxyUrl?: string; storageState?: unknown } = {}) {
       this.index = h.connections.length;
       this.opts = opts;
       h.connections.push(true);

@@ -312,7 +312,7 @@ DOM-diagnostics pair is excluded from that surface; set
   challenge could never complete its own status poll.
   For a task gated by the user's connected Google account, pass
   `require_live_identity: true` to `operate_start`. The start restores the
-  canonical login snapshot into a fresh private profile, then fails closed with
+  saved portable login snapshot into a fresh private profile, then fails closed with
   a context-backed login handoff if the existing live-provider detector finds
   no current Google session. It never opens Chrome on the canonical profile.
   To route only that browser session through a proxy, pass `proxy` to
@@ -373,11 +373,13 @@ DOM-diagnostics pair is excluded from that surface; set
 - `operate_finish` closes the session and optionally accepts a nested `outcome`.
   `none` only closes; `credentials` requires `store` and preserves credential
   extraction, vault storage, and auto-promotion; `result` requires `summary` or
-  `data` and can run `verify_recipe` before closing. Finish first stops new
-  calls and drains calls already using that session within a bounded terminal
-  transition. Payment state never blocks teardown: finish clears any remaining
-  payment state and destroys, rather than pools, a payment-sensitive browser
-  profile. Sessions also close automatically after 10 minutes without an
+  `data`. A result is eligible to save portable login state only when
+  `verify_recipe` confirms it or `data.confirmed` is `true`; credential outcomes
+  qualify only after unblocked extraction and vault storage. `none`, failed or
+  unconfirmed outcomes, and payment-sensitive sessions preserve the prior saved
+  snapshot. Finish first stops new calls and drains calls already using that
+  session within a bounded terminal transition, then closes its browser and
+  schedules private-profile removal. Sessions also close automatically after 10 minutes without an
   operation and begin terminal teardown at 30 minutes; only an active payment
   receives the short bounded close grace. Callers should finish promptly instead
   of treating an open browser as durable background state.

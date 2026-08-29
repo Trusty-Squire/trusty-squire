@@ -22,8 +22,25 @@ describe("operator session storage state", () => {
     const canonical = mkdtempSync(join(tmpdir(), "ts-session-state-"));
     roots.push(canonical);
     const state = {
-      cookies: [{ name: "user_session", value: "opaque", domain: "github.com", path: "/", expires: -1, httpOnly: true, secure: true, sameSite: "Lax" as const }],
-      origins: [{ origin: "https://merchant.example", localStorage: [{ name: "token", value: "opaque" }], indexedDB: [{ name: "auth", version: 1, stores: [] }] }],
+      cookies: [
+        {
+          name: "user_session",
+          value: "opaque",
+          domain: "github.com",
+          path: "/",
+          expires: -1,
+          httpOnly: true,
+          secure: true,
+          sameSite: "Lax" as const,
+        },
+      ],
+      origins: [
+        {
+          origin: "https://merchant.example",
+          localStorage: [{ name: "token", value: "opaque" }],
+          indexedDB: [{ name: "auth", version: 1, stores: [] }],
+        },
+      ],
     };
 
     await writeSessionState(canonical, state);
@@ -65,10 +82,7 @@ describe("operator session storage state", () => {
       origins: [{ origin: "https://second.example", localStorage: [] }],
     };
 
-    await Promise.all([
-      writeSessionState(canonical, first),
-      writeSessionState(canonical, second),
-    ]);
+    await Promise.all([writeSessionState(canonical, first), writeSessionState(canonical, second)]);
 
     expect([first, second]).toContainEqual(await readSessionState(canonical));
   });

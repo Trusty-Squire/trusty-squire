@@ -1,14 +1,7 @@
 // Covers deterministic Google-login helpers and lifecycle boundaries.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  readFileSync,
-  mkdtempSync,
-  mkdirSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";

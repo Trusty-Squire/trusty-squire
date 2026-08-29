@@ -61,10 +61,7 @@ import {
   type ProfileCloseState,
 } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
-import {
-  GOOGLE_LOGIN_COOKIE_MARKERS,
-  type BrowserStorageState,
-} from "./session-state.js";
+import { GOOGLE_LOGIN_COOKIE_MARKERS, type BrowserStorageState } from "./session-state.js";
 import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
 import {
   createOperatorBrowserMarker,
@@ -3393,9 +3390,9 @@ export async function launchPlainLoginBrowser(params: {
 }
 
 export class BrowserController {
-  // The persistent browser context. Persistent (launchPersistentContext)
-  // rather than an ephemeral context so the profile carries the user's
-  // Google session across runs — see profile.ts / google-login.ts.
+  // A persistent browser context backed by this session's private user-data
+  // directory. Portable login state is restored before first navigation; the
+  // directory itself is never reused by another operate session.
   private context: BrowserContext | null = null;
   private page: Page | null = null;
   private checkoutCardGroupScope: CheckoutCardGroupScope | undefined;
@@ -3413,7 +3410,7 @@ export class BrowserController {
     { handle: JSHandle<Document>; identity: string }
   >();
   // The page start() configured with the controller's navigation/captcha
-  // handlers. OAuth may temporarily switch `this.page` to a popup, but warm
+  // handlers. OAuth may temporarily switch `this.page` to a popup, but session
   // reuse must always restore this original page rather than adopting a popup
   // whose lifecycle handlers were never installed.
   private primaryPage: Page | null = null;
@@ -3608,7 +3605,7 @@ export class BrowserController {
     });
   }
 
-  // Required health gate for a warm browser. BrowserContext alone is not a
+  // Required health gate for a live session browser. BrowserContext alone is not a
   // sufficient signal: a dead CDP transport can leave stale JS objects behind.
   isConnected(): boolean {
     const browser = this.cdpBrowser ?? this.context?.browser() ?? null;
@@ -15880,7 +15877,7 @@ export class BrowserController {
   // The logged-in-providers.json marker is a memo that drifts out of sync
   // (a --force-relogin clears it, a misclassified run clears it, a parallel
   // run overwrites it) — so a session that is genuinely live in the cookies
-  // can go invisible to provider selection, which is exactly how a warm
+  // can go invisible to provider selection, which is exactly how a restored
   // GitHub session got skipped in favour of a broken Google path. The cookie
   // jar is the ground truth: read it directly. Cookie NAMES + presence only;
   // values are never read into logs. Best-effort — a read failure returns [].
@@ -16432,7 +16429,7 @@ export class BrowserController {
         }
         // A process-tree SIGTERM can close the CDP target before Playwright
         // observes it. That is successful teardown, not a reason to skip the
-        // proof/reap path or quarantine a cleanly closed warm profile.
+        // proof/reap path or retain a cleanly closed ephemeral profile.
         if (page !== null) await page.close().catch(() => undefined);
         if (context !== null) await context.close().catch(() => undefined);
         if (cdpBrowser !== null) await cdpBrowser.close().catch(() => undefined);

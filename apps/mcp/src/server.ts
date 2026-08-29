@@ -175,8 +175,8 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
           },
         });
       // Tool handlers await independently.  A finish must therefore close the
-      // admission gate and drain calls that already entered before it resets or
-      // pools a browser.  `operate_finish*` owns that transition itself.
+      // admission gate and drain calls that already entered before it snapshots
+      // eligible state and closes the browser. `operate_finish*` owns that transition.
       const sessionId =
         typeof parsed.data.session_id === "string" ? parsed.data.session_id : undefined;
       const result =
@@ -257,8 +257,8 @@ function errorContent(code: string, message: string, guidance?: Record<string, u
 // kill the process, which turns one bad operate_* call into "MCP server
 // unreachable" for the host agent. Log the escape and keep serving: the
 // in-flight call fails on its own (its awaited promise threw or timed out),
-// session/browser state is self-contained and recycled by the warm-browser
-// health checks, and no security gate depends on process death — a crash
+// session/browser state is self-contained and bounded by its watchdog and
+// terminal teardown, and no security gate depends on process death — a crash
 // leaves any half-done page action in exactly the same state, minus the
 // transport. Installed only for `mcp server`; the CLI keeps fail-fast.
 export function installServerProcessGuards(): void {

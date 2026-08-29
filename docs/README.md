@@ -13,10 +13,13 @@ launch reader.
   first-class OpenCode MCP support.
 - [DESIGN-replay-eval-harness.md](DESIGN-replay-eval-harness.md) owns the replay-engine evaluation
   predicate, frozen-corpus contract, all-cold baseline, and current known gaps.
+- [ephemeral-profile-revert-spec.md](ephemeral-profile-revert-spec.md) records the accepted
+  migration from shared operator profiles to per-session profiles; the current lifecycle contract
+  remains in [DESIGN-warm-browser-reuse.md](DESIGN-warm-browser-reuse.md).
 - [opencode-ecosystem-entry.md](opencode-ecosystem-entry.md) contains prepared upstream discovery
   copy for review after the OpenCode target is released.
 - [BUSINESS-MODEL.md](BUSINESS-MODEL.md) records the current pricing and
   positioning model.
 
-Historical design notes and obsolete launch plans are intentionally not kept in
+Other historical design notes and obsolete launch plans are intentionally not kept in
 the public docs tree. They remain available through git history.

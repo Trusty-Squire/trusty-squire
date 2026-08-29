@@ -1,14 +1,21 @@
 # Ephemeral per-operate browser profiles — implementation spec
 
+Status: implemented. This document records the change rationale and acceptance
+criteria; [`DESIGN-warm-browser-reuse.md`](DESIGN-warm-browser-reuse.md) owns the
+current operator-profile lifecycle contract.
+
 ## Decision
 
-Remove the operator profile pool. Each `operate_start` creates one new, private Chrome user-data directory, seeds browser session/auth state from the canonical login state, keeps that browser open for all calls with the same `session_id`, and deletes the directory after `operate_finish` closes Chrome.
+Remove the operator profile pool. Each `operate_start` creates one new, private Chrome user-data directory, seeds browser session/auth state from the canonical login state, keeps that browser open for all calls with the same `session_id`, and schedules best-effort directory deletion after `operate_finish` proves Chrome closed.
 
 No pool, shared seed lock, slot count, broker, lease daemon, or feature flag. The operator path must never launch Chrome on `CHROME_PROFILE_DIR`.
 
-## Evidence: current mechanics
+## Evidence: removed mechanics
 
-| Current behavior | Evidence |
+This table records the base-commit behavior replaced by this change, not the
+current implementation.
+
+| Removed behavior | Evidence |
 | --- | --- |
 | Canonical profile: `TRUSTY_SQUIRE_PROFILE_DIR` or `~/.trusty-squire/chrome-profile`. | `apps/mcp/src/bot/profile.ts:26-27` |
 | Advisory lock name is `trusty-squire-profile-<digest>.lock` (not the brief's shorthand `profile-<digest>.lock`); current wrapper is `withProfileOperationGuard` (not `withProfileLock`). | `profile.ts:291-306, 443-527` |
@@ -19,7 +26,7 @@ No pool, shared seed lock, slot count, broker, lease daemon, or feature flag. Th
 | Finish resets a reusable page, closes Chrome, returns a safe profile to warm storage, otherwise destroys it. | `provision-session.ts:860-890, 7522-7535`; `browser.ts:13437-13483` |
 | Pooling was introduced by `89d9e429 feat(mcp): isolate operator sessions with profile pooling (#514)`; the predecessor had one warm controller/profile. | `git show --stat 89d9e429`; `git show 89d9e429^:apps/mcp/src/bot/provision-session.ts:590-734` |
 
-The current pool is 1,117 lines and its focused test is 922 lines. This is the complexity to remove, not replace.
+The removed pool was 1,117 lines and its focused test was 922 lines. This is the complexity removed rather than replaced.
 
 History check: the immediate parent of the pooling commit is a shared warm-controller implementation,
 not a literal per-instance state-seeding implementation. Therefore this is not a blind `git revert`;
@@ -36,7 +43,7 @@ At start, create a unique `0700` directory with a `trusty-squire-operate-` mkdte
 Required coverage:
 
 - Google OAuth: all Google cookie rows, including the current SID/APISID family; the existing live-session detector uses `__Secure-1PSID`, `SAPISID`, or `SID` (`browser.ts:1653-1684`).
-- GitHub OAuth: all `github.com` rows, including `user_session`, which the same detector treats as live. The current filtered seed drops it.
+- GitHub OAuth: all `github.com` rows, including `user_session`, which the same detector treats as live. The removed filtered seed dropped it.
 - Merchant logins: all cookies plus local storage and IndexedDB from the storage-state JSON. This covers cookie sessions and Firebase-style tokens without copying a full profile. Provider/email marker JSON remains a hint, never auth proof (`login-state.ts:101-156`).
 
 Never copy card fields, approvals, action traces, cache, history, or extensions.
@@ -45,19 +52,22 @@ Never copy card fields, approvals, action traces, cache, history, or extensions.
 
 ### Start
 
-Replace pool/direct acquisition with a small `startEphemeralBrowser` in `provision-session.ts`:
+Replace pool/direct acquisition through the retained `acquireWarmBrowser` internal seam in `provision-session.ts`:
 
 - make and seed the unique directory;
 - read state JSON;
 - construct `BrowserController({ profileDir: fresh, storageState })`;
 - after its context exists, restore state before creating/navigating the primary page (the placement is `browser.ts:3446-3601`);
-- remember controller, fresh dir, and canonical profile on the session.
+- retain controller-to-profile and canonical-namespace custody in the in-memory
+  browser record associated with the session.
 
 Remove the `requireLiveIdentity` direct-canonical exception. Preserve the existing live-provider pre-navigation gate, but evaluate it against the seeded fresh browser. Existing multi-step reuse already works: a session owns one browser in `sessions` (`provision-session.ts:624, 2598-2634`) until finish removes it.
 
 ### Finish
 
-Preserve current call-drain, audit, payment, and session-removal ordering (`provision-session.ts:7538-7584`). On an explicit successful finish:
+Preserve the rc.9 call-drain, audit, and payment ordering. Keep the session and
+terminal owner discoverable through capture and atomic write-back so shutdown
+revocation reaches the final rename fence. On an explicit successful finish:
 
 1. Capture `context.storageState({ indexedDB: true })` before close.
 2. Use the rc.9 bounded terminal owner to perform the existing identity-proven browser close.
@@ -78,7 +88,7 @@ Write-back is deliberately **last writer wins**. Atomic rename prevents corrupti
 2. In `browser.ts`, add optional input-state application and a narrow capture method; keep self-launch + CDP. Remove operator start's `profileOperationLease`/shared guard (`3110-3136`, `3266-3270`).
 3. In `provision-session.ts`, delete pool/direct lease acquisition, capacity waiters, warm release/reset, and use the ephemeral lifecycle above.
 4. In `google-login.ts`, replace `canPublishOperatorProfileSeed`/`publishOperatorProfileSeed` at `1163-1176` with state snapshot publication.
-5. Update `docs/DESIGN-warm-browser-reuse.md` and comments; it currently describes the pool and direct canonical path.
+5. Update `docs/DESIGN-warm-browser-reuse.md` and comments from the prior pool and direct-canonical path to the ephemeral lifecycle.
 
 Delete rather than rehome:
 
@@ -94,7 +104,7 @@ Keep only the small process-identity/close-proof helpers needed to kill an owned
 
 1. Three simultaneous `operate_start` calls receive three distinct profile paths and no capacity/seed-lock wait.
 2. Storage-state JSON round-trips cookies, local storage, and IndexedDB; no profile, cache, history, or SQLite-cookie bootstrap is used.
-3. An explicit successful finish persists a login to a later fresh task, closes Chrome, and removes its profile. No-outcome or failed finishes preserve the prior snapshot. A payment, sealed-field, or pending-3DS session destroys without snapshot write-back. Unknown close retains only its unique directory.
+3. An explicit successful finish persists a login to a later fresh task, closes Chrome, and schedules detached profile removal. No-outcome or failed finishes preserve the prior snapshot. A payment, sealed-field, or pending-3DS session destroys without snapshot write-back. Unknown close retains only its unique directory.
 4. Two explicit successful finishes leave one valid state file; the last completed snapshot is visible.
 5. Multiple observe/act calls on one session do not create a second browser/profile.
 6. `require_live_identity` tests prove a fresh seeded profile, never canonical profile access.
@@ -109,16 +119,17 @@ Targets: Exa public auth entry, Cartesia public signup, and Groq public login/AP
 
 ## Startup, rollout, and invariants
 
-The current warm worker is closed at finish (`docs/DESIGN-warm-browser-reuse.md:34-35`), so it avoids a profile copy, not Chrome launch. `STATE.md:427-430` measured self-launch + CDP attach at about 870 ms. Estimate installed-browser startup at 0.9–1.5 s warm versus 1.0–2.0 s fresh-with-state (roughly 0.1–0.5 s overhead before network navigation). Measure medians/p95 with temporary `provision-audit` fields: `profile_seed_ms`, `storage_restore_ms`, `browser_launch_ms`, and `start_total_ms`; remove them after first-release evidence. The avoided retained/copy class is approximately 280 MB, not a small auth snapshot.
+The removed warm worker closed at finish, so it avoided a profile copy, not Chrome launch. `STATE.md:427-430` measured self-launch + CDP attach at about 870 ms. The implementation estimate was 0.9–1.5 s warm versus 1.0–2.0 s fresh-with-state (roughly 0.1–0.5 s overhead before network navigation). The avoided retained/copy class is approximately 280 MB, not a small auth snapshot.
 
 Ship the direct replacement, no new flag. `TRUSTY_SQUIRE_PROFILE_DIR` remains unchanged. Card sealing, one-human approval, host-scoped egress, 3DS handling, vault restrictions, payment audit ordering, and session addressing are all unchanged.
 
 ## What could go wrong
 
-- Current direct identity code says Google consoles can reject copied session state (`operator-direct-identity.ts:3-26`). A seeded `require_live_identity` regression plus read-only Firebase/GCP authenticated reachability smoke must pass. If it fails, report the incompatible mechanism; do not quietly restore the shared canonical fallback.
+- The removed direct-identity path warned that Google consoles can reject copied session state. A seeded `require_live_identity` regression plus read-only Firebase/GCP authenticated reachability smoke must pass. If it fails, report the incompatible mechanism; do not quietly restore the shared canonical fallback.
 - A plain successful login has no context to capture; retain the prior snapshot rather than deleting saved logins.
 - Concurrent finish can lose one login update by design; it cannot corrupt storage.
-- IndexedDB snapshots can grow; measure their bytes, but never replace this design with cache/history copying.
+- IndexedDB snapshots can grow; snapshots larger than 4 MiB are skipped while
+  retaining the prior state. Never replace this design with cache/history copying.
 - Uncertain teardown can retain a directory; its uniqueness makes it non-blocking.
 
 ## Investigation record
@@ -136,9 +147,10 @@ rg -n -C 5 'storageState' node_modules/.pnpm/playwright-core@1.59.1/.../types.d.
 
 Key output: `89d9e429 feat(mcp): isolate operator sessions with profile pooling (#514)` introduced the pool; the Exa matrix in `STATE.md` identifies launcher mode, not shared-profile reuse, as the proven Turnstile factor.
 
-## Owner decisions (supersede the seeding sections above)
+## Owner decisions applied to this spec
 
-Two eng-review decisions override the spec's original seeding design. Implement THESE:
+Two eng-review decisions replaced the spec's original seeding design and are
+reflected in the sections above:
 
 1. **Seed via Playwright `storageState` only — drop the SQLite cookie-DB copy entirely.**
    `BrowserContext.setStorageState()` (verified present, playwright-core 1.59.1 `types.d.ts:9413`;
@@ -159,12 +171,12 @@ Two eng-review decisions override the spec's original seeding design. Implement 
    Accepted cost: a modestly larger local secret surface (session tokens on disk). The card seal,
    one-human-approval, host-scoped egress, and payment audit are unchanged and orthogonal.
 
-Everything else in the spec stands: remove the pool + shared seed lock + `operator-direct-identity.ts`,
-per-instance mkdtemp profile per `operate_start`, destroy-on-finish, destroy (skip write-back) on
+Everything else in the spec remains: remove the pool + shared seed lock + `operator-direct-identity.ts`,
+per-instance mkdtemp profile per `operate_start`, detached best-effort destruction after finish, destruction without write-back on
 `activePayment`/`paymentFieldSealActive`/`pendingThreeDs`, last-writer-wins atomic JSON write-back,
 retain rc.9 watchdog.
-Delete `google-login.ts`'s `publishOperatorProfileSeed` path — write full `storageState` on any clean
-context-backed login, not a Google-gated seed.
+The implementation deletes `google-login.ts`'s `publishOperatorProfileSeed` path and writes full
+`storageState` on any clean context-backed login, not a Google-gated seed.
 
 ## GSTACK REVIEW REPORT
 
@@ -207,6 +219,6 @@ login to a later task; payment/sealed/pending-3DS session destroys without write
 reuses one browser; **stale-session re-login guardrail fires and re-authenticates**;
 `require_live_identity` uses a seeded profile; retain rc.9 watchdog + `closeAllProvisionSessions` tests.
 
-**VERDICT:** ENG CLEARED — ready to implement. Delivery: no-mistakes, base `staging`.
+**VERDICT:** ENG CLEARED — implemented on the feature branch targeting `staging`.
 
 NO UNRESOLVED DECISIONS

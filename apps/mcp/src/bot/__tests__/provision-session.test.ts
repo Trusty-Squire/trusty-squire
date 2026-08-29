@@ -1301,9 +1301,7 @@ describe("googleSessionGate (Change 5 — fail-closed precondition gate)", () =>
       expect(r.needs_user.wall).toBe("google_session");
       expect(r.needs_user.resume).toBe("login");
       expect(r.needs_user.message).toMatch(/has NOT started/i);
-      expect(r.needs_user.message).toContain(
-        "login --provider=google --force-relogin",
-      );
+      expect(r.needs_user.message).toContain("login --provider=google --force-relogin");
       expect(r.needs_user.message).not.toContain("connect --force-relogin");
     }
   });

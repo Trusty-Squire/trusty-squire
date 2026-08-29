@@ -93,8 +93,7 @@ export function classifyGitHubAuthState(url: string, bodyText: string): OAuthAut
     path.includes("/installations/select_target") ||
     text.includes("wants to access your") ||
     text.includes("by clicking authorize") ||
-    (text.includes("install") &&
-      (text.includes("on your account") || text.includes("github app")))
+    (text.includes("install") && (text.includes("on your account") || text.includes("github app")))
   ) {
     return "consent";
   }

@@ -23,7 +23,8 @@ A successful context-backed interactive login captures Playwright
 storage, and IndexedDB and is atomically stored as
 `<CHROME_PROFILE_DIR>/trusty-squire-session-state.json` with mode `0600`.
 Plain Chrome login cannot capture a context and therefore preserves the prior
-snapshot.
+snapshot. Snapshots larger than 4 MiB are ignored on read and skipped on write,
+also preserving the prior snapshot.
 
 Every operator browser restores that snapshot before its first target
 navigation. `require_live_identity` runs the shared live-provider detector in

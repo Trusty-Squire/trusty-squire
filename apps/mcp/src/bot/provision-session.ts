@@ -795,7 +795,9 @@ async function forceReleaseWarmBrowserPage(browser: BrowserController): Promise<
   if (closeState === "closed") {
     destroyEphemeralProfileDetached(ephemeral.profileDir);
   } else {
-    console.error(`[operator] retained ephemeral profile after unproven browser close: ${ephemeral.profileDir}`);
+    console.error(
+      `[operator] retained ephemeral profile after unproven browser close: ${ephemeral.profileDir}`,
+    );
   }
 }
 
@@ -856,7 +858,9 @@ async function closeEphemeralBrowser(
   let state: Awaited<ReturnType<BrowserController["captureStorageState"]>> | undefined;
   if (persistState && typeof ephemeral.controller.captureStorageState === "function") {
     state = await ephemeral.controller.captureStorageState().catch((error: unknown) => {
-      console.error(`[operator] storageState capture failed; retaining prior snapshot: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(
+        `[operator] storageState capture failed; retaining prior snapshot: ${error instanceof Error ? error.message : String(error)}`,
+      );
       return undefined;
     });
   }
@@ -893,7 +897,9 @@ async function closeEphemeralBrowser(
     if (leasedBrowsers.get(ephemeral.controller) === ephemeral) {
       leasedBrowsers.delete(ephemeral.controller);
     }
-    console.error(`[operator] retained ephemeral profile after unproven browser close: ${ephemeral.profileDir}`);
+    console.error(
+      `[operator] retained ephemeral profile after unproven browser close: ${ephemeral.profileDir}`,
+    );
   }
 }
 
