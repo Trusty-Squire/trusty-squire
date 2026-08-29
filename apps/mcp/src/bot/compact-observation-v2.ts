@@ -407,11 +407,38 @@ function safeAutocompleteV2(value: string | null | undefined): string | null {
     : null;
 }
 
-function safeOriginV2(value: string | null | undefined): string | null {
+function safeHostnameV2(value: string): boolean {
+  const hostname = value.toLowerCase();
+  if (
+    hostname.length === 0 ||
+    hostname.length > 253 ||
+    findCredentialTokens(hostname).length > 0 ||
+    containsCredentialShape(hostname)
+  ) {
+    return false;
+  }
+  return hostname.split(".").every((label) => {
+    if (label.startsWith("xn--")) return false;
+    if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)) return false;
+    if (/\d{8,}/.test(label)) return false;
+    if (label.length >= 24 && /[a-z]/.test(label) && /\d/.test(label)) return false;
+    return label.length < 32;
+  });
+}
+
+export function safeOriginV2(value: string | null | undefined): string | null {
   if (typeof value !== "string") return null;
   try {
     const parsed = new URL(value);
-    return parsed.origin === value ? value : null;
+    if (
+      (parsed.protocol !== "https:" && parsed.protocol !== "http:") ||
+      parsed.username.length > 0 ||
+      parsed.password.length > 0 ||
+      !safeHostnameV2(parsed.hostname)
+    ) {
+      return null;
+    }
+    return parsed.origin;
   } catch {
     return null;
   }
@@ -696,13 +723,54 @@ function privateQueryTokenV2(value: string): string | null {
   return normalized;
 }
 
+function privateQueryTermsV2(value: string): string[] | null {
+  const normalized = value.normalize("NFKC").trim().toLowerCase();
+  if (
+    normalized.length < 2 ||
+    normalized.length > 96 ||
+    hasPanLikeDigits(normalized) ||
+    EMAIL_VALUE_RE.test(normalized) ||
+    SECRET_ASSIGNMENT_RE.test(normalized) ||
+    CARD_SECURITY_VALUE_RE.test(normalized) ||
+    HIGH_ENTROPY_TOKEN_RE.test(normalized) ||
+    findOtpCredential(normalized) !== null ||
+    isStandaloneOtpCredential(normalized) ||
+    containsCredentialShape(normalized)
+  ) {
+    return null;
+  }
+  const rawTerms = normalized.match(/[\p{L}\p{M}][\p{L}\p{M}\p{N}]{1,47}/gu);
+  if (rawTerms === null || rawTerms.length === 0 || rawTerms.length > 6) return null;
+  const separators = normalized.replace(/[\p{L}\p{M}][\p{L}\p{M}\p{N}]{1,47}/gu, "");
+  if (!/^[\s&'’+,.!?():/_|-]*$/u.test(separators)) return null;
+  const terms = rawTerms.map(privateQueryTokenV2);
+  return terms.every((term): term is string => term !== null) ? [...new Set(terms)] : null;
+}
+
 export function controlMatchesPrivateQueryV2(el: InteractiveElement, query: string): boolean {
-  const needle = privateQueryTokenV2(query);
-  if (needle === null) return false;
+  const needles = privateQueryTermsV2(query);
+  if (needles === null) return false;
   return controlNamingTexts(el).some((candidate) => {
     if (typeof candidate !== "string") return false;
+    const normalized = candidate.normalize("NFKC").trim().toLowerCase();
+    if (
+      hasPanLikeDigits(normalized) ||
+      EMAIL_VALUE_RE.test(normalized) ||
+      SECRET_ASSIGNMENT_RE.test(normalized) ||
+      CARD_SECURITY_VALUE_RE.test(normalized) ||
+      HIGH_ENTROPY_TOKEN_RE.test(normalized) ||
+      findOtpCredential(normalized) !== null ||
+      isStandaloneOtpCredential(normalized) ||
+      containsCredentialShape(normalized)
+    ) {
+      return false;
+    }
     const tokens = candidate.normalize("NFKC").match(/[\p{L}\p{M}][\p{L}\p{M}\p{N}]{1,47}/gu);
-    return tokens?.some((token) => privateQueryTokenV2(token) === needle) === true;
+    if (tokens === null) return false;
+    const safeTokens = new Set(
+      tokens.map(privateQueryTokenV2).filter((token): token is string => token !== null),
+    );
+    return needles.every((needle) => safeTokens.has(needle));
   });
 }
 
@@ -744,17 +812,27 @@ function intentOf(el: InteractiveElement): SafeIntentV2 | undefined {
   return INTENTS.find(([, expression]) => texts.some((text) => expression.test(text)))?.[0];
 }
 
-function fieldOf(el: InteractiveElement): SafeFieldV2 | undefined {
+function hasExplicitPaymentFieldSignal(el: InteractiveElement): boolean {
+  const autocomplete = (el.autocomplete ?? "").toLowerCase();
+  const text = candidateText(el).toLowerCase();
+  return (
+    autocomplete
+      .trim()
+      .split(/\s+/)
+      .some((token) => token.startsWith("cc-")) ||
+    /\b(?:cvc|cvv|csc|card verification(?: (?:value|number))?|card security code)\b/.test(text) ||
+    /\b(?:card number|payment card|credit card|debit card)\b/.test(text)
+  );
+}
+
+function fieldOf(el: InteractiveElement, paymentContext = false): SafeFieldV2 | undefined {
   const autocomplete = (el.autocomplete ?? "").toLowerCase();
   const autocompleteTokens = new Set(autocomplete.trim().split(/\s+/).filter(Boolean));
   const hasAutocomplete = (...tokens: string[]): boolean =>
     tokens.some((token) => autocompleteTokens.has(token));
   const type = (el.type ?? "").toLowerCase();
   const text = candidateText(el).toLowerCase();
-  if (
-    [...autocompleteTokens].some((token) => token.startsWith("cc-")) ||
-    /\b(?:cvc|cvv|csc|card verification(?: value)?|card security code)\b/.test(text)
-  ) {
+  if (hasExplicitPaymentFieldSignal(el) || (paymentContext && /\bsecurity code\b/.test(text))) {
     return "payment";
   }
   if (type === "password" || hasAutocomplete("current-password", "new-password")) {
@@ -812,6 +890,10 @@ export function safeStageV2(url: string, elements: readonly InteractiveElement[]
   const actionableElements = elements.filter(
     (element) => element.visible === true && element.topmost !== false,
   );
+  const routeStage = checkoutStageFromUrlV2(url);
+  const paymentContext =
+    routeStage !== null ||
+    actionableElements.some((element) => hasExplicitPaymentFieldSignal(element));
   const checkoutFields = new Set<SafeFieldV2>([
     "address",
     "city",
@@ -822,7 +904,7 @@ export function safeStageV2(url: string, elements: readonly InteractiveElement[]
   ]);
   const hasCheckoutField = actionableElements.some((el) => {
     const role = roleOf(el);
-    const field = fieldOf(el);
+    const field = fieldOf(el, paymentContext);
     return (
       (role === "textbox" || role === "select") && field !== undefined && checkoutFields.has(field)
     );
@@ -830,10 +912,10 @@ export function safeStageV2(url: string, elements: readonly InteractiveElement[]
   const authFields = actionableElements.filter((el) => {
     const role = roleOf(el);
     if (role !== "textbox" && role !== "select") return false;
-    const field = fieldOf(el);
+    const field = fieldOf(el, paymentContext);
     return field === "email" || field === "username" || field === "password";
   });
-  const hasPasswordField = authFields.some((el) => fieldOf(el) === "password");
+  const hasPasswordField = authFields.some((el) => fieldOf(el, paymentContext) === "password");
   const hasScopedAuthForm = actionableElements.some((el) => {
     if (roleOf(el) !== "button" || (intentOf(el) !== "login" && intentOf(el) !== "signup")) {
       return false;
@@ -851,11 +933,10 @@ export function safeStageV2(url: string, elements: readonly InteractiveElement[]
     );
   });
   if (hasPasswordField || hasScopedAuthForm) return "auth";
-  const routeStage = checkoutStageFromUrlV2(url);
   if (routeStage !== null) return routeStage;
   const hasPaymentField = actionableElements.some((el) => {
     const role = roleOf(el);
-    return (role === "textbox" || role === "select") && fieldOf(el) === "payment";
+    return (role === "textbox" || role === "select") && fieldOf(el, paymentContext) === "payment";
   });
   const hasCheckoutAction = actionableElements.some(
     (el) => roleOf(el) === "button" && intentOf(el) === "checkout",
@@ -901,8 +982,12 @@ export function buildSafeControlsV2(args: {
   legacyRefs: ReadonlyMap<InteractiveElement, string>;
   generation: number;
   pageOrigin: string;
+  pageUrl?: string;
 }): { rows: SafeControlV2[]; byRef: Map<string, string> } {
   const rows: Array<{ legacy: string; row: Omit<SafeControlV2, "ref">; priority: number }> = [];
+  const paymentContext =
+    checkoutStageFromUrlV2(args.pageUrl ?? "") !== null ||
+    args.elements.some((element) => hasExplicitPaymentFieldSignal(element));
   for (const el of args.elements) {
     if (el.visible !== true || el.topmost === false) continue;
     const role = roleOf(el);
@@ -910,7 +995,7 @@ export function buildSafeControlsV2(args: {
     if (role === null || legacy === undefined) continue;
     const state = stateOf(el);
     const action = intentOf(el);
-    const field = fieldOf(el);
+    const field = fieldOf(el, paymentContext);
     const cardChoice = el.cardRadioGroup;
     // Native TypeScript port of browse-use's compact DOM formatting: the
     // already CDP-derived interactive inventory supplies each visible control's

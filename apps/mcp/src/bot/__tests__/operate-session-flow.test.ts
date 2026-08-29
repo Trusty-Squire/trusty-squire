@@ -1120,6 +1120,46 @@ describe("prepared-statement replay", () => {
     expect(result.status === "fallback_required" && result.next_index).toBe(1);
   });
 
+  it("normalizes private browser failures during V2 recipe replay", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        testId: "variant",
+        labelText: "Variant",
+        selector: "#private-variant-selector",
+        selectOptions: [{ value: "blue", text: "Ocean Blue" }],
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    h.selectError = new Error(
+      'select <select> #private-variant-selector: option "Private option" was not found',
+    );
+
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [
+          {
+            action: {
+              kind: "select",
+              target: { dom_hint: { testid: "variant" }, accessible_name: "Variant" },
+              value: "Blue",
+            },
+          },
+        ],
+      }),
+      {},
+    );
+
+    expect(result).toMatchObject({ status: "fallback_required", reason: "selection_failed" });
+    expect(JSON.stringify(result)).not.toContain("private-variant-selector");
+    expect(JSON.stringify(result)).not.toContain("Private option");
+  });
+
   it("never replays operate_pay and hands the charge to the fresh approval flow", async () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
@@ -3496,6 +3536,33 @@ describe("Compact V2 action-map boundary", () => {
     }
   });
 
+  it("screens host metadata before V2 audit and replay retention", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const secretHost = "api123456789012345678901234.attacker.test";
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      const started = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/signup",
+      });
+      await expect(
+        act(started.session_id, { kind: "goto", url: `https://${secretHost}/checkout` }),
+      ).rejects.toThrow("target_not_allowed");
+      await act(started.session_id, { kind: "allow_host", host: secretHost });
+
+      const session = paymentSession(started.session_id);
+      expect(session.recipeRejectionReason).toBe("compact_v2_unrepresentable_host");
+      expect(JSON.stringify(session.actionTrace)).not.toContain(secretHost);
+      expect(writes.join("")).not.toContain(secretHost);
+      expect(writes.join("")).toContain("<sealed-host>");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("keeps start metadata, rejects locators, and binds a handle to its current page snapshot", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.workerEmail = "operator@example.test";
@@ -3686,6 +3753,29 @@ describe("Compact V2 action-map boundary", () => {
     expect((acme.safe_table as Array<[string]>)[0]![0]).not.toBe(
       (japanese.safe_table as Array<[string]>)[0]![0],
     );
+  });
+
+  it("requires every private query term to match one naming source", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Buy Acme Basic", selector: "#basic" }),
+      elem({
+        index: 1,
+        tag: "button",
+        role: "button",
+        visibleText: "Buy Acme Pro",
+        selector: "#pro",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/products",
+    });
+
+    const result = await observeQuery(started.session_id, "Acme Pro");
+
+    expect(result.safe_table).toHaveLength(1);
+    expect(JSON.stringify(result)).not.toContain("Acme");
+    expect(JSON.stringify(result)).not.toContain("Pro");
   });
 
   it("reissues handles when a private live binding changes", async () => {
@@ -4125,9 +4215,11 @@ describe("Compact V2 action-map boundary", () => {
     ).rejects.toThrow("reobserve_required");
     expect(h.selected).toEqual([]);
     const result = await formSelectMany(started.session_id, { [handle]: "Korea" });
-    expect(result.fields).toEqual([
-      expect.objectContaining({ status: "selected", selected_option: "South Korea" }),
-    ]);
+    expect(result.fields).toEqual([expect.objectContaining({ status: "selected" })]);
+    expect(JSON.stringify(result.fields)).not.toContain("South Korea");
+    expect(
+      JSON.stringify([...paymentSession(started.session_id).committedSelectValues]),
+    ).not.toContain("#country");
     expect(result.observation.format).toBe("compact-v2");
   });
 
@@ -4176,9 +4268,10 @@ describe("Compact V2 action-map boundary", () => {
 
     expect(h.selected).toEqual([{ selector: "#variant", matcher: "Blue" }]);
     expect(result.fields).toEqual([
-      expect.objectContaining({ status: "selected", selected_option: "Ocean Blue" }),
+      expect.objectContaining({ status: "selected" }),
       expect.objectContaining({ status: "failed", reason: "reobserve_required" }),
     ]);
+    expect(JSON.stringify(result.fields)).not.toContain("Ocean Blue");
   });
 
   it("rejects a changed bulk target after the preceding mutation", async () => {
@@ -4224,7 +4317,7 @@ describe("Compact V2 action-map boundary", () => {
 
     expect(h.selected).toEqual([{ selector: "#variant", matcher: "Blue" }]);
     expect(result.fields).toEqual([
-      expect.objectContaining({ status: "selected", selected_option: "Ocean Blue" }),
+      expect.objectContaining({ status: "selected" }),
       expect.objectContaining({ status: "failed", reason: "reobserve_required" }),
     ]);
   });

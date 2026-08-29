@@ -51,6 +51,7 @@ import {
   encodeV2Delta,
   encodeV2Page,
   safeDescriptionV2,
+  safeOriginV2,
   safePageSemanticsV2,
   sealRetainedInteractiveElementsV2,
   safeStageV2,
@@ -1258,8 +1259,37 @@ const settle = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, m
 // the trail greppable. No credential VALUES are ever logged — only the action
 // shape + url.
 function audit(sessionId: string, event: string, detail: Record<string, unknown> = {}): void {
+  const session = sessions.get(sessionId);
+  const sealedDetail =
+    session?.compactV2Mode === "on"
+      ? Object.fromEntries(
+          Object.entries(detail).map(([key, value]) => {
+            if ((key === "url" || key === "service_url") && typeof value === "string") {
+              return [key, compactV2AuditUrl(value)];
+            }
+            if (
+              (key === "host" ||
+                key === "url_host" ||
+                key === "frame_origin" ||
+                key === "recipe_domain") &&
+              typeof value === "string"
+            ) {
+              return [key, compactV2AuditHost(value)];
+            }
+            if (key === "allowed_hosts" && Array.isArray(value)) {
+              return [
+                key,
+                value.map((host) =>
+                  typeof host === "string" ? compactV2AuditHost(host) : "<sealed-host>",
+                ),
+              ];
+            }
+            return [key, value];
+          }),
+        )
+      : detail;
   process.stderr.write(
-    `${JSON.stringify({ marker: "provision-audit", surface: "operate", session_id: sessionId, event, ...detail })}\n`,
+    `${JSON.stringify({ marker: "provision-audit", surface: "operate", session_id: sessionId, event, ...sealedDetail })}\n`,
   );
 }
 
@@ -1636,6 +1666,7 @@ export class TargetStaleError extends Error {
 
 class CompactV2ReobserveRequiredError extends Error {}
 class ProvisionTargetNotAllowedError extends Error {}
+class CompactV2ActionFailureError extends Error {}
 
 function replacementCandidates(elements: readonly InteractiveElement[]): Record<string, string[]> {
   const refs = provisionElementRefs(elements);
@@ -2016,6 +2047,7 @@ function resolveAuthorizedCompactV2Target(
     legacyRefs: provisionElementRefs(elements),
     generation: session.compactV2Index?.generation ?? 0,
     pageOrigin,
+    pageUrl: session.browser.currentUrl(),
   });
   let liveRow: SafeControlV2 | undefined;
   for (const [ref, legacyRef] of safe.byRef) {
@@ -4736,6 +4768,24 @@ function retainSessionElements(session: Session, elements: InteractiveElement[])
       : elements;
 }
 
+function compactV2CommittedSelectKey(session: Session, selector: string): string {
+  if (session.compactV2Mode !== "on") return selector;
+  return createHmac("sha256", session.compactV2Secret)
+    .update(`select-key\0${selector}`)
+    .digest("base64url");
+}
+
+function compactV2CommittedSelectValue(session: Session, value: string): string {
+  if (session.compactV2Mode !== "on") return value;
+  return createHmac("sha256", session.compactV2Secret)
+    .update(`select-value\0${value}`)
+    .digest("base64url");
+}
+
+function clearCommittedSelectValue(session: Session, selector: string): void {
+  session.committedSelectValues.delete(compactV2CommittedSelectKey(session, selector));
+}
+
 function compactV2CorrelationSelector(session: Session, element: InteractiveElement): string {
   const binding = JSON.stringify([
     element.frameOrigin ?? null,
@@ -4753,6 +4803,12 @@ function replaySafeElementForSession(
   element: InteractiveElement | null,
 ): InteractiveElement | null {
   if (element === null || session.compactV2Mode !== "on") return element;
+  if (element.frameOrigin !== null && element.frameOrigin !== undefined) {
+    if (safeOriginV2(element.frameOrigin) === null) {
+      rejectRecipeRecording(session, "compact_v2_unrepresentable_frame_origin");
+      return null;
+    }
+  }
   return (
     sealRetainedInteractiveElementsV2([element], (candidate) =>
       compactV2CorrelationSelector(session, candidate),
@@ -4975,6 +5031,7 @@ function compactV2Observation(
     legacyRefs,
     generation: snapshotGeneration,
     pageOrigin,
+    pageUrl: session.browser.currentUrl(),
   });
   let delta = samePage ? diffSafeControlsV2(previous, stage, safe.rows) : null;
   const privateBindingsChanged =
@@ -4999,6 +5056,7 @@ function compactV2Observation(
       legacyRefs,
       generation: snapshotGeneration,
       pageOrigin,
+      pageUrl: session.browser.currentUrl(),
     });
     delta = null;
   }
@@ -5148,6 +5206,7 @@ export async function observeQuery(
     legacyRefs: liveRefs,
     generation: index.generation,
     pageOrigin,
+    pageUrl: session.browser.currentUrl(),
   });
   if (
     liveSafe.rows.length !== index.rows.length ||
@@ -5580,15 +5639,23 @@ async function actInternally(
   collectCheckoutState = false,
   compactV2Authorization?: CompactV2TargetAuthorization,
 ): Promise<InternalActResult> {
-  return await executeAct(
-    sessionId,
-    action,
-    detail,
-    cartIdentity,
-    true,
-    collectCheckoutState,
-    compactV2Authorization,
-  );
+  const session = sessionForCall(sessionId);
+  try {
+    return await executeAct(
+      sessionId,
+      action,
+      detail,
+      cartIdentity,
+      true,
+      collectCheckoutState,
+      compactV2Authorization,
+    );
+  } catch (error) {
+    if (session?.compactV2Active === true && !(error instanceof ManualCardEntryBlockedError)) {
+      throw new CompactV2ActionFailureError(compactV2ActionFailureReason(error, action.kind));
+    }
+    throw error;
+  }
 }
 
 export async function act(
@@ -5869,7 +5936,10 @@ async function executeAct(
           selectFrame !== null
             ? await browser.selectInFrame(selectFrame, el.selector, action.text)
             : await browser.selectOption(el.selector, action.text);
-        session.committedSelectValues.set(el.selector, committedText);
+        session.committedSelectValues.set(
+          compactV2CommittedSelectKey(session, el.selector),
+          compactV2CommittedSelectValue(session, committedText),
+        );
         completedAction = { ...action, text: committedText };
         await settleAfterStateChange(browser);
         break;
@@ -6025,10 +6095,10 @@ async function executeAct(
           // SuggestionPopups / detectTypeSuggestionPopup / commitTypeSuggestion
           // are page-scoped). Out of scope for the checkout-option case frame
           // support exists for; a plain frame-scoped fill covers it.
-          session.committedSelectValues.delete(el.selector);
+          clearCommittedSelectValue(session, el.selector);
           await browser.typeInFrame(frameTargetFor(el)!, el.selector, action.text);
         } else if (action.kind === "type") {
-          session.committedSelectValues.delete(el.selector);
+          clearCommittedSelectValue(session, el.selector);
           if (!isAutocompleteScopedTypeField(action.provenance, el)) {
             // Free text only — e.g. a site-search/catalog-search box, which
             // can legitimately open its own suggestion listbox too. 3.1 only
@@ -6226,7 +6296,7 @@ async function executeAct(
 
 export interface FormSelectManyFieldResult {
   label: string;
-  option: string;
+  option?: string;
   status: "selected" | "failed";
   selected_option?: string;
   reason?: string;
@@ -6244,6 +6314,13 @@ export async function formSelectMany(
 
   for (let index = 0; index < selectionEntries.length; index += 1) {
     const [label, option] = selectionEntries[index]!;
+    const publicLabel =
+      session.compactV2Active && !/^@e:[0-9a-z]+\.[0-9a-z]+$/.test(label)
+        ? "<rejected-v2-target>"
+        : label;
+    const publicSelection = session.compactV2Active
+      ? { label: publicLabel }
+      : { label: publicLabel, option };
     let authorization: CompactV2TargetAuthorization | undefined;
     if (session.compactV2Active) {
       try {
@@ -6252,8 +6329,7 @@ export async function formSelectMany(
         audit(sessionId, "act", { kind: "select_many", target: "<rejected-v2-target>" });
         if (index === 0) throw error;
         fields.push({
-          label,
-          option,
+          ...publicSelection,
           status: "failed",
           reason: compactV2SelectionFailureReason(error),
         });
@@ -6278,32 +6354,31 @@ export async function formSelectMany(
       // `detail:none` is intentionally a minimal ack. The explicit observe here
       // refreshes the DOM generation between every potentially mutating select.
       await observe(sessionId, "compact");
+      const publicSelectedOption = session.compactV2Active
+        ? safeDescriptionV2(selectedOption)
+        : selectedOption;
       fields.push({
-        label,
-        option,
+        ...publicSelection,
         status: "selected",
-        selected_option: selectedOption,
+        ...(publicSelectedOption === undefined ? {} : { selected_option: publicSelectedOption }),
       });
     } catch (err) {
       if (session.compactV2Active) {
         fields.push({
-          label,
-          option,
+          ...publicSelection,
           status: "failed",
           reason: compactV2SelectionFailureReason(err),
         });
       } else if (err instanceof TargetStaleError) {
         fields.push({
-          label,
-          option,
+          ...publicSelection,
           status: "failed",
           reason: err.message,
           repair: err.result,
         });
       } else {
         fields.push({
-          label,
-          option,
+          ...publicSelection,
           status: "failed",
           reason: err instanceof Error ? err.message : String(err),
         });
@@ -6326,6 +6401,7 @@ function compactV2SelectionFailureReason(error: unknown): string {
 }
 
 function compactV2ActionFailureReason(error: unknown, kind: ProvisionAction["kind"]): string {
+  if (error instanceof CompactV2ActionFailureError) return error.message;
   if (error instanceof TargetStaleError || error instanceof CompactV2ReobserveRequiredError) {
     return "reobserve_required";
   }
@@ -6429,11 +6505,13 @@ function looksLikeEmailValue(v: string): boolean {
 }
 
 function compactV2AuditUrl(rawUrl: string): string {
-  try {
-    return new URL(rawUrl).origin;
-  } catch {
-    return "";
-  }
+  return safeOriginV2(rawUrl) ?? "<sealed-origin>";
+}
+
+function compactV2AuditHost(rawHost: string): string {
+  const origin = safeOriginV2(rawHost.includes("://") ? rawHost : `https://${rawHost}`);
+  if (origin === null) return "<sealed-host>";
+  return new URL(origin).host;
 }
 
 const COMPACT_V2_REPLAY_ROUTE_SEGMENTS = new Set([
@@ -6484,6 +6562,7 @@ const COMPACT_V2_REPLAY_ROUTE_SEGMENTS = new Set([
 function compactV2ReplaySafeUrl(rawUrl: string): string | null {
   try {
     const parsed = new URL(rawUrl);
+    if (safeOriginV2(parsed.origin) === null) return null;
     if (
       parsed.username.length > 0 ||
       parsed.password.length > 0 ||
@@ -6517,6 +6596,12 @@ function compactV2RecordedAction(
     const url = compactV2ReplaySafeUrl(action.url);
     if (url !== null) return { ...action, url };
     rejectRecipeRecording(session, "compact_v2_unrepresentable_goto");
+    return null;
+  }
+  if (action.kind === "allow_host") {
+    const origin = safeOriginV2(`https://${action.host}`);
+    if (origin !== null) return { ...action, host: new URL(origin).hostname };
+    rejectRecipeRecording(session, "compact_v2_unrepresentable_host");
     return null;
   }
   if (action.kind === "type") {
@@ -7693,10 +7778,7 @@ function replayTargetWithinRecipeDomain(url: string, recipeDomain: string): bool
 }
 
 function markReplayDomainLockViolation(session: Session, host: string, recipeDomain: string): void {
-  rejectRecipeRecording(
-    session,
-    `replay refused: "${host}" is outside the recipe's own domain "${recipeDomain}"`,
-  );
+  rejectRecipeRecording(session, "replay_domain_lock_violation");
   audit(session.id, "replay_domain_lock_violation", { host, recipe_domain: recipeDomain });
 }
 
@@ -7721,20 +7803,22 @@ function verifyReplayFieldInElements(
   ]);
   if (guard.ok) {
     if (expected.kind === "select") {
-      session.committedSelectValues.delete(resolution.element.selector);
+      clearCommittedSelectValue(session, resolution.element.selector);
     }
     return { ok: true };
   }
   if (
     allowCommittedSelect &&
     expected.kind === "select" &&
-    session.committedSelectValues.get(resolution.element.selector) === expected.expected
+    session.committedSelectValues.get(
+      compactV2CommittedSelectKey(session, resolution.element.selector),
+    ) === compactV2CommittedSelectValue(session, expected.expected)
   ) {
-    session.committedSelectValues.delete(resolution.element.selector);
+    clearCommittedSelectValue(session, resolution.element.selector);
     return { ok: true };
   }
   if (expected.kind === "select") {
-    session.committedSelectValues.delete(resolution.element.selector);
+    clearCommittedSelectValue(session, resolution.element.selector);
   }
   return { ok: false, reason: guard.reason };
 }
@@ -8005,12 +8089,16 @@ export async function replayOperatorRecipe(
     host: string,
   ): Promise<OperatorReplayResult> => {
     markReplayDomainLockViolation(session, host, recipeDomain);
+    const publicHost = session.compactV2Active ? compactV2AuditHost(host) : host;
+    const publicRecipeDomain = session.compactV2Active
+      ? compactV2AuditHost(recipeDomain)
+      : recipeDomain;
     return {
       status: "domain_lock_violation",
       observation: await observe(sessionId),
       step_index: stepIndex,
-      host,
-      recipe_domain: recipeDomain,
+      host: publicHost,
+      recipe_domain: publicRecipeDomain,
     };
   };
 
@@ -8173,7 +8261,15 @@ export async function replayOperatorRecipe(
       }
     } catch (error) {
       if (error instanceof ManualCardEntryBlockedError) throw error;
-      return await fallback(step, i, error instanceof Error ? error.message : String(error));
+      return await fallback(
+        step,
+        i,
+        session.compactV2Active
+          ? compactV2ActionFailureReason(error, action.kind)
+          : error instanceof Error
+            ? error.message
+            : String(error),
+      );
     }
   }
 

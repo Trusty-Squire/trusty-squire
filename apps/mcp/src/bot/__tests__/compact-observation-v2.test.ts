@@ -5,12 +5,14 @@ import {
   OBSERVE_V2_MAX_TOKENS,
   buildSafeControlsV2,
   compactV2LegacyRefForHandle,
+  controlMatchesPrivateQueryV2,
   diffSafeControlsV2,
   equalSafePageSemanticsV2,
   encodeV2Delta,
   encodeV2Page,
   safePageSemanticsV2,
   safeDescriptionV2,
+  safeOriginV2,
   sealRetainedInteractiveElementsV2,
   safeStageV2,
 } from "../compact-observation-v2.js";
@@ -119,6 +121,15 @@ describe("compact observation v2", () => {
     );
     expect(JSON.stringify(sealed)).not.toContain("correcthorsebattery");
     expect(JSON.stringify(sealed)).not.toContain("private-selector");
+  });
+
+  it("screens retained frame origins through the credential boundary", () => {
+    expect(safeOriginV2("https://payments.example.com")).toBe("https://payments.example.com");
+    expect(safeOriginV2("https://api123456789012345678901234.attacker.test")).toBeNull();
+    const [sealed] = sealRetainedInteractiveElementsV2([
+      element({ frameOrigin: "https://api123456789012345678901234.attacker.test" }),
+    ]);
+    expect(sealed?.frameOrigin).toBeNull();
   });
 
   it("returns an intact first page and signed cursor below the final wire cap", () => {
@@ -348,6 +359,14 @@ describe("compact observation v2", () => {
     expect(safe.rows).toEqual([expect.objectContaining({ name: "Copy API key" })]);
   });
 
+  it("matches every private query term against one control naming source", () => {
+    const basic = element({ visibleText: "Buy Acme Basic" });
+    const pro = element({ visibleText: "Buy Acme Pro" });
+    expect(controlMatchesPrivateQueryV2(basic, "Acme Pro")).toBe(false);
+    expect(controlMatchesPrivateQueryV2(pro, "Acme Pro")).toBe(true);
+    expect(controlMatchesPrivateQueryV2(pro, "Acme-Pro")).toBe(true);
+  });
+
   it("classifies password-masked card security controls as payment fields", () => {
     const cvc = element({
       tag: "input",
@@ -380,6 +399,33 @@ describe("compact observation v2", () => {
     });
     expect(safe.rows).toEqual([expect.objectContaining({ field: "payment" })]);
     expect(safeStageV2("https://merchant.invalid/checkout", [cvc])).toBe("checkout");
+  });
+
+  it("uses checkout context for ambiguous security-code fields", () => {
+    const securityCode = element({
+      tag: "input",
+      type: "password",
+      role: "textbox",
+      ariaLabel: "Security code",
+    });
+    const safe = buildSafeControlsV2({
+      elements: [securityCode],
+      legacyRefs: new Map([[securityCode, "@e:security-code"]]),
+      generation: 1,
+      pageOrigin: "https://merchant.invalid",
+      pageUrl: "https://merchant.invalid/checkout",
+    });
+    expect(safe.rows).toEqual([expect.objectContaining({ field: "payment" })]);
+    expect(safeStageV2("https://merchant.invalid/checkout", [securityCode])).toBe("checkout");
+    expect(safeStageV2("https://merchant.invalid/login", [securityCode])).toBe("auth");
+
+    const cardVerification = element({
+      tag: "input",
+      type: "password",
+      role: "textbox",
+      ariaLabel: "Card verification number",
+    });
+    expect(safeStageV2("https://merchant.invalid/order", [cardVerification])).toBe("checkout");
   });
 
   it("reduces completion and checkout signals to a finite page-stage enum", () => {
