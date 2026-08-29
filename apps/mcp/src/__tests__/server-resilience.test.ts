@@ -169,7 +169,7 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
         example: {
           session_id: "<session_id>",
           kind: "select_many",
-          selections: { "Observed field label": "Visible option label" },
+          selections: { "@e:<current-handle>": "Visible option label" },
         },
         guidance: [/intended order/i, /re-observes after each success/i, /partial results/i],
       },

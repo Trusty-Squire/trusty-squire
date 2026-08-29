@@ -6040,7 +6040,7 @@ async function executeAct(
               ...resolved.labels,
             ]);
             if (
-              session.placeOrderApproval !== null &&
+              (session.placeOrderApproval !== null || getActivePendingThreeDs(session) !== null) &&
               isPlaceOrderCandidate &&
               (action.kind === "click" || action.kind === "js_click")
             ) {
@@ -6099,7 +6099,10 @@ async function executeAct(
         bindCartIdentity(isCartAffectingAction(action, el));
         if (action.kind === "click" || action.kind === "js_click") {
           const target = frameTargetFor(el);
-          if (session.placeOrderApproval !== null && isPlaceOrderClickCandidate(el)) {
+          if (
+            (session.placeOrderApproval !== null || getActivePendingThreeDs(session) !== null) &&
+            isPlaceOrderClickCandidate(el)
+          ) {
             await runClickWithPlaceOrderGuard(session, (shouldTrack) =>
               browser.clickWithDispatchTracking(
                 target !== null

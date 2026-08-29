@@ -542,11 +542,15 @@ export function sealRetainedInteractiveElementsV2(
     screenPath: null,
     container: null,
     containerId:
-      Number.isSafeInteger(element.containerId) && (element.containerId ?? 0) > 0
+      typeof element.containerId === "number" &&
+      Number.isSafeInteger(element.containerId) &&
+      element.containerId > 0
         ? element.containerId
         : null,
     formId:
-      Number.isSafeInteger(element.formId) && (element.formId ?? 0) > 0 ? element.formId : null,
+      typeof element.formId === "number" && Number.isSafeInteger(element.formId) && element.formId > 0
+        ? element.formId
+        : null,
     topmost: element.topmost ?? null,
     occludedBy: null,
     cardRadioGroup:

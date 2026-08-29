@@ -37,6 +37,7 @@ const h = vi.hoisted(() => ({
   providers: ["google"] as string[],
   oauthStatus: "already_valid" as string,
   currentUrl: "",
+  mainDocumentEpoch: 0,
   elements: [] as unknown[],
   visibleText: "",
 }));
@@ -50,9 +51,13 @@ vi.mock("../browser.js", () => ({
     }
     async goto(url: string): Promise<void> {
       h.currentUrl = url;
+      h.mainDocumentEpoch += 1;
     }
     currentUrl(): string {
       return h.currentUrl;
+    }
+    mainDocumentIdentity(): string {
+      return String(h.mainDocumentEpoch);
     }
     recoverActivePage(): void {}
     async extractInteractiveElements(): Promise<unknown[]> {
@@ -1509,16 +1514,22 @@ describe("observe-delta mutable-path re-mint rate (#2 assessment)", () => {
 
 describe("observe-delta wiring (real observe() over a mocked browser)", () => {
   let dir: string;
+  let compactV2ModeBeforeTest: string | undefined;
   beforeEach(() => {
+    compactV2ModeBeforeTest = process.env.TRUSTY_SQUIRE_OBSERVE_V2;
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "off";
     h.providers = ["google"];
     h.oauthStatus = "already_valid";
     h.visibleText = "";
     h.currentUrl = "";
+    h.mainDocumentEpoch = 0;
     dir = mkdtempSync(join(tmpdir(), "ts-observe-"));
     process.env.TRUSTY_SQUIRE_OBSERVE_DIR = dir;
   });
   afterEach(async () => {
     await closeAllProvisionSessions();
+    if (compactV2ModeBeforeTest === undefined) delete process.env.TRUSTY_SQUIRE_OBSERVE_V2;
+    else process.env.TRUSTY_SQUIRE_OBSERVE_V2 = compactV2ModeBeforeTest;
     delete process.env.TRUSTY_SQUIRE_OBSERVE_DIR;
     rmSync(dir, { recursive: true, force: true });
   });
