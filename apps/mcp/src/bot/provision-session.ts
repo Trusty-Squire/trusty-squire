@@ -49,6 +49,7 @@ import {
   equalSafePageSemanticsV2,
   encodeV2Delta,
   encodeV2Page,
+  safeDescriptionV2,
   safePageSemanticsV2,
   sealRetainedInteractiveElementsV2,
   safeStageV2,
@@ -4748,7 +4749,35 @@ function configuredCompactV2Mode(): "off" | "shadow" | "on" {
 
 function retainSessionElements(session: Session, elements: InteractiveElement[]): void {
   session.lastElements =
-    session.compactV2Mode === "on" ? sealRetainedInteractiveElementsV2(elements) : elements;
+    session.compactV2Mode === "on"
+      ? sealRetainedInteractiveElementsV2(elements, (element) =>
+          compactV2CorrelationSelector(session, element),
+        )
+      : elements;
+}
+
+function compactV2CorrelationSelector(session: Session, element: InteractiveElement): string {
+  const binding = JSON.stringify([
+    element.frameOrigin ?? null,
+    element.framePath ?? null,
+    element.selector,
+  ]);
+  return `@c:${createHmac("sha256", session.compactV2Secret)
+    .update(binding)
+    .digest("base64url")
+    .slice(0, 22)}`;
+}
+
+function replaySafeElementForSession(
+  session: Session,
+  element: InteractiveElement | null,
+): InteractiveElement | null {
+  if (element === null || session.compactV2Mode !== "on") return element;
+  return (
+    sealRetainedInteractiveElementsV2([element], (candidate) =>
+      compactV2CorrelationSelector(session, candidate),
+    )[0] ?? null
+  );
 }
 
 interface CompactV2StartMetadata {
@@ -6123,8 +6152,9 @@ async function executeAct(
   // INBOX_READ_HOSTS): replay re-reads the code via awaitVerification, and a
   // recorded inbox click would bake the email's subject into a shared recipe.
   if (!isInboxReadHost(browser.currentUrl())) {
-    recordTrace(session, completedAction, resolvedEl, sensitiveSource);
-    recordCaptureRound(session, completedAction, resolvedEl, urlBeforeAction);
+    const replayElement = replaySafeElementForSession(session, resolvedEl);
+    recordTrace(session, completedAction, replayElement, sensitiveSource);
+    recordCaptureRound(session, completedAction, replayElement, urlBeforeAction);
   }
   if (cartAffecting) {
     session.lastCartMutation = {
@@ -6233,7 +6263,14 @@ export async function formSelectMany(
         selected_option: selectedOption,
       });
     } catch (err) {
-      if (err instanceof TargetStaleError) {
+      if (session.compactV2Active) {
+        fields.push({
+          label,
+          option,
+          status: "failed",
+          reason: compactV2SelectionFailureReason(err),
+        });
+      } else if (err instanceof TargetStaleError) {
         fields.push({
           label,
           option,
@@ -6260,6 +6297,15 @@ export async function formSelectMany(
     fields,
     observation: await observe(sessionId, "compact"),
   };
+}
+
+function compactV2SelectionFailureReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof TargetStaleError || message === "reobserve_required") {
+    return "reobserve_required";
+  }
+  if (/domain-scope|frame|cross-origin|not allowed/i.test(message)) return "target_not_allowed";
+  return "selection_failed";
 }
 
 // PR3 privacy: in the operator model the host fills the USER's real email into
@@ -6469,7 +6515,9 @@ export function recipeTargetFor(
       : {}),
     ...(nearText !== null ? { near_text_hint: scrub(nearText) } : {}),
     ...(hrefHint !== null && !isSingleUseUrl(el.href ?? "") ? { href_hint: scrub(hrefHint) } : {}),
-    ...(el.selector.length > 0 ? { css: scrub(el.selector) } : {}),
+    ...(el.selector.length > 0 && !el.selector.startsWith("@c:")
+      ? { css: scrub(el.selector) }
+      : {}),
     ...(el.visibleText !== null && el.visibleText.length > 0
       ? { visible_text: scrub(el.visibleText) }
       : {}),
@@ -6695,10 +6743,12 @@ function recordCaptureRound(
 // step is synthesized from the page where the credential is shown.
 async function recordExtractRound(session: Session): Promise<void> {
   let html = "";
-  try {
-    html = (await session.browser.getState()).html;
-  } catch {
-    /* best-effort — the copy-button/inventory extract path still works */
+  if (session.compactV2Mode !== "on") {
+    try {
+      html = (await session.browser.getState()).html;
+    } catch {
+      /* best-effort — the copy-button/inventory extract path still works */
+    }
   }
   session.captureRounds.push({
     service: captureService(session),
@@ -7122,15 +7172,39 @@ async function rememberCheckoutLeg(
 // Read a single page snapshot for postcondition checking. Field VALUES are
 // reduced to lengths here so a token/secret success-signal can't leak.
 async function snapshotForPostcondition(session: Session): Promise<PostconditionSnapshot> {
+  const privateFields =
+    session.compactV2Mode === "on"
+      ? (await session.browser.extractInteractiveElements())
+          .filter((element) => typeof element.value === "string" && element.value.length > 0)
+          .map((element) => {
+            const sealed = sealRetainedInteractiveElementsV2([element])[0]!;
+            const description = safeDescriptionV2(
+              sealed.labelText ??
+                sealed.ariaLabel ??
+                sealed.placeholder ??
+                sealed.title ??
+                sealed.name ??
+                sealed.id,
+            );
+            const fieldRole = localeStableFieldRole(sealed);
+            return {
+              label: [description, fieldRole]
+                .filter((value): value is string => value !== undefined && value !== null)
+                .join(" "),
+              value_len: element.value!.length,
+            };
+          })
+          .filter((field) => field.label.length > 0)
+      : null;
   const obs = await observeSession(session);
-  // Read lengths off the RAW elements (session.lastElements, set by
-  // observeSession). The compact wire carries only value_len and never the raw
-  // value; deriving from the live elements preserves the real length for a
-  // min_value_len success-signal. Lengths never expose the value, so this stays
-  // leak-free.
-  const fields = session.lastElements
-    .filter((e) => typeof e.value === "string" && e.value.length > 0)
-    .map((e) => ({ label: elementRef(e), value_len: (e.value ?? "").length }));
+  const fields =
+    privateFields ??
+    session.lastElements
+      .filter((element) => typeof element.value === "string" && element.value.length > 0)
+      .map((element) => ({
+        label: elementRef(element),
+        value_len: element.value!.length,
+      }));
   return {
     url: obs.format === "compact-v2" ? session.browser.currentUrl() : obs.url,
     text:

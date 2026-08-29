@@ -11,6 +11,7 @@ import {
   encodeV2Page,
   safePageSemanticsV2,
   safeDescriptionV2,
+  sealRetainedInteractiveElementsV2,
   safeStageV2,
 } from "../compact-observation-v2.js";
 import type { InteractiveElement } from "../browser.js";
@@ -84,6 +85,7 @@ describe("compact observation v2", () => {
 
   it("rejects arbitrary standalone strings outside the semantic-safe grammar", () => {
     expect(safeDescriptionV2("correcthorsebattery")).toBeUndefined();
+    expect(safeDescriptionV2("correct horse battery staple")).toBeUndefined();
     expect(
       safePageSemanticsV2({
         title: "correcthorsebattery",
@@ -98,6 +100,25 @@ describe("compact observation v2", () => {
       pageOrigin: "https://merchant.invalid",
     });
     expect(safe.rows[0]?.name).toBeUndefined();
+  });
+
+  it("retains only finite DOM semantic tokens", () => {
+    const [sealed] = sealRetainedInteractiveElementsV2(
+      [
+        element({
+          tag: "correcthorsebattery",
+          type: "correcthorsebattery",
+          role: "correcthorsebattery",
+          selector: "#private-selector",
+        }),
+      ],
+      () => "@c:opaque",
+    );
+    expect(sealed).toEqual(
+      expect.objectContaining({ tag: "unknown", type: null, role: null, selector: "@c:opaque" }),
+    );
+    expect(JSON.stringify(sealed)).not.toContain("correcthorsebattery");
+    expect(JSON.stringify(sealed)).not.toContain("private-selector");
   });
 
   it("returns an intact first page and signed cursor below the final wire cap", () => {
@@ -351,6 +372,11 @@ describe("compact observation v2", () => {
       ]),
     ).toBe("auth");
     expect(
+      safeStageV2("https://merchant.invalid/checkout", [
+        element({ tag: "input", type: "password", role: "textbox" }),
+      ]),
+    ).toBe("auth");
+    expect(
       safeStageV2("https://merchant.invalid/products/widget", [
         element({ visibleText: "Add to cart", role: "button", topmost: false }),
         element({
@@ -502,6 +528,23 @@ describe("compact observation v2", () => {
       delta: true,
     });
     expect(Buffer.byteLength(JSON.stringify(delta), "utf8")).toBeLessThan(128);
+  });
+
+  it("emits an explicit semantic clear when the sealed semantics become empty", () => {
+    const delta = encodeV2Delta({
+      sessionId: "session",
+      stage: "form",
+      semantics: {},
+      delta: { added: [], changed: [], removed: [], stageChanged: false },
+    });
+    expect(delta).toEqual({
+      format: "compact-v2",
+      url: "",
+      text: "",
+      session_id: "session",
+      delta: true,
+      semantic: {},
+    });
   });
 
   it("emits only safe upserts and removed refs for a structural delta", () => {

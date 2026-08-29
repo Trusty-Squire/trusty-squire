@@ -200,52 +200,117 @@ const SECRET_ASSIGNMENT_RE = /\b(?:password|passcode|token|api[_ -]?key|secret)\
 const HIGH_ENTROPY_TOKEN_RE = /\b[A-Za-z0-9_-]{24,}\b/;
 const CARD_SECURITY_VALUE_RE = /\b(?:cvv|cvc|security\s*code)\s*[:#-]?\s*\d{3,4}\b/i;
 const SAFE_DESCRIPTION_GRAMMAR_RE = /^[\p{L}\p{N}][\p{L}\p{N}\s&'’+,.!?():=/@_|-]*$/u;
-const SAFE_SINGLE_WORD_DESCRIPTIONS = new Set([
+const SAFE_DESCRIPTION_WORDS = new Set([
+  "a",
+  "access",
   "account",
+  "add",
   "address",
+  "an",
+  "and",
+  "api",
   "back",
+  "bag",
+  "basket",
+  "billing",
+  "button",
   "cancel",
+  "card",
   "cart",
+  "choose",
   "checkout",
   "city",
   "close",
+  "code",
+  "confirm",
+  "contact",
   "continue",
+  "control",
+  "controls",
+  "copy",
   "country",
+  "create",
+  "customer",
   "date",
+  "dense",
   "delivery",
+  "details",
+  "different",
+  "discount",
   "dismiss",
   "done",
   "email",
+  "example",
+  "external",
+  "first",
   "finish",
+  "form",
+  "gift",
+  "google",
+  "in",
+  "item",
+  "key",
+  "large",
+  "log",
   "login",
+  "merchant",
   "name",
+  "native",
   "next",
+  "no",
+  "now",
+  "option",
+  "order",
+  "page",
   "password",
   "pay",
   "payment",
   "phone",
   "postal",
   "previous",
+  "private",
+  "proceed",
+  "product",
   "promo",
   "quantity",
   "region",
   "register",
+  "registration",
+  "review",
   "save",
+  "sample",
   "search",
+  "secure",
+  "select",
+  "serialized",
   "shipping",
+  "sign",
   "signup",
   "size",
+  "storefront",
   "style",
   "submit",
   "terms",
+  "thanks",
+  "to",
+  "token",
+  "united",
   "username",
   "variant",
+  "verification",
+  "view",
+  "with",
+  "workspace",
+  "your",
 ]);
 
 function hasSafeDescriptionGrammar(value: string): boolean {
   if (!SAFE_DESCRIPTION_GRAMMAR_RE.test(value)) return false;
   const words = value.match(/[\p{L}\p{N}]+/gu) ?? [];
-  return words.length >= 2 || SAFE_SINGLE_WORD_DESCRIPTIONS.has((words[0] ?? "").toLowerCase());
+  return (
+    words.length > 0 &&
+    words.every((word) => SAFE_DESCRIPTION_WORDS.has(word.toLowerCase()) || /^[0-9]$/.test(word))
+  );
 }
 
 function containsCredentialShape(value: string): boolean {
@@ -354,23 +419,75 @@ function safeOriginV2(value: string | null | undefined): string | null {
 
 export function sealRetainedInteractiveElementsV2(
   elements: readonly InteractiveElement[],
+  selectorFor: (element: InteractiveElement) => string = () => "",
 ): InteractiveElement[] {
   const description = (value: string | null | undefined): string | null =>
     safeDescriptionV2(value) ?? null;
-  const token = (value: string | null | undefined): string | null =>
-    typeof value === "string" && /^[a-z][a-z0-9-]{0,31}$/i.test(value) ? value : null;
+  const finiteToken = (
+    value: string | null | undefined,
+    allowed: ReadonlySet<string>,
+  ): string | null => {
+    const normalized = value?.toLowerCase();
+    return normalized !== undefined && allowed.has(normalized) ? normalized : null;
+  };
+  const tags = new Set([
+    "a",
+    "button",
+    "details",
+    "input",
+    "label",
+    "option",
+    "select",
+    "summary",
+    "textarea",
+  ]);
+  const types = new Set([
+    "button",
+    "checkbox",
+    "date",
+    "email",
+    "file",
+    "hidden",
+    "image",
+    "month",
+    "number",
+    "password",
+    "radio",
+    "reset",
+    "search",
+    "submit",
+    "tel",
+    "text",
+    "time",
+    "url",
+    "week",
+  ]);
+  const roles = new Set([
+    "button",
+    "checkbox",
+    "combobox",
+    "link",
+    "listbox",
+    "menuitem",
+    "option",
+    "radio",
+    "searchbox",
+    "switch",
+    "tab",
+    "textbox",
+  ]);
   return elements.map((element) => ({
     index: element.index,
-    tag: token(element.tag) ?? "unknown",
-    type: token(element.type),
+    tag: finiteToken(element.tag, tags) ?? "unknown",
+    type: finiteToken(element.type, types),
     id: description(element.id),
     name: description(element.name),
     placeholder: description(element.placeholder),
     ariaLabel: description(element.ariaLabel),
-    role: token(element.role),
+    role: finiteToken(element.role, roles),
     labelText: description(element.labelText),
     visibleText: description(element.visibleText),
-    selector: "",
+    selector: selectorFor(element),
     visible: element.visible === true,
     inViewport: element.inViewport === true,
     inConsentWidget: element.inConsentWidget === true,
@@ -484,9 +601,7 @@ export function encodeV2Delta(args: {
     text: "",
     session_id: args.sessionId,
     delta: true,
-    ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
-      ? {}
-      : { semantic: args.semantics }),
+    ...(args.semantics === undefined ? {} : { semantic: args.semantics }),
     ...(args.delta.stageChanged ? { stage: args.stage } : {}),
     // `safe_table` follows the established TS delta protocol: rows are
     // upserts, irrespective of whether their ref is new or changed. This keeps
@@ -652,8 +767,6 @@ export function safeStageV2(url: string, elements: readonly InteractiveElement[]
   ) {
     return "complete";
   }
-  const routeStage = checkoutStageFromUrlV2(url);
-  if (routeStage !== null) return routeStage;
   const actionableElements = elements.filter(
     (element) => element.visible === true && element.topmost !== false,
   );
@@ -672,14 +785,6 @@ export function safeStageV2(url: string, elements: readonly InteractiveElement[]
       (role === "textbox" || role === "select") && field !== undefined && checkoutFields.has(field)
     );
   });
-  const hasPaymentField = actionableElements.some((el) => {
-    const role = roleOf(el);
-    return (role === "textbox" || role === "select") && fieldOf(el) === "payment";
-  });
-  const hasCheckoutAction = actionableElements.some(
-    (el) => roleOf(el) === "button" && intentOf(el) === "checkout",
-  );
-  if (hasPaymentField || (hasCheckoutAction && hasCheckoutField)) return "checkout";
   const authFields = actionableElements.filter((el) => {
     const role = roleOf(el);
     if (role !== "textbox" && role !== "select") return false;
@@ -704,6 +809,16 @@ export function safeStageV2(url: string, elements: readonly InteractiveElement[]
     );
   });
   if (hasPasswordField || hasScopedAuthForm) return "auth";
+  const routeStage = checkoutStageFromUrlV2(url);
+  if (routeStage !== null) return routeStage;
+  const hasPaymentField = actionableElements.some((el) => {
+    const role = roleOf(el);
+    return (role === "textbox" || role === "select") && fieldOf(el) === "payment";
+  });
+  const hasCheckoutAction = actionableElements.some(
+    (el) => roleOf(el) === "button" && intentOf(el) === "checkout",
+  );
+  if (hasPaymentField || (hasCheckoutAction && hasCheckoutField)) return "checkout";
   if (actionableElements.some((el) => intentOf(el) === "add_to_cart")) return "browse";
   if (actionableElements.some((el) => roleOf(el) === "textbox" || roleOf(el) === "select"))
     return "form";

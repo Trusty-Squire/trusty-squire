@@ -26,6 +26,7 @@ const h = vi.hoisted(() => ({
   typed: [] as Array<{ selector: string; text: string; sealed?: true }>,
   uploads: [] as Array<{ selector: string; filePath: string }>,
   selected: [] as Array<{ selector: string; matcher: string | undefined }>,
+  selectError: null as Error | null,
   selectMutation: null as unknown[] | null,
   phoneCountries: [] as string[],
   phoneCountry: null as string | null,
@@ -410,6 +411,7 @@ vi.mock("../browser.js", () => ({
     }
     async selectOption(selector: string, matcher?: string): Promise<string> {
       h.selected.push({ selector, matcher });
+      if (h.selectError !== null) throw h.selectError;
       let committed = matcher ?? "";
       for (const element of h.elements as Array<Record<string, unknown>>) {
         if (element.selector !== selector) continue;
@@ -843,6 +845,7 @@ import {
   getActivePendingThreeDs,
   setActivePendingThreeDs,
   captureScreenshot,
+  captureAndPromoteSession,
   observeQuery,
   verifyPostcondition,
 } from "../provision-session.js";
@@ -932,6 +935,7 @@ beforeEach(() => {
   h.typed = [];
   h.uploads = [];
   h.selected = [];
+  h.selectError = null;
   h.selectMutation = null;
   h.phoneCountries = [];
   h.phoneCountry = null;
@@ -3296,7 +3300,68 @@ describe("Compact V2 action-map boundary", () => {
     expect(serialized).not.toContain("4111111111111111");
     expect(serialized).not.toContain("correcthorsebattery");
     expect(serialized).not.toContain("#card-number");
-    expect(retained[0]).toMatchObject({ value: null, selector: "", autocomplete: "cc-number" });
+    expect(retained[0]).toMatchObject({
+      value: null,
+      selector: expect.stringMatching(/^@c:/),
+      autocomplete: "cc-number",
+    });
+  });
+
+  it("uses opaque correlation for sealed trace capture and promotion", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const captureDir = mkdtempSync(join(tmpdir(), "compact-v2-promotion-"));
+    const previousCaptureDir = process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
+    process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE = captureDir;
+    try {
+      h.elements = [
+        elem({
+          tag: "button",
+          role: "button",
+          id: "correcthorsebattery",
+          name: "correcthorsebattery",
+          selector: "#private-action-selector",
+          visibleText: "Create account",
+        }),
+      ];
+      const started = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/signup",
+      });
+      const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+        .safe_table[0]![0];
+      await act(started.session_id, { kind: "click", target: handle });
+
+      const session = paymentSession(started.session_id);
+      const actionRound = session.captureRounds[0]!;
+      const observedSelector = (actionRound.observed as { selector: string }).selector;
+      expect(observedSelector).toMatch(/^@c:/);
+      expect(actionRound.inventory.some((element) => element.selector === observedSelector)).toBe(
+        true,
+      );
+      expect(JSON.stringify(session.actionTrace)).not.toContain("private-action-selector");
+      expect(JSON.stringify(session.actionTrace)).not.toContain("correcthorsebattery");
+      expect(session.actionTrace[0]?.action).not.toHaveProperty("target.css");
+
+      h.elements = [
+        elem({
+          tag: "button",
+          role: "button",
+          selector: "#private-copy-selector",
+          visibleText: "Copy API key",
+        }),
+      ];
+      await observe(started.session_id);
+      const promoted = await captureAndPromoteSession(started.session_id);
+      expect(promoted).toMatchObject({ kind: "ok" });
+      expect(JSON.stringify(session.captureRounds)).not.toContain("private-action-selector");
+      expect(JSON.stringify(session.captureRounds)).not.toContain("private-copy-selector");
+    } finally {
+      if (previousCaptureDir === undefined) {
+        delete process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
+      } else {
+        process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE = previousCaptureDir;
+      }
+      rmSync(captureDir, { recursive: true, force: true });
+    }
   });
 
   it("keeps start metadata, rejects locators, and binds a handle to its current page snapshot", async () => {
@@ -3594,7 +3659,7 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
     const facts = (started as unknown as { safe_table: Array<[string, string, string?]> })
       .safe_table[0]![2]!;
-    expect(facts.split("|")).toEqual(["n=Continue%7Cs=d%7Cx=x", "a=continue"]);
+    expect(facts).toBe("a=continue");
   });
 
   it("prioritizes payment evidence over an incidental cart upsell", async () => {
@@ -3662,6 +3727,34 @@ describe("Compact V2 action-map boundary", () => {
         success_signal: { url_contains: "/checkout/review" },
       }),
     ).resolves.toMatchObject({ confirmed: true });
+  });
+
+  it("verifies V2 field lengths from fresh private values without retaining them", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        type: "text",
+        role: "textbox",
+        selector: "#postal-code",
+        labelText: "Postal code",
+        autocomplete: "postal-code",
+        value: "12345",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    await expect(
+      verifyPostcondition(started.session_id, {
+        kind: "execute_capability",
+        describe: "Postal code remains filled",
+        success_signal: { field_text: "Postal code", min_value_len: 5 },
+      }),
+    ).resolves.toMatchObject({ confirmed: true, evidence: { value_len: 5 } });
+    const retained = paymentSession(started.session_id).lastElements;
+    expect(retained[0]?.value).toBeNull();
+    expect(JSON.stringify(retained)).not.toContain("12345");
   });
 
   it("keeps trusted start metadata inside the hard wire budget", async () => {
@@ -3972,6 +4065,35 @@ describe("Compact V2 action-map boundary", () => {
     ]);
   });
 
+  it("normalizes private browser selection failures in V2 results", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Variant",
+        selector: "#private-variant-selector",
+        selectOptions: [{ value: "blue", text: "Ocean Blue" }],
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+    h.selectError = new Error(
+      'select <select> #private-variant-selector: option "Private option" was not found',
+    );
+
+    const result = await formSelectMany(started.session_id, { [handle]: "Missing" });
+
+    expect(result.fields).toEqual([
+      expect.objectContaining({ status: "failed", reason: "selection_failed" }),
+    ]);
+    expect(JSON.stringify(result)).not.toContain("private-variant-selector");
+    expect(JSON.stringify(result)).not.toContain("Private option");
+  });
+
   it("refreshes the sealed batch after a failed selection", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
@@ -4010,7 +4132,7 @@ describe("Compact V2 action-map boundary", () => {
     expect(result.fields).toEqual([
       expect.objectContaining({
         status: "failed",
-        reason: expect.stringContaining("domain-scope"),
+        reason: "target_not_allowed",
       }),
       expect.objectContaining({ status: "selected", selected_option: "Large" }),
     ]);
