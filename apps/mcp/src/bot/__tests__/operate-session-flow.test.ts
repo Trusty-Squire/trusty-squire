@@ -44,6 +44,7 @@ const h = vi.hoisted(() => ({
   autocompleteDiscardCalls: 0,
   autocompleteDiscardEscapeCalls: [] as boolean[],
   clickCalls: 0,
+  clickError: null as Error | null,
   frameClicks: [] as string[],
   frameJsClicks: [] as string[],
   frameTypes: [] as Array<{ frameUrl: string; selector: string; text: string; sealed?: true }>,
@@ -462,6 +463,7 @@ vi.mock("../browser.js", () => ({
         h.phoneCountry = h.clickPhoneCountryMutation;
       }
       if (h.clearElementsOnClick) h.elements = [];
+      if (h.clickError !== null) throw h.clickError;
     }
     async clickViaJs(): Promise<void> {}
     async clickInFrame(target: { frameUrl: string }, selector: string): Promise<void> {
@@ -797,7 +799,6 @@ import { sealToRecipient } from "../payment-hpke.js";
 import { operatePayTool, operatePaymentStatusTool } from "../../tools/operate-pay.js";
 import { ApiClient } from "../../api-client.js";
 import { dispatchOperatorBrowserProcessTermination } from "../operator-browser-watchdog.js";
-import type { formSelectMany } from "../provision-session.js";
 import {
   startProvisionSession,
   act,
@@ -822,6 +823,7 @@ import {
   cartAdd,
   coordinatePaymentDispatchAudit,
   finishPaymentDispatchHandoff,
+  formSelectMany,
   recordActivePaymentProvenance,
   setActivePendingCardFill,
   claimActivePaymentForOperatePay,
@@ -939,6 +941,7 @@ beforeEach(() => {
   h.autocompleteDiscardCalls = 0;
   h.autocompleteDiscardEscapeCalls = [];
   h.clickCalls = 0;
+  h.clickError = null;
   h.frameClicks = [];
   h.frameJsClicks = [];
   h.frameTypes = [];
@@ -1041,6 +1044,7 @@ const replayRecipe = (overrides: Partial<OperatorRecipe> = {}): OperatorRecipe =
 
 describe("prepared-statement replay", () => {
   it("resolves, binds, and acts without putting the host in the hot path", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
         testId: "shipping-city",
@@ -3271,6 +3275,94 @@ describe("Compact V2 action-map boundary", () => {
     expect(freshRef).toMatch(/^@e:/);
     await act(started.session_id, { kind: "click", target: freshRef! });
     expect(h.clickCalls).toBe(1);
+  });
+
+  it("audits forged targets opaquely before rejecting them", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+      const forged = "4111111111111111";
+      await expect(act(started.session_id, { kind: "click", target: forged })).rejects.toThrow(
+        "reobserve_required",
+      );
+      const auditText = writes.join("");
+      expect(auditText).toContain("<rejected-v2-target>");
+      expect(auditText).not.toContain(forged);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("keeps shadow observations on the V1 action contract", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "shadow";
+    h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    expect(started.format).toBeUndefined();
+    await act(started.session_id, { kind: "click", target: "Continue" });
+    expect(h.clickCalls).toBe(1);
+  });
+
+  it("invalidates a handle when a dispatched action throws", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> }).safe_table[0]![0];
+    h.clickError = new Error("dispatch failed after click");
+    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+      "dispatch failed after click",
+    );
+    h.clickError = null;
+    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+      "reobserve_required",
+    );
+    expect(h.clickCalls).toBe(1);
+  });
+
+  it("invalidates a handle before the captcha driver receives the browser", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> }).safe_table[0]![0];
+    await expect(captchaGate(started.session_id)).resolves.toMatchObject({ found: false });
+    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+      "reobserve_required",
+    );
+  });
+
+  it("invalidates a handle before the payment driver receives the browser", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> }).safe_table[0]![0];
+    await activeProvisionBrowserForPayment(paymentSession(started.session_id));
+    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+      "reobserve_required",
+    );
+  });
+
+  it("keeps bulk selection private while V2 remains the public boundary", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Country",
+        selector: "#country",
+        selectOptions: [{ value: "kr", text: "South Korea" }],
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const result = await formSelectMany(started.session_id, { Country: "Korea" });
+    expect(result.fields).toEqual([
+      expect.objectContaining({ status: "selected", selected_option: "South Korea" }),
+    ]);
+    expect(result.observation.format).toBe("compact-v2");
   });
 });
 
@@ -7449,6 +7541,7 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
 
 describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => {
   it("returns legible post-add cart state and suppresses a retry for the same line", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.currentUrl = "https://shop.example.com/cart";
     h.visibleText = "Cart Quantity: 0 Subtotal 968円 Shipping Free Total 968円";
     h.elements = [elem({ name: "quantity", labelText: "Quantity", selector: "#qty", value: "0" })];

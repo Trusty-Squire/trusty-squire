@@ -205,8 +205,44 @@ describe("compact observation v2", () => {
     expect(safeStageV2("https://merchant.invalid/thank-you", [])).toBe("complete");
     expect(safeStageV2("https://merchant.invalid/incomplete", [])).toBe("browse");
     expect(
+      safeStageV2("https://merchant.invalid/cart", [element({ visibleText: "Checkout", role: "button" })]),
+    ).toBe("cart");
+    expect(
+      safeStageV2("https://merchant.invalid/products/widget", [
+        element({ visibleText: "View cart", role: "link" }),
+      ]),
+    ).toBe("browse");
+    expect(
       safeStageV2("https://merchant.invalid/order", [element({ visibleText: "Checkout", role: "button" })]),
     ).toBe("checkout");
+  });
+
+  it("parses tokenized autocomplete fields and required state", () => {
+    const city = element({
+      tag: "input",
+      role: "textbox",
+      autocomplete: "section-delivery shipping address-level2",
+      required: true,
+    });
+    const postal = element({
+      tag: "input",
+      role: "textbox",
+      selector: "#postal",
+      autocomplete: "shipping postal-code",
+    });
+    const safe = buildSafeControlsV2({
+      elements: [city, postal],
+      legacyRefs: new Map([
+        [city, "@e:city"],
+        [postal, "@e:postal"],
+      ]),
+      generation: 1,
+      pageOrigin: "https://merchant.invalid",
+    });
+    expect(safe.rows).toEqual([
+      expect.objectContaining({ field: "city", state: "r" }),
+      expect.objectContaining({ field: "postal" }),
+    ]);
   });
 
   it("keeps compact control state and finite action semantics on the wire", () => {
@@ -235,11 +271,13 @@ describe("compact observation v2", () => {
 
   it("uses a tiny sealed delta when the safe map is unchanged", () => {
     const page = encodeV2Delta({
+      sessionId: "session",
       stage: "form",
       delta: { added: [], changed: [], removed: [], stageChanged: false },
     });
     expect(page).toEqual({
       format: "compact-v2",
+      session_id: "session",
       delta: true,
     });
     expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThan(80);
@@ -265,11 +303,12 @@ describe("compact observation v2", () => {
       ["@e:first-control", "b", "Continue"],
     ]);
     const repeat = encodeV2Delta({
+      sessionId: "session",
       stage: "browse",
       delta: { added: [], changed: [], removed: [], stageChanged: false },
     });
-    expect(repeat).toEqual({ format: "compact-v2", delta: true });
-    expect(Buffer.byteLength(JSON.stringify(repeat), "utf8")).toBeLessThan(40);
+    expect(repeat).toEqual({ format: "compact-v2", session_id: "session", delta: true });
+    expect(Buffer.byteLength(JSON.stringify(repeat), "utf8")).toBeLessThan(80);
   });
 
   it("keeps unchanged semantic essentials sticky instead of repeating them in every delta", () => {
@@ -277,12 +316,13 @@ describe("compact observation v2", () => {
     expect(equalSafePageSemanticsV2(semantics, { ...semantics, headings: ["Create your account"] })).toBe(true);
     expect(equalSafePageSemanticsV2(semantics, { title: "Different page", headings: ["Create your account"] })).toBe(false);
     const delta = encodeV2Delta({
+      sessionId: "session",
       stage: "form",
       semantics: undefined,
       delta: { added: [], changed: [], removed: [], stageChanged: false },
     });
-    expect(delta).toEqual({ format: "compact-v2", delta: true });
-    expect(Buffer.byteLength(JSON.stringify(delta), "utf8")).toBeLessThan(40);
+    expect(delta).toEqual({ format: "compact-v2", session_id: "session", delta: true });
+    expect(Buffer.byteLength(JSON.stringify(delta), "utf8")).toBeLessThan(80);
   });
 
   it("emits only safe upserts and removed refs for a structural delta", () => {
@@ -307,7 +347,7 @@ describe("compact observation v2", () => {
       "form",
       [changed, added],
     );
-    const page = encodeV2Delta({ stage: "form", delta });
+    const page = encodeV2Delta({ sessionId: "session", stage: "form", delta });
     const wire = JSON.stringify(page);
     expect(wire).toContain("safe_table");
     expect(wire).toContain("@e:added");

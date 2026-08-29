@@ -14329,6 +14329,7 @@ export class BrowserController {
         value: string | null;
         checked: boolean | null;
         disabled: boolean | null;
+        required: boolean | null;
         selectOptions: Array<{ value: string; text: string }> | null;
         selectedOptionText: string | null;
         interactedThisRun: boolean;
@@ -14460,6 +14461,7 @@ export class BrowserController {
               ? el.checked
               : null,
           disabled: el.matches(":disabled") || el.getAttribute("aria-disabled") === "true" ? true : null,
+          required: el.matches(":required") || el.getAttribute("aria-required") === "true" ? true : null,
           // For <select>: the currently-selected option's visible text
           // and a short list of available option labels. The combination
           // is how the planner detects the "React-defaulted dropdown"
@@ -16968,6 +16970,8 @@ export interface InteractiveElement {
   checked?: boolean | null;
   /** Native or ARIA disabled state captured with the interactive DOM record. */
   disabled?: boolean | null;
+  /** Native or ARIA required state captured with the interactive DOM record. */
+  required?: boolean | null;
   // <select>-only: the visible text of the currently-selected option
   // and a short list of available option labels (capped to 8 — long
   // pickers like countries blow the inventory rendering). Lets the
