@@ -1998,30 +1998,6 @@ function compactV2AuthorizationForHandle(
   return { legacyRef: legacy, row };
 }
 
-function revalidateCompactV2Authorization(
-  session: Session,
-  authorization: CompactV2TargetAuthorization,
-): CompactV2TargetAuthorization {
-  const index = session.compactV2Index;
-  if (
-    index === null ||
-    index.expiresAt < Date.now() ||
-    index.pageKey !== compactV2PageKey(session)
-  ) {
-    invalidateCompactV2Snapshot(session);
-    throwCompactV2ReobserveRequired();
-  }
-  for (const [ref, legacyRef] of session.compactV2Refs) {
-    if (legacyRef !== authorization.legacyRef) continue;
-    const row = index.rows.find((candidate) => candidate.ref === ref);
-    if (row !== undefined && sameCompactV2Control(authorization.row, row)) {
-      return { legacyRef, row };
-    }
-  }
-  invalidateCompactV2Snapshot(session);
-  throwCompactV2ReobserveRequired();
-}
-
 function resolveAuthorizedCompactV2Target(
   session: Session,
   elements: readonly InteractiveElement[],
@@ -5583,7 +5559,15 @@ export async function act(
   detail: ObserveDetail = "compact",
   cartIdentity?: CartIdentityContext,
 ): Promise<Observation> {
-  return (await executeAct(sessionId, action, detail, cartIdentity, false, false)).observation;
+  const session = sessionForCall(sessionId);
+  try {
+    return (await executeAct(sessionId, action, detail, cartIdentity, false, false)).observation;
+  } catch (error) {
+    if (session?.compactV2Active === true) {
+      throw new Error(compactV2ActionFailureReason(error, action.kind));
+    }
+    throw error;
+  }
 }
 
 async function executeAct(
@@ -5650,7 +5634,9 @@ async function executeAct(
   audit(sessionId, "act", {
     kind: action.kind,
     ...(auditTarget !== undefined ? { target: auditTarget } : {}),
-    ...("url" in action ? { url: action.url } : {}),
+    ...("url" in action
+      ? { url: session.compactV2Active ? compactV2SafeUrl(action.url) : action.url }
+      : {}),
   });
 
   // The URL the action is taken ON — captured BEFORE the action navigates. The
@@ -6105,7 +6091,7 @@ async function executeAct(
           await browser.uploadFile(el.selector, action.path);
           audit(sessionId, "upload", {
             target: auditTarget,
-            path: action.path,
+            path: session.compactV2Active ? "<local-file>" : action.path,
             host: registrableHost(browser.currentUrl()),
           });
         } else {
@@ -6215,39 +6201,35 @@ export async function formSelectMany(
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const selectionEntries = Object.entries(selections);
-  const authorizedSelections = selectionEntries.map(([label, option]) => {
-    if (!session.compactV2Active) return { label, option };
-    try {
-      return {
-        label,
-        option,
-        authorization: compactV2AuthorizationForHandle(session, label),
-      };
-    } catch (error) {
-      audit(sessionId, "act", { kind: "select_many", target: "<rejected-v2-target>" });
-      throw error;
-    }
-  });
 
-  // Keep variant changes in one host call. Each successful select is followed
-  // by a real observe before the next target resolves: variant widgets commonly
-  // replace all dependent selects, so continuing from an old inventory is worse
-  // than reporting a partial result.
-  for (let index = 0; index < authorizedSelections.length; index += 1) {
-    const { label, option, authorization } = authorizedSelections[index]!;
+  for (let index = 0; index < selectionEntries.length; index += 1) {
+    const [label, option] = selectionEntries[index]!;
+    let authorization: CompactV2TargetAuthorization | undefined;
+    if (session.compactV2Active) {
+      try {
+        authorization = compactV2AuthorizationForHandle(session, label);
+      } catch (error) {
+        audit(sessionId, "act", { kind: "select_many", target: "<rejected-v2-target>" });
+        if (index === 0) throw error;
+        fields.push({
+          label,
+          option,
+          status: "failed",
+          reason: compactV2SelectionFailureReason(error),
+        });
+        if (index + 1 < selectionEntries.length) await observe(sessionId, "compact");
+        continue;
+      }
+    }
     try {
-      const currentAuthorization =
-        authorization === undefined
-          ? undefined
-          : revalidateCompactV2Authorization(session, authorization);
-      const target = currentAuthorization?.legacyRef ?? label;
+      const target = authorization?.legacyRef ?? label;
       const actionResult = await actInternally(
         sessionId,
         { kind: "select", target, text: option },
         "none",
         undefined,
         false,
-        currentAuthorization,
+        authorization,
       );
       const selectedOption = actionResult.outcome.selectedOption;
       if (selectedOption === undefined) {
@@ -6286,7 +6268,7 @@ export async function formSelectMany(
           reason: err instanceof Error ? err.message : String(err),
         });
       }
-      if (session.compactV2Active && index + 1 < authorizedSelections.length) {
+      if (session.compactV2Active && index + 1 < selectionEntries.length) {
         await observe(sessionId, "compact");
       }
     }
@@ -6300,12 +6282,18 @@ export async function formSelectMany(
 }
 
 function compactV2SelectionFailureReason(error: unknown): string {
+  return compactV2ActionFailureReason(error, "select");
+}
+
+function compactV2ActionFailureReason(error: unknown, kind: ProvisionAction["kind"]): string {
   const message = error instanceof Error ? error.message : String(error);
   if (error instanceof TargetStaleError || message === "reobserve_required") {
     return "reobserve_required";
   }
-  if (/domain-scope|frame|cross-origin|not allowed/i.test(message)) return "target_not_allowed";
-  return "selection_failed";
+  if (/domain-scope|frame|cross-origin|not allowed|control plane/i.test(message)) {
+    return "target_not_allowed";
+  }
+  return kind === "select" ? "selection_failed" : "action_failed";
 }
 
 // PR3 privacy: in the operator model the host fills the USER's real email into
@@ -6399,6 +6387,44 @@ function emailTemplateForRepresentation(representation: string, email: string): 
 const REPLAY_VERIFIED_HOLE = /^(?:address|contact)(?:\.|$)|^quantity$/;
 function looksLikeEmailValue(v: string): boolean {
   return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v.trim());
+}
+
+function compactV2SafeUrl(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl);
+    if (isSingleUseUrl(rawUrl)) return parsed.origin;
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return "";
+  }
+}
+
+function compactV2RecordedAction(
+  session: Session,
+  action: ProvisionAction,
+): ProvisionAction | null {
+  if (session.compactV2Mode !== "on") return action;
+  if (action.kind === "goto") {
+    if (isSingleUseUrl(action.url)) return null;
+    const url = compactV2SafeUrl(action.url);
+    return url.length === 0 ? null : { ...action, url };
+  }
+  if (action.kind === "type") {
+    if (looksLikeEmailValue(action.text)) return { ...action, text: EMAIL_SLOT_TEMPLATE };
+    return null;
+  }
+  if (action.kind === "select") {
+    const text = safeDescriptionV2(action.text);
+    return text === undefined ? null : { ...action, text };
+  }
+  if (action.kind === "set_phone_country") {
+    return /^[a-z]{2}$/i.test(action.country)
+      ? { ...action, country: action.country.toUpperCase() }
+      : null;
+  }
+  return action;
 }
 // Exported for unit tests.
 export function redactEmailForTrace(value: string): string {
@@ -6535,6 +6561,9 @@ function recordTrace(
   el: InteractiveElement | null,
   sensitiveSource?: RecordedValueSource,
 ): void {
+  const recordedAction = compactV2RecordedAction(session, action);
+  if (recordedAction === null) return;
+  action = recordedAction;
   // Never freeze a single-use link (email-verify / magic / reset token) into
   // the recipe — it's dead on the next replay. The host agent re-plans the
   // verification step live (operate_act { kind: "await_verification" } fetches a FRESH link)
@@ -6725,15 +6754,22 @@ function recordCaptureRound(
   el: InteractiveElement | null,
   urlAtObservation: string,
 ): void {
-  const observed = captureObserved(action, el);
+  const recordedAction = compactV2RecordedAction(session, action);
+  if (recordedAction === null) return;
+  const observed = captureObserved(recordedAction, el);
   if (observed === null) return;
   session.captureRounds.push({
     service: captureService(session),
     round: session.captureRounds.length,
-    oauth: action.kind === "oauth_click" || action.kind === "oauth_login",
+    oauth: recordedAction.kind === "oauth_click" || recordedAction.kind === "oauth_login",
     // The URL the inventory + action belong to (pre-action), NOT the post-
     // navigation URL — see urlBeforeAction in act().
-    state: { url: urlAtObservation, title: "", html: "", screenshot: "" },
+    state: {
+      url: session.compactV2Mode === "on" ? compactV2SafeUrl(urlAtObservation) : urlAtObservation,
+      title: "",
+      html: "",
+      screenshot: "",
+    },
     inventory: session.lastElements,
     observed,
   });
@@ -6754,7 +6790,15 @@ async function recordExtractRound(session: Session): Promise<void> {
     service: captureService(session),
     round: session.captureRounds.length,
     oauth: false,
-    state: { url: session.browser.currentUrl(), title: "", html, screenshot: "" },
+    state: {
+      url:
+        session.compactV2Mode === "on"
+          ? compactV2SafeUrl(session.browser.currentUrl())
+          : session.browser.currentUrl(),
+      title: "",
+      html,
+      screenshot: "",
+    },
     inventory: session.lastElements,
     observed: { kind: "extract", reason: "extract the credential shown on the page" },
   });

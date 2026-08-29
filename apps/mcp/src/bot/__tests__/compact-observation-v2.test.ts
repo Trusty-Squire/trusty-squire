@@ -334,6 +334,37 @@ describe("compact observation v2", () => {
     expect(JSON.stringify(safe.rows)).not.toContain("4111111111111111");
   });
 
+  it("uses the first safe accessibility label after rejecting an unsafe visible value", () => {
+    const button = element({
+      visibleText: "abcdefghijklmnopqrstuvwxyz123456",
+      ariaLabel: "Copy API key",
+    });
+    const safe = buildSafeControlsV2({
+      elements: [button],
+      legacyRefs: new Map([[button, "@e:copy"]]),
+      generation: 1,
+      pageOrigin: "https://merchant.invalid",
+    });
+    expect(safe.rows).toEqual([expect.objectContaining({ name: "Copy API key" })]);
+  });
+
+  it("classifies password-masked card security controls as payment fields", () => {
+    const cvc = element({
+      tag: "input",
+      type: "password",
+      role: "textbox",
+      autocomplete: "cc-csc",
+    });
+    const safe = buildSafeControlsV2({
+      elements: [cvc],
+      legacyRefs: new Map([[cvc, "@e:cvc"]]),
+      generation: 1,
+      pageOrigin: "https://merchant.invalid",
+    });
+    expect(safe.rows).toEqual([expect.objectContaining({ field: "payment" })]);
+    expect(safeStageV2("https://merchant.invalid/checkout", [cvc])).toBe("checkout");
+  });
+
   it("reduces completion and checkout signals to a finite page-stage enum", () => {
     expect(safeStageV2("https://merchant.invalid/thank-you", [])).toBe("complete");
     expect(safeStageV2("https://merchant.invalid/incomplete", [])).toBe("browse");

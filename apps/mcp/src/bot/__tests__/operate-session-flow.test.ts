@@ -3364,6 +3364,49 @@ describe("Compact V2 action-map boundary", () => {
     }
   });
 
+  it("omits raw action values and token URLs from V2 retention and audit sinks", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        role: "textbox",
+        labelText: "Name",
+        selector: "#private-name",
+      }),
+    ];
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      const started = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/signup",
+      });
+      const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+        .safe_table[0]![0];
+      const rawValue = "correct horse battery staple";
+      await act(started.session_id, { kind: "type", target: handle, text: rawValue });
+
+      const token = "ab12cd34ef56gh78ij90kl";
+      const magicUrl = `https://shop.example.com/magic?code=${token}`;
+      await act(started.session_id, { kind: "goto", url: magicUrl });
+
+      const session = paymentSession(started.session_id);
+      const retained = JSON.stringify({
+        trace: session.actionTrace,
+        capture: session.captureRounds,
+      });
+      expect(h.typed).toContainEqual({ selector: "#private-name", text: rawValue });
+      expect(h.gotos).toContain(magicUrl);
+      expect(retained).not.toContain(rawValue);
+      expect(retained).not.toContain(token);
+      expect(writes.join("")).not.toContain(token);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("keeps start metadata, rejects locators, and binds a handle to its current page snapshot", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.workerEmail = "operator@example.test";
@@ -3892,7 +3935,7 @@ describe("Compact V2 action-map boundary", () => {
       .safe_table[0]![0];
     h.clickError = new Error("dispatch failed after click");
     await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
-      "dispatch failed after click",
+      "action_failed",
     );
     h.clickError = null;
     await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
@@ -3964,7 +4007,7 @@ describe("Compact V2 action-map boundary", () => {
     expect(result.observation.format).toBe("compact-v2");
   });
 
-  it("revalidates unchanged bulk targets after the preceding mutation", async () => {
+  it("rejects old-generation bulk targets after the preceding mutation", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
@@ -4007,13 +4050,10 @@ describe("Compact V2 action-map boundary", () => {
       [sizeHandle!]: "Large",
     });
 
-    expect(h.selected).toEqual([
-      { selector: "#variant", matcher: "Blue" },
-      { selector: "#size", matcher: "Large" },
-    ]);
+    expect(h.selected).toEqual([{ selector: "#variant", matcher: "Blue" }]);
     expect(result.fields).toEqual([
       expect.objectContaining({ status: "selected", selected_option: "Ocean Blue" }),
-      expect.objectContaining({ status: "selected", selected_option: "Large" }),
+      expect.objectContaining({ status: "failed", reason: "reobserve_required" }),
     ]);
   });
 
@@ -4094,7 +4134,39 @@ describe("Compact V2 action-map boundary", () => {
     expect(JSON.stringify(result)).not.toContain("Private option");
   });
 
-  it("refreshes the sealed batch after a failed selection", async () => {
+  it("normalizes private browser selection failures from direct V2 actions", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Variant",
+        selector: "#private-direct-selector",
+        selectOptions: [{ value: "blue", text: "Ocean Blue" }],
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+    h.selectError = new Error(
+      'select <select> #private-direct-selector: option "Private option" was not found',
+    );
+
+    const error = await act(started.session_id, {
+      kind: "select",
+      target: handle,
+      text: "Missing",
+    }).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("selection_failed");
+    expect((error as Error).message).not.toContain("private-direct-selector");
+    expect((error as Error).message).not.toContain("Private option");
+  });
+
+  it("does not authorize later old-generation handles after a failed selection", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
@@ -4128,13 +4200,13 @@ describe("Compact V2 action-map boundary", () => {
       [sizeHandle!]: "Large",
     });
 
-    expect(h.selected).toEqual([{ selector: "#size", matcher: "Large" }]);
+    expect(h.selected).toEqual([]);
     expect(result.fields).toEqual([
       expect.objectContaining({
         status: "failed",
         reason: "target_not_allowed",
       }),
-      expect.objectContaining({ status: "selected", selected_option: "Large" }),
+      expect.objectContaining({ status: "failed", reason: "reobserve_required" }),
     ]);
   });
 });

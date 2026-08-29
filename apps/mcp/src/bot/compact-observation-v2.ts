@@ -659,15 +659,17 @@ function candidateText(el: InteractiveElement): string {
 function controlDescription(el: InteractiveElement): string | undefined {
   // Labels are chosen from visible/accessibility naming sources only. Native
   // button values are names; field values, `name`, and `id` stay excluded.
-  return safeDescriptionV2(
-    el.visibleText ??
-      el.labelText ??
-      el.ariaLabel ??
-      el.iconLabel ??
-      el.title ??
-      el.placeholder ??
-      (isButtonInput(el) ? el.value : undefined),
-  );
+  return [
+    el.visibleText,
+    el.labelText,
+    el.ariaLabel,
+    el.iconLabel,
+    el.title,
+    el.placeholder,
+    isButtonInput(el) ? el.value : undefined,
+  ]
+    .map((candidate) => safeDescriptionV2(candidate))
+    .find((candidate) => candidate !== undefined);
 }
 
 function roleOf(el: InteractiveElement): SafeRoleV2 | null {
@@ -715,6 +717,7 @@ function fieldOf(el: InteractiveElement): SafeFieldV2 | undefined {
     tokens.some((token) => autocompleteTokens.has(token));
   const type = (el.type ?? "").toLowerCase();
   const text = candidateText(el).toLowerCase();
+  if ([...autocompleteTokens].some((token) => token.startsWith("cc-"))) return "payment";
   if (type === "password" || hasAutocomplete("current-password", "new-password")) {
     return "password";
   }
