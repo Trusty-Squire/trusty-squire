@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import type { InteractiveElement } from "./browser.js";
+import { findCredentialTokens, looksLikeCredentialValue } from "./credential-shape.js";
 
 export const OBSERVE_V2_MAX_WIRE_BYTES = 4_096;
 export const OBSERVE_V2_MAX_TOKENS = 1_024;
@@ -181,6 +182,14 @@ const SECRET_ASSIGNMENT_RE = /\b(?:password|passcode|token|api[_ -]?key|secret)\
 const HIGH_ENTROPY_TOKEN_RE = /\b[A-Za-z0-9_-]{24,}\b/;
 const CARD_SECURITY_VALUE_RE = /\b(?:cvv|cvc|security\s*code)\s*[:#-]?\s*\d{3,4}\b/i;
 
+function containsCredentialShape(value: string): boolean {
+  if (findCredentialTokens(value).length > 0) return true;
+  return value
+    .split(/[\s"'`()<>\[\]{},;:=]+/)
+    .filter(Boolean)
+    .some((token) => looksLikeCredentialValue(token));
+}
+
 function hasPanLikeDigits(value: string): boolean {
   return value.replace(/\D/g, "").length >= 13;
 }
@@ -200,7 +209,8 @@ export function safeDescriptionV2(value: string | null | undefined): string | un
     EMAIL_VALUE_RE.test(normalized) ||
     SECRET_ASSIGNMENT_RE.test(normalized) ||
     CARD_SECURITY_VALUE_RE.test(normalized) ||
-    HIGH_ENTROPY_TOKEN_RE.test(normalized)
+    HIGH_ENTROPY_TOKEN_RE.test(normalized) ||
+    containsCredentialShape(normalized)
   ) {
     return undefined;
   }
@@ -263,6 +273,8 @@ export function encodeV2Delta(args: {
 }): Record<string, unknown> | null {
   const payload: Record<string, unknown> = {
     format: "compact-v2",
+    url: "",
+    text: "",
     session_id: args.sessionId,
     delta: true,
     ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
@@ -380,17 +392,44 @@ function fieldOf(el: InteractiveElement): SafeFieldV2 | undefined {
 
 /** A code-owned page-stage enum; it never forwards the URL or page copy. */
 export function safeStageV2(url: string, elements: readonly InteractiveElement[]): SafeStageV2 {
-  const internalUrl = url.toLowerCase();
-  if (/(?:^|[/?#-])(?:success|complete|confirm|thank-you|thank_you|finished|done)(?:[/?#-]|$)/.test(internalUrl)) {
+  let pathname = "";
+  try {
+    pathname = decodeURIComponent(new URL(url).pathname).toLowerCase();
+  } catch {}
+  if (/(?:^|\/)(?:success|complete|confirm|thank-you|thank_you|finished|done)(?:\.(?:php|html?))?(?:\/|$)/.test(pathname)) {
     return "complete";
   }
-  if (/(?:^|[/?#-])(?:cart|basket|bag)(?:[/?#-]|$)/.test(internalUrl)) return "cart";
-  if (/(?:^|[/?#-])(?:checkout|payment)(?:[/?#-]|$)/.test(internalUrl)) return "checkout";
+  const routeStage = checkoutStageFromUrlV2(url);
+  if (routeStage !== null) return routeStage;
   if (elements.some((el) => intentOf(el) === "payment" || intentOf(el) === "checkout")) return "checkout";
   if (elements.some((el) => intentOf(el) === "add_to_cart")) return "browse";
   if (elements.some((el) => intentOf(el) === "login" || intentOf(el) === "signup")) return "auth";
   if (elements.some((el) => roleOf(el) === "textbox" || roleOf(el) === "select")) return "form";
   return "browse";
+}
+
+export function checkoutStageFromUrlV2(url: string): "cart" | "checkout" | null {
+  let pathname = "";
+  try {
+    pathname = decodeURIComponent(new URL(url).pathname).toLowerCase();
+  } catch {
+    return null;
+  }
+  if (
+    /(?:^|\/)(?:checkout|secure[-_]?checkout|payment|order[-_]?review|order\/review)(?:\.(?:php|html?))?(?:\/|$)/i.test(
+      pathname,
+    )
+  ) {
+    return "checkout";
+  }
+  if (
+    /(?:^|\/)(?:cart|shopping[-_]?cart|view[-_]?cart|basket|bag)(?:\.(?:php|html?))?(?:\/|$)/i.test(
+      pathname,
+    )
+  ) {
+    return "cart";
+  }
+  return null;
 }
 
 function frameOf(el: InteractiveElement, pageOrigin: string): SafeControlV2["frame"] {
@@ -453,16 +492,21 @@ export function encodeV2Page(args: {
   cursorFor: (offset: number) => string;
   offset?: number;
   unchanged?: boolean;
+  startMetadata?: { hint?: string; userEmail?: string };
 }): { payload: Record<string, unknown>; nextOffset: number } {
   const offset = args.offset ?? 0;
   if (args.unchanged === true && offset === 0) {
     return {
       payload: {
         format: "compact-v2",
+        url: "",
+        text: "",
         // This is the mandatory MCP continuation handle. Unlike page data it
         // cannot be abbreviated without breaking operate_observe/act/finish.
         session_id: args.sessionId,
         stage: args.stage,
+        ...(args.startMetadata?.hint === undefined ? {} : { hint: args.startMetadata.hint }),
+        ...(args.startMetadata?.userEmail === undefined ? {} : { user_email: args.startMetadata.userEmail }),
         ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
           ? {}
           : { semantic: args.semantics }),
@@ -480,8 +524,12 @@ export function encodeV2Page(args: {
     const remainder = args.rows.length - (index + 1);
     const payload: Record<string, unknown> = {
       format: "compact-v2",
+      url: "",
+      text: "",
       session_id: args.sessionId,
       stage: args.stage,
+      ...(args.startMetadata?.hint === undefined ? {} : { hint: args.startMetadata.hint }),
+      ...(args.startMetadata?.userEmail === undefined ? {} : { user_email: args.startMetadata.userEmail }),
       ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
         ? {}
         : { semantic: args.semantics }),
@@ -495,8 +543,12 @@ export function encodeV2Page(args: {
   const remaining = args.rows.length - nextOffset;
   const payload: Record<string, unknown> = {
     format: "compact-v2",
+    url: "",
+    text: "",
     session_id: args.sessionId,
     stage: args.stage,
+    ...(args.startMetadata?.hint === undefined ? {} : { hint: args.startMetadata.hint }),
+    ...(args.startMetadata?.userEmail === undefined ? {} : { user_email: args.startMetadata.userEmail }),
     ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
       ? {}
       : { semantic: args.semantics }),

@@ -841,7 +841,10 @@ import {
   getActivePendingThreeDs,
   setActivePendingThreeDs,
   captureScreenshot,
+  observeQuery,
+  verifyPostcondition,
 } from "../provision-session.js";
+import { OBSERVE_V2_MAX_WIRE_BYTES } from "../compact-observation-v2.js";
 import {
   isRecipeDomainLocked,
   isRecipeShareEligible,
@@ -3297,6 +3300,86 @@ describe("Compact V2 action-map boundary", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  it("rejects a handle after its snapshot lifetime expires", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
+    let now = 1_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+      const ref = (started as unknown as { safe_table: Array<[string, string, string?]> }).safe_table[0]![0];
+      now += 5 * 60_000 + 1;
+      await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+        "reobserve_required",
+      );
+      expect(h.clickCalls).toBe(0);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("binds paging cursors to the normalized query and role", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = Array.from({ length: 8 }, (_, index) =>
+      elem({
+        index,
+        tag: "button",
+        role: "button",
+        visibleText: `Item ${index}`,
+        selector: `#item-${index}`,
+      }),
+    );
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/products" });
+    const pageCursor = (started.overflow as { next_cursor: string }).next_cursor;
+    await expect(observeQuery(started.session_id, "Item", undefined, pageCursor)).rejects.toThrow(
+      "invalid_cursor",
+    );
+    const queryPage = await observeQuery(started.session_id, "Item");
+    const queryCursor = (queryPage.overflow as { next_cursor: string }).next_cursor;
+    await expect(observeQuery(started.session_id, "Other", undefined, queryCursor)).rejects.toThrow(
+      "invalid_cursor",
+    );
+    await expect(observeQuery(started.session_id, "Item", "link", queryCursor)).rejects.toThrow(
+      "invalid_cursor",
+    );
+  });
+
+  it("invalidates handles before postcondition probe navigation", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> }).safe_table[0]![0];
+    await verifyPostcondition(started.session_id, {
+      kind: "observe_artifact",
+      describe: "Checkout remains visible",
+      probe_url: "https://shop.example.com/checkout",
+      success_signal: { text_present: "Checkout" },
+    });
+    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+      "reobserve_required",
+    );
+    expect(h.clickCalls).toBe(0);
+  });
+
+  it("keeps trusted start metadata inside the hard wire budget", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.workerEmail = "operator@example.test";
+    h.elements = [elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" })];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+      hint: "route-🧭".repeat(5_000),
+    });
+    expect(Buffer.byteLength(JSON.stringify(started), "utf8")).toBeLessThanOrEqual(
+      OBSERVE_V2_MAX_WIRE_BYTES,
+    );
+    expect(started).toMatchObject({
+      format: "compact-v2",
+      hint: expect.stringContaining("route-🧭"),
+      user_email: "operator@example.test",
+    });
+    expect(Buffer.byteLength(started.hint ?? "", "utf8")).toBeLessThanOrEqual(1_024);
   });
 
   it("keeps shadow observations on the V1 action contract", async () => {

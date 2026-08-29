@@ -64,6 +64,20 @@ describe("compact observation v2", () => {
     ]);
   });
 
+  it("removes credential-shaped labels before building the safe table", () => {
+    const button = element({ visibleText: "Copy api_1234567890123" });
+    const safe = buildSafeControlsV2({
+      elements: [button],
+      legacyRefs: new Map([[button, "@e:copy-secret"]]),
+      generation: 1,
+      pageOrigin: "https://merchant.invalid",
+    });
+    expect(safe.rows).toEqual([
+      expect.objectContaining({ ref: "@e:1.1", role: "button" }),
+    ]);
+    expect(JSON.stringify(safe.rows)).not.toContain("api_1234567890123");
+  });
+
   it("returns an intact first page and signed cursor below the final wire cap", () => {
     const rows = Array.from({ length: 200 }, (_, index) => ({
       ref: `@e:${index.toString(36).padStart(18, "a")}`,
@@ -215,6 +229,7 @@ describe("compact observation v2", () => {
     expect(
       safeStageV2("https://merchant.invalid/order", [element({ visibleText: "Checkout", role: "button" })]),
     ).toBe("checkout");
+    expect(safeStageV2("https://merchant.invalid/products/checkout-tote", [])).toBe("browse");
   });
 
   it("parses tokenized autocomplete fields and required state", () => {
@@ -277,10 +292,12 @@ describe("compact observation v2", () => {
     });
     expect(page).toEqual({
       format: "compact-v2",
+      url: "",
+      text: "",
       session_id: "session",
       delta: true,
     });
-    expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThan(80);
+    expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThan(128);
   });
 
   it("keeps controls on the first page and sends no rows for its unchanged re-observe", () => {
@@ -307,8 +324,14 @@ describe("compact observation v2", () => {
       stage: "browse",
       delta: { added: [], changed: [], removed: [], stageChanged: false },
     });
-    expect(repeat).toEqual({ format: "compact-v2", session_id: "session", delta: true });
-    expect(Buffer.byteLength(JSON.stringify(repeat), "utf8")).toBeLessThan(80);
+    expect(repeat).toEqual({
+      format: "compact-v2",
+      url: "",
+      text: "",
+      session_id: "session",
+      delta: true,
+    });
+    expect(Buffer.byteLength(JSON.stringify(repeat), "utf8")).toBeLessThan(128);
   });
 
   it("keeps unchanged semantic essentials sticky instead of repeating them in every delta", () => {
@@ -321,8 +344,14 @@ describe("compact observation v2", () => {
       semantics: undefined,
       delta: { added: [], changed: [], removed: [], stageChanged: false },
     });
-    expect(delta).toEqual({ format: "compact-v2", session_id: "session", delta: true });
-    expect(Buffer.byteLength(JSON.stringify(delta), "utf8")).toBeLessThan(80);
+    expect(delta).toEqual({
+      format: "compact-v2",
+      url: "",
+      text: "",
+      session_id: "session",
+      delta: true,
+    });
+    expect(Buffer.byteLength(JSON.stringify(delta), "utf8")).toBeLessThan(128);
   });
 
   it("emits only safe upserts and removed refs for a structural delta", () => {

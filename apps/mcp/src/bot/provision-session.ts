@@ -42,6 +42,7 @@ import type {
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import {
   buildSafeControlsV2,
+  checkoutStageFromUrlV2,
   compactV2LegacyRefForHandle,
   diffSafeControlsV2,
   equalSafePageSemanticsV2,
@@ -1954,7 +1955,7 @@ function throwCompactV2ReobserveRequired(): never {
 function currentCompactV2LegacyTarget(session: Session, target: string): string {
   const index = session.compactV2Index;
   if (index === null) throwCompactV2ReobserveRequired();
-  if (index.pageKey !== compactV2PageKey(session)) {
+  if (index.expiresAt < Date.now() || index.pageKey !== compactV2PageKey(session)) {
     invalidateCompactV2Snapshot(session);
     throwCompactV2ReobserveRequired();
   }
@@ -2970,21 +2971,20 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
       }
       if (attempt === 0) await browser.waitForCaptchaChallengeToSettle(800, 0).catch(() => false);
     }
-    const observation = await observeSession(session);
     // Tell the agent which provider the user actually has a live session for
     // (Google-preferred) — the bot knows from the profile cookies, so the agent
     // doesn't have to guess. Composed with the skill route hint (if any).
+    const loginHint = loginSessionGuidance(liveProviders);
     const hintParts = [
-      loginSessionGuidance(liveProviders),
+      loginHint,
       ...(opts.hint !== undefined ? [opts.hint] : []),
     ];
-    if (observation.format === "compact-v2") {
-      return {
-        ...observation,
-        hint: hintParts.join("\n"),
-        ...(session.userEmail !== null ? { user_email: session.userEmail } : {}),
-      };
-    }
+    const observation = await observeSession(
+      session,
+      "compact",
+      compactV2StartMetadata(opts.hint, loginHint, session.userEmail),
+    );
+    if (observation.format === "compact-v2") return observation;
     return {
       ...observation,
       hint: hintParts.join("\n"),
@@ -4379,26 +4379,7 @@ async function captureCartCheckoutForFillCardFallback(
 }
 
 function checkoutStageFromUrl(url: string): CheckoutState["stage"] | null {
-  let pathname = "";
-  try {
-    pathname = decodeURIComponent(new URL(url).pathname).toLowerCase();
-  } catch {
-    return null;
-  }
-  if (
-    /(?:^|\/)(?:checkout|secure[-_]?checkout|payment|order[-_]?review|order\/review)(?:\.(?:php|html?))?(?:\/|$)/i.test(
-      pathname,
-    )
-  ) {
-    return "checkout";
-  }
-  if (
-    /(?:^|\/)(?:cart|shopping[-_]?cart|view[-_]?cart|basket|bag)(?:\.(?:php|html?))?(?:\/|$)/i.test(
-      pathname,
-    )
-  )
-    return "cart";
-  return null;
+  return checkoutStageFromUrlV2(url);
 }
 
 function checkoutStage(
@@ -4659,11 +4640,70 @@ function compactV2Mode(): "off" | "shadow" | "on" {
   return configured === "shadow" ? "shadow" : "on";
 }
 
-function compactV2Cursor(session: Session, generation: number, offset: number): string {
+interface CompactV2StartMetadata {
+  hint?: string;
+  userEmail?: string;
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  const ellipsis = "…";
+  const contentLimit = Math.max(0, maxBytes - Buffer.byteLength(ellipsis, "utf8"));
+  let result = "";
+  let bytes = 0;
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > contentLimit) break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return `${result}${ellipsis}`;
+}
+
+function compactV2StartMetadata(
+  registryHint: string | undefined,
+  loginHint: string,
+  userEmail: string | null,
+): CompactV2StartMetadata {
+  const hint = [
+    truncateUtf8(loginHint, 252),
+    ...(registryHint === undefined ? [] : [truncateUtf8(registryHint, 768)]),
+  ].join("\n");
+  const validEmail =
+    userEmail !== null &&
+    Buffer.byteLength(userEmail, "utf8") <= 254 &&
+    /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(userEmail)
+      ? userEmail
+      : undefined;
+  return {
+    ...(hint.length === 0 ? {} : { hint: truncateUtf8(hint, 1_024) }),
+    ...(validEmail === undefined ? {} : { userEmail: validEmail }),
+  };
+}
+
+const COMPACT_V2_PAGE_CURSOR_SCOPE = "p";
+
+function compactV2QueryCursorScope(
+  session: Session,
+  query: string,
+  role: SafeControlV2["role"] | undefined,
+): string {
+  return createHmac("sha256", session.compactV2Secret)
+    .update(JSON.stringify([query, role ?? null]))
+    .digest("base64url")
+    .slice(0, 10);
+}
+
+function compactV2Cursor(
+  session: Session,
+  generation: number,
+  offset: number,
+  scope: string,
+): string {
   // The session-held index owns the five-minute expiry, so the cursor need not
   // repeat a UUID/timestamp on every dense-page observation. A session-secret
   // HMAC makes this compact in-MCP token unforgeable across sessions.
-  const body = `${generation.toString(36)}:${offset.toString(36)}`;
+  const body = `${generation.toString(36)}:${offset.toString(36)}:${scope}`;
   const signature = createHmac("sha256", session.compactV2Secret).update(body).digest("base64url").slice(0, 12);
   return `${body}.${signature}`;
 }
@@ -4677,13 +4717,25 @@ function compactV2PageKey(session: Session): string {
     .digest("base64url");
 }
 
-function parseCompactV2Cursor(session: Session, cursor: string): { generation: number; offset: number } {
+function parseCompactV2Cursor(
+  session: Session,
+  cursor: string,
+  expectedScope: string,
+): { generation: number; offset: number } {
   const [body, signature, extra] = cursor.split(".");
   if (body === undefined || signature === undefined || extra !== undefined) throw new Error("invalid_cursor");
   const expected = createHmac("sha256", session.compactV2Secret).update(body).digest("base64url").slice(0, 12);
   if (signature !== expected) throw new Error("invalid_cursor");
-  const [generationRaw, offsetRaw, extraPart] = body.split(":");
-  if (generationRaw === undefined || offsetRaw === undefined || extraPart !== undefined) throw new Error("invalid_cursor");
+  const [generationRaw, offsetRaw, scope, extraPart] = body.split(":");
+  if (
+    generationRaw === undefined ||
+    offsetRaw === undefined ||
+    scope === undefined ||
+    extraPart !== undefined ||
+    scope !== expectedScope
+  ) {
+    throw new Error("invalid_cursor");
+  }
   const generation = Number.parseInt(generationRaw, 36);
   const offset = Number.parseInt(offsetRaw, 36);
   if (
@@ -4703,6 +4755,7 @@ function compactV2Observation(
   generation: number,
   elements: readonly InteractiveElement[],
   semanticSource: ObservationSemanticSourceV2,
+  startMetadata?: CompactV2StartMetadata,
 ): Observation {
   const legacyRefs = provisionElementRefs(elements);
   let pageOrigin = "";
@@ -4776,16 +4829,18 @@ function compactV2Observation(
     });
     // A high-churn delta is less useful than a fresh paged map.  This also
     // guarantees any overflow remains in the MCP cursor protocol.
-    if (encodedDelta !== null) return { ...(encodedDelta as unknown as Observation), url: "", text: "" };
+    if (encodedDelta !== null) return encodedDelta as unknown as Observation;
   }
   const page = encodeV2Page({
     sessionId: session.id,
     stage: index.stage,
     semantics,
     rows: index.rows,
-    cursorFor: (offset) => compactV2Cursor(session, snapshotGeneration, offset),
+    cursorFor: (offset) =>
+      compactV2Cursor(session, snapshotGeneration, offset, COMPACT_V2_PAGE_CURSOR_SCOPE),
+    ...(startMetadata === undefined ? {} : { startMetadata }),
   });
-  return { ...(page.payload as unknown as Observation), url: "", text: "" };
+  return page.payload as unknown as Observation;
 }
 
 function exerciseCompactV2Shadow(
@@ -4830,13 +4885,14 @@ export async function observeQuery(
     invalidateCompactV2Snapshot(session);
     throw new Error("stale_cursor");
   }
+  const needle = norm(query);
+  const cursorScope = compactV2QueryCursorScope(session, needle, role);
   let offset = 0;
   if (cursor !== undefined) {
-    const parsed = parseCompactV2Cursor(session, cursor);
+    const parsed = parseCompactV2Cursor(session, cursor, cursorScope);
     if (parsed.generation !== index.generation) throw new Error("stale_cursor");
     offset = parsed.offset;
   }
-  const needle = norm(query);
   const currentRefs = provisionElementRefs(session.lastElements);
   const allowed = new Set<string>();
   for (const el of session.lastElements) {
@@ -4852,7 +4908,7 @@ export async function observeQuery(
     semantics: index.semantics,
     rows,
     offset,
-    cursorFor: (next) => compactV2Cursor(session, index.generation, next),
+    cursorFor: (next) => compactV2Cursor(session, index.generation, next, cursorScope),
   });
   return page.payload;
 }
@@ -4860,6 +4916,7 @@ export async function observeQuery(
 async function observeSession(
   session: Session,
   detail: "compact" | "full" = "compact",
+  startMetadata?: CompactV2StartMetadata,
 ): Promise<Observation> {
   const oauthInProgress = (): Observation => {
     session.prevObserve = null;
@@ -4907,7 +4964,9 @@ async function observeSession(
     // inventory. Its allowlist seal runs before any retained/emitted view; no
     // Python subprocess or externally provisioned runtime participates.
     const v2Mode = compactV2Mode();
-    if (v2Mode === "on") return compactV2Observation(session, generation, elements, semanticSource);
+    if (v2Mode === "on") {
+      return compactV2Observation(session, generation, elements, semanticSource, startMetadata);
+    }
     if (v2Mode === "shadow") exerciseCompactV2Shadow(session, generation, elements, semanticSource);
     session.compactV2Active = false;
     invalidateCompactV2Snapshot(session);
@@ -6763,6 +6822,7 @@ export async function verifyPostcondition(
     if (host !== null && !session.allowedHosts.some((e) => e.host === host)) {
       session.allowedHosts.push({ host, source: "mid_session" });
     }
+    invalidateCompactV2Snapshot(session);
     await session.browser.goto(postcondition.probe_url);
     await settle(1500);
   }
