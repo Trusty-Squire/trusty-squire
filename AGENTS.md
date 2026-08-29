@@ -455,16 +455,15 @@ Preserve that contract when changing browser startup or shutdown: never replace 
 identity-proven scope with root-PID-only signaling or broad `pkill`. The strict
 containment follow-up is `ts-operator-browser-cgroup-containment` in `TODOS.md`.
 
-### 13. Ephemeral operator profiles need a legacy Google-identity bridge
+### 13. Plain-Chrome login must publish portable Google identity
 
-The supported plain-Chrome login path cannot produce Playwright `storageState`, and
-`BrowserContext.setStorageState()` clears cookies already present in a persistent
-profile. When starting a private operator profile, preserve the fallback in
-`apps/mcp/src/bot/session-state.ts`: if the saved snapshot has no Google identity,
-copy only the allowlisted canonical Google cookies plus Chrome `Local State`, and do
-not subsequently apply the partial snapshot. Never solve this by reopening the
-canonical profile or restoring a shared-profile lock; parallel isolated sessions are
-the contract.
+The supported plain-Chrome login path cannot expose a Playwright context during
+Google OAuth. After the plain browser closes with proven ownership, reopen the
+canonical authoring profile under the existing login guard only long enough to
+capture `storageState({ indexedDB: true })`, close it, and publish the snapshot.
+Operator startup must restore that snapshot into its private profile; it must never
+open the canonical profile or copy Chrome cookie databases. Parallel isolated
+operator sessions remain the contract.
 
 ### 14. Payment mandate expiry has separate acceptance and relay semantics
 

@@ -22,7 +22,9 @@ A successful context-backed interactive login captures Playwright
 `storageState({ indexedDB: true })`. The snapshot includes all cookies, local
 storage, and IndexedDB and is atomically stored as
 `<CHROME_PROFILE_DIR>/trusty-squire-session-state.json` with mode `0600`.
-Plain Chrome login cannot capture a context and therefore preserves the prior
+Plain Chrome remains unattached throughout Google OAuth. After its proven close,
+the login flow briefly reopens the canonical authoring profile in a headless
+context, captures the same portable state, closes the context, and publishes the
 snapshot. Snapshots larger than 4 MiB are ignored on read and skipped on write,
 also preserving the prior snapshot.
 

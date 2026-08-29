@@ -199,8 +199,6 @@ vi.mock("../session-state.js", () => ({
     if (h.storageStateReadGate !== null) await h.storageStateReadGate;
     return h.storageStates.get(profileDir);
   },
-  sessionStateHasGoogleIdentity: () => false,
-  seedEphemeralIdentityFromCanonical: () => false,
   writeSessionState: async (
     profileDir: string,
     state: unknown,

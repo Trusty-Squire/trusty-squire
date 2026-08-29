@@ -27,6 +27,7 @@ import { OPERATOR_BROWSER_MARKER_ENV } from "../operator-browser-watchdog.js";
 import { loggedInProviders, markProviderLoggedIn } from "../login-state.js";
 import {
   cancelActiveLoginBrowsers,
+  captureProfileStorageState,
   installClaimPollCompleted,
   openInstallConfirmInBotChrome,
   classifyGoogleAuthState,
@@ -681,6 +682,115 @@ describe("bot Chrome launch consistency", () => {
       headless: true,
       channel: "chrome",
     });
+  });
+
+  it("captures every browser storage surface from the closed canonical login", async () => {
+    const state = {
+      cookies: [
+        {
+          name: "__Host-1PLSID",
+          value: "primary-google-session",
+          domain: ".google.com",
+          path: "/",
+          expires: -1,
+          httpOnly: true,
+          secure: true,
+          sameSite: "Lax" as const,
+        },
+        {
+          name: "SMSV",
+          value: "secondary-google-session",
+          domain: "accounts.google.com",
+          path: "/",
+          expires: -1,
+          httpOnly: true,
+          secure: true,
+          sameSite: "Lax" as const,
+        },
+      ],
+      origins: [
+        {
+          origin: "https://accounts.google.com",
+          localStorage: [{ name: "identity", value: "opaque" }],
+        },
+      ],
+    };
+    const storageState = vi.fn(async () => state);
+    const close = vi.fn(async () => undefined);
+    const launcher = {
+      launchPersistentContext: vi.fn(async () => ({ storageState, close }) as never),
+    };
+
+    await expect(captureProfileStorageState("/isolated-profile", launcher)).resolves.toEqual(state);
+    expect(storageState).toHaveBeenCalledWith({ indexedDB: true });
+    expect(close).toHaveBeenCalledOnce();
+    expect(launcher.launchPersistentContext).toHaveBeenCalledWith(
+      "/isolated-profile",
+      expect.objectContaining({ headless: true, channel: "chrome" }),
+    );
+  });
+
+  it("publishes plain-login identity after closing Chrome and capturing through a context", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-plain-login-capture-"));
+    const state = {
+      cookies: [
+        {
+          name: "SID",
+          value: "portable-google-session",
+          domain: ".google.com",
+          path: "/",
+          expires: -1,
+          httpOnly: true,
+          secure: true,
+          sameSite: "Lax" as const,
+        },
+      ],
+      origins: [],
+    };
+    const events: string[] = [];
+    const capture = vi.fn(async (capturedProfileDir: string) => {
+      expect(capturedProfileDir).toBe(profileDir);
+      events.push("capture");
+      return state;
+    });
+    try {
+      const result = await runDisplayedChrome(
+        {
+          profileDir,
+          url: "https://example.test/install",
+          deadline: Date.now() + 60_000,
+          pollUntilDone: async () => false,
+          bannerLabel: "Complete sign-in.",
+          plainProfileLogin: true,
+          plainPollUntilDone: async () => true,
+        },
+        {
+          resolveChannelBinary: () => "/unused/chrome",
+          launchPlainLoginBrowser: async () => ({
+            identity: {
+              host: hostname(),
+              pid: 2_147_483_000,
+              start_time: "missing",
+              user_data_dir: profileDir,
+            },
+            teardown: async () => {
+              events.push("close");
+            },
+            forceTeardown: vi.fn(),
+            isRunning: () => true,
+          }),
+          captureProfileStorageState: capture,
+        },
+      );
+
+      expect(result).toEqual({ status: "completed", closeState: "closed", storageState: state });
+      expect(events).toEqual(["close", "capture"]);
+      await finalizeLoginRun({ profileDir }, result);
+      expect(JSON.parse(readFileSync(join(profileDir, "trusty-squire-session-state.json"), "utf8")))
+        .toEqual(state);
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
   });
 });
 

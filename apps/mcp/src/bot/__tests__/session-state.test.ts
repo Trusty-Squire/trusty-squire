@@ -1,15 +1,12 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createEphemeralProfile,
   destroyEphemeralProfile,
   MAX_SESSION_STATE_BYTES,
   readSessionState,
-  seedEphemeralIdentityFromCanonical,
-  sessionStateHasGoogleIdentity,
   sessionStatePath,
   writeSessionState,
 } from "../session-state.js";
@@ -133,69 +130,4 @@ describe("operator session storage state", () => {
     }
   });
 
-  it("seeds a legacy Google login into each private profile without copying site cookies", () => {
-    const canonical = mkdtempSync(join(tmpdir(), "ts-session-state-legacy-"));
-    const first = createEphemeralProfile();
-    const second = createEphemeralProfile();
-    roots.push(canonical, first, second);
-    mkdirSync(join(canonical, "Default"), { recursive: true });
-    writeFileSync(join(canonical, "Local State"), '{"os_crypt":{"encrypted_key":"opaque"}}');
-    const source = new Database(join(canonical, "Default", "Cookies"));
-    source.exec(
-      "CREATE TABLE meta (key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, value LONGVARCHAR); " +
-        "CREATE TABLE cookies (host_key TEXT NOT NULL, name TEXT NOT NULL, encrypted_value BLOB); " +
-        "CREATE UNIQUE INDEX cookies_unique ON cookies(host_key, name);",
-    );
-    source.prepare("INSERT INTO meta (key, value) VALUES (?, ?)").run("version", "24");
-    source
-      .prepare("INSERT INTO cookies (host_key, name, encrypted_value) VALUES (?, ?, ?)")
-      .run(".google.com", "SID", Buffer.from("google-session"));
-    source
-      .prepare("INSERT INTO cookies (host_key, name, encrypted_value) VALUES (?, ?, ?)")
-      .run("merchant.example", "session", Buffer.from("merchant-session"));
-    source.close();
-
-    expect(seedEphemeralIdentityFromCanonical(canonical, first)).toBe(true);
-    expect(seedEphemeralIdentityFromCanonical(canonical, second)).toBe(true);
-
-    for (const destination of [first, second]) {
-      expect(readFileSync(join(destination, "Local State"), "utf8")).toContain("encrypted_key");
-      const cookies = new Database(join(destination, "Default", "Cookies"), {
-        readonly: true,
-      });
-      expect(cookies.prepare("SELECT host_key, name FROM cookies").all()).toEqual([
-        { host_key: ".google.com", name: "SID" },
-      ]);
-      cookies.close();
-    }
-
-    const untouchedSource = new Database(join(canonical, "Default", "Cookies"), {
-      readonly: true,
-    });
-    expect(untouchedSource.prepare("SELECT count(*) AS count FROM cookies").get()).toEqual({
-      count: 2,
-    });
-    untouchedSource.close();
-  });
-
-  it("distinguishes a usable Google snapshot from a blank partial snapshot", () => {
-    expect(sessionStateHasGoogleIdentity({ cookies: [], origins: [] })).toBe(false);
-    expect(
-      sessionStateHasGoogleIdentity({
-        cookies: [
-          {
-            name: "SID",
-            value: "long-enough-google-session",
-            domain: ".google.com",
-            path: "/",
-            expires: -1,
-            httpOnly: true,
-            secure: true,
-            sameSite: "Lax",
-          },
-        ],
-        origins: [],
-      }),
-    ).toBe(true);
-  });
 });

@@ -126,7 +126,7 @@ Ship the direct replacement, no new flag. `TRUSTY_SQUIRE_PROFILE_DIR` remains un
 ## What could go wrong
 
 - The removed direct-identity path warned that Google consoles can reject copied session state. A seeded `require_live_identity` regression plus read-only Firebase/GCP authenticated reachability smoke must pass. If it fails, report the incompatible mechanism; do not quietly restore the shared canonical fallback.
-- A plain successful login has no context to capture; retain the prior snapshot rather than deleting saved logins.
+- A plain successful login stays unattached during OAuth, then captures portable state by briefly reopening the closed canonical authoring profile under its existing guard.
 - Concurrent finish can lose one login update by design; it cannot corrupt storage.
 - IndexedDB snapshots can grow; snapshots larger than 4 MiB are skipped while
   retaining the prior state. Never replace this design with cache/history copying.

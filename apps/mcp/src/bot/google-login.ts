@@ -107,6 +107,27 @@ function resolveChromium(): PersistentLauncher {
   }
 }
 
+export async function captureProfileStorageState(
+  profileDir: string,
+  launcher: PersistentLauncher = resolveChromium(),
+): Promise<BrowserStorageState> {
+  const context = await launchWithProfileGate(
+    profileDir,
+    () =>
+      launchPersistentLoginContext(launcher, profileDir, {
+        headless: true,
+        ignoreDefaultArgs: ["--enable-automation"],
+        args: ["--no-sandbox", "--disable-dev-shm-usage"],
+      }),
+    { failFast: true },
+  );
+  try {
+    return await context.storageState({ indexedDB: true });
+  } finally {
+    await context.close();
+  }
+}
+
 // --- config ------------------------------------------------------------
 // Per-provider login targets for `mcp login` (T13). `cookies` are ones
 // the provider only sets after a completed login — polling for them is
@@ -667,8 +688,6 @@ export async function finalizeLoginRun(
   if (result.status === "completed" || result.status === "preflight_satisfied") {
     await opts.onConfirmedLogin?.();
   }
-  // Plain Chrome has no context to capture. Leave the existing snapshot alone;
-  // it is safer than erasing every saved login after an interactive connect.
   if (result.closeState === "closed" && result.storageState !== undefined) {
     await writeSessionState(opts.profileDir, result.storageState);
   }
@@ -706,6 +725,7 @@ export async function runDisplayedChrome(
   runtime: {
     resolveChannelBinary: typeof resolveChannelBinary;
     launchPlainLoginBrowser: typeof launchPlainLoginBrowser;
+    captureProfileStorageState?: typeof captureProfileStorageState;
   } = { resolveChannelBinary, launchPlainLoginBrowser },
 ): Promise<LoginRunResult> {
   // PLAIN-BROWSER path (connect claim): launch plain Chrome, never attach CDP,
@@ -769,7 +789,11 @@ export async function runDisplayedChrome(
     } finally {
       closeState = await lifecycle.finish();
     }
-    return { status, closeState };
+    const storageState =
+      status === "completed" && closeState === "closed"
+        ? await (runtime.captureProfileStorageState ?? captureProfileStorageState)(opts.profileDir)
+        : undefined;
+    return { status, closeState, ...(storageState === undefined ? {} : { storageState }) };
   }
   const chromium = resolveChromium();
   const proxyOpt = loginProxyOption();

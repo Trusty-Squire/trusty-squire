@@ -347,9 +347,9 @@ function copyTableRows(
   table: "meta" | "cookies",
   where = "",
   bindings: readonly string[] = [],
-): number {
+): void {
   const columns = source.pragma(`table_info(${table})`) as SqliteColumnRow[];
-  if (columns.length === 0) return 0;
+  if (columns.length === 0) return;
   const identifiers = columns.map((column) => quoteSqliteIdentifier(column.name));
   const rows = source
     .prepare(`SELECT ${identifiers.join(", ")} FROM ${quoteSqliteIdentifier(table)}${where}`)
@@ -362,11 +362,10 @@ function copyTableRows(
   destination.transaction((selected: Record<string, unknown>[]) => {
     for (const row of selected) insert.run(...columns.map((column) => row[column.name]));
   })(rows);
-  return rows.length;
 }
 
-function copyIdentityCookies(sourcePath: string, destinationPath: string): number {
-  if (!existsSync(sourcePath)) return 0;
+function copyIdentityCookies(sourcePath: string, destinationPath: string): void {
+  if (!existsSync(sourcePath)) return;
   let source: Database.Database | null = null;
   let destination: Database.Database | null = null;
   try {
@@ -397,7 +396,7 @@ function copyIdentityCookies(sourcePath: string, destinationPath: string): numbe
       copyTableRows(source, destination, "meta");
     }
     const names = [...OPERATOR_SEED_GOOGLE_COOKIE_NAMES];
-    const cookieCount = copyTableRows(
+    copyTableRows(
       source,
       destination,
       "cookies",
@@ -418,7 +417,6 @@ function copyIdentityCookies(sourcePath: string, destinationPath: string): numbe
     source.close();
     source = null;
     chmodSync(destinationPath, 0o600);
-    return cookieCount;
   } catch (err) {
     destination?.close();
     source?.close();
@@ -427,17 +425,7 @@ function copyIdentityCookies(sourcePath: string, destinationPath: string): numbe
   }
 }
 
-/**
- * Copy only login-authoring identity into a private Chrome profile.
- *
- * This is also the migration bridge for pre-storageState installations: the
- * canonical profile may contain a usable Google session even though no
- * Playwright snapshot has ever been published from it.
- */
-export function seedOperatorIdentityProfile(
-  sourceProfileDir: string,
-  destination: string,
-): boolean {
+function copyIdentitySeed(sourceProfileDir: string, destination: string): void {
   if (!lstatSync(sourceProfileDir).isDirectory()) {
     throw new Error(`operator login source is not a directory: ${sourceProfileDir}`);
   }
@@ -445,13 +433,9 @@ export function seedOperatorIdentityProfile(
   for (const relative of IDENTITY_SEED_FILES) {
     copyIdentitySeedFile(sourceProfileDir, destination, relative);
   }
-  return (
-    IDENTITY_COOKIE_FILES.reduce(
-      (total, relative) =>
-        total + copyIdentityCookies(join(sourceProfileDir, relative), join(destination, relative)),
-      0,
-    ) > 0
-  );
+  for (const relative of IDENTITY_COOKIE_FILES) {
+    copyIdentityCookies(join(sourceProfileDir, relative), join(destination, relative));
+  }
 }
 
 function assertProfileAcquisitionActive(
@@ -556,7 +540,7 @@ async function publishSeedLocked(p: PoolPaths, sourceProfileDir: string): Promis
   const destination = join(p.generations, generation);
   try {
     ensurePrivateDir(staging);
-    seedOperatorIdentityProfile(sourceProfileDir, join(staging, "user-data"));
+    copyIdentitySeed(sourceProfileDir, join(staging, "user-data"));
     renameSync(staging, destination);
     const nextLink = join(p.seed, `.current-${generation}`);
     symlinkSync(join("generations", generation), nextLink, "dir");
