@@ -61,7 +61,7 @@ Preserve current call-drain, audit, payment, and session-removal ordering (`prov
 
 1. Capture `context.storageState({ indexedDB: true })` before close.
 2. Use the rc.9 bounded terminal owner to perform the existing identity-proven browser close.
-3. Only after close is proven, encode and write the canonical state JSON off the main event loop, then replace it if the terminal owner is still authoritative immediately before the atomic rename.
+3. Only after close is proven, serialize the state on the best-effort capture path, skip oversized snapshots, write an accepted snapshot asynchronously, then replace it if the terminal owner is still authoritative immediately before the atomic rename.
 4. Release the in-memory browser lease and schedule detached best-effort removal
    of the unique directory. Normal and forced terminal paths never await the
    recursive delete.

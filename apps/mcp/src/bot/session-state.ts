@@ -1,14 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, mkdtempSync, renameSync } from "node:fs";
-import { mkdir, rm } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Worker } from "node:worker_threads";
 import type { BrowserContext } from "playwright";
 
 export type BrowserStorageState = Awaited<ReturnType<BrowserContext["storageState"]>>;
 
 export const SESSION_STATE_FILE = "trusty-squire-session-state.json";
+export const MAX_SESSION_STATE_BYTES = 4 * 1024 * 1024;
 export const GOOGLE_LOGIN_COOKIE_MARKERS = [
   "__Secure-1PSID",
   "SID",
@@ -17,67 +17,6 @@ export const GOOGLE_LOGIN_COOKIE_MARKERS = [
   "APISID",
   "SAPISID",
 ] as const;
-
-const SNAPSHOT_WORKER_SOURCE = String.raw`
-const { parentPort, workerData } = require("node:worker_threads");
-const { chmod, readFile, writeFile } = require("node:fs/promises");
-
-async function run() {
-  if (workerData.operation === "read") {
-    const serialized = await readFile(workerData.path, "utf8");
-    parentPort.postMessage({ ok: true, state: JSON.parse(serialized) });
-    return;
-  }
-  await writeFile(workerData.path, JSON.stringify(workerData.state), { mode: 0o600 });
-  await chmod(workerData.path, 0o600);
-  parentPort.postMessage({ ok: true });
-}
-
-run().catch((error) => {
-  parentPort.postMessage({
-    ok: false,
-    error: error instanceof Error ? error.message : String(error),
-  });
-});
-`;
-
-type SnapshotWorkerRequest =
-  | { operation: "read"; path: string }
-  | { operation: "write"; path: string; state: BrowserStorageState };
-
-type SnapshotWorkerResponse =
-  | { ok: true; state?: BrowserStorageState }
-  | { ok: false; error: string };
-
-function runSnapshotWorker(
-  request: SnapshotWorkerRequest,
-): Promise<BrowserStorageState | undefined> {
-  return new Promise((resolve, reject) => {
-    const worker = new Worker(SNAPSHOT_WORKER_SOURCE, {
-      eval: true,
-      workerData: request,
-    });
-    let settled = false;
-    worker.once("message", (response: SnapshotWorkerResponse) => {
-      settled = true;
-      if (response.ok) {
-        resolve(response.state);
-      } else {
-        reject(new Error(response.error));
-      }
-    });
-    worker.once("error", (error) => {
-      if (settled) return;
-      settled = true;
-      reject(error);
-    });
-    worker.once("exit", (code) => {
-      if (settled) return;
-      settled = true;
-      reject(new Error(`storageState worker exited with code ${code}`));
-    });
-  });
-}
 
 export function sessionStatePath(profileDir: string): string {
   return join(profileDir, SESSION_STATE_FILE);
@@ -103,7 +42,14 @@ export async function readSessionState(
 ): Promise<BrowserStorageState | undefined> {
   const path = sessionStatePath(profileDir);
   try {
-    return await runSnapshotWorker({ operation: "read", path });
+    const serialized = await readFile(path);
+    if (serialized.byteLength > MAX_SESSION_STATE_BYTES) {
+      console.error(
+        `[operator] storageState snapshot exceeds ${MAX_SESSION_STATE_BYTES} bytes; ignoring saved state`,
+      );
+      return undefined;
+    }
+    return JSON.parse(serialized.toString("utf8")) as BrowserStorageState;
   } catch {
     return undefined;
   }
@@ -115,12 +61,21 @@ export async function writeSessionState(
   state: BrowserStorageState,
   canPublish: () => boolean = () => true,
 ): Promise<boolean> {
+  const serialized = JSON.stringify(state);
+  const serializedBytes = Buffer.byteLength(serialized);
+  if (serializedBytes > MAX_SESSION_STATE_BYTES) {
+    console.error(
+      `[operator] storageState snapshot is ${serializedBytes} bytes, exceeding the ${MAX_SESSION_STATE_BYTES}-byte limit; retaining prior snapshot`,
+    );
+    return false;
+  }
   await mkdir(profileDir, { recursive: true, mode: 0o700 });
   const destination = sessionStatePath(profileDir);
   const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
   let published = false;
   try {
-    await runSnapshotWorker({ operation: "write", path: temporary, state });
+    await writeFile(temporary, serialized, { mode: 0o600 });
+    await chmod(temporary, 0o600);
     if (!canPublish()) return false;
     renameSync(temporary, destination);
     published = true;

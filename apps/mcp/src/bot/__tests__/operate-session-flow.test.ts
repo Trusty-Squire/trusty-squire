@@ -3928,6 +3928,41 @@ describe("operate session — ephemeral profile lifecycle", () => {
     }
   });
 
+  it("drains concurrent sessions under one shutdown deadline", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_DRAIN_TIMEOUT_MS", "50");
+    try {
+      const started = await Promise.all([
+        startProvisionSession({ serviceUrl: "https://app.example.com/one" }),
+        startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
+        startProvisionSession({ serviceUrl: "https://app.example.com/three" }),
+      ]);
+      const releases: Array<() => void> = [];
+      const entered = started.map(({ session_id }) =>
+        withProvisionSessionCall(
+          session_id,
+          async () =>
+            await new Promise<void>((resolve) => {
+              releases.push(resolve);
+            }),
+        ),
+      );
+      await vi.waitFor(() => expect(releases).toHaveLength(3));
+
+      const shutdown = closeAllProvisionSessions();
+      await vi.advanceTimersByTimeAsync(50);
+      await shutdown;
+
+      expect(h.closeCalls).toBe(3);
+      expect(activeSessionCount()).toBe(0);
+      for (const release of releases) release();
+      await Promise.all(entered);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    }
+  });
+
   it("bounds finish preparation and audits pending 3DS before forced teardown", async () => {
     vi.useFakeTimers();
     vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS", "50");
@@ -4008,6 +4043,44 @@ describe("operate session — ephemeral profile lifecycle", () => {
       h.captureStorageStateGate = null;
       vi.unstubAllEnvs();
       vi.useRealTimers();
+    }
+  });
+
+  it("lets shutdown revoke a finish while storage capture is pending", async () => {
+    let releaseCapture: (() => void) | undefined;
+    h.captureStorageStateGate = new Promise<void>((resolve) => {
+      releaseCapture = resolve;
+    });
+    try {
+      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+      const session = paymentSession(started.session_id);
+      const finishing = finishProvisionSessionWithPreparation(
+        started.session_id,
+        async () => "prepared",
+        () => true,
+      ).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      await vi.waitFor(() => expect(h.captureStorageStateCalls).toBe(1));
+      expect(activeSessionCount()).toBe(1);
+
+      const shutdown = closeAllProvisionSessions();
+      await vi.waitFor(() =>
+        expect((session.terminalTeardownOwner as { forced: boolean } | null)?.forced).toBe(true),
+      );
+      releaseCapture?.();
+      const finishError = await finishing;
+      await shutdown;
+
+      expect(finishError).toEqual(
+        expect.objectContaining({ message: expect.stringMatching(/forced/) }),
+      );
+      expect(h.storageStateWrites).toEqual([]);
+      expect(activeSessionCount()).toBe(0);
+    } finally {
+      releaseCapture?.();
+      h.captureStorageStateGate = null;
     }
   });
 

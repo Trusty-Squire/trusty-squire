@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createEphemeralProfile,
   destroyEphemeralProfile,
+  MAX_SESSION_STATE_BYTES,
   readSessionState,
   sessionStatePath,
   writeSessionState,
@@ -72,36 +73,33 @@ describe("operator session storage state", () => {
     expect([first, second]).toContainEqual(await readSessionState(canonical));
   });
 
-  it("encodes and decodes snapshots outside the main event loop", async () => {
-    const canonical = mkdtempSync(join(tmpdir(), "ts-session-state-worker-"));
+  it("skips oversized snapshots and preserves the prior state", async () => {
+    const canonical = mkdtempSync(join(tmpdir(), "ts-session-state-cap-"));
     roots.push(canonical);
-    const state = {
+    const prior = {
       cookies: [],
-      origins: [{ origin: "https://worker.example", localStorage: [] }],
+      origins: [{ origin: "https://prior.example", localStorage: [] }],
     };
+    const oversized = {
+      cookies: [],
+      origins: [
+        {
+          origin: "https://oversized.example",
+          localStorage: [{ name: "state", value: "x".repeat(MAX_SESSION_STATE_BYTES) }],
+        },
+      ],
+    };
+    await writeSessionState(canonical, prior);
 
-    const stringify = vi.spyOn(JSON, "stringify").mockImplementation(() => {
-      throw new Error("main-thread JSON.stringify called");
-    });
-    let published: boolean;
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
-      published = await writeSessionState(canonical, state);
+      await expect(writeSessionState(canonical, oversized)).resolves.toBe(false);
+      expect(error).toHaveBeenCalledWith(expect.stringContaining("retaining prior snapshot"));
     } finally {
-      stringify.mockRestore();
+      error.mockRestore();
     }
 
-    const parse = vi.spyOn(JSON, "parse").mockImplementation(() => {
-      throw new Error("main-thread JSON.parse called");
-    });
-    let restored: Awaited<ReturnType<typeof readSessionState>>;
-    try {
-      restored = await readSessionState(canonical);
-    } finally {
-      parse.mockRestore();
-    }
-
-    expect(published).toBe(true);
-    expect(restored).toEqual(state);
+    await expect(readSessionState(canonical)).resolves.toEqual(prior);
   });
 
   it("creates distinct 0700 profiles and removes only the finished instance", async () => {

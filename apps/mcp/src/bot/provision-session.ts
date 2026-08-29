@@ -862,7 +862,7 @@ async function closeEphemeralBrowser(
         state,
         () => owner?.forced !== true,
       );
-      if (!published) {
+      if (!published && owner?.forced) {
         throw new Error("operator browser terminal teardown was forced");
       }
     }
@@ -7953,13 +7953,13 @@ async function closeFinishingProvisionSession(
   session.activePayment = null;
   session.paymentFieldSealActive = false;
   session.pendingThreeDs = null;
-  sessions.delete(sessionId);
   stopSessionWatchdog(session);
   await releaseWarmBrowserPage(
     session.browser,
     persistState,
     session.terminalTeardownOwner ?? undefined,
   );
+  if (sessions.get(sessionId) === session) sessions.delete(sessionId);
   disposeSessionWatchdog(session);
   return { session_id: sessionId, url, closed: true };
 }
@@ -8053,26 +8053,41 @@ export async function closeAllProvisionSessions(): Promise<void> {
   shutdownGeneration += 1;
   shutdownInProgress += 1;
   try {
-    for (const pending of [...startingBrowsers]) {
-      await cancelStartingBrowser(pending).catch(() => undefined);
-    }
-    const closingSessions = [...sessions.values()];
-    for (const session of closingSessions) {
-      session.closing = true;
-      stopSessionWatchdog(session);
-    }
-    let closeError: unknown;
-    for (const session of closingSessions) {
-      const drained = await waitForSessionCallsToDrain(session);
-      const error = await forceTerminateProvisionSession(session, "shutdown_terminate", {
-        reason: drained ? "transport_disconnect" : "call_drain_timeout",
-      });
-      if (closeError === undefined && error !== undefined) closeError = error;
-    }
-    for (const ephemeral of [...leasedBrowsers.values()]) {
-      await forceReleaseWarmBrowserPage(ephemeral.controller).catch(() => undefined);
-    }
-    if (closeError !== undefined) throw closeError;
+    const timeoutMs = positiveTimeout(
+      "TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS",
+      DEFAULT_SESSION_TERMINAL_TRANSITION_TIMEOUT_MS,
+    );
+    await withTerminalTimeout(
+      (async () => {
+        await Promise.all(
+          [...startingBrowsers].map(async (pending) => {
+            await cancelStartingBrowser(pending).catch(() => undefined);
+          }),
+        );
+        const closingSessions = [...sessions.values()];
+        for (const session of closingSessions) {
+          session.closing = true;
+          stopSessionWatchdog(session);
+        }
+        const closeErrors = await Promise.all(
+          closingSessions.map(async (session) => {
+            const drained = await waitForSessionCallsToDrain(session);
+            return await forceTerminateProvisionSession(session, "shutdown_terminate", {
+              reason: drained ? "transport_disconnect" : "call_drain_timeout",
+            });
+          }),
+        );
+        await Promise.all(
+          [...leasedBrowsers.values()].map(async (ephemeral) => {
+            await forceReleaseWarmBrowserPage(ephemeral.controller).catch(() => undefined);
+          }),
+        );
+        const closeError = closeErrors.find((error) => error !== undefined);
+        if (closeError !== undefined) throw closeError;
+      })(),
+      timeoutMs,
+      `operator shutdown exceeded ${timeoutMs}ms`,
+    );
   } finally {
     shutdownInProgress -= 1;
   }

@@ -188,7 +188,7 @@ remote CDP, macOS, and Windows operator sessions are not supported in this migra
 
 1. Your coding agent names the website and the outcome it needs: an account,
    authenticated setup, app publishing, a purchase, a gift, or a booking.
-2. Trusty Squire works through the service flow one step at a time. Ordinary tasks open an isolated browser profile; tasks that must act as your connected Google identity use the signed-in profile directly and run one at a time.
+2. Trusty Squire works through the service flow one step at a time. Every task opens its own fresh browser profile, seeded only with portable signed-in storage state when identity is needed, so independent sessions can run concurrently without opening the canonical login profile.
 3. If the flow produces an API key or client secret, Trusty Squire captures it
    into the vault without returning the raw value through its credential tools.
 4. The agent can make an authenticated request, create a host-scoped app grant,
