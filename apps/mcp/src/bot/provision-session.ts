@@ -6176,7 +6176,8 @@ export async function formSelectMany(
   // by a real observe before the next target resolves: variant widgets commonly
   // replace all dependent selects, so continuing from an old inventory is worse
   // than reporting a partial result.
-  for (const { label, option, authorization } of authorizedSelections) {
+  for (let index = 0; index < authorizedSelections.length; index += 1) {
+    const { label, option, authorization } = authorizedSelections[index]!;
     try {
       const currentAuthorization =
         authorization === undefined
@@ -6220,6 +6221,9 @@ export async function formSelectMany(
           status: "failed",
           reason: err instanceof Error ? err.message : String(err),
         });
+      }
+      if (session.compactV2Active && index + 1 < authorizedSelections.length) {
+        await observe(sessionId, "compact");
       }
     }
   }

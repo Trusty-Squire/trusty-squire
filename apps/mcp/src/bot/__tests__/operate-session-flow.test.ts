@@ -869,6 +869,7 @@ import {
   operateRecipeRunTool,
   operateRecipeSaveTool,
   provisionActTool,
+  provisionObserveTool,
   storedExtractResult,
   withSigninHost,
 } from "../../tools/provision-drive.js";
@@ -2016,6 +2017,15 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
     expect(provisionActTool.description).toContain("Under default compact-v2");
     expect(provisionActTool.description).toContain("opaque `reobserve_required`");
     expect(provisionActTool.description).toContain("In V1, stable target refs remain reusable");
+    expect(provisionObserveTool.description).toContain("default compact-v2 mode");
+    expect(provisionObserveTool.description).toContain("[ref,role,facts?]");
+    expect(provisionObserveTool.description).toContain("s=<state bitset>");
+    expect(provisionObserveTool.description).toContain(
+      "c=checked,u=unchecked,d=disabled,r=required",
+    );
+    expect(provisionObserveTool.description).toContain("x=s for a same-origin child");
+    expect(provisionObserveTool.description).toContain("Fact-only rows begin with a keyed segment");
+    expect(provisionObserveTool.description).toContain("In V1 only, pass detail");
 
     const dir = mkdtempSync(join(tmpdir(), "recipe-guidance-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
@@ -3437,10 +3447,21 @@ describe("Compact V2 action-map boundary", () => {
         selector: "#verification",
         visibleText: "Your verification code is 481920",
       }),
+      elem({
+        index: 1,
+        tag: "button",
+        role: "button",
+        selector: "#standalone-code",
+        visibleText: "735104",
+      }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
     expect(JSON.stringify(started)).not.toContain("481920");
+    expect(JSON.stringify(started)).not.toContain("735104");
     await expect(observeQuery(started.session_id, "481920")).resolves.toMatchObject({
+      safe_table: [],
+    });
+    await expect(observeQuery(started.session_id, "735104")).resolves.toMatchObject({
       safe_table: [],
     });
   });
@@ -3453,22 +3474,35 @@ describe("Compact V2 action-map boundary", () => {
     expect(started).toMatchObject({ format: "compact-v2", stage: "checkout" });
   });
 
-  it("does not promote incidental auth-labeled buttons to an auth stage", async () => {
+  it("requires auth actions and fields to share a container", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
-      elem({ tag: "button", role: "button", selector: "#signup", visibleText: "Sign up" }),
       elem({
-        index: 1,
         tag: "button",
         role: "button",
-        selector: "#email-us",
-        visibleText: "Email us",
+        selector: "#login",
+        visibleText: "Log in",
+        container: "header:site",
+      }),
+      elem({
+        index: 1,
+        tag: "input",
+        type: "email",
+        selector: "#newsletter-email",
+        labelText: "Email",
+        container: "footer:newsletter",
       }),
     ];
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/products",
     });
-    expect(started).toMatchObject({ format: "compact-v2", stage: "browse" });
+    expect(started).toMatchObject({ format: "compact-v2", stage: "form" });
+
+    h.elements = (h.elements as Array<Record<string, unknown>>).map((element) => ({
+      ...element,
+      container: "form:login",
+    }));
+    await expect(observe(started.session_id)).resolves.toMatchObject({ stage: "auth" });
   });
 
   it("invalidates handles before postcondition probe navigation", async () => {
@@ -3781,6 +3815,44 @@ describe("Compact V2 action-map boundary", () => {
     expect(result.fields).toEqual([
       expect.objectContaining({ status: "selected", selected_option: "Ocean Blue" }),
       expect.objectContaining({ status: "failed", reason: "reobserve_required" }),
+    ]);
+  });
+
+  it("refreshes the sealed batch after a failed selection", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "External variant",
+        selector: "#external-variant",
+        frameOrigin: "https://untrusted.example",
+        frameUrl: "https://untrusted.example/variant",
+        selectOptions: [{ value: "blue", text: "Ocean Blue" }],
+      }),
+      elem({
+        index: 1,
+        tag: "select",
+        role: "combobox",
+        labelText: "Size",
+        selector: "#size",
+        selectOptions: [{ value: "large", text: "Large" }],
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> }).safe_table;
+    const externalHandle = rows.find(([, , facts]) => facts?.startsWith("External variant"))?.[0];
+    const sizeHandle = rows.find(([, , facts]) => facts?.startsWith("Size"))?.[0];
+
+    const result = await formSelectMany(started.session_id, {
+      [externalHandle!]: "Blue",
+      [sizeHandle!]: "Large",
+    });
+
+    expect(h.selected).toEqual([{ selector: "#size", matcher: "Large" }]);
+    expect(result.fields).toEqual([
+      expect.objectContaining({ status: "failed", reason: expect.stringContaining("domain-scope") }),
+      expect.objectContaining({ status: "selected", selected_option: "Large" }),
     ]);
   });
 });

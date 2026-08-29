@@ -3,6 +3,7 @@ import type { InteractiveElement } from "./browser.js";
 import {
   findCredentialTokens,
   findOtpCredential,
+  isStandaloneOtpCredential,
   looksLikeCredentialValue,
 } from "./credential-shape.js";
 
@@ -215,6 +216,7 @@ export function safeDescriptionV2(value: string | null | undefined): string | un
     CARD_SECURITY_VALUE_RE.test(normalized) ||
     HIGH_ENTROPY_TOKEN_RE.test(normalized) ||
     findOtpCredential(normalized) !== null ||
+    isStandaloneOtpCredential(normalized) ||
     containsCredentialShape(normalized)
   ) {
     return undefined;
@@ -428,19 +430,28 @@ export function safeStageV2(url: string, elements: readonly InteractiveElement[]
   const routeStage = checkoutStageFromUrlV2(url);
   if (routeStage !== null) return routeStage;
   if (elements.some((el) => intentOf(el) === "add_to_cart")) return "browse";
-  const hasAuthAction = elements.some(
-    (el) =>
-      roleOf(el) === "button" &&
-      (intentOf(el) === "login" || intentOf(el) === "signup"),
-  );
-  const hasAuthField = elements.some((el) => {
+  const authFields = elements.filter((el) => {
     const role = roleOf(el);
     if (role !== "textbox" && role !== "select") return false;
     const field = fieldOf(el);
-    return field === "email" || field === "username";
+    return field === "email" || field === "username" || field === "password";
   });
-  const hasPasswordField = elements.some((el) => fieldOf(el) === "password");
-  if (hasPasswordField || (hasAuthAction && hasAuthField)) return "auth";
+  const hasPasswordField = authFields.some((el) => fieldOf(el) === "password");
+  const hasScopedAuthForm = elements.some((el) => {
+    if (
+      roleOf(el) !== "button" ||
+      (intentOf(el) !== "login" && intentOf(el) !== "signup")
+    ) {
+      return false;
+    }
+    const container = el.container?.trim();
+    return (
+      container !== undefined &&
+      container.length > 0 &&
+      authFields.some((field) => field.container?.trim() === container)
+    );
+  });
+  if (hasPasswordField || hasScopedAuthForm) return "auth";
   const checkoutFields = new Set<SafeFieldV2>([
     "address",
     "city",

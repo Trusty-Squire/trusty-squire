@@ -336,6 +336,7 @@ const startSchema = z.object({
 });
 
 const OBSERVE_DELTA_CONTRACT =
+  "The following observation rules are V1-only (TRUSTY_SQUIRE_OBSERVE_V2=off or shadow). " +
   "In V1 compact observations, elements are carried in `el_table`: a TAB-delimited table whose FIRST line is the " +
   "header (tab-joined column names, a subset of ref,label,tag,role,type,value_len,checked,href,testId," +
   "topmost,occluded_by, always starting ref,label,tag) and each following line is ONE element (tab-joined " +
@@ -362,8 +363,14 @@ const OBSERVE_DELTA_CONTRACT =
 
 const COMPACT_V2_CONTRACT =
   "When format is `compact-v2`, use its sealed map: session_id is the continuation handle; `stage` is a finite enum; " +
-  "semantic carries the screened title and primary visible heading; safe_table contains [ref,role,short_label?] action rows, where role is " +
-  "b=button,l=link,t=textbox,s=select,c=checkbox,r=radio,tb=tab,m=menuitem,f=file. Short labels are included for viewport-prioritized controls; " +
+  "semantic carries the screened title and primary visible heading; safe_table rows use [ref,role,facts?], where role is " +
+  "b=button,l=link,t=textbox,s=select,c=checkbox,r=radio,tb=tab,m=menuitem,f=file. facts is a pipe-delimited string: " +
+  "an optional first unkeyed segment is the screened short label, followed by any present s=<state bitset>, a=<action>, " +
+  "f=<field>, q=<choice position>/<choice total>, and x=<frame> segments. Fact-only rows begin with a keyed segment. " +
+  "State bitset codes are c=checked,u=unchecked,d=disabled,r=required; frame codes are x=s for a same-origin child " +
+  "and x=x for a cross-origin child, while an omitted x means the main frame. Actions are search,close,next,previous,submit," +
+  "continue,login,signup,add_to_cart,view_cart,checkout,payment; fields are email,password,username,name,phone,search,address," +
+  "city,region,postal,country,date,quantity,promo,payment. Short labels are included for viewport-prioritized controls; " +
   "card/secret-shaped text and field values are never emitted. For a named product/control from the task, " +
   "call operate_observe_query with those task words; it returns matching actionable refs without revealing " +
   "page labels, values, snapshots, or raw DOM. Use overflow.next_cursor to page. `detail:full` does not bypass this seal while V2 is enabled; " +
@@ -422,27 +429,21 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
 
 const observeSchema = z.object({
   session_id: z.string().min(1),
-  // Payload verbosity. Default "compact" (stable-ref element/text deltas plus a
-  // complete snapshot pointer). Pass "full" for the legacy
-  // screen+accessibility+full-field payload on a genuinely ambiguous step.
+  // Payload verbosity within the selected observation mode. In V2 both values
+  // remain sealed; in V1, full requests the legacy expanded payload.
   detail: z.enum(["compact", "full"]).optional(),
 });
 
 export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
   name: "operate_observe",
   description:
-    "Re-read the current page of an operate session. DEFAULT is a COMPACT " +
-    "payload whose elements ride in `el_table` (a tab-delimited table; each row's " +
-    "stable `ref` is the operate_act.target) with compact label/role/href/value_len " +
-    "columns and `frame_origin` on child-frame controls; ordinary same- and " +
-    "cross-origin frames are included, while known captcha challenge frames stay " +
-    "behind the dedicated captcha flow. Path is retained only in snapshot_file, " +
-    "and redundant screen/accessibility trees are omitted. " +
+    "Re-read the current page of an operate session. The default compact-v2 mode returns the sealed " +
+    "safe_table action map; `detail:\"full\"` remains sealed and does not restore legacy fields. " +
     COMPACT_V2_CONTRACT +
+    "Only explicitly selected V1 modes use el_table, reusable stable refs, locator fallbacks, snapshot_file, " +
+    "or the legacy expanded elements payload. " +
     OBSERVE_DELTA_CONTRACT +
-    "Pass " +
-    'detail:"full" for the legacy screen+accessibility+full-field payload on a ' +
-    "genuinely ambiguous step.",
+    'In V1 only, pass detail:"full" for the legacy screen+accessibility+full-field payload on a genuinely ambiguous step.',
   inputSchema: observeSchema,
   jsonInputSchema: {
     type: "object",

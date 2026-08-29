@@ -30,6 +30,10 @@ export function findOtpCredential(value: string): string | null {
   return match?.[1] ?? match?.[2] ?? null;
 }
 
+export function isStandaloneOtpCredential(value: string): boolean {
+  return /^\d{4,8}$/.test(value.trim());
+}
+
 // A real credential never looks like a code identifier. X's anti-bot tombstone
 // ("JavaScript is not available…") leaked `loader.tweetUnavailableTombstoneHandler`
 // (a JS function name) into the extractor, which wrote it to the vault as a key
