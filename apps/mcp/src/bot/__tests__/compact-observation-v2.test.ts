@@ -126,6 +126,7 @@ describe("compact observation v2", () => {
   it("screens retained frame origins through the credential boundary", () => {
     expect(safeOriginV2("https://payments.example.com")).toBe("https://payments.example.com");
     expect(safeOriginV2("https://api123456789012345678901234.attacker.test")).toBeNull();
+    expect(safeOriginV2("https://4111-1111-1111-1111.attacker.test")).toBeNull();
     const [sealed] = sealRetainedInteractiveElementsV2([
       element({ frameOrigin: "https://api123456789012345678901234.attacker.test" }),
     ]);
@@ -365,6 +366,11 @@ describe("compact observation v2", () => {
     expect(controlMatchesPrivateQueryV2(basic, "Acme Pro")).toBe(false);
     expect(controlMatchesPrivateQueryV2(pro, "Acme Pro")).toBe(true);
     expect(controlMatchesPrivateQueryV2(pro, "Acme-Pro")).toBe(true);
+
+    const iphone15 = element({ visibleText: "Buy iPhone 15 Pro" });
+    const iphone16 = element({ visibleText: "Buy iPhone 16 Pro" });
+    expect(controlMatchesPrivateQueryV2(iphone15, "iPhone 16 Pro")).toBe(false);
+    expect(controlMatchesPrivateQueryV2(iphone16, "iPhone 16 Pro")).toBe(true);
   });
 
   it("classifies password-masked card security controls as payment fields", () => {
@@ -426,6 +432,25 @@ describe("compact observation v2", () => {
       ariaLabel: "Card verification number",
     });
     expect(safeStageV2("https://merchant.invalid/order", [cardVerification])).toBe("checkout");
+
+    for (const label of ["CVN", "CID"]) {
+      const verificationCode = element({
+        tag: "input",
+        type: "password",
+        role: "textbox",
+        ariaLabel: label,
+      });
+      const contextual = buildSafeControlsV2({
+        elements: [verificationCode],
+        legacyRefs: new Map([[verificationCode, `@e:${label.toLowerCase()}`]]),
+        generation: 1,
+        pageOrigin: "https://merchant.invalid",
+        pageUrl: "https://merchant.invalid/checkout",
+      });
+      expect(contextual.rows).toEqual([expect.objectContaining({ field: "payment" })]);
+      expect(safeStageV2("https://merchant.invalid/checkout", [verificationCode])).toBe("checkout");
+      expect(safeStageV2("https://merchant.invalid/login", [verificationCode])).toBe("auth");
+    }
   });
 
   it("reduces completion and checkout signals to a finite page-stage enum", () => {

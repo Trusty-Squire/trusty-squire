@@ -412,6 +412,7 @@ function safeHostnameV2(value: string): boolean {
   if (
     hostname.length === 0 ||
     hostname.length > 253 ||
+    hasPanLikeDigits(hostname) ||
     findCredentialTokens(hostname).length > 0 ||
     containsCredentialShape(hostname)
   ) {
@@ -706,9 +707,10 @@ function controlDescription(el: InteractiveElement): string | undefined {
 function privateQueryTokenV2(value: string): string | null {
   const normalized = value.normalize("NFKC").trim().toLowerCase();
   if (
-    normalized.length < 2 ||
+    normalized.length < 1 ||
     normalized.length > 48 ||
-    !/^[\p{L}\p{M}][\p{L}\p{M}\p{N}]{1,47}$/u.test(normalized) ||
+    !/^[\p{L}\p{M}\p{N}]{1,48}$/u.test(normalized) ||
+    (/^\p{N}+$/u.test(normalized) && normalized.length > 4) ||
     hasPanLikeDigits(normalized) ||
     EMAIL_VALUE_RE.test(normalized) ||
     SECRET_ASSIGNMENT_RE.test(normalized) ||
@@ -726,7 +728,7 @@ function privateQueryTokenV2(value: string): string | null {
 function privateQueryTermsV2(value: string): string[] | null {
   const normalized = value.normalize("NFKC").trim().toLowerCase();
   if (
-    normalized.length < 2 ||
+    normalized.length < 1 ||
     normalized.length > 96 ||
     hasPanLikeDigits(normalized) ||
     EMAIL_VALUE_RE.test(normalized) ||
@@ -739,9 +741,9 @@ function privateQueryTermsV2(value: string): string[] | null {
   ) {
     return null;
   }
-  const rawTerms = normalized.match(/[\p{L}\p{M}][\p{L}\p{M}\p{N}]{1,47}/gu);
+  const rawTerms = normalized.match(/[\p{L}\p{M}\p{N}]{1,48}/gu);
   if (rawTerms === null || rawTerms.length === 0 || rawTerms.length > 6) return null;
-  const separators = normalized.replace(/[\p{L}\p{M}][\p{L}\p{M}\p{N}]{1,47}/gu, "");
+  const separators = normalized.replace(/[\p{L}\p{M}\p{N}]{1,48}/gu, "");
   if (!/^[\s&'’+,.!?():/_|-]*$/u.test(separators)) return null;
   const terms = rawTerms.map(privateQueryTokenV2);
   return terms.every((term): term is string => term !== null) ? [...new Set(terms)] : null;
@@ -765,7 +767,7 @@ export function controlMatchesPrivateQueryV2(el: InteractiveElement, query: stri
     ) {
       return false;
     }
-    const tokens = candidate.normalize("NFKC").match(/[\p{L}\p{M}][\p{L}\p{M}\p{N}]{1,47}/gu);
+    const tokens = candidate.normalize("NFKC").match(/[\p{L}\p{M}\p{N}]{1,48}/gu);
     if (tokens === null) return false;
     const safeTokens = new Set(
       tokens.map(privateQueryTokenV2).filter((token): token is string => token !== null),
@@ -832,7 +834,10 @@ function fieldOf(el: InteractiveElement, paymentContext = false): SafeFieldV2 | 
     tokens.some((token) => autocompleteTokens.has(token));
   const type = (el.type ?? "").toLowerCase();
   const text = candidateText(el).toLowerCase();
-  if (hasExplicitPaymentFieldSignal(el) || (paymentContext && /\bsecurity code\b/.test(text))) {
+  if (
+    hasExplicitPaymentFieldSignal(el) ||
+    (paymentContext && type === "password" && /\b(?:security code|cvn|cid)\b/.test(text))
+  ) {
     return "payment";
   }
   if (type === "password" || hasAutocomplete("current-password", "new-password")) {

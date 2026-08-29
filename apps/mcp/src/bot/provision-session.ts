@@ -1666,6 +1666,7 @@ export class TargetStaleError extends Error {
 
 class CompactV2ReobserveRequiredError extends Error {}
 class ProvisionTargetNotAllowedError extends Error {}
+class ProvisionTargetMissingError extends Error {}
 class CompactV2ActionFailureError extends Error {}
 
 function replacementCandidates(elements: readonly InteractiveElement[]): Record<string, string[]> {
@@ -3776,7 +3777,7 @@ async function performCartAdd(session: Session, record: CartAddRecord): Promise<
       break;
     } catch (error) {
       addError = error;
-      if (!(error instanceof Error) || !error.message.startsWith("no element matched locator")) {
+      if (!(error instanceof ProvisionTargetMissingError)) {
         throw error;
       }
     }
@@ -5651,7 +5652,11 @@ async function actInternally(
       compactV2Authorization,
     );
   } catch (error) {
-    if (session?.compactV2Active === true && !(error instanceof ManualCardEntryBlockedError)) {
+    if (
+      session?.compactV2Active === true &&
+      !(error instanceof ManualCardEntryBlockedError) &&
+      !(error instanceof ProvisionTargetMissingError)
+    ) {
       throw new CompactV2ActionFailureError(compactV2ActionFailureReason(error, action.kind));
     }
     throw error;
@@ -5980,7 +5985,7 @@ async function executeAct(
           );
           if (!resolved.ok) {
             if (resolved.reason === "none") {
-              throw new Error(
+              throw new ProvisionTargetMissingError(
                 `no element matched locator "${action.target}". If the control is visible, ` +
                   `try a shorter/exact text= label or a css=<selector>.`,
               );

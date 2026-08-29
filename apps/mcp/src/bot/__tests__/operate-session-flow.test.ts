@@ -150,6 +150,7 @@ const h = vi.hoisted(() => ({
         } | null;
       }
     | { ok: false; reason: "none" | "ambiguous"; candidates: string[] },
+  locatorResolveMissValues: [] as string[],
   locatorClickCalls: 0,
   locatorTypeCalls: [] as Array<{ text: string; sealed: boolean }>,
   capturedSealedFieldKeys: [] as string[][],
@@ -562,7 +563,7 @@ vi.mock("../browser.js", () => ({
     }
     async resolvePageTarget(
       _mode: string,
-      _value: string,
+      value: string,
       intent = "click",
     ): Promise<
       | {
@@ -581,6 +582,9 @@ vi.mock("../browser.js", () => ({
       | { ok: false; reason: "none" | "ambiguous"; candidates: string[] }
     > {
       h.locatorResolveIntents.push(intent);
+      if (h.locatorResolveMissValues.includes(value)) {
+        return { ok: false, reason: "none", candidates: [] };
+      }
       if (h.locatorResolve.ok) {
         return {
           ok: true,
@@ -1019,6 +1023,7 @@ beforeEach(() => {
     text: "Control",
     safetySignals: { billingObject: false, accountSetup: false },
   };
+  h.locatorResolveMissValues = [];
   h.locatorClickCalls = 0;
   h.locatorTypeCalls = [];
   h.capturedSealedFieldKeys = [];
@@ -3538,7 +3543,7 @@ describe("Compact V2 action-map boundary", () => {
 
   it("screens host metadata before V2 audit and replay retention", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
-    const secretHost = "api123456789012345678901234.attacker.test";
+    const secretHost = "4111-1111-1111-1111.attacker.test";
     const writes: string[] = [];
     const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
       writes.push(String(chunk));
@@ -3776,6 +3781,28 @@ describe("Compact V2 action-map boundary", () => {
     expect(result.safe_table).toHaveLength(1);
     expect(JSON.stringify(result)).not.toContain("Acme");
     expect(JSON.stringify(result)).not.toContain("Pro");
+  });
+
+  it("uses numeric private query terms to distinguish sealed controls", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Buy iPhone 15 Pro", selector: "#15" }),
+      elem({
+        index: 1,
+        tag: "button",
+        role: "button",
+        visibleText: "Buy iPhone 16 Pro",
+        selector: "#16",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/products",
+    });
+
+    const result = await observeQuery(started.session_id, "iPhone 16 Pro");
+
+    expect(result.safe_table).toHaveLength(1);
+    expect(JSON.stringify(result)).not.toContain("iPhone");
   });
 
   it("reissues handles when a private live binding changes", async () => {
@@ -8605,6 +8632,35 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
 });
 
 describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => {
+  it("tries the next code-owned cart locator after a V2 target miss", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.currentUrl = "https://shop.example.com/cart";
+    h.visibleText = "Cart Quantity: 0 Total 968円";
+    h.elements = [elem({ name: "quantity", labelText: "Quantity", selector: "#qty", value: "0" })];
+    h.checkoutSummary = {
+      merchant: "Synthetic Shop",
+      checkout_origin: "https://shop.example.com",
+      amount_cents: 968,
+      currency: "JPY",
+    };
+    h.locatorResolveMissValues = ["Add to Cart"];
+    h.cartLineItemsAfterClick = [
+      {
+        title: "Tiara",
+        quantity: 1,
+        product_identities: ["sku:tiara"],
+        option_signatures: ["size=M"],
+      },
+    ];
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    await expect(
+      cartAdd(started.session_id, "sku:tiara", "size=M", "cart-add-bag-fallback"),
+    ).resolves.toMatchObject({ status: "added", cart_delta: "+1" });
+    expect(h.locatorResolveIntents).toEqual(["click", "click"]);
+    expect(h.locatorClickCalls).toBe(1);
+  });
+
   it("returns legible post-add cart state and suppresses a retry for the same line", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.currentUrl = "https://shop.example.com/cart";
