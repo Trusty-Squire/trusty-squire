@@ -25,6 +25,7 @@ import {
   finishProvisionSessionWithPreparation,
   observedHostsForSession,
   currentProvisionUrl,
+  isCompactV2ProvisionSession,
   stashSecretSlot,
   readSecretSlotValue,
   getSessionUserEmail,
@@ -40,6 +41,7 @@ import {
   type ExtractResult,
   manualCardEntryBlockReason,
 } from "../bot/provision-session.js";
+import { safeDescriptionV2 } from "../bot/compact-observation-v2.js";
 import { signSkillForPublish } from "../skill-cli/signing.js";
 import {
   readRecipe,
@@ -1115,7 +1117,19 @@ async function handleFormSelectMany(args: FormSelectManyArgs) {
   return await formSelectMany(args.session_id, args.selections);
 }
 
+function compactV2ThickResult<T extends object>(compactV2: boolean, result: T): T {
+  if (!compactV2) return result;
+  const sealed: Record<string, unknown> = { ...result };
+  if ("url" in sealed) sealed.url = "";
+  if ("credentials" in sealed) sealed.credentials = {};
+  if (typeof sealed.blocked_reason === "string") {
+    sealed.blocked_reason = safeDescriptionV2(sealed.blocked_reason) ?? "credential_unavailable";
+  }
+  return sealed as T;
+}
+
 async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
+  const compactV2 = isCompactV2ProvisionSession(args.session_id);
   const extracted = await extractCredentials(args.session_id);
 
   // Sealed transfer: capture the primary secret into a session-local slot and
@@ -1141,7 +1155,7 @@ async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
       wantKey !== null ? candidates.find(([k]) => norm(k).includes(wantKey)) : undefined;
     const full = (matched ?? candidates[0])?.[1];
     if (typeof full !== "string" || full.length === 0) {
-      return {
+      return compactV2ThickResult(compactV2, {
         session_id: extracted.session_id,
         url: extracted.url,
         candidate_count: extracted.candidate_count,
@@ -1150,11 +1164,11 @@ async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
         blocked_reason:
           "the secret is still masked/hidden — reveal it first (click the " +
           'show/reveal/copy control near the key), then operate_act { kind: "extract" } again',
-      };
+      });
     }
     const handle = stashSecretSlot(args.session_id, args.into_slot, full);
     // Strip raw credential VALUES from the response — host gets the handle only.
-    return {
+    return compactV2ThickResult(compactV2, {
       session_id: extracted.session_id,
       url: extracted.url,
       candidate_count: extracted.candidate_count,
@@ -1163,11 +1177,11 @@ async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
       ...(extracted.blocked_reason !== undefined
         ? { blocked_reason: extracted.blocked_reason }
         : {}),
-    };
+    });
   }
 
   if (args.store === undefined || Object.keys(extracted.credentials).length === 0) {
-    return extracted;
+    return compactV2ThickResult(compactV2, extracted);
   }
   if (api === null) {
     throw new Error(
@@ -1175,7 +1189,7 @@ async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
     );
   }
   const stored = await persistExtracted(args.session_id, extracted.credentials, args.store, api);
-  return storedExtractResult(extracted, stored);
+  return compactV2ThickResult(compactV2, storedExtractResult(extracted, stored));
 }
 
 async function handleCaptcha(args: CaptchaArgs) {
@@ -1696,6 +1710,7 @@ async function handleFinishOutcome(
   outcome: Exclude<FinishOutcome, { kind: "none" }>,
   api: ApiClient,
 ) {
+  const compactV2 = isCompactV2ProvisionSession(sessionId);
   let successfulOutcome = false;
   const { finish, prepared } = await finishProvisionSessionWithPreparation(
     sessionId,
@@ -1743,7 +1758,7 @@ async function handleFinishOutcome(
     },
     () => successfulOutcome,
   );
-  return { ...prepared, url: finish.url };
+  return compactV2ThickResult(compactV2, { ...prepared, url: finish.url });
 }
 
 // Not part of the default MCP tool surface (dropped from OPERATE_TOOLS). Kept
@@ -1871,7 +1886,8 @@ export const provisionFinishTool: Tool<z.infer<typeof finishSchema>> = {
   async handler(args, api) {
     const outcome = args.outcome ?? { kind: "none" as const };
     if (outcome.kind === "none") {
-      return await finishProvisionSession(args.session_id);
+      const compactV2 = isCompactV2ProvisionSession(args.session_id);
+      return compactV2ThickResult(compactV2, await finishProvisionSession(args.session_id));
     }
     if (outcome.kind === "credentials" && api === null) {
       throw new Error("operate_finish credentials requires an active Trusty Squire session");

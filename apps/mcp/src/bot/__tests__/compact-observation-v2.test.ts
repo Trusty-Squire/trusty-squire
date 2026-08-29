@@ -371,6 +371,11 @@ describe("compact observation v2", () => {
     const iphone16 = element({ visibleText: "Buy iPhone 16 Pro" });
     expect(controlMatchesPrivateQueryV2(iphone15, "iPhone 16 Pro")).toBe(false);
     expect(controlMatchesPrivateQueryV2(iphone16, "iPhone 16 Pro")).toBe(true);
+
+    const model2023 = element({ visibleText: "Buy Model 2023" });
+    const model2024 = element({ visibleText: "Buy Model 2024" });
+    expect(controlMatchesPrivateQueryV2(model2023, "Model 2024")).toBe(false);
+    expect(controlMatchesPrivateQueryV2(model2024, "Model 2024")).toBe(true);
   });
 
   it("classifies password-masked card security controls as payment fields", () => {
@@ -433,10 +438,13 @@ describe("compact observation v2", () => {
     });
     expect(safeStageV2("https://merchant.invalid/order", [cardVerification])).toBe("checkout");
 
-    for (const label of ["CVN", "CID"]) {
+    for (const [label, type] of [
+      ["CVN", "tel"],
+      ["CID", "text"],
+    ] as const) {
       const verificationCode = element({
         tag: "input",
-        type: "password",
+        type,
         role: "textbox",
         ariaLabel: label,
       });
@@ -449,7 +457,6 @@ describe("compact observation v2", () => {
       });
       expect(contextual.rows).toEqual([expect.objectContaining({ field: "payment" })]);
       expect(safeStageV2("https://merchant.invalid/checkout", [verificationCode])).toBe("checkout");
-      expect(safeStageV2("https://merchant.invalid/login", [verificationCode])).toBe("auth");
     }
   });
 

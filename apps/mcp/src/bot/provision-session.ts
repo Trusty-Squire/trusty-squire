@@ -1254,6 +1254,34 @@ export async function withPaymentSessionCall<T>(
 
 const settle = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+function compactV2AuditValue(key: string, value: unknown): unknown {
+  if ((key === "url" || key === "service_url") && typeof value === "string") {
+    return compactV2AuditUrl(value);
+  }
+  if (
+    (key === "host" || key === "url_host" || key === "frame_origin" || key === "recipe_domain") &&
+    typeof value === "string"
+  ) {
+    return compactV2AuditHost(value);
+  }
+  if (key === "allowed_hosts" && Array.isArray(value)) {
+    return value.map((host) =>
+      typeof host === "string" ? compactV2AuditHost(host) : "<sealed-host>",
+    );
+  }
+  if (typeof value === "string") return safeDescriptionV2(value) ?? "<sealed>";
+  if (Array.isArray(value)) return value.map((item) => compactV2AuditValue("", item));
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([nestedKey, nestedValue]) => [
+        nestedKey,
+        compactV2AuditValue(nestedKey, nestedValue),
+      ]),
+    );
+  }
+  return value;
+}
+
 // Audit trail (security posture): every session action emits one structured
 // stderr line the host's MCP log captures. The `provision-audit` marker makes
 // the trail greppable. No credential VALUES are ever logged — only the action
@@ -1263,29 +1291,7 @@ function audit(sessionId: string, event: string, detail: Record<string, unknown>
   const sealedDetail =
     session?.compactV2Mode === "on"
       ? Object.fromEntries(
-          Object.entries(detail).map(([key, value]) => {
-            if ((key === "url" || key === "service_url") && typeof value === "string") {
-              return [key, compactV2AuditUrl(value)];
-            }
-            if (
-              (key === "host" ||
-                key === "url_host" ||
-                key === "frame_origin" ||
-                key === "recipe_domain") &&
-              typeof value === "string"
-            ) {
-              return [key, compactV2AuditHost(value)];
-            }
-            if (key === "allowed_hosts" && Array.isArray(value)) {
-              return [
-                key,
-                value.map((host) =>
-                  typeof host === "string" ? compactV2AuditHost(host) : "<sealed-host>",
-                ),
-              ];
-            }
-            return [key, value];
-          }),
+          Object.entries(detail).map(([key, value]) => [key, compactV2AuditValue(key, value)]),
         )
       : detail;
   process.stderr.write(
@@ -2050,6 +2056,17 @@ function resolveAuthorizedCompactV2Target(
     pageOrigin,
     pageUrl: session.browser.currentUrl(),
   });
+  const index = session.compactV2Index;
+  if (
+    index === null ||
+    safe.rows.length !== index.rows.length ||
+    safe.byRef.size !== session.compactV2Refs.size ||
+    safe.rows.some((row, rowIndex) => !sameCompactV2Control(row, index.rows[rowIndex]!)) ||
+    [...safe.byRef].some(([ref, legacy]) => session.compactV2Refs.get(ref) !== legacy)
+  ) {
+    invalidateCompactV2Snapshot(session);
+    throwCompactV2ReobserveRequired();
+  }
   let liveRow: SafeControlV2 | undefined;
   for (const [ref, legacyRef] of safe.byRef) {
     if (legacyRef === authorization.legacyRef) {
@@ -3307,6 +3324,10 @@ export function currentProvisionUrl(sessionId: string): string {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   return session.browser.currentUrl();
+}
+
+export function isCompactV2ProvisionSession(sessionId: string): boolean {
+  return sessionForCall(sessionId)?.compactV2Mode === "on";
 }
 
 function activeProvisionSession(): Session {

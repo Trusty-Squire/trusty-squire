@@ -86,6 +86,7 @@ const h = vi.hoisted(() => ({
   visibleText: "",
   visibleTextGate: null as Promise<void> | null,
   extractVisibleTextCalls: 0,
+  openFirstMailResult: false,
   // fill_card cart-total-carry-forward (Session.lastCartCheckout): null means
   // "no total on this page" (readCheckoutSummary rejects, the common case).
   checkoutSummary: null as {
@@ -308,7 +309,7 @@ vi.mock("../browser.js", () => ({
       return h.cartLineItems.map((line) => ({ ...line, details: line.details ?? line.title }));
     }
     async openFirstMailResult(): Promise<boolean> {
-      return false;
+      return h.openFirstMailResult;
     }
     async waitForInteractiveDom(): Promise<void> {}
     async waitForCaptchaChallengeToSettle(): Promise<boolean> {
@@ -998,6 +999,7 @@ beforeEach(() => {
   h.visibleText = "";
   h.visibleTextGate = null;
   h.extractVisibleTextCalls = 0;
+  h.openFirstMailResult = false;
   h.checkoutSummary = null;
   h.cartLineItems = [];
   h.cartLineItemsAfterClick = null;
@@ -3783,26 +3785,50 @@ describe("Compact V2 action-map boundary", () => {
     expect(JSON.stringify(result)).not.toContain("Pro");
   });
 
-  it("uses numeric private query terms to distinguish sealed controls", async () => {
+  it("uses four-digit private query terms to distinguish sealed controls", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
-      elem({ tag: "button", role: "button", visibleText: "Buy iPhone 15 Pro", selector: "#15" }),
+      elem({ tag: "button", role: "button", visibleText: "Buy Model 2023", selector: "#2023" }),
       elem({
         index: 1,
         tag: "button",
         role: "button",
-        visibleText: "Buy iPhone 16 Pro",
-        selector: "#16",
+        visibleText: "Buy Model 2024",
+        selector: "#2024",
       }),
     ];
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/products",
     });
 
-    const result = await observeQuery(started.session_id, "iPhone 16 Pro");
+    const result = await observeQuery(started.session_id, "Model 2024");
 
     expect(result.safe_table).toHaveLength(1);
-    expect(JSON.stringify(result)).not.toContain("iPhone");
+    expect(JSON.stringify(result)).not.toContain("Model");
+  });
+
+  it("rejects a handle when the complete live action map remints its index", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const email = elem({
+      tag: "input",
+      type: "email",
+      role: "textbox",
+      labelText: "Email",
+      selector: "#email",
+    });
+    h.elements = [email];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    const handle = (started as unknown as { safe_table: Array<[string]> }).safe_table[0]![0];
+
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+      email,
+    ];
+
+    await expect(
+      act(started.session_id, { kind: "type", target: handle, text: "buyer@example.com" }),
+    ).rejects.toThrow("reobserve_required");
+    expect(h.typed).toEqual([]);
   });
 
   it("reissues handles when a private live binding changes", async () => {
@@ -4976,6 +5002,32 @@ describe("operate_extract — vault-store response", () => {
       stored_credential: { reference: "vault://acct/folded-extract" },
     });
     expect(JSON.stringify(result)).not.toContain(rawSecret);
+  });
+
+  it("seals raw Compact V2 extraction results at the public tool boundary", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const rawSecret = "sk-live-public-extract-secret-123456789";
+    const urlToken = "private-url-token-123456789";
+    h.visibleText = `API key ${rawSecret}`;
+    const started = await startProvisionSession({
+      serviceUrl: `https://app.example.com/api-keys?token=${urlToken}`,
+    });
+
+    const result = (await provisionActTool.handler(
+      provisionActTool.inputSchema.parse({
+        session_id: started.session_id,
+        kind: "extract",
+      }),
+      null,
+    )) as Record<string, unknown>;
+
+    expect(result).toMatchObject({
+      session_id: started.session_id,
+      url: "",
+      credentials: {},
+    });
+    expect(JSON.stringify(result)).not.toContain(rawSecret);
+    expect(JSON.stringify(result)).not.toContain(urlToken);
   });
 });
 
@@ -6318,6 +6370,32 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     // Remembered for the session: a later await needs no re-grant.
     expect((await awaitVerification(sid, {})).found).toBe(true);
   });
+
+  it("seals sender text before writing a Compact V2 verification audit", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const privateSender = "private.sender@example.com";
+    const obs = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      consentInboxRead: true,
+    });
+    h.visibleText = `From: Sender <${privateSender}>\nYour verification code is 481920.`;
+    h.openFirstMailResult = true;
+    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    try {
+      const result = await awaitVerification(obs.session_id, {});
+      const auditLine = stderrWrite.mock.calls
+        .map(([line]) => String(line))
+        .find((line) => line.includes('"event":"await_verification"'));
+
+      expect(result.source_from).toBe(privateSender);
+      expect(auditLine).toBeDefined();
+      expect(auditLine).not.toContain(privateSender);
+      expect(auditLine).toContain('"source_from":"<sealed>"');
+    } finally {
+      stderrWrite.mockRestore();
+    }
+  });
 });
 
 describe("operate session — scroll (T5 fix: reveal below-the-fold controls)", () => {
@@ -6576,6 +6654,26 @@ describe("operate_finish lifecycle consolidation", () => {
     expect(unconfirmed).toMatchObject({ kind: "result", summary: "Task stopped before success" });
     expect(h.storageStateWrites).toEqual([]);
     expect(h.storageStates.get(canonical)).toBe(prior);
+  });
+
+  it("seals the current URL from Compact V2 finish results", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const urlToken = "private-finish-token-123456789";
+    const started = await startProvisionSession({
+      serviceUrl: `https://app.example.com/done?token=${urlToken}`,
+    });
+
+    const result = (await provisionFinishTool.handler(
+      { session_id: started.session_id },
+      null,
+    )) as Record<string, unknown>;
+
+    expect(result).toMatchObject({
+      session_id: started.session_id,
+      url: "",
+      closed: true,
+    });
+    expect(JSON.stringify(result)).not.toContain(urlToken);
   });
 
   it("returns the legacy result shape from outcome=result, including scalar data coercion", async () => {

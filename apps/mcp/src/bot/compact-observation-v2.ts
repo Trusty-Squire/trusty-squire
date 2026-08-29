@@ -710,15 +710,7 @@ function privateQueryTokenV2(value: string): string | null {
     normalized.length < 1 ||
     normalized.length > 48 ||
     !/^[\p{L}\p{M}\p{N}]{1,48}$/u.test(normalized) ||
-    (/^\p{N}+$/u.test(normalized) && normalized.length > 4) ||
-    hasPanLikeDigits(normalized) ||
-    EMAIL_VALUE_RE.test(normalized) ||
-    SECRET_ASSIGNMENT_RE.test(normalized) ||
-    CARD_SECURITY_VALUE_RE.test(normalized) ||
-    HIGH_ENTROPY_TOKEN_RE.test(normalized) ||
-    findOtpCredential(normalized) !== null ||
-    isStandaloneOtpCredential(normalized) ||
-    containsCredentialShape(normalized)
+    (/^\p{N}+$/u.test(normalized) && normalized.length > 4)
   ) {
     return null;
   }
@@ -836,7 +828,7 @@ function fieldOf(el: InteractiveElement, paymentContext = false): SafeFieldV2 | 
   const text = candidateText(el).toLowerCase();
   if (
     hasExplicitPaymentFieldSignal(el) ||
-    (paymentContext && type === "password" && /\b(?:security code|cvn|cid)\b/.test(text))
+    (paymentContext && /\b(?:security code|cvn|cid)\b/.test(text))
   ) {
     return "payment";
   }
