@@ -181,7 +181,7 @@ describe("operator session storage state", () => {
     });
   });
 
-  it("atomically clears the Google marker when a capture replaces marker-bearing identity", async () => {
+  it("refuses to replace marker-bearing Google identity with a cookie-less capture", async () => {
     const canonical = mkdtempSync(join(tmpdir(), "ts-session-state-marker-clear-"));
     roots.push(canonical);
     const marker = join(canonical, "logged-in-providers.json");
@@ -204,7 +204,7 @@ describe("operator session storage state", () => {
       },
       undefined,
     );
-    writeFileSync(marker, JSON.stringify(["google", "github"]));
+    writeFileSync(marker, JSON.stringify(["google", "github"]), { mode: 0o600 });
 
     const capturedWithoutGoogle = {
       cookies: [
@@ -223,10 +223,12 @@ describe("operator session storage state", () => {
     };
     await expect(
       writeCanonicalIdentitySnapshot(canonical, capturedWithoutGoogle, undefined),
-    ).resolves.toBe(true);
+    ).resolves.toBe(false);
 
-    await expect(readSessionState(canonical)).resolves.toEqual(capturedWithoutGoogle);
-    expect(JSON.parse(readFileSync(marker, "utf8"))).toEqual(["github"]);
+    await expect(readSessionState(canonical)).resolves.toMatchObject({
+      cookies: [expect.objectContaining({ name: "SID", domain: ".google.com" })],
+    });
+    expect(JSON.parse(readFileSync(marker, "utf8"))).toEqual(["google", "github"]);
     expect(statSync(marker).mode & 0o777).toBe(0o600);
   });
 

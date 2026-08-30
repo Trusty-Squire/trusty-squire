@@ -1,18 +1,17 @@
-// Regression: `mcp login --provider=<p> --force-relogin` must drop the
-// provider's logged-in marker UP FRONT. Otherwise a stale marker from a
-// prior successful login survives a re-login the user abandons or that
-// times out (GitHub's 2FA "verify it's you" never finished), leaving
-// logged-in-providers.json claiming a session whose auth cookie
-// (user_session) no longer exists — the bot then auto-prefers that
-// provider's OAuth path and every signup fails. Observed 2026-06-02.
+// Explicit login must open a fresh provider ceremony without destroying the
+// last portable identity first. The live context clears its provider cookies;
+// the canonical snapshot is replaced only after a completed capture.
 
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type * as GoogleLogin from "../../bot/google-login.js";
-import type * as SessionState from "../../bot/session-state.js";
 import { acquireProfileOperationGuard } from "../../bot/profile.js";
+import {
+  readSessionState,
+  writeCanonicalIdentitySnapshot,
+} from "../../bot/session-state.js";
 
 // vi.hoisted so these are initialized before the hoisted vi.mock factories
 // reference them (and so tsc sees plain Mocks, not spread wrappers).
@@ -23,7 +22,6 @@ const m = vi.hoisted(() => ({
   loggedInProviders: vi.fn(() => [] as string[]),
   clearAllProviderMarkers: vi.fn(),
   clearProviderCookies: vi.fn(async () => true),
-  invalidateCanonicalGoogleIdentity: vi.fn(async () => true),
 }));
 
 // Spread the real module (oauth-providers.ts + agent.ts pull other
@@ -41,14 +39,6 @@ vi.mock("../../bot/login-state.js", () => ({
   clearAllProviderMarkers: m.clearAllProviderMarkers,
   clearProviderCookies: m.clearProviderCookies,
 }));
-
-vi.mock("../../bot/session-state.js", async (importActual) => {
-  const actual = await importActual<typeof SessionState>();
-  return {
-    ...actual,
-    invalidateCanonicalGoogleIdentity: m.invalidateCanonicalGoogleIdentity,
-  };
-});
 
 const { runCli } = await import("../cli.js");
 
@@ -81,17 +71,33 @@ describe("login --force-relogin marker honesty", () => {
     expect(m.markProviderLoggedIn).not.toHaveBeenCalled();
   });
 
-  it("treats every explicit login as a fresh provider login without requiring --force-relogin", async () => {
+  it("treats every explicit login as fresh without deleting the last Google snapshot", async () => {
+    const prior = {
+      cookies: [
+        {
+          name: "SID",
+          value: "prior-portable-google-session",
+          domain: ".google.com",
+          path: "/",
+          expires: -1,
+          httpOnly: true,
+          secure: true,
+          sameSite: "Lax" as const,
+        },
+      ],
+      origins: [],
+    };
+    await writeCanonicalIdentitySnapshot(profileDir, prior, undefined, () => true, ["google"]);
     m.ensureOAuthSession.mockResolvedValue({ status: "timeout" });
     await expect(
       runCli(["login", "--provider=google", `--profile-dir=${profileDir}`]),
     ).rejects.toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(m.clearProviderLoggedIn).not.toHaveBeenCalled();
-    expect(m.invalidateCanonicalGoogleIdentity).toHaveBeenCalledWith(profileDir);
     expect(m.ensureOAuthSession).toHaveBeenCalledWith(
       expect.objectContaining({ provider: "google", profileDir, forceOpen: true }),
     );
+    await expect(readSessionState(profileDir)).resolves.toEqual(prior);
   });
 
   it("prints the package version for an explicit login", async () => {
@@ -103,14 +109,14 @@ describe("login --force-relogin marker honesty", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringMatching(/@trusty-squire\/mcp \d+\.\d+\.\d+/));
   });
 
-  it("invalidates portable Google identity before a forced login can time out", async () => {
+  it("keeps the same fresh-login path when --force-relogin is passed", async () => {
     m.ensureOAuthSession.mockResolvedValue({ status: "timeout" });
     await expect(
       runCli(["login", "--provider=google", "--force-relogin", `--profile-dir=${profileDir}`]),
     ).rejects.toThrow("process.exit");
-
-    expect(m.invalidateCanonicalGoogleIdentity).toHaveBeenCalledWith(profileDir);
-    expect(m.ensureOAuthSession).toHaveBeenCalled();
+    expect(m.ensureOAuthSession).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "google", profileDir, forceOpen: true }),
+    );
   });
 
   it("exits non-zero when another Trusty Squire session owns the browser", async () => {
