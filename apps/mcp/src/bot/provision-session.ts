@@ -70,6 +70,7 @@ import {
   createEphemeralProfile,
   destroyEphemeralProfile,
   hasUsableGoogleIdentity,
+  readCanonicalIdentityState,
   readPendingSessionStates,
   readSessionState,
   removePendingSessionState,
