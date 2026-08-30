@@ -292,7 +292,7 @@ setInterval(() => undefined, 1000);
         return runtime;
       }),
       exit: vi.fn(),
-    } as unknown as Parameters<typeof registerRemoteLoginRigCleanup>[2];
+    } as unknown as NonNullable<Parameters<typeof registerRemoteLoginRigCleanup>[2]>;
     const set = vi.fn();
 
     const remove = registerRemoteLoginRigCleanup(rig, () => undefined, runtime, {
@@ -352,7 +352,7 @@ setInterval(() => undefined, 1000);
         return runtime;
       }),
       exit: vi.fn(),
-    } as unknown as Parameters<typeof registerRemoteLoginRigCleanup>[2];
+    } as unknown as NonNullable<Parameters<typeof registerRemoteLoginRigCleanup>[2]>;
     const set = vi.fn();
 
     registerRemoteLoginRigCleanup(rig, () => undefined, runtime, {

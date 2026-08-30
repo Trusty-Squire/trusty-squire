@@ -8,13 +8,16 @@ CI cannot complete an OAuth login. **Run both login paths once per release**:
       a Google sign-in completes on a machine with a user-visible display.
 - [ ] On a headless Linux host with no user-visible display, `install`,
       `connect`, or `login` prints a reachable noVNC URL; keyboard and pointer
-      input complete sign-in from another device; completion, timeout, error,
-      and SIGHUP each remove the per-login Xvfb, x11vnc, websockify, and owned
-      quick-tunnel processes.
+      input complete sign-in from another device. Record
+      `pgrep -a 'Xvfb|x11vnc|websockify|cloudflared'` before each teardown case;
+      completion, timeout, error, Ctrl-C, SIGTERM, and SIGHUP must each return
+      to that baseline with no per-login helper or owned quick-tunnel process.
 - [ ] With both `TS_LOGIN_PUBLIC_HOSTNAME` and `TS_LOGIN_LOCAL_PORT` set,
       headless login reuses the operator-managed named tunnel while teardown
       removes the per-login display and local listener without stopping that
       external tunnel.
+- [ ] A normal automated `operate_start` session launches Chrome new-headless
+      and starts no Xvfb, x11vnc, websockify, or login tunnel.
 - [ ] Starting a concurrent `connect` or `login` exits non-zero without
       waiting and prints `another Trusty Squire session is already using
       the browser — close it first`.

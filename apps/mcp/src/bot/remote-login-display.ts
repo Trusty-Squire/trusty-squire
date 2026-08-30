@@ -440,15 +440,7 @@ export async function startRemoteLoginDisplay(rig: RemoteLoginRig): Promise<stri
     const authFile = rig.authFile!;
     const xvfb = spawn(
       rig.binaries.xvfb,
-      [
-        "-screen",
-        "0",
-        `${rig.width}x${rig.height}x24`,
-        "-auth",
-        authFile,
-        "-displayfd",
-        "3",
-      ],
+      ["-screen", "0", `${rig.width}x${rig.height}x24`, "-auth", authFile, "-displayfd", "3"],
       {
         stdio: ["ignore", "pipe", "pipe", "pipe"],
         env: process.env,

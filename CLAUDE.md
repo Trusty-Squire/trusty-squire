@@ -161,8 +161,9 @@ silent failures.
      account-bound `agent_session_token` to the local session file.
   3. Runs the one-time OAuth login (the `mcp login` flow folded in —
      Google/GitHub session into the bot's Chrome profile; non-fatal,
-     `--skip-browser` opts out for CI). Interactive login requires a
-     user-visible browser display.
+     `--skip-browser` opts out for CI). The [README install section](README.md#install)
+     owns the supported interactive-login environments; automated operator launch
+     constraints live in [`AGENTS.md`](AGENTS.md#browser-launch-posture).
      Every install is account-bound — there is no anonymous tier.
      Provisioning is free during beta (the signup quota + `402 payment_required`
      paywall were removed). See the 2026-05-18
