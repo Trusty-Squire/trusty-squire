@@ -18,7 +18,7 @@ export interface PendingPaymentApprovalInput {
 export interface PendingPaymentApprovalRecord extends PendingPaymentApprovalInput {
   id: string;
   accountId: string;
-  status: "pending" | "approved" | "expired";
+  status: "pending" | "approved" | "denied" | "expired";
   jws: string | null;
   sealedCard: string | null;
   reviewJws: string | null;
@@ -52,6 +52,7 @@ export interface PendingPaymentApprovalStore {
   create(accountId: string, input: PendingPaymentApprovalInput): Promise<string>;
   getById(id: string): Promise<PendingPaymentApprovalRecord | null>;
   getByIdForAccount(id: string, accountId: string): Promise<PendingPaymentApprovalRecord | null>;
+  deny(id: string, now: Date): Promise<"denied" | "not_pending">;
   bindCardForAccount(
     id: string,
     accountId: string,
@@ -143,6 +144,21 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
   async getById(id: string): Promise<PendingPaymentApprovalRecord | null> {
     const record = this.records.get(id);
     return record === undefined ? null : { ...record };
+  }
+
+  async deny(id: string, now: Date): Promise<"denied" | "not_pending"> {
+    const record = this.records.get(id);
+    if (record === undefined || record.status !== "pending" || record.expiresAt <= now) {
+      return "not_pending";
+    }
+    record.status = "denied";
+    record.jws = null;
+    record.sealedCard = null;
+    record.reviewJws = null;
+    record.reviewSealedCard = null;
+    record.submissionJws = null;
+    record.submissionSealedCard = null;
+    return "denied";
   }
 
   async bindCardForAccount(

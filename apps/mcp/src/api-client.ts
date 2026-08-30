@@ -129,7 +129,7 @@ export interface UsageResponse {
 
 export interface PaymentApproval {
   id: string;
-  status: "pending" | "approved" | "expired";
+  status: "pending" | "approved" | "denied" | "expired";
   merchant: string;
   checkout_origin: string;
   amount_cents: number;

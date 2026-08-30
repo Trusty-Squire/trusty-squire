@@ -41,6 +41,9 @@ export interface Tool<TArgs extends Record<string, unknown> = Record<string, unk
 
 export interface ToolContext {
   notifyUser: (message: string, data?: Record<string, unknown>) => Promise<void>;
+  // In-process override for hosts/tests with a tighter transport deadline.
+  // Omitted by the MCP server, which uses operate_pay's one-minute default.
+  paymentApprovalWaitMs?: number;
 }
 
 // Re-exported for convenience; defined in its own module to avoid a

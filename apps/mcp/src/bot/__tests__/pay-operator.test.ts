@@ -1939,7 +1939,7 @@ describe("operate_pay split checkout — confirm", () => {
 // Friction-audit finding #1: operate_pay used to block the MCP call for up
 // to five (or eighteen, JIT) minutes polling for a human's phone tap. These
 // exercise the fix: a bounded per-call poll budget that returns
-// approval_pending instead of blocking, and idempotent resume — a later
+// approval_pending at an explicit zero bound, and idempotent resume — a later
 // call reuses the SAME approval/operator keypair rather than minting a
 // duplicate approval.
 
@@ -1952,6 +1952,7 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
   expiresAt: string;
   setReview: () => void;
   setApproved: () => void;
+  setDenied: () => void;
   setPendingApproved: () => void;
   setInvalidFinalJws: () => void;
   setInvalidFinalCard: () => void;
@@ -1961,6 +1962,7 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
     | "none"
     | "review"
     | "approval"
+    | "denied"
     | "approval_pending"
     | "invalid_jws"
     | "invalid_card" = "none";
@@ -1997,11 +1999,12 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
       if (
         !readsRelayCandidate ||
         candidateState === "none" ||
+        candidateState === "denied" ||
         (candidateState === "review" && reviewConfirmed)
       ) {
         return Response.json({
           id: "appr_resume",
-          status: "pending",
+          status: candidateState === "denied" ? "denied" : "pending",
           ...checkout,
           nonce,
           card_ref: "card_resume",
@@ -2116,6 +2119,10 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
       candidateState = "approval";
       reviewConfirmed = false;
     },
+    setDenied: () => {
+      candidateState = "denied";
+      reviewConfirmed = false;
+    },
     setPendingApproved: () => {
       candidateState = "approval_pending";
       reviewConfirmed = false;
@@ -2129,7 +2136,7 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
   };
 }
 
-describe("operate_pay non-blocking approval [P0]", () => {
+describe("operate_pay bounded approval continuation [P0]", () => {
   const baseArgs = {
     card_ref: "card_resume",
     merchant: CHECKOUT.merchant,
@@ -2139,7 +2146,26 @@ describe("operate_pay non-blocking approval [P0]", () => {
     reason: "office restock",
   };
 
-  it("returns approval_pending immediately instead of blocking when nobody has approved yet", async () => {
+  it("returns a human denial as a truthful terminal outcome in one call", async () => {
+    const env = buildResumableEnv();
+    env.setDenied();
+
+    await expect(
+      executeOperatePay(baseArgs, env.api, env.browser, {
+        fetch: env.fetch,
+        vouchflowApiBase: "https://vouchflow.test",
+        vouchflowExpectedAudience: "customer_test",
+        webBase: "https://web.test",
+        surfaceApprovalUrl: vi.fn(),
+      }),
+    ).resolves.toMatchObject({
+      status: "payment_approval_denied",
+      approval_id: "appr_resume",
+    });
+    expect(env.filledCards).toHaveLength(0);
+  });
+
+  it("returns a clean same-approval continuation when an explicit zero wait ends", async () => {
     const env = buildResumableEnv();
     const sleepCalls: number[] = [];
     const pendingStates: PendingApprovalWait[] = [];
@@ -2164,7 +2190,7 @@ describe("operate_pay non-blocking approval [P0]", () => {
       approved_amount_cents: CHECKOUT.amount_cents,
       currency: CHECKOUT.currency,
       phase: null,
-      next: { tool: "operate_payment_status", wait_seconds: 15 },
+      next: { tool: "operate_pay" },
     });
     expect(result.approval_url).toContain("appr_resume");
     expect(result.expires_at).toBe(env.expiresAt);

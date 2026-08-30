@@ -270,6 +270,21 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(vouchflow.signPayload).not.toHaveBeenCalled();
   });
 
+  it("lets the human deny and makes the page terminal without a passkey", async () => {
+    bound = true;
+    render(<PaymentApprovalPage />);
+    const deny = await screen.findByRole("button", { name: "Deny payment" });
+
+    await userEvent.setup().click(deny);
+
+    await waitFor(() =>
+      expect(api.apiPost).toHaveBeenCalledWith("/v1/pay/approvals/appr_1/deny", {}),
+    );
+    expect(screen.getByText("Payment denied — you can return to your session.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Approve payment/ })).toBeNull();
+    expect(vouchflow.signPayload).not.toHaveBeenCalled();
+  });
+
   it("shows normal payment copy for a genuine zero-dollar approval", async () => {
     bound = true;
     approvalAmountCents = 0;

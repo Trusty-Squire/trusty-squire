@@ -161,11 +161,12 @@ interface PayDependencies {
   // the terms of an approval already presented to the human for signing.
   resumeFrom?: PendingApprovalWait;
   // [P0] How long (ms, from this call's start) THIS invocation will actively
-  // poll for approval before giving up and returning approval_pending,
+  // wait for approval before giving up and returning approval_pending,
   // bounded by the overall approval deadline. Undefined = the legacy
   // behavior of waiting for the full approval/JIT timeout (used by direct
   // executeOperatePay callers, e.g. unit tests). The MCP tool layer passes a
-  // short bound (0) so operate_pay never blocks the RPC waiting on a human.
+  // bounded human-response window so approval detection belongs to the system,
+  // while an exhausted client call can resume this same approval cleanly.
   pollBudgetMs?: number;
   // [P0] Fired when a call ends still-pending (poll budget exhausted, human
   // hasn't responded yet) so the session layer can persist resumable state.
@@ -948,6 +949,18 @@ export async function executeOperatePay(
       if (approval.status === "expired" || approvalExpired()) {
         return expiredApprovalResult();
       }
+      if (approval.status === "denied") {
+        resumableState = undefined;
+        keypairHandedOff = false;
+        return {
+          status: "payment_approval_denied",
+          approval_id: approvalId,
+          approval_url: approvalUrl,
+          merchant: checkout.merchant,
+          amount_cents: checkout.amount_cents,
+          currency: checkout.currency,
+        };
+      }
       const hasCandidate =
         typeof approval.jws === "string" && typeof approval.sealed_card === "string";
       if (approval.status === "approved" && !hasCandidate) {
@@ -1216,11 +1229,11 @@ export async function executeOperatePay(
           candidate_kind: "review",
           ready_to_charge: false,
           next: {
-            tool: "operate_payment_status",
-            wait_seconds: 15,
+            tool: "operate_pay",
             message:
               "The review signature was verified, but final payment approval is still required. " +
-              "Refresh the approval page if it does not advance to the final approval prompt.",
+              "Refresh the approval page if it does not advance to the final approval prompt, " +
+              "then call operate_pay again with the same arguments; it resumes this approval and waits.",
           },
         };
       }
@@ -1239,7 +1252,13 @@ export async function executeOperatePay(
           merchant: checkout.merchant,
           candidate_kind: "none",
           ready_to_charge: false,
-          next: { tool: "operate_payment_status", wait_seconds: 15 },
+          next: {
+            tool: "operate_pay",
+            message:
+              "The bounded server wait ended before the human responded. Call operate_pay again " +
+              "with the same arguments; it resumes this approval and continues waiting without " +
+              "creating another approval.",
+          },
         };
       }
       if (jit) {

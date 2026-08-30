@@ -812,6 +812,33 @@ describe("payment approval relay", () => {
     expect(approve.json()).toEqual({ error: "payment_approval_expired" });
   });
 
+  it("makes an explicit human denial terminal for the waiting operator", async () => {
+    const created = await createApproval();
+    const deny = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/deny`,
+      payload: {},
+    });
+    expect(deny.statusCode).toBe(200);
+    expect(deny.json()).toEqual({ status: "denied" });
+
+    const status = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({ id: created.id, status: "denied" });
+
+    const secondDeny = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/deny`,
+      payload: {},
+    });
+    expect(secondDeny.statusCode).toBe(409);
+    expect(secondDeny.json()).toEqual({ error: "payment_approval_not_pending" });
+  });
+
   it("pushes to Telegram on create when the account has a linked chat", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal("fetch", fetchMock);

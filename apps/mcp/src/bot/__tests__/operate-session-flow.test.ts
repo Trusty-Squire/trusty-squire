@@ -9249,16 +9249,15 @@ describe("awaiting-approval payment lease [P0]", () => {
   });
 });
 
-// ── operate_pay tool completion — resumes the SAME approval [P0] ───────────
+// ── operate_pay tool completion — system-owned approval wait [P0] ──────────
 //
 // The full operate_pay MCP tool (session lease + executeOperatePay), not just
 // the pure executeOperatePay unit. A single-page checkout whose card fields
-// live in a late-mounting cross-origin PCI iframe: the first call creates the
-// approval and hands back approval_pending; once the phone taps approve, a
-// SECOND operate_pay call with the SAME arguments must resume that exact
-// approval and fill+submit within it — never mint a fresh approval, never
-// re-arm approval_pending once the mandate is already signed.
-describe("operate_pay tool completion — resumes the SAME approval [P0]", () => {
+// live in a late-mounting cross-origin PCI iframe: the approval URL is surfaced
+// while the call remains open, the server detects the phone response, and the
+// same call fills/submits. A no-progress-transport fallback still resumes the
+// exact approval on one later call without minting another.
+describe("operate_pay tool completion — system-owned approval wait [P0]", () => {
   const CHECKOUT = {
     merchant: "Kobee Japan",
     checkout_origin: "https://store.kobeejapan.net",
@@ -9432,7 +9431,7 @@ describe("operate_pay tool completion — resumes the SAME approval [P0]", () =>
     global.fetch = originalFetch;
   });
 
-  it("fills and submits within the SAME approval once the phone has responded — never re-arms approval_pending", async () => {
+  it("detects the phone approval and submits in the same operate_pay call", async () => {
     const env = buildPaymentEnv();
     // executeOperatePay's own JWKS fetch goes through the real global fetch
     // (the tool layer never overrides deps.fetch) — route it through the same
@@ -9441,28 +9440,23 @@ describe("operate_pay tool completion — resumes the SAME approval [P0]", () =>
 
     await startProvisionSession({ serviceUrl: "https://store.kobeejapan.net/checkout" });
 
-    const first = (await operatePayTool.handler(baseArgs, env.api)) as Record<string, unknown>;
-    expect(first.status).toBe("approval_pending");
-    expect(env.approvalBodies).toHaveLength(1);
-    expect(env.immediateApprovalReads).toEqual([false]);
-    expect(getActivePendingApproval()).not.toBeNull();
+    const notifyUser = vi.fn().mockImplementation(async () => {
+      // The notification is delivered before executeOperatePay enters its
+      // server-owned wait, so the human can respond while this call is open.
+      env.setApproved();
+    });
+    const result = (await operatePayTool.handler(baseArgs, env.api, { notifyUser })) as Record<
+      string,
+      unknown
+    >;
 
-    // The human taps approve on their phone.
-    env.setApproved();
-
-    // Completion call: same arguments, no phase — the single-page path. The
-    // card fields live in the (by now mounted) cross-origin PCI iframe; the
-    // mock's fillAndSubmitCheckout stands in for that fill.
-    const second = (await operatePayTool.handler(baseArgs, env.api)) as Record<string, unknown>;
-
-    expect(second.status).toBe("payment_submitted");
-    expect(env.immediateApprovalReads).toEqual([false, true]);
-    // Exactly ONE approval was ever minted across both calls — a re-arm would
-    // show up here as a second POST /v1/pay/approvals.
+    expect(result.status).toBe("payment_submitted");
+    expect(notifyUser).toHaveBeenCalledOnce();
+    // Exactly ONE approval was minted and spent in this call.
     expect(env.approvalBodies).toHaveLength(1);
     expect(h.filledCards).toEqual([SYNTHETIC_CARD]);
-    // The lease resolved to a terminal outcome — no dangling awaiting_approval
-    // state left behind for a THIRD call to loop on.
+    // The lease resolved to a terminal outcome — no dangling approval state
+    // for an agent-side polling loop.
     expect(getActivePendingApproval()).toBeNull();
   });
 
@@ -9484,7 +9478,9 @@ describe("operate_pay tool completion — resumes the SAME approval [P0]", () =>
     expect(["payment_submitted", "payment_3ds_required", "payment_declined"]).toContain(
       second.status,
     );
-    expect(env.immediateApprovalReads).toEqual([false, true]);
+    // Only the first no-progress call uses the immediate candidate read. The
+    // resumed call enters the server wait and receives the approved candidate.
+    expect(env.immediateApprovalReads).toEqual([false]);
   });
 });
 

@@ -32,6 +32,12 @@ import type { ThreeDsResolution } from "../bot/browser.js";
 import type { ApiClient } from "../api-client.js";
 import { assertApi, type Tool } from "./index.js";
 
+// Long enough for a ready human to approve without making the MCP request as
+// long-lived as the approval itself (five minutes for saved-card ceremonies,
+// longer for JIT). If this bound expires, session state retains the same
+// approval and the next operate_pay call continues waiting on it.
+const OPERATE_PAY_APPROVAL_WAIT_MS = 60_000;
+
 const inputSchema = z
   .object({
     session_id: z.string().uuid().optional(),
@@ -135,7 +141,11 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
     "Reads the live merchant and checkout total independently of informational checkout_state. " +
     "When the live total cannot be machine-read, caller-supplied amount_cents and currency become " +
     "the authoritative approval amount and take precedence over a prior cart observation. " +
-    "creates a phone approval link, waits for approval, " +
+    "creates and immediately surfaces a phone approval link, then waits server-side for up to " +
+    "one minute for approval, denial, or expiry before returning. Approval proceeds directly " +
+    "to charge in this same call. If that bounded wait ends first, calling operate_pay once more " +
+    "with the same arguments resumes the same approval and waits again; never poll approval in " +
+    "an agent-side loop. " +
     "verifies the passkey-signed purchase mandate, opens the card only in this process, " +
     "fills common checkout fields, submits, and audits only the last four digits. Never " +
     "solves 3-D Secure; waits for user completion, then returns a needs_user handoff if unresolved " +
@@ -416,11 +426,19 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
             ...(paymentClaim.resumeApproval !== undefined
               ? { resumeFrom: paymentClaim.resumeApproval }
               : {}),
-            // [P0] Never block the RPC waiting on the human — one live check,
-            // then hand back approval_pending. operate_payment_status (or
-            // simply calling operate_pay again, which resumes this SAME
-            // approval) is how the host finds out when the phone responds.
-            pollBudgetMs: 0,
+            // Approval detection belongs here, not in an agent polling loop.
+            // The URL is surfaced before executeOperatePay enters this bounded
+            // wait. On exhaustion, onApprovalPending persists the SAME approval
+            // so a later operate_pay call continues without another passkey gate.
+            // A client without progress notifications must receive the newly
+            // minted URL before it can ask a human to act. Its first call may
+            // therefore return immediately; the resumed call already has the
+            // URL and uses the normal system-owned wait.
+            pollBudgetMs:
+              context?.paymentApprovalWaitMs ??
+              (context?.notifyUser !== undefined || paymentClaim.resumeApproval !== undefined
+                ? OPERATE_PAY_APPROVAL_WAIT_MS
+                : 0),
           },
         );
         if (result.payment_fields_cleared === false) paymentFieldsCleared = false;
@@ -521,7 +539,14 @@ async function readApprovalStatus(
       candidate_submitted: false,
       candidate_kind: state.reviewVerified === true ? "review" : "none",
       ready_to_charge: false,
-      next: { tool: "operate_payment_status", session_id: sessionId, wait_seconds: 15 },
+      next: {
+        tool: "operate_pay",
+        session_id: sessionId,
+        hint:
+          "The bounded status wait ended before the human responded. Call operate_pay again " +
+          "with the same arguments; it resumes this approval, waits server-side, and proceeds " +
+          "to charge after approval.",
+      },
     };
   }
   const candidateSubmitted =
@@ -533,6 +558,7 @@ async function readApprovalStatus(
       : observedCandidateKind;
   const readyToCharge = observedCandidateKind === "approval";
   const expired = approval.status === "expired";
+  const terminalWithoutCharge = expired || approval.status === "denied";
   return {
     status: expired ? "expired" : approval.status,
     approval_id: state.approval_id,
@@ -545,7 +571,7 @@ async function readApprovalStatus(
     candidate_submitted: candidateSubmitted,
     candidate_kind: candidateKind,
     ready_to_charge: readyToCharge,
-    ...(expired
+    ...(terminalWithoutCharge
       ? {}
       : readyToCharge
         ? {
@@ -573,12 +599,12 @@ async function readApprovalStatus(
           : candidateKind === "review"
             ? {
                 next: {
-                  tool: "operate_payment_status",
+                  tool: "operate_pay",
                   session_id: sessionId,
-                  wait_seconds: 15,
                   hint:
                     "The review signature was verified. Final payment approval is still required; " +
-                    "refresh the approval page if the final prompt is not visible.",
+                    "refresh the approval page if the final prompt is not visible, then call " +
+                    "operate_pay once to wait and continue this same approval.",
                 },
               }
             : candidateKind === "invalid"
@@ -592,9 +618,11 @@ async function readApprovalStatus(
                 }
               : {
                   next: {
-                    tool: "operate_payment_status",
+                    tool: "operate_pay",
                     session_id: sessionId,
-                    wait_seconds: 15,
+                    hint:
+                      "Call operate_pay again with the same arguments. It resumes this approval " +
+                      "and waits server-side instead of requiring an agent polling loop.",
                   },
                 }),
   };
@@ -709,8 +737,22 @@ async function paymentStatusResult(
     if (waitSeconds <= 0) {
       return paymentResult(session, await readApprovalStatus(api, state, session.id, false));
     }
-    const boundMs = Math.min(Math.max(waitSeconds * 1000, 1_000), 15_000);
-    return paymentResult(session, await readApprovalStatus(api, state, session.id, true, boundMs));
+    const callDeadline = Date.now() + Math.min(Math.max(waitSeconds * 1000, 1_000), 60_000);
+    let result: Record<string, unknown>;
+    do {
+      const remainingMs = Math.max(callDeadline - Date.now(), 0);
+      result = await readApprovalStatus(
+        api,
+        state,
+        session.id,
+        true,
+        Math.min(remainingMs, 15_000),
+      );
+      const terminalCandidate = result.ready_to_charge === true;
+      const terminalStatus = result.status !== "pending";
+      if (terminalCandidate || terminalStatus || remainingMs <= 15_000) break;
+    } while (Date.now() < callDeadline);
+    return paymentResult(session, result);
   }
   const threeDsState = getActivePendingThreeDs(session);
   if (threeDsState !== null) {
@@ -724,21 +766,23 @@ async function paymentStatusResult(
 
 const paymentStatusInputSchema = z.object({
   session_id: z.string().uuid().optional(),
-  wait_seconds: z.number().int().min(0).max(15).optional(),
+  wait_seconds: z.number().int().min(0).max(60).optional(),
 });
 
 export const operatePaymentStatusTool: Tool<z.infer<typeof paymentStatusInputSchema>> = {
   name: "operate_payment_status",
   description:
     "Report the status of the addressed session's payment approval currently awaiting " +
-    "the human's phone tap, if any — started by an operate_pay call that returned approval_pending. " +
+    "the human's phone tap, if any — started by an operate_pay call whose bounded server wait " +
+    "returned approval_pending. Prefer re-calling operate_pay so approval proceeds directly to " +
+    "charge; this status tool is a read-only alternative that also waits server-side. " +
     "Also covers an already-submitted charge whose 3-D Secure challenge (including a decoupled/" +
     "out-of-band app-push) had not resolved when a prior operate_pay call's own wait ended (that " +
     'call returns payment_3ds_required or payment_outcome_unknown with needs_user.wall="3ds" and ' +
     "a next hint pointing here) — call this again to keep checking rather than re-calling " +
     "operate_pay, which does not resume a post-submit 3DS wait; reports payment_3ds_pending while " +
     "still unresolved. Never re-releases the card or creates a new approval. Pass `wait_seconds` " +
-    "(0-15, default 0) to bound-wait for a change instead of an instant peek; never blocks longer " +
+    "(0-60, default 0) to bound-wait for a change instead of an instant peek; never blocks longer " +
     "than that. Never verifies a mandate or opens a card. Only candidate_kind=approval with " +
     "ready_to_charge=true is a final authorization; a review candidate still requires final " +
     "approval. Preserves any passively observed payment_instrument_mismatch warning from issuer/" +
@@ -757,9 +801,9 @@ export const operatePaymentStatusTool: Tool<z.infer<typeof paymentStatusInputSch
       wait_seconds: {
         type: "integer",
         minimum: 0,
-        maximum: 15,
+        maximum: 60,
         description:
-          "Upper bound on this call's wait. 0 (default) is an instant peek; 1-15 bound-waits for a change.",
+          "Upper bound on this call's server-side wait. 0 (default) is an instant peek; 1-60 waits for approval, expiry, or the bound.",
       },
     },
   },

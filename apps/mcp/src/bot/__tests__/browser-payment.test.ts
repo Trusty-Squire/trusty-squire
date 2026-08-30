@@ -88,7 +88,7 @@ describe("captured payment submit dispatch", () => {
     expect(onSubmitDispatched).toHaveBeenCalledOnce();
   });
 
-  it("retains an unknown charge when input dispatch may precede click rejection", async () => {
+  it("keeps the outcome unknown without claiming dispatch when click evidence is absent", async () => {
     const onSubmitDispatched = vi.fn();
 
     await expect(
@@ -103,7 +103,7 @@ describe("captured payment submit dispatch", () => {
       }),
     ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
 
-    expect(onSubmitDispatched).toHaveBeenCalledOnce();
+    expect(onSubmitDispatched).not.toHaveBeenCalled();
   });
 
   it("preserves a proven pre-dispatch approval rejection", async () => {
@@ -127,7 +127,7 @@ describe("captured payment submit dispatch", () => {
     expect(onSubmitDispatched).not.toHaveBeenCalled();
   });
 
-  it("retains an unknown charge when trusted input completes without observer evidence", async () => {
+  it("does not convert trusted input completion into submit evidence", async () => {
     const onSubmitDispatched = vi.fn();
 
     await expect(
@@ -139,7 +139,7 @@ describe("captured payment submit dispatch", () => {
       }),
     ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
 
-    expect(onSubmitDispatched).toHaveBeenCalledOnce();
+    expect(onSubmitDispatched).not.toHaveBeenCalled();
   });
 });
 
@@ -743,6 +743,58 @@ describe("checkout payment parsing", () => {
         await browser.close();
       }
     },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "does not report charge dispatch when a required shipping field blocks form submission",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <form id="checkout">
+            <span>First name</span>
+            <input id="required-shipping-field" required>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-exp">
+            <input autocomplete="cc-csc">
+            <input autocomplete="cc-name">
+            <button type="submit">Pay now</button>
+          </form>
+          <script>
+            const form = document.querySelector("#checkout");
+            const button = form.querySelector("button");
+            const required = document.querySelector("#required-shipping-field");
+            button.addEventListener("click", () => {
+              document.body.dataset.paymentClicks =
+                String(Number(document.body.dataset.paymentClicks || "0") + 1);
+            });
+            form.addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.paymentSubmits =
+                String(Number(document.body.dataset.paymentSubmits || "0") + 1);
+            });
+            required.addEventListener("invalid", () => {
+              document.body.dataset.shippingInvalid = "true";
+            });
+          </script>
+        `);
+        const controller = BrowserController.fromHarnessPage(page);
+        const onSubmitDispatched = vi.fn();
+
+        await expect(
+          controller.fillAndSubmitCheckout(APPROVAL_CARD, { onSubmitDispatched }),
+        ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
+
+        expect(await page.locator("body").getAttribute("data-payment-clicks")).toBe("1");
+        expect(await page.locator("body").getAttribute("data-payment-submits")).toBeNull();
+        expect(await page.locator("body").getAttribute("data-shipping-invalid")).toBe("true");
+        expect(onSubmitDispatched).not.toHaveBeenCalled();
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
   );
 
   it.skipIf(!chromiumAvailable)(

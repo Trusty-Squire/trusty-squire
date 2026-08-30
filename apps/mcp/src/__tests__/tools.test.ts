@@ -568,12 +568,10 @@ describe("operate_act manual card refusal", () => {
   });
 });
 
-// [P0] Non-blocking approval: operate_pay never blocks the RPC on the human's
-// phone tap. It makes one live check and, when nobody has responded yet,
-// hands back approval_pending and leaves the session in the awaiting_approval
-// rest state instead — verified here at the tool-wiring layer (operate-pay.ts),
-// distinct from pay-operator.test.ts's executeOperatePay-level coverage.
-describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
+// Approval detection is system-owned: when progress notifications can surface
+// the link while the RPC remains open, operate_pay waits for the human itself.
+// A bounded wait still persists an idempotent same-approval continuation.
+describe("operate_pay server-owned approval wait [P0] — tool wiring", () => {
   it("never consumes checkout_state as a charge input", async () => {
     const createPaymentApproval = vi.fn().mockResolvedValue({
       id: "appr_checkout_hint",
@@ -617,7 +615,7 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     });
   });
 
-  it("returns approval_pending (never payment_approval_timeout) when the human hasn't responded, and marks the lease awaiting_approval", async () => {
+  it("returns a same-approval continuation when an in-process transport has no wait budget", async () => {
     mockBrowser = stubBrowser();
     const createPaymentApproval = vi.fn().mockResolvedValue({
       id: "appr_wire",
@@ -649,24 +647,22 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     });
 
     const notifyUser = vi.fn().mockResolvedValue(undefined);
-    const result = (await operatePayTool.handler(args, api, { notifyUser })) as Record<
-      string,
-      unknown
-    >;
+    const result = (await operatePayTool.handler(args, api, {
+      notifyUser,
+      paymentApprovalWaitMs: 0,
+    })) as Record<string, unknown>;
     expect(result).toMatchObject({
       status: "approval_pending",
       approval_id: "appr_wire",
-      next: { tool: "operate_payment_status", wait_seconds: 15 },
+      next: { tool: "operate_pay" },
     });
-    // The RPC completed on a single live check — the old blocking loop that
-    // polled until payment_approval_timeout never ran.
     expect(getPaymentApproval).toHaveBeenCalledOnce();
     expect(getPaymentApproval).toHaveBeenCalledWith("appr_wire", "immediate");
     expect(mockAwaitingApproval).not.toBeNull();
     expect(mockPaymentLease).toBeNull();
 
     // A re-initiation now resumes — never a second POST /v1/pay/approvals.
-    await operatePayTool.handler(args, api, { notifyUser });
+    await operatePayTool.handler(args, api, { notifyUser, paymentApprovalWaitMs: 0 });
     expect(createPaymentApproval).toHaveBeenCalledOnce();
     expect(notifyUser).toHaveBeenCalledTimes(2);
     expect(notifyUser).toHaveBeenNthCalledWith(
@@ -723,14 +719,14 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     const args = operatePayTool.inputSchema.parse(PAYMENT_DETAILS);
     const notifyUser = vi.fn().mockResolvedValue(undefined);
 
-    const first = (await operatePayTool.handler(args, api, { notifyUser })) as Record<
-      string,
-      unknown
-    >;
-    const second = (await operatePayTool.handler(args, api, { notifyUser })) as Record<
-      string,
-      unknown
-    >;
+    const first = (await operatePayTool.handler(args, api, {
+      notifyUser,
+      paymentApprovalWaitMs: 0,
+    })) as Record<string, unknown>;
+    const second = (await operatePayTool.handler(args, api, {
+      notifyUser,
+      paymentApprovalWaitMs: 0,
+    })) as Record<string, unknown>;
 
     expect(first).toMatchObject({ status: "approval_pending", approval_id: "appr_expired" });
     expect(second).toMatchObject({ status: "approval_pending", approval_id: "appr_fresh" });
@@ -775,17 +771,18 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
       sealed_card: null,
       expires_at: expiresAt,
     });
-    const getPaymentApproval = vi
-      .fn()
-      .mockResolvedValueOnce(pendingApproval("appr_deleted"))
-      .mockRejectedValueOnce(
-        new ApiCallError(
+    const getPaymentApproval = vi.fn(async (id: string, candidateRead?: unknown) => {
+      if (id === "appr_deleted" && candidateRead === undefined) {
+        throw new ApiCallError(
           404,
           "payment_approval_not_found",
           "GET /v1/pay/approvals/appr_deleted → 404 payment_approval_not_found",
-        ),
-      )
-      .mockResolvedValueOnce(pendingApproval("appr_replacement"));
+        );
+      }
+      return pendingApproval(id);
+    });
+    // The resumed call's resource validation (no candidate-read argument)
+    // sees the deletion; long-poll reads in the first call remain pending.
     const api = makeMockApi({
       listPaymentCards: vi.fn().mockResolvedValue([{ id: "card_1", label: "Personal" }]),
       createPaymentApproval,
@@ -795,20 +792,20 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     const args = operatePayTool.inputSchema.parse(PAYMENT_DETAILS);
     const notifyUser = vi.fn().mockResolvedValue(undefined);
 
-    await operatePayTool.handler(args, api, { notifyUser });
+    await operatePayTool.handler(args, api, { notifyUser, paymentApprovalWaitMs: 0 });
     const deletedState = mockAwaitingApproval;
-    const replacement = (await operatePayTool.handler(args, api, { notifyUser })) as Record<
-      string,
-      unknown
-    >;
+    const replacement = (await operatePayTool.handler(args, api, {
+      notifyUser,
+      paymentApprovalWaitMs: 0,
+    })) as Record<string, unknown>;
 
     expect(replacement).toMatchObject({
       status: "approval_pending",
       approval_id: "appr_replacement",
     });
     expect(createPaymentApproval).toHaveBeenCalledTimes(2);
-    expect(getPaymentApproval).toHaveBeenNthCalledWith(2, "appr_deleted");
-    expect(getPaymentApproval).toHaveBeenNthCalledWith(3, "appr_replacement", "immediate");
+    expect(getPaymentApproval).toHaveBeenCalledWith("appr_deleted");
+    expect(getPaymentApproval).toHaveBeenCalledWith("appr_replacement", "immediate");
     expect(deletedState?.keypair.privateKey).toBe("");
     expect(notifyUser).toHaveBeenLastCalledWith(
       "Approve payment using Personal on your phone: https://trustysquire.ai/vault/pay/appr_replacement",
@@ -844,7 +841,10 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     ).rejects.toThrow("notification unavailable");
     expect(mockAwaitingApproval).toMatchObject({ approval_id: "appr_restore" });
 
-    await operatePayTool.handler(args, api);
+    await operatePayTool.handler(args, api, {
+      notifyUser: vi.fn().mockResolvedValue(undefined),
+      paymentApprovalWaitMs: 0,
+    });
     expect(createPaymentApproval).toHaveBeenCalledOnce();
   });
 
@@ -972,6 +972,7 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
       operatePayTool.handler(
         operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, three_ds_wait_seconds: 0 }),
         api,
+        { notifyUser: vi.fn().mockResolvedValue(undefined), paymentApprovalWaitMs: 0 },
       ),
     ).resolves.toMatchObject({
       status: "approval_pending",
@@ -1148,6 +1149,7 @@ describe("operate_payment_status [P0]", () => {
           session_id: PAYMENT_SESSION_B_ID,
         }),
         payApi,
+        { notifyUser: vi.fn().mockResolvedValue(undefined), paymentApprovalWaitMs: 0 },
       ),
     ).resolves.toMatchObject({
       session_id: PAYMENT_SESSION_B_ID,
@@ -1172,11 +1174,11 @@ describe("operate_payment_status [P0]", () => {
     );
   });
 
-  it("rejects waits longer than the 15-second tool contract", () => {
-    expect(() => operatePaymentStatusTool.inputSchema.parse({ wait_seconds: 16 })).toThrow();
+  it("rejects waits longer than the one-minute tool contract", () => {
+    expect(() => operatePaymentStatusTool.inputSchema.parse({ wait_seconds: 61 })).toThrow();
     expect(() => operatePaymentStatusTool.inputSchema.parse({ wait_seconds: -1 })).toThrow();
     expect(operatePaymentStatusTool.jsonInputSchema).toMatchObject({
-      properties: { wait_seconds: { minimum: 0, maximum: 15 } },
+      properties: { wait_seconds: { minimum: 0, maximum: 60 } },
     });
     expect(operatePaymentStatusTool.annotations?.readOnlyHint).toBe(false);
   });
@@ -1204,7 +1206,7 @@ describe("operate_payment_status [P0]", () => {
       status: "pending",
       approval_id: "appr_status",
       candidate_submitted: false,
-      next: { tool: "operate_payment_status", session_id: paymentSessionId, wait_seconds: 15 },
+      next: { tool: "operate_pay", session_id: paymentSessionId },
     });
     expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", "peek");
     expect(confirmPaymentApproval).not.toHaveBeenCalled();
@@ -1236,6 +1238,65 @@ describe("operate_payment_status [P0]", () => {
       next: { tool: "operate_pay", session_id: paymentSessionId },
     });
     expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", "wait-peek");
+  });
+
+  it("keeps a one-minute wait inside one status call until final approval arrives", async () => {
+    mockAwaitingApproval = baseState;
+    const pending = {
+      id: "appr_status",
+      status: "pending" as const,
+      merchant: "M",
+      amount_cents: 100,
+      currency: "USD",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      card_ref: "card_1",
+      operator_pubkey: operatorPublicKey,
+    };
+    const getPaymentApproval = vi
+      .fn()
+      .mockResolvedValueOnce({ ...pending, jws: null, sealed_card: null })
+      .mockResolvedValueOnce({
+        ...pending,
+        jws: candidateJws("approval"),
+        sealed_card: "sealed",
+      });
+    const api = makeMockApi({ getPaymentApproval } as unknown as ApiClient);
+
+    await expect(
+      operatePaymentStatusTool.handler({ wait_seconds: 60 }, api),
+    ).resolves.toMatchObject({
+      status: "pending",
+      candidate_kind: "approval",
+      ready_to_charge: true,
+      next: { tool: "operate_pay" },
+    });
+    expect(getPaymentApproval).toHaveBeenCalledTimes(2);
+    expect(getPaymentApproval).toHaveBeenNthCalledWith(1, "appr_status", "wait-peek");
+    expect(getPaymentApproval).toHaveBeenNthCalledWith(2, "appr_status", "wait-peek");
+  });
+
+  it("returns a denied approval as a terminal status without another action", async () => {
+    mockAwaitingApproval = baseState;
+    const getPaymentApproval = vi.fn().mockResolvedValue({
+      id: "appr_status",
+      status: "denied",
+      merchant: "M",
+      amount_cents: 100,
+      currency: "USD",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      card_ref: "card_1",
+      operator_pubkey: operatorPublicKey,
+      jws: null,
+      sealed_card: null,
+    });
+    const api = makeMockApi({ getPaymentApproval } as unknown as ApiClient);
+
+    const result = (await operatePaymentStatusTool.handler({ wait_seconds: 60 }, api)) as Record<
+      string,
+      unknown
+    >;
+    expect(result).toMatchObject({ status: "denied", ready_to_charge: false });
+    expect(result).not.toHaveProperty("next");
   });
 
   it("distinguishes a review candidate from final charge authorization", async () => {
@@ -1287,7 +1348,7 @@ describe("operate_payment_status [P0]", () => {
       candidate_submitted: false,
       candidate_kind: "review",
       ready_to_charge: false,
-      next: { tool: "operate_payment_status", wait_seconds: 15 },
+      next: { tool: "operate_pay" },
     });
   });
 

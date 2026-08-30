@@ -108,6 +108,22 @@ export class PrismaPendingPaymentApprovalStore implements PendingPaymentApproval
         };
   }
 
+  async deny(id: string, now: Date): Promise<"denied" | "not_pending"> {
+    const result = await this.prisma.pendingPaymentApproval.updateMany({
+      where: { id, status: "pending", expires_at: { gt: now } },
+      data: {
+        status: "denied",
+        jws: null,
+        sealed_card: null,
+        review_jws: null,
+        review_sealed_card: null,
+        submission_jws: null,
+        submission_sealed_card: null,
+      },
+    });
+    return result.count > 0 ? "denied" : "not_pending";
+  }
+
   async bindCardForAccount(
     id: string,
     accountId: string,

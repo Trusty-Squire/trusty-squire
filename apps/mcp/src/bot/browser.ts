@@ -474,7 +474,6 @@ export async function runCaptureConfirmedPaymentSubmit<T>(options: {
       throw clickError;
     }
     if (clickError !== undefined && !inputDispatchPossible) throw clickError;
-    options.onSubmitDispatched?.();
     throw new PaymentSubmitOutcomeUnknownError();
   }
   options.onSubmitDispatched?.();
@@ -11635,12 +11634,17 @@ export class BrowserController {
                 };
               };
               const tracked = element as Element & {
-                __tsPaymentSubmitDispatchListener?: EventListener;
+                __tsPaymentSubmitDispatchListener?: {
+                  event: "click" | "submit";
+                  listener: EventListener;
+                  target: Element;
+                };
               };
-              if (tracked.__tsPaymentSubmitDispatchListener !== undefined) {
-                element.removeEventListener(
-                  "click",
-                  tracked.__tsPaymentSubmitDispatchListener,
+              const priorTracking = tracked.__tsPaymentSubmitDispatchListener;
+              if (priorTracking !== undefined) {
+                priorTracking.target.removeEventListener(
+                  priorTracking.event,
+                  priorTracking.listener,
                   true,
                 );
               }
@@ -11704,8 +11708,27 @@ export class BrowserController {
                   state.dispatched = true;
                 }
               };
-              tracked.__tsPaymentSubmitDispatchListener = listener;
-              element.addEventListener("click", listener, { capture: true, once: true });
+              const form =
+                element instanceof HTMLButtonElement || element instanceof HTMLInputElement
+                  ? element.form
+                  : null;
+              const nativeSubmitControl =
+                form !== null &&
+                (element instanceof HTMLButtonElement
+                  ? element.type === "submit"
+                  : element instanceof HTMLInputElement &&
+                    (element.type === "submit" || element.type === "image"));
+              const dispatchTarget = nativeSubmitControl ? form : element;
+              const dispatchEvent = nativeSubmitControl ? "submit" : "click";
+              tracked.__tsPaymentSubmitDispatchListener = {
+                event: dispatchEvent,
+                listener,
+                target: dispatchTarget,
+              };
+              dispatchTarget.addEventListener(dispatchEvent, listener, {
+                capture: true,
+                once: true,
+              });
             },
             {
               baselineStorageKey: dispatchBaselineStorageKey,
@@ -11799,14 +11822,15 @@ export class BrowserController {
             .evaluate(
               (element) => {
                 const tracked = element as Element & {
-                  __tsPaymentSubmitDispatchListener?: EventListener;
+                  __tsPaymentSubmitDispatchListener?: {
+                    event: "click" | "submit";
+                    listener: EventListener;
+                    target: Element;
+                  };
                 };
-                if (tracked.__tsPaymentSubmitDispatchListener !== undefined) {
-                  element.removeEventListener(
-                    "click",
-                    tracked.__tsPaymentSubmitDispatchListener,
-                    true,
-                  );
+                const tracking = tracked.__tsPaymentSubmitDispatchListener;
+                if (tracking !== undefined) {
+                  tracking.target.removeEventListener(tracking.event, tracking.listener, true);
                   delete tracked.__tsPaymentSubmitDispatchListener;
                 }
               },
