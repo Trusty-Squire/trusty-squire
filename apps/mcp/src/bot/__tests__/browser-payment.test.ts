@@ -821,7 +821,7 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "keeps the expiry fence through an asynchronous merchant submit handler",
+    "returns outcome unknown when an earlier mutation precedes a blocked late charge",
     async () => {
       const browser = await chromium.launch({ headless: true });
       try {
@@ -855,11 +855,56 @@ describe("checkout payment parsing", () => {
 
         await expect(
           controller.fillAndSubmitCheckout(APPROVAL_CARD, { beforeSubmitDispatch: () => 100 }),
-        ).rejects.toThrow("payment_approval_expired");
+        ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
 
         await page.waitForTimeout(210);
         expect(analyticsRequests).toBe(1);
         expect(chargeRequests).toBe(0);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "allows 3DS follow-up after an authorized native charge dispatch",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const context = await browser.newContext();
+        const page = await context.newPage();
+        let threeDsRequests = 0;
+        await context.route("https://merchant.test/charge", async (route) => {
+          await route.fulfill({
+            contentType: "text/html",
+            body: `<script>
+              setTimeout(async () => {
+                await fetch("https://merchant.test/3ds");
+                history.pushState({}, "", "/thank-you/order-123");
+              }, 150);
+            </script>`,
+          });
+        });
+        await context.route("https://merchant.test/3ds", async (route) => {
+          threeDsRequests += 1;
+          await route.fulfill({ body: "ok" });
+        });
+        await page.setContent(`
+          <form action="https://merchant.test/charge" method="post">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-exp">
+            <input autocomplete="cc-csc">
+            <input autocomplete="cc-name">
+            <button type="submit">Pay now</button>
+          </form>
+        `);
+        const controller = BrowserController.fromHarnessPage(page);
+
+        await expect(
+          controller.fillAndSubmitCheckout(APPROVAL_CARD, { beforeSubmitDispatch: () => 100 }),
+        ).resolves.toEqual({ three_ds_required: false, order_confirmed: true });
+        expect(threeDsRequests).toBe(1);
+        await context.close();
       } finally {
         await browser.close();
       }

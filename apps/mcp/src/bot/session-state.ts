@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, mkdtempSync, renameSync } from "node:fs";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserContext } from "playwright";
@@ -9,6 +9,7 @@ export type BrowserStorageState = Awaited<ReturnType<BrowserContext["storageStat
 
 export const SESSION_STATE_FILE = "trusty-squire-session-state.json";
 export const CANONICAL_IDENTITY_METADATA_FILE = "trusty-squire-identity.json";
+export const PENDING_SESSION_STATE_PREFIX = `${SESSION_STATE_FILE}.pending.`;
 const LEGACY_PROVIDER_EMAILS_FILE = "provider-emails.json";
 export const MAX_SESSION_STATE_BYTES = 4 * 1024 * 1024;
 const MAX_IDENTITY_METADATA_BYTES = 4 * 1024;
@@ -44,6 +45,7 @@ export function isSessionStateArtifact(entry: string): boolean {
   return (
     entry === SESSION_STATE_FILE ||
     entry === CANONICAL_IDENTITY_METADATA_FILE ||
+    (entry.startsWith(PENDING_SESSION_STATE_PREFIX) && entry.endsWith(".json")) ||
     ((entry.startsWith(`${SESSION_STATE_FILE}.`) ||
       entry.startsWith(`${CANONICAL_IDENTITY_METADATA_FILE}.`)) &&
       entry.endsWith(".tmp"))
@@ -254,6 +256,66 @@ export async function writeSessionState(
 ): Promise<boolean> {
   const metadata = await readCanonicalIdentityMetadata(profileDir);
   return await writeCanonicalIdentitySnapshot(profileDir, state, metadata, canPublish);
+}
+
+export interface PendingSessionState {
+  path: string;
+  state: BrowserStorageState;
+}
+
+export async function writePendingSessionState(
+  profileDir: string,
+  state: BrowserStorageState,
+  canPublish: () => boolean = () => true,
+): Promise<string | undefined> {
+  const serialized = JSON.stringify(state);
+  if (Buffer.byteLength(serialized) > MAX_SESSION_STATE_BYTES) return undefined;
+  await mkdir(profileDir, { recursive: true, mode: 0o700 });
+  const destination = join(
+    profileDir,
+    `${PENDING_SESSION_STATE_PREFIX}${String(Date.now()).padStart(16, "0")}.${randomUUID()}.json`,
+  );
+  const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
+  let published = false;
+  try {
+    await writeFile(temporary, serialized, { mode: 0o600 });
+    await chmod(temporary, 0o600);
+    if (!canPublish()) return undefined;
+    renameSync(temporary, destination);
+    published = true;
+    return destination;
+  } finally {
+    if (!published) await rm(temporary, { force: true }).catch(() => undefined);
+  }
+}
+
+export async function readPendingSessionStates(
+  profileDir: string,
+): Promise<PendingSessionState[]> {
+  let entries: string[];
+  try {
+    entries = await readdir(profileDir);
+  } catch {
+    return [];
+  }
+  const pending: PendingSessionState[] = [];
+  for (const entry of entries.sort()) {
+    if (!entry.startsWith(PENDING_SESSION_STATE_PREFIX) || !entry.endsWith(".json")) continue;
+    const path = join(profileDir, entry);
+    try {
+      const serialized = await readFile(path);
+      if (serialized.byteLength > MAX_SESSION_STATE_BYTES) continue;
+      const parsed = JSON.parse(serialized.toString("utf8")) as unknown;
+      if (isBrowserStorageState(parsed)) pending.push({ path, state: parsed });
+    } catch {
+      continue;
+    }
+  }
+  return pending;
+}
+
+export async function removePendingSessionState(path: string): Promise<void> {
+  await rm(path, { force: true });
 }
 
 export async function writeCanonicalIdentitySnapshot(

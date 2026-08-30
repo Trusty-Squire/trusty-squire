@@ -76,6 +76,7 @@ const h = vi.hoisted(() => ({
   storageStateReads: [] as string[],
   storageStateReadGate: null as Promise<void> | null,
   storageStateWrites: [] as Array<{ profileDir: string; state: unknown }>,
+  pendingStorageStates: [] as Array<{ path: string; profileDir: string; state: unknown }>,
   storageStateWriteError: null as Error | null,
   storageStateWriteGate: null as Promise<void> | null,
   storageStateWriteAttempts: 0,
@@ -264,6 +265,23 @@ vi.mock("../session-state.js", async (importOriginal) => {
       h.storageStates.set(profileDir, state);
       return true;
     },
+    writePendingSessionState: async (
+      profileDir: string,
+      state: unknown,
+      canPublish: () => boolean = () => true,
+    ) => {
+      if (!canPublish()) return undefined;
+      const path = `${profileDir}/pending-${h.pendingStorageStates.length}.json`;
+      h.pendingStorageStates.push({ path, profileDir, state });
+      return path;
+    },
+    readPendingSessionStates: async (profileDir: string) =>
+      h.pendingStorageStates
+        .filter((entry) => entry.profileDir === profileDir)
+        .map((entry) => ({ path: entry.path, state: entry.state })),
+    removePendingSessionState: async (path: string) => {
+      h.pendingStorageStates = h.pendingStorageStates.filter((entry) => entry.path !== path);
+    },
     writeCanonicalIdentitySnapshot: async (
       profileDir: string,
       state: unknown,
@@ -292,9 +310,15 @@ vi.mock("../browser.js", () => ({
   BrowserController: class {
     private readonly index: number;
     private readonly opts: { profileDir?: string; proxyUrl?: string; storageState?: unknown };
+    private readonly detached: boolean;
+    private detachedUrl = "about:blank";
     constructor(opts: { profileDir?: string; proxyUrl?: string; storageState?: unknown } = {}) {
       this.index = h.connections.length;
       this.opts = opts;
+      this.detached =
+        this.index > 0 &&
+        opts.profileDir !== undefined &&
+        opts.profileDir !== h.profileDirs[0];
       h.connections.push(true);
       h.profileDirs.push(opts.profileDir);
       h.proxyUrls.push(opts.proxyUrl);
@@ -322,11 +346,14 @@ vi.mock("../browser.js", () => ({
     }
     async goto(url: string): Promise<void> {
       h.gotos.push(url);
-      h.currentUrl = url;
-      h.mainDocumentEpoch += 1;
+      if (this.detached) this.detachedUrl = url;
+      else {
+        h.currentUrl = url;
+        h.mainDocumentEpoch += 1;
+      }
     }
     currentUrl(): string {
-      return h.currentUrl;
+      return this.detached ? this.detachedUrl : h.currentUrl;
     }
     mainDocumentIdentity(): string {
       return String(h.mainDocumentEpoch);
@@ -1098,6 +1125,7 @@ beforeEach(() => {
   h.storageStateReads = [];
   h.storageStateReadGate = null;
   h.storageStateWrites = [];
+  h.pendingStorageStates = [];
   h.storageStateWriteError = null;
   h.storageStateWriteGate = null;
   h.storageStateWriteAttempts = 0;
@@ -3428,6 +3456,7 @@ describe("operate session — OAuth lifecycle", () => {
       provider: "google",
     });
     await vi.waitFor(() => expect(h.restoredStorageStates).toHaveLength(1));
+    h.oauthDestination = null;
     const secondAct = act(second.session_id, {
       kind: "oauth_click",
       target: "Continue",
@@ -6036,7 +6065,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
     }
   });
 
-  it("never publishes deferred state after shutdown advances ownership", async () => {
+  it("keeps deferred successful state durable across immediate shutdown", async () => {
     const canonical = "/tmp/trusty-squire-unit-deferred-publication-owner";
     const externalOperation = acquireProfileOperationGuard(canonical);
     try {
@@ -6051,12 +6080,23 @@ describe("operate session — ephemeral profile lifecycle", () => {
         () => true,
       );
       expect(h.storageStateWrites).toEqual([]);
+      expect(h.pendingStorageStates).toHaveLength(1);
 
       await closeAllProvisionSessions();
       externalOperation.release();
       await new Promise<void>((resolve) => setTimeout(resolve, 150));
 
       expect(h.storageStateWrites).toEqual([]);
+      expect(h.pendingStorageStates).toHaveLength(1);
+
+      await startProvisionSession({
+        serviceUrl: "https://app.example.com/two",
+        profileDir: canonical,
+      });
+      await vi.waitFor(() => expect(h.storageStateWrites).toHaveLength(1));
+
+      expect(h.storageStateWrites[0]?.profileDir).toBe(canonical);
+      expect(h.pendingStorageStates).toEqual([]);
     } finally {
       externalOperation.release();
     }
@@ -7079,10 +7119,12 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     });
     h.currentUrl = "https://app.example.com/verify-email";
     h.visibleText = "Your verification code is 481920.";
+    h.captureStorageStates.set(1, googleState);
     const res = await awaitVerification(obs.session_id, {});
     expect(res.code).toBe("481920");
     expect(res.sealed).toBeUndefined();
-    expect(h.restoredStorageStates[0]).toEqual({ browserIndex: 0, state: googleState });
+    expect(h.seededStorageStates[1]).toEqual(googleState);
+    expect(h.connections[0]).toBe(true);
     expect(h.temporaryHostScopes).toEqual([
       { hosts: ["mail.google.com"], phase: "enter" },
       { hosts: ["mail.google.com"], phase: "exit" },

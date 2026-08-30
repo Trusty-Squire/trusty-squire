@@ -1171,6 +1171,7 @@ interface PendingOAuthBoundary {
   productUrl: string;
   providerPage: Page | null;
   destinationUrl: string | null;
+  releaseObservation: () => Promise<void>;
 }
 
 // Descriptor-level PayPal surface classifier retained for callers that need to
@@ -11563,7 +11564,8 @@ export class BrowserController {
     this.checkoutOutcomeBaseline = undefined;
     let submitted = false;
     let clearSubmittedDispatchTracking: (() => Promise<void>) | null = null;
-    let readSubmittedDispatchExpired: (() => Promise<boolean>) | null = null;
+    let readSubmittedDispatchExpiry: (() => Promise<"active" | "expired" | "unknown">) | null =
+      null;
     for (const frame of this.page.frames()) {
       const matches = frame.locator('button,input[type="submit"],[role="button"]');
       const count = Math.min(await matches.count().catch(() => 0), 100);
@@ -11638,11 +11640,56 @@ export class BrowserController {
         const dispatchNetworkContext = this.page.context();
         let dispatchNetworkDeadline: number | null = null;
         let dispatchNetworkExpired = false;
+        let dispatchNetworkMayHaveOccurred = false;
+        let dispatchNetworkConfirmed = false;
+        let clickDispatchStarted = false;
+        const nativeSubmission = await candidate
+          .evaluate((element) => {
+            const form =
+              element instanceof HTMLButtonElement || element instanceof HTMLInputElement
+                ? element.form
+                : element.closest("form");
+            if (form === null) return null;
+            return {
+              action: form.action,
+              method: form.method.toUpperCase(),
+            };
+          })
+          .catch(() => null);
         const dispatchNetworkFence = async (route: Route): Promise<void> => {
+          const request = route.request();
+          const method = request.method().toUpperCase();
+          const mutation = !["GET", "HEAD", "OPTIONS"].includes(method);
           if (dispatchNetworkDeadline !== null && Date.now() >= dispatchNetworkDeadline) {
             dispatchNetworkExpired = true;
             await route.abort("blockedbyclient");
             return;
+          }
+          const nativeChargeDispatch =
+            clickDispatchStarted &&
+            mutation &&
+            request.isNavigationRequest() &&
+            nativeSubmission !== null &&
+            method === nativeSubmission.method &&
+            request.url() === nativeSubmission.action;
+          if (nativeChargeDispatch) {
+            dispatchNetworkConfirmed = true;
+            dispatchNetworkDeadline = null;
+            await frame
+              .evaluate((token) => {
+                const stateWindow = window as Window & {
+                  __trustySquirePaymentSubmitDispatch?: {
+                    token: string;
+                    expiresAt: number | null;
+                  };
+                };
+                if (stateWindow.__trustySquirePaymentSubmitDispatch?.token === token) {
+                  stateWindow.__trustySquirePaymentSubmitDispatch.expiresAt = null;
+                }
+              }, dispatchToken)
+              .catch(() => undefined);
+          } else if (clickDispatchStarted && mutation) {
+            dispatchNetworkMayHaveOccurred = true;
           }
           await route.fallback();
         };
@@ -11975,6 +12022,7 @@ export class BrowserController {
                 }
               }, expiresAt);
               markInputDispatchPossible();
+              clickDispatchStarted = true;
               await candidate.click({
                 noWaitAfter: true,
                 ...(typeof remainingMs === "number"
@@ -12002,8 +12050,14 @@ export class BrowserController {
             onSubmitDispatched: reportSubmitDispatched,
           });
           clearSubmittedDispatchTracking = clearDispatchTracking;
-          readSubmittedDispatchExpired = async () =>
-            dispatchNetworkExpired || (await readDispatchState())?.expired === true;
+          readSubmittedDispatchExpiry = async () => {
+            const expired =
+              dispatchNetworkExpired || (await readDispatchState())?.expired === true;
+            if (!expired) return "active";
+            return dispatchNetworkMayHaveOccurred || dispatchNetworkConfirmed
+              ? "unknown"
+              : "expired";
+          };
         } catch (error) {
           await clearDispatchTracking();
           throw error;
@@ -12027,7 +12081,9 @@ export class BrowserController {
     }
     try {
       const assertDispatchNotExpired = async (): Promise<void> => {
-        if (await readSubmittedDispatchExpired?.()) {
+        const expiry = await readSubmittedDispatchExpiry?.();
+        if (expiry === "unknown") throw new PaymentSubmitOutcomeUnknownError();
+        if (expiry === "expired") {
           throw new BrowserClickDispatchError(
             "not_dispatched",
             new Error("payment_approval_expired"),
@@ -15370,6 +15426,7 @@ export class BrowserController {
     if (!this.page || !this.context) throw new Error("Browser not started");
     const pending = this.takePendingOAuthBoundary(selector);
     if (pending !== null) {
+      await pending.releaseObservation();
       this.maybeAttachOAuthNetListener();
       this.oauthProductPage = pending.product;
       this.oauthProviderPage = pending.providerPage;
@@ -15466,17 +15523,29 @@ export class BrowserController {
     let boundaryPage: Page | null = null;
     let externalDestination: string | null = null;
     let probeRouteInstalled = false;
+    let retainProbeRoute = false;
     let actionStarted = false;
     const probeRoute = async (route: Route): Promise<void> => {
-      const requestPage = route.request().frame().page();
+      const request = route.request();
+      let requestPage: Page;
+      try {
+        requestPage = request.frame().page();
+      } catch {
+        await route.fallback();
+        return;
+      }
       const opener = requestPage === product ? null : await requestPage.opener().catch(() => null);
       if (requestPage !== product && opener !== product) {
         await route.fallback();
         return;
       }
-      const url = route.request().url();
+      const url = request.url();
       observedUrls.add(url);
       const provider = classify(url);
+      const pending = this.pendingOAuthBoundary;
+      if (pending?.selector === selector && provider !== null) {
+        pending.destinationUrl = url;
+      }
       if (requestPage !== product) boundaryPage = requestPage;
       let external = false;
       try {
@@ -15486,11 +15555,16 @@ export class BrowserController {
         external = false;
       }
       if (external) externalDestination = url;
-      if (provider === "google" && route.request().isNavigationRequest()) {
+      if (provider === "google" && request.isNavigationRequest()) {
         await route.abort("blockedbyclient");
         return;
       }
       await route.fallback();
+    };
+    const releaseObservation = async (): Promise<void> => {
+      if (!probeRouteInstalled) return;
+      probeRouteInstalled = false;
+      await context.unroute("**/*", probeRoute).catch(() => undefined);
     };
     const recordPopup = (page: Page): void => {
       void page
@@ -15540,6 +15614,7 @@ export class BrowserController {
               productUrl,
               providerPage: boundaryPage ?? popup,
               destinationUrl: observedUrl,
+              releaseObservation,
             };
             return provider;
           }
@@ -15560,8 +15635,10 @@ export class BrowserController {
         productUrl,
         providerPage: boundaryPage ?? popup,
         destinationUrl: externalDestination,
+        releaseObservation,
       };
-      return externalDestination === null ? null : "other";
+      retainProbeRoute = true;
+      return null;
     } catch {
       if (actionStarted) {
         const resolved = [...observedUrls]
@@ -15581,13 +15658,15 @@ export class BrowserController {
           productUrl,
           providerPage: boundaryPage ?? popup,
           destinationUrl: resolved?.observedUrl ?? externalDestination,
+          releaseObservation,
         };
-        return resolved?.provider ?? (externalDestination === null ? null : "other");
+        if (resolved === undefined) retainProbeRoute = true;
+        return resolved?.provider ?? null;
       }
       return null;
     } finally {
       context.off("page", recordPopup);
-      if (probeRouteInstalled) await context.unroute("**/*", probeRoute).catch(() => undefined);
+      if (!retainProbeRoute) await releaseObservation();
       if (!actionStarted && popup !== null && !popup.isClosed()) {
         await popup.close().catch(() => undefined);
       }
@@ -15605,8 +15684,13 @@ export class BrowserController {
   // clicks the product's already-observed OAuth control and waits for the
   // provider-owned window to finish; no credentials, frames, or consent scopes
   // are read or bypassed here.
-  async loginWithOAuth(selector: string, settleTimeoutMs = 12_000): Promise<void> {
+  async loginWithOAuth(
+    selector: string,
+    settleTimeoutMs = 12_000,
+    consentProvider?: OAuthProviderId,
+  ): Promise<void> {
     const pending = this.takePendingOAuthBoundary(selector);
+    await pending?.releaseObservation();
     const product = pending?.product ?? this.page;
     const context = this.context;
     if (product === null || product.isClosed() || context === null) {
@@ -15681,13 +15765,34 @@ export class BrowserController {
       this.oauthProviderPage = transient;
       this.oauthProviderPageClosed = transient.isClosed();
       this.restoreProductPageWhenOAuthPageCloses(transient, durableProduct);
-      const settled = await this.waitForOAuthLifecycle(
-        transient,
-        productUrl,
-        settleTimeoutMs,
-        providerPage === null,
-        productDeparted,
-      );
+      this.page = transient;
+      let settled: "closed" | "returned" | null = null;
+      if (consentProvider === undefined) {
+        settled = await this.waitForOAuthLifecycle(
+          transient,
+          productUrl,
+          settleTimeoutMs,
+          providerPage === null,
+          productDeparted,
+        );
+      } else {
+        const deadline = Date.now() + settleTimeoutMs;
+        while (settled === null && Date.now() < deadline) {
+          const remaining = deadline - Date.now();
+          settled = await this.waitForOAuthLifecycle(
+            transient,
+            productUrl,
+            Math.min(1_000, remaining),
+            providerPage === null,
+            productDeparted,
+          );
+          if (settled !== null || transient.isClosed()) break;
+          productDeparted =
+            productDeparted || !this.isOAuthProductUrl(transient.url(), productUrl);
+          const advanced = await this.advanceOAuthConsent(consentProvider).catch(() => false);
+          if (!advanced) await this.sleep(Math.min(250, Math.max(1, deadline - Date.now())));
+        }
+      }
       if (settled === null) {
         throw new Error(
           `OAuth login is still awaiting the provider after ${Math.ceil(settleTimeoutMs / 1000)} seconds. Retry oauth_login; do not read or close the browser session.`,

@@ -7,11 +7,14 @@ import {
   destroyEphemeralProfile,
   invalidateCanonicalGoogleIdentity,
   MAX_SESSION_STATE_BYTES,
+  readPendingSessionStates,
   readCanonicalIdentityState,
   readCanonicalIdentityMetadata,
   readSessionState,
   sessionStatePath,
+  removePendingSessionState,
   writeCanonicalIdentitySnapshot,
+  writePendingSessionState,
   writeSessionState,
 } from "../session-state.js";
 
@@ -78,6 +81,25 @@ describe("operator session storage state", () => {
     await expect(writeSessionState(canonical, replacement, () => false)).resolves.toBe(false);
 
     await expect(readSessionState(canonical)).resolves.toEqual(prior);
+  });
+
+  it("persists successful deferred state independently of canonical publication", async () => {
+    const canonical = mkdtempSync(join(tmpdir(), "ts-session-state-pending-"));
+    roots.push(canonical);
+    const state = {
+      cookies: [
+        { name: "merchant_session", value: "confirmed", domain: ".merchant.test", path: "/" },
+      ],
+      origins: [],
+    };
+
+    const path = await writePendingSessionState(canonical, state);
+    expect(path).toBeDefined();
+    await expect(readPendingSessionStates(canonical)).resolves.toEqual([{ path, state }]);
+    expect(statSync(path!).mode & 0o777).toBe(0o600);
+
+    await removePendingSessionState(path!);
+    await expect(readPendingSessionStates(canonical)).resolves.toEqual([]);
   });
 
   it("invalidates only Google identity before a forced re-login", async () => {

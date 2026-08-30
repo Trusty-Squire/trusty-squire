@@ -70,10 +70,13 @@ import {
   destroyEphemeralProfile,
   hasUsableGoogleIdentity,
   readCanonicalIdentityState,
+  readPendingSessionStates,
   readSessionState,
+  removePendingSessionState,
   stripGoogleIdentityFromSessionState,
   type BrowserStorageState,
   writeCanonicalIdentitySnapshot,
+  writePendingSessionState,
   writeSessionState,
 } from "./session-state.js";
 import {
@@ -806,11 +809,14 @@ async function withCanonicalProfileOperation<T>(
 async function withCanonicalSnapshotPublication<T>(
   profileDir: string,
   run: () => Promise<T>,
-): Promise<T> {
+  canContinue: () => boolean = () => true,
+): Promise<T | undefined> {
   for (;;) {
+    if (!canContinue()) return undefined;
     try {
       const lease = await acquireFreeProfileOperationGuard(profileDir);
       try {
+        if (!canContinue()) return undefined;
         return await run();
       } finally {
         lease.release();
@@ -823,6 +829,27 @@ async function withCanonicalSnapshotPublication<T>(
       timer.unref();
     });
   }
+}
+
+async function reconcilePendingSessionStates(
+  profileDir: string,
+  canPublish: () => boolean = () => true,
+): Promise<void> {
+  await withCanonicalSnapshotPublication(
+    profileDir,
+    async () => {
+      const pending = await readPendingSessionStates(profileDir);
+      for (const entry of pending) {
+        if (!canPublish()) return;
+        const latest = await readSessionState(profileDir);
+        const state =
+          latest === undefined ? entry.state : mergeGoogleIdentityStorageState(entry.state, latest);
+        if (!(await writeSessionState(profileDir, state, canPublish))) return;
+        await removePendingSessionState(entry.path);
+      }
+    },
+    canPublish,
+  );
 }
 
 function isGoogleStorageHost(host: unknown): boolean {
@@ -891,8 +918,27 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
   let googleIdentityAvailable = false;
   let googleAccountEmail: string | null = null;
   try {
-    const { storageState: savedStorageState, identityMetadata } =
+    const pendingStates = await readPendingSessionStates(canonicalProfileDir);
+    const canReconcile = (): boolean =>
+      shutdownInProgress === 0 &&
+      generation === shutdownGeneration &&
+      !pending.cancelRequested;
+    void reconcilePendingSessionStates(canonicalProfileDir, canReconcile).catch(
+      (publishError: unknown) => {
+        console.error(
+          `[operator] pending storageState reconciliation failed: ${publishError instanceof Error ? publishError.message : String(publishError)}`,
+        );
+      },
+    );
+    const { storageState: canonicalStorageState, identityMetadata } =
       await readCanonicalIdentityState(canonicalProfileDir);
+    const savedStorageState = pendingStates.reduce<BrowserStorageState | undefined>(
+      (latest, entry) =>
+        latest === undefined
+          ? entry.state
+          : mergeGoogleIdentityStorageState(entry.state, latest),
+      canonicalStorageState,
+    );
     googleIdentityAvailable = hasUsableGoogleIdentity(savedStorageState);
     googleAccountEmail = identityMetadata?.googleAccountEmail ?? null;
     const storageState =
@@ -1074,18 +1120,6 @@ async function closeEphemeralBrowser(
         owner?.forced !== true &&
         ephemeral.shutdownGeneration === shutdownGeneration &&
         shutdownInProgress === 0;
-      const publish = async (): Promise<boolean> =>
-        await withCanonicalSnapshotPublication(ephemeral.canonicalProfileDir, async () => {
-          if (!canPublish()) return false;
-          const latest = await readSessionState(ephemeral.canonicalProfileDir);
-          return await writeSessionState(
-            ephemeral.canonicalProfileDir,
-            latest === undefined
-              ? capturedState
-              : mergeGoogleIdentityStorageState(capturedState, latest),
-            canPublish,
-          );
-        });
       try {
         const lease = await acquireFreeProfileOperationGuard(ephemeral.canonicalProfileDir);
         try {
@@ -1105,11 +1139,21 @@ async function closeEphemeralBrowser(
         }
       } catch (error) {
         if (!(error instanceof ProfileBusyError)) throw error;
-        void publish().catch((publishError: unknown) => {
-          console.error(
-            `[operator] deferred storageState publication failed: ${publishError instanceof Error ? publishError.message : String(publishError)}`,
-          );
-        });
+        const pending = await writePendingSessionState(
+          ephemeral.canonicalProfileDir,
+          capturedState,
+          canPublish,
+        );
+        if (pending === undefined) {
+          throw new Error("operator browser terminal teardown was forced");
+        }
+        void reconcilePendingSessionStates(ephemeral.canonicalProfileDir, canPublish).catch(
+          (publishError: unknown) => {
+            console.error(
+              `[operator] deferred storageState publication failed: ${publishError instanceof Error ? publishError.message : String(publishError)}`,
+            );
+          },
+        );
       }
     }
     if (owner?.forced) {
@@ -1134,22 +1178,9 @@ function isGoogleOAuthAction(
   element: InteractiveElement,
 ): boolean | null {
   if (action.provider !== undefined) return action.provider === "google";
-  const destination = [element.href, element.id, element.name, element.testId]
-    .filter((value): value is string => typeof value === "string")
-    .join(" ");
+  const destination = element.href ?? "";
   if (/github\.com|(?:^|[^a-z])github(?:[^a-z]|$)/i.test(destination)) return false;
   if (/accounts\.google\.com|(?:^|[^a-z])google(?:[^a-z]|$)/i.test(destination)) return true;
-  const legacySignal = [
-    element.visibleText,
-    element.labelText,
-    element.ariaLabel,
-    element.iconLabel,
-    element.title,
-  ]
-    .filter((value): value is string => typeof value === "string")
-    .join(" ");
-  if (/(?:^|[^a-z])github(?:[^a-z]|$)/i.test(legacySignal)) return false;
-  if (/(?:^|[^a-z])google(?:[^a-z]|$)/i.test(legacySignal)) return true;
   return null;
 }
 
@@ -1161,7 +1192,7 @@ async function googleOAuthBoundaryRequired(
   const classified = isGoogleOAuthAction(action, element);
   if (classified !== null) return classified;
   const destination = await browser.detectOAuthProviderDestination(element.selector);
-  return destination === "google";
+  return destination !== "github" && destination !== "other";
 }
 
 async function runSerializedGoogleIdentityOperation<T>(
@@ -1349,12 +1380,113 @@ async function runSerializedGoogleIdentityOperation<T>(
   );
 }
 
+async function runDetachedGoogleIdentityOperation<T>(
+  session: Session,
+  operation: (browser: BrowserController) => Promise<T>,
+): Promise<T> {
+  const browser = session.browser;
+  const ephemeral = leasedBrowsers.get(browser);
+  if (ephemeral === undefined) {
+    return (await runSerializedGoogleIdentityOperation(session, operation)).result;
+  }
+  const generation = provisionStartGeneration();
+  const ownsSession = (): boolean =>
+    shutdownInProgress === 0 &&
+    generation === shutdownGeneration &&
+    !session.closing &&
+    sessions.get(session.id) === session &&
+    session.browser === browser;
+  return await withCanonicalProfileOperation(
+    ephemeral.canonicalProfileDir,
+    async () => {
+      if (!ownsSession()) {
+        throw new Error("Google identity operation cancelled during operator shutdown");
+      }
+      const profileDir = createEphemeralProfile();
+      const latestState = await readSessionState(ephemeral.canonicalProfileDir);
+      const detached = new BrowserController({
+        profileDir,
+        ...(latestState === undefined ? {} : { storageState: latestState }),
+        ...(ephemeral.proxyUrl === undefined ? {} : { proxyUrl: ephemeral.proxyUrl }),
+      });
+      const pending: StartingBrowser = {
+        controller: detached,
+        profileDir,
+        canonicalProfileDir: ephemeral.canonicalProfileDir,
+        launch: Promise.resolve(),
+        cancelRequested: false,
+        cleanupPromise: null,
+      };
+      startingBrowsers.add(pending);
+      let closeState: "closed" | "force_closed_unproven" | "unknown" = "unknown";
+      try {
+        pending.launch = startBrowserBounded(detached, session.id, async () => {
+          await cancelStartingBrowser(pending);
+        });
+        await pending.launch;
+        if (pending.cancelRequested || !ownsSession()) {
+          throw new Error("Google identity operation cancelled during operator shutdown");
+        }
+        await detached.setHostScopeAllowedHosts(
+          () => ["accounts.google.com", "myaccount.google.com"],
+          () => [],
+        );
+        let result: T | undefined;
+        let operationError: unknown;
+        try {
+          result = await operation(detached);
+        } catch (error) {
+          operationError = error;
+        }
+        const googleAccountEmail = await detached.detectGoogleAccountEmail();
+        const rotatedState = await detached.captureStorageState();
+        closeState = await closeBrowserBounded(
+          detached,
+          false,
+          "Google identity browser close timed out",
+        );
+        if (closeState !== "closed") {
+          throw new Error(`Google identity browser closed without proof (${closeState})`);
+        }
+        if (!ownsSession()) {
+          throw new Error("Google identity operation cancelled during operator shutdown");
+        }
+        const priorIdentity = await readCanonicalIdentityState(ephemeral.canonicalProfileDir);
+        const published = await writeCanonicalIdentitySnapshot(
+          ephemeral.canonicalProfileDir,
+          rotatedState,
+          googleAccountEmail === null
+            ? priorIdentity.identityMetadata
+            : { googleAccountEmail },
+          ownsSession,
+        );
+        if (!published) {
+          throw new Error("Google identity operation could not publish session state");
+        }
+        if (operationError !== undefined) throw operationError;
+        return result as T;
+      } finally {
+        startingBrowsers.delete(pending);
+        if (closeState !== "closed") {
+          closeState = await closeBrowserBounded(
+            detached,
+            true,
+            "Google identity browser cleanup timed out",
+          ).catch(() => "unknown" as const);
+        }
+        if (closeState === "closed") destroyEphemeralProfileDetached(profileDir);
+      }
+    },
+    ownsSession,
+  );
+}
+
 async function runSerializedGoogleOAuth(
   session: Session,
   selector: string,
 ): Promise<BrowserController> {
   const completed = await runSerializedGoogleIdentityOperation(session, async (browser) => {
-    await browser.loginWithOAuth(selector);
+    await browser.loginWithOAuth(selector, 30_000, "google");
     await settleAfterStateChange(browser);
   }, { requireFreshAccountEmail: true });
   return completed.browser;
@@ -9418,8 +9550,7 @@ export async function awaitVerification(
 
   invalidateCompactV2Snapshot(session);
 
-  const resumeUrl = session.browser.currentUrl() || session.startUrl;
-  const verification = await runSerializedGoogleIdentityOperation(session, async (browser) => {
+  const verification = await runDetachedGoogleIdentityOperation(session, async (browser) => {
     return await browser.withTemporaryHostScopeAllowedHosts(["mail.google.com"], async () => {
       const query = buildVerificationSearchQuery(opts.sender);
       const searchUrl = `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
@@ -9451,8 +9582,8 @@ export async function awaitVerification(
       }
       return { code, link, sourceFrom };
     });
-  }, { resumeUrl });
-  const { code, link, sourceFrom } = verification.result;
+  });
+  const { code, link, sourceFrom } = verification;
   const found = code !== null || link !== null;
   audit(sessionId, "await_verification", {
     sender: opts.sender ?? null,
