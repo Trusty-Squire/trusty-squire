@@ -540,6 +540,33 @@ describe("payment approval relay", () => {
     });
   });
 
+  it("marks only a previously accepted relay candidate for bounded expiry handling", async () => {
+    await server.close();
+    const verifier = vi.fn(async () => ({}));
+    server = await buildServer({ deps, vouchVerifier: verifier });
+    const created = await createApproval();
+    const submission = makeSubmission(created);
+
+    const relayed = await relaySubmission(created.id, submission);
+    expect(relayed.approvalStatus).toBe(202);
+    expect(verifier).toHaveBeenNthCalledWith(
+      1,
+      expect.not.objectContaining({ previouslyVerifiedRelay: true }),
+    );
+
+    const confirm = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: submission,
+    });
+    expect(confirm.statusCode).toBe(200);
+    expect(verifier).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ previouslyVerifiedRelay: true }),
+    );
+  });
+
   it("refuses confirmation when approval expires during vouch verification", async () => {
     const created = await createApproval();
     const submission = makeSubmission(created);
@@ -563,6 +590,34 @@ describe("payment approval relay", () => {
     expect(confirm.statusCode).toBe(409);
     expect(confirm.json()).toEqual({ error: "payment_approval_candidate_changed" });
     expect((await deps.pendingPaymentApprovalStore.getById(created.id))?.status).toBe("pending");
+  });
+
+  it("rejects an expired approved relay before vouch verification", async () => {
+    await server.close();
+    const verifier = vi.fn(async () => ({}));
+    server = await buildServer({ deps, vouchVerifier: verifier });
+    const created = await createApproval();
+    const submission = makeSubmission(created);
+    await relaySubmission(created.id, submission);
+    const confirmed = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: submission,
+    });
+    expect(confirmed.statusCode).toBe(200);
+    expect(verifier).toHaveBeenCalledTimes(2);
+    nowMs = Date.parse(created.expires_at) + 1;
+
+    const expired = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: submission,
+    });
+    expect(expired.statusCode).toBe(409);
+    expect(expired.json()).toEqual({ error: "payment_approval_expired" });
+    expect(verifier).toHaveBeenCalledTimes(2);
   });
 
   it.each(["review", "approval"] as const)(

@@ -692,6 +692,7 @@ const actSchema = z
     path: z.string().min(1).max(4096).optional(),
     url: z.string().url().optional(),
     key: z.string().min(1).max(40).optional(),
+    provider: z.enum(["google", "github"]).optional(),
     // allow_host: a bare hostname to cross into mid-session.
     host: z.string().min(1).max(253).optional(),
     // type_secret: the sealed slot whose value to type into `target`.
@@ -1045,9 +1046,17 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
     case "js_click":
       return { kind: "js_click", target: need(args.target, "target") };
     case "oauth_click":
-      return { kind: "oauth_click", target: need(args.target, "target") };
+      return {
+        kind: "oauth_click",
+        target: need(args.target, "target"),
+        ...(args.provider === undefined ? {} : { provider: args.provider }),
+      };
     case "oauth_login":
-      return { kind: "oauth_login", target: need(args.target, "target") };
+      return {
+        kind: "oauth_login",
+        target: need(args.target, "target"),
+        ...(args.provider === undefined ? {} : { provider: args.provider }),
+      };
     case "type":
       return {
         kind: "type",
@@ -1426,6 +1435,12 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
       path: { type: "string" },
       url: { type: "string" },
       key: { type: "string" },
+      provider: {
+        type: "string",
+        enum: ["google", "github"],
+        description:
+          "OAuth provider for oauth_login/oauth_click. Declare it for JavaScript-driven controls whose label or destination does not identify the provider.",
+      },
       host: { type: "string" },
       slot: { type: "string" },
       product_identity: { type: "string", minLength: 1 },

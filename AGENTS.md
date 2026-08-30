@@ -455,6 +455,14 @@ Preserve that contract when changing browser startup or shutdown: never replace 
 identity-proven scope with root-PID-only signaling or broad `pkill`. The strict
 containment follow-up is `ts-operator-browser-cgroup-containment` in `TODOS.md`.
 
+### 13. OAuth identity uses portable state and a narrow lease
+
+Every `oauth_login` and legacy `oauth_click` is serialized by the narrow action
+lease from action start through completion and cooldown; all other operator work
+stays parallel. Operators never open the canonical profile or copy Chrome cookie
+databases. The portable-state capture and handoff contract is owned by
+`docs/DESIGN-warm-browser-reuse.md`.
+
 ## Final note
 
 You are reading this file because a prior agent burned four version numbers, confused users, and forced a human to intervene. The agent was not malicious. It was not lazy. It was pattern-matching on its own prose instead of on tool output.

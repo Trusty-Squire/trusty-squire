@@ -203,7 +203,12 @@ close-out. The single-page (`phase="single"`) checkout still reads the live tota
 fills, and submits in one call. Before dispatch it may select only the sole
 unambiguous new-card radio competing with a merchant-saved card, then re-verifies
 that choice and every sealed value at the final pre-click boundary; any ambiguity or
-state change fails closed. After dispatch, the native 3-D Secure wait passively
+state change fails closed. The approval lifetime is checked after mandate
+verification and again immediately before that explicit charge click. Expiry before
+the click returns `payment_approval_expired` without dispatch; once input dispatch
+may have begun, the deadline cannot abort the merchant's charge or legitimate 3-D
+Secure follow-up, and uncertain completion remains `payment_outcome_unknown`. After
+dispatch, the native 3-D Secure wait passively
 compares issuer/network/last-four evidence rendered by the issuer/app with the
 released card. A discrepancy is returned and retained across resumable status polls
 as a structured `payment_instrument_mismatch` warning; it never mutates or cancels
@@ -254,8 +259,14 @@ values.
 
 The MCP operator fetches Vouchflow's JWKS and fails closed unless signature,
 issuer, audience, purchase context, payload hash, and user presence all verify.
-It confirms the exact verified submission before retaining the card to fill the
-checkout. Browser passkeys are capped at low confidence in Vouchflow regardless
+First acceptance at `POST /approve` also requires a currently valid assertion.
+An exact, nonce-bound candidate already verified there may outlive the assertion
+while waiting in the authenticated relay: only `/confirm` and the MCP relay consumer
+may revalidate it at a point inside its signed validity interval, and only within the
+18-minute maximum approval lifetime. Signature, issuer, audience, context, payload
+binding, confidence, and the approval record's own expiry remain mandatory. The
+operator confirms the exact verified submission before retaining the card to fill
+the checkout. Browser passkeys are capped at low confidence in Vouchflow regardless
 of biometric, so mandate assurance rests on user presence, the single-use nonce,
 and amount, recipient, origin, and item binding rather than a high confidence
 tier. Plaintext PAN and CVV are not returned through MCP to the coding-agent

@@ -29,12 +29,13 @@ import {
   withProfileOperationGuard,
 } from "./profile.js";
 import {
+  extractGoogleAccountEmail,
   launchPlainLoginBrowser,
   launchSelfManagedLoginContext,
   resolveChannelBinary,
   selfLaunchEnabled,
 } from "./browser.js";
-export { extractGoogleAccountEmail } from "./browser.js";
+export { extractGoogleAccountEmail };
 import {
   startInstallCompletionListener,
   withInstallCompletionCallback,
@@ -43,8 +44,11 @@ import { markProviderLoggedIn } from "./login-state.js";
 import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
+  canonicalIdentitySnapshotDisposition,
   GOOGLE_LOGIN_COOKIE_MARKERS,
-  writeSessionState,
+  hasUsableGoogleIdentity,
+  readCanonicalIdentityMetadata,
+  writeCanonicalIdentitySnapshot,
   type BrowserStorageState,
 } from "./session-state.js";
 import {
@@ -56,6 +60,7 @@ import {
   startRemoteLoginDisplay,
   teardownRemoteLoginRig,
 } from "./remote-login-display.js";
+export { extractOAuthScopes, scopesAreBasic, scrapeGoogleScopePhrases } from "./oauth-scope.js";
 
 const require = createRequire(import.meta.url);
 
@@ -104,6 +109,103 @@ function resolveChromium(): PersistentLauncher {
     return extra.chromium;
   } catch {
     return (require("playwright") as { chromium: PersistentLauncher }).chromium;
+  }
+}
+
+export async function captureProfileStorageState(
+  profileDir: string,
+  runtime: {
+    resolveChannelBinary: typeof resolveChannelBinary;
+    launchSelfManagedLoginContext: typeof launchSelfManagedLoginContext;
+    teardownLoginBrowser: typeof teardownLoginBrowser;
+  } = {
+    resolveChannelBinary,
+    launchSelfManagedLoginContext,
+    teardownLoginBrowser,
+  },
+): Promise<{ storageState: BrowserStorageState; googleAccountEmail?: string }> {
+  const lifecycle = createTrackedLoginBrowserLifecycle();
+  let state: BrowserStorageState | undefined;
+  let googleAccountEmail: string | null = null;
+  let closeState: ProfileCloseState = "unknown";
+  let captureContextAcquired = false;
+  try {
+    const binary = runtime.resolveChannelBinary("chrome");
+    if (binary === null) throw new Error("no Chrome binary found for identity capture");
+    let tracked = false;
+    const trackBrowser = (browser: {
+      teardown: () => Promise<void>;
+      forceTeardown: () => void;
+      isRunning: () => boolean;
+    }): void => {
+      if (tracked) return;
+      tracked = true;
+      lifecycle.browserLaunched(
+        async () =>
+          await runtime.teardownLoginBrowser({
+            profileDir,
+            identity: null,
+            closeBrowser: browser.teardown,
+            forceClose: browser.forceTeardown,
+            isRunning: browser.isRunning,
+          }),
+      );
+    };
+    const browser = await runtime.launchSelfManagedLoginContext({
+      binary,
+      profileDir,
+      initialUrl: "about:blank",
+      appMode: false,
+      window: { width: 1280, height: 800 },
+      env: process.env,
+      proxyServer: null,
+      extraArgs: ["--headless=new", "--no-sandbox", "--disable-dev-shm-usage"],
+      onSpawned: trackBrowser,
+    });
+    trackBrowser(browser);
+    const context = browser.context;
+    captureContextAcquired = true;
+    googleAccountEmail = await detectGoogleAccountEmailInContext(context);
+    state = await context.storageState({ indexedDB: true });
+  } catch (error) {
+    if (!captureContextAcquired) lifecycle.throwIfCancelled();
+    throw error;
+  } finally {
+    closeState = await lifecycle.finish();
+  }
+  lifecycle.throwIfCancelled();
+  if (closeState !== "closed") {
+    throw new Error(`login identity capture closed without proof (${closeState})`);
+  }
+  return {
+    storageState: state!,
+    ...(googleAccountEmail === null ? {} : { googleAccountEmail }),
+  };
+}
+
+async function detectGoogleAccountEmailInContext(context: BrowserContext): Promise<string | null> {
+  let page: Awaited<ReturnType<BrowserContext["newPage"]>> | null = null;
+  try {
+    page = await context.newPage();
+    await page.goto("https://myaccount.google.com/", {
+      waitUntil: "domcontentloaded",
+      timeout: 20_000,
+    });
+    if (new URL(page.url()).hostname !== "myaccount.google.com") return null;
+    const labels = await page
+      .locator("[aria-label]")
+      .evaluateAll((elements) =>
+        elements.map((element) => element.getAttribute("aria-label") ?? ""),
+      );
+    for (const label of labels) {
+      const email = extractGoogleAccountEmail(label.trim());
+      if (email !== null) return email;
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    await page?.close().catch(() => undefined);
   }
 }
 
@@ -322,102 +424,6 @@ export function classifyGoogleAuthState(url: string, bodyText: string): GoogleAu
   return "needs_login";
 }
 
-// --- T7: OAuth consent scope gate --------------------------------------
-// After the bot clicks "Sign in with Google" and lands on a consent
-// screen, the OAuth signup flow auto-approves it ONLY when every scope
-// the service requested is a basic-identity scope. Anything broader
-// (Gmail/Drive/contacts) aborts the run for human review — a
-// prompt-injected or confused agent must not be able to grant a wide
-// OAuth scope on the user's behalf (see the plan's Security Boundary).
-//
-// The allowlist is Google-OIDC vocabulary. GitHub (Phase 2, D7) gets
-// its own provider-aware allowlist when that provider lands.
-const BASIC_OAUTH_SCOPES: ReadonlySet<string> = new Set([
-  "openid",
-  "email",
-  "profile",
-  "https://www.googleapis.com/auth/userinfo.email",
-  "https://www.googleapis.com/auth/userinfo.profile",
-]);
-
-// Pull the OAuth `scope` parameter off a Google consent URL. Robust by
-// design (a spec refinement): a query-param read, never a DOM scrape or
-// a vision call. Google nests the real authorize request inside a
-// `continue=` (or similar) param on the consent/chooser URL, so this
-// walks nested URL-valued params up to a small depth to find `scope`.
-//
-// Returns the parsed scope list, or null when no `scope` param is
-// present anywhere — the caller treats "can't read the scopes" as
-// "can't confirm they're basic" and pauses for human review.
-//
-// Exported for unit testing — the nested-URL walk is the error-prone bit.
-export function extractOAuthScopes(rawUrl: string): string[] | null {
-  const scopes: string[] = [];
-  const visit = (urlStr: string, depth: number): void => {
-    if (scopes.length > 0 || depth > 8) return;
-    let u: URL;
-    try {
-      u = new URL(urlStr);
-    } catch {
-      return;
-    }
-    const scope = u.searchParams.get("scope");
-    if (scope !== null && scope.trim().length > 0) {
-      // Google separates scopes with spaces; tolerate "+" and "," too.
-      for (const s of scope.split(/[\s,+]+/)) {
-        const trimmed = s.trim();
-        if (trimmed.length > 0) scopes.push(trimmed);
-      }
-      return;
-    }
-    // Recurse into any param whose value is itself a URL (Google's
-    // `continue`, `authError`, etc. carry the nested authorize request).
-    for (const value of u.searchParams.values()) {
-      if (/^https?:\/\//i.test(value.trim())) visit(value, depth + 1);
-    }
-  };
-  visit(rawUrl, 0);
-  return scopes.length > 0 ? scopes : null;
-}
-
-// True when EVERY requested scope is in the basic-identity allowlist —
-// the gate for auto-approving a consent screen. An empty list returns
-// false: no scopes parsed means we could not confirm, so we do not
-// auto-approve. Exported for unit testing.
-export function scopesAreBasic(scopes: readonly string[]): boolean {
-  return scopes.length > 0 && scopes.every((s) => BASIC_OAUTH_SCOPES.has(s));
-}
-
-// Defense-in-depth for the case where extractOAuthScopes returns null
-// (no parseable scope= param) but the page IS a real scope-grant
-// consent. Google's consent screen lists each scope visually with a
-// templated verb phrase: "See your", "Manage your", "Edit your", "Send
-// email", etc. A scope-summary / account-chooser / post-grant
-// confirmation does not include these phrases. So when the URL gives
-// us nothing, the visible-text phrases are the next best signal.
-//
-// Returns the list of suspicious phrases found (each capped at 80 chars
-// so a runaway match cannot blow up the response). Empty list = the
-// page does not appear to grant any sensitive scope.
-export function scrapeGoogleScopePhrases(text: string): string[] {
-  const patterns: RegExp[] = [
-    /see\s+(?:and\s+download|and\s+manage)\s+[^.\n]+/gi,
-    /manage\s+(?:your|all|all\s+your)\s+(?:contacts|google\s+drive|photos|calendars?|tasks|mail|gmail|files|account|youtube)[^.\n]*/gi,
-    /edit\s+(?:your|all)\s+(?:contacts|google\s+drive|photos|calendars?|tasks|mail|gmail|files)[^.\n]*/gi,
-    /send\s+(?:email|mail|messages)\s+(?:on\s+your\s+behalf|as\s+you)[^.\n]*/gi,
-    /view\s+(?:your|all|all\s+your)\s+(?:contacts|google\s+drive|photos|calendars?|tasks|mail|gmail|files|youtube|location\s+history)[^.\n]*/gi,
-    /access\s+your\s+(?:google\s+drive|gmail|contacts|calendars?|photos|youtube)[^.\n]*/gi,
-    /delete\s+(?:your|all)\s+[^.\n]+/gi,
-  ];
-  const matches = new Set<string>();
-  for (const p of patterns) {
-    for (const m of text.matchAll(p)) {
-      matches.add(m[0].slice(0, 80).trim());
-    }
-  }
-  return Array.from(matches);
-}
-
 // Google's "number-match" challenge (URL: /signin/challenge/dp) shows
 // ONE big number on the desktop browser; the user's phone shows three
 // options and they tap the matching one. The number is the only piece
@@ -469,8 +475,35 @@ export async function teardownLoginBrowser(opts: {
   identity: ProfileProcessIdentity | null;
   closeBrowser: () => Promise<void>;
   forceClose: () => unknown;
+  isRunning?: () => boolean;
   timeoutMs?: number;
 }): Promise<ProfileCloseState> {
+  if (opts.identity === null && opts.isRunning !== undefined) {
+    const timeoutMs = opts.timeoutMs ?? 15_000;
+    let timer: NodeJS.Timeout | undefined;
+    const closed = await Promise.race([
+      Promise.resolve()
+        .then(opts.closeBrowser)
+        .then(
+          () => true,
+          () => false,
+        ),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+    if (timer !== undefined) clearTimeout(timer);
+    const waitForExit = async (): Promise<boolean> => {
+      const deadline = Date.now() + 2_000;
+      while (opts.isRunning!() && Date.now() < deadline) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      }
+      return !opts.isRunning!();
+    };
+    if (closed && (await waitForExit())) return "closed";
+    opts.forceClose();
+    return (await waitForExit()) ? "closed" : "force_closed_unproven";
+  }
   return await closeProfileWithProof({
     profileDir: opts.profileDir,
     identity: opts.identity,
@@ -508,6 +541,7 @@ export async function cancelActiveLoginBrowsers(): Promise<void> {
 }
 
 interface TrackedLoginBrowserLifecycle {
+  cancellation: Promise<void>;
   cancel(): Promise<void>;
   throwIfCancelled(): void;
   browserLaunched(teardown: () => Promise<ProfileCloseState>): void;
@@ -527,6 +561,10 @@ function createTrackedLoginBrowserLifecycle(
   let browserTeardown: Promise<ProfileCloseState> | undefined;
   let runTeardown: Promise<void> | undefined;
   let cancellation: Promise<void> | undefined;
+  let resolveCancellation!: () => void;
+  const cancellationSignal = new Promise<void>((resolve) => {
+    resolveCancellation = resolve;
+  });
   let finishing: Promise<ProfileCloseState> | undefined;
 
   const settleLaunch = (): void => {
@@ -547,8 +585,10 @@ function createTrackedLoginBrowserLifecycle(
   let lifecycle!: TrackedLoginBrowserLifecycle;
   const untrack = trackActiveLoginBrowser(async () => await lifecycle.cancel());
   lifecycle = {
+    cancellation: cancellationSignal,
     cancel: (): Promise<void> => {
       cancelled = true;
+      resolveCancellation();
       cancellation ??= (async () => {
         await launchSettlement;
         try {
@@ -658,20 +698,53 @@ export interface LoginRunResult {
   status: "completed" | "preflight_satisfied" | "timeout";
   closeState: ProfileCloseState;
   storageState?: BrowserStorageState;
+  googleAccountEmail?: string;
+}
+
+async function captureClosedPlainLoginState(
+  profileDir: string,
+  status: LoginRunResult["status"],
+  closeState: ProfileCloseState,
+  capture: typeof captureProfileStorageState,
+): Promise<Pick<LoginRunResult, "storageState" | "googleAccountEmail">> {
+  if (status !== "completed" || closeState !== "closed") return {};
+  return await capture(profileDir);
 }
 
 export async function finalizeLoginRun(
   opts: Pick<RunInBotChromeOpts, "profileDir" | "onConfirmedLogin" | "seedProvider">,
   result: LoginRunResult,
 ): Promise<void> {
-  if (result.status === "completed" || result.status === "preflight_satisfied") {
+  if (result.status !== "completed" && result.status !== "preflight_satisfied") return;
+  if (result.closeState !== "closed" || result.storageState === undefined) {
+    throw new Error("login identity snapshot closed without publishable state");
+  }
+  const seedProvider =
+    typeof opts.seedProvider === "function" ? opts.seedProvider() : opts.seedProvider;
+  const priorMetadata = await readCanonicalIdentityMetadata(opts.profileDir);
+  if (seedProvider === "google" && result.status === "completed") {
+    if (!hasUsableGoogleIdentity(result.storageState)) {
+      throw new Error("Google login completed without a live identity marker");
+    }
+  }
+  const metadata =
+    result.googleAccountEmail !== undefined
+      ? { googleAccountEmail: result.googleAccountEmail }
+      : seedProvider === "google" && result.status === "completed"
+        ? undefined
+        : priorMetadata;
+  const disposition = canonicalIdentitySnapshotDisposition(result.storageState, metadata);
+  if (disposition === "oversized") {
     await opts.onConfirmedLogin?.();
+    return;
   }
-  // Plain Chrome has no context to capture. Leave the existing snapshot alone;
-  // it is safer than erasing every saved login after an interactive connect.
-  if (result.closeState === "closed" && result.storageState !== undefined) {
-    await writeSessionState(opts.profileDir, result.storageState);
-  }
+  const published = await writeCanonicalIdentitySnapshot(
+    opts.profileDir,
+    result.storageState,
+    metadata,
+  );
+  if (!published) throw new Error("login identity snapshot could not be published");
+  await opts.onConfirmedLogin?.();
 }
 
 async function runInBotChromeWithProfileGuard(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
@@ -706,6 +779,7 @@ export async function runDisplayedChrome(
   runtime: {
     resolveChannelBinary: typeof resolveChannelBinary;
     launchPlainLoginBrowser: typeof launchPlainLoginBrowser;
+    captureProfileStorageState?: typeof captureProfileStorageState;
   } = { resolveChannelBinary, launchPlainLoginBrowser },
 ): Promise<LoginRunResult> {
   // PLAIN-BROWSER path (connect claim): launch plain Chrome, never attach CDP,
@@ -747,6 +821,7 @@ export async function runDisplayedChrome(
             identity: browser.identity,
             closeBrowser: browser.teardown,
             forceClose: browser.forceTeardown,
+            isRunning: browser.isRunning,
           }),
       );
       console.error(`\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`);
@@ -769,7 +844,17 @@ export async function runDisplayedChrome(
     } finally {
       closeState = await lifecycle.finish();
     }
-    return { status, closeState };
+    const captured = await captureClosedPlainLoginState(
+      opts.profileDir,
+      status,
+      closeState,
+      runtime.captureProfileStorageState ?? captureProfileStorageState,
+    );
+    return {
+      status,
+      closeState,
+      ...captured,
+    };
   }
   const chromium = resolveChromium();
   const proxyOpt = loginProxyOption();
@@ -778,6 +863,7 @@ export async function runDisplayedChrome(
   let status: LoginRunResult["status"] = "timeout";
   let closeState: ProfileCloseState = "unknown";
   let storageState: BrowserStorageState | undefined;
+  let googleAccountEmail: string | null = null;
   try {
     const context = await launchWithProfileGate(
       opts.profileDir,
@@ -834,15 +920,24 @@ export async function runDisplayedChrome(
       status = ok ? "completed" : "timeout";
     }
     if (status === "completed" || status === "preflight_satisfied") {
+      googleAccountEmail = await detectGoogleAccountEmailInContext(context);
       storageState = await context.storageState({ indexedDB: true });
     }
   } finally {
     closeState = await lifecycle.finish();
   }
-  return { status, closeState, ...(storageState === undefined ? {} : { storageState }) };
+  return {
+    status,
+    closeState,
+    ...(storageState === undefined ? {} : { storageState }),
+    ...(googleAccountEmail === null ? {} : { googleAccountEmail }),
+  };
 }
 
-export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
+export async function runRemoteLoginChrome(
+  opts: RunInBotChromeOpts,
+  runtime: { captureProfileStorageState?: typeof captureProfileStorageState } = {},
+): Promise<LoginRunResult> {
   const rig = createRemoteLoginRig();
   let activeTeardown: (() => Promise<void>) | undefined;
   let plainBrowserIsRunning: (() => boolean) | undefined;
@@ -1012,10 +1107,20 @@ export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<Lo
         }
       }
       const closeState = await lifecycle.finish();
+      const captured =
+        context === undefined
+          ? await captureClosedPlainLoginState(
+              opts.profileDir,
+              completed ? "completed" : "timeout",
+              closeState,
+              runtime.captureProfileStorageState ?? captureProfileStorageState,
+            )
+          : {};
       return {
         status: completed ? "completed" : "timeout",
         closeState,
         ...(storageState === undefined ? {} : { storageState }),
+        ...captured,
       };
     } finally {
       await lifecycle.finish();

@@ -1792,6 +1792,10 @@ describe("TOOLS registry", () => {
         "login_load_saved",
       ]),
     );
+    expect(properties.provider).toMatchObject({
+      type: "string",
+      enum: ["google", "github"],
+    });
 
     const names = TOOLS.map((tool) => tool.name);
     expect(names).not.toEqual(

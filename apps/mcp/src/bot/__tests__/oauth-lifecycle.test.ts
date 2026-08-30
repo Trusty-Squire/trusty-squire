@@ -163,6 +163,78 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it("clicks a provider-less SPA OAuth control exactly once without probing its traffic", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/login", async (route) => {
+      await route.fulfill({ contentType: "text/html", body: "<main>Login</main>" });
+    });
+    await context.route("https://accounts.google.com/**", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: "<script>setTimeout(() => window.close(), 20)</script>",
+      });
+    });
+    await product.goto("https://product.test/login");
+    await product.evaluate(() => {
+      const button = document.createElement("button");
+      button.id = "oauth";
+      button.textContent = "Continue";
+      button.onclick = () => {
+        document.body.dataset.oauthClicks = String(
+          Number(document.body.dataset.oauthClicks ?? "0") + 1,
+        );
+        button.disabled = true;
+        window.open("https://accounts.google.com/o/oauth2/v2/auth");
+      };
+      document.body.append(button);
+    });
+    const controller = BrowserController.fromHarnessPage(product);
+
+    try {
+      await controller.loginWithOAuth("#oauth", 2_000);
+      expect(await product.locator("#oauth").count()).toBe(1);
+      expect(await product.locator("#oauth").isDisabled()).toBe(true);
+      expect(await product.locator("body").getAttribute("data-oauth-clicks")).toBe("1");
+      expect(controller.currentUrl()).toBe("https://product.test/login");
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("completes Google account choice and consent inside one OAuth operation", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/**", async (route) => {
+      const callback = route.request().url().endsWith("/callback");
+      await route.fulfill({
+        contentType: "text/html",
+        body: callback
+          ? '<script>window.opener.document.querySelector("#state").textContent="Signed in"; window.close()</script>'
+          : '<main id="state">Signed out</main><button id="oauth" onclick="window.open(\'https://accounts.google.com/chooser\')">Continue</button>',
+      });
+    });
+    await context.route("https://accounts.google.com/**", async (route) => {
+      const consent = route.request().url().includes("/consent?");
+      await route.fulfill({
+        contentType: "text/html",
+        body: consent
+          ? "<button onclick=\"location.href='https://product.test/callback'\">Continue</button>"
+          : '<button data-identifier="worker@example.com" onclick="location.href=\'https://accounts.google.com/consent?scope=openid%20email%20profile\'">worker@example.com</button>',
+      });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+
+    try {
+      await controller.loginWithOAuth("#oauth", 5_000, "google");
+      await expect(product.locator("#state").textContent()).resolves.toBe("Signed in");
+      expect(controller.currentUrl()).toBe("https://product.test/login");
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
   it("waits for a same-tab provider round trip to return and settle", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();

@@ -52,7 +52,7 @@ export interface PaymentBrowser {
   readCheckoutConfirmSummary(approvedCurrency?: string): Promise<CheckoutSummary>;
   fillAndSubmitCheckout(
     card: CheckoutCard,
-    options?: { onSubmitDispatched?: () => void },
+    options?: { onSubmitDispatched?: () => void; beforeSubmitDispatch?: () => void | number },
   ): Promise<CheckoutSubmitResult>;
   fillCheckoutCardFields(card: CheckoutCard): Promise<void>;
   submitFilledCheckout(): Promise<CheckoutSubmitResult>;
@@ -358,6 +358,51 @@ function confidenceAtLeastLow(value: unknown): boolean {
   return value === "low" || value === "medium" || value === "high";
 }
 
+const MAX_PREVERIFIED_MANDATE_RELAY_MS = 18 * 60 * 1_000;
+
+function isJwtExpired(error: unknown): boolean {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "ERR_JWT_EXPIRED"
+  );
+}
+
+async function verifyRelayedAssertion(
+  jws: string,
+  jwks: ReturnType<typeof createLocalJWKSet>,
+  expectedAudience: string,
+): Promise<JWTPayload> {
+  const options = {
+    issuer: "https://vouchflow.dev",
+    audience: expectedAudience,
+  } as const;
+  try {
+    return (await jwtVerify(jws, jwks, options)).payload;
+  } catch (error) {
+    if (!isJwtExpired(error)) throw error;
+    const decoded = decodeJwt(jws);
+    const issuedAt = decoded.iat;
+    const expiresAt = decoded.exp;
+    const now = Date.now();
+    if (
+      !Number.isSafeInteger(issuedAt) ||
+      !Number.isSafeInteger(expiresAt) ||
+      expiresAt! <= issuedAt! ||
+      now - expiresAt! * 1_000 > MAX_PREVERIFIED_MANDATE_RELAY_MS
+    ) {
+      throw new Error("mandate_assertion_expired");
+    }
+    return (
+      await jwtVerify(jws, jwks, {
+        ...options,
+        currentDate: new Date((expiresAt! - 1) * 1_000),
+      })
+    ).payload;
+  }
+}
+
 async function verifyMandate(
   jws: string,
   expectedHash: Uint8Array,
@@ -387,10 +432,15 @@ async function verifyMandate(
   ) {
     throw new Error("invalid_jwks");
   }
-  const { payload } = await jwtVerify(jws, createLocalJWKSet(body as JSONWebKeySet), {
-    issuer: "https://vouchflow.dev",
-    audience: expectedAudience,
-  });
+  // Every candidate returned by this authenticated relay was already checked
+  // at phone submission. Re-check all cryptographic and binding properties,
+  // while allowing only that exact candidate's short-lived assertion to age
+  // within the still-live approval window.
+  const payload = await verifyRelayedAssertion(
+    jws,
+    createLocalJWKSet(body as JSONWebKeySet),
+    expectedAudience,
+  );
   const signedHash = decodePayloadHash(payload.payload_sha256);
   if (!timingSafeEqual(Buffer.from(expectedHash), Buffer.from(signedHash))) {
     throw new Error("payload_hash_mismatch");
@@ -414,6 +464,7 @@ function safeFailureReason(error: unknown): string {
     "payload_hash_mismatch",
     "invalid_mandate_context",
     "insufficient_mandate_confidence",
+    "mandate_assertion_expired",
     "invalid_card_pan",
     "invalid_card_expiry",
   ];
@@ -862,6 +913,12 @@ export async function executeOperatePay(
       // stays in the vault, so the retry is a fast has-card approval.
       return jit ? { ...base, card_persisted: true } : base;
     };
+    const approvalExpired = (): boolean => deps.now() >= deadline;
+    const expiredApprovalResult = (): Record<string, unknown> => {
+      resumableState = undefined;
+      keypairHandedOff = false;
+      return timeoutResult();
+    };
 
     let approved: { jws: string; sealed_card: string; card_ref: string | null } | undefined;
     let claims: JWTPayload | undefined;
@@ -885,11 +942,11 @@ export async function executeOperatePay(
         approvalId,
         deps.now() < callDeadline ? true : "immediate",
       );
+      const liveDeadline = Date.parse(approval.expires_at);
+      if (Number.isFinite(liveDeadline)) deadline = Math.min(deadline, liveDeadline);
       boundCardRef = approval.card_ref;
-      if (approval.status === "expired") {
-        resumableState = undefined;
-        keypairHandedOff = false;
-        return timeoutResult();
+      if (approval.status === "expired" || approvalExpired()) {
+        return expiredApprovalResult();
       }
       const hasCandidate =
         typeof approval.jws === "string" && typeof approval.sealed_card === "string";
@@ -1003,6 +1060,7 @@ export async function executeOperatePay(
                 approval_url: approvalUrl,
               };
             }
+            if (approvalExpired()) return expiredApprovalResult();
 
             let candidateCardBytes: Uint8Array | undefined;
             let candidateCard: CheckoutCard;
@@ -1125,6 +1183,10 @@ export async function executeOperatePay(
                 }
               }
             }
+            if (approvalExpired()) {
+              candidateCardBytes.fill(0);
+              return expiredApprovalResult();
+            }
             logPaymentCandidateLifecycle(approvalId, "approval", "ready_to_charge");
             cardBytes = candidateCardBytes;
             card = candidateCard;
@@ -1207,8 +1269,6 @@ export async function executeOperatePay(
         approval_url: approvalUrl,
       };
     }
-    deps.onCardResolved(cardRef);
-
     const last4 = card.pan.slice(-4);
     const mandateId =
       typeof claims.mandate_id === "string"
@@ -1276,6 +1336,8 @@ export async function executeOperatePay(
           ...(liveOrigin !== null ? { live_checkout_origin: liveOrigin } : {}),
         };
       }
+      if (approvalExpired()) return expiredApprovalResult();
+      deps.onCardResolved(cardRef);
       try {
         await browser.fillCheckoutCardFields(card);
       } catch (error) {
@@ -1343,6 +1405,8 @@ export async function executeOperatePay(
       };
     }
 
+    if (approvalExpired()) return expiredApprovalResult();
+    deps.onCardResolved(cardRef);
     const pendingThreeDsHandoff: PendingThreeDsWait = {
       approval_id: approvalId,
       approval_url: approvalUrl,
@@ -1389,11 +1453,21 @@ export async function executeOperatePay(
             ? { issuer: args.card_issuer, issuer_source: "bin_metadata" as const }
             : {}),
         },
-        { onSubmitDispatched: retainPendingThreeDs },
+        {
+          onSubmitDispatched: retainPendingThreeDs,
+          beforeSubmitDispatch: () => {
+            if (approvalExpired()) throw new Error("payment_approval_expired");
+            return deadline - deps.now();
+          },
+        },
       );
       if (submitResult.three_ds_required) paymentStatus = "payment_3ds_required";
       else if (!submitResult.order_confirmed) paymentStatus = "payment_outcome_unknown";
     } catch (error) {
+      if (error instanceof Error && error.message === "payment_approval_expired") {
+        clearPendingThreeDs();
+        return expiredApprovalResult();
+      }
       const outcomeUnknown = error instanceof PaymentSubmitOutcomeUnknownError;
       paymentStatus = outcomeUnknown ? "payment_outcome_unknown" : "payment_checkout_failed";
       if (outcomeUnknown) {

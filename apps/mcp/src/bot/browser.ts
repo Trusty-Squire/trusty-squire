@@ -467,6 +467,12 @@ export async function runCaptureConfirmedPaymentSubmit<T>(options: {
   const evidence = await options.readEvidence();
   await options.clear();
   if (!evidence.dispatched) {
+    if (
+      clickError instanceof BrowserClickDispatchError &&
+      clickError.dispatchStatus === "not_dispatched"
+    ) {
+      throw clickError;
+    }
     if (clickError !== undefined && !inputDispatchPossible) throw clickError;
     options.onSubmitDispatched?.();
     throw new PaymentSubmitOutcomeUnknownError();
@@ -3091,6 +3097,7 @@ export interface SelfLaunchedLogin {
   // running — the zombie-chrome leak). Also reaps the profile lock.
   teardown: () => Promise<void>;
   forceTeardown: () => void;
+  isRunning: () => boolean;
   identity: ProfileProcessIdentity | null;
 }
 
@@ -3164,9 +3171,37 @@ export async function launchSelfManagedLoginContext(params: {
   // falls back to launchPersistentContext for credentialed proxies).
   proxyServer: string | null;
   extraArgs?: readonly string[];
+  onSpawned?: (
+    browser: Pick<SelfLaunchedLogin, "teardown" | "forceTeardown" | "isRunning">,
+  ) => void;
 }): Promise<SelfLaunchedLogin> {
   let child: ChildProcess | null = null;
   let childIdentity: ProfileProcessIdentity | null = null;
+  let browser: Browser | null = null;
+  let torn = false;
+  const isRunning = (): boolean => childProcessIsRunning(child);
+  const forceTeardown = (): void => {
+    if (childIdentity !== null) {
+      const tracked = selfManagedChromes.get(childIdentity.pid);
+      signalOwnedChromeProcessTree(childIdentity, false, "SIGKILL", {
+        ...(tracked === undefined ? {} : { proof: tracked.proof }),
+      });
+      reapProfileHolderIfOwned(params.profileDir, childIdentity);
+      return;
+    }
+    if (childProcessIsRunning(child)) child?.kill("SIGKILL");
+  };
+  const teardown = async (): Promise<void> => {
+    if (torn) return;
+    torn = true;
+    await browser?.close().catch(() => undefined);
+    if (!childProcessIsRunning(child)) return;
+    if (childIdentity !== null) {
+      signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
+    } else {
+      child?.kill("SIGTERM");
+    }
+  };
   const endpoint = await withChromeStartupLock(
     async () => {
       const port = await findFreePort();
@@ -3199,6 +3234,7 @@ export async function launchSelfManagedLoginContext(params: {
         chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
       });
       try {
+        params.onSpawned?.({ teardown, forceTeardown, isRunning });
         const endpoint = await waitForDevtools(port, 30_000, spawned);
         childIdentity = await resolveAttachedProfileChildIdentity(
           spawned,
@@ -3210,6 +3246,7 @@ export async function launchSelfManagedLoginContext(params: {
         }
         return endpoint;
       } catch (err) {
+        forceTeardown();
         childIdentity = await terminateTrackedProfileChild(spawned, params.profileDir, {
           identity: childIdentity,
         });
@@ -3228,37 +3265,26 @@ export async function launchSelfManagedLoginContext(params: {
     throw new Error("self-launched login Chrome lost its process handle");
   }
 
-  const { browser, context } = await attachSelfManagedLoginContext(
-    endpoint,
-    child,
-    params.profileDir,
-    childIdentity,
-  );
-
-  let torn = false;
-  const teardown = async (): Promise<void> => {
-    if (torn) return;
-    torn = true;
-    // Disconnect the CDP browser first; over connectOverCDP this leaves the
-    // real Chrome running, so kill the child explicitly (SIGTERM, then a
-    // hard SIGKILL after a short grace) to avoid the zombie-chrome leak.
-    await browser.close();
-    if (child !== null && childIdentity !== null) {
-      signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
-    }
+  let attached: Awaited<ReturnType<typeof attachSelfManagedLoginContext>>;
+  try {
+    attached = await attachSelfManagedLoginContext(
+      endpoint,
+      child,
+      params.profileDir,
+      childIdentity,
+    );
+  } catch (error) {
+    forceTeardown();
+    throw error;
+  }
+  browser = attached.browser;
+  return {
+    context: attached.context,
+    teardown,
+    forceTeardown,
+    isRunning,
+    identity: childIdentity,
   };
-
-  const forceTeardown = (): void => {
-    if (childIdentity !== null) {
-      const tracked = selfManagedChromes.get(childIdentity.pid);
-      signalOwnedChromeProcessTree(childIdentity, false, "SIGKILL", {
-        ...(tracked === undefined ? {} : { proof: tracked.proof }),
-      });
-    }
-    reapProfileHolderIfOwned(params.profileDir, childIdentity);
-  };
-
-  return { context, teardown, forceTeardown, identity: childIdentity };
 }
 
 export interface PlainLoginBrowser {
@@ -3381,6 +3407,8 @@ export async function launchPlainLoginBrowser(params: {
       signalOwnedChromeProcessTree(childIdentity, false, "SIGKILL", {
         ...(tracked === undefined ? {} : { proof: tracked.proof }),
       });
+    } else if (childProcessIsRunning(child)) {
+      child?.kill("SIGKILL");
     }
     reapProfileHolderIfOwned(params.profileDir, childIdentity);
   };
@@ -3389,6 +3417,8 @@ export async function launchPlainLoginBrowser(params: {
     torn = true;
     if (child !== null && childIdentity !== null) {
       signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
+    } else if (childProcessIsRunning(child)) {
+      child?.kill("SIGTERM");
     }
   };
   return {
@@ -3477,6 +3507,7 @@ export class BrowserController {
   private hostScopeAllowedHostsProvider:
     | (() => { allowedHosts: readonly string[]; siblingDomainHosts: readonly string[] })
     | null = null;
+  private readonly operationScopedAllowedHosts = new Map<string, number>();
   private hostScopeGuardInstallation: Promise<void> | null = null;
 
   // Feed the current session's allowed hosts to the request-scope guard. Read
@@ -3489,7 +3520,7 @@ export class BrowserController {
     siblingDomainProvider: () => readonly string[] = provider,
   ): Promise<void> {
     this.hostScopeAllowedHostsProvider = () => ({
-      allowedHosts: provider(),
+      allowedHosts: [...provider(), ...this.operationScopedAllowedHosts.keys()],
       siblingDomainHosts: siblingDomainProvider(),
     });
     this.hostScopeGuardInstallation ??= this.installHostScopeGuard().catch((error: unknown) => {
@@ -3497,6 +3528,28 @@ export class BrowserController {
       throw error;
     });
     await this.hostScopeGuardInstallation;
+  }
+
+  async withTemporaryHostScopeAllowedHosts<T>(
+    hosts: readonly string[],
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const normalized = [...new Set(hosts.map((host) => host.trim().toLowerCase()).filter(Boolean))];
+    for (const host of normalized) {
+      this.operationScopedAllowedHosts.set(
+        host,
+        (this.operationScopedAllowedHosts.get(host) ?? 0) + 1,
+      );
+    }
+    try {
+      return await operation();
+    } finally {
+      for (const host of normalized) {
+        const remaining = (this.operationScopedAllowedHosts.get(host) ?? 1) - 1;
+        if (remaining <= 0) this.operationScopedAllowedHosts.delete(host);
+        else this.operationScopedAllowedHosts.set(host, remaining);
+      }
+    }
   }
 
   // Defect-A fail-fast request-scope guard. Only XHR/fetch subresource API
@@ -11169,7 +11222,7 @@ export class BrowserController {
 
   async fillAndSubmitCheckout(
     card: CheckoutCard,
-    options: { onSubmitDispatched?: () => void } = {},
+    options: { onSubmitDispatched?: () => void; beforeSubmitDispatch?: () => void | number } = {},
   ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     this.checkoutCardGroupScope = undefined;
@@ -11211,7 +11264,11 @@ export class BrowserController {
       this.rememberPaymentInstrumentExpectation(card);
       primary = {
         kind: "outcome",
-        value: await this.submitFilledCheckoutInScope(cardGroup, options.onSubmitDispatched),
+        value: await this.submitFilledCheckoutInScope(
+          cardGroup,
+          options.onSubmitDispatched,
+          options.beforeSubmitDispatch,
+        ),
       };
     } catch (error) {
       primary = { kind: "error", value: error };
@@ -11485,6 +11542,7 @@ export class BrowserController {
   private async submitFilledCheckoutInScope(
     cardGroup?: CheckoutCardGroupScope,
     onSubmitDispatched?: () => void,
+    beforeSubmitDispatch?: () => void | number,
   ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     const savedCardSelection = await this.resolveCompetingSavedCardSelection();
@@ -11494,6 +11552,7 @@ export class BrowserController {
     let outcomeBaseline: CheckoutOutcomeBaseline | undefined;
     this.checkoutOutcomeBaseline = undefined;
     let submitted = false;
+    let clearSubmittedDispatchTracking: (() => Promise<void>) | null = null;
     for (const frame of this.page.frames()) {
       const matches = frame.locator('button,input[type="submit"],[role="button"]');
       const count = Math.min(await matches.count().catch(() => 0), 100);
@@ -11737,19 +11796,23 @@ export class BrowserController {
         const clearDispatchTracking = async (): Promise<void> => {
           this.checkoutSubmitDispatchWaiters.delete(dispatchToken);
           await candidate
-            .evaluate((element) => {
-              const tracked = element as Element & {
-                __tsPaymentSubmitDispatchListener?: EventListener;
-              };
-              if (tracked.__tsPaymentSubmitDispatchListener !== undefined) {
-                element.removeEventListener(
-                  "click",
-                  tracked.__tsPaymentSubmitDispatchListener,
-                  true,
-                );
-                delete tracked.__tsPaymentSubmitDispatchListener;
-              }
-            })
+            .evaluate(
+              (element) => {
+                const tracked = element as Element & {
+                  __tsPaymentSubmitDispatchListener?: EventListener;
+                };
+                if (tracked.__tsPaymentSubmitDispatchListener !== undefined) {
+                  element.removeEventListener(
+                    "click",
+                    tracked.__tsPaymentSubmitDispatchListener,
+                    true,
+                  );
+                  delete tracked.__tsPaymentSubmitDispatchListener;
+                }
+              },
+              undefined,
+              { timeout: 250 },
+            )
             .catch(() => undefined);
           await frame
             .evaluate((token) => {
@@ -11783,8 +11846,14 @@ export class BrowserController {
           }
           capturedBaseline = await runCaptureConfirmedPaymentSubmit({
             click: async (markInputDispatchPossible) => {
+              const remainingMs = beforeSubmitDispatch?.();
               markInputDispatchPossible();
-              await candidate.click({ noWaitAfter: true });
+              await candidate.click({
+                noWaitAfter: true,
+                ...(typeof remainingMs === "number"
+                  ? { timeout: Math.max(1, Math.ceil(remainingMs)) }
+                  : {}),
+              });
             },
             readEvidence: async () => {
               const documentBaseline = await readDispatchOutcomeBaseline();
@@ -11798,17 +11867,28 @@ export class BrowserController {
             clear: async () => undefined,
             onSubmitDispatched: reportSubmitDispatched,
           });
-        } finally {
+          clearSubmittedDispatchTracking = clearDispatchTracking;
+        } catch (error) {
           await clearDispatchTracking();
+          throw error;
         }
-        outcomeBaseline = capturedBaseline ?? (await this.captureCheckoutOutcomeBaseline());
+        try {
+          outcomeBaseline = capturedBaseline ?? (await this.captureCheckoutOutcomeBaseline());
+        } catch (error) {
+          await clearSubmittedDispatchTracking?.();
+          clearSubmittedDispatchTracking = null;
+          throw error;
+        }
         this.checkoutOutcomeBaseline = outcomeBaseline;
         submitted = true;
         break;
       }
       if (submitted) break;
     }
-    if (!submitted || outcomeBaseline === undefined) throw new Error("payment_submit_not_found");
+    if (!submitted || outcomeBaseline === undefined) {
+      await clearSubmittedDispatchTracking?.();
+      throw new Error("payment_submit_not_found");
+    }
     try {
       const challengeDeadline = Date.now() + 15_000;
       while (Date.now() < challengeDeadline) {
@@ -11816,13 +11896,22 @@ export class BrowserController {
           return { three_ds_required: false, order_confirmed: true };
         }
         const challenge = await this.detectThreeDsChallenge();
-        if (challenge.three_ds_required) return challenge;
+        if (challenge.three_ds_required) {
+          return challenge;
+        }
         await this.page.waitForTimeout(250).catch(() => undefined);
       }
       return { three_ds_required: false, order_confirmed: false };
     } catch (error) {
-      if (error instanceof PaymentSubmitOutcomeUnknownError) throw error;
+      if (
+        error instanceof PaymentSubmitOutcomeUnknownError ||
+        error instanceof BrowserClickDispatchError
+      ) {
+        throw error;
+      }
       throw new PaymentSubmitOutcomeUnknownError();
+    } finally {
+      await clearSubmittedDispatchTracking?.();
     }
   }
 
@@ -15170,7 +15259,11 @@ export class BrowserController {
   // clicks the product's already-observed OAuth control and waits for the
   // provider-owned window to finish; no credentials, frames, or consent scopes
   // are read or bypassed here.
-  async loginWithOAuth(selector: string, settleTimeoutMs = 12_000): Promise<void> {
+  async loginWithOAuth(
+    selector: string,
+    settleTimeoutMs = 12_000,
+    consentProvider?: OAuthProviderId,
+  ): Promise<void> {
     const product = this.page;
     const context = this.context;
     if (product === null || product.isClosed() || context === null) {
@@ -15218,18 +15311,39 @@ export class BrowserController {
         resolvePopup(null);
       }
       const transient = providerPage ?? product;
+      productDeparted = productDeparted || !this.isOAuthProductUrl(transient.url(), productUrl);
       const durableProduct = providerPage === null ? recovery : product;
       this.oauthProductPage = durableProduct;
       this.oauthProviderPage = transient;
       this.oauthProviderPageClosed = transient.isClosed();
       this.restoreProductPageWhenOAuthPageCloses(transient, durableProduct);
-      const settled = await this.waitForOAuthLifecycle(
-        transient,
-        productUrl,
-        settleTimeoutMs,
-        providerPage === null,
-        productDeparted,
-      );
+      this.page = transient;
+      let settled: "closed" | "returned" | null = null;
+      if (consentProvider === undefined) {
+        settled = await this.waitForOAuthLifecycle(
+          transient,
+          productUrl,
+          settleTimeoutMs,
+          providerPage === null,
+          productDeparted,
+        );
+      } else {
+        const deadline = Date.now() + settleTimeoutMs;
+        while (settled === null && Date.now() < deadline) {
+          const remaining = deadline - Date.now();
+          settled = await this.waitForOAuthLifecycle(
+            transient,
+            productUrl,
+            Math.min(1_000, remaining),
+            providerPage === null,
+            productDeparted,
+          );
+          if (settled !== null || transient.isClosed()) break;
+          productDeparted = productDeparted || !this.isOAuthProductUrl(transient.url(), productUrl);
+          const advanced = await this.advanceOAuthConsent(consentProvider).catch(() => false);
+          if (!advanced) await this.sleep(Math.min(250, Math.max(1, deadline - Date.now())));
+        }
+      }
       if (settled === null) {
         throw new Error(
           `OAuth login is still awaiting the provider after ${Math.ceil(settleTimeoutMs / 1000)} seconds. Retry oauth_login; do not read or close the browser session.`,
@@ -15708,6 +15822,11 @@ export class BrowserController {
     return await this.context.storageState({ indexedDB: true });
   }
 
+  async restoreStorageState(state: BrowserStorageState): Promise<void> {
+    if (this.context === null) throw new Error("Browser not started");
+    await this.context.setStorageState(state);
+  }
+
   recoverActivePage(): boolean {
     return this.adoptLivePage();
   }
@@ -16004,8 +16123,8 @@ export class BrowserController {
     }
   }
 
-  // Advance a provider's consent / account-chooser screen by one click
-  // — the scope-gated auto-approve (T7/T13). Returns false when no
+  // Advance a provider's consent / account-chooser screen by one click.
+  // Returns false when no
   // approve control is present — the agent then aborts rather than
   // hang. Clicks only; never types (the critical guarantee holds here).
   async advanceOAuthConsent(provider: OAuthProviderId): Promise<boolean> {

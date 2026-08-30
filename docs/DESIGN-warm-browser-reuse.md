@@ -22,20 +22,29 @@ A successful context-backed interactive login captures Playwright
 `storageState({ indexedDB: true })`. The snapshot includes all cookies, local
 storage, and IndexedDB and is atomically stored as
 `<CHROME_PROFILE_DIR>/trusty-squire-session-state.json` with mode `0600`.
-Plain Chrome login cannot capture a context and therefore preserves the prior
-snapshot. Snapshots larger than 4 MiB are ignored on read and skipped on write,
-also preserving the prior snapshot.
+Plain Chrome remains unattached throughout Google OAuth. After its proven close,
+the login flow briefly reopens the canonical authoring profile in a headless
+context, captures the same portable state and Google account email, closes the
+context, and publishes both in one atomic identity snapshot. Snapshots larger
+than 4 MiB are ignored on read and skipped on write, also preserving the prior
+snapshot and its matching account metadata.
 
-Every operator browser restores that snapshot before its first target
-navigation. `require_live_identity` runs the shared live-provider detector in
-the fresh seeded browser. A stale identity fails closed with the context-backed
-login handoff and cannot overwrite canonical state.
+Ordinary operator startup restores the snapshot without Google identity, so two
+parallel profiles cannot hold the same rotating Google session. Every
+`oauth_login` and legacy `oauth_click` waits on the process-local handoff and the
+cross-process canonical-profile operation guard from explicit action start through
+completion and one release cooldown. At that boundary the action restores the
+latest full snapshot, completes OAuth, captures the rotated state, proves bounded
+close, publishes it, and restarts the same private profile before releasing the
+next waiter.
+`require_live_identity` relies on the saved identity markers without preloading
+Google state or probing Google from the ordinary concurrent browser.
 
-An explicitly successful result has either `data.confirmed: true` or a
-confirmed `verify_recipe`. Credential outcomes succeed only after extraction
-and vault storage complete without a blocker. No-outcome, failed, unconfirmed,
-payment-active, payment-field-sealed, and pending-3DS sessions never publish a
-snapshot.
+Google OAuth publishes at the serialized handoff boundary. Every explicitly
+successful non-payment session may also publish its non-Google state at finish;
+the merge retains the latest serialized Google identity. No-outcome, failed,
+unconfirmed, payment-active, payment-field-sealed, and pending-3DS sessions never
+publish at finish.
 
 ## 3. Start and active ownership
 

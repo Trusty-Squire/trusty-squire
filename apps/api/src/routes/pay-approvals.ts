@@ -631,7 +631,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         reply.code(409).send({ error: "payment_approval_candidate_changed" });
         return;
       }
-      if (record.status === "pending" && record.expiresAt <= now) {
+      if (record.expiresAt <= now) {
         reply.code(409).send({ error: "payment_approval_expired" });
         return;
       }
@@ -676,6 +676,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
           expectedPayloadHash: payloadHash,
           expectedContext: PAYMENT_VOUCH_CONTEXT,
           expectedAudience: vouchflowAudience,
+          previouslyVerifiedRelay: true,
         });
       } catch (error) {
         const code =

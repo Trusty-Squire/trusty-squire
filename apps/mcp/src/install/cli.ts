@@ -68,6 +68,7 @@ import {
   profilePathIdentity,
   withProfileOperationGuard,
 } from "../bot/profile.js";
+import { invalidateCanonicalGoogleIdentity } from "../bot/session-state.js";
 import { VERSION } from "../version.js";
 import { ensureLatestVersion } from "./version-check.js";
 import * as ui from "./ui.js";
@@ -1335,6 +1336,13 @@ async function loginWithProfileGuard(args: Argv, profileDir: string): Promise<vo
   // (user_session) no longer exists. ensureOAuthSession re-adds the marker
   // only when it confirms a live cookie, so success still records it.
   if (args.forceRelogin) clearProviderLoggedIn(provider, profileDir);
+  if (args.forceRelogin && provider === "google") {
+    const invalidated = await invalidateCanonicalGoogleIdentity(profileDir);
+    if (!invalidated) {
+      ui.fail("I couldn't invalidate the previous Google identity snapshot.");
+      process.exit(1);
+    }
+  }
   const result = await ensureOAuthSession({
     provider,
     // --profile-dir pins login to an isolated profile (a secondary

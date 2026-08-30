@@ -13,7 +13,7 @@ import {
   withProfileOperationGuard,
 } from "./profile.js";
 import { isOAuthProviderId, type OAuthProviderId } from "./oauth-providers.js";
-import { isSessionStateArtifact } from "./session-state.js";
+import { invalidateCanonicalGoogleIdentity, isSessionStateArtifact } from "./session-state.js";
 
 interface ProviderCookieContext {
   cookies(): Promise<Array<{ name: string; domain: string; path: string }>>;
@@ -180,7 +180,12 @@ export async function clearProviderCookies(
           }),
         { failFast: true },
       );
-      return await clearProviderCookiesFromContext(context, provider);
+      const cleared = await clearProviderCookiesFromContext(context, provider);
+      if (!cleared) return false;
+      if (provider === undefined || provider === "google") {
+        return await invalidateCanonicalGoogleIdentity(profileDir);
+      }
+      return true;
     } catch (err) {
       if (err instanceof ProfileBusyError) throw err;
       return false;

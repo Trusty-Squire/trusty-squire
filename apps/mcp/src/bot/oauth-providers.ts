@@ -14,11 +14,8 @@
 // repo/admin/org scopes must abort. Each provider carries its own
 // allowlist.
 
-import {
-  classifyGoogleAuthState,
-  scopesAreBasic as googleScopesAreBasic,
-  extractOAuthScopes,
-} from "./google-login.js";
+import { classifyGoogleAuthState } from "./google-login.js";
+import { scopesAreBasic as googleScopesAreBasic, extractOAuthScopes } from "./oauth-scope.js";
 
 // extractOAuthScopes reads the `scope` query parameter — provider-
 // agnostic (Google and GitHub both carry it on the consent URL), so
