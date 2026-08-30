@@ -33,7 +33,6 @@ import {
   type PageTargetSafetySignals,
   type ThreeDsResolution,
 } from "./browser.js";
-import { classifyOAuthProviderDestination } from "./oauth-destination.js";
 import type {
   CartCheckoutObservation,
   PendingApprovalWait,
@@ -445,8 +444,9 @@ export type ProvisionAction =
     }
   | { kind: "goto"; url: string }
   | { kind: "press"; key: string }
-  // Route an OAuth-provider button through startOAuth so the popup is adopted
-  // as the active page (the host then observes the account chooser/consent).
+  // Route every OAuth-provider action through the narrow auth lease. This
+  // serializes only the provider login/capture moment; all other work remains
+  // parallel.
   | { kind: "oauth_click"; target: string; provider?: OAuthProviderId }
   // Return to the product page after the OAuth handshake completes.
   | { kind: "oauth_settle" }
@@ -760,18 +760,36 @@ const leasedBrowsers = new Map<BrowserController, EphemeralBrowser>();
 const startingBrowsers = new Set<StartingBrowser>();
 let shutdownGeneration = 0;
 let shutdownInProgress = 0;
-let googleOAuthHandoffTail: Promise<void> = Promise.resolve();
+let oauthActionLeaseTail: Promise<void> = Promise.resolve();
 
-async function withGoogleOAuthHandoff<T>(run: () => Promise<T>): Promise<T> {
+const DEFAULT_OAUTH_LOGIN_LEASE_COOLDOWN_MS = 3_000;
+
+function oauthLoginLeaseCooldownMs(): number {
+  const configured = Number(process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS);
+  return Number.isFinite(configured) && configured >= 0
+    ? Math.min(configured, 60_000)
+    : DEFAULT_OAUTH_LOGIN_LEASE_COOLDOWN_MS;
+}
+
+async function waitForOAuthLeaseCooldown(cooldownMs: number): Promise<void> {
+  if (cooldownMs <= 0) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, cooldownMs);
+    timer.unref();
+  });
+}
+
+async function withOAuthActionLease<T>(run: () => Promise<T>, releaseCooldownMs = 0): Promise<T> {
   let release!: () => void;
-  const previous = googleOAuthHandoffTail;
-  googleOAuthHandoffTail = new Promise<void>((resolve) => {
+  const previous = oauthActionLeaseTail;
+  oauthActionLeaseTail = new Promise<void>((resolve) => {
     release = resolve;
   });
   await previous;
   try {
     return await run();
   } finally {
+    await waitForOAuthLeaseCooldown(releaseCooldownMs);
     release();
   }
 }
@@ -780,8 +798,9 @@ async function withCanonicalProfileOperation<T>(
   profileDir: string,
   run: () => Promise<T>,
   canContinue: () => boolean = () => true,
+  releaseCooldownMs = 0,
 ): Promise<T> {
-  return await withGoogleOAuthHandoff(async () => {
+  return await withOAuthActionLease(async () => {
     for (;;) {
       if (!canContinue()) {
         throw new Error("canonical profile operation cancelled during operator shutdown");
@@ -796,6 +815,7 @@ async function withCanonicalProfileOperation<T>(
         try {
           return await run();
         } finally {
+          await waitForOAuthLeaseCooldown(releaseCooldownMs);
           lease.release();
         }
       }
@@ -921,9 +941,7 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
   try {
     const pendingStates = await readPendingSessionStates(canonicalProfileDir);
     const canReconcile = (): boolean =>
-      shutdownInProgress === 0 &&
-      generation === shutdownGeneration &&
-      !pending.cancelRequested;
+      shutdownInProgress === 0 && generation === shutdownGeneration && !pending.cancelRequested;
     void reconcilePendingSessionStates(canonicalProfileDir, canReconcile).catch(
       (publishError: unknown) => {
         console.error(
@@ -935,9 +953,7 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
       await readCanonicalIdentityState(canonicalProfileDir);
     const savedStorageState = pendingStates.reduce<BrowserStorageState | undefined>(
       (latest, entry) =>
-        latest === undefined
-          ? entry.state
-          : mergeGoogleIdentityStorageState(entry.state, latest),
+        latest === undefined ? entry.state : mergeGoogleIdentityStorageState(entry.state, latest),
       canonicalStorageState,
     );
     googleIdentityAvailable = hasUsableGoogleIdentity(savedStorageState);
@@ -1176,44 +1192,22 @@ async function closeEphemeralBrowser(
   }
 }
 
-function observedOAuthProvider(
-  element: InteractiveElement,
-  productUrl: string,
-): "google" | "non_google" | null {
-  if (element.href === undefined) return null;
-  const destination = classifyOAuthProviderDestination(element.href, productUrl);
-  return destination === null ? null : destination === "google" ? "google" : "non_google";
-}
-
-type OAuthBoundaryDisposition = "google" | "non_google" | "unresolved";
-
-async function oauthBoundaryDisposition(
-  browser: BrowserController,
-  action: Extract<ProvisionAction, { kind: "oauth_click" | "oauth_login" }>,
-  element: InteractiveElement,
-): Promise<OAuthBoundaryDisposition> {
-  const observed = observedOAuthProvider(element, browser.currentUrl());
-  if (observed !== null) return observed;
-  if (action.provider === "google") return "google";
-  const initial = await browser.detectOAuthProviderDestination(element.selector);
-  const destination =
-    initial ?? (await browser.waitForPendingOAuthProviderDestination(element.selector));
-  if (destination === "google") return "google";
-  if (destination === "github" || destination === "other") return "non_google";
-  return "unresolved";
-}
-
 async function runSerializedGoogleIdentityOperation<T>(
   session: Session,
   operation: (browser: BrowserController) => Promise<T>,
-  options: { requireFreshAccountEmail?: boolean; resumeUrl?: string } = {},
+  options: {
+    requireFreshAccountEmail?: boolean;
+    resumeUrl?: string;
+    releaseCooldownMs?: number;
+  } = {},
 ): Promise<{ browser: BrowserController; result: T }> {
   const browser = session.browser;
   const ephemeral = leasedBrowsers.get(browser);
   if (ephemeral === undefined) {
-    return await withGoogleOAuthHandoff(async () => {
-      return { browser, result: await operation(browser) };
-    });
+    return await withOAuthActionLease(
+      async () => ({ browser, result: await operation(browser) }),
+      options.releaseCooldownMs,
+    );
   }
   const generation = provisionStartGeneration();
   const ownsSession = (): boolean =>
@@ -1281,9 +1275,7 @@ async function runSerializedGoogleIdentityOperation<T>(
         const published = await writeCanonicalIdentitySnapshot(
           ephemeral.canonicalProfileDir,
           rotatedState,
-          googleAccountEmail === null
-            ? priorIdentity.identityMetadata
-            : { googleAccountEmail },
+          googleAccountEmail === null ? priorIdentity.identityMetadata : { googleAccountEmail },
           () => ownsSession(),
         );
         if (!published) {
@@ -1385,6 +1377,7 @@ async function runSerializedGoogleIdentityOperation<T>(
       return { browser: readyReplacement, result: operationResult as T };
     },
     ownsSession,
+    options.releaseCooldownMs,
   );
 }
 
@@ -1463,9 +1456,7 @@ async function runDetachedGoogleIdentityOperation<T>(
         const published = await writeCanonicalIdentitySnapshot(
           ephemeral.canonicalProfileDir,
           rotatedState,
-          googleAccountEmail === null
-            ? priorIdentity.identityMetadata
-            : { googleAccountEmail },
+          googleAccountEmail === null ? priorIdentity.identityMetadata : { googleAccountEmail },
           ownsSession,
         );
         if (!published) {
@@ -1492,12 +1483,19 @@ async function runDetachedGoogleIdentityOperation<T>(
 async function runSerializedOAuthBoundary(
   session: Session,
   selector: string,
-  provider: "google" | undefined,
+  provider: OAuthProviderId | undefined,
 ): Promise<BrowserController> {
-  const completed = await runSerializedGoogleIdentityOperation(session, async (browser) => {
-    await browser.loginWithOAuth(selector, 30_000, provider);
-    await settleAfterStateChange(browser);
-  }, provider === "google" ? { requireFreshAccountEmail: true } : {});
+  const completed = await runSerializedGoogleIdentityOperation(
+    session,
+    async (browser) => {
+      await browser.loginWithOAuth(selector, 30_000, provider);
+      await settleAfterStateChange(browser);
+    },
+    {
+      ...(provider === "google" ? { requireFreshAccountEmail: true } : {}),
+      releaseCooldownMs: oauthLoginLeaseCooldownMs(),
+    },
+  );
   return completed.browser;
 }
 
@@ -6787,16 +6785,7 @@ async function executeAct(
           });
         } else {
           assertNoFrameTarget(el, "oauth_click");
-          const disposition = await oauthBoundaryDisposition(browser, action, el);
-          if (disposition !== "non_google") {
-            browser = await runSerializedOAuthBoundary(
-              session,
-              el.selector,
-              disposition === "google" ? "google" : undefined,
-            );
-          } else {
-            await browser.startOAuth(el.selector);
-          }
+          browser = await runSerializedOAuthBoundary(session, el.selector, action.provider);
         }
         if (action.kind !== "type") await settleAfterStateChange(browser);
         break;
@@ -6825,17 +6814,7 @@ async function executeAct(
         }
         resolvedEl = el;
         assertNoFrameTarget(el, "oauth_login");
-        const disposition = await oauthBoundaryDisposition(browser, action, el);
-        if (disposition !== "non_google") {
-          browser = await runSerializedOAuthBoundary(
-            session,
-            el.selector,
-            disposition === "google" ? "google" : undefined,
-          );
-        } else {
-          await browser.loginWithOAuth(el.selector);
-          await settleAfterStateChange(browser);
-        }
+        browser = await runSerializedOAuthBoundary(session, el.selector, action.provider);
         break;
       }
     }

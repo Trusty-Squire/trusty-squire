@@ -18,8 +18,13 @@ import {
 } from "../browser.js";
 import {
   cartAdd,
+  claimActivePaymentForOperatePay,
   closeAllProvisionSessions,
+  finishProvisionSession,
+  observe,
+  releaseActivePaymentLease,
   startHarnessProvisionSession,
+  withPaymentSessionCall,
 } from "../provision-session.js";
 
 // The real-browser checkout-fill test needs a Playwright Chromium binary. The
@@ -741,174 +746,219 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "blocks a charge at the page event boundary after approval expiry",
+    "holds the payment action lease across a submit-associated SPA charge and 3DS follow-up",
     async () => {
       const browser = await chromium.launch({ headless: true });
+      let sessionId: string | undefined;
       try {
-        const page = await browser.newPage();
-        await page.setContent(`
-          <form id="checkout">
-            <input autocomplete="cc-number">
-            <input autocomplete="cc-exp">
-            <input autocomplete="cc-csc">
-            <input autocomplete="cc-name">
-            <button type="submit">Pay now</button>
-          </form>
-          <script>
-            document.querySelector("button").addEventListener("pointerdown", () => {
-              const realNow = Date.now;
-              Date.now = () => realNow() + 1000;
-            }, { capture: true });
-            document.querySelector("#checkout").addEventListener("submit", (event) => {
-              event.preventDefault();
-              document.body.dataset.submitted = "true";
-            });
-          </script>
-        `);
-        const controller = BrowserController.fromHarnessPage(page);
-
-        await expect(
-          controller.fillAndSubmitCheckout(APPROVAL_CARD, { beforeSubmitDispatch: () => 500 }),
-        ).rejects.toThrow("payment_approval_expired");
-
-        expect(await page.locator("body").getAttribute("data-submitted")).toBeNull();
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "blocks merchant network dispatch from an earlier capture listener after expiry",
-    async () => {
-      const browser = await chromium.launch({ headless: true });
-      try {
-        const page = await browser.newPage();
-        let chargeRequests = 0;
-        page.on("request", (request) => {
-          if (request.url() === "https://merchant.test/charge") chargeRequests += 1;
-        });
-        await page.setContent(`
-          <form id="checkout">
-            <input autocomplete="cc-number">
-            <input autocomplete="cc-exp">
-            <input autocomplete="cc-csc">
-            <input autocomplete="cc-name">
-            <button type="submit">Pay now</button>
-          </form>
-          <script>
-            document.querySelector("button").addEventListener("pointerdown", () => {
-              const realNow = Date.now;
-              Date.now = () => realNow() + 1000;
-            }, { capture: true });
-            window.addEventListener("click", () => {
-              void fetch("https://merchant.test/charge").catch(() => undefined);
-            }, { capture: true });
-          </script>
-        `);
-        const controller = BrowserController.fromHarnessPage(page);
-
-        await expect(
-          controller.fillAndSubmitCheckout(APPROVAL_CARD, { beforeSubmitDispatch: () => 500 }),
-        ).rejects.toThrow("payment_approval_expired");
-
-        await page.waitForTimeout(50);
-        expect(chargeRequests).toBe(0);
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "returns outcome unknown when an earlier mutation precedes a blocked late charge",
-    async () => {
-      const browser = await chromium.launch({ headless: true });
-      try {
-        const page = await browser.newPage();
+        const context = await browser.newContext();
+        const page = await context.newPage();
         let analyticsRequests = 0;
         let chargeRequests = 0;
-        page.on("request", (request) => {
-          if (request.url() === "https://merchant.test/analytics") analyticsRequests += 1;
-          if (request.url() === "https://merchant.test/charge") chargeRequests += 1;
+        let releaseChargeResponse!: () => void;
+        const chargeResponseAllowed = new Promise<void>((resolve) => {
+          releaseChargeResponse = resolve;
         });
-        await page.setContent(`
-          <form id="checkout">
-            <input autocomplete="cc-number">
-            <input autocomplete="cc-exp">
-            <input autocomplete="cc-csc">
-            <input autocomplete="cc-name">
-            <button type="submit">Pay now</button>
-          </form>
-          <script>
-            document.querySelector("#checkout").addEventListener("submit", (event) => {
-              event.preventDefault();
-              void fetch("https://merchant.test/analytics").catch(() => undefined);
-              setTimeout(() => {
-                void fetch("https://merchant.test/charge").catch(() => undefined);
-              }, 150);
-              setTimeout(() => history.pushState({}, "", "/thank-you"), 200);
-            });
-          </script>
-        `);
+        let reportChargeStarted!: () => void;
+        const chargeStarted = new Promise<void>((resolve) => {
+          reportChargeStarted = resolve;
+        });
+        let leaseHeldDuringCharge = false;
+        let activeSession: Parameters<typeof claimActivePaymentForOperatePay>[1];
+        await context.route("https://merchant.test/checkout", async (route) => {
+          await route.fulfill({
+            contentType: "text/html",
+            body: `
+              <form id="checkout">
+                <input autocomplete="cc-number">
+                <input autocomplete="cc-exp">
+                <input autocomplete="cc-csc">
+                <input autocomplete="cc-name">
+                <button type="submit">Pay now</button>
+              </form>
+              <script>
+                document.querySelector("#checkout").addEventListener("submit", async (event) => {
+                  event.preventDefault();
+                  void fetch("/analytics").catch(() => undefined);
+                  await fetch("/charge");
+                  document.body.insertAdjacentHTML("beforeend", "<p>Authenticate payment</p>");
+                });
+              </script>
+            `,
+          });
+        });
+        await context.route("https://merchant.test/analytics", async (route) => {
+          analyticsRequests += 1;
+          await route.fulfill({ body: "ok" });
+        });
+        await context.route("https://merchant.test/charge", async (route) => {
+          chargeRequests += 1;
+          try {
+            claimActivePaymentForOperatePay(undefined, activeSession);
+          } catch (error) {
+            leaseHeldDuringCharge =
+              error instanceof Error &&
+              /another payment operation is already in progress/.test(error.message);
+          }
+          reportChargeStarted();
+          await chargeResponseAllowed;
+          await route.fulfill({ body: "ok" });
+        });
         const controller = BrowserController.fromHarnessPage(page);
+        const started = await startHarnessProvisionSession({
+          serviceUrl: "https://merchant.test/checkout",
+          browser: controller,
+        });
+        sessionId = started.session_id;
 
-        await expect(
-          controller.fillAndSubmitCheckout(APPROVAL_CARD, { beforeSubmitDispatch: () => 100 }),
-        ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
+        let leaseReleased = false;
+        const action = withPaymentSessionCall(sessionId, async (session) => {
+          activeSession = session;
+          const claim = claimActivePaymentForOperatePay(undefined, session);
+          if (claim.kind !== "lease") throw new Error("expected payment action lease");
+          try {
+            return await controller.fillAndSubmitCheckout(APPROVAL_CARD, {
+              beforeSubmitDispatch: () => 100,
+            });
+          } finally {
+            leaseReleased = releaseActivePaymentLease(claim.lease, true, session);
+          }
+        });
 
-        await page.waitForTimeout(210);
+        await chargeStarted;
+        expect(leaseHeldDuringCharge).toBe(true);
+        const observation = await observe(sessionId, "full");
+        expect(JSON.stringify(observation)).not.toContain(APPROVAL_CARD.pan);
+        expect(JSON.stringify(observation)).not.toContain(`"value":"${APPROVAL_CARD.cvv}"`);
+        releaseChargeResponse();
+
+        await expect(action).resolves.toMatchObject({
+          three_ds_required: true,
+          order_confirmed: false,
+        });
+
         expect(analyticsRequests).toBe(1);
-        expect(chargeRequests).toBe(0);
+        expect(chargeRequests).toBe(1);
+        expect(leaseReleased).toBe(true);
+        await withPaymentSessionCall(sessionId, async (session) => {
+          const fresh = claimActivePaymentForOperatePay(undefined, session);
+          if (fresh.kind !== "lease") throw new Error("expected released payment lease");
+          expect(releaseActivePaymentLease(fresh.lease, true, session)).toBe(true);
+        });
       } finally {
+        if (sessionId !== undefined) {
+          await finishProvisionSession(sessionId).catch(() => undefined);
+        }
         await browser.close();
       }
     },
+    15_000,
   );
 
   it.skipIf(!chromiumAvailable)(
-    "allows 3DS follow-up after an authorized native charge dispatch",
+    "holds the payment action lease across native charge navigation and its 3DS follow-up",
     async () => {
       const browser = await chromium.launch({ headless: true });
+      let sessionId: string | undefined;
       try {
         const context = await browser.newContext();
         const page = await context.newPage();
         let threeDsRequests = 0;
+        let releaseThreeDsResponse!: () => void;
+        const threeDsResponseAllowed = new Promise<void>((resolve) => {
+          releaseThreeDsResponse = resolve;
+        });
+        let reportThreeDsStarted!: () => void;
+        const threeDsStarted = new Promise<void>((resolve) => {
+          reportThreeDsStarted = resolve;
+        });
+        let leaseHeldDuringThreeDs = false;
+        let activeSession: Parameters<typeof claimActivePaymentForOperatePay>[1];
+        await context.route("https://merchant.test/checkout", async (route) => {
+          await route.fulfill({
+            contentType: "text/html",
+            body: `
+              <form action="https://merchant.test/charge" method="post">
+                <input autocomplete="cc-number">
+                <input autocomplete="cc-exp">
+                <input autocomplete="cc-csc">
+                <input autocomplete="cc-name">
+                <button type="submit">Pay now</button>
+              </form>
+            `,
+          });
+        });
         await context.route("https://merchant.test/charge", async (route) => {
           await route.fulfill({
             contentType: "text/html",
             body: `<script>
-              setTimeout(async () => {
+              void (async () => {
                 await fetch("https://merchant.test/3ds");
-                history.pushState({}, "", "/thank-you/order-123");
-              }, 150);
+                document.body.textContent = "Authenticate payment";
+              })();
             </script>`,
           });
         });
         await context.route("https://merchant.test/3ds", async (route) => {
           threeDsRequests += 1;
+          try {
+            claimActivePaymentForOperatePay(undefined, activeSession);
+          } catch (error) {
+            leaseHeldDuringThreeDs =
+              error instanceof Error &&
+              /another payment operation is already in progress/.test(error.message);
+          }
+          reportThreeDsStarted();
+          await threeDsResponseAllowed;
           await route.fulfill({ body: "ok" });
         });
-        await page.setContent(`
-          <form action="https://merchant.test/charge" method="post">
-            <input autocomplete="cc-number">
-            <input autocomplete="cc-exp">
-            <input autocomplete="cc-csc">
-            <input autocomplete="cc-name">
-            <button type="submit">Pay now</button>
-          </form>
-        `);
         const controller = BrowserController.fromHarnessPage(page);
+        const started = await startHarnessProvisionSession({
+          serviceUrl: "https://merchant.test/checkout",
+          browser: controller,
+        });
+        sessionId = started.session_id;
 
-        await expect(
-          controller.fillAndSubmitCheckout(APPROVAL_CARD, { beforeSubmitDispatch: () => 100 }),
-        ).resolves.toEqual({ three_ds_required: false, order_confirmed: true });
+        let leaseReleased = false;
+        const action = withPaymentSessionCall(sessionId, async (session) => {
+          activeSession = session;
+          const claim = claimActivePaymentForOperatePay(undefined, session);
+          if (claim.kind !== "lease") throw new Error("expected payment action lease");
+          try {
+            return await controller.fillAndSubmitCheckout(APPROVAL_CARD, {
+              beforeSubmitDispatch: () => 100,
+            });
+          } finally {
+            leaseReleased = releaseActivePaymentLease(claim.lease, true, session);
+          }
+        });
+
+        await threeDsStarted;
+        expect(leaseHeldDuringThreeDs).toBe(true);
+        releaseThreeDsResponse();
+
+        const result = await action;
+        expect(result).toMatchObject({
+          three_ds_required: true,
+          order_confirmed: false,
+        });
+        expect(JSON.stringify(result)).not.toContain(APPROVAL_CARD.pan);
+        expect(JSON.stringify(result)).not.toContain(APPROVAL_CARD.cvv);
         expect(threeDsRequests).toBe(1);
-        await context.close();
+        expect(leaseReleased).toBe(true);
+        await withPaymentSessionCall(sessionId, async (session) => {
+          const fresh = claimActivePaymentForOperatePay(undefined, session);
+          if (fresh.kind !== "lease") throw new Error("expected released payment lease");
+          expect(releaseActivePaymentLease(fresh.lease, true, session)).toBe(true);
+        });
       } finally {
+        if (sessionId !== undefined) {
+          await finishProvisionSession(sessionId).catch(() => undefined);
+        }
         await browser.close();
       }
     },
+    60_000,
   );
 
   it.skipIf(!chromiumAvailable)(

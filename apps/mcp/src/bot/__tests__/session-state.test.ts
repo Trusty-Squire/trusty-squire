@@ -88,7 +88,16 @@ describe("operator session storage state", () => {
     roots.push(canonical);
     const state = {
       cookies: [
-        { name: "merchant_session", value: "confirmed", domain: ".merchant.test", path: "/" },
+        {
+          name: "merchant_session",
+          value: "confirmed",
+          domain: ".merchant.test",
+          path: "/",
+          expires: -1,
+          httpOnly: true,
+          secure: true,
+          sameSite: "Lax" as const,
+        },
       ],
       origins: [],
     };
@@ -107,8 +116,26 @@ describe("operator session storage state", () => {
     roots.push(canonical);
     const state = {
       cookies: [
-        { name: "SID", value: "google-session", domain: ".google.com", path: "/" },
-        { name: "rp_session", value: "merchant-session", domain: ".merchant.test", path: "/" },
+        {
+          name: "SID",
+          value: "google-session",
+          domain: ".google.com",
+          path: "/",
+          expires: -1,
+          httpOnly: true,
+          secure: true,
+          sameSite: "Lax" as const,
+        },
+        {
+          name: "rp_session",
+          value: "merchant-session",
+          domain: ".merchant.test",
+          path: "/",
+          expires: -1,
+          httpOnly: true,
+          secure: true,
+          sameSite: "Lax" as const,
+        },
       ],
       origins: [
         { origin: "https://accounts.google.com", localStorage: [] },

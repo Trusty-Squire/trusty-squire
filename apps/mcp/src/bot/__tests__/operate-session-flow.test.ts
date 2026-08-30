@@ -15,8 +15,6 @@ const h = vi.hoisted(() => ({
   providers: ["google"] as string[] | null,
   oauthStatus: "already_valid" as string,
   oauthLoginCalls: [] as string[],
-  oauthDestination: "google" as "google" | "github" | "other" | null,
-  oauthDestinationAfterWait: null as "google" | "github" | "other" | null,
   oauthConsentProviders: [] as Array<string | undefined>,
   oauthLoginGates: new Map<number, Promise<void>>(),
   oauthResultUrl: "https://app.example.com/dashboard",
@@ -320,9 +318,7 @@ vi.mock("../browser.js", () => ({
       this.index = h.connections.length;
       this.opts = opts;
       this.detached =
-        this.index > 0 &&
-        opts.profileDir !== undefined &&
-        opts.profileDir !== h.profileDirs[0];
+        this.index > 0 && opts.profileDir !== undefined && opts.profileDir !== h.profileDirs[0];
       h.connections.push(true);
       h.profileDirs.push(opts.profileDir);
       h.proxyUrls.push(opts.proxyUrl);
@@ -742,14 +738,6 @@ vi.mock("../browser.js", () => ({
       h.uploads.push({ selector, filePath });
     }
     async startOAuth(): Promise<void> {}
-    async detectOAuthProviderDestination(): Promise<"google" | "github" | "other" | null> {
-      return h.oauthDestination;
-    }
-    async waitForPendingOAuthProviderDestination(): Promise<
-      "google" | "github" | "other" | null
-    > {
-      return h.oauthDestinationAfterWait;
-    }
     async loginWithOAuth(
       selector: string,
       _settleTimeoutMs?: number,
@@ -1081,11 +1069,10 @@ function elem(partial: Record<string, unknown>): unknown {
 beforeEach(() => {
   compactV2ModeBeforeTest = process.env.TRUSTY_SQUIRE_OBSERVE_V2;
   process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "off";
+  process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
   h.providers = ["google"];
   h.oauthStatus = "already_valid";
   h.oauthLoginCalls = [];
-  h.oauthDestination = "google";
-  h.oauthDestinationAfterWait = null;
   h.oauthConsentProviders = [];
   h.oauthLoginGates = new Map();
   h.oauthResultUrl = "https://app.example.com/dashboard";
@@ -3016,6 +3003,7 @@ describe("verified recipe recording", () => {
 afterEach(async () => {
   vi.useRealTimers();
   await closeAllProvisionSessions();
+  delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
   if (compactV2ModeBeforeTest === undefined) delete process.env.TRUSTY_SQUIRE_OBSERVE_V2;
   else process.env.TRUSTY_SQUIRE_OBSERVE_V2 = compactV2ModeBeforeTest;
 });
@@ -3365,7 +3353,7 @@ describe("3.1 — autocomplete-aware type fill", () => {
 });
 
 describe("operate session — OAuth lifecycle", () => {
-  it("serializes Google OAuth handoffs and restores the freshly published state", async () => {
+  it("serializes every OAuth action and restores the freshly published state", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-google-handoff";
     const state0 = {
       cookies: [
@@ -3473,7 +3461,6 @@ describe("operate session — OAuth lifecycle", () => {
       provider: "google",
     });
     await vi.waitFor(() => expect(h.restoredStorageStates).toHaveLength(1));
-    h.oauthDestination = null;
     const secondAct = act(second.session_id, {
       kind: "oauth_click",
       target: "Continue",
@@ -3498,7 +3485,8 @@ describe("operate session — OAuth lifecycle", () => {
     await finishProvisionSession(second.session_id);
   });
 
-  it("keeps resolved non-Google JavaScript OAuth parallel with Google handoff", async () => {
+  it("holds the tunable cooldown before the next OAuth action acquires the lease", async () => {
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "75";
     h.visibleText = "Continue";
     h.elements = [
       elem({
@@ -3508,77 +3496,42 @@ describe("operate session — OAuth lifecycle", () => {
         selector: "#oauth",
       }),
     ];
-    let releaseGoogle!: () => void;
+    let releaseFirst!: () => void;
     h.oauthLoginGates.set(
       0,
       new Promise<void>((resolve) => {
-        releaseGoogle = resolve;
+        releaseFirst = resolve;
       }),
     );
-    const google = await startProvisionSession({
+    const first = await startProvisionSession({
       serviceUrl: "https://app.example.com/login",
     });
-    const other = await startProvisionSession({
+    const second = await startProvisionSession({
       serviceUrl: "https://app.example.com/login",
     });
-    const googleAct = act(google.session_id, {
+    const firstAct = act(first.session_id, {
       kind: "oauth_login",
       target: "Continue",
-      provider: "google",
     });
     await vi.waitFor(() => expect(h.oauthLoginCalls).toEqual(["#oauth"]));
-    h.oauthDestination = "other";
-
-    await act(other.session_id, { kind: "oauth_login", target: "Continue" });
-    expect(h.oauthLoginCalls).toEqual(["#oauth", "#oauth"]);
-    expect(h.restoredStorageStates).toHaveLength(1);
-
-    releaseGoogle();
-    await googleAct;
-    await finishProvisionSession(google.session_id);
-    await finishProvisionSession(other.session_id);
-  });
-
-  it("lets a delayed confirmed non-Google destination bypass the Google handoff", async () => {
-    h.visibleText = "Continue";
-    h.elements = [
-      elem({
-        visibleText: "Continue",
-        labelText: "Continue",
-        role: "button",
-        selector: "#oauth",
-      }),
-    ];
-    let releaseGoogle!: () => void;
-    h.oauthLoginGates.set(
-      0,
-      new Promise<void>((resolve) => {
-        releaseGoogle = resolve;
-      }),
-    );
-    const google = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
-    const other = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
-    const googleAct = act(google.session_id, {
+    const secondAct = act(second.session_id, {
       kind: "oauth_login",
       target: "Continue",
-      provider: "google",
+      provider: "github",
     });
-    await vi.waitFor(() => expect(h.oauthLoginCalls).toEqual(["#oauth"]));
-    h.oauthDestination = null;
-    h.oauthDestinationAfterWait = "other";
+    const releasedAt = Date.now();
+    releaseFirst();
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    expect(h.oauthLoginCalls).toEqual(["#oauth"]);
+    await vi.waitFor(() => expect(h.oauthLoginCalls).toEqual(["#oauth", "#oauth"]));
+    expect(Date.now() - releasedAt).toBeGreaterThanOrEqual(50);
 
-    await act(other.session_id, { kind: "oauth_login", target: "Continue" });
-    expect(h.oauthLoginCalls).toEqual(["#oauth", "#oauth"]);
-    expect(h.oauthConsentProviders).toEqual(["google", undefined]);
-    expect(h.restoredStorageStates).toHaveLength(1);
-
-    releaseGoogle();
-    await googleAct;
-    await finishProvisionSession(google.session_id);
-    await finishProvisionSession(other.session_id);
+    await Promise.all([firstAct, secondAct]);
+    await finishProvisionSession(first.session_id);
+    await finishProvisionSession(second.session_id);
   });
 
-  it("routes an observed Google destination through the handoff despite a conflicting provider", async () => {
+  it("does not infer a provider from destination URLs inside the leased action", async () => {
     h.visibleText = "Continue";
     h.elements = [
       elem({
@@ -3599,7 +3552,7 @@ describe("operate session — OAuth lifecycle", () => {
       provider: "github",
     });
 
-    expect(h.oauthConsentProviders).toEqual(["google"]);
+    expect(h.oauthConsentProviders).toEqual(["github"]);
     expect(h.restoredStorageStates).toHaveLength(1);
     await finishProvisionSession(started.session_id);
   });
@@ -6440,8 +6393,12 @@ describe("operate session — ephemeral profile lifecycle", () => {
       externalOperation.release();
       await vi.waitFor(() => expect(h.storageStateWrites).toHaveLength(1));
       expect(h.storageStateWrites[0]?.profileDir).toBe(canonical);
-      expect(h.storageStateWrites[0]?.state.cookies).toEqual(
-        expect.arrayContaining(h.captureStorageState.cookies),
+      const capturedStorageState = h.captureStorageState as { cookies: unknown[] };
+      const writtenStorageState = h.storageStateWrites[0]?.state as
+        | { cookies: unknown[] }
+        | undefined;
+      expect(writtenStorageState?.cookies).toEqual(
+        expect.arrayContaining(capturedStorageState.cookies),
       );
     } finally {
       externalOperation.release();
