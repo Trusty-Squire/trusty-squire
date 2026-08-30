@@ -1124,7 +1124,9 @@ describe("operate_payment_status [P0]", () => {
     });
     expect(getStatusApproval).toHaveBeenCalledWith("appr_session_a", "peek");
 
-    const getWaitApproval = vi.fn().mockResolvedValue(approvalRecord(stateB));
+    const getWaitApproval = vi
+      .fn()
+      .mockResolvedValue({ ...approvalRecord(stateB), status: "denied" as const });
     await expect(
       operatePaymentStatusTool.handler(
         { session_id: PAYMENT_SESSION_B_ID, wait_seconds: 15 },
@@ -1366,6 +1368,7 @@ describe("operate_payment_status [P0]", () => {
         jws: null,
         sealed_card: null,
       };
+      const denialAt = Date.now() + 750;
       const getPaymentApproval = vi
         .fn()
         .mockImplementationOnce(
@@ -1375,10 +1378,10 @@ describe("operate_payment_status [P0]", () => {
             ),
         )
         .mockImplementationOnce(
-          async () =>
-            await new Promise((resolve) =>
-              setTimeout(() => resolve({ ...pending, status: "denied" }), 250),
-            ),
+          async () => ({
+            ...pending,
+            status: Date.now() >= denialAt ? "denied" : "pending",
+          }),
         );
       const api = makeMockApi({ getPaymentApproval } as unknown as ApiClient);
 
@@ -1387,6 +1390,7 @@ describe("operate_payment_status [P0]", () => {
 
       await expect(result).resolves.toMatchObject({ status: "denied", ready_to_charge: false });
       expect(getPaymentApproval).toHaveBeenCalledTimes(2);
+      expect(getPaymentApproval).toHaveBeenNthCalledWith(2, "appr_status", "peek");
     } finally {
       vi.useRealTimers();
     }
@@ -1409,7 +1413,7 @@ describe("operate_payment_status [P0]", () => {
     const api = makeMockApi({ getPaymentApproval } as unknown as ApiClient);
 
     await expect(
-      operatePaymentStatusTool.handler({ wait_seconds: 15 }, api),
+      operatePaymentStatusTool.handler({}, api),
     ).resolves.toMatchObject({
       status: "pending",
       candidate_submitted: true,
@@ -1417,7 +1421,7 @@ describe("operate_payment_status [P0]", () => {
       ready_to_charge: false,
       next: { tool: "operate_pay" },
     });
-    expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", "wait-peek", expect.any(Number));
+    expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", "peek");
   });
 
   it("keeps the verified-review state explicit while waiting for the final signature", async () => {

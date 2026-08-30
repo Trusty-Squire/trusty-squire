@@ -38,6 +38,7 @@ import { assertApi, type Tool } from "./index.js";
 // approval and the next operate_pay call continues waiting on it.
 const OPERATE_PAY_APPROVAL_WAIT_MS = 60_000;
 const PAYMENT_APPROVAL_RESPONSE_RESERVE_MS = 500;
+const PAYMENT_APPROVAL_FINAL_PEEK_RESPONSE_MS = 100;
 
 const inputSchema = z
   .object({
@@ -750,10 +751,8 @@ async function paymentStatusResult(
       return paymentResult(session, await readApprovalStatus(api, state, session.id, false));
     }
     const callDeadline = Date.now() + Math.min(Math.max(waitSeconds * 1000, 1_000), 60_000);
-    const maxReads = Math.ceil((callDeadline - Date.now()) / 15_000) + 1;
     let result: Record<string, unknown>;
-    let reads = 0;
-    do {
+    for (;;) {
       const remainingMs = Math.max(callDeadline - Date.now(), 0);
       result = await readApprovalStatus(
         api,
@@ -762,11 +761,25 @@ async function paymentStatusResult(
         true,
         Math.min(remainingMs, 15_000),
       );
-      reads += 1;
       const terminalCandidate = result.ready_to_charge === true;
       const terminalStatus = result.status !== "pending";
       if (terminalCandidate || terminalStatus || Date.now() >= callDeadline) break;
-    } while (reads < maxReads);
+      const tailMs = Math.max(callDeadline - Date.now(), 0);
+      if (tailMs <= PAYMENT_APPROVAL_RESPONSE_RESERVE_MS) {
+        const delayMs = Math.max(tailMs - PAYMENT_APPROVAL_FINAL_PEEK_RESPONSE_MS, 0);
+        if (delayMs > 0) {
+          await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+        }
+        result = await readApprovalStatus(
+          api,
+          state,
+          session.id,
+          false,
+          Math.max(callDeadline - Date.now(), 0),
+        );
+        break;
+      }
+    }
     return paymentResult(session, result);
   }
   const threeDsState = getActivePendingThreeDs(session);

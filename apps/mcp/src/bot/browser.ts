@@ -907,16 +907,21 @@ export const CHECKOUT_SUBMIT_LABEL_RE =
 
 const CHECKOUT_PAYMENT_REQUEST_PATH_RE =
   /(?:^|[/_.-])(?:charge|charges|authorize|authorization|capture|payment[_-]?intents?|payments?|place[_-]?order|submit[_-]?payment|confirm[_-]?(?:order|payment)|complete[_-]?(?:order|payment|purchase)|purchase)(?:$|[/_.-])/i;
+const CHECKOUT_PAYMENT_REQUEST_PAYLOAD_RE =
+  /(?:complete|place|submit|confirm|create|authorize|capture)[_\s-]*(?:checkout|order|payment|purchase|payment[_\s-]*intent)|(?:checkout|order|payment|purchase)[_\s-]*(?:complete|submit|confirm|authorize|capture)/i;
+const CHECKOUT_PAYMENT_REQUEST_OBSERVATION_MS = 1_000;
 
 function isCheckoutPaymentRequest(request: Request): boolean {
   if (request.resourceType() !== "fetch" && request.resourceType() !== "xhr") return false;
-  const method = request.method().toUpperCase();
-  if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") return true;
   try {
-    return CHECKOUT_PAYMENT_REQUEST_PATH_RE.test(new URL(request.url()).pathname);
+    if (CHECKOUT_PAYMENT_REQUEST_PATH_RE.test(new URL(request.url()).pathname)) return true;
   } catch {
     return false;
   }
+  const method = request.method().toUpperCase();
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return false;
+  if (request.headers()["idempotency-key"] !== undefined) return true;
+  return CHECKOUT_PAYMENT_REQUEST_PAYLOAD_RE.test(request.postData() ?? "");
 }
 
 export function checkoutSubmitLabel(signals: {
@@ -11782,6 +11787,10 @@ export class BrowserController {
         }
         let paymentRequestTrackingArmed = false;
         let concretePaymentRequestObserved = false;
+        let resolveConcretePaymentRequest = (): void => undefined;
+        const concretePaymentRequest = new Promise<void>((resolve) => {
+          resolveConcretePaymentRequest = resolve;
+        });
         const paymentRequestListener = (request: Request): void => {
           if (!paymentRequestTrackingArmed || this.page === undefined) return;
           let sourceFrame: Frame;
@@ -11793,6 +11802,7 @@ export class BrowserController {
           if (sourceFrame !== frame && sourceFrame !== this.page.mainFrame()) return;
           if (!request.isNavigationRequest() && !isCheckoutPaymentRequest(request)) return;
           concretePaymentRequestObserved = true;
+          resolveConcretePaymentRequest();
         };
         this.page.on("request", paymentRequestListener);
         const readDispatchOutcomeBaseline = async (): Promise<CheckoutOutcomeBaseline | null> => {
@@ -11840,8 +11850,9 @@ export class BrowserController {
             let timer: ReturnType<typeof setTimeout> | undefined;
             const snapshot = await Promise.race([
               boundDispatch,
+              concretePaymentRequest.then(() => null),
               new Promise<null>((resolve) => {
-                timer = setTimeout(() => resolve(null), 250);
+                timer = setTimeout(() => resolve(null), CHECKOUT_PAYMENT_REQUEST_OBSERVATION_MS);
               }),
             ]);
             if (timer !== undefined) clearTimeout(timer);

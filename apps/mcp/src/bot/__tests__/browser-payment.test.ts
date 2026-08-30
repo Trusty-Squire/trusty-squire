@@ -1147,6 +1147,129 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "tracks a generic charge request after delayed tokenization",
+    async () => {
+      const checkoutUrl = "https://merchant.test/checkout";
+      const chargeUrl = "https://merchant.test/graphql";
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        let chargeRequests = 0;
+        await page.route(checkoutUrl, async (route) => {
+          await route.fulfill({
+            contentType: "text/html",
+            body: `
+              <form><button type="button">Pay now</button></form>
+              <script>
+                document.querySelector("button").addEventListener("click", () => {
+                  setTimeout(async () => {
+                    await fetch("/graphql", {
+                      method: "POST",
+                      headers: { "content-type": "application/json" },
+                      body: JSON.stringify({ operationName: "CompleteCheckout" })
+                    });
+                    setTimeout(() => history.pushState({}, "", "/receipt/ORD-DELAY-123"), 100);
+                  }, 300);
+                });
+              </script>`,
+          });
+        });
+        await page.route(chargeUrl, async (route) => {
+          chargeRequests += 1;
+          await route.fulfill({ body: "charge accepted" });
+        });
+        await page.goto(checkoutUrl);
+        const controller = BrowserController.fromHarnessPage(page);
+        const onSubmitDispatched = vi.fn();
+
+        await expect(
+          (
+            controller as unknown as {
+              submitFilledCheckoutInScope: (
+                cardGroup: undefined,
+                onDispatched: () => void,
+              ) => Promise<CheckoutSubmitResult>;
+            }
+          ).submitFilledCheckoutInScope(undefined, onSubmitDispatched),
+        ).resolves.toEqual({ three_ds_required: false, order_confirmed: true });
+
+        expect(chargeRequests).toBe(1);
+        expect(onSubmitDispatched).toHaveBeenCalledOnce();
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "ignores analytics and background autosave requests after a bare payment click",
+    async () => {
+      const checkoutUrl = "https://merchant.test/checkout";
+      const analyticsUrl = "https://merchant.test/analytics";
+      const graphqlUrl = "https://merchant.test/graphql";
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        let analyticsRequests = 0;
+        let autosaveRequests = 0;
+        await page.route(checkoutUrl, async (route) => {
+          await route.fulfill({
+            contentType: "text/html",
+            body: `
+              <form><button type="button">Pay now</button></form>
+              <script>
+                document.querySelector("button").addEventListener("click", () => {
+                  void fetch("/analytics", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ event: "pay_now_click" })
+                  });
+                  setTimeout(() => {
+                    void fetch("/graphql", {
+                      method: "POST",
+                      headers: { "content-type": "application/json" },
+                      body: JSON.stringify({ operationName: "SaveCart" })
+                    });
+                  }, 300);
+                });
+              </script>`,
+          });
+        });
+        await page.route(analyticsUrl, async (route) => {
+          analyticsRequests += 1;
+          await route.fulfill({ body: "ok" });
+        });
+        await page.route(graphqlUrl, async (route) => {
+          autosaveRequests += 1;
+          await route.fulfill({ body: "ok" });
+        });
+        await page.goto(checkoutUrl);
+        const controller = BrowserController.fromHarnessPage(page);
+        const onSubmitDispatched = vi.fn();
+
+        await expect(
+          (
+            controller as unknown as {
+              submitFilledCheckoutInScope: (
+                cardGroup: undefined,
+                onDispatched: () => void,
+              ) => Promise<CheckoutSubmitResult>;
+            }
+          ).submitFilledCheckoutInScope(undefined, onSubmitDispatched),
+        ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
+
+        expect(analyticsRequests).toBe(1);
+        expect(autosaveRequests).toBe(1);
+        expect(onSubmitDispatched).not.toHaveBeenCalled();
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "holds the payment action lease across a submit-associated SPA charge and 3DS follow-up",
     async () => {
       const browser = await chromium.launch({ headless: true });
