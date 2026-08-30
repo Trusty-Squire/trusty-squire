@@ -36,6 +36,8 @@ jobs:
           cache: pnpm
       - name: Install MCP dependency tree
         run: pnpm install --frozen-lockfile --filter '@trusty-squire/mcp...'
+      - name: Install Chromium for browser-backed MCP tests
+        run: pnpm --filter '@trusty-squire/mcp' exec playwright install --with-deps chromium
       - name: Build MCP workspace dependencies
         run: pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/recipe-schema' build
       - name: Run slow integration tier after merge
