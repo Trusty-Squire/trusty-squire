@@ -72,6 +72,10 @@ export interface ProfileProcessIdentity {
   // Present only when the browser is the leader of a process group Trusty
   // Squire created. Older/fallback identities omit it and remain PID-only.
   process_group_id?: number;
+  // Exact per-launch marker inherited by every browser process. It lets the
+  // owner reaper prove a detached process group still belongs to this launch
+  // after the group's original leader has exited.
+  process_marker?: string;
 }
 
 export type ProcessIdentityState = "matching" | "stale" | "unknown";
@@ -243,10 +247,17 @@ export function signalProfileProcess(
   signal: NodeJS.Signals,
   kill: (pid: number, signal: NodeJS.Signals) => unknown = process.kill,
 ): boolean {
-  if (!profileProcessMatches(identity, profileDir)) return false;
-  const currentProcessGroupId = readLinuxProcessGroupId(identity.pid);
+  const leaderMatches = profileProcessMatches(identity, profileDir);
+  const currentProcessGroupId = leaderMatches ? readLinuxProcessGroupId(identity.pid) : null;
+  const markedGroupSurvives =
+    !leaderMatches &&
+    identity.process_group_id === identity.pid &&
+    identity.process_marker !== undefined &&
+    linuxProcessGroupHasMarker(identity.process_group_id, identity.process_marker);
+  if (!leaderMatches && !markedGroupSurvives) return false;
   const signalTarget =
-    identity.process_group_id === identity.pid && currentProcessGroupId === identity.pid
+    identity.process_group_id === identity.pid &&
+    (currentProcessGroupId === identity.pid || markedGroupSurvives)
       ? -identity.pid
       : identity.pid;
   try {
@@ -255,6 +266,23 @@ export function signalProfileProcess(
   } catch {
     return false;
   }
+}
+
+function linuxProcessGroupHasMarker(processGroupId: number, marker: string): boolean {
+  if (process.platform !== "linux") return false;
+  const prefix = "TRUSTY_SQUIRE_OPERATOR_BROWSER_MARKER=";
+  try {
+    for (const entry of readdirSync("/proc")) {
+      if (!/^\d+$/.test(entry)) continue;
+      const pid = Number(entry);
+      if (readLinuxProcessGroupId(pid) !== processGroupId) continue;
+      const environ = readFileSync(`/proc/${pid}/environ`, "utf8").split("\0");
+      if (environ.some((value) => value === `${prefix}${marker}`)) return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
 }
 
 export async function closeProfileWithProof(opts: {

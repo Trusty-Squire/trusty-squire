@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -10,9 +11,13 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  linuxOperatorBrowserProcesses,
+  operatorBrowserProcessMatchesMarker,
+} from "./operator-browser-watchdog.js";
 import { sweepOperatorProfilePoolOrphans } from "./operator-profile-pool.js";
 import {
   clearStaleSingletonLock,
@@ -29,20 +34,38 @@ interface OwnerIdentity {
   start_time: string;
 }
 
+interface OwnerLaunchRecord {
+  marker: string;
+  user_data_dir: string;
+}
+
+interface OwnerProfileRecord {
+  path: string;
+  token: string;
+}
+
 interface OwnerReaperManifest {
-  version: 1;
+  version: 2;
   token: string;
   owner: OwnerIdentity;
   resources: ProfileProcessIdentity[];
+  launches: OwnerLaunchRecord[];
+  profiles: OwnerProfileRecord[];
 }
 
 export interface OwnerProcessReaper {
   readonly manifestPath: string;
   track(identity: ProfileProcessIdentity): void;
   untrack(identity: ProfileProcessIdentity): void;
+  trackLaunch(marker: string, profileDir: string): void;
+  untrackLaunch(marker: string): void;
+  trackProfile(profileDir: string): void;
+  untrackProfile(profileDir: string): void;
   stop(): void;
 }
 
+export const OWNER_PROFILE_SIGNATURE_FILE = ".trusty-squire-owner-profile.json";
+const EPHEMERAL_PROFILE_PREFIX = "trusty-squire-operate-";
 const DEFAULT_POLL_MS = 1_000;
 const DEFAULT_TERM_GRACE_MS = 2_000;
 let activeReaper: OwnerProcessReaper | null = null;
@@ -64,11 +87,30 @@ function ensurePrivateDir(path: string): void {
   chmodSync(path, 0o700);
 }
 
+function isLaunch(value: unknown): value is OwnerLaunchRecord {
+  if (value === null || typeof value !== "object") return false;
+  const launch = value as Partial<OwnerLaunchRecord>;
+  return typeof launch.marker === "string" && typeof launch.user_data_dir === "string";
+}
+
+function isProfile(value: unknown): value is OwnerProfileRecord {
+  if (value === null || typeof value !== "object") return false;
+  const profile = value as Partial<OwnerProfileRecord>;
+  return typeof profile.path === "string" && typeof profile.token === "string";
+}
+
 function readManifest(path: string): OwnerReaperManifest | null {
   try {
-    const value = JSON.parse(readFileSync(path, "utf8")) as Partial<OwnerReaperManifest>;
+    const value = JSON.parse(readFileSync(path, "utf8")) as {
+      version?: number;
+      token?: string;
+      owner?: OwnerIdentity;
+      resources?: ProfileProcessIdentity[];
+      launches?: unknown[];
+      profiles?: unknown[];
+    };
     if (
-      value.version !== 1 ||
+      (value.version !== 1 && value.version !== 2) ||
       typeof value.token !== "string" ||
       value.owner === undefined ||
       !Number.isSafeInteger(value.owner.pid) ||
@@ -86,12 +128,22 @@ function readManifest(path: string): OwnerReaperManifest | null {
         typeof resource.start_time === "string" &&
         typeof resource.user_data_dir === "string",
     );
-    if (resources.length !== value.resources.length) return null;
+    const launches = value.version === 2 && Array.isArray(value.launches) ? value.launches : [];
+    const profiles = value.version === 2 && Array.isArray(value.profiles) ? value.profiles : [];
+    if (
+      resources.length !== value.resources.length ||
+      launches.some((launch) => !isLaunch(launch)) ||
+      profiles.some((profile) => !isProfile(profile))
+    ) {
+      return null;
+    }
     return {
-      version: 1,
+      version: 2,
       token: value.token,
       owner: value.owner,
       resources,
+      launches: launches as OwnerLaunchRecord[],
+      profiles: profiles as OwnerProfileRecord[],
     };
   } catch {
     return null;
@@ -121,7 +173,43 @@ function signalTrackedResources(manifest: OwnerReaperManifest, signal: NodeJS.Si
   for (const identity of manifest.resources) {
     if (signalProfileProcess(identity, identity.user_data_dir, signal)) signalled += 1;
   }
+  for (const launch of manifest.launches) {
+    for (const processRecord of linuxOperatorBrowserProcesses()) {
+      if (
+        processRecord.marker !== launch.marker ||
+        !operatorBrowserProcessMatchesMarker(processRecord.pid, launch.marker)
+      ) {
+        continue;
+      }
+      try {
+        process.kill(processRecord.pid, signal);
+        signalled += 1;
+      } catch {
+        // It exited between discovery and the signal.
+      }
+    }
+  }
   return signalled;
+}
+
+function signedEphemeralProfile(record: OwnerProfileRecord): boolean {
+  const path = resolve(record.path);
+  if (dirname(path) !== resolve(tmpdir()) || !basename(path).startsWith(EPHEMERAL_PROFILE_PREFIX)) {
+    return false;
+  }
+  try {
+    if (!lstatSync(path).isDirectory() || lstatSync(path).isSymbolicLink()) return false;
+    const signature = JSON.parse(
+      readFileSync(join(path, OWNER_PROFILE_SIGNATURE_FILE), "utf8"),
+    ) as {
+      version?: unknown;
+      token?: unknown;
+      path?: unknown;
+    };
+    return signature.version === 1 && signature.token === record.token && signature.path === path;
+  } catch {
+    return false;
+  }
 }
 
 function cleanTrackedProfiles(manifest: OwnerReaperManifest): void {
@@ -130,9 +218,24 @@ function cleanTrackedProfiles(manifest: OwnerReaperManifest): void {
       clearStaleSingletonLock(identity.user_data_dir);
     }
   }
+  for (const profile of manifest.profiles) {
+    if (signedEphemeralProfile(profile)) rmSync(profile.path, { recursive: true, force: true });
+  }
 }
 
-export function sweepOrphanedOwnerProcesses(rootDir = defaultRootDir()): number {
+async function reapManifest(path: string, manifest: OwnerReaperManifest): Promise<number> {
+  const graceMs = envPositiveMs("TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS", DEFAULT_TERM_GRACE_MS);
+  const signalled = signalTrackedResources(manifest, "SIGTERM");
+  await new Promise<void>((resolveWait) => setTimeout(resolveWait, graceMs));
+  const latest = readManifest(path) ?? manifest;
+  signalTrackedResources(latest, "SIGKILL");
+  cleanTrackedProfiles(latest);
+  await sweepOperatorProfilePoolOrphans().catch(() => undefined);
+  rmSync(path, { force: true });
+  return signalled;
+}
+
+export async function sweepOrphanedOwnerProcesses(rootDir = defaultRootDir()): Promise<number> {
   if (process.platform !== "linux" || !existsSync(rootDir)) return 0;
   let reaped = 0;
   for (const entry of readdirSync(rootDir)) {
@@ -140,31 +243,18 @@ export function sweepOrphanedOwnerProcesses(rootDir = defaultRootDir()): number 
     const path = join(rootDir, entry);
     const manifest = readManifest(path);
     if (manifest === null || !shouldReapOwner(ownerState(manifest))) continue;
-    reaped += signalTrackedResources(manifest, "SIGKILL");
-    cleanTrackedProfiles(manifest);
-    rmSync(path, { force: true });
+    reaped += await reapManifest(path, manifest);
   }
   return reaped;
 }
 
 export async function runOwnerProcessReaperWorker(manifestPath: string): Promise<void> {
   const pollMs = envPositiveMs("TRUSTY_SQUIRE_REAPER_POLL_MS", DEFAULT_POLL_MS);
-  const termGraceMs = envPositiveMs("TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS", DEFAULT_TERM_GRACE_MS);
   for (;;) {
     const manifest = readManifest(manifestPath);
     if (manifest === null) return;
-    const state = ownerState(manifest);
-    if (shouldReapOwner(state)) {
-      signalTrackedResources(manifest, "SIGTERM");
-      await new Promise<void>((resolveWait) => setTimeout(resolveWait, termGraceMs));
-      const latest = readManifest(manifestPath) ?? manifest;
-      signalTrackedResources(latest, "SIGKILL");
-      cleanTrackedProfiles(latest);
-      // Ephemeral operator profiles remain owned by the pool. Once their
-      // process and owner birth identities are stale, invoke that pool's
-      // quarantine/removal rules instead of deleting profile paths here.
-      await sweepOperatorProfilePoolOrphans().catch(() => undefined);
-      rmSync(manifestPath, { force: true });
+    if (shouldReapOwner(ownerState(manifest))) {
+      await reapManifest(manifestPath, manifest);
       return;
     }
     await new Promise<void>((resolveWait) => setTimeout(resolveWait, pollMs));
@@ -172,21 +262,25 @@ export async function runOwnerProcessReaperWorker(manifestPath: string): Promise
 }
 
 export function startOwnerProcessReaper(
-  options: {
-    rootDir?: string;
-    workerPath?: string;
-  } = {},
+  options: { rootDir?: string; workerPath?: string } = {},
 ): OwnerProcessReaper | null {
   if (process.platform !== "linux") return null;
   activeReaper?.stop();
   const rootDir = resolve(options.rootDir ?? defaultRootDir());
   ensurePrivateDir(rootDir);
-  sweepOrphanedOwnerProcesses(rootDir);
+  void sweepOrphanedOwnerProcesses(rootDir).catch(() => undefined);
   const owner = processBirthIdentity(process.pid);
   if (owner === null) return null;
   const token = randomUUID();
   const manifestPath = join(rootDir, `${owner.pid}-${token}.json`);
-  let manifest: OwnerReaperManifest = { version: 1, token, owner, resources: [] };
+  let manifest: OwnerReaperManifest = {
+    version: 2,
+    token,
+    owner,
+    resources: [],
+    launches: [],
+    profiles: [],
+  };
   writeManifest(manifestPath, manifest);
 
   const compiledWorkerPath = fileURLToPath(
@@ -220,8 +314,10 @@ export function startOwnerProcessReaper(
     manifestPath,
     track: (identity) => {
       if (stopped) return;
-      const resources = manifest.resources.filter((entry) => entry.pid !== identity.pid);
-      update({ ...manifest, resources: [...resources, identity] });
+      update({
+        ...manifest,
+        resources: [...manifest.resources.filter((entry) => entry.pid !== identity.pid), identity],
+      });
     },
     untrack: (identity) => {
       if (stopped) return;
@@ -231,6 +327,50 @@ export function startOwnerProcessReaper(
           (entry) => entry.pid !== identity.pid || entry.start_time !== identity.start_time,
         ),
       });
+    },
+    trackLaunch: (marker, profileDir) => {
+      if (stopped) return;
+      update({
+        ...manifest,
+        launches: [
+          ...manifest.launches.filter((entry) => entry.marker !== marker),
+          { marker, user_data_dir: resolve(profileDir) },
+        ],
+      });
+    },
+    untrackLaunch: (marker) => {
+      if (stopped) return;
+      update({
+        ...manifest,
+        launches: manifest.launches.filter((entry) => entry.marker !== marker),
+      });
+    },
+    trackProfile: (profileDir) => {
+      if (stopped) return;
+      const path = resolve(profileDir);
+      if (
+        dirname(path) !== resolve(tmpdir()) ||
+        !basename(path).startsWith(EPHEMERAL_PROFILE_PREFIX)
+      )
+        return;
+      const profileToken = randomUUID();
+      writeFileSync(
+        join(path, OWNER_PROFILE_SIGNATURE_FILE),
+        `${JSON.stringify({ version: 1, token: profileToken, path })}\n`,
+        { mode: 0o600, flag: "wx" },
+      );
+      update({
+        ...manifest,
+        profiles: [
+          ...manifest.profiles.filter((entry) => entry.path !== path),
+          { path, token: profileToken },
+        ],
+      });
+    },
+    untrackProfile: (profileDir) => {
+      if (stopped) return;
+      const path = resolve(profileDir);
+      update({ ...manifest, profiles: manifest.profiles.filter((entry) => entry.path !== path) });
     },
     stop: () => {
       if (stopped) return;
@@ -247,7 +387,18 @@ export function startOwnerProcessReaper(
 export function trackOwnerProcess(identity: ProfileProcessIdentity): void {
   activeReaper?.track(identity);
 }
-
 export function untrackOwnerProcess(identity: ProfileProcessIdentity): void {
   activeReaper?.untrack(identity);
+}
+export function trackOwnerBrowserLaunch(marker: string, profileDir: string): void {
+  activeReaper?.trackLaunch(marker, profileDir);
+}
+export function untrackOwnerBrowserLaunch(marker: string): void {
+  activeReaper?.untrackLaunch(marker);
+}
+export function trackOwnerEphemeralProfile(profileDir: string): void {
+  activeReaper?.trackProfile(profileDir);
+}
+export function untrackOwnerEphemeralProfile(profileDir: string): void {
+  activeReaper?.untrackProfile(profileDir);
 }

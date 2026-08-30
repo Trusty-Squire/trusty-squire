@@ -187,7 +187,7 @@ describe("operator browser process watchdog", () => {
     expect(terminate).toHaveBeenCalledOnce();
   });
 
-  it("ends a continuously active session at maximum lifetime", async () => {
+  it("never ends a continuously active session at a process lifetime threshold", async () => {
     const terminate = vi.fn();
     const watchdog = new OperatorBrowserWatchdog({
       startedAt: 1_000,
@@ -200,26 +200,16 @@ describe("operator browser process watchdog", () => {
     });
 
     expect(watchdog.check(30_999)).toBeNull();
-    expect(watchdog.check(31_000)).toEqual({
-      kind: "max_lifetime",
-      lifetime_ms: 30_000,
-      timeout_ms: 30_000,
-    });
+    expect(watchdog.check(31_000)).toBeNull();
     await Promise.resolve();
-    expect(terminate).toHaveBeenCalledOnce();
+    expect(terminate).not.toHaveBeenCalled();
   });
 
-  it("shares session teardown already started by the session watchdog", async () => {
+  it("refuses process-watchdog teardown while a live session action is active", async () => {
     let processTerminate:
-      | ((reason: OperatorBrowserWatchdogReason) => void | Promise<void>)
+      | ((reason: OperatorBrowserWatchdogReason) => boolean | void | Promise<boolean | void>)
       | undefined;
-    let releaseSessionTeardown: (() => void) | undefined;
-    const terminate = vi.fn(
-      async () =>
-        await new Promise<void>((resolve) => {
-          releaseSessionTeardown = resolve;
-        }),
-    );
+    const terminate = vi.fn();
     const watchdog = new OperatorBrowserWatchdog({
       startedAt: 0,
       lastActivityAt: () => 0,
@@ -236,29 +226,17 @@ describe("operator browser process watchdog", () => {
     watchdog.start();
 
     try {
-      expect(watchdog.check(30_000)?.kind).toBe("max_lifetime");
-      await vi.waitFor(() => expect(releaseSessionTeardown).toBeTypeOf("function"));
-
-      let processTerminationSettled = false;
-      const processTermination = Promise.resolve(
+      expect(watchdog.check(30_000)).toBeNull();
+      const permitted = await Promise.resolve(
         processTerminate?.({
           kind: "max_lifetime",
           lifetime_ms: 30_000,
           timeout_ms: 30_000,
         }),
-      ).then(() => {
-        processTerminationSettled = true;
-      });
-      await Promise.resolve();
-
-      expect(processTerminationSettled).toBe(false);
-      expect(terminate).toHaveBeenCalledOnce();
-
-      releaseSessionTeardown?.();
-      await processTermination;
-      expect(processTerminationSettled).toBe(true);
+      );
+      expect(permitted).toBe(false);
+      expect(terminate).not.toHaveBeenCalled();
     } finally {
-      releaseSessionTeardown?.();
       watchdog.dispose();
     }
   });

@@ -5,6 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
+import {
+  trackOwnerEphemeralProfile,
+  untrackOwnerEphemeralProfile,
+} from "./owner-process-reaper.js";
 
 export type BrowserStorageState = Awaited<ReturnType<BrowserContext["storageState"]>>;
 
@@ -213,11 +217,16 @@ export async function writeCanonicalIdentityMetadata(
 export function createEphemeralProfile(): string {
   const profileDir = mkdtempSync(join(tmpdir(), "trusty-squire-operate-"));
   chmodSync(profileDir, 0o700);
+  trackOwnerEphemeralProfile(profileDir);
   return profileDir;
 }
 
 export async function destroyEphemeralProfile(profileDir: string): Promise<void> {
-  await rm(profileDir, { recursive: true, force: true });
+  try {
+    await rm(profileDir, { recursive: true, force: true });
+  } finally {
+    untrackOwnerEphemeralProfile(profileDir);
+  }
 }
 
 /**

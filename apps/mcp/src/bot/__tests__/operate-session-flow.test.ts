@@ -1002,6 +1002,7 @@ import {
   captureObserved,
   getActivePendingThreeDs,
   setActivePendingThreeDs,
+  clearActivePendingThreeDsIfCurrent,
   captureScreenshot,
   captureAndPromoteSession,
   observeQuery,
@@ -6053,106 +6054,83 @@ describe("operate session — ephemeral profile lifecycle", () => {
     expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
   });
 
-  it("forces operate_finish teardown when an entered call never drains", async () => {
-    vi.useFakeTimers();
-    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_DRAIN_TIMEOUT_MS", "50");
-    try {
-      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
-      let releaseCall: (() => void) | undefined;
-      const entered = withProvisionSessionCall(
-        started.session_id,
+  it("never tears down operate_finish while an entered action is active", async () => {
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+    let releaseCall: (() => void) | undefined;
+    const entered = withProvisionSessionCall(
+      started.session_id,
+      async () =>
+        await new Promise<void>((resolve) => {
+          releaseCall = resolve;
+        }),
+    );
+    await vi.waitFor(() => expect(releaseCall).toBeTypeOf("function"));
+
+    let settled = false;
+    const finishing = finishProvisionSession(started.session_id).then(() => {
+      settled = true;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(settled).toBe(false);
+    expect(h.closeCalls).toBe(0);
+    releaseCall?.();
+    await entered;
+    await finishing;
+    expect(h.closeCalls).toBe(1);
+  });
+
+  it("never tears down transport disconnect while an entered action is active", async () => {
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+    let releaseCall: (() => void) | undefined;
+    const entered = withProvisionSessionCall(
+      started.session_id,
+      async () =>
+        await new Promise<void>((resolve) => {
+          releaseCall = resolve;
+        }),
+    );
+    await vi.waitFor(() => expect(releaseCall).toBeTypeOf("function"));
+
+    const shutdown = closeAllProvisionSessions();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(h.closeCalls).toBe(0);
+    releaseCall?.();
+    await entered;
+    await shutdown;
+    expect(h.closeCalls).toBe(1);
+  });
+
+  it("drains every concurrent action before shutdown", async () => {
+    const started = await Promise.all([
+      startProvisionSession({ serviceUrl: "https://app.example.com/one" }),
+      startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
+      startProvisionSession({ serviceUrl: "https://app.example.com/three" }),
+    ]);
+    const releases: Array<() => void> = [];
+    const entered = started.map(({ session_id }) =>
+      withProvisionSessionCall(
+        session_id,
         async () =>
           await new Promise<void>((resolve) => {
-            releaseCall = resolve;
+            releases.push(resolve);
           }),
-      );
-      await vi.waitFor(() => expect(releaseCall).toBeTypeOf("function"));
+      ),
+    );
+    await vi.waitFor(() => expect(releases).toHaveLength(3));
 
-      const finishing = expect(finishProvisionSession(started.session_id)).rejects.toThrow(
-        /call drain timed out; browser terminated/,
-      );
-      await vi.advanceTimersByTimeAsync(50);
-      await finishing;
-
-      expect(h.closeCalls).toBe(1);
-      expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
-      expect(activeSessionCount()).toBe(0);
-      releaseCall?.();
-      await entered;
-    } finally {
-      vi.unstubAllEnvs();
-      vi.useRealTimers();
-    }
+    const shutdown = closeAllProvisionSessions();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(h.closeCalls).toBe(0);
+    for (const release of releases) release();
+    await Promise.all(entered);
+    await shutdown;
+    expect(h.closeCalls).toBe(3);
+    expect(activeSessionCount()).toBe(0);
   });
 
-  it("forces disconnect teardown when an entered call never drains", async () => {
+  it("keeps finish preparation alive through its action boundary", async () => {
     vi.useFakeTimers();
-    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_DRAIN_TIMEOUT_MS", "50");
-    try {
-      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
-      let releaseCall: (() => void) | undefined;
-      const entered = withProvisionSessionCall(
-        started.session_id,
-        async () =>
-          await new Promise<void>((resolve) => {
-            releaseCall = resolve;
-          }),
-      );
-      await vi.waitFor(() => expect(releaseCall).toBeTypeOf("function"));
-
-      const shutdown = closeAllProvisionSessions();
-      await vi.advanceTimersByTimeAsync(50);
-      await shutdown;
-
-      expect(h.closeCalls).toBe(1);
-      expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
-      expect(activeSessionCount()).toBe(0);
-      releaseCall?.();
-      await entered;
-    } finally {
-      vi.unstubAllEnvs();
-      vi.useRealTimers();
-    }
-  });
-
-  it("drains concurrent sessions under one shutdown deadline", async () => {
-    vi.useFakeTimers();
-    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_DRAIN_TIMEOUT_MS", "50");
-    try {
-      const started = await Promise.all([
-        startProvisionSession({ serviceUrl: "https://app.example.com/one" }),
-        startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
-        startProvisionSession({ serviceUrl: "https://app.example.com/three" }),
-      ]);
-      const releases: Array<() => void> = [];
-      const entered = started.map(({ session_id }) =>
-        withProvisionSessionCall(
-          session_id,
-          async () =>
-            await new Promise<void>((resolve) => {
-              releases.push(resolve);
-            }),
-        ),
-      );
-      await vi.waitFor(() => expect(releases).toHaveLength(3));
-
-      const shutdown = closeAllProvisionSessions();
-      await vi.advanceTimersByTimeAsync(50);
-      await shutdown;
-
-      expect(h.closeCalls).toBe(3);
-      expect(activeSessionCount()).toBe(0);
-      for (const release of releases) release();
-      await Promise.all(entered);
-    } finally {
-      vi.unstubAllEnvs();
-      vi.useRealTimers();
-    }
-  });
-
-  it("bounds finish preparation and audits pending 3DS before forced teardown", async () => {
-    vi.useFakeTimers();
-    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS", "50");
+    let releasePrepare: (() => void) | undefined;
     try {
       const auditPayment = vi.fn().mockResolvedValue({ id: "audit_timeout" });
       const started = await startProvisionSession({
@@ -6175,14 +6153,18 @@ describe("operate session — ephemeral profile lifecycle", () => {
       });
       h.waitForThreeDsResult = "timeout";
 
-      const finishing = expect(
-        finishProvisionSessionWithPreparation(
-          started.session_id,
-          async () => await new Promise<never>(() => undefined),
-        ),
-      ).rejects.toThrow(/terminal transition timed out; browser terminated/);
+      const finishing = finishProvisionSessionWithPreparation(
+        started.session_id,
+        async () =>
+          await new Promise<string>((resolve) => {
+            releasePrepare = () => resolve("prepared");
+          }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
       await vi.advanceTimersByTimeAsync(50);
-      await finishing;
+      expect(h.forceCloseCalls).toBe(0);
+      releasePrepare?.();
+      await expect(finishing).resolves.toMatchObject({ prepared: "prepared" });
 
       expect(h.waitForThreeDsCalls).toEqual([0]);
       expect(auditPayment).toHaveBeenCalledWith(
@@ -6197,9 +6179,8 @@ describe("operate session — ephemeral profile lifecycle", () => {
     }
   });
 
-  it("keeps ephemeral custody while storage capture is forced closed", async () => {
+  it("keeps ephemeral custody while storage capture remains in flight", async () => {
     vi.useFakeTimers();
-    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS", "50");
     let releaseCapture: (() => void) | undefined;
     h.captureStorageStateGate = new Promise<void>((resolve) => {
       releaseCapture = resolve;
@@ -6209,26 +6190,22 @@ describe("operate session — ephemeral profile lifecycle", () => {
         serviceUrl: "https://app.example.com/one",
         requireLiveIdentity: true,
       });
-      const finishing = expect(
-        finishProvisionSessionWithPreparation(
-          started.session_id,
-          async () => "prepared",
-          () => true,
-        ),
-      ).rejects.toThrow(/terminal transition timed out; browser terminated/);
+      const finishing = finishProvisionSessionWithPreparation(
+        started.session_id,
+        async () => "prepared",
+        () => true,
+      );
       await vi.advanceTimersByTimeAsync(0);
       expect(h.storageStateWrites).toEqual([]);
 
       await vi.advanceTimersByTimeAsync(50);
-      await finishing;
-
-      expect(h.forceCloseCalls).toBe(1);
-      expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
+      expect(h.forceCloseCalls).toBe(0);
       expect(h.storageStateWrites).toEqual([]);
 
       releaseCapture?.();
       await vi.advanceTimersByTimeAsync(0);
-      expect(h.storageStateWrites).toEqual([]);
+      await expect(finishing).resolves.toMatchObject({ prepared: "prepared" });
+      expect(h.storageStateWrites).toHaveLength(1);
     } finally {
       releaseCapture?.();
       h.captureStorageStateGate = null;
@@ -6278,9 +6255,8 @@ describe("operate session — ephemeral profile lifecycle", () => {
     }
   });
 
-  it("never publishes state after terminal ownership is forced during write", async () => {
+  it("lets an in-flight terminal state write finish before closing", async () => {
     vi.useFakeTimers();
-    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS", "50");
     let releaseWrite: (() => void) | undefined;
     h.storageStateWriteGate = new Promise<void>((resolve) => {
       releaseWrite = resolve;
@@ -6290,25 +6266,22 @@ describe("operate session — ephemeral profile lifecycle", () => {
         serviceUrl: "https://app.example.com/one",
         requireLiveIdentity: true,
       });
-      const finishing = expect(
-        finishProvisionSessionWithPreparation(
-          started.session_id,
-          async () => "prepared",
-          () => true,
-        ),
-      ).rejects.toThrow(/terminal transition timed out; browser terminated/);
+      const finishing = finishProvisionSessionWithPreparation(
+        started.session_id,
+        async () => "prepared",
+        () => true,
+      );
       await vi.advanceTimersByTimeAsync(0);
       expect(h.storageStateWriteAttempts).toBe(1);
       expect(h.storageStateWrites).toEqual([]);
 
       await vi.advanceTimersByTimeAsync(50);
-      await finishing;
-      expect(h.forceCloseCalls).toBe(2);
-      expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
+      expect(h.forceCloseCalls).toBe(1);
 
       releaseWrite?.();
       await vi.advanceTimersByTimeAsync(0);
-      expect(h.storageStateWrites).toEqual([]);
+      await expect(finishing).resolves.toMatchObject({ prepared: "prepared" });
+      expect(h.storageStateWrites).toHaveLength(1);
     } finally {
       releaseWrite?.();
       h.storageStateWriteGate = null;
@@ -6864,7 +6837,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
       // while its stdio pipe stayed open. The server-level 12h grace cannot
       // protect this case; the session watchdog must destroy its browser AND
       // destroy its unique profile. Otherwise a dead session can leak browser state.
-      await vi.advanceTimersByTimeAsync(10 * 60 * 1_000);
+      await vi.advanceTimersByTimeAsync(60 * 60 * 1_000);
 
       expect(h.closeCalls).toBe(1);
       expect(activeSessionCount()).toBe(0);
@@ -6885,7 +6858,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
 
   it("refreshes the idle deadline when the final active call completes", async () => {
     vi.useFakeTimers();
-    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_SESSION_IDLE_TIMEOUT_MS", "100");
+    vi.stubEnv("TRUSTY_SQUIRE_SESSION_IDLE_TIMEOUT_MS", "100");
     vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_BROWSER_WATCHDOG_INTERVAL_MS", "10");
     vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_BROWSER_MAX_LIFETIME_MS", "10000");
     try {
@@ -6934,7 +6907,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
       },
     ],
   ] as const)(
-    "defers %s watchdog teardown until an active payment call settles",
+    "rejects %s watchdog teardown while a payment action is active",
     async (_label, reason) => {
       const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
       let releasePayment: (() => void) | undefined;
@@ -6947,29 +6920,19 @@ describe("operate session — ephemeral profile lifecycle", () => {
       );
       await vi.waitFor(() => expect(releasePayment).toBeTypeOf("function"));
 
-      let terminated = false;
-      const termination = dispatchOperatorBrowserProcessTermination("v1:1:mock-0", reason).then(
-        () => {
-          terminated = true;
-        },
+      await expect(dispatchOperatorBrowserProcessTermination("v1:1:mock-0", reason)).resolves.toBe(
+        false,
       );
-      await Promise.resolve();
-
-      expect(terminated).toBe(false);
       expect(h.closeCalls).toBe(0);
       expect(activeSessionCount()).toBe(1);
 
       releasePayment?.();
       await payment;
-      await termination;
-
-      expect(h.closeCalls).toBe(1);
-      expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
-      expect(activeSessionCount()).toBe(0);
+      await finishProvisionSession(started.session_id);
     },
   );
 
-  it("forces the outer deadline while sharing an in-flight payment audit", async () => {
+  it("never forces an outer watchdog deadline during a payment audit", async () => {
     vi.useFakeTimers();
     vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS", "50");
     vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_PENDING_3DS_FINALIZE_TIMEOUT_MS", "10");
@@ -6985,7 +6948,6 @@ describe("operate session — ephemeral profile lifecycle", () => {
         serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
         api: { auditPayment } as unknown as ApiClient,
       });
-      const selectedSession = paymentSession(started.session_id);
       const state = {
         approval_id: "appr_outer_deadline",
         approval_url: "https://web.test/vault/pay/appr_outer_deadline",
@@ -7015,36 +6977,26 @@ describe("operate session — ephemeral profile lifecycle", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(auditPayment).toHaveBeenCalledOnce();
 
-      const termination = dispatchOperatorBrowserProcessTermination("v1:1:mock-0", {
-        kind: "max_lifetime",
-        lifetime_ms: 30 * 60 * 1_000,
-        timeout_ms: 30 * 60 * 1_000,
-      });
+      const termination = expect(
+        dispatchOperatorBrowserProcessTermination("v1:1:mock-0", {
+          kind: "max_lifetime",
+          lifetime_ms: 30 * 60 * 1_000,
+          timeout_ms: 30 * 60 * 1_000,
+        }),
+      ).resolves.toBe(false);
       await vi.advanceTimersByTimeAsync(49);
       expect(h.closeCalls).toBe(0);
 
       await vi.advanceTimersByTimeAsync(1);
-      expect(() =>
-        armPaymentDispatchHandoff(
-          {
-            ...state,
-            approval_id: "appr_after_outer_deadline",
-            approval_url: "https://web.test/vault/pay/appr_after_outer_deadline",
-          },
-          selectedSession,
-        ),
-      ).toThrow("closed before payment dispatch");
-      await vi.advanceTimersByTimeAsync(10);
       await termination;
-
-      expect(h.waitForThreeDsCalls).toEqual([0]);
       expect(auditPayment).toHaveBeenCalledOnce();
-      expect(h.closeCalls).toBe(1);
-      expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
-      expect(activeSessionCount()).toBe(0);
+      expect(h.closeCalls).toBe(0);
+      expect(activeSessionCount()).toBe(1);
 
       releaseAudit?.();
       await payment;
+      clearActivePendingThreeDsIfCurrent(state);
+      await finishProvisionSession(started.session_id);
     } finally {
       releaseAudit?.();
       vi.unstubAllEnvs();
@@ -7054,7 +7006,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
 
   it("bounds the pending 3DS final audit before watchdog teardown", async () => {
     vi.useFakeTimers();
-    vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_SESSION_IDLE_TIMEOUT_MS", "100");
+    vi.stubEnv("TRUSTY_SQUIRE_SESSION_IDLE_TIMEOUT_MS", "100");
     vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_BROWSER_WATCHDOG_INTERVAL_MS", "10");
     vi.stubEnv("TRUSTY_SQUIRE_OPERATOR_PENDING_3DS_FINALIZE_TIMEOUT_MS", "50");
     const auditPayment = vi.fn(async () => await new Promise<never>(() => undefined));

@@ -345,6 +345,7 @@ describe("owner-death process reaping", () => {
       const groupFile = path.join(caseDir, "group.json");
       const readyFile = path.join(caseDir, "ready.json");
       const fixture = path.join(caseDir, "owner.mjs");
+      const processMarker = "v1:1:owner-reaper-smoke";
       await fs.mkdir(profileDir, { recursive: true });
       const ownerReaperUrl = pathToFileURL(
         path.join(pkgRoot, "dist", "bot", "owner-process-reaper.js"),
@@ -363,11 +364,12 @@ describe("owner-death process reaping", () => {
           `const memberCode = ${JSON.stringify(
             `const { spawn } = require("node:child_process"); const { writeFileSync } = require("node:fs"); const helper = spawn("sleep", ["300"], { stdio: "ignore" }); writeFileSync(${JSON.stringify(groupFile)}, JSON.stringify([process.pid, helper.pid])); setInterval(() => {}, 1000);`,
           )};\n` +
-          `const leader = spawn(process.execPath, ["-e", memberCode, "--", "--user-data-dir=" + profileDir], { detached: true, stdio: "ignore" });\n` +
+          `const leader = spawn(process.execPath, ["-e", memberCode, "--", "--user-data-dir=" + profileDir], { detached: true, stdio: "ignore", env: { ...process.env, TRUSTY_SQUIRE_OPERATOR_BROWSER_MARKER: ${JSON.stringify(processMarker)} } });\n` +
           `leader.unref();\n` +
           `let identity = null;\n` +
           `for (let i = 0; i < 100 && identity === null; i += 1) { identity = profileProcessIdentity(leader.pid, profileDir); if (identity === null) await new Promise((r) => setTimeout(r, 10)); }\n` +
           `if (identity === null) process.exit(3);\n` +
+          `identity.process_marker = ${JSON.stringify(processMarker)};\n` +
           `trackOwnerProcess(identity);\n` +
           `writeFileSync(readyFile, JSON.stringify({ owner: process.pid, leader: leader.pid }));\n` +
           `setInterval(() => {}, 1000);\n`,
@@ -387,6 +389,12 @@ describe("owner-death process reaping", () => {
         members = JSON.parse(await fs.readFile(groupFile, "utf8")) as number[];
         expect(members).toHaveLength(2);
         expect(members.every(processIsRunning)).toBe(true);
+
+        // Prove the persisted pgid + exact launch marker can reap the group
+        // even after its original leader is already gone.
+        process.kill(members[0]!, "SIGKILL");
+        await waitUntil(() => !processIsRunning(members[0]!), 10_000);
+        expect(processIsRunning(members[1]!)).toBe(true);
 
         owner.kill("SIGKILL");
         await waitForExit(owner);

@@ -66,10 +66,16 @@ import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
 import {
   createOperatorBrowserMarker,
   OPERATOR_BROWSER_MARKER_ENV,
+  operatorBrowserProcessMarker,
   operatorBrowserProcessMatchesMarker,
   startGlobalOperatorBrowserProcessWatchdog,
 } from "./operator-browser-watchdog.js";
-import { trackOwnerProcess, untrackOwnerProcess } from "./owner-process-reaper.js";
+import {
+  trackOwnerBrowserLaunch,
+  trackOwnerProcess,
+  untrackOwnerBrowserLaunch,
+  untrackOwnerProcess,
+} from "./owner-process-reaper.js";
 
 // Lazy registration: installing the plugin mutates the chromium singleton
 // from playwright-extra so we only do it once per process. We require()
@@ -2979,10 +2985,12 @@ function trackOwnedChromeProcessTree(
   processGroup: boolean,
 ): OwnedChromeProcessTreeProof | null {
   installSelfManagedChromeCleanup();
-  const proof = captureOwnedChromeProcessTreeProof(identity, processGroup);
+  const marker = operatorBrowserProcessMarker(identity.pid);
+  const trackedIdentity = marker === null ? identity : { ...identity, process_marker: marker };
+  const proof = captureOwnedChromeProcessTreeProof(trackedIdentity, processGroup);
   if (proof === null) return null;
   ownedChromeProcessTrees.add(proof);
-  trackOwnerProcess(identity);
+  trackOwnerProcess(proof.identity);
   return proof;
 }
 
@@ -3554,6 +3562,7 @@ export class BrowserController {
   private childChromeProcessGroup = false;
   private ownedChromeProcessTreeProof: OwnedChromeProcessTreeProof | null = null;
   private operatorProcessMarker: string | null = null;
+  private ownerLaunchTracked = false;
   private cdpBrowser: Browser | null = null;
   // True once a local browser context launched this session.
   private launchedContext = false;
@@ -4130,6 +4139,10 @@ export class BrowserController {
         `[operator] REMOTE-CDP mode — attaching to ${(process.env.BOT_CDP_ENDPOINT ?? "").trim()} ` +
           `(real-host GPU + egress; local fingerprint spoof + display setup disabled)`,
       );
+    }
+    if (!remoteMode && !this.ownerLaunchTracked) {
+      trackOwnerBrowserLaunch(this.operatorBrowserMarker(), this.profileDir);
+      this.ownerLaunchTracked = true;
     }
     // T3.1: probe where this run's traffic actually exits so the
     // browser's declared timezone matches its egress IP (a US-timezone
@@ -16722,6 +16735,10 @@ export class BrowserController {
       if (this.ownedChromeProcessTreeProof === treeProof) {
         this.ownedChromeProcessTreeProof = null;
       }
+    }
+    if (closeState === "closed" && this.ownerLaunchTracked) {
+      untrackOwnerBrowserLaunch(this.operatorBrowserMarker());
+      this.ownerLaunchTracked = false;
     }
     return closeState;
   }

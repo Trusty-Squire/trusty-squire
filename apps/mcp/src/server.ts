@@ -17,6 +17,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { ApiClient } from "./api-client.js";
 import { setSelfManagedChromeTerminationSignalExitEnabled } from "./bot/browser.js";
 import { cancelActiveLoginBrowsers } from "./bot/google-login.js";
+import { operatorBrowserWatchdogConfig } from "./bot/operator-browser-watchdog.js";
 import { sweepOperatorProfilePoolOrphans } from "./bot/operator-profile-pool.js";
 import { startOwnerProcessReaper } from "./bot/owner-process-reaper.js";
 import {
@@ -53,7 +54,6 @@ const DEFAULT_REGISTRY_BASE =
 const DEFAULT_IDLE_TIMEOUT_MS = 20 * 60 * 1_000; // 20m, no open session
 const DEFAULT_IDLE_TIMEOUT_WITH_SESSION_MS = 12 * 60 * 60 * 1_000; // 12h, session open
 const DEFAULT_IDLE_CHECK_INTERVAL_MS = 5 * 60 * 1_000; // 5m — must stay well under the 20m bound above
-const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 60 * 60 * 1_000; // 1h per browser session
 
 function envMs(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -75,10 +75,6 @@ function idleTimeoutWithSessionMs(): number {
 
 function idleCheckIntervalMs(): number {
   return envMs("TRUSTY_SQUIRE_SERVER_IDLE_CHECK_INTERVAL_MS", DEFAULT_IDLE_CHECK_INTERVAL_MS);
-}
-
-function sessionIdleTimeoutMs(): number {
-  return envMs("TRUSTY_SQUIRE_SESSION_IDLE_TIMEOUT_MS", DEFAULT_SESSION_IDLE_TIMEOUT_MS);
 }
 
 // Exported for unit testing; kept pure so the branches (recent activity,
@@ -432,7 +428,10 @@ export async function runServer(): Promise<void> {
     void (async () => {
       try {
         const now = Date.now();
-        const reaped = await reapIdleProvisionSessions(now, sessionIdleTimeoutMs());
+        const reaped = await reapIdleProvisionSessions(
+          now,
+          operatorBrowserWatchdogConfig().idleTimeoutMs,
+        );
         if (reaped.length > 0) {
           process.stderr.write(
             `[trusty-squire] reaped ${reaped.length} idle operator browser session(s)\n`,
