@@ -1,12 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdtempSync, renameSync } from "node:fs";
+import { renameSync } from "node:fs";
 import { chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
-  trackOwnerEphemeralProfile,
+  createOwnerEphemeralProfile,
   untrackOwnerEphemeralProfile,
 } from "./owner-process-reaper.js";
 
@@ -215,10 +214,7 @@ export async function writeCanonicalIdentityMetadata(
 
 /** A private Chrome profile for exactly one operate session. */
 export function createEphemeralProfile(): string {
-  const profileDir = mkdtempSync(join(tmpdir(), "trusty-squire-operate-"));
-  chmodSync(profileDir, 0o700);
-  trackOwnerEphemeralProfile(profileDir);
-  return profileDir;
+  return createOwnerEphemeralProfile();
 }
 
 export async function destroyEphemeralProfile(

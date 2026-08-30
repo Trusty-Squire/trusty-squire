@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, readlinkSync } from "node:fs";
 
 export const DEFAULT_OPERATOR_SESSION_IDLE_TIMEOUT_MS = 60 * 60 * 1_000;
 export const DEFAULT_OPERATOR_BROWSER_MAX_LIFETIME_MS = 30 * 60 * 1_000;
@@ -204,11 +204,54 @@ function parseProcessStat(pid: number): {
   }
 }
 
-export function isOperatorChromiumCommand(command: string): boolean {
-  const executable = command.split("\0", 1)[0] ?? "";
+function isOperatorChromiumExecutable(executable: string): boolean {
   return /(?:^|\/)(?:chrome|google-chrome(?:-stable)?|chromium(?:-browser)?|chrome-headless-shell|headless_shell|chrome_crashpad_handler|chromium_crashpad_handler)$/i.test(
     executable,
   );
+}
+
+export function isOperatorChromiumCommand(command: string): boolean {
+  const entries = command.split("\0").filter((entry) => entry.length > 0);
+  const firstEntry = entries[0] ?? "";
+  const rewrittenTitle = entries.length === 1 && /\s/.test(firstEntry);
+  const executable = rewrittenTitle
+    ? (/^(?:"([^"]+)"|'([^']+)'|(\S+))(?:\s|$)/.exec(firstEntry)?.slice(1).find(Boolean) ??
+      "")
+    : firstEntry;
+  return isOperatorChromiumExecutable(executable);
+}
+
+export type OperatorBrowserProcessCommandState = "matching" | "stale" | "unknown";
+
+export function operatorBrowserProcessCommandState(
+  pid: number,
+  readers: {
+    readCommand?: (pid: number) => string;
+    readExecutable?: (pid: number) => string;
+  } = {},
+): OperatorBrowserProcessCommandState {
+  const readCommand =
+    readers.readCommand ??
+    ((processId) => readFileSync(`/proc/${processId}/cmdline`, "utf8"));
+  const readExecutable =
+    readers.readExecutable ?? ((processId) => readlinkSync(`/proc/${processId}/exe`));
+  let commandDefinitive = false;
+  try {
+    const command = readCommand(pid);
+    if (isOperatorChromiumCommand(command)) return "matching";
+    const entries = command.split("\0").filter((entry) => entry.length > 0);
+    commandDefinitive = entries.length > 1 || (entries.length === 1 && !/\s/.test(entries[0]!));
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ESRCH") return "stale";
+  }
+  try {
+    return isOperatorChromiumExecutable(readExecutable(pid)) ? "matching" : "stale";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ESRCH") return "stale";
+    return commandDefinitive ? "stale" : "unknown";
+  }
 }
 
 export function operatorBrowserProcessMarker(pid: number): string | null {
@@ -224,11 +267,7 @@ export function operatorBrowserProcessMarker(pid: number): string | null {
 }
 
 function readOperatorBrowserProcess(pid: number): OperatorBrowserProcessRecord | null {
-  try {
-    if (!isOperatorChromiumCommand(readFileSync(`/proc/${pid}/cmdline`, "utf8"))) return null;
-  } catch {
-    return null;
-  }
+  if (operatorBrowserProcessCommandState(pid) !== "matching") return null;
   const marker = operatorBrowserProcessMarker(pid);
   if (marker === null || operatorBrowserMarkerStartedAt(marker) === null) return null;
   const stat = parseProcessStat(pid);
@@ -237,7 +276,10 @@ function readOperatorBrowserProcess(pid: number): OperatorBrowserProcessRecord |
 
 export function operatorBrowserProcessMatchesMarker(pid: number, marker: string): boolean {
   if (process.platform !== "linux") return false;
-  return readOperatorBrowserProcess(pid)?.marker === marker;
+  return (
+    operatorBrowserProcessMarker(pid) === marker &&
+    operatorBrowserProcessCommandState(pid) === "matching"
+  );
 }
 
 export function linuxOperatorBrowserProcesses(): OperatorBrowserProcessRecord[] {

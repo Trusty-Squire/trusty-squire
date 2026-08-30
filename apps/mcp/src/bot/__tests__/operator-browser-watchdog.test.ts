@@ -5,6 +5,7 @@ import {
   createOperatorBrowserMarker,
   dispatchOperatorBrowserProcessTermination,
   isOperatorChromiumCommand,
+  operatorBrowserProcessCommandState,
   operatorBrowserMarkerStartedAt,
   registerOperatorBrowserLaunchWatchdog,
   type OperatorBrowserProcessRecord,
@@ -284,5 +285,23 @@ describe("operator browser process watchdog", () => {
     expect(isOperatorChromiumCommand("/usr/bin/unrelated_crashpad_handler\0--monitor-self")).toBe(
       false,
     );
+    expect(isOperatorChromiumCommand("/opt/google/chrome/chrome --type=renderer\0")).toBe(true);
+  });
+
+  it("uses executable identity for rewritten titles and preserves ambiguous matches", () => {
+    expect(
+      operatorBrowserProcessCommandState(42, {
+        readCommand: () => "Chrome Helper (Renderer)\0",
+        readExecutable: () => "/opt/google/chrome/chrome",
+      }),
+    ).toBe("matching");
+    expect(
+      operatorBrowserProcessCommandState(42, {
+        readCommand: () => "Browser Helper (Renderer)\0",
+        readExecutable: () => {
+          throw Object.assign(new Error("unreadable"), { code: "EACCES" });
+        },
+      }),
+    ).toBe("unknown");
   });
 });

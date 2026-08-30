@@ -1,12 +1,18 @@
-import { existsSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   OWNER_PROFILE_SIGNATURE_FILE,
+  OWNER_HELPER_MARKER_ENV,
+  createOwnerEphemeralProfile,
+  ensureOwnerProcessReaper,
   markOwnerBrowserLaunchTerminal,
+  ownerBrowserLaunchState,
   reconcileOwnerBrowserLaunchAfterLeaderExit,
+  spawnOwnerTrackedHelper,
   stopOwnerProcessReaper,
   sweepOrphanedOwnerProcesses,
   terminateOwnerBrowserLaunch,
@@ -26,6 +32,149 @@ afterEach(async () => {
 });
 
 describe("owner process startup sweep", () => {
+  it.skipIf(process.platform !== "linux")(
+    "reaps a helper from its pending exact-marker record",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "trusty-squire-reaper-test-"));
+      cleanup.push(root);
+      vi.stubEnv("TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS", "1");
+      const marker = "v1:pending-helper-test";
+      const helper = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], {
+        detached: true,
+        stdio: "ignore",
+        env: { ...process.env, [OWNER_HELPER_MARKER_ENV]: marker },
+      });
+      helper.unref();
+      try {
+        await new Promise<void>((resolve, reject) => {
+          helper.once("spawn", resolve);
+          helper.once("error", reject);
+        });
+        await writeFile(
+          join(root, "stale.json"),
+          `${JSON.stringify({
+            version: 4,
+            token: "manifest",
+            owner: { pid: 999_999_999, start_time: "1" },
+            resources: [],
+            launches: [],
+            profiles: [],
+            helpers: [{ marker, state: "pending" }],
+          })}\n`,
+        );
+
+        await sweepOrphanedOwnerProcesses(root);
+        await Promise.race([
+          new Promise<void>((resolve) => helper.once("exit", () => resolve())),
+          new Promise<never>((_resolve, reject) =>
+            setTimeout(() => reject(new Error("pending helper survived cleanup")), 2_000),
+          ),
+        ]);
+
+        expect(helper.exitCode !== null || helper.signalCode !== null).toBe(true);
+      } finally {
+        if (helper.pid !== undefined) {
+          try {
+            process.kill(-helper.pid, "SIGKILL");
+          } catch {}
+        }
+      }
+    },
+  );
+
+  it("persists exact helper custody before spawn and clears it on spawn failure", () => {
+    const root = join(tmpdir(), `trusty-squire-reaper-test-${Date.now()}`);
+    cleanup.push(root);
+    vi.stubEnv("TRUSTY_SQUIRE_REAPER_DIR", root);
+    const reaper = ensureOwnerProcessReaper();
+    expect(reaper).not.toBeNull();
+    let atSpawn: { helpers: Array<{ marker: string; state?: string }> } | undefined;
+
+    expect(() =>
+      spawnOwnerTrackedHelper("missing-helper", [], {}, {
+        spawn: (() => {
+          atSpawn = JSON.parse(readFileSync(reaper!.manifestPath, "utf8")) as typeof atSpawn;
+          throw new Error("spawn failed");
+        }) as never,
+      }),
+    ).toThrow("spawn failed");
+
+    expect(atSpawn?.helpers).toEqual([
+      expect.objectContaining({ marker: expect.stringMatching(/^v1:/), state: "pending" }),
+    ]);
+    const afterFailure = JSON.parse(readFileSync(reaper!.manifestPath, "utf8")) as {
+      helpers: unknown[];
+    };
+    expect(afterFailure.helpers).toEqual([]);
+  });
+
+  it("reserves profile custody before directory creation and clears failed reservations", () => {
+    const root = join(tmpdir(), `trusty-squire-reaper-test-${Date.now()}`);
+    const profile = join(tmpdir(), `trusty-squire-operate-test-${Date.now()}`);
+    const staging = join(tmpdir(), `.trusty-squire-profile-staging-test-${Date.now()}`);
+    cleanup.push(root, profile, staging);
+    vi.stubEnv("TRUSTY_SQUIRE_REAPER_DIR", root);
+    const reaper = ensureOwnerProcessReaper();
+    expect(reaper).not.toBeNull();
+    let atCreation: { profiles: Array<{ path: string; state?: string }> } | undefined;
+
+    expect(() =>
+      createOwnerEphemeralProfile({
+        path: () => profile,
+        stagingPath: () => staging,
+        createDirectory: (path) => {
+          expect(path).toBe(staging);
+          atCreation = JSON.parse(readFileSync(reaper!.manifestPath, "utf8")) as typeof atCreation;
+          throw new Error("directory creation failed");
+        },
+      }),
+    ).toThrow("directory creation failed");
+
+    expect(atCreation?.profiles).toEqual([
+      {
+        path: profile,
+        staging_path: staging,
+        token: expect.any(String),
+        state: "pending",
+      },
+    ]);
+    const afterFailure = JSON.parse(readFileSync(reaper!.manifestPath, "utf8")) as {
+      profiles: unknown[];
+    };
+    expect(afterFailure.profiles).toEqual([]);
+  });
+
+  it("publishes an ephemeral profile only after its exact signature is present", () => {
+    const root = join(tmpdir(), `trusty-squire-reaper-test-${Date.now()}`);
+    cleanup.push(root);
+    vi.stubEnv("TRUSTY_SQUIRE_REAPER_DIR", root);
+    const profile = createOwnerEphemeralProfile();
+    cleanup.push(profile);
+    const reaper = ensureOwnerProcessReaper();
+    const signature = JSON.parse(
+      readFileSync(join(profile, OWNER_PROFILE_SIGNATURE_FILE), "utf8"),
+    ) as { path: string; token: string };
+    const manifest = JSON.parse(readFileSync(reaper!.manifestPath, "utf8")) as {
+      profiles: Array<{ path: string; token: string; state: string; staging_path?: string }>;
+    };
+
+    expect(signature.path).toBe(profile);
+    expect(manifest.profiles).toEqual([
+      { path: profile, token: signature.token, state: "ready" },
+    ]);
+  });
+
+  it("retains launch custody when an exact marker has ambiguous process identity", () => {
+    const marker = "v1:1:ambiguous-descendant";
+    expect(
+      ownerBrowserLaunchState(marker, {
+        readProcessIds: () => [42],
+        readMarker: () => marker,
+        readCommandState: () => "unknown",
+      }),
+    ).toBe("unknown");
+  });
+
   it("keeps launch cleanup blocked when the original leader exits before its marked descendants", async () => {
     const root = await mkdtemp(join(tmpdir(), "trusty-squire-reaper-test-"));
     cleanup.push(root);
@@ -72,8 +221,10 @@ describe("owner process startup sweep", () => {
     vi.stubEnv("TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS", "1");
     const root = await mkdtemp(join(tmpdir(), "trusty-squire-reaper-test-"));
     const signed = await mkdtemp(join(tmpdir(), "trusty-squire-operate-"));
+    const pending = await mkdtemp(join(tmpdir(), ".trusty-squire-profile-staging-"));
+    const pendingFinal = join(tmpdir(), `trusty-squire-operate-pending-${Date.now()}`);
     const foreign = await mkdtemp(join(tmpdir(), "trusty-squire-operate-"));
-    cleanup.push(root, signed, foreign);
+    cleanup.push(root, signed, pending, foreign);
     const token = "signed-profile-token";
     await writeFile(
       join(signed, OWNER_PROFILE_SIGNATURE_FILE),
@@ -87,21 +238,29 @@ describe("owner process startup sweep", () => {
     await writeFile(
       join(root, "stale.json"),
       `${JSON.stringify({
-        version: 2,
+        version: 4,
         token: "manifest",
         owner: { pid: 999_999_999, start_time: "1" },
         resources: [],
         launches: [],
         profiles: [
-          { path: signed, token },
-          { path: foreign, token },
+          { path: signed, token, state: "ready" },
+          {
+            path: pendingFinal,
+            staging_path: pending,
+            token: "pending-token",
+            state: "pending",
+          },
+          { path: foreign, token, state: "ready" },
         ],
+        helpers: [],
       })}\n`,
     );
 
     await sweepOrphanedOwnerProcesses(root);
 
     expect(existsSync(signed)).toBe(false);
+    expect(existsSync(pending)).toBe(false);
     expect(existsSync(foreign)).toBe(true);
     expect(await readFile(join(foreign, OWNER_PROFILE_SIGNATURE_FILE), "utf8")).toContain(
       "someone-else",
