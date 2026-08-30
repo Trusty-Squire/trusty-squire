@@ -45,6 +45,8 @@ import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
   GOOGLE_LOGIN_COOKIE_MARKERS,
+  hasUsableGoogleIdentity,
+  readCanonicalIdentityMetadata,
   writeCanonicalIdentitySnapshot,
   type BrowserStorageState,
 } from "./session-state.js";
@@ -799,12 +801,25 @@ export async function finalizeLoginRun(
   if (result.closeState !== "closed" || result.storageState === undefined) {
     throw new Error("login identity snapshot closed without publishable state");
   }
+  const seedProvider =
+    typeof opts.seedProvider === "function" ? opts.seedProvider() : opts.seedProvider;
+  const priorMetadata = await readCanonicalIdentityMetadata(opts.profileDir);
+  if (seedProvider === "google" && result.status === "completed") {
+    if (!hasUsableGoogleIdentity(result.storageState)) {
+      throw new Error("Google login completed without a live identity marker");
+    }
+    if (result.googleAccountEmail === undefined) {
+      throw new Error("Google login completed without account identity metadata");
+    }
+  }
+  const metadata =
+    result.googleAccountEmail === undefined
+      ? priorMetadata
+      : { googleAccountEmail: result.googleAccountEmail };
   const published = await writeCanonicalIdentitySnapshot(
     opts.profileDir,
     result.storageState,
-    result.googleAccountEmail === undefined
-      ? undefined
-      : { googleAccountEmail: result.googleAccountEmail },
+    metadata,
   );
   if (!published) throw new Error("login identity snapshot could not be published");
   await opts.onConfirmedLogin?.();

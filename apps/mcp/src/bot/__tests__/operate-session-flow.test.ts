@@ -3330,11 +3330,11 @@ describe("operate session — OAuth lifecycle", () => {
       origins: [state2.origins[0]!, state1.origins[1]!],
     };
     h.storageStates.set(canonical, state0);
-    h.visibleText = "Continue with Google";
+    h.visibleText = "Continue";
     h.elements = [
       elem({
-        visibleText: "Continue with Google",
-        labelText: "Continue with Google",
+        visibleText: "Continue",
+        labelText: "Continue",
         role: "button",
         selector: "#google-oauth",
       }),
@@ -3363,12 +3363,14 @@ describe("operate session — OAuth lifecycle", () => {
 
     const firstAct = act(first.session_id, {
       kind: "oauth_login",
-      target: "Continue with Google",
+      target: "Continue",
+      provider: "google",
     });
     await vi.waitFor(() => expect(h.restoredStorageStates).toHaveLength(1));
     const secondAct = act(second.session_id, {
       kind: "oauth_click",
-      target: "Continue with Google",
+      target: "Continue",
+      provider: "google",
     });
     await Promise.resolve();
     await Promise.resolve();

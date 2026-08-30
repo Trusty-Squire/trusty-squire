@@ -68,7 +68,7 @@ import { pickVerificationLink } from "./email-verification.js";
 import {
   createEphemeralProfile,
   destroyEphemeralProfile,
-  GOOGLE_LOGIN_COOKIE_MARKERS,
+  hasUsableGoogleIdentity,
   readCanonicalIdentityMetadata,
   readSessionState,
   stripGoogleIdentityFromSessionState,
@@ -442,13 +442,13 @@ export type ProvisionAction =
   | { kind: "press"; key: string }
   // Route an OAuth-provider button through startOAuth so the popup is adopted
   // as the active page (the host then observes the account chooser/consent).
-  | { kind: "oauth_click"; target: string }
+  | { kind: "oauth_click"; target: string; provider?: OAuthProviderId }
   // Return to the product page after the OAuth handshake completes.
   | { kind: "oauth_settle" }
   // Atomic operator OAuth action. A recovery product tab and explicit provider
   // lifecycle tracking prevent a normal provider close from leaving the model
   // on a detached Playwright handle.
-  | { kind: "oauth_login"; target: string }
+  | { kind: "oauth_login"; target: string; provider?: OAuthProviderId }
   // Operator surface — declare a host to cross into mid-session (multi-app
   // tasks: GCP Console → Firebase → the user's app). Pushed to the allow-set
   // with source "mid_session" and audited; the goto gate then permits it.
@@ -805,25 +805,6 @@ function isGoogleStorageHost(host: unknown): boolean {
   return typeof host === "string" && /(^|\.)google\.com$/i.test(host.replace(/^\./, ""));
 }
 
-function hasUsableGoogleIdentity(state: BrowserStorageState | undefined): boolean {
-  if (state === undefined) return false;
-  const nowSeconds = Date.now() / 1_000;
-  return state.cookies.some((cookie) => {
-    const value = (cookie as { value?: unknown }).value;
-    const expires = (cookie as { expires?: unknown }).expires;
-    return (
-      isGoogleStorageHost(cookie.domain) &&
-      GOOGLE_LOGIN_COOKIE_MARKERS.includes(
-        cookie.name as (typeof GOOGLE_LOGIN_COOKIE_MARKERS)[number],
-      ) &&
-      typeof value === "string" &&
-      value.length > 10 &&
-      (expires === undefined ||
-        (typeof expires === "number" && (expires <= 0 || expires > nowSeconds)))
-    );
-  });
-}
-
 export function mergeGoogleIdentityStorageState(
   current: BrowserStorageState,
   latest: BrowserStorageState,
@@ -1098,7 +1079,11 @@ async function closeEphemeralBrowser(
   }
 }
 
-function isGoogleOAuthElement(element: InteractiveElement): boolean {
+function isGoogleOAuthAction(
+  action: Extract<ProvisionAction, { kind: "oauth_click" | "oauth_login" }>,
+  element: InteractiveElement,
+): boolean {
+  if (action.provider !== undefined) return action.provider === "google";
   const signal = [
     element.visibleText,
     element.labelText,
@@ -6574,7 +6559,7 @@ async function executeAct(
           });
         } else {
           assertNoFrameTarget(el, "oauth_click");
-          if (isGoogleOAuthElement(el)) {
+          if (isGoogleOAuthAction(action, el)) {
             browser = await runSerializedGoogleOAuth(session, el.selector);
           } else {
             await browser.startOAuth(el.selector);
@@ -6607,7 +6592,7 @@ async function executeAct(
         }
         resolvedEl = el;
         assertNoFrameTarget(el, "oauth_login");
-        if (isGoogleOAuthElement(el)) {
+        if (isGoogleOAuthAction(action, el)) {
           browser = await runSerializedGoogleOAuth(session, el.selector);
         } else {
           await browser.loginWithOAuth(el.selector);
@@ -8625,7 +8610,14 @@ export async function replayOperatorRecipe(
       } else if (recorded.kind === "js_click") {
         action = { kind: "js_click", target: ref };
       } else {
-        action = { kind: "oauth_click", target: ref };
+        const recipeProvider = (recipe as { oauth_provider?: unknown }).oauth_provider;
+        action = {
+          kind: "oauth_click",
+          target: ref,
+          ...(recipeProvider === "google" || recipeProvider === "github"
+            ? { provider: recipeProvider }
+            : {}),
+        };
       }
     }
 

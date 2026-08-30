@@ -20,6 +20,25 @@ export const GOOGLE_LOGIN_COOKIE_MARKERS = [
   "SAPISID",
 ] as const;
 
+export function hasUsableGoogleIdentity(
+  state: BrowserStorageState | undefined,
+  nowSeconds = Date.now() / 1_000,
+): boolean {
+  if (state === undefined) return false;
+  return state.cookies.some((cookie) => {
+    if (typeof cookie.domain !== "string") return false;
+    const host = cookie.domain.replace(/^\./, "");
+    return (
+      /(^|\.)google\.com$/i.test(host) &&
+      GOOGLE_LOGIN_COOKIE_MARKERS.includes(
+        cookie.name as (typeof GOOGLE_LOGIN_COOKIE_MARKERS)[number],
+      ) &&
+      cookie.value.length > 10 &&
+      (cookie.expires === undefined || cookie.expires <= 0 || cookie.expires > nowSeconds)
+    );
+  });
+}
+
 export function isSessionStateArtifact(entry: string): boolean {
   return (
     entry === SESSION_STATE_FILE ||

@@ -38,7 +38,7 @@ Keep `CHROME_PROFILE_DIR` only as the interactive `connect`/`login` authoring pr
 
 Add a small `apps/mcp/src/bot/session-state.ts`. Its authoritative state file is `<CHROME_PROFILE_DIR>/trusty-squire-session-state.json`, written with mode `0600` by atomic temp-file + rename. It is Playwright storage-state JSON, not a profile copy.
 
-At start, create a unique `0700` directory with a `trusty-squire-operate-` mkdtemp prefix and restore the JSON snapshot without Google identity. At a Google `oauth_login`, restore the latest full snapshot inside the process-local handoff. The installed Playwright type exposes restore plus `storageState({ indexedDB: true })` capture (`node_modules/.pnpm/playwright-core@1.59.1/.../types.d.ts:9407-9471`). No Chrome cookie database or profile files are copied.
+At start, create a unique `0700` directory with a `trusty-squire-operate-` mkdtemp prefix and restore the JSON snapshot without Google identity. Canonical markers establish Google identity availability without probing Google from the concurrent profile. At a declared or destination-resolved Google OAuth action, restore the latest full snapshot inside the process-local and cross-process handoff. The installed Playwright type exposes restore plus `storageState({ indexedDB: true })` capture (`node_modules/.pnpm/playwright-core@1.59.1/.../types.d.ts:9407-9471`). No Chrome cookie database or profile files are copied.
 
 Required coverage:
 
@@ -61,11 +61,11 @@ Replace pool/direct acquisition through the retained `acquireWarmBrowser` intern
 - retain controller-to-profile and canonical-namespace custody in the in-memory
   browser record associated with the session.
 
-Remove the `requireLiveIdentity` direct-canonical exception. Preserve the existing live-provider pre-navigation gate, but evaluate it against the seeded fresh browser. Existing multi-step reuse already works: a session owns one browser in `sessions` (`provision-session.ts:624, 2598-2634`) until finish removes it.
+Remove the `requireLiveIdentity` direct-canonical exception. Preserve the existing live-provider pre-navigation gate, but evaluate Google availability from canonical snapshot markers while keeping Google state out of the seeded browser. Existing multi-step reuse already works: a session owns one browser in `sessions` (`provision-session.ts:624, 2598-2634`) until finish removes it.
 
 ### Google OAuth handoff
 
-Serialize only the Google-authenticated `oauth_login` moment. The waiter restores the latest full snapshot, completes OAuth, captures the rotated state, proves bounded browser close, atomically publishes, restarts the same private profile, and then releases the next waiter. Ordinary browsing, payments, and non-Google OAuth remain parallel.
+Serialize only the declared or destination-resolved Google-authenticated OAuth moment. The waiter restores the latest full snapshot, completes OAuth, captures the rotated state, proves bounded browser close, atomically publishes, restarts the same private profile, and then releases the next waiter. Ordinary browsing, payments, and non-Google OAuth remain parallel.
 
 ### Finish
 

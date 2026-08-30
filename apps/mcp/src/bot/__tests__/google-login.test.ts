@@ -1015,6 +1015,76 @@ describe("confirmed login finalization", () => {
     }
   });
 
+  it("preserves prior account metadata when a later probe is inconclusive", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
+    try {
+      await finalizeLoginRun(
+        { profileDir },
+        {
+          status: "completed",
+          closeState: "closed",
+          storageState: { cookies: [], origins: [] },
+          googleAccountEmail: "worker@example.com",
+        },
+      );
+      await finalizeLoginRun(
+        { profileDir },
+        {
+          status: "preflight_satisfied",
+          closeState: "closed",
+          storageState: { cookies: [], origins: [{ origin: "https://app.example.com", localStorage: [] }] },
+        },
+      );
+
+      await expect(readCanonicalIdentityMetadata(profileDir)).resolves.toEqual({
+        googleAccountEmail: "worker@example.com",
+      });
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a fresh Google login without both live identity and account metadata", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
+    const liveGoogleState = {
+      cookies: [
+        {
+          name: "SID",
+          value: "live-google-session",
+          domain: ".google.com",
+          path: "/",
+          expires: -1,
+          httpOnly: true,
+          secure: true,
+          sameSite: "Lax" as const,
+        },
+      ],
+      origins: [],
+    };
+    try {
+      await expect(
+        finalizeLoginRun(
+          { profileDir, seedProvider: "google" },
+          { status: "completed", closeState: "closed", storageState: liveGoogleState },
+        ),
+      ).rejects.toThrow("without account identity metadata");
+      await expect(
+        finalizeLoginRun(
+          { profileDir, seedProvider: "google" },
+          {
+            status: "completed",
+            closeState: "closed",
+            storageState: { cookies: [], origins: [] },
+            googleAccountEmail: "worker@example.com",
+          },
+        ),
+      ).rejects.toThrow("without a live identity marker");
+      await expect(readSessionState(profileDir)).resolves.toBeUndefined();
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
   it("does not replace the prior snapshot when browser closure is unproven", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
     const path = join(profileDir, "trusty-squire-session-state.json");
