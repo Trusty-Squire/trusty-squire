@@ -11711,15 +11711,9 @@ export class BrowserController {
               const form =
                 element instanceof HTMLButtonElement || element instanceof HTMLInputElement
                   ? element.form
-                  : null;
-              const nativeSubmitControl =
-                form !== null &&
-                (element instanceof HTMLButtonElement
-                  ? element.type === "submit"
-                  : element instanceof HTMLInputElement &&
-                    (element.type === "submit" || element.type === "image"));
-              const dispatchTarget = nativeSubmitControl ? form : element;
-              const dispatchEvent = nativeSubmitControl ? "submit" : "click";
+                  : element.closest("form");
+              const dispatchTarget = form ?? element;
+              const dispatchEvent = form === null ? "click" : "submit";
               tracked.__tsPaymentSubmitDispatchListener = {
                 event: dispatchEvent,
                 listener,

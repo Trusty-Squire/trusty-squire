@@ -503,6 +503,21 @@ function cardRequiredResult(
   };
 }
 
+function approvalDeniedResult(
+  approvalId: string,
+  approvalUrl: string,
+  checkout: CheckoutSummary,
+): Record<string, unknown> {
+  return {
+    status: "payment_approval_denied",
+    approval_id: approvalId,
+    approval_url: approvalUrl,
+    merchant: checkout.merchant,
+    amount_cents: checkout.amount_cents,
+    currency: checkout.currency,
+  };
+}
+
 // Total additional time (beyond this call's own bounded wait) that a
 // resumed, still-pending decoupled/out-of-band 3DS challenge stays
 // checkable via operate_payment_status before handing back an accurate
@@ -752,26 +767,17 @@ export async function executeOperatePay(
 
     if (resume !== undefined) {
       let reusable = false;
-      if (deps.now() < resume.deadline) {
-        try {
-          const live = await api.getPaymentApproval(resume.approval_id);
-          if (live.status === "denied") {
-            resumableState = undefined;
-            keypairHandedOff = false;
-            return {
-              status: "payment_approval_denied",
-              approval_id: resume.approval_id,
-              approval_url: resume.approval_url,
-              merchant: resume.checkout.merchant,
-              amount_cents: resume.checkout.amount_cents,
-              currency: resume.checkout.currency,
-            };
-          }
-          reusable = isLiveResumableApproval(live, resume, deps.now());
-        } catch (error) {
-          if (!(error instanceof ApiCallError && error.code === "payment_approval_not_found")) {
-            throw error;
-          }
+      try {
+        const live = await api.getPaymentApproval(resume.approval_id);
+        if (live.status === "denied") {
+          resumableState = undefined;
+          keypairHandedOff = false;
+          return approvalDeniedResult(resume.approval_id, resume.approval_url, resume.checkout);
+        }
+        reusable = isLiveResumableApproval(live, resume, deps.now());
+      } catch (error) {
+        if (!(error instanceof ApiCallError && error.code === "payment_approval_not_found")) {
+          throw error;
         }
       }
       if (!reusable) {
@@ -963,20 +969,13 @@ export async function executeOperatePay(
       const liveDeadline = Date.parse(approval.expires_at);
       if (Number.isFinite(liveDeadline)) deadline = Math.min(deadline, liveDeadline);
       boundCardRef = approval.card_ref;
-      if (approval.status === "expired" || approvalExpired()) {
-        return expiredApprovalResult();
-      }
       if (approval.status === "denied") {
         resumableState = undefined;
         keypairHandedOff = false;
-        return {
-          status: "payment_approval_denied",
-          approval_id: approvalId,
-          approval_url: approvalUrl,
-          merchant: checkout.merchant,
-          amount_cents: checkout.amount_cents,
-          currency: checkout.currency,
-        };
+        return approvalDeniedResult(approvalId, approvalUrl, checkout);
+      }
+      if (approval.status === "expired" || approvalExpired()) {
+        return expiredApprovalResult();
       }
       const hasCandidate =
         typeof approval.jws === "string" && typeof approval.sealed_card === "string";

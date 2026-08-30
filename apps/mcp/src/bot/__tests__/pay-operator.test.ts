@@ -2146,7 +2146,7 @@ describe("operate_pay bounded approval continuation [P0]", () => {
     reason: "office restock",
   };
 
-  it("returns a human denial as a truthful terminal outcome in one call", async () => {
+  it("returns an in-flight denial even after the local deadline passes", async () => {
     const env = buildResumableEnv();
     env.setDenied();
 
@@ -2157,6 +2157,7 @@ describe("operate_pay bounded approval continuation [P0]", () => {
         vouchflowExpectedAudience: "customer_test",
         webBase: "https://web.test",
         surfaceApprovalUrl: vi.fn(),
+        now: () => Date.parse(env.expiresAt) + 1,
       }),
     ).resolves.toMatchObject({
       status: "payment_approval_denied",
@@ -2165,7 +2166,7 @@ describe("operate_pay bounded approval continuation [P0]", () => {
     expect(env.filledCards).toHaveLength(0);
   });
 
-  it("returns a denial between calls without minting a replacement approval", async () => {
+  it("returns a persisted denial after deadline without minting a replacement approval", async () => {
     const env = buildResumableEnv();
     let pending: PendingApprovalWait | undefined;
     await executeOperatePay(baseArgs, env.api, env.browser, {
@@ -2180,6 +2181,7 @@ describe("operate_pay bounded approval continuation [P0]", () => {
       },
     });
     if (pending === undefined) throw new Error("expected pending approval");
+    pending.deadline = Date.now() - 1;
     env.setDenied();
 
     await expect(
