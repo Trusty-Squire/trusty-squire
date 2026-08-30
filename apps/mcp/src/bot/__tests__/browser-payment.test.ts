@@ -960,6 +960,87 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "does not report external native-button dispatch when requestSubmit is invalid",
+    async () => {
+      const merchantUrl = "https://merchant.test/checkout";
+      const paymentUrl = "https://checkout.pci.shopifyinc.test/pay";
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.route("**/*", async (route) => {
+          if (route.request().url() === paymentUrl) {
+            return route.fulfill({
+              contentType: "text/html",
+              body: `
+                <form id="checkout">
+                  <label>First name <input id="first-name" required></label>
+                </form>
+                <button type="button">Pay now</button>
+                <script>
+                  const form = document.querySelector("#checkout");
+                  const required = document.querySelector("#first-name");
+                  document.querySelector("button").addEventListener("click", () => {
+                    document.body.dataset.paymentClicks =
+                      String(Number(document.body.dataset.paymentClicks || "0") + 1);
+                    form.requestSubmit();
+                  });
+                  form.addEventListener("submit", (event) => {
+                    event.preventDefault();
+                    document.body.dataset.paymentSubmits =
+                      String(Number(document.body.dataset.paymentSubmits || "0") + 1);
+                  });
+                  required.addEventListener("invalid", () => {
+                    document.body.dataset.shippingInvalid = "true";
+                  });
+                </script>`,
+            });
+          }
+          if (route.request().url() === merchantUrl) {
+            return route.fulfill({
+              contentType: "text/html",
+              body: `<iframe src="${paymentUrl}"></iframe>`,
+            });
+          }
+          return route.fulfill({ status: 404, body: "not found" });
+        });
+        await page.goto(merchantUrl);
+        await page.waitForLoadState("networkidle");
+        page.setDefaultTimeout(1_000);
+        const controller = BrowserController.fromHarnessPage(page);
+        const internals = controller as unknown as {
+          submitFilledCheckoutInScope: (
+            cardGroup: undefined,
+            onDispatched: () => void,
+          ) => Promise<CheckoutSubmitResult>;
+          detectThreeDsChallenge: () => Promise<CheckoutSubmitResult>;
+        };
+        internals.detectThreeDsChallenge = vi.fn(async () => {
+          throw new Error("stop after dispatch check");
+        });
+        const onSubmitDispatched = vi.fn();
+
+        await expect(
+          internals.submitFilledCheckoutInScope(undefined, onSubmitDispatched),
+        ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
+
+        const paymentFrame = page.frames().find((frame) => frame.url() === paymentUrl);
+        expect(paymentFrame).toBeDefined();
+        await expect(
+          paymentFrame!.evaluate(() => ({
+            clicks: document.body.dataset.paymentClicks ?? null,
+            submits: document.body.dataset.paymentSubmits ?? null,
+            invalid: document.body.dataset.shippingInvalid ?? null,
+          })),
+        ).resolves.toEqual({ clicks: "1", submits: null, invalid: "true" });
+        expect(onSubmitDispatched).not.toHaveBeenCalled();
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "tracks an async click-only charge request before delayed receipt navigation",
     async () => {
       const checkoutUrl = "https://merchant.test/checkout";
@@ -979,6 +1060,60 @@ describe("checkout payment parsing", () => {
                 document.querySelector("button").addEventListener("click", async () => {
                   await fetch("/charge");
                   setTimeout(() => history.pushState({}, "", "/receipt/ORD-ASYNC-123"), 500);
+                });
+              </script>`,
+          });
+        });
+        await page.route(chargeUrl, async (route) => {
+          chargeRequests += 1;
+          await route.fulfill({ body: "charge accepted" });
+        });
+        await page.goto(checkoutUrl);
+        const controller = BrowserController.fromHarnessPage(page);
+        const onSubmitDispatched = vi.fn();
+
+        await expect(
+          (
+            controller as unknown as {
+              submitFilledCheckoutInScope: (
+                cardGroup: undefined,
+                onDispatched: () => void,
+              ) => Promise<CheckoutSubmitResult>;
+            }
+          ).submitFilledCheckoutInScope(undefined, onSubmitDispatched),
+        ).resolves.toEqual({ three_ds_required: false, order_confirmed: true });
+
+        expect(chargeRequests).toBe(1);
+        expect(onSubmitDispatched).toHaveBeenCalledOnce();
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "tracks an async click-only charge through a generic endpoint",
+    async () => {
+      const checkoutUrl = "https://merchant.test/checkout";
+      const chargeUrl = "https://merchant.test/graphql";
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        let chargeRequests = 0;
+        await page.route(checkoutUrl, async (route) => {
+          await route.fulfill({
+            contentType: "text/html",
+            body: `
+              <form><button type="button">Pay now</button></form>
+              <script>
+                document.querySelector("button").addEventListener("click", async () => {
+                  await fetch("/graphql", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ operationName: "CompleteCheckout" })
+                  });
+                  setTimeout(() => history.pushState({}, "", "/receipt/ORD-GQL-123"), 500);
                 });
               </script>`,
           });

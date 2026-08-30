@@ -701,7 +701,10 @@ async function threeDsStatusResult(
       auditRecorded = false;
     }
   }
-  clearActivePendingThreeDsIfCurrent(state, session);
+  const merchantReconciliationRequired = terminalStatus === null && state.outcome === "unknown";
+  if (!merchantReconciliationRequired) {
+    clearActivePendingThreeDsIfCurrent(state, session);
+  }
   return {
     status: finalStatus,
     audit_recorded: auditRecorded,
@@ -712,15 +715,19 @@ async function threeDsStatusResult(
     ...(state.payment_instrument_mismatch !== undefined
       ? { warning: state.payment_instrument_mismatch }
       : {}),
-    ...(terminalStatus === null && state.outcome === "three_ds"
+    ...(terminalStatus === null
       ? {
           needs_user: {
-            wall: "3ds",
+            wall: state.outcome === "three_ds" ? "3ds" : "merchant_reconciliation",
             message:
-              "The 3-D Secure challenge never reached a confirmed outcome within the resumable " +
-              "window. Check the merchant account directly for whether the order was placed " +
-              "before retrying — Trusty Squire will not re-release this card without a fresh " +
-              "approval.",
+              state.outcome === "three_ds"
+                ? "The 3-D Secure challenge never reached a confirmed outcome within the resumable " +
+                  "window. Check the merchant account directly for whether the order was placed " +
+                  "before retrying — Trusty Squire will not re-release this card without a fresh " +
+                  "approval."
+                : "The merchant outcome remains unknown. Check the merchant account directly for " +
+                  "whether the order was placed before retrying; this payment attempt remains " +
+                  "reserved until the session is closed.",
             resume: "checkout",
           },
         }
@@ -743,7 +750,9 @@ async function paymentStatusResult(
       return paymentResult(session, await readApprovalStatus(api, state, session.id, false));
     }
     const callDeadline = Date.now() + Math.min(Math.max(waitSeconds * 1000, 1_000), 60_000);
+    const maxReads = Math.ceil((callDeadline - Date.now()) / 15_000) + 1;
     let result: Record<string, unknown>;
+    let reads = 0;
     do {
       const remainingMs = Math.max(callDeadline - Date.now(), 0);
       result = await readApprovalStatus(
@@ -753,10 +762,11 @@ async function paymentStatusResult(
         true,
         Math.min(remainingMs, 15_000),
       );
+      reads += 1;
       const terminalCandidate = result.ready_to_charge === true;
       const terminalStatus = result.status !== "pending";
-      if (terminalCandidate || terminalStatus || remainingMs <= 15_000) break;
-    } while (Date.now() < callDeadline);
+      if (terminalCandidate || terminalStatus || Date.now() >= callDeadline) break;
+    } while (reads < maxReads);
     return paymentResult(session, result);
   }
   const threeDsState = getActivePendingThreeDs(session);

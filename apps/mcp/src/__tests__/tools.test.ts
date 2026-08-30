@@ -1351,6 +1351,47 @@ describe("operate_payment_status [P0]", () => {
     }
   });
 
+  it("continues a short status wait when denial follows an early pending response", async () => {
+    vi.useFakeTimers();
+    try {
+      mockAwaitingApproval = baseState;
+      const pending = {
+        id: "appr_status",
+        merchant: "M",
+        amount_cents: 100,
+        currency: "USD",
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        card_ref: "card_1",
+        operator_pubkey: operatorPublicKey,
+        jws: null,
+        sealed_card: null,
+      };
+      const getPaymentApproval = vi
+        .fn()
+        .mockImplementationOnce(
+          async () =>
+            await new Promise((resolve) =>
+              setTimeout(() => resolve({ ...pending, status: "pending" }), 500),
+            ),
+        )
+        .mockImplementationOnce(
+          async () =>
+            await new Promise((resolve) =>
+              setTimeout(() => resolve({ ...pending, status: "denied" }), 250),
+            ),
+        );
+      const api = makeMockApi({ getPaymentApproval } as unknown as ApiClient);
+
+      const result = operatePaymentStatusTool.handler({ wait_seconds: 1 }, api);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      await expect(result).resolves.toMatchObject({ status: "denied", ready_to_charge: false });
+      expect(getPaymentApproval).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("distinguishes a review candidate from final charge authorization", async () => {
     mockAwaitingApproval = baseState;
     const getPaymentApproval = vi.fn().mockResolvedValue({

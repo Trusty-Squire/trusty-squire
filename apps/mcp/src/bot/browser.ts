@@ -910,6 +910,8 @@ const CHECKOUT_PAYMENT_REQUEST_PATH_RE =
 
 function isCheckoutPaymentRequest(request: Request): boolean {
   if (request.resourceType() !== "fetch" && request.resourceType() !== "xhr") return false;
+  const method = request.method().toUpperCase();
+  if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") return true;
   try {
     return CHECKOUT_PAYMENT_REQUEST_PATH_RE.test(new URL(request.url()).pathname);
   } catch {
@@ -11648,11 +11650,12 @@ export class BrowserController {
                 __trustySquirePaymentSubmitDispatch?: {
                   token: string;
                   dispatched: boolean;
+                  validationBlocked: boolean;
                 };
               };
               const tracked = element as Element & {
                 __tsPaymentSubmitDispatchListeners?: Array<{
-                  event: "click" | "submit";
+                  event: "invalid" | "submit";
                   listener: EventListener;
                   target: Element;
                 }>;
@@ -11670,6 +11673,7 @@ export class BrowserController {
               stateWindow.__trustySquirePaymentSubmitDispatch = {
                 token,
                 dispatched: false,
+                validationBlocked: false,
               };
               const listener: EventListener = () => {
                 const state = stateWindow.__trustySquirePaymentSubmitDispatch;
@@ -11732,19 +11736,27 @@ export class BrowserController {
                   ? element.form
                   : element.closest("form");
               const submitTargets =
-                form !== null
-                  ? [form]
-                  : element.matches('[role="button"]')
-                    ? Array.from(document.forms)
-                    : [];
-              const registrations =
-                submitTargets.length > 0
-                  ? submitTargets.map((target) => ({
-                      event: "submit" as const,
-                      listener,
-                      target,
-                    }))
-                  : [{ event: "click" as const, listener, target: element }];
+                form !== null ? [form] : Array.from(document.forms);
+              const registrations: Array<{
+                event: "invalid" | "submit";
+                listener: EventListener;
+                target: Element;
+              }> = submitTargets.map((target) => ({
+                event: "submit" as const,
+                listener,
+                target,
+              }));
+              const invalidListener: EventListener = () => {
+                const state = stateWindow.__trustySquirePaymentSubmitDispatch;
+                if (state?.token === token) state.validationBlocked = true;
+              };
+              registrations.push(
+                ...submitTargets.map((target) => ({
+                  event: "invalid" as const,
+                  listener: invalidListener,
+                  target,
+                })),
+              );
               tracked.__tsPaymentSubmitDispatchListeners = registrations;
               for (const registration of registrations) {
                 registration.target.addEventListener(registration.event, registration.listener, {
@@ -11838,6 +11850,7 @@ export class BrowserController {
         const readDispatchState = async (): Promise<{
           sameDocument: boolean;
           dispatched: boolean;
+          validationBlocked: boolean;
         } | null> =>
           await frame
             .evaluate((token) => {
@@ -11845,12 +11858,14 @@ export class BrowserController {
                 __trustySquirePaymentSubmitDispatch?: {
                   token: string;
                   dispatched: boolean;
+                  validationBlocked: boolean;
                 };
               };
               const state = stateWindow.__trustySquirePaymentSubmitDispatch;
               return {
                 sameDocument: state?.token === token,
                 dispatched: state?.token === token && state.dispatched,
+                validationBlocked: state?.token === token && state.validationBlocked,
               };
             }, dispatchToken)
             .catch(() => null);
@@ -11863,7 +11878,7 @@ export class BrowserController {
               (element) => {
                 const tracked = element as Element & {
                   __tsPaymentSubmitDispatchListeners?: Array<{
-                    event: "click" | "submit";
+                    event: "invalid" | "submit";
                     listener: EventListener;
                     target: Element;
                   }>;
@@ -11890,6 +11905,7 @@ export class BrowserController {
                 __trustySquirePaymentSubmitDispatch?: {
                   token: string;
                   dispatched: boolean;
+                  validationBlocked: boolean;
                 };
               };
               if (stateWindow.__trustySquirePaymentSubmitDispatch?.token === token) {
@@ -11935,7 +11951,8 @@ export class BrowserController {
                 dispatchState?.dispatched !== true &&
                 (await this.hasConfirmedCheckoutOutcome(clickOnlyOutcomeBaseline));
               const clickOnlyDispatchObserved =
-                concretePaymentRequestObserved || clickOnlyOutcomeConfirmed;
+                (concretePaymentRequestObserved && dispatchState?.validationBlocked !== true) ||
+                clickOnlyOutcomeConfirmed;
               return {
                 baseline: clickOnlyDispatchObserved ? clickOnlyOutcomeBaseline : baseline,
                 dispatched:

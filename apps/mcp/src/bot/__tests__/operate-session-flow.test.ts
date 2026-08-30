@@ -7135,7 +7135,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
     expect(auditPayment).toHaveBeenCalledWith(
       expect.objectContaining({
         approval_id: "appr_dispatch_race",
-        status: "payment_3ds_unresolved",
+        status: "payment_outcome_unknown",
       }),
     );
     expect(session.paymentDispatchHandoff).toBeNull();
@@ -9741,6 +9741,30 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
       expect.objectContaining({ status: "payment_3ds_unresolved" }),
     ]);
     expect(h.waitForThreeDsCalls).toEqual([0]);
+  });
+
+  it("retains an expired unknown attempt for merchant reconciliation", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: env.api,
+    });
+    const unknownState = buildThreeDsState(Date.now() - 1, undefined, "unknown");
+    setActivePendingThreeDs(unknownState);
+    h.waitForThreeDsResult = "timeout";
+
+    await expect(operatePaymentStatusTool.handler({}, env.api)).resolves.toMatchObject({
+      status: "payment_outcome_unknown",
+      audit_recorded: true,
+      needs_user: { wall: "merchant_reconciliation", resume: "checkout" },
+    });
+    expect(getActivePendingThreeDs()).toBe(unknownState);
+    expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(
+      /prior charge has unresolved 3-D Secure state/,
+    );
+    expect(env.auditBodies).toEqual([
+      expect.objectContaining({ status: "payment_outcome_unknown" }),
+    ]);
   });
 
   it("retains expired 3DS state when its required terminal audit cannot be written", async () => {
