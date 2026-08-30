@@ -1339,7 +1339,7 @@ describe("operate_payment_status [P0]", () => {
       const api = makeMockApi({ getPaymentApproval } as unknown as ApiClient);
 
       const result = operatePaymentStatusTool.handler({ wait_seconds: 1 }, api);
-      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(1_500);
 
       await expect(result).resolves.toMatchObject({ status: "denied", ready_to_charge: false });
       expect(getPaymentApproval).toHaveBeenCalledWith(
@@ -1347,7 +1347,7 @@ describe("operate_payment_status [P0]", () => {
         "wait-peek",
         expect.any(Number),
       );
-      expect(Number(getPaymentApproval.mock.calls[0]?.[2])).toBeLessThan(1_000);
+      expect(Number(getPaymentApproval.mock.calls[0]?.[2])).toBe(1_000);
     } finally {
       vi.useRealTimers();
     }
@@ -1368,7 +1368,6 @@ describe("operate_payment_status [P0]", () => {
         jws: null,
         sealed_card: null,
       };
-      const denialAt = Date.now() + 750;
       const getPaymentApproval = vi
         .fn()
         .mockImplementationOnce(
@@ -1378,10 +1377,10 @@ describe("operate_payment_status [P0]", () => {
             ),
         )
         .mockImplementationOnce(
-          async () => ({
-            ...pending,
-            status: Date.now() >= denialAt ? "denied" : "pending",
-          }),
+          async () =>
+            await new Promise((resolve) =>
+              setTimeout(() => resolve({ ...pending, status: "denied" }), 450),
+            ),
         );
       const api = makeMockApi({ getPaymentApproval } as unknown as ApiClient);
 
@@ -1390,7 +1389,12 @@ describe("operate_payment_status [P0]", () => {
 
       await expect(result).resolves.toMatchObject({ status: "denied", ready_to_charge: false });
       expect(getPaymentApproval).toHaveBeenCalledTimes(2);
-      expect(getPaymentApproval).toHaveBeenNthCalledWith(2, "appr_status", "peek");
+      expect(getPaymentApproval).toHaveBeenNthCalledWith(
+        2,
+        "appr_status",
+        "wait-peek",
+        500,
+      );
     } finally {
       vi.useRealTimers();
     }

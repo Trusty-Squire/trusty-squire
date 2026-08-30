@@ -38,7 +38,6 @@ import { assertApi, type Tool } from "./index.js";
 // approval and the next operate_pay call continues waiting on it.
 const OPERATE_PAY_APPROVAL_WAIT_MS = 60_000;
 const PAYMENT_APPROVAL_RESPONSE_RESERVE_MS = 500;
-const PAYMENT_APPROVAL_FINAL_PEEK_RESPONSE_MS = 100;
 
 const inputSchema = z
   .object({
@@ -508,27 +507,29 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
 // [P0] Used by operate_payment_status: maps the LIVE server record
 // (never the locally-cached approval terms) to a status the host can act on.
 // Never opens the sealed card or calls confirm — read-only, no side effects.
-// `boundMs`, when given, races the server call so this can never outlast the
-// caller's own bound even though the server's wait_for_submission window is
-// a fixed ~15s.
+// `serverWaitMs`, when given, races the server call with a bounded response
+// grace after the server-side observation window.
 async function readApprovalStatus(
   api: ApiClient,
   state: PendingApprovalWait,
   sessionId: string,
   waitForSubmission: boolean,
-  boundMs?: number,
+  serverWaitMs?: number,
 ): Promise<Record<string, unknown>> {
-  const serverWaitMs =
-    boundMs === undefined ? undefined : Math.max(boundMs - PAYMENT_APPROVAL_RESPONSE_RESERVE_MS, 0);
   const fetchApproval = waitForSubmission
     ? api.getPaymentApproval(state.approval_id, "wait-peek", serverWaitMs)
     : api.getPaymentApproval(state.approval_id, "peek");
   const approval =
-    boundMs === undefined
+    serverWaitMs === undefined
       ? await fetchApproval
       : await Promise.race([
           fetchApproval,
-          new Promise<null>((resolve) => setTimeout(() => resolve(null), boundMs)),
+          new Promise<null>((resolve) =>
+            setTimeout(
+              () => resolve(null),
+              serverWaitMs + PAYMENT_APPROVAL_RESPONSE_RESERVE_MS,
+            ),
+          ),
         ]);
   if (approval === null) {
     return {
@@ -764,21 +765,6 @@ async function paymentStatusResult(
       const terminalCandidate = result.ready_to_charge === true;
       const terminalStatus = result.status !== "pending";
       if (terminalCandidate || terminalStatus || Date.now() >= callDeadline) break;
-      const tailMs = Math.max(callDeadline - Date.now(), 0);
-      if (tailMs <= PAYMENT_APPROVAL_RESPONSE_RESERVE_MS) {
-        const delayMs = Math.max(tailMs - PAYMENT_APPROVAL_FINAL_PEEK_RESPONSE_MS, 0);
-        if (delayMs > 0) {
-          await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
-        }
-        result = await readApprovalStatus(
-          api,
-          state,
-          session.id,
-          false,
-          Math.max(callDeadline - Date.now(), 0),
-        );
-        break;
-      }
     }
     return paymentResult(session, result);
   }

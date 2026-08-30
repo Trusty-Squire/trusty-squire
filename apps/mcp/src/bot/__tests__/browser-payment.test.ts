@@ -1058,7 +1058,7 @@ describe("checkout payment parsing", () => {
               </form>
               <script>
                 document.querySelector("button").addEventListener("click", async () => {
-                  await fetch("/charge");
+                  await fetch("/charge", { method: "POST" });
                   setTimeout(() => history.pushState({}, "", "/receipt/ORD-ASYNC-123"), 500);
                 });
               </script>`,
@@ -1085,6 +1085,94 @@ describe("checkout payment parsing", () => {
 
         expect(chargeRequests).toBe(1);
         expect(onSubmitDispatched).toHaveBeenCalledOnce();
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "ignores safe-method and payment-method traffic before invalid submission",
+    async () => {
+      const merchantUrl = "https://merchant.test/checkout";
+      const paymentUrl = "https://checkout.pci.shopifyinc.test/pay";
+      const optionsUrl = "https://checkout.pci.shopifyinc.test/payments/options";
+      const paymentMethodUrl = "https://checkout.pci.shopifyinc.test/v1/payment_methods";
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        let optionsRequests = 0;
+        let paymentMethodRequests = 0;
+        await page.route("**/*", async (route) => {
+          const url = route.request().url();
+          if (url === paymentUrl) {
+            return route.fulfill({
+              contentType: "text/html",
+              body: `
+                <form id="checkout">
+                  <label>First name <input id="first-name" required></label>
+                </form>
+                <button type="button">Pay now</button>
+                <script>
+                  const form = document.querySelector("#checkout");
+                  const required = document.querySelector("#first-name");
+                  document.querySelector("button").addEventListener("click", async () => {
+                    await fetch("/payments/options");
+                    await fetch("/v1/payment_methods", {
+                      method: "POST",
+                      headers: { "content-type": "application/json" },
+                      body: JSON.stringify({ type: "card" })
+                    });
+                    form.requestSubmit();
+                  });
+                  required.addEventListener("invalid", () => {
+                    document.body.dataset.shippingInvalid = "true";
+                  });
+                </script>`,
+            });
+          }
+          if (url === optionsUrl) {
+            optionsRequests += 1;
+            return route.fulfill({ contentType: "application/json", body: "{}" });
+          }
+          if (url === paymentMethodUrl) {
+            paymentMethodRequests += 1;
+            return route.fulfill({ contentType: "application/json", body: "{}" });
+          }
+          if (url === merchantUrl) {
+            return route.fulfill({
+              contentType: "text/html",
+              body: `<iframe src="${paymentUrl}"></iframe>`,
+            });
+          }
+          return route.fulfill({ status: 404, body: "not found" });
+        });
+        await page.goto(merchantUrl);
+        await page.waitForLoadState("networkidle");
+        page.setDefaultTimeout(1_500);
+        const controller = BrowserController.fromHarnessPage(page);
+        const onSubmitDispatched = vi.fn();
+
+        await expect(
+          (
+            controller as unknown as {
+              submitFilledCheckoutInScope: (
+                cardGroup: undefined,
+                onDispatched: () => void,
+              ) => Promise<CheckoutSubmitResult>;
+            }
+          ).submitFilledCheckoutInScope(undefined, onSubmitDispatched),
+        ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
+
+        const paymentFrame = page.frames().find((frame) => frame.url() === paymentUrl);
+        expect(paymentFrame).toBeDefined();
+        await expect(
+          paymentFrame!.evaluate(() => document.body.dataset.shippingInvalid ?? null),
+        ).resolves.toBe("true");
+        expect(optionsRequests).toBe(1);
+        expect(paymentMethodRequests).toBe(1);
+        expect(onSubmitDispatched).not.toHaveBeenCalled();
       } finally {
         await browser.close();
       }

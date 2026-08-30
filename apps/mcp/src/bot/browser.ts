@@ -907,19 +907,23 @@ export const CHECKOUT_SUBMIT_LABEL_RE =
 
 const CHECKOUT_PAYMENT_REQUEST_PATH_RE =
   /(?:^|[/_.-])(?:charge|charges|authorize|authorization|capture|payment[_-]?intents?|payments?|place[_-]?order|submit[_-]?payment|confirm[_-]?(?:order|payment)|complete[_-]?(?:order|payment|purchase)|purchase)(?:$|[/_.-])/i;
+const CHECKOUT_PRECHARGE_REQUEST_PATH_RE =
+  /(?:^|[/_.-])(?:payment[_-]?methods?|setup[_-]?intents?|tokens?|tokenize|tokenization|options?|configuration)(?:$|[/_.-])/i;
 const CHECKOUT_PAYMENT_REQUEST_PAYLOAD_RE =
   /(?:complete|place|submit|confirm|create|authorize|capture)[_\s-]*(?:checkout|order|payment|purchase|payment[_\s-]*intent)|(?:checkout|order|payment|purchase)[_\s-]*(?:complete|submit|confirm|authorize|capture)/i;
 const CHECKOUT_PAYMENT_REQUEST_OBSERVATION_MS = 1_000;
 
 function isCheckoutPaymentRequest(request: Request): boolean {
   if (request.resourceType() !== "fetch" && request.resourceType() !== "xhr") return false;
+  const method = request.method().toUpperCase();
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return false;
   try {
-    if (CHECKOUT_PAYMENT_REQUEST_PATH_RE.test(new URL(request.url()).pathname)) return true;
+    const pathname = new URL(request.url()).pathname;
+    if (CHECKOUT_PRECHARGE_REQUEST_PATH_RE.test(pathname)) return false;
+    if (CHECKOUT_PAYMENT_REQUEST_PATH_RE.test(pathname)) return true;
   } catch {
     return false;
   }
-  const method = request.method().toUpperCase();
-  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return false;
   if (request.headers()["idempotency-key"] !== undefined) return true;
   return CHECKOUT_PAYMENT_REQUEST_PAYLOAD_RE.test(request.postData() ?? "");
 }
