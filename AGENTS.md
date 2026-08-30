@@ -462,6 +462,14 @@ lease from action start through completion and cooldown; all other operator work
 stays parallel. Operators never open the canonical profile or copy Chrome cookie
 databases. The portable-state capture and handoff contract is owned by
 `docs/DESIGN-warm-browser-reuse.md`.
+### 14. MCP tests have required-fast and post-merge-slow tiers
+
+`apps/mcp/vitest.tiers.ts` is the static tier manifest. The required `test`
+check and `release.yml` run `test:fast`; `.github/workflows/mcp-slow-tests.yml`
+runs the named integration files after merges and the complete suite nightly.
+Payment/card-sealing files are explicitly listed in the required tier and run
+whole, without generated test-name filters. Never move card-sealing or
+payment-safety coverage to the slow tier.
 
 ## Final note
 

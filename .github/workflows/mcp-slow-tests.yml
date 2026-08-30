@@ -1,0 +1,50 @@
+name: MCP slow tests
+
+# Long integration/corpus suites stay live without blocking release PRs. Every
+# merge that can affect MCP runs the slow partition; the nightly run executes
+# the complete suite as a partition-drift backstop.
+on:
+  push:
+    branches: [main, staging]
+    paths:
+      - "apps/mcp/**"
+      - "packages/recipe-schema/**"
+      - "packages/skill-schema/**"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/mcp-slow-tests.yml"
+      - ".github/workflows/release.yml"
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: mcp-slow-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-slow:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.11.0
+          cache: pnpm
+      - name: Install MCP dependency tree
+        run: pnpm install --frozen-lockfile --filter '@trusty-squire/mcp...'
+      - name: Build MCP workspace dependencies
+        run: pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/recipe-schema' build
+      - name: Run slow integration tier after merge
+        if: github.event_name == 'push'
+        env:
+          MCP_SKIP_PACK_SMOKE: "1"
+        run: pnpm --filter @trusty-squire/mcp test:slow
+      - name: Run complete MCP suite nightly
+        if: github.event_name != 'push'
+        env:
+          MCP_SKIP_PACK_SMOKE: "1"
+        run: pnpm --filter @trusty-squire/mcp test
