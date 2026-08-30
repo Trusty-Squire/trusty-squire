@@ -924,10 +924,65 @@ const CHECKOUT_PAYMENT_EXECUTION_OPERATIONS = new Set([
   "purchase",
   "submitpayment",
 ]);
+const CHECKOUT_PAYMENT_EXECUTION_COLLECTIONS = new Set(["charges", "orders", "purchases"]);
+const CHECKOUT_PAYMENT_EXCLUDED_PATH_SEGMENTS = new Set([
+  "analytics",
+  "collect",
+  "events",
+  "logs",
+  "metrics",
+  "paymentmethods",
+  "setupintents",
+  "telemetry",
+  "tokenization",
+  "tokens",
+  "tracking",
+]);
 const CHECKOUT_PAYMENT_REQUEST_OBSERVATION_MS = 15_000;
 
 function normalizedPaymentOperation(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function isCheckoutPaymentExecutionOperation(value: string): boolean {
+  const operation = normalizedPaymentOperation(value);
+  if (CHECKOUT_PAYMENT_EXECUTION_OPERATIONS.has(operation)) return true;
+  if (
+    [
+      "analytics",
+      "autosave",
+      "click",
+      "event",
+      "impression",
+      "metric",
+      "telemetry",
+      "track",
+      "view",
+    ].some((marker) => operation.includes(marker))
+  ) {
+    return false;
+  }
+  const hasCheckoutExecutionSubject = ["charge", "checkout", "order", "purchase"].some(
+    (subject) => operation.includes(subject),
+  );
+  if (
+    !hasCheckoutExecutionSubject &&
+    ["paymentmethod", "setupintent", "tokeniz"].some((marker) => operation.includes(marker))
+  ) {
+    return false;
+  }
+  const hasExecutionSubject = hasCheckoutExecutionSubject || operation.includes("payment");
+  const hasExecutionVerb = [
+    "authorize",
+    "capture",
+    "complete",
+    "confirm",
+    "create",
+    "execute",
+    "place",
+    "submit",
+  ].some((verb) => operation.includes(verb));
+  return hasExecutionSubject && hasExecutionVerb;
 }
 
 function hasCheckoutPaymentExecutionPayload(request: Request): boolean {
@@ -956,9 +1011,7 @@ function hasCheckoutPaymentExecutionPayload(request: Request): boolean {
     const mutation = /\bmutation\s+([A-Za-z0-9_-]+)/i.exec(payload)?.[1];
     if (mutation !== undefined) candidates.push(mutation);
   }
-  return candidates.some((candidate) =>
-    CHECKOUT_PAYMENT_EXECUTION_OPERATIONS.has(normalizedPaymentOperation(candidate)),
-  );
+  return candidates.some(isCheckoutPaymentExecutionOperation);
 }
 
 function isCheckoutPaymentRequest(request: Request): boolean {
@@ -967,7 +1020,22 @@ function isCheckoutPaymentRequest(request: Request): boolean {
   if (method === "GET" || method === "HEAD" || method === "OPTIONS") return false;
   try {
     const segments = new URL(request.url()).pathname.split("/").filter(Boolean);
+    const normalizedSegments = segments.map(normalizedPaymentOperation);
+    if (
+      normalizedSegments.some((segment) =>
+        CHECKOUT_PAYMENT_EXCLUDED_PATH_SEGMENTS.has(segment),
+      )
+    ) {
+      return false;
+    }
     const lastSegment = segments.at(-1);
+    if (
+      method === "POST" &&
+      lastSegment !== undefined &&
+      CHECKOUT_PAYMENT_EXECUTION_COLLECTIONS.has(normalizedPaymentOperation(lastSegment))
+    ) {
+      return true;
+    }
     if (
       lastSegment !== undefined &&
       CHECKOUT_PAYMENT_EXECUTION_OPERATIONS.has(normalizedPaymentOperation(lastSegment))
@@ -11857,6 +11925,11 @@ export class BrowserController {
         const concretePaymentRequest = new Promise<void>((resolve) => {
           resolveConcretePaymentRequest = resolve;
         });
+        let navigationObserved = false;
+        let resolveNavigation = (): void => undefined;
+        const navigation = new Promise<void>((resolve) => {
+          resolveNavigation = resolve;
+        });
         const paymentRequestListener = (request: Request): void => {
           if (!paymentRequestTrackingArmed || this.page === undefined) return;
           let sourceFrame: Frame;
@@ -11866,11 +11939,18 @@ export class BrowserController {
             return;
           }
           if (sourceFrame !== frame && sourceFrame !== this.page.mainFrame()) return;
-          if (!request.isNavigationRequest() && !isCheckoutPaymentRequest(request)) return;
+          if (!isCheckoutPaymentRequest(request)) return;
           concretePaymentRequestObserved = true;
           resolveConcretePaymentRequest();
         };
+        const navigationListener = (navigatedFrame: Frame): void => {
+          if (!paymentRequestTrackingArmed || this.page === undefined) return;
+          if (navigatedFrame !== frame && navigatedFrame !== this.page.mainFrame()) return;
+          navigationObserved = true;
+          resolveNavigation();
+        };
         this.page.on("request", paymentRequestListener);
+        this.page.on("framenavigated", navigationListener);
         const readDispatchOutcomeBaseline = async (): Promise<CheckoutOutcomeBaseline | null> => {
           const snapshot = await this.page!.mainFrame()
             .evaluate(
@@ -11917,6 +11997,7 @@ export class BrowserController {
             const snapshot = await Promise.race([
               boundDispatch,
               concretePaymentRequest.then(() => null),
+              navigation.then(() => null),
               new Promise<null>((resolve) => {
                 timer = setTimeout(() => resolve(null), CHECKOUT_PAYMENT_REQUEST_OBSERVATION_MS);
               }),
@@ -11949,6 +12030,7 @@ export class BrowserController {
         const clearDispatchTracking = async (): Promise<void> => {
           paymentRequestTrackingArmed = false;
           this.page?.off("request", paymentRequestListener);
+          this.page?.off("framenavigated", navigationListener);
           this.checkoutSubmitDispatchWaiters.delete(dispatchToken);
           await candidate
             .evaluate(
@@ -12027,9 +12109,16 @@ export class BrowserController {
                 baseline === null &&
                 dispatchState?.dispatched !== true &&
                 (await this.hasConfirmedCheckoutOutcome(clickOnlyOutcomeBaseline));
+              const clickOnlyThreeDsObserved =
+                baseline === null &&
+                dispatchState?.dispatched !== true &&
+                navigationObserved &&
+                (await this.detectThreeDsChallenge().catch(() => undefined))?.three_ds_required ===
+                  true;
               const clickOnlyDispatchObserved =
                 (concretePaymentRequestObserved && dispatchState?.validationBlocked !== true) ||
-                clickOnlyOutcomeConfirmed;
+                clickOnlyOutcomeConfirmed ||
+                clickOnlyThreeDsObserved;
               return {
                 baseline: clickOnlyDispatchObserved ? clickOnlyOutcomeBaseline : baseline,
                 dispatched:

@@ -1199,7 +1199,9 @@ describe("checkout payment parsing", () => {
                   await fetch("/graphql", {
                     method: "POST",
                     headers: { "content-type": "application/json" },
-                    body: JSON.stringify({ operationName: "CompleteCheckout" })
+                    body: JSON.stringify({
+                      operationName: "CheckoutCompleteWithTokenizedPaymentV3"
+                    })
                   });
                   setTimeout(() => history.pushState({}, "", "/receipt/ORD-GQL-123"), 500);
                 });
@@ -1227,6 +1229,131 @@ describe("checkout payment parsing", () => {
 
         expect(chargeRequests).toBe(1);
         expect(onSubmitDispatched).toHaveBeenCalledOnce();
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "tracks click-only order creation through a REST collection endpoint",
+    async () => {
+      const checkoutUrl = "https://merchant.test/checkout";
+      const orderUrl = "https://merchant.test/api/orders";
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        let orderRequests = 0;
+        await page.route(checkoutUrl, async (route) => {
+          await route.fulfill({
+            contentType: "text/html",
+            body: `
+              <form><button type="button">Pay now</button></form>
+              <script>
+                document.querySelector("button").addEventListener("click", async () => {
+                  await fetch("/api/orders", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ cart_id: "cart-123" })
+                  });
+                  history.pushState({}, "", "/receipt/ORD-REST-123");
+                });
+              </script>`,
+          });
+        });
+        await page.route(orderUrl, async (route) => {
+          orderRequests += 1;
+          await route.fulfill({ body: "order accepted" });
+        });
+        await page.goto(checkoutUrl);
+        const controller = BrowserController.fromHarnessPage(page);
+        const onSubmitDispatched = vi.fn();
+
+        await expect(
+          (
+            controller as unknown as {
+              submitFilledCheckoutInScope: (
+                cardGroup: undefined,
+                onDispatched: () => void,
+              ) => Promise<CheckoutSubmitResult>;
+            }
+          ).submitFilledCheckoutInScope(undefined, onSubmitDispatched),
+        ).resolves.toEqual({ three_ds_required: false, order_confirmed: true });
+
+        expect(orderRequests).toBe(1);
+        expect(onSubmitDispatched).toHaveBeenCalledOnce();
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "does not treat checkout review navigation after invalid requestSubmit as dispatch",
+    async () => {
+      const merchantUrl = "https://merchant.test/checkout";
+      const paymentUrl = "https://checkout.pci.shopifyinc.test/pay";
+      const reviewUrl = "https://checkout.pci.shopifyinc.test/checkout/review";
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.route("**/*", async (route) => {
+          const url = route.request().url();
+          if (url === paymentUrl) {
+            return route.fulfill({
+              contentType: "text/html",
+              body: `
+                <form id="checkout">
+                  <label>First name <input id="first-name" required></label>
+                </form>
+                <button type="button">Pay now</button>
+                <script>
+                  const form = document.querySelector("#checkout");
+                  document.querySelector("#first-name").addEventListener("invalid", () => {
+                    sessionStorage.setItem("shippingInvalid", "true");
+                  });
+                  document.querySelector("button").addEventListener("click", () => {
+                    form.requestSubmit();
+                    window.location.href = "/checkout/review";
+                  });
+                </script>`,
+            });
+          }
+          if (url === reviewUrl) {
+            return route.fulfill({ contentType: "text/html", body: "Checkout review" });
+          }
+          if (url === merchantUrl) {
+            return route.fulfill({
+              contentType: "text/html",
+              body: `<iframe src="${paymentUrl}"></iframe>`,
+            });
+          }
+          return route.fulfill({ status: 404, body: "not found" });
+        });
+        await page.goto(merchantUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = BrowserController.fromHarnessPage(page);
+        const onSubmitDispatched = vi.fn();
+
+        await expect(
+          (
+            controller as unknown as {
+              submitFilledCheckoutInScope: (
+                cardGroup: undefined,
+                onDispatched: () => void,
+              ) => Promise<CheckoutSubmitResult>;
+            }
+          ).submitFilledCheckoutInScope(undefined, onSubmitDispatched),
+        ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
+
+        const reviewFrame = page.frames().find((candidate) => candidate.url() === reviewUrl);
+        expect(reviewFrame).toBeDefined();
+        await expect(
+          reviewFrame!.evaluate(() => sessionStorage.getItem("shippingInvalid")),
+        ).resolves.toBe("true");
+        expect(onSubmitDispatched).not.toHaveBeenCalled();
       } finally {
         await browser.close();
       }
@@ -1306,11 +1433,13 @@ describe("checkout payment parsing", () => {
     async () => {
       const checkoutUrl = "https://merchant.test/checkout";
       const analyticsUrl = "https://merchant.test/payment";
+      const orderAnalyticsUrl = "https://merchant.test/analytics/orders";
       const graphqlUrl = "https://merchant.test/graphql";
       const browser = await chromium.launch({ headless: true });
       try {
         const page = await browser.newPage();
         let analyticsRequests = 0;
+        let orderAnalyticsRequests = 0;
         let autosaveRequests = 0;
         await page.route(checkoutUrl, async (route) => {
           await route.fulfill({
@@ -1323,6 +1452,11 @@ describe("checkout payment parsing", () => {
                     method: "POST",
                     headers: { "content-type": "application/json" },
                     body: JSON.stringify({ action: "payment_submit_click" })
+                  });
+                  void fetch("/analytics/orders", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ operationName: "CreateOrder" })
                   });
                   setTimeout(() => {
                     void fetch("/graphql", {
@@ -1337,6 +1471,10 @@ describe("checkout payment parsing", () => {
         });
         await page.route(analyticsUrl, async (route) => {
           analyticsRequests += 1;
+          await route.fulfill({ body: "ok" });
+        });
+        await page.route(orderAnalyticsUrl, async (route) => {
+          orderAnalyticsRequests += 1;
           await route.fulfill({ body: "ok" });
         });
         await page.route(graphqlUrl, async (route) => {
@@ -1359,6 +1497,7 @@ describe("checkout payment parsing", () => {
         ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
 
         expect(analyticsRequests).toBe(1);
+        expect(orderAnalyticsRequests).toBe(1);
         expect(autosaveRequests).toBe(1);
         expect(onSubmitDispatched).not.toHaveBeenCalled();
       } finally {

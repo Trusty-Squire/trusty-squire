@@ -886,6 +886,30 @@ describe("payment approval relay", () => {
     expect(Date.now() - startedAt).toBeLessThan(3_000);
   });
 
+  it("returns a denial committed at the approval wait deadline", async () => {
+    const created = await createApproval();
+    const peek = vi
+      .spyOn(deps.pendingPaymentApprovalStore, "peekRelayCandidateForAccount")
+      .mockImplementationOnce(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        await deps.pendingPaymentApprovalStore.deny(created.id, new Date(nowMs));
+        return null;
+      });
+
+    try {
+      const status = await server.inject({
+        method: "GET",
+        url: `/v1/pay/approvals/${created.id}?wait_for_submission=1&peek_submission=1&wait_ms=1`,
+        headers: { authorization: `Bearer ${agentToken}` },
+      });
+
+      expect(status.statusCode).toBe(200);
+      expect(status.json()).toMatchObject({ status: "denied", jws: null, sealed_card: null });
+    } finally {
+      peek.mockRestore();
+    }
+  });
+
   it("pushes to Telegram on create when the account has a linked chat", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal("fetch", fetchMock);
