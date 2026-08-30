@@ -120,9 +120,44 @@ Routing rules for THIS server's vault tools:
   user wants the plaintext (e.g. for a .env file), they read it from the
   Trusty Squire web vault themselves.`;
 
-interface ServerCallLifecycle {
-  started(): void;
+export interface ServerCallLifecycle {
+  started(): boolean;
   finished(): void;
+}
+
+export interface ServerCallAdmission extends ServerCallLifecycle {
+  closeAndDrain(): Promise<void>;
+  inFlightCount(): number;
+}
+
+export function createServerCallAdmission(): ServerCallAdmission {
+  let accepting = true;
+  let inFlight = 0;
+  let drain: Promise<void> | undefined;
+  let finishDrain: (() => void) | undefined;
+  return {
+    started: () => {
+      if (!accepting) return false;
+      inFlight += 1;
+      return true;
+    },
+    finished: () => {
+      inFlight -= 1;
+      if (inFlight === 0) {
+        finishDrain?.();
+        finishDrain = undefined;
+      }
+    },
+    closeAndDrain: () => {
+      accepting = false;
+      if (inFlight === 0) return Promise.resolve();
+      drain ??= new Promise<void>((resolveDrain) => {
+        finishDrain = resolveDrain;
+      });
+      return drain;
+    },
+    inFlightCount: () => inFlight,
+  };
 }
 
 export async function buildServer(
@@ -174,7 +209,9 @@ export async function buildServer(
           `Run \`npx @trusty-squire/mcp connect\` to reconnect.`,
       );
     }
-    callLifecycle?.started();
+    if (callLifecycle !== undefined && !callLifecycle.started()) {
+      return errorContent("server_unavailable", "server is shutting down");
+    }
     try {
       api.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
       const invoke = async () =>
@@ -337,24 +374,8 @@ export async function runServer(): Promise<void> {
         })
       : null;
 
-  let inFlightCalls = 0;
-  const callDrainWaiters = new Set<() => void>();
-  const server = await buildServer(api, {
-    started: () => {
-      inFlightCalls += 1;
-    },
-    finished: () => {
-      inFlightCalls -= 1;
-      if (inFlightCalls === 0) {
-        for (const wake of callDrainWaiters) wake();
-        callDrainWaiters.clear();
-      }
-    },
-  });
-  const waitForCallsToDrain = async (): Promise<void> => {
-    if (inFlightCalls === 0) return;
-    await new Promise<void>((resolveWait) => callDrainWaiters.add(resolveWait));
-  };
+  const callAdmission = createServerCallAdmission();
+  const server = await buildServer(api, callAdmission);
   const transport = new StdioServerTransport();
 
   // A stdio client can disappear without sending a signal (for example when
@@ -366,6 +387,7 @@ export async function runServer(): Promise<void> {
   let idleTimer: NodeJS.Timeout | undefined;
   const requestShutdown = (): void => {
     if (shutdown !== undefined) return;
+    const admittedCallsDrained = callAdmission.closeAndDrain();
 
     shutdown = (async () => {
       process.stdin.removeListener("end", requestShutdown);
@@ -381,7 +403,7 @@ export async function runServer(): Promise<void> {
         // server. Its own signal handlers stand down in server mode (see
         // registerHeadlessRigCleanup), leaving this coordinator as the one
         // exit owner.
-        await waitForCallsToDrain();
+        await admittedCallsDrained;
         await cancelActiveLoginBrowsers();
         await closeAllProvisionSessions();
         await server.close();
@@ -423,7 +445,7 @@ export async function runServer(): Promise<void> {
   let idleSweepInFlight = false;
   idleTimer = setInterval(() => {
     if (shutdown !== undefined) return;
-    if (idleSweepInFlight || inFlightCalls > 0) return;
+    if (idleSweepInFlight || callAdmission.inFlightCount() > 0) return;
     idleSweepInFlight = true;
     void (async () => {
       try {

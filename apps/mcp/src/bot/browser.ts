@@ -101,6 +101,26 @@ export function registerLocalBrowserLaunch(
   };
 }
 
+export async function closeBrowserContextWithin(
+  context: { close(): Promise<unknown> },
+  timeoutMs = 2_000,
+): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  const outcome = await Promise.race([
+    Promise.resolve()
+      .then(() => context.close())
+      .then(
+        () => true,
+        () => false,
+      ),
+    new Promise<false>((resolveTimeout) => {
+      timer = setTimeout(() => resolveTimeout(false), timeoutMs);
+    }),
+  ]);
+  if (timer !== undefined) clearTimeout(timer);
+  return outcome;
+}
+
 function spawnLocalBrowser(
   binary: string,
   args: readonly string[],
@@ -138,6 +158,22 @@ function markLocalBrowserLaunchTerminal(child: ChildProcess | null): void {
   if (child === null) return;
   const marker = localBrowserLaunchMarkers.get(child);
   if (marker !== undefined) markOwnerBrowserLaunchTerminal(marker);
+}
+
+export async function closeLocalBrowserLaunch(
+  marker: string | undefined,
+  runtime: {
+    markTerminal?: typeof markOwnerBrowserLaunchTerminal;
+    terminate?: typeof terminateOwnerBrowserLaunch;
+    untrack?: typeof untrackOwnerBrowserLaunch;
+  } = {},
+): Promise<void> {
+  if (marker === undefined) return;
+  (runtime.markTerminal ?? markOwnerBrowserLaunchTerminal)(marker);
+  if (!(await (runtime.terminate ?? terminateOwnerBrowserLaunch)(marker))) {
+    throw new Error("local login browser closure unproven");
+  }
+  (runtime.untrack ?? untrackOwnerBrowserLaunch)(marker);
 }
 
 export type ContextInitScriptId = "evaluate-name-shim" | "navigator-webdriver" | "webgl-spoof";
@@ -3251,6 +3287,7 @@ export interface SelfLaunchedLogin {
   forceTeardown: () => void;
   isRunning: () => boolean;
   identity: ProfileProcessIdentity | null;
+  marker: string;
 }
 
 export function childProcessIsRunning(child: ChildProcess | null): boolean {
@@ -3324,13 +3361,14 @@ export async function launchSelfManagedLoginContext(params: {
   proxyServer: string | null;
   extraArgs?: readonly string[];
   onSpawned?: (
-    browser: Pick<SelfLaunchedLogin, "teardown" | "forceTeardown" | "isRunning">,
+    browser: Pick<SelfLaunchedLogin, "teardown" | "forceTeardown" | "isRunning" | "marker">,
   ) => void;
 }): Promise<SelfLaunchedLogin> {
   let child: ChildProcess | null = null;
   let childIdentity: ProfileProcessIdentity | null = null;
   let browser: Browser | null = null;
-  let torn = false;
+  let launchMarker: string | undefined;
+  let teardownPromise: Promise<void> | undefined;
   const isRunning = (): boolean => childProcessIsRunning(child);
   const forceTeardown = (): void => {
     markLocalBrowserLaunchTerminal(child);
@@ -3344,17 +3382,20 @@ export async function launchSelfManagedLoginContext(params: {
     }
     if (childProcessIsRunning(child)) child?.kill("SIGKILL");
   };
-  const teardown = async (): Promise<void> => {
-    if (torn) return;
-    torn = true;
-    markLocalBrowserLaunchTerminal(child);
-    await browser?.close().catch(() => undefined);
-    if (!childProcessIsRunning(child)) return;
-    if (childIdentity !== null) {
-      signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
-    } else {
-      child?.kill("SIGTERM");
-    }
+  const teardown = (): Promise<void> => {
+    teardownPromise ??= (async () => {
+      markLocalBrowserLaunchTerminal(child);
+      if (browser !== null) await closeBrowserContextWithin(browser);
+      if (childProcessIsRunning(child)) {
+        if (childIdentity !== null) {
+          signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
+        } else {
+          child?.kill("SIGTERM");
+        }
+      }
+      await closeLocalBrowserLaunch(launchMarker);
+    })();
+    return teardownPromise;
   };
   const endpoint = await withChromeStartupLock(
     async () => {
@@ -3383,13 +3424,17 @@ export async function launchSelfManagedLoginContext(params: {
         stdio: ["ignore", "ignore", "pipe"],
       });
       child = spawned;
+      launchMarker = localBrowserLaunchMarkers.get(spawned);
+      if (launchMarker === undefined) {
+        throw new Error("self-launched login Chrome lost its ownership marker");
+      }
       childIdentity = registerSelfManagedChrome(spawned, params.profileDir);
       let chromeStderr = "";
       spawned.stderr?.on("data", (chunk: Buffer) => {
         chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
       });
       try {
-        params.onSpawned?.({ teardown, forceTeardown, isRunning });
+        params.onSpawned?.({ teardown, forceTeardown, isRunning, marker: launchMarker });
         const endpoint = await waitForDevtools(port, 30_000, spawned);
         childIdentity = await resolveAttachedProfileChildIdentity(
           spawned,
@@ -3419,6 +3464,9 @@ export async function launchSelfManagedLoginContext(params: {
   if (child === null) {
     throw new Error("self-launched login Chrome lost its process handle");
   }
+  if (launchMarker === undefined) {
+    throw new Error("self-launched login Chrome lost its ownership marker");
+  }
 
   let attached: Awaited<ReturnType<typeof attachSelfManagedLoginContext>>;
   try {
@@ -3439,6 +3487,7 @@ export async function launchSelfManagedLoginContext(params: {
     forceTeardown,
     isRunning,
     identity: childIdentity,
+    marker: launchMarker,
   };
 }
 
@@ -3450,6 +3499,7 @@ export interface PlainLoginBrowser {
   // for the polling loop to fail loudly if the visible browser disappears.
   isRunning: () => boolean;
   identity: ProfileProcessIdentity | null;
+  marker: string;
 }
 
 // Launch a TRULY PLAIN Chrome for the interactive connect claim — NO
@@ -3483,6 +3533,7 @@ export async function launchPlainLoginBrowser(params: {
 }): Promise<PlainLoginBrowser> {
   let child: ChildProcess | null = null;
   let childIdentity: ProfileProcessIdentity | null = null;
+  let launchMarker: string | undefined;
   await withChromeStartupLock(
     async () => {
       clearStaleSingletonLock(params.profileDir);
@@ -3504,6 +3555,7 @@ export async function launchPlainLoginBrowser(params: {
         stdio: ["ignore", "ignore", "pipe"],
       });
       child = spawned;
+      launchMarker = localBrowserLaunchMarkers.get(spawned);
       childIdentity = registerSelfManagedChrome(spawned, params.profileDir);
       let chromeStderr = "";
       spawned.stderr?.on("data", (chunk: Buffer) => {
@@ -3556,7 +3608,11 @@ export async function launchPlainLoginBrowser(params: {
     { deadlineMs: 0 },
   );
 
-  let torn = false;
+  if (launchMarker === undefined) {
+    throw new Error("plain login Chrome lost its ownership marker");
+  }
+
+  let teardownPromise: Promise<void> | undefined;
   const forceTeardown = (): void => {
     markLocalBrowserLaunchTerminal(child);
     if (childIdentity !== null) {
@@ -3569,21 +3625,24 @@ export async function launchPlainLoginBrowser(params: {
     }
     reapProfileHolderIfOwned(params.profileDir, childIdentity);
   };
-  const teardown = async (): Promise<void> => {
-    if (torn) return;
-    torn = true;
-    markLocalBrowserLaunchTerminal(child);
-    if (child !== null && childIdentity !== null) {
-      signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
-    } else if (childProcessIsRunning(child)) {
-      child?.kill("SIGTERM");
-    }
+  const teardown = (): Promise<void> => {
+    teardownPromise ??= (async () => {
+      markLocalBrowserLaunchTerminal(child);
+      if (child !== null && childIdentity !== null) {
+        signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
+      } else if (childProcessIsRunning(child)) {
+        child?.kill("SIGTERM");
+      }
+      await closeLocalBrowserLaunch(launchMarker);
+    })();
+    return teardownPromise;
   };
   return {
     teardown,
     forceTeardown,
     isRunning: () => childProcessIsRunning(child),
     identity: childIdentity,
+    marker: launchMarker,
   };
 }
 
@@ -16571,8 +16630,7 @@ export class BrowserController {
       if (tracked?.proof === proof) selfManagedChromes.delete(proof.identity.pid);
       if (this.ownedChromeProcessTreeProof === proof) this.ownedChromeProcessTreeProof = null;
     }
-    const markerClosed =
-      !this.ownerLaunchTracked || (await terminateOwnerBrowserLaunch(marker));
+    const markerClosed = !this.ownerLaunchTracked || (await terminateOwnerBrowserLaunch(marker));
     if (closed && markerClosed && this.ownerLaunchTracked) {
       untrackOwnerBrowserLaunch(marker);
       this.ownerLaunchTracked = false;
@@ -16805,8 +16863,7 @@ export class BrowserController {
         this.ownedChromeProcessTreeProof = null;
       }
     }
-    const markerClosed =
-      !this.ownerLaunchTracked || (await terminateOwnerBrowserLaunch(marker));
+    const markerClosed = !this.ownerLaunchTracked || (await terminateOwnerBrowserLaunch(marker));
     if (markerClosed && this.ownerLaunchTracked) {
       untrackOwnerBrowserLaunch(marker);
       this.ownerLaunchTracked = false;

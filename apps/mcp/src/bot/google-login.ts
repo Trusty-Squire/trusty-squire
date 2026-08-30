@@ -29,6 +29,7 @@ import {
   withProfileOperationGuard,
 } from "./profile.js";
 import {
+  closeBrowserContextWithin,
   extractGoogleAccountEmail,
   launchPlainLoginBrowser,
   launchSelfManagedLoginContext,
@@ -107,6 +108,7 @@ export async function launchPersistentLoginContext(
     markTerminal?: typeof markOwnerBrowserLaunchTerminal;
     terminate?: typeof terminateOwnerBrowserLaunch;
     untrack?: typeof untrackOwnerBrowserLaunch;
+    closeTimeoutMs?: number;
   } = {},
 ): Promise<PersistentLoginContext> {
   const register = runtime.registerLocalBrowserLaunch ?? registerLocalBrowserLaunch;
@@ -136,7 +138,7 @@ export async function launchPersistentLoginContext(
     close: (): Promise<void> => {
       closing ??= (async () => {
         markTerminal(ownership.marker);
-        await context.close().catch(() => undefined);
+        await closeBrowserContextWithin(context, runtime.closeTimeoutMs);
         const terminated = await terminate(ownership.marker).catch(() => false);
         if (!terminated) throw new Error("persistent login browser closure unproven");
         untrack(ownership.marker);
@@ -184,6 +186,7 @@ export async function captureProfileStorageState(
       teardown: () => Promise<void>;
       forceTeardown: () => void;
       isRunning: () => boolean;
+      marker: string;
     }): void => {
       if (tracked) return;
       tracked = true;
@@ -600,6 +603,7 @@ export async function teardownLoginBrowser(opts: {
   isRunning?: () => boolean;
   timeoutMs?: number;
 }): Promise<ProfileCloseState> {
+  let profileState: ProfileCloseState;
   if (opts.identity === null && opts.isRunning !== undefined) {
     const timeoutMs = opts.timeoutMs ?? 15_000;
     let timer: NodeJS.Timeout | undefined;
@@ -622,17 +626,21 @@ export async function teardownLoginBrowser(opts: {
       }
       return !opts.isRunning!();
     };
-    if (closed && (await waitForExit())) return "closed";
-    opts.forceClose();
-    return (await waitForExit()) ? "closed" : "force_closed_unproven";
+    if (closed && (await waitForExit())) profileState = "closed";
+    else {
+      opts.forceClose();
+      profileState = (await waitForExit()) ? "closed" : "force_closed_unproven";
+    }
+  } else {
+    profileState = await closeProfileWithProof({
+      profileDir: opts.profileDir,
+      identity: opts.identity,
+      close: opts.closeBrowser,
+      forceClose: opts.forceClose,
+      ...(opts.timeoutMs !== undefined ? { closeTimeoutMs: opts.timeoutMs } : {}),
+    });
   }
-  return await closeProfileWithProof({
-    profileDir: opts.profileDir,
-    identity: opts.identity,
-    close: opts.closeBrowser,
-    forceClose: opts.forceClose,
-    ...(opts.timeoutMs !== undefined ? { closeTimeoutMs: opts.timeoutMs } : {}),
-  });
+  return profileState;
 }
 
 // --- shutdown coordination with the operator server -------------------

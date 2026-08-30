@@ -578,6 +578,23 @@ function ownerProfileState(record: OwnerProfileRecord): ProcessIdentityState {
   return "unknown";
 }
 
+function profileProcessesAreStale(
+  manifest: OwnerReaperManifest,
+  profile: OwnerProfileRecord,
+): boolean {
+  const profileDir = resolve(profile.path);
+  return (
+    manifest.resources
+      .filter((identity) => resolve(identity.user_data_dir) === profileDir)
+      .every(
+        (identity) => profileProcessIdentityState(identity, identity.user_data_dir) === "stale",
+      ) &&
+    manifest.launches
+      .filter((launch) => resolve(launch.user_data_dir) === profileDir)
+      .every((launch) => ownerBrowserLaunchState(launch.marker) === "stale")
+  );
+}
+
 function cleanTrackedProfiles(manifest: OwnerReaperManifest): void {
   for (const identity of manifest.resources) {
     if (profileProcessIdentityState(identity, identity.user_data_dir) === "stale") {
@@ -585,6 +602,7 @@ function cleanTrackedProfiles(manifest: OwnerReaperManifest): void {
     }
   }
   for (const profile of manifest.profiles) {
+    if (!profileProcessesAreStale(manifest, profile)) continue;
     if (signedEphemeralProfile(profile)) {
       rmSync(profile.path, { recursive: true, force: true });
     }

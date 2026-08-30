@@ -14,7 +14,7 @@ import {
 } from "./profile.js";
 import { isOAuthProviderId, type OAuthProviderId } from "./oauth-providers.js";
 import { invalidateCanonicalGoogleIdentity, isSessionStateArtifact } from "./session-state.js";
-import { registerLocalBrowserLaunch } from "./browser.js";
+import { closeBrowserContextWithin, registerLocalBrowserLaunch } from "./browser.js";
 import {
   markOwnerBrowserLaunchTerminal,
   terminateOwnerBrowserLaunch,
@@ -183,6 +183,7 @@ export async function clearProviderCookies(
     markTerminal?: typeof markOwnerBrowserLaunchTerminal;
     terminate?: typeof terminateOwnerBrowserLaunch;
     untrack?: typeof untrackOwnerBrowserLaunch;
+    closeTimeoutMs?: number;
   } = {},
 ): Promise<boolean> {
   return await withProfileOperationGuard(profileDir, async () => {
@@ -214,11 +215,11 @@ export async function clearProviderCookies(
       cleared = false;
     } finally {
       if (ownership === null) {
-        await context?.close().catch(() => undefined);
+        if (context !== null) await closeBrowserContextWithin(context, runtime.closeTimeoutMs);
       } else {
         const marker = ownership.marker;
         (runtime.markTerminal ?? markOwnerBrowserLaunchTerminal)(marker);
-        await context?.close().catch(() => undefined);
+        if (context !== null) await closeBrowserContextWithin(context, runtime.closeTimeoutMs);
         lifecycleClosed = await (runtime.terminate ?? terminateOwnerBrowserLaunch)(marker).catch(
           () => false,
         );

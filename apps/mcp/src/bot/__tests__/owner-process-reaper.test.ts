@@ -296,15 +296,17 @@ describe("owner process startup sweep", () => {
     const signed = await mkdtemp(join(tmpdir(), "trusty-squire-operate-"));
     const signedPending = await mkdtemp(join(tmpdir(), ".trusty-squire-profile-staging-"));
     const signedPendingFinal = join(tmpdir(), `trusty-squire-operate-signed-pending-${Date.now()}`);
+    const retained = await mkdtemp(join(tmpdir(), "trusty-squire-operate-"));
     const unsignedPending = await mkdtemp(join(tmpdir(), ".trusty-squire-profile-staging-"));
     const unsignedPendingFinal = join(
       tmpdir(),
       `trusty-squire-operate-unsigned-pending-${Date.now()}`,
     );
     const foreign = await mkdtemp(join(tmpdir(), "trusty-squire-operate-"));
-    cleanup.push(root, signed, signedPending, unsignedPending, foreign);
+    cleanup.push(root, signed, signedPending, retained, unsignedPending, foreign);
     const token = "signed-profile-token";
     const pendingToken = "signed-pending-token";
+    const retainedToken = "live-profile-token";
     await writeFile(
       join(signed, OWNER_PROFILE_SIGNATURE_FILE),
       `${JSON.stringify({ version: 1, token, path: signed })}\n`,
@@ -312,6 +314,10 @@ describe("owner process startup sweep", () => {
     await writeFile(
       join(foreign, OWNER_PROFILE_SIGNATURE_FILE),
       `${JSON.stringify({ version: 1, token: "someone-else", path: foreign })}\n`,
+    );
+    await writeFile(
+      join(retained, OWNER_PROFILE_SIGNATURE_FILE),
+      `${JSON.stringify({ version: 1, token: retainedToken, path: retained })}\n`,
     );
     await writeFile(
       join(signedPending, OWNER_PROFILE_SIGNATURE_FILE),
@@ -324,10 +330,18 @@ describe("owner process startup sweep", () => {
         version: 4,
         token: "manifest",
         owner: { pid: 999_999_999, start_time: "1" },
-        resources: [],
+        resources: [
+          {
+            host: "foreign-host.invalid",
+            pid: 999_999_998,
+            start_time: "1",
+            user_data_dir: retained,
+          },
+        ],
         launches: [],
         profiles: [
           { path: signed, token, state: "ready" },
+          { path: retained, token: retainedToken, state: "ready" },
           {
             path: signedPendingFinal,
             staging_path: signedPending,
@@ -349,6 +363,7 @@ describe("owner process startup sweep", () => {
     await sweepOrphanedOwnerProcesses(root);
 
     expect(existsSync(signed)).toBe(false);
+    expect(existsSync(retained)).toBe(true);
     expect(existsSync(signedPending)).toBe(false);
     expect(existsSync(unsignedPending)).toBe(true);
     expect(existsSync(foreign)).toBe(true);

@@ -142,6 +142,32 @@ describe("provider cookie clearing", () => {
     }
   });
 
+  it("reaches exact-marker teardown when cookie-clear context close hangs", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ts-login-state-hung-close-"));
+    const terminate = vi.fn(async () => true);
+    try {
+      await expect(
+        clearProviderCookies(dir, "github", {
+          loadChromium: async () => ({
+            launchPersistentContext: async () => ({
+              cookies: async () => [],
+              clearCookies: async () => undefined,
+              close: async () => await new Promise<never>(() => undefined),
+            }),
+          }),
+          registerLaunch: () => ({ marker: "v1:1:hung-cookie-clear", env: {} }),
+          markTerminal: vi.fn(),
+          terminate,
+          untrack: vi.fn(),
+          closeTimeoutMs: 1,
+        }),
+      ).resolves.toBe(true);
+      expect(terminate).toHaveBeenCalledWith("v1:1:hung-cookie-clear");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("refuses to open the canonical profile while another operation owns it", async () => {
     const dir = mkdtempSync(join(tmpdir(), "ts-login-state-guard-"));
     const lease = acquireProfileOperationGuard(dir);
