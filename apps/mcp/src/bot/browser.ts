@@ -912,6 +912,17 @@ function sealedElementSemanticKeys(descriptor: SealedElementDescriptor): string[
 export const CHECKOUT_SUBMIT_LABEL_RE =
   /^(?:pay(?:\s+now)?|place\s+order|complete\s+(?:order|purchase|payment)|submit\s+payment|buy\s+now|confirm\s+(?:order|payment))\b|^ご?注文(?:内容)?[をの]?確定|^ご?注文する|^確定(?:する|$)|^購入(?:する|を確定|$)|^今すぐ(?:購入|注文|支払)|^支払う|^お?支払い(?:を確定|$)/i;
 
+const CHECKOUT_CHARGE_REQUEST_PATH_RE =
+  /(?:^|\/)(?:charges?|payment[_-]?intents?(?:\/[^/]+)?\/confirm|(?:place|submit|confirm)[_-]?(?:order|payment)|checkout\/(?:complete|confirm|submit)|purchase)(?:\/|$)/i;
+
+function isCheckoutChargeRequestUrl(rawUrl: string): boolean {
+  try {
+    return CHECKOUT_CHARGE_REQUEST_PATH_RE.test(new URL(rawUrl).pathname);
+  } catch {
+    return false;
+  }
+}
+
 export function checkoutSubmitLabel(signals: {
   ariaLabel?: string | null;
   inputValue?: string | null;
@@ -11672,12 +11683,25 @@ export class BrowserController {
             await route.abort("blockedbyclient");
             return;
           }
-          const chargeDispatch =
+          const nativeChargeDispatch =
             clickDispatchStarted &&
             mutation &&
             nativeSubmission !== null &&
             method === nativeSubmission.method &&
             request.url() === nativeSubmission.action;
+          let requestFrameMatches = false;
+          try {
+            requestFrameMatches = request.frame() === frame;
+          } catch {
+            requestFrameMatches = false;
+          }
+          const spaChargeDispatch =
+            clickDispatchStarted &&
+            mutation &&
+            requestFrameMatches &&
+            (request.resourceType() === "fetch" || request.resourceType() === "xhr") &&
+            isCheckoutChargeRequestUrl(request.url());
+          const chargeDispatch = nativeChargeDispatch || spaChargeDispatch;
           if (chargeDispatch) {
             dispatchNetworkConfirmed = true;
             dispatchNetworkDeadline = null;
@@ -15509,15 +15533,21 @@ export class BrowserController {
     let actionStarted = false;
     const probeRoute = async (route: Route): Promise<void> => {
       const request = route.request();
+      let requestFrame: Frame;
       let requestPage: Page;
       try {
-        requestPage = request.frame().page();
+        requestFrame = request.frame();
+        requestPage = requestFrame.page();
       } catch {
         await route.fallback();
         return;
       }
       const opener = requestPage === product ? null : await requestPage.opener().catch(() => null);
       if (requestPage !== product && opener !== product) {
+        await route.fallback();
+        return;
+      }
+      if (!request.isNavigationRequest() || requestFrame !== requestPage.mainFrame()) {
         await route.fallback();
         return;
       }
@@ -15554,7 +15584,9 @@ export class BrowserController {
       popup = page;
       boundaryPage = page;
       observedUrls.add(page.url());
-      page.on("framenavigated", (frame) => observedUrls.add(frame.url()));
+      page.on("framenavigated", (frame) => {
+        if (frame === page.mainFrame()) observedUrls.add(frame.url());
+      });
       void page
         .opener()
         .then((opener) => {

@@ -7,6 +7,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
 import { BrowserController } from "../browser.js";
+import { classifyOAuthProviderDestination } from "../oauth-destination.js";
 import {
   act,
   finishProvisionSession,
@@ -39,6 +40,15 @@ describe("BrowserController OAuth popup lifecycle", () => {
 
   afterAll(async () => {
     await browser?.close();
+  });
+
+  it.each([
+    "https://tenant.auth0.com/authorize",
+    "https://tenant.okta.com/oauth2/default/v1/authorize",
+  ])("keeps generic broker destination %s unresolved", (destination) => {
+    expect(
+      classifyOAuthProviderDestination(destination, "https://product.test/login"),
+    ).toBeNull();
   });
 
   it("reattaches the active controller page when a provider closes its OAuth-return popup", async () => {
@@ -258,7 +268,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
-  it("keeps a delayed unresolved broker fenced until Google identity is restored", async () => {
+  it("keeps a generic Auth0 broker unresolved until Google identity is restored", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();
     await context.route("https://product.test/**", async (route) => {
@@ -266,11 +276,11 @@ describe("BrowserController OAuth popup lifecycle", () => {
         contentType: "text/html",
         body:
           route.request().url() === "https://product.test/login"
-            ? '<button id="oauth" onclick="window.open(\'https://broker.test/start\')">Continue</button><output id="clicks">0</output><script>document.querySelector("#oauth").addEventListener("click", () => document.querySelector("#clicks").textContent = String(Number(document.querySelector("#clicks").textContent) + 1))</script>'
+            ? '<button id="oauth" onclick="window.open(\'https://tenant.auth0.com/authorize\')">Continue</button><output id="clicks">0</output><script>document.querySelector("#oauth").addEventListener("click", () => document.querySelector("#clicks").textContent = String(Number(document.querySelector("#clicks").textContent) + 1))</script>'
             : "<main>Signed in</main>",
       });
     });
-    await context.route("https://broker.test/start", async (route) => {
+    await context.route("https://tenant.auth0.com/authorize", async (route) => {
       await route.fulfill({
         contentType: "text/html",
         body: '<script>setTimeout(() => location.href="https://accounts.google.com/o/oauth2/auth", 100)</script>',
@@ -292,6 +302,42 @@ describe("BrowserController OAuth popup lifecycle", () => {
       ).resolves.toBe("google");
       await controller.loginWithOAuth("#oauth", 2_000, "google");
       await expect(product.locator("#clicks").textContent()).resolves.toBe("1");
+      expect(controller.currentUrl()).toBe("https://product.test/login");
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("ignores provider-shaped subresources while observing OAuth navigation", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/login", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: `<button id="oauth">Continue</button>
+          <script>
+            document.querySelector("#oauth").addEventListener("click", () => {
+              void fetch("https://accounts.google.com/oauth-preload");
+              setTimeout(() => {
+                window.open("https://login.microsoftonline.com/common/oauth2/v2.0/authorize");
+              }, 50);
+            });
+          </script>`,
+      });
+    });
+    await context.route("https://accounts.google.com/**", async (route) => {
+      await route.fulfill({ body: "preloaded" });
+    });
+    await context.route("https://login.microsoftonline.com/**", async (route) => {
+      await route.fulfill({ contentType: "text/html", body: "Microsoft OAuth" });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+
+    try {
+      await expect(controller.detectOAuthProviderDestination("#oauth", 2_000)).resolves.toBe(
+        "other",
+      );
       expect(controller.currentUrl()).toBe("https://product.test/login");
     } finally {
       await context.close().catch(() => undefined);

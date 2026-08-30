@@ -931,7 +931,7 @@ describe("checkout payment parsing", () => {
         });
         await page.goto("https://merchant.test/checkout");
         await page.setContent(`
-          <form action="https://merchant.test/charge" method="post">
+          <form>
             <input autocomplete="cc-number">
             <input autocomplete="cc-exp">
             <input autocomplete="cc-csc">
@@ -941,7 +941,7 @@ describe("checkout payment parsing", () => {
           <script>
             document.querySelector("form").addEventListener("submit", async (event) => {
               event.preventDefault();
-              await fetch(event.currentTarget.action, { method: event.currentTarget.method });
+              await fetch("https://merchant.test/charge", { method: "POST" });
               setTimeout(async () => {
                 await fetch("https://merchant.test/3ds");
                 history.pushState({}, "", "/thank-you/order-123");

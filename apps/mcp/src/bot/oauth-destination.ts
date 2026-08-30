@@ -19,9 +19,7 @@ export function classifyOAuthProviderDestination(
     return "google";
   }
   if (
-    /(^|\.)(?:github\.com|microsoftonline\.com|live\.com|appleid\.apple\.com|okta\.com|auth0\.com)$/i.test(
-      host,
-    ) ||
+    /(^|\.)(?:github\.com|microsoftonline\.com|live\.com|appleid\.apple\.com)$/i.test(host) ||
     /(?:provider|connection|oauth|sso|auth)[=/_-](?:github|microsoft|apple|okta|auth0)\b/i.test(
       signal,
     )
