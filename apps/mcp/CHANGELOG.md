@@ -1,5 +1,10 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.13-rc.12 (2026-08-30)
+
+- fix(mcp): prevent OAuth handoff hangs (#606)
+- ci: cut MCP release validation latency (#605)
+
 ## 1.1.13-rc.9 (2026-08-28)
 
 - fix(mcp): contain runaway operator browsers (#596)
