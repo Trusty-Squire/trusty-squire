@@ -255,6 +255,32 @@ describe("operator session storage state", () => {
     });
   });
 
+  it("treats missing metadata in a v1 snapshot as authoritative", async () => {
+    const canonical = mkdtempSync(join(tmpdir(), "ts-session-state-v1-metadata-clear-"));
+    roots.push(canonical);
+    const state = {
+      cookies: [
+        {
+          name: "SID",
+          value: "rotated-google-session",
+          domain: ".google.com",
+          path: "/",
+        },
+      ],
+      origins: [],
+    };
+    await writeCanonicalIdentitySnapshot(canonical, state, undefined);
+    writeFileSync(
+      join(canonical, "provider-emails.json"),
+      JSON.stringify({ google: "stale-worker@example.com" }),
+    );
+
+    await expect(readCanonicalIdentityState(canonical)).resolves.toEqual({
+      storageState: state,
+      identityMetadata: undefined,
+    });
+  });
+
   it("creates distinct 0700 profiles and removes only the finished instance", async () => {
     const first = createEphemeralProfile();
     const second = createEphemeralProfile();

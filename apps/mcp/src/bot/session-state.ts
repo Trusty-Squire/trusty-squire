@@ -125,7 +125,7 @@ export async function readCanonicalIdentityState(
     if (parsed === undefined) {
       return { storageState: undefined, identityMetadata: undefined };
     }
-    if (parsed.kind === "snapshot" && parsed.value.identityMetadata !== undefined) {
+    if (parsed.kind === "snapshot") {
       return {
         storageState: parsed.value.storageState,
         identityMetadata: parsed.value.identityMetadata,
@@ -135,7 +135,7 @@ export async function readCanonicalIdentityState(
     const confirmed = await readCanonicalIdentityFile(profileDir);
     if (confirmed?.serialized !== parsed.serialized) continue;
     return {
-      storageState: parsed.kind === "snapshot" ? parsed.value.storageState : parsed.value,
+      storageState: parsed.value,
       identityMetadata,
     };
   }

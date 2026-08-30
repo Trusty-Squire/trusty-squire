@@ -66,6 +66,7 @@ import type { ApiClient } from "../api-client.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
 import { pickVerificationLink } from "./email-verification.js";
 import {
+  canonicalIdentitySnapshotDisposition,
   createEphemeralProfile,
   destroyEphemeralProfile,
   hasUsableGoogleIdentity,
@@ -1253,20 +1254,13 @@ async function runSerializedGoogleIdentityOperation<T>(
     } catch (error) {
       operationError = error;
     }
-    const googleAccountEmail = await browser.detectGoogleAccountEmail();
-    let rotatedState: Awaited<ReturnType<BrowserController["captureStorageState"]>> | undefined;
-    let captureError: unknown;
-    try {
-      rotatedState = await browser.captureStorageState();
-    } catch (error) {
-      captureError = error;
-    }
-    if (rotatedState === undefined) throw captureError;
     let originalCloseState: "closed" | "force_closed_unproven" | "unknown" = "unknown";
     let replacement: BrowserController | null = null;
     let replacementPending: StartingBrowser | null = null;
     let readyReplacement: BrowserController | null = null;
     try {
+      const googleAccountEmail = await browser.detectGoogleAccountEmail();
+      const rotatedState = await browser.captureStorageState();
       originalCloseState = await closeBrowserBounded(
         browser,
         false,
@@ -1278,14 +1272,17 @@ async function runSerializedGoogleIdentityOperation<T>(
         );
       }
       assertOwned();
-      const published = await writeCanonicalIdentitySnapshot(
-        ephemeral.canonicalProfileDir,
-        rotatedState,
-        googleAccountEmail === null ? undefined : { googleAccountEmail },
-        () => ownsSession(),
-      );
-      if (!published) {
-        throw new Error("Google OAuth identity handoff could not publish session state");
+      const metadata = googleAccountEmail === null ? undefined : { googleAccountEmail };
+      if (canonicalIdentitySnapshotDisposition(rotatedState, metadata) !== "oversized") {
+        const published = await writeCanonicalIdentitySnapshot(
+          ephemeral.canonicalProfileDir,
+          rotatedState,
+          metadata,
+          () => ownsSession(),
+        );
+        if (!published) {
+          throw new Error("Google OAuth identity handoff could not publish session state");
+        }
       }
       assertOwned();
 
@@ -1336,6 +1333,14 @@ async function runSerializedGoogleIdentityOperation<T>(
       if (resumeUrl.length > 0) await replacement.goto(resumeUrl);
       readyReplacement = replacement;
     } catch (error) {
+      let originalCleanupState = originalCloseState;
+      if (originalCleanupState !== "closed") {
+        originalCleanupState = await closeBrowserBounded(
+          browser,
+          true,
+          "Google OAuth browser cleanup timed out",
+        ).catch(() => "unknown" as const);
+      }
       let replacementCloseState: "closed" | "force_closed_unproven" | "unknown" = "closed";
       let pendingHandledProfile = false;
       if (replacementPending !== null) {
@@ -1362,12 +1367,12 @@ async function runSerializedGoogleIdentityOperation<T>(
       stopSessionWatchdog(session);
       disposeSessionWatchdog(session);
       if (
-        originalCloseState === "closed" &&
+        originalCleanupState === "closed" &&
         replacementCloseState === "closed" &&
         !pendingHandledProfile
       ) {
         destroyEphemeralProfileDetached(ephemeral.profileDir);
-      } else if (originalCloseState !== "closed" || replacementCloseState !== "closed") {
+      } else if (originalCleanupState !== "closed" || replacementCloseState !== "closed") {
         console.error(
           `[operator] retained ephemeral profile after failed Google OAuth handoff: ${ephemeral.profileDir}`,
         );
@@ -1457,14 +1462,17 @@ async function runDetachedGoogleIdentityOperation<T>(
         if (!ownsSession()) {
           throw new Error("Google identity operation cancelled during operator shutdown");
         }
-        const published = await writeCanonicalIdentitySnapshot(
-          ephemeral.canonicalProfileDir,
-          rotatedState,
-          googleAccountEmail === null ? undefined : { googleAccountEmail },
-          ownsSession,
-        );
-        if (!published) {
-          throw new Error("Google identity operation could not publish session state");
+        const metadata = googleAccountEmail === null ? undefined : { googleAccountEmail };
+        if (canonicalIdentitySnapshotDisposition(rotatedState, metadata) !== "oversized") {
+          const published = await writeCanonicalIdentitySnapshot(
+            ephemeral.canonicalProfileDir,
+            rotatedState,
+            metadata,
+            ownsSession,
+          );
+          if (!published) {
+            throw new Error("Google identity operation could not publish session state");
+          }
         }
         if (operationError !== undefined) throw operationError;
         return result as T;

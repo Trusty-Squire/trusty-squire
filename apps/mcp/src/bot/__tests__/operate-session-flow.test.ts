@@ -945,6 +945,7 @@ import { ApiClient } from "../../api-client.js";
 import { dispatchOperatorBrowserProcessTermination } from "../operator-browser-watchdog.js";
 import { BrowserController } from "../browser.js";
 import { acquireProfileOperationGuard } from "../profile.js";
+import { MAX_SESSION_STATE_BYTES } from "../session-state.js";
 import {
   startProvisionSession,
   startHarnessProvisionSession,
@@ -3798,9 +3799,61 @@ describe("operate session — OAuth lifecycle", () => {
       act(started.session_id, { kind: "oauth_login", target: "Continue with Google" }),
     ).rejects.toThrow("capture failed");
 
-    expect(h.closeCalls).toBe(0);
+    expect(h.closeCalls).toBe(1);
+    expect(activeSessionCount()).toBe(0);
+    expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
+    expect(h.storageStateWrites).toEqual([]);
+    await expect(finishProvisionSession(started.session_id)).rejects.toThrow(
+      "unknown provision session",
+    );
+  });
+
+  it("keeps OAuth successful when the rotated snapshot is oversized", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-google-oversized";
+    const google = {
+      cookies: [
+        {
+          name: "SID",
+          value: "google-session-before-oversized-capture",
+          domain: ".google.com",
+          path: "/",
+        },
+      ],
+      origins: [],
+    };
+    const rotated = {
+      cookies: [{ ...google.cookies[0]!, value: "google-session-after-oversized-capture" }],
+      origins: [
+        {
+          origin: "https://app.example.com",
+          localStorage: [{ name: "state", value: "x".repeat(MAX_SESSION_STATE_BYTES) }],
+        },
+      ],
+    };
+    h.storageStates.set(canonical, google);
+    h.captureStorageStateSequences.set(0, [{ cookies: [], origins: [] }, rotated]);
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+
+    await expect(
+      act(started.session_id, { kind: "oauth_login", target: "Continue with Google" }),
+    ).resolves.toMatchObject({ url: "https://app.example.com/login" });
+
     expect(activeSessionCount()).toBe(1);
     expect(h.storageStateWrites).toEqual([]);
+    expect(h.storageStates.get(canonical)).toEqual(google);
+    expect(h.seededStorageStates[1]).toEqual(rotated);
     await finishProvisionSession(started.session_id);
   });
 
@@ -7250,7 +7303,15 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     });
     h.currentUrl = "https://app.example.com/verify-email";
     h.visibleText = "Your verification code is 481920.";
-    h.captureStorageStates.set(1, googleState);
+    h.captureStorageStates.set(1, {
+      ...googleState,
+      origins: [
+        {
+          origin: "https://mail.google.com",
+          localStorage: [{ name: "state", value: "x".repeat(MAX_SESSION_STATE_BYTES) }],
+        },
+      ],
+    });
     const res = await awaitVerification(obs.session_id, {});
     expect(res.code).toBe("481920");
     expect(res.sealed).toBeUndefined();
@@ -7261,6 +7322,8 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
       { hosts: ["mail.google.com"], phase: "exit" },
     ]);
     expect(h.currentUrl).toBe("https://app.example.com/verify-email");
+    expect(h.storageStateWrites).toEqual([]);
+    expect(h.storageStates.get(canonical)).toEqual(googleState);
   });
 
   it("recursively seals delegated verification results in Compact V2 only", async () => {
