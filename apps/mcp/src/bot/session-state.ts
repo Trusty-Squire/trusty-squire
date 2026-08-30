@@ -4,6 +4,7 @@ import { chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserContext } from "playwright";
+import type { OAuthProviderId } from "./oauth-providers.js";
 
 export type BrowserStorageState = Awaited<ReturnType<BrowserContext["storageState"]>>;
 
@@ -22,6 +23,10 @@ export const GOOGLE_LOGIN_COOKIE_MARKERS = [
   "APISID",
   "SAPISID",
 ] as const;
+
+function isCanonicalProviderMarker(value: unknown): value is OAuthProviderId {
+  return value === "google" || value === "github";
+}
 
 export function hasUsableGoogleIdentity(
   state: BrowserStorageState | undefined,
@@ -65,6 +70,7 @@ interface CanonicalIdentitySnapshot {
   version: 1;
   storageState: BrowserStorageState;
   identityMetadata?: CanonicalIdentityMetadata;
+  providerMarkers?: OAuthProviderId[];
 }
 
 export interface CanonicalIdentityState {
@@ -156,6 +162,9 @@ async function readCanonicalIdentityFile(
     const text = serialized.toString("utf8");
     const parsed = JSON.parse(text) as Record<string, unknown>;
     if (parsed.version === 1 && isBrowserStorageState(parsed.storageState)) {
+      const providerMarkers = Array.isArray(parsed.providerMarkers)
+        ? parsed.providerMarkers.filter(isCanonicalProviderMarker)
+        : undefined;
       const metadata = parsed.identityMetadata;
       if (metadata !== undefined) {
         if (metadata === null || typeof metadata !== "object") return undefined;
@@ -168,13 +177,18 @@ async function readCanonicalIdentityFile(
             version: 1,
             storageState: parsed.storageState,
             identityMetadata: { googleAccountEmail: email },
+            ...(providerMarkers === undefined ? {} : { providerMarkers }),
           },
         };
       }
       return {
         kind: "snapshot",
         serialized: text,
-        value: { version: 1, storageState: parsed.storageState },
+        value: {
+          version: 1,
+          storageState: parsed.storageState,
+          ...(providerMarkers === undefined ? {} : { providerMarkers }),
+        },
       };
     }
     return isBrowserStorageState(parsed)
@@ -327,57 +341,61 @@ export async function writeCanonicalIdentitySnapshot(
   state: BrowserStorageState,
   metadata: CanonicalIdentityMetadata | undefined,
   canPublish: () => boolean = () => true,
+  confirmedProviders: readonly OAuthProviderId[] = [],
 ): Promise<boolean> {
   const disposition = canonicalIdentitySnapshotDisposition(state, metadata);
   if (disposition === "invalid_metadata") return false;
+  await mkdir(profileDir, { recursive: true, mode: 0o700 });
+  const destination = sessionStatePath(profileDir);
+  const markerDestination = join(profileDir, LOGGED_IN_PROVIDERS_FILE);
+  let parsedProviders: unknown;
+  try {
+    parsedProviders = JSON.parse(await readFile(markerDestination, "utf8"));
+  } catch {
+    // Missing/malformed legacy marker starts from the last atomic snapshot.
+  }
+  const providers = new Set<OAuthProviderId>(
+    Array.isArray(parsedProviders) ? parsedProviders.filter(isCanonicalProviderMarker) : [],
+  );
+  for (const provider of confirmedProviders) providers.add(provider);
+  if (!hasUsableGoogleIdentity(state)) providers.delete("google");
+  const providerMarkers = [...providers].sort();
+  const includeProviderMarkers = confirmedProviders.length > 0 || Array.isArray(parsedProviders);
   const snapshot: CanonicalIdentitySnapshot = {
     version: 1,
     storageState: state,
     ...(metadata === undefined ? {} : { identityMetadata: metadata }),
+    ...(includeProviderMarkers ? { providerMarkers } : {}),
   };
   const serialized = JSON.stringify(snapshot);
   const serializedBytes = Buffer.byteLength(serialized);
-  if (disposition === "oversized") {
+  if (disposition === "oversized" || serializedBytes > MAX_SESSION_STATE_BYTES) {
     console.error(
       `[operator] storageState snapshot is ${serializedBytes} bytes, exceeding the ${MAX_SESSION_STATE_BYTES}-byte limit; retaining prior snapshot`,
     );
     return false;
   }
-  await mkdir(profileDir, { recursive: true, mode: 0o700 });
-  const destination = sessionStatePath(profileDir);
   const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
-  const markerDestination = join(profileDir, LOGGED_IN_PROVIDERS_FILE);
-  let markerTemporary: string | undefined;
+  let markerTemporary: string | undefined = includeProviderMarkers
+    ? `${markerDestination}.${process.pid}.${randomUUID()}.tmp`
+    : undefined;
   let published = false;
   try {
     await writeFile(temporary, serialized, { mode: 0o600 });
     await chmod(temporary, 0o600);
-    if (!hasUsableGoogleIdentity(state)) {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(await readFile(markerDestination, "utf8"));
-      } catch {
-        // A missing/malformed marker already reads as no logged-in providers.
-      }
-      if (Array.isArray(parsed) && parsed.includes("google")) {
-        markerTemporary = `${markerDestination}.${process.pid}.${randomUUID()}.tmp`;
-        await writeFile(
-          markerTemporary,
-          JSON.stringify(parsed.filter((provider) => provider !== "google")),
-          { mode: 0o600 },
-        );
-        await chmod(markerTemporary, 0o600);
-      }
+    if (markerTemporary !== undefined) {
+      await writeFile(markerTemporary, JSON.stringify(providerMarkers), { mode: 0o600 });
+      await chmod(markerTemporary, 0o600);
     }
     if (!canPublish()) return false;
-    // Clear the positive marker first. A crash between these renames can cause
-    // a conservative false negative, never the stale-positive inconsistency
-    // where an empty portable snapshot still advertises Google as logged in.
+    // The snapshot carries the authoritative provider markers. Its single
+    // rename publishes cookies + markers together; the legacy marker mirror is
+    // renamed second for older readers.
+    renameSync(temporary, destination);
     if (markerTemporary !== undefined) {
       renameSync(markerTemporary, markerDestination);
       markerTemporary = undefined;
     }
-    renameSync(temporary, destination);
     published = true;
     return true;
   } finally {

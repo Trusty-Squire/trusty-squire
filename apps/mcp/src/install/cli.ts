@@ -1328,34 +1328,28 @@ async function loginWithProfileGuard(args: Argv, profileDir: string): Promise<vo
   const provider: OAuthProviderId = args.providerArg ?? args.forceReloginProvider ?? "google";
   const label = provider === "github" ? "GitHub" : "Google";
   ui.heading(`Sign in to ${label}`);
-  // --force-relogin wipes this provider's cookies (via forceOpen below),
-  // so drop its marker up front too. Otherwise a stale marker from a
-  // prior successful login survives a re-login that the user abandons or
-  // that times out (e.g. GitHub's 2FA "verify it's you" never finished) —
-  // leaving logged-in-providers.json claiming a session whose auth cookie
-  // (user_session) no longer exists. ensureOAuthSession re-adds the marker
-  // only when it confirms a live cookie, so success still records it.
-  if (args.forceRelogin) clearProviderLoggedIn(provider, profileDir);
-  if (args.forceRelogin && provider === "google") {
+  ui.hint(`Running @trusty-squire/mcp ${VERSION}.`);
+  // An explicit login always means "open a fresh provider login". Requiring a
+  // second --force-relogin flag made the command silently short-circuit on any
+  // cached cookie, even when the user was deliberately repairing this flow.
+  // Google invalidation publishes the cookie-less snapshot and marker
+  // together; GitHub has no portable-identity precondition, so only its marker
+  // is cleared before the fresh OAuth round trip.
+  if (provider === "google") {
     const invalidated = await invalidateCanonicalGoogleIdentity(profileDir);
     if (!invalidated) {
       ui.fail("I couldn't invalidate the previous Google identity snapshot.");
       process.exit(1);
     }
+  } else {
+    clearProviderLoggedIn(provider, profileDir);
   }
   const result = await ensureOAuthSession({
     provider,
     // --profile-dir pins login to an isolated profile (a secondary
     // personal Google identity) instead of the shared bot profile.
     ...(args.profileDir !== undefined ? { profileDir: args.profileDir } : {}),
-    // 0.8.3-rc.1 — --force-relogin now also applies to the bare
-    // `login` command. Without this, a valid cached session
-    // short-circuits the flow and the operator has no way to open
-    // the browser — even when the actual problem is a service-
-    // side challenge (GitHub's "verify it's you" / Google's device-
-    // prompt drift) that only an interactive browser session can
-    // clear.
-    ...(args.forceRelogin ? { forceOpen: true } : {}),
+    forceOpen: true,
   });
   switch (result.status) {
     case "already_valid":

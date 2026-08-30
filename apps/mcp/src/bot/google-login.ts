@@ -40,7 +40,6 @@ import {
   startInstallCompletionListener,
   withInstallCompletionCallback,
 } from "./install-completion.js";
-import { markProviderLoggedIn } from "./login-state.js";
 import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
@@ -210,13 +209,12 @@ async function detectGoogleAccountEmailInContext(context: BrowserContext): Promi
 }
 
 // --- config ------------------------------------------------------------
-// Per-provider login targets for `mcp login` (T13). `cookies` are ones
-// the provider only sets after a completed login — polling for them is
-// how the flow detects the user finished.
+// Provider cookie markers for `mcp login` (T13). A cookie proves the provider
+// login succeeded; the Trusty Squire vault return proves its OAuth handoff also
+// finished before the portable session is published.
 interface LoginTarget {
   provider: OAuthProviderId;
   label: string;
-  loginUrl: string;
   cookieOrigin: string;
   cookies: readonly string[];
 }
@@ -224,18 +222,53 @@ const LOGIN_TARGETS: Record<OAuthProviderId, LoginTarget> = {
   google: {
     provider: "google",
     label: "Google",
-    loginUrl: "https://accounts.google.com/",
     cookieOrigin: "https://www.google.com",
     cookies: GOOGLE_LOGIN_COOKIE_MARKERS,
   },
   github: {
     provider: "github",
     label: "GitHub",
-    loginUrl: "https://github.com/login",
     cookieOrigin: "https://github.com",
     cookies: ["user_session", "__Host-user_session_same_site"],
   },
 };
+const DEFAULT_LOGIN_WEB_BASE = "https://trustysquire.ai";
+
+export function explicitLoginStartUrl(
+  provider: OAuthProviderId,
+  webBase = process.env.TRUSTY_SQUIRE_WEB_BASE ?? DEFAULT_LOGIN_WEB_BASE,
+): string {
+  const url = new URL(`/v1/auth/oauth/${provider}/start`, webBase);
+  url.searchParams.set("next", "/vault");
+  return url.toString();
+}
+
+interface ExplicitLoginContext {
+  cookies(url: string): Promise<Array<{ name: string }>>;
+  pages(): Array<{ url(): string }>;
+}
+
+export async function explicitLoginCompleted(
+  context: ExplicitLoginContext,
+  provider: OAuthProviderId,
+  webBase = process.env.TRUSTY_SQUIRE_WEB_BASE ?? DEFAULT_LOGIN_WEB_BASE,
+): Promise<boolean> {
+  const target = LOGIN_TARGETS[provider];
+  const cookies = await context.cookies(target.cookieOrigin);
+  if (!cookies.some((cookie) => target.cookies.includes(cookie.name))) return false;
+  const expected = new URL(webBase);
+  const page = context.pages()[0];
+  if (page === undefined) return false;
+  try {
+    const current = new URL(page.url());
+    return (
+      current.origin === expected.origin &&
+      (current.pathname === "/vault" || current.pathname.startsWith("/vault/"))
+    );
+  } catch {
+    return false;
+  }
+}
 export interface LoginResult {
   status: "logged_in" | "already_valid" | "timeout" | "error";
   detail?: string;
@@ -677,6 +710,9 @@ export interface RunInBotChromeOpts {
   onProxyDisposition?: (proxy: LoginProxyDisposition) => void;
   onConfirmedLogin?: () => Promise<void>;
   seedProvider?: OAuthProviderId | (() => OAuthProviderId | null);
+  confirmedProviders?:
+    | readonly OAuthProviderId[]
+    | (() => readonly OAuthProviderId[]);
 }
 
 const LOGIN_BROWSER_CLOSED_ERROR =
@@ -712,7 +748,10 @@ async function captureClosedPlainLoginState(
 }
 
 export async function finalizeLoginRun(
-  opts: Pick<RunInBotChromeOpts, "profileDir" | "onConfirmedLogin" | "seedProvider">,
+  opts: Pick<
+    RunInBotChromeOpts,
+    "profileDir" | "onConfirmedLogin" | "seedProvider" | "confirmedProviders"
+  >,
   result: LoginRunResult,
 ): Promise<void> {
   if (result.status !== "completed" && result.status !== "preflight_satisfied") return;
@@ -721,6 +760,10 @@ export async function finalizeLoginRun(
   }
   const seedProvider =
     typeof opts.seedProvider === "function" ? opts.seedProvider() : opts.seedProvider;
+  const confirmedProviders =
+    typeof opts.confirmedProviders === "function"
+      ? opts.confirmedProviders()
+      : (opts.confirmedProviders ?? []);
   const priorMetadata = await readCanonicalIdentityMetadata(opts.profileDir);
   if (seedProvider === "google" && result.status === "completed") {
     if (!hasUsableGoogleIdentity(result.storageState)) {
@@ -742,6 +785,8 @@ export async function finalizeLoginRun(
     opts.profileDir,
     result.storageState,
     metadata,
+    () => true,
+    confirmedProviders,
   );
   if (!published) throw new Error("login identity snapshot could not be published");
   await opts.onConfirmedLogin?.();
@@ -1227,6 +1272,7 @@ export async function ensureOAuthSession(opts?: {
   // Google's number-match drift) the cached cookie alone doesn't
   // resolve.
   forceOpen?: boolean;
+  webBase?: string;
 }): Promise<LoginResult> {
   const provider: OAuthProviderId = opts?.provider ?? "google";
   const target = LOGIN_TARGETS[provider];
@@ -1235,9 +1281,10 @@ export async function ensureOAuthSession(opts?: {
   const deadline = Date.now() + timeoutMinutes * 60 * 1000;
 
   try {
+    const webBase = opts?.webBase ?? process.env.TRUSTY_SQUIRE_WEB_BASE ?? DEFAULT_LOGIN_WEB_BASE;
     const result = await runInBotChrome({
       profileDir,
-      url: target.loginUrl,
+      url: explicitLoginStartUrl(provider, webBase),
       deadline,
       bannerLabel: `You'll see a Chrome window — log into your ${target.label} account.`,
       // When forceOpen is true, the preflight ALSO clears the
@@ -1268,9 +1315,9 @@ export async function ensureOAuthSession(opts?: {
         }
         return hasProviderSession(ctx, target);
       },
-      pollUntilDone: (ctx) => hasProviderSession(ctx, target),
-      onConfirmedLogin: async () => markProviderLoggedIn(provider, profileDir),
+      pollUntilDone: (ctx) => explicitLoginCompleted(ctx, provider, webBase),
       seedProvider: provider,
+      confirmedProviders: [provider],
     });
     // Map runInBotChrome's status set to ensureOAuthSession's contract.
     let mapped: LoginResult;
@@ -1322,6 +1369,7 @@ export async function openInstallConfirmInBotChrome(
   let completion: Awaited<ReturnType<typeof startInstallCompletionListener>> | undefined;
   let observedGoogleIdentity = false;
   const completedProviders = new Set<OAuthProviderId>();
+  const observedProviders = new Set<OAuthProviderId>();
 
   try {
     const doneUrl = new URL("/install/done", opts.confirmUrl).toString();
@@ -1357,8 +1405,8 @@ export async function openInstallConfirmInBotChrome(
       // mode) and mark whichever seeded.
       plainOnSuccess: async (dir) => {
         for (const provider of ["google", "github"] as const) {
-          if (profileHasProviderCookies(dir, provider)) {
-            markProviderLoggedIn(provider, dir);
+          if (completedProviders.has(provider) && profileHasProviderCookies(dir, provider)) {
+            observedProviders.add(provider);
             if (provider === "google" && completedProviders.has("google")) {
               observedGoogleIdentity = true;
             }
@@ -1372,6 +1420,7 @@ export async function openInstallConfirmInBotChrome(
         // the OAuth login is the whole point of the plain path.
       },
       seedProvider: () => (observedGoogleIdentity ? "google" : null),
+      confirmedProviders: () => [...observedProviders],
     });
     if (result.status === "completed") {
       return { status: "claimed" };

@@ -39,6 +39,8 @@ import {
   classifyGoogleAuthState,
   checkLoginStatusWithin,
   detectActiveProviderSessions,
+  explicitLoginCompleted,
+  explicitLoginStartUrl,
   extractGoogleAccountEmail,
   extractGoogleNumberMatch,
   extractOAuthScopes,
@@ -153,6 +155,39 @@ describe("interactive login display routing", () => {
     });
     expect(displayed).toHaveBeenCalledOnce();
     expect(remote).not.toHaveBeenCalled();
+  });
+});
+
+describe("explicit provider login completion", () => {
+  it("starts at Trusty Squire OAuth and returns to the vault", () => {
+    expect(explicitLoginStartUrl("google", "https://trustysquire.ai")).toBe(
+      "https://trustysquire.ai/v1/auth/oauth/google/start?next=%2Fvault",
+    );
+    expect(explicitLoginStartUrl("github", "https://trustysquire.ai")).toBe(
+      "https://trustysquire.ai/v1/auth/oauth/github/start?next=%2Fvault",
+    );
+  });
+
+  it("does not complete on a provider cookie until the OAuth callback reaches the vault", async () => {
+    const cookies = vi.fn(async () => [
+      { name: "SID", value: "live-google-session", domain: ".google.com", path: "/" },
+    ]);
+    const context = {
+      cookies,
+      pages: () => [
+        { url: () => "https://myaccount.google.com/" },
+        { url: () => "https://trustysquire.ai/vault" },
+      ],
+    };
+
+    await expect(
+      explicitLoginCompleted(context, "google", "https://trustysquire.ai"),
+    ).resolves.toBe(false);
+
+    context.pages = () => [{ url: () => "https://trustysquire.ai/vault" }];
+    await expect(
+      explicitLoginCompleted(context, "google", "https://trustysquire.ai"),
+    ).resolves.toBe(true);
   });
 });
 
@@ -1070,13 +1105,17 @@ describe("confirmed login finalization", () => {
     };
     try {
       await finalizeLoginRun(
-        { profileDir, seedProvider: "google" },
+        { profileDir, seedProvider: "google", confirmedProviders: ["google"] },
         { status: "completed", closeState: "closed", storageState: liveGoogleState },
       );
       await expect(readSessionState(profileDir)).resolves.toEqual(liveGoogleState);
+      expect(loggedInProviders(profileDir)).toEqual(["google"]);
+      expect(
+        JSON.parse(readFileSync(join(profileDir, "trusty-squire-session-state.json"), "utf8")),
+      ).toMatchObject({ providerMarkers: ["google"] });
       await expect(
         finalizeLoginRun(
-          { profileDir, seedProvider: "google" },
+          { profileDir, seedProvider: "google", confirmedProviders: ["google"] },
           {
             status: "completed",
             closeState: "closed",
@@ -1094,14 +1133,13 @@ describe("confirmed login finalization", () => {
   it("treats an oversized completed login snapshot as a clean skip", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
     const prior = { cookies: [], origins: [] };
-    const onConfirmedLogin = vi.fn(async () => undefined);
     try {
       await finalizeLoginRun(
         { profileDir },
         { status: "completed", closeState: "closed", storageState: prior },
       );
       await finalizeLoginRun(
-        { profileDir, onConfirmedLogin },
+        { profileDir, confirmedProviders: ["google"] },
         {
           status: "completed",
           closeState: "closed",
@@ -1117,7 +1155,7 @@ describe("confirmed login finalization", () => {
         },
       );
 
-      expect(onConfirmedLogin).toHaveBeenCalledOnce();
+      expect(loggedInProviders(profileDir)).toEqual([]);
       await expect(readSessionState(profileDir)).resolves.toEqual(prior);
     } finally {
       rmSync(profileDir, { recursive: true, force: true });

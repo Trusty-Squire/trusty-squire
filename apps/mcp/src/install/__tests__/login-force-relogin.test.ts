@@ -81,14 +81,26 @@ describe("login --force-relogin marker honesty", () => {
     expect(m.markProviderLoggedIn).not.toHaveBeenCalled();
   });
 
-  it("does NOT touch the marker when --force-relogin is absent", async () => {
+  it("treats every explicit login as a fresh provider login without requiring --force-relogin", async () => {
     m.ensureOAuthSession.mockResolvedValue({ status: "timeout" });
     await expect(
-      runCli(["login", "--provider=github", `--profile-dir=${profileDir}`]),
+      runCli(["login", "--provider=google", `--profile-dir=${profileDir}`]),
     ).rejects.toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(m.clearProviderLoggedIn).not.toHaveBeenCalled();
-    expect(m.invalidateCanonicalGoogleIdentity).not.toHaveBeenCalled();
+    expect(m.invalidateCanonicalGoogleIdentity).toHaveBeenCalledWith(profileDir);
+    expect(m.ensureOAuthSession).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "google", profileDir, forceOpen: true }),
+    );
+  });
+
+  it("prints the package version for an explicit login", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    m.ensureOAuthSession.mockResolvedValue({ status: "already_valid" });
+
+    await runCli(["login", "--provider=google", `--profile-dir=${profileDir}`]);
+
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/@trusty-squire\/mcp \d+\.\d+\.\d+/));
   });
 
   it("invalidates portable Google identity before a forced login can time out", async () => {
