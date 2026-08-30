@@ -6,6 +6,8 @@ const BASIC_OAUTH_SCOPES: ReadonlySet<string> = new Set([
   "https://www.googleapis.com/auth/userinfo.profile",
 ]);
 
+const GITHUB_BASIC_SCOPES: ReadonlySet<string> = new Set(["read:user", "user:email"]);
+
 export function extractOAuthScopes(rawUrl: string): string[] | null {
   const scopes: string[] = [];
   const visit = (urlStr: string, depth: number): void => {
@@ -34,6 +36,10 @@ export function extractOAuthScopes(rawUrl: string): string[] | null {
 
 export function scopesAreBasic(scopes: readonly string[]): boolean {
   return scopes.length > 0 && scopes.every((scope) => BASIC_OAUTH_SCOPES.has(scope));
+}
+
+export function githubScopesAreBasic(scopes: readonly string[]): boolean {
+  return scopes.length > 0 && scopes.every((scope) => GITHUB_BASIC_SCOPES.has(scope));
 }
 
 export function scrapeGoogleScopePhrases(text: string): string[] {

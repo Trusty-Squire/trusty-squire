@@ -61,7 +61,12 @@ import {
   type ProfileCloseState,
 } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
-import { extractOAuthScopes, scopesAreBasic, scrapeGoogleScopePhrases } from "./oauth-scope.js";
+import {
+  extractOAuthScopes,
+  githubScopesAreBasic,
+  scopesAreBasic,
+  scrapeGoogleScopePhrases,
+} from "./oauth-scope.js";
 import { GOOGLE_LOGIN_COOKIE_MARKERS, type BrowserStorageState } from "./session-state.js";
 import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
 import {
@@ -16124,8 +16129,28 @@ export class BrowserController {
   // — the scope-gated auto-approve (T7/T13). Returns false when no
   // approve control is present — the agent then aborts rather than
   // hang. Clicks only; never types (the critical guarantee holds here).
-  async advanceOAuthConsent(provider: OAuthProviderId): Promise<boolean> {
+  async advanceOAuthConsent(declaredProvider: OAuthProviderId): Promise<boolean> {
     if (!this.page) throw new Error("Browser not started");
+    const tile = this.page.locator("[data-identifier]").first();
+    if ((await tile.count().catch(() => 0)) > 0) {
+      try {
+        await tile.click({ timeout: 8000 });
+        return true;
+      } catch {
+        // fall through to the approve-button path
+      }
+    }
+    const consentText = await this.page
+      .locator("body")
+      .innerText()
+      .catch(() => "");
+    const provider: OAuthProviderId = /\bgoogle account\b|\bcontinue (?:to|with) google\b/i.test(
+      consentText,
+    )
+      ? "google"
+      : /\bgithub\b/i.test(consentText)
+        ? "github"
+        : declaredProvider;
     if (provider === "github") {
       // GitHub App install flow can include an account target chooser before
       // the Install/Authorize screen:
@@ -16178,6 +16203,14 @@ export class BrowserController {
             .catch(() => false);
           if (advanced) return true;
         }
+      }
+      const scopes = extractOAuthScopes(this.page.url());
+      if (
+        scopes === null ||
+        !githubScopesAreBasic(scopes) ||
+        scrapeGoogleScopePhrases(consentText).length > 0
+      ) {
+        return false;
       }
       // GitHub consent screen variants:
       //   Classic OAuth: "Authorize <app>"
@@ -16265,22 +16298,7 @@ export class BrowserController {
       );
       return false;
     }
-    // Google. Account chooser: Google renders each account with a
-    // stable data-identifier attribute (the account email).
-    const tile = this.page.locator("[data-identifier]").first();
-    if ((await tile.count().catch(() => 0)) > 0) {
-      try {
-        await tile.click({ timeout: 8000 });
-        return true;
-      } catch {
-        // fall through to the approve-button path
-      }
-    }
     const scopes = extractOAuthScopes(this.page.url());
-    const consentText = await this.page
-      .locator("body")
-      .innerText()
-      .catch(() => "");
     if (
       scopes === null ||
       !scopesAreBasic(scopes) ||

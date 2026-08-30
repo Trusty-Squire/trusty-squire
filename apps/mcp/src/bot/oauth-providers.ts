@@ -18,12 +18,13 @@ import { classifyGoogleAuthState } from "./google-login.js";
 import {
   scopesAreBasic as googleScopesAreBasic,
   extractOAuthScopes,
+  githubScopesAreBasic,
 } from "./oauth-scope.js";
 
 // extractOAuthScopes reads the `scope` query parameter — provider-
 // agnostic (Google and GitHub both carry it on the consent URL), so
 // the agent imports it from here alongside the provider registry.
-export { extractOAuthScopes };
+export { extractOAuthScopes, githubScopesAreBasic };
 
 export type OAuthProviderId = "google" | "github";
 
@@ -181,15 +182,6 @@ export function isGitHubForced2faVerification(bodyText: string): boolean {
 // delete_repo, org, gist, workflow, notifications — must abort for
 // human review: a prompt-injected agent must not be able to grant the
 // bot's GitHub a repo-write or org-admin scope.
-const GITHUB_BASIC_SCOPES: ReadonlySet<string> = new Set(["read:user", "user:email"]);
-
-// True when EVERY requested scope is basic-identity. Empty list →
-// false: no scopes parsed means we cannot confirm, so we do not
-// auto-approve (consistent with the Google gate). Exported for tests.
-export function githubScopesAreBasic(scopes: readonly string[]): boolean {
-  return scopes.length > 0 && scopes.every((s) => GITHUB_BASIC_SCOPES.has(s));
-}
-
 // --- provider descriptor ---------------------------------------------
 export interface OAuthProvider {
   id: OAuthProviderId;
