@@ -185,6 +185,7 @@ export class ApiClient {
   async getPaymentApproval(
     id: string,
     candidateRead: boolean | "immediate" | "peek" | "wait-peek" = false,
+    waitMs?: number,
   ): Promise<PaymentApproval> {
     const query =
       candidateRead === true
@@ -196,7 +197,11 @@ export class ApiClient {
             : candidateRead === "wait-peek"
               ? "?wait_for_submission=1&peek_submission=1"
               : "";
-    return this.get(`/v1/pay/approvals/${encodeURIComponent(id)}${query}`);
+    const boundedWait =
+      waitMs === undefined
+        ? ""
+        : `${query.length === 0 ? "?" : "&"}wait_ms=${Math.max(0, Math.floor(waitMs))}`;
+    return this.get(`/v1/pay/approvals/${encodeURIComponent(id)}${query}${boundedWait}`);
   }
 
   async confirmPaymentApproval(

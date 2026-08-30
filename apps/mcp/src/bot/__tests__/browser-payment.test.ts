@@ -3042,7 +3042,7 @@ describe("3-D Secure resolution", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "returns timeout when neither an order route nor a decline appears",
+    "reports a pending challenge when neither an order route nor a decline appears",
     async () => {
       const { browser, page, controller } = await setupChallenge();
       let clock = 0;
@@ -3051,7 +3051,7 @@ describe("3-D Secure resolution", () => {
         clock += timeout;
       });
       try {
-        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("challenge_pending");
       } finally {
         wait.mockRestore();
         now.mockRestore();
@@ -3071,7 +3071,7 @@ describe("3-D Secure resolution", () => {
       });
       try {
         await page.evaluate(() => history.replaceState({}, "", "/checkout?success_url=/done"));
-        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("challenge_pending");
       } finally {
         wait.mockRestore();
         now.mockRestore();

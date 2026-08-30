@@ -1134,7 +1134,7 @@ describe("operate_payment_status [P0]", () => {
       session_id: PAYMENT_SESSION_B_ID,
       approval_id: "appr_session_b",
     });
-    expect(getWaitApproval).toHaveBeenCalledWith("appr_session_b", "wait-peek");
+    expect(getWaitApproval).toHaveBeenCalledWith("appr_session_b", "wait-peek", expect.any(Number));
 
     const getPayApproval = vi.fn().mockResolvedValue(approvalRecord(stateB));
     const payApi = makeMockApi({
@@ -1237,7 +1237,7 @@ describe("operate_payment_status [P0]", () => {
       ready_to_charge: true,
       next: { tool: "operate_pay", session_id: paymentSessionId },
     });
-    expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", "wait-peek");
+    expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", "wait-peek", expect.any(Number));
   });
 
   it("keeps a one-minute wait inside one status call until final approval arrives", async () => {
@@ -1271,8 +1271,18 @@ describe("operate_payment_status [P0]", () => {
       next: { tool: "operate_pay" },
     });
     expect(getPaymentApproval).toHaveBeenCalledTimes(2);
-    expect(getPaymentApproval).toHaveBeenNthCalledWith(1, "appr_status", "wait-peek");
-    expect(getPaymentApproval).toHaveBeenNthCalledWith(2, "appr_status", "wait-peek");
+    expect(getPaymentApproval).toHaveBeenNthCalledWith(
+      1,
+      "appr_status",
+      "wait-peek",
+      expect.any(Number),
+    );
+    expect(getPaymentApproval).toHaveBeenNthCalledWith(
+      2,
+      "appr_status",
+      "wait-peek",
+      expect.any(Number),
+    );
   });
 
   it("returns a denied approval as a terminal status without another action", async () => {
@@ -1324,7 +1334,7 @@ describe("operate_payment_status [P0]", () => {
       ready_to_charge: false,
       next: { tool: "operate_pay" },
     });
-    expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", "wait-peek");
+    expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", "wait-peek", expect.any(Number));
   });
 
   it("keeps the verified-review state explicit while waiting for the final signature", async () => {

@@ -94,6 +94,7 @@ export interface PendingThreeDsWait {
   payment_instrument_mismatch?: PaymentInstrumentMismatch;
   mandate_id?: string;
   deadline: number;
+  outcome: "three_ds" | "unknown";
 }
 
 export interface CartCheckoutObservation {
@@ -596,6 +597,8 @@ function statusAfterThreeDsResolution(
       return "payment_submitted";
     case "failed":
       return "payment_declined";
+    case "challenge_pending":
+      return "payment_3ds_required";
     case "timeout":
       return currentStatus;
   }
@@ -752,6 +755,18 @@ export async function executeOperatePay(
       if (deps.now() < resume.deadline) {
         try {
           const live = await api.getPaymentApproval(resume.approval_id);
+          if (live.status === "denied") {
+            resumableState = undefined;
+            keypairHandedOff = false;
+            return {
+              status: "payment_approval_denied",
+              approval_id: resume.approval_id,
+              approval_url: resume.approval_url,
+              merchant: resume.checkout.merchant,
+              amount_cents: resume.checkout.amount_cents,
+              currency: resume.checkout.currency,
+            };
+          }
           reusable = isLiveResumableApproval(live, resume, deps.now());
         } catch (error) {
           if (!(error instanceof ApiCallError && error.code === "payment_approval_not_found")) {
@@ -939,10 +954,12 @@ export async function executeOperatePay(
       if (iteration > 0 && !immediateReviewFollowup && !shouldKeepPolling()) break;
       immediateReviewFollowup = false;
       iteration++;
-      const approval = await api.getPaymentApproval(
-        approvalId,
-        deps.now() < callDeadline ? true : "immediate",
-      );
+      const remainingPollMs = Math.max(Math.min(callDeadline, deadline) - deps.now(), 0);
+      const candidateRead = remainingPollMs > 0 ? true : "immediate";
+      const approval =
+        candidateRead === true
+          ? await api.getPaymentApproval(approvalId, true, Math.min(remainingPollMs, 15_000))
+          : await api.getPaymentApproval(approvalId, "immediate");
       const liveDeadline = Date.parse(approval.expires_at);
       if (Number.isFinite(liveDeadline)) deadline = Math.min(deadline, liveDeadline);
       boundCardRef = approval.card_ref;
@@ -1433,6 +1450,7 @@ export async function executeOperatePay(
       last4,
       ...(mandateId !== undefined ? { mandate_id: mandateId } : {}),
       deadline: deps.now() + THREE_DS_RESUME_WINDOW_MS,
+      outcome: "unknown",
     };
     deps.onThreeDsHandoffArmed(pendingThreeDsHandoff);
     let retainedPendingThreeDs: PendingThreeDsWait | null = null;
@@ -1452,14 +1470,18 @@ export async function executeOperatePay(
       deps.onThreeDsCleared(retainedPendingThreeDs);
       retainedPendingThreeDs = null;
     };
-    const pendingThreeDsNext = {
+    const pendingOutcomeNext = (): Record<string, unknown> => ({
       tool: "operate_payment_status",
       wait_seconds: 15,
       hint:
-        "The 3-D Secure challenge has not resolved. Call operate_payment_status to keep " +
-        "checking the same submitted charge — this does not re-release the card or create a " +
-        "new approval.",
-    };
+        pendingThreeDsHandoff.outcome === "three_ds"
+          ? "The 3-D Secure challenge has not resolved. Call operate_payment_status to keep " +
+            "checking the same submitted charge — this does not re-release the card or create a " +
+            "new approval."
+          : "The submitted payment has no confirmed merchant outcome or 3-D Secure evidence. " +
+            "Call operate_payment_status to keep checking the same attempt; its outcome remains " +
+            "unknown until terminal merchant or authentication evidence appears.",
+    });
     let paymentStatus = "payment_submitted";
     let submitResult: CheckoutSubmitResult = { three_ds_required: false, order_confirmed: false };
     try {
@@ -1482,6 +1504,7 @@ export async function executeOperatePay(
       );
       if (submitResult.three_ds_required) paymentStatus = "payment_3ds_required";
       else if (!submitResult.order_confirmed) paymentStatus = "payment_outcome_unknown";
+      if (submitResult.three_ds_required) pendingThreeDsHandoff.outcome = "three_ds";
     } catch (error) {
       if (error instanceof Error && error.message === "payment_approval_expired") {
         clearPendingThreeDs();
@@ -1490,7 +1513,12 @@ export async function executeOperatePay(
       const outcomeUnknown = error instanceof PaymentSubmitOutcomeUnknownError;
       paymentStatus = outcomeUnknown ? "payment_outcome_unknown" : "payment_checkout_failed";
       if (outcomeUnknown) {
-        await browser.waitForThreeDsResolution(0).catch(() => undefined);
+        const resolution = await browser.waitForThreeDsResolution(0).catch(() => undefined);
+        if (resolution === "challenge_pending") {
+          pendingThreeDsHandoff.outcome = "three_ds";
+          submitResult.three_ds_required = true;
+          paymentStatus = "payment_3ds_required";
+        }
         const mismatch = browser.paymentInstrumentMismatch?.();
         if (mismatch !== undefined) submitResult.payment_instrument_mismatch = mismatch;
       }
@@ -1515,7 +1543,9 @@ export async function executeOperatePay(
         status: paymentStatus,
         audit_recorded,
         reason: outcomeUnknown
-          ? "payment_submit_outcome_unknown"
+          ? paymentStatus === "payment_3ds_required"
+            ? "payment_3ds_required"
+            : "payment_submit_outcome_unknown"
           : error instanceof Error && /^payment_[a-z_]+(?::[a-z_]+)?$/.test(error.message)
             ? error.message
             : "payment_checkout_failed",
@@ -1523,7 +1553,18 @@ export async function executeOperatePay(
         ...(submitResult.payment_instrument_mismatch !== undefined
           ? { warning: submitResult.payment_instrument_mismatch }
           : {}),
-        ...(outcomeUnknown && retainedPendingThreeDs !== null ? { next: pendingThreeDsNext } : {}),
+        ...(outcomeUnknown && retainedPendingThreeDs !== null
+          ? { next: pendingOutcomeNext() }
+          : {}),
+        ...(paymentStatus === "payment_3ds_required"
+          ? {
+              needs_user: {
+                wall: "3ds",
+                message: threeDsHandoffMessage(submitResult, undefined),
+                resume: "checkout",
+              },
+            }
+          : {}),
       };
     } finally {
       cardBytes?.fill(0);
@@ -1537,13 +1578,25 @@ export async function executeOperatePay(
       !submitResult.order_confirmed &&
       threeDsWaitMs > 0
     ) {
-      getThreeDsTelegramSent = trackThreeDsNotification(
-        api.notifyThreeDs(approvalId, threeDsNotificationMode(submitResult)),
-      );
+      const challengeKnownBeforeWait = pendingThreeDsHandoff.outcome === "three_ds";
+      if (challengeKnownBeforeWait) {
+        getThreeDsTelegramSent = trackThreeDsNotification(
+          api.notifyThreeDs(approvalId, threeDsNotificationMode(submitResult)),
+        );
+      }
       const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
       const mismatch = browser.paymentInstrumentMismatch?.();
       if (mismatch !== undefined) submitResult.payment_instrument_mismatch ??= mismatch;
       paymentStatus = statusAfterThreeDsResolution(paymentStatus, resolution);
+      if (resolution === "challenge_pending") {
+        pendingThreeDsHandoff.outcome = "three_ds";
+        submitResult.three_ds_required = true;
+        if (!challengeKnownBeforeWait) {
+          getThreeDsTelegramSent = trackThreeDsNotification(
+            api.notifyThreeDs(approvalId, "detected_challenge"),
+          );
+        }
+      }
     }
 
     let auditRecorded = true;
@@ -1571,13 +1624,19 @@ export async function executeOperatePay(
         ...(submitResult.payment_instrument_mismatch !== undefined
           ? { warning: submitResult.payment_instrument_mismatch }
           : {}),
-        needs_user: {
-          wall: "3ds",
-          message: threeDsHandoffMessage(submitResult, getThreeDsTelegramSent()),
-          resume: "checkout",
-          ...(submitResult.challenge_url !== undefined ? { url: submitResult.challenge_url } : {}),
-        },
-        next: pendingThreeDsNext,
+        ...(paymentStatus === "payment_3ds_required"
+          ? {
+              needs_user: {
+                wall: "3ds",
+                message: threeDsHandoffMessage(submitResult, getThreeDsTelegramSent()),
+                resume: "checkout",
+                ...(submitResult.challenge_url !== undefined
+                  ? { url: submitResult.challenge_url }
+                  : {}),
+              },
+            }
+          : {}),
+        next: pendingOutcomeNext(),
       };
     }
     if (paymentStatus === "payment_declined") {

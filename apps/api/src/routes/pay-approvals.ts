@@ -259,14 +259,22 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     id: string,
     accountId: string,
     peek: boolean,
-  ): Promise<Submission | null> => {
-    const deadline = Date.now() + submissionWaitMs;
-    while (Date.now() < deadline) {
+    waitMs: number,
+  ): Promise<{ record: ApprovalRecord | null; submission: Submission | null }> => {
+    const deadline = Date.now() + waitMs;
+    while (true) {
+      const record = await opts.deps.pendingPaymentApprovalStore.getByIdForAccount(id, accountId);
+      if (record === null) return { record: null, submission: null };
+      const now = opts.deps.now?.() ?? new Date();
+      if (record.status !== "pending" || record.expiresAt <= now) {
+        return { record, submission: null };
+      }
       const submission = await readSubmission(id, accountId, peek);
-      if (submission !== null) return submission;
-      await sleep(relayPollIntervalMs);
+      if (submission !== null) return { record, submission };
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) return { record, submission: null };
+      await sleep(Math.min(relayPollIntervalMs, remainingMs));
     }
-    return null;
   };
 
   fastify.get("/v1/pay/config", { preHandler: opts.requireAgent }, async (req, reply) => {
@@ -374,9 +382,10 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       wait_for_submission?: string;
       read_submission?: string;
       peek_submission?: string;
+      wait_ms?: string;
     };
   }>("/v1/pay/approvals/:id", { preHandler: opts.requireAny }, async (req, reply) => {
-    const record = await opts.deps.pendingPaymentApprovalStore.getByIdForAccount(
+    let record = await opts.deps.pendingPaymentApprovalStore.getByIdForAccount(
       req.params.id,
       req.auth!.account_id,
     );
@@ -384,18 +393,34 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       reply.code(404).send({ error: "payment_approval_not_found" });
       return;
     }
+    const peekSubmission = req.query.peek_submission === "1";
+    let submission: Submission | null = null;
+    if (req.auth!.kind === "agent" && req.query.wait_for_submission === "1") {
+      const requestedWaitMs = Number(req.query.wait_ms);
+      const waitMs = Number.isFinite(requestedWaitMs)
+        ? Math.min(Math.max(Math.floor(requestedWaitMs), 0), submissionWaitMs)
+        : submissionWaitMs;
+      const waited = await waitForSubmission(record.id, record.accountId, peekSubmission, waitMs);
+      if (waited.record === null) {
+        reply.code(404).send({ error: "payment_approval_not_found" });
+        return;
+      }
+      record = waited.record;
+      submission = waited.submission;
+    } else {
+      const now = opts.deps.now?.() ?? new Date();
+      if (
+        req.auth!.kind === "agent" &&
+        record.status === "pending" &&
+        record.expiresAt > now &&
+        (req.query.read_submission === "1" || peekSubmission)
+      ) {
+        submission = await readSubmission(record.id, record.accountId, peekSubmission);
+      }
+    }
     const now = opts.deps.now?.() ?? new Date();
     const status =
       record.status === "pending" && record.expiresAt <= now ? "expired" : record.status;
-    const canReadSubmission = req.auth!.kind === "agent" && status === "pending";
-    const peekSubmission = req.query.peek_submission === "1";
-    const submission = !canReadSubmission
-      ? null
-      : req.query.wait_for_submission === "1"
-        ? await waitForSubmission(record.id, record.accountId, peekSubmission)
-        : req.query.read_submission === "1" || peekSubmission
-          ? await readSubmission(record.id, record.accountId, peekSubmission)
-          : null;
     if (submission !== null && !peekSubmission)
       event("candidate_delivered", record, submissionFingerprint(submission), "ok");
     return reply.code(200).send({

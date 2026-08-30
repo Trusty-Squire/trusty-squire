@@ -516,10 +516,9 @@ async function readApprovalStatus(
   waitForSubmission: boolean,
   boundMs?: number,
 ): Promise<Record<string, unknown>> {
-  const fetchApproval = api.getPaymentApproval(
-    state.approval_id,
-    waitForSubmission ? "wait-peek" : "peek",
-  );
+  const fetchApproval = waitForSubmission
+    ? api.getPaymentApproval(state.approval_id, "wait-peek", boundMs)
+    : api.getPaymentApproval(state.approval_id, "peek");
   const approval =
     boundMs === undefined
       ? await fetchApproval
@@ -655,6 +654,7 @@ async function threeDsStatusResult(
   const boundMs =
     expiredAtEntry || waitSeconds <= 0 ? 0 : Math.min(Math.max(waitSeconds * 1000, 1_000), 15_000);
   const resolution = await browser.waitForThreeDsResolution(boundMs);
+  if (resolution === "challenge_pending") state.outcome = "three_ds";
   const mismatch = browser.paymentInstrumentMismatch?.();
   if (mismatch !== undefined) state.payment_instrument_mismatch ??= mismatch;
   const terminalStatus = threeDsResolutionStatus(resolution);
@@ -662,7 +662,7 @@ async function threeDsStatusResult(
     terminalStatus === null && (expiredAtEntry || Date.now() >= state.deadline);
   if (terminalStatus === null && !unresolvedPastDeadline) {
     return {
-      status: "payment_3ds_pending",
+      status: state.outcome === "three_ds" ? "payment_3ds_pending" : "payment_outcome_unknown",
       approval_url: state.approval_url,
       merchant: state.checkout.merchant,
       amount_cents: state.checkout.amount_cents,
@@ -673,7 +673,9 @@ async function threeDsStatusResult(
       next: { tool: "operate_payment_status", session_id: session.id, wait_seconds: 15 },
     };
   }
-  const finalStatus = terminalStatus ?? "payment_3ds_unresolved";
+  const finalStatus =
+    terminalStatus ??
+    (state.outcome === "three_ds" ? "payment_3ds_unresolved" : "payment_outcome_unknown");
   let auditRecorded = true;
   if (terminalStatus === null) {
     await api.auditPayment({
@@ -707,7 +709,7 @@ async function threeDsStatusResult(
     ...(state.payment_instrument_mismatch !== undefined
       ? { warning: state.payment_instrument_mismatch }
       : {}),
-    ...(terminalStatus === null
+    ...(terminalStatus === null && state.outcome === "three_ds"
       ? {
           needs_user: {
             wall: "3ds",
@@ -778,10 +780,11 @@ export const operatePaymentStatusTool: Tool<z.infer<typeof paymentStatusInputSch
     "charge; this status tool is a read-only alternative that also waits server-side. " +
     "Also covers an already-submitted charge whose 3-D Secure challenge (including a decoupled/" +
     "out-of-band app-push) had not resolved when a prior operate_pay call's own wait ended (that " +
-    'call returns payment_3ds_required or payment_outcome_unknown with needs_user.wall="3ds" and ' +
-    "a next hint pointing here) — call this again to keep checking rather than re-calling " +
-    "operate_pay, which does not resume a post-submit 3DS wait; reports payment_3ds_pending while " +
-    "still unresolved. Never re-releases the card or creates a new approval. Pass `wait_seconds` " +
+    "call returns payment_3ds_required or payment_outcome_unknown with a next hint pointing " +
+    "here) — call this again to keep checking rather than re-calling " +
+    "operate_pay, which does not resume a post-submit outcome wait; reports payment_3ds_pending " +
+    "only after actual 3DS evidence and otherwise preserves payment_outcome_unknown. Never " +
+    "re-releases the card or creates a new approval. Pass `wait_seconds` " +
     "(0-60, default 0) to bound-wait for a change instead of an instant peek; never blocks longer " +
     "than that. Never verifies a mandate or opens a card. Only candidate_kind=approval with " +
     "ready_to_charge=true is a final authorization; a review candidate still requires final " +

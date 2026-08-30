@@ -69,7 +69,7 @@ async function harness(
   expectedAudience: string | null = "customer_test",
   apiAudience?: string,
   threeDs?: {
-    resolution: "succeeded" | "failed" | "timeout";
+    resolution: "succeeded" | "failed" | "challenge_pending" | "timeout";
     waitSeconds?: number;
     notifyNeverResolves?: boolean;
     notifySent?: boolean;
@@ -134,7 +134,7 @@ async function harness(
     }
     if (
       (url.endsWith("/v1/pay/approvals/approval_test") ||
-        url.endsWith("/v1/pay/approvals/approval_test?wait_for_submission=1")) &&
+        url.includes("/v1/pay/approvals/approval_test?wait_for_submission=1")) &&
       init?.method === "GET"
     ) {
       approvalPolls += 1;
@@ -475,7 +475,7 @@ describe("operate_pay", () => {
       }
       if (
         (url.endsWith("/v1/pay/approvals/approval_fallback") ||
-          url.endsWith("/v1/pay/approvals/approval_fallback?wait_for_submission=1")) &&
+          url.includes("/v1/pay/approvals/approval_fallback?wait_for_submission=1")) &&
         init?.method === "GET"
       ) {
         const operatorPublicKey = String(approvalBodies[0]!.operator_pubkey);
@@ -1010,7 +1010,7 @@ describe("operate_pay", () => {
     expect(pendingThreeDsStates).toMatchObject([{ payment_instrument_mismatch: mismatch }]);
   });
 
-  it("waits and hands back an app-push message without an on-page challenge", async () => {
+  it("keeps an outcome unknown without inventing an app-push challenge", async () => {
     const { result, notifyCalls, notifyBodies, browser } = await harness(
       "happy",
       "customer_test",
@@ -1026,14 +1026,11 @@ describe("operate_pay", () => {
 
     expect(result).toMatchObject({
       status: "payment_outcome_unknown",
-      needs_user: {
-        wall: "3ds",
-        resume: "checkout",
-        message: expect.stringMatching(/No order confirmation.*bank app/),
-      },
+      next: { tool: "operate_payment_status", wait_seconds: 15 },
     });
-    expect(notifyCalls).toHaveLength(1);
-    expect(notifyBodies).toEqual([{ mode: "possible_out_of_band" }]);
+    expect(result).not.toHaveProperty("needs_user");
+    expect(notifyCalls).toHaveLength(0);
+    expect(notifyBodies).toEqual([]);
     expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
   });
 
@@ -1104,7 +1101,10 @@ describe("operate_pay", () => {
     expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_outcome_unknown" })]);
     expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(0);
     expect(pendingThreeDsStates).toHaveLength(1);
-    expect(pendingThreeDsStates[0]).toMatchObject({ payment_instrument_mismatch: mismatch });
+    expect(pendingThreeDsStates[0]).toMatchObject({
+      outcome: "unknown",
+      payment_instrument_mismatch: mismatch,
+    });
   });
 
   it("does not retain pending 3DS when checkout fails before charge dispatch", async () => {
@@ -1278,7 +1278,7 @@ async function runJit(cfg: {
     }
     if (
       (url.endsWith("/v1/pay/approvals/appr_jit") ||
-        url.endsWith("/v1/pay/approvals/appr_jit?wait_for_submission=1")) &&
+        url.includes("/v1/pay/approvals/appr_jit?wait_for_submission=1")) &&
       init?.method === "GET"
     ) {
       const state = cfg.poll(clock);
@@ -1635,7 +1635,7 @@ async function runSplitFill(
     }
     if (
       (url.endsWith("/v1/pay/approvals/appr_split") ||
-        url.endsWith("/v1/pay/approvals/appr_split?wait_for_submission=1")) &&
+        url.includes("/v1/pay/approvals/appr_split?wait_for_submission=1")) &&
       init?.method === "GET"
     ) {
       // Sign the mandate over whatever checkout the operator MINTED the
@@ -1988,14 +1988,14 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
     }
     if (
       (url.endsWith("/v1/pay/approvals/appr_resume") ||
-        url.endsWith("/v1/pay/approvals/appr_resume?wait_for_submission=1") ||
+        url.includes("/v1/pay/approvals/appr_resume?wait_for_submission=1") ||
         url.endsWith("/v1/pay/approvals/appr_resume?read_submission=1")) &&
       init?.method === "GET"
     ) {
       const approval = approvalBodies[0]!;
       const operatorPublicKey = String(approval.operator_pubkey);
       const readsRelayCandidate =
-        url.endsWith("?wait_for_submission=1") || url.endsWith("?read_submission=1");
+        url.includes("?wait_for_submission=1") || url.endsWith("?read_submission=1");
       if (
         !readsRelayCandidate ||
         candidateState === "none" ||
@@ -2162,6 +2162,40 @@ describe("operate_pay bounded approval continuation [P0]", () => {
       status: "payment_approval_denied",
       approval_id: "appr_resume",
     });
+    expect(env.filledCards).toHaveLength(0);
+  });
+
+  it("returns a denial between calls without minting a replacement approval", async () => {
+    const env = buildResumableEnv();
+    let pending: PendingApprovalWait | undefined;
+    await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      pollBudgetMs: 0,
+      onApprovalPending: (state) => {
+        pending = state;
+      },
+    });
+    if (pending === undefined) throw new Error("expected pending approval");
+    env.setDenied();
+
+    await expect(
+      executeOperatePay(baseArgs, env.api, env.browser, {
+        fetch: env.fetch,
+        vouchflowApiBase: "https://vouchflow.test",
+        vouchflowExpectedAudience: "customer_test",
+        webBase: "https://web.test",
+        surfaceApprovalUrl: vi.fn(),
+        resumeFrom: pending,
+      }),
+    ).resolves.toMatchObject({
+      status: "payment_approval_denied",
+      approval_id: "appr_resume",
+    });
+    expect(env.approvalBodies).toHaveLength(1);
     expect(env.filledCards).toHaveLength(0);
   });
 

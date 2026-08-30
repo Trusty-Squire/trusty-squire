@@ -420,28 +420,28 @@ export default function PaymentApprovalPage() {
           <p className="pay-anchor">
             Pay with <span className="mono">{cardLine}</span> · {amountLabel} to {approval.merchant}
           </p>
-          {jitReviewBlocked ? (
-            <div className="app-banner err">
-              {jitBindingMismatch
-                ? "This payment was attached to a different card than the one you added."
-                : (cardMetadataError ?? "We couldn't load the saved card for this payment.")}
-              {!jitBindingMismatch && (
-                <button className="linkbtn" type="button" onClick={() => void refreshCeremony()}>
-                  Retry
-                </button>
-              )}
-            </div>
-          ) : needsPasskeySetup ? (
-            <button
-              className="btn-primary"
-              type="button"
-              onClick={() => void setUpPasskey()}
-              disabled={busy}
-            >
-              {busy ? "Setting up…" : "Sign in and set up passkey"}
-            </button>
-          ) : (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "10px" }}>
+          <div style={{ display: "grid", gap: "10px" }}>
+            {jitReviewBlocked ? (
+              <div className="app-banner err">
+                {jitBindingMismatch
+                  ? "This payment was attached to a different card than the one you added."
+                  : (cardMetadataError ?? "We couldn't load the saved card for this payment.")}
+                {!jitBindingMismatch && (
+                  <button className="linkbtn" type="button" onClick={() => void refreshCeremony()}>
+                    Retry
+                  </button>
+                )}
+              </div>
+            ) : needsPasskeySetup ? (
+              <button
+                className="btn-primary"
+                type="button"
+                onClick={() => void setUpPasskey()}
+                disabled={busy}
+              >
+                {busy ? "Setting up…" : "Sign in and set up passkey"}
+              </button>
+            ) : (
               <button
                 className="btn-primary"
                 type="button"
@@ -450,6 +450,8 @@ export default function PaymentApprovalPage() {
               >
                 {busy ? "Working…" : "Approve payment"}
               </button>
+            )}
+            <div>
               <button
                 className="btn-secondary"
                 type="button"
@@ -459,7 +461,7 @@ export default function PaymentApprovalPage() {
                 Deny payment
               </button>
             </div>
-          )}
+          </div>
         </section>
       )}
     </AppShell>

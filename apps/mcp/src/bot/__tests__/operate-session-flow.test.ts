@@ -185,7 +185,7 @@ const h = vi.hoisted(() => ({
     challenge_url?: string;
   },
   clearSealedPaymentFieldsCalls: 0,
-  waitForThreeDsResult: "timeout" as "succeeded" | "failed" | "timeout",
+  waitForThreeDsResult: "timeout" as "succeeded" | "failed" | "challenge_pending" | "timeout",
   waitForThreeDsCalls: [] as number[],
   paymentInstrumentMismatch: null as null | {
     kind: "payment_instrument_mismatch";
@@ -809,7 +809,9 @@ vi.mock("../browser.js", () => ({
     async clearSealedPaymentFields(): Promise<void> {
       h.clearSealedPaymentFieldsCalls += 1;
     }
-    async waitForThreeDsResolution(timeoutMs: number): Promise<"succeeded" | "failed" | "timeout"> {
+    async waitForThreeDsResolution(
+      timeoutMs: number,
+    ): Promise<"succeeded" | "failed" | "challenge_pending" | "timeout"> {
       h.waitForThreeDsCalls.push(timeoutMs);
       return h.waitForThreeDsResult;
     }
@@ -6167,6 +6169,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
         last4: "9192",
         mandate_id: "mandate_timeout_3ds",
         deadline: Date.now() + 60_000,
+        outcome: "three_ds",
       });
       h.waitForThreeDsResult = "timeout";
 
@@ -6993,6 +6996,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
         last4: "9192",
         mandate_id: "mandate_outer_deadline",
         deadline: Date.now() + 60_000,
+        outcome: "unknown" as const,
       };
       const payment = withPaymentSessionCall(started.session_id, async (session) => {
         armPaymentDispatchHandoff(state, session);
@@ -7070,6 +7074,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
           last4: "9192",
           mandate_id: "mandate_watchdog_3ds",
           deadline: Date.now() + 60_000,
+          outcome: "three_ds",
         },
         paymentSession(session.session_id),
       );
@@ -7106,6 +7111,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
       last4: "9192",
       mandate_id: "mandate_dispatch_race",
       deadline: Date.now() + 60_000,
+      outcome: "unknown" as const,
     };
     armPaymentDispatchHandoff(state, session);
 
@@ -8643,6 +8649,7 @@ describe("pending card-fill charge guard", () => {
       checkout: pending.checkout,
       last4: pending.last4,
       deadline: Date.now() + 60_000,
+      outcome: "three_ds",
     });
 
     await expect(act(started.session_id, { kind: "click", target: "Place order" })).rejects.toThrow(
@@ -9319,14 +9326,14 @@ describe("operate_pay tool completion — system-owned approval wait [P0]", () =
       }
       if (
         (url.endsWith("/v1/pay/approvals/appr_kobee") ||
-          url.endsWith("/v1/pay/approvals/appr_kobee?wait_for_submission=1") ||
+          url.includes("/v1/pay/approvals/appr_kobee?wait_for_submission=1") ||
           url.endsWith("/v1/pay/approvals/appr_kobee?read_submission=1")) &&
         init?.method === "GET"
       ) {
         const approval = approvalBodies[0]!;
         const operatorPublicKey = String(approval.operator_pubkey);
         const readsRelayCandidate =
-          url.endsWith("?wait_for_submission=1") || url.endsWith("?read_submission=1");
+          url.includes("?wait_for_submission=1") || url.endsWith("?read_submission=1");
         if (url.endsWith("?read_submission=1")) immediateApprovalReads.push(approved);
         if (!approved || !readsRelayCandidate) {
           return Response.json({
@@ -9514,6 +9521,7 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
         observed: "3ds_challenge";
       };
     },
+    outcome: "three_ds" | "unknown" = "three_ds",
   ) {
     return {
       approval_id: "appr_3ds",
@@ -9522,6 +9530,7 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
       last4: "9192",
       mandate_id: "mandate_3ds",
       deadline,
+      outcome,
       ...(payment_instrument_mismatch !== undefined ? { payment_instrument_mismatch } : {}),
     };
   }
@@ -9549,6 +9558,7 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
     const env = buildStatusEnv();
     await startProvisionSession({
       serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: env.api,
     });
     const threeDsState = buildThreeDsState();
     setActivePendingThreeDs(threeDsState);
@@ -9590,6 +9600,40 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
         mandateId: "mandate_3ds",
       }),
     ]);
+  });
+
+  it("preserves an unknown outcome while no 3DS or merchant evidence appears", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: env.api,
+    });
+    const unknownState = buildThreeDsState(Date.now() + 60_000, undefined, "unknown");
+    setActivePendingThreeDs(unknownState);
+    h.waitForThreeDsResult = "timeout";
+
+    await expect(operatePaymentStatusTool.handler({}, env.api)).resolves.toMatchObject({
+      status: "payment_outcome_unknown",
+      next: { tool: "operate_payment_status", wait_seconds: 15 },
+    });
+    expect(getActivePendingThreeDs()).toBe(unknownState);
+    expect(env.auditBodies).toHaveLength(0);
+  });
+
+  it("reports 3DS pending only after the browser observes a challenge", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: env.api,
+    });
+    const unknownState = buildThreeDsState(Date.now() + 60_000, undefined, "unknown");
+    setActivePendingThreeDs(unknownState);
+    h.waitForThreeDsResult = "challenge_pending";
+
+    await expect(operatePaymentStatusTool.handler({}, env.api)).resolves.toMatchObject({
+      status: "payment_3ds_pending",
+    });
+    expect(unknownState.outcome).toBe("three_ds");
   });
 
   it("keeps an ACS instrument-mismatch warning visible across 3DS status waits", async () => {

@@ -344,7 +344,7 @@ export function clickDispatchStatusForError(error: unknown): ClickDispatchStatus
 // machine (rc.21-rc.22) intercepted the challenge instead and could never
 // finish a decoupled/app-push ACS handshake in the headless operator
 // browser; do not reintroduce interception here.
-export type ThreeDsResolution = "succeeded" | "failed" | "timeout";
+export type ThreeDsResolution = "succeeded" | "failed" | "challenge_pending" | "timeout";
 
 interface CheckoutFrameDescriptor {
   url: string;
@@ -12463,11 +12463,13 @@ export class BrowserController {
       /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
     const deadline = Date.now() + Math.max(timeoutMs, 0);
     const mismatchAtEntry = this.observedPaymentInstrumentMismatch;
+    let challengeObserved = false;
     while (true) {
       await this.page.bringToFront().catch(() => undefined);
-      await this.detectThreeDsChallenge().catch(() => undefined);
+      const challenge = await this.detectThreeDsChallenge().catch(() => undefined);
+      if (challenge?.three_ds_required === true) challengeObserved = true;
       if (mismatchAtEntry === undefined && this.observedPaymentInstrumentMismatch !== undefined) {
-        return "timeout";
+        return challengeObserved ? "challenge_pending" : "timeout";
       }
       if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) return "succeeded";
       const texts = await Promise.all(
@@ -12481,7 +12483,7 @@ export class BrowserController {
       );
       if (texts.some((text) => failureText.test(text))) return "failed";
       const remainingMs = deadline - Date.now();
-      if (remainingMs <= 0) return "timeout";
+      if (remainingMs <= 0) return challengeObserved ? "challenge_pending" : "timeout";
       await this.page.waitForTimeout(Math.min(1_000, remainingMs)).catch(() => undefined);
     }
   }

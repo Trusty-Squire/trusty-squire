@@ -9795,10 +9795,14 @@ function profileRequiresDestroy(session: Session): boolean {
   );
 }
 
-function pendingThreeDsAuditStatus(resolution: ThreeDsResolution): string {
+function pendingThreeDsAuditStatus(
+  resolution: ThreeDsResolution,
+  pending: PendingThreeDsWait,
+): string {
   if (resolution === "succeeded") return "payment_submitted";
   if (resolution === "failed") return "payment_declined";
-  return "payment_3ds_unresolved";
+  if (resolution === "challenge_pending") pending.outcome = "three_ds";
+  return pending.outcome === "three_ds" ? "payment_3ds_unresolved" : "payment_outcome_unknown";
 }
 
 async function auditPendingThreeDsForSessionClose(session: Session): Promise<void> {
@@ -9814,7 +9818,7 @@ async function auditPendingThreeDsForSessionClose(session: Session): Promise<voi
     await session.api!.auditPayment({
       ...pending.checkout,
       last4: pending.last4,
-      status: pendingThreeDsAuditStatus(resolution),
+      status: pendingThreeDsAuditStatus(resolution, pending),
       approval_id: pending.approval_id,
       ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
     });
