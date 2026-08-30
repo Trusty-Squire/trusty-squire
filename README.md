@@ -188,7 +188,12 @@ remote CDP, macOS, and Windows operator sessions are not supported in this migra
 
 1. Your coding agent names the website and the outcome it needs: an account,
    authenticated setup, app publishing, a purchase, a gift, or a booking.
-2. Trusty Squire works through the service flow one step at a time. Every task opens its own fresh browser profile and restores portable signed-in storage state whenever a snapshot is available, so independent sessions can run concurrently without opening the canonical login profile.
+2. Trusty Squire works through the service flow one step at a time. Every task
+   opens its own fresh browser profile and restores the snapshot's non-Google
+   signed-in state, so independent sessions can run concurrently without opening
+   the canonical login profile. Google state is restored inside the serialized
+   `oauth_login` or legacy `oauth_click` boundary; sanctioned Gmail verification
+   uses a separate temporary identity browser.
 3. If the flow produces an API key or client secret, Trusty Squire captures it
    into the vault without returning the raw value through its credential tools.
 4. The agent can make an authenticated request, create a host-scoped app grant,
@@ -326,10 +331,10 @@ can select the legacy V1 `el_table`/snapshot contract with
   session-start-trust requirement — otherwise a checkout's own out-of-band 3DS
   challenge could never complete its own status poll.
   For a task gated by the user's connected Google account, pass
-  `require_live_identity: true` to `operate_start`. The start restores the
-  saved portable login snapshot into a fresh private profile, then fails closed with
-  a context-backed login handoff if the existing live-provider detector finds
-  no current Google session. It never opens Chrome on the canonical profile.
+  `require_live_identity: true` to `operate_start`. The start checks the saved
+  snapshot for an unexpired Google identity marker without loading Google state
+  into the ordinary private profile. If no usable marker exists, it fails closed
+  with a login handoff. It never opens Chrome on the canonical profile.
   To route only that browser session through a proxy, pass `proxy` to
   `operate_start` as an HTTP or HTTPS URL (credentials are optional), or as an
   unauthenticated SOCKS5 URL. The value is launch-only and sensitive: it is not
@@ -346,9 +351,12 @@ can select the legacy V1 `el_table`/snapshot contract with
   For a provider login, pass the observed provider-button ref to the atomic
   `oauth_login` action. It retains the product tab across provider-owned popup
   redirects and closes, then returns the post-login product observation even if
-  `detail` is `none`. `oauth_click` and `oauth_settle` remain for legacy replay
-  compatibility. If an observation races that legacy transition, the response
-  reports `oauth.state: "in_progress"` and directs the host to observe again.
+  `detail` is `none`. Every `oauth_login` and legacy `oauth_click` is serialized
+  from action start through completion and a short release cooldown; other
+  session work remains parallel. `oauth_click` and `oauth_settle` remain for
+  legacy replay compatibility. If an observation races that legacy transition,
+  the response reports `oauth.state: "in_progress"` and directs the host to
+  observe again.
 - `operate_act` also owns eight consolidated workflow/lifecycle kinds — the
   entire operator surface beyond navigation, payment, finish, and recipe
   replay is reached through `operate_act`'s `kind`:

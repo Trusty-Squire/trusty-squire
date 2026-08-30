@@ -11796,19 +11796,23 @@ export class BrowserController {
         const clearDispatchTracking = async (): Promise<void> => {
           this.checkoutSubmitDispatchWaiters.delete(dispatchToken);
           await candidate
-            .evaluate((element) => {
-              const tracked = element as Element & {
-                __tsPaymentSubmitDispatchListener?: EventListener;
-              };
-              if (tracked.__tsPaymentSubmitDispatchListener !== undefined) {
-                element.removeEventListener(
-                  "click",
-                  tracked.__tsPaymentSubmitDispatchListener,
-                  true,
-                );
-                delete tracked.__tsPaymentSubmitDispatchListener;
-              }
-            }, undefined, { timeout: 250 })
+            .evaluate(
+              (element) => {
+                const tracked = element as Element & {
+                  __tsPaymentSubmitDispatchListener?: EventListener;
+                };
+                if (tracked.__tsPaymentSubmitDispatchListener !== undefined) {
+                  element.removeEventListener(
+                    "click",
+                    tracked.__tsPaymentSubmitDispatchListener,
+                    true,
+                  );
+                  delete tracked.__tsPaymentSubmitDispatchListener;
+                }
+              },
+              undefined,
+              { timeout: 250 },
+            )
             .catch(() => undefined);
           await frame
             .evaluate((token) => {

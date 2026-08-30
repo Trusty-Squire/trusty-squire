@@ -11,6 +11,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type * as GoogleLogin from "../../bot/google-login.js";
+import type * as SessionState from "../../bot/session-state.js";
 import { acquireProfileOperationGuard } from "../../bot/profile.js";
 
 // vi.hoisted so these are initialized before the hoisted vi.mock factories
@@ -42,7 +43,7 @@ vi.mock("../../bot/login-state.js", () => ({
 }));
 
 vi.mock("../../bot/session-state.js", async (importActual) => {
-  const actual = await importActual<typeof import("../../bot/session-state.js")>();
+  const actual = await importActual<typeof SessionState>();
   return {
     ...actual,
     invalidateCanonicalGoogleIdentity: m.invalidateCanonicalGoogleIdentity,

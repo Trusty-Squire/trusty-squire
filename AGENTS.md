@@ -455,28 +455,13 @@ Preserve that contract when changing browser startup or shutdown: never replace 
 identity-proven scope with root-PID-only signaling or broad `pkill`. The strict
 containment follow-up is `ts-operator-browser-cgroup-containment` in `TODOS.md`.
 
-### 13. Plain-Chrome login must publish portable Google identity
+### 13. OAuth identity uses portable state and a narrow lease
 
-The supported plain-Chrome login path cannot expose a Playwright context during
-Google OAuth. After the plain browser closes with proven ownership, reopen the
-canonical authoring profile under the existing login guard only long enough to
-capture `storageState({ indexedDB: true })`, close it, and publish the snapshot.
-Operator startup restores non-Google state only. Every `oauth_login` and legacy
-`oauth_click` is serialized by the narrow action lease from action start through
-completion and cooldown; all other operator work stays parallel. The identity
-handoff contract is documented in `docs/DESIGN-warm-browser-reuse.md`. Operators
-must never open the canonical profile or copy Chrome cookie databases.
-
-### 14. Payment mandate expiry has separate acceptance and relay semantics
-
-Vouchflow assertions can expire while an already-verified, nonce-bound payment
-candidate waits for the operator to resume. `POST /approve` must always verify at
-the current time. Only `/confirm` and the MCP consumer of that authenticated relay
-may use the bounded previously-verified path in
-`apps/api/src/services/vouch-mandate.ts` and `apps/mcp/src/bot/pay-operator.ts`.
-That path must still verify signature, issuer, audience, context, payload binding,
-confidence, and the outer approval lifetime; never turn the relay exception into a
-first-acceptance clock tolerance.
+Every `oauth_login` and legacy `oauth_click` is serialized by the narrow action
+lease from action start through completion and cooldown; all other operator work
+stays parallel. Operators never open the canonical profile or copy Chrome cookie
+databases. The portable-state capture and handoff contract is owned by
+`docs/DESIGN-warm-browser-reuse.md`.
 
 ## Final note
 

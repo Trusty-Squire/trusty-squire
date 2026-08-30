@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createEphemeralProfile,
   destroyEphemeralProfile,
+  hasUsableGoogleIdentity,
   invalidateCanonicalGoogleIdentity,
   MAX_SESSION_STATE_BYTES,
   readPendingSessionStates,
@@ -25,6 +26,29 @@ afterEach(() => {
 });
 
 describe("operator session storage state", () => {
+  it("selects portable Google identity only while its auth marker is unexpired", () => {
+    const nowSeconds = 2_000_000_000;
+    const state = (expires: number) => ({
+      cookies: [
+        {
+          name: "SID",
+          value: "opaque-google-session",
+          domain: ".google.com",
+          path: "/",
+          expires,
+          httpOnly: true,
+          secure: true,
+          sameSite: "Lax" as const,
+        },
+      ],
+      origins: [],
+    });
+
+    expect(hasUsableGoogleIdentity(state(nowSeconds - 1), nowSeconds)).toBe(false);
+    expect(hasUsableGoogleIdentity(state(nowSeconds + 1), nowSeconds)).toBe(true);
+    expect(hasUsableGoogleIdentity(state(-1), nowSeconds)).toBe(true);
+  });
+
   it("atomically preserves cookies, local storage, and IndexedDB in a 0600 snapshot", async () => {
     const canonical = mkdtempSync(join(tmpdir(), "ts-session-state-"));
     roots.push(canonical);
@@ -265,6 +289,10 @@ describe("operator session storage state", () => {
           value: "rotated-google-session",
           domain: ".google.com",
           path: "/",
+          expires: -1,
+          httpOnly: true,
+          secure: true,
+          sameSite: "Lax" as const,
         },
       ],
       origins: [],

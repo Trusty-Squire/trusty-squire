@@ -60,11 +60,7 @@ import {
   startRemoteLoginDisplay,
   teardownRemoteLoginRig,
 } from "./remote-login-display.js";
-export {
-  extractOAuthScopes,
-  scopesAreBasic,
-  scrapeGoogleScopePhrases,
-} from "./oauth-scope.js";
+export { extractOAuthScopes, scopesAreBasic, scrapeGoogleScopePhrases } from "./oauth-scope.js";
 
 const require = createRequire(import.meta.url);
 

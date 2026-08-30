@@ -3549,9 +3549,10 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     await releaseWarmBrowserPage(browser, false);
     throw error;
   }
-  // Change 5 — fail-closed identity gate BEFORE driving. If an operate task
-  // needs to act as the user and there's no usable Google snapshot, hand back now;
-  // do not start the browser or the task. No autonomous login is attempted.
+  // Fail closed before driving the service. If an operate task needs to act as
+  // the user and there is no usable Google snapshot, close the just-created
+  // private browser and hand back without navigating or starting the task.
+  // No autonomous login is attempted.
   if (opts.requireLiveIdentity === true) {
     const gate = googleSessionGate(liveProviders);
     if (!gate.ok) {

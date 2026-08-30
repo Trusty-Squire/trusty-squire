@@ -30,11 +30,13 @@ than 4 MiB are ignored on read and skipped on write, also preserving the prior
 snapshot and its matching account metadata.
 
 Ordinary operator startup restores the snapshot without Google identity, so two
-parallel profiles cannot hold the same rotating Google session. A Google
-`oauth_login` action waits on the process-local handoff and the cross-process
-canonical-profile operation guard, restores the latest full snapshot, completes
-OAuth, captures the rotated state, proves bounded close, publishes it, and
-restarts the same private profile before releasing the next waiter.
+parallel profiles cannot hold the same rotating Google session. Every
+`oauth_login` and legacy `oauth_click` waits on the process-local handoff and the
+cross-process canonical-profile operation guard from explicit action start through
+completion and one release cooldown. At that boundary the action restores the
+latest full snapshot, completes OAuth, captures the rotated state, proves bounded
+close, publishes it, and restarts the same private profile before releasing the
+next waiter.
 `require_live_identity` relies on the saved identity markers without preloading
 Google state or probing Google from the ordinary concurrent browser.
 

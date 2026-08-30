@@ -71,10 +71,7 @@ export interface CanonicalIdentityState {
   identityMetadata: CanonicalIdentityMetadata | undefined;
 }
 
-export type CanonicalIdentitySnapshotDisposition =
-  | "accepted"
-  | "invalid_metadata"
-  | "oversized";
+export type CanonicalIdentitySnapshotDisposition = "accepted" | "invalid_metadata" | "oversized";
 
 function canonicalIdentityMetadataPath(profileDir: string): string {
   return join(profileDir, CANONICAL_IDENTITY_METADATA_FILE);
@@ -101,7 +98,10 @@ export async function readCanonicalIdentityMetadata(
 async function readLegacyIdentityMetadata(
   profileDir: string,
 ): Promise<CanonicalIdentityMetadata | undefined> {
-  for (const path of [canonicalIdentityMetadataPath(profileDir), legacyProviderEmailsPath(profileDir)]) {
+  for (const path of [
+    canonicalIdentityMetadataPath(profileDir),
+    legacyProviderEmailsPath(profileDir),
+  ]) {
     try {
       const serialized = await readFile(path);
       if (serialized.byteLength > MAX_IDENTITY_METADATA_BYTES) continue;
@@ -294,9 +294,7 @@ export async function writePendingSessionState(
   }
 }
 
-export async function readPendingSessionStates(
-  profileDir: string,
-): Promise<PendingSessionState[]> {
+export async function readPendingSessionStates(profileDir: string): Promise<PendingSessionState[]> {
   let entries: string[];
   try {
     entries = await readdir(profileDir);

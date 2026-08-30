@@ -12,7 +12,7 @@ import {
   BrowserController,
   childProcessIsRunning,
   launchCancellablePersistentContext,
-  launchSelfManagedLoginContext,
+  type launchSelfManagedLoginContext,
   resolvePersistentFallbackIdentity,
   resolveAttachedProfileChildIdentity,
   terminateTrackedProfileChild,
@@ -1036,7 +1036,10 @@ describe("confirmed login finalization", () => {
         {
           status: "preflight_satisfied",
           closeState: "closed",
-          storageState: { cookies: [], origins: [{ origin: "https://app.example.com", localStorage: [] }] },
+          storageState: {
+            cookies: [],
+            origins: [{ origin: "https://app.example.com", localStorage: [] }],
+          },
         },
       );
 

@@ -10,6 +10,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { constants, publicEncrypt } from "node:crypto";
 import type * as GoogleLoginModule from "../google-login.js";
+import type * as SessionState from "../session-state.js";
 
 const h = vi.hoisted(() => ({
   providers: ["google"] as string[] | null,
@@ -195,7 +196,7 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock("../session-state.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../session-state.js")>();
+  const actual = await importOriginal<typeof SessionState>();
   return {
     ...actual,
     createEphemeralProfile: () => {

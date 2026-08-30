@@ -223,8 +223,10 @@ describe("operation-scoped host allowances", () => {
         );
 
         await expect(
-          controller.withTemporaryHostScopeAllowedHosts(["mail.google.com"], async () =>
-            await page.evaluate(async (url) => await (await fetch(url)).text(), mailUrl),
+          controller.withTemporaryHostScopeAllowedHosts(
+            ["mail.google.com"],
+            async () =>
+              await page.evaluate(async (url) => await (await fetch(url)).text(), mailUrl),
           ),
         ).resolves.toBe("mail");
 

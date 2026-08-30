@@ -13,10 +13,7 @@ import {
   withProfileOperationGuard,
 } from "./profile.js";
 import { isOAuthProviderId, type OAuthProviderId } from "./oauth-providers.js";
-import {
-  invalidateCanonicalGoogleIdentity,
-  isSessionStateArtifact,
-} from "./session-state.js";
+import { invalidateCanonicalGoogleIdentity, isSessionStateArtifact } from "./session-state.js";
 
 interface ProviderCookieContext {
   cookies(): Promise<Array<{ name: string; domain: string; path: string }>>;

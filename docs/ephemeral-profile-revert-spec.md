@@ -87,7 +87,7 @@ If the existing `profileRequiresDestroy` condition is true (`activePayment`, `pa
 
 `connect`/`login` keeps editing the canonical authoring profile. On a successful context-backed login, write the full JSON state as well. After a successful plain-Chrome login closes with proof, briefly reopen the canonical profile headlessly, capture the full state, close with proof, and publish it.
 
-Google identity write-back is ordered by the process-local OAuth handoff. Atomic rename prevents file corruption.
+Google identity write-back is ordered by the process-local OAuth handoff and cross-process profile guard. Atomic rename prevents file corruption.
 
 ## File-level changes
 
