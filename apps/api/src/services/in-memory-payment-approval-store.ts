@@ -72,7 +72,7 @@ export interface PendingPaymentApprovalStore {
     accountId: string,
     fingerprint: string,
     now: Date,
-  ): Promise<"confirmed" | "candidate_changed" | "not_pending">;
+  ): Promise<"confirmed" | "candidate_changed" | "denied" | "not_pending">;
   submitCandidate(
     id: string,
     accountId: string,
@@ -95,7 +95,7 @@ export interface PendingPaymentApprovalStore {
     accountId: string,
     fingerprint: string,
     now: Date,
-  ): Promise<"confirmed" | "candidate_changed" | "not_pending">;
+  ): Promise<"confirmed" | "candidate_changed" | "denied" | "not_pending">;
 }
 
 export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprovalStore {
@@ -251,8 +251,9 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
     accountId: string,
     fingerprint: string,
     now: Date,
-  ): Promise<"confirmed" | "candidate_changed" | "not_pending"> {
+  ): Promise<"confirmed" | "candidate_changed" | "denied" | "not_pending"> {
     const record = this.records.get(id);
+    if (record?.accountId === accountId && record.status === "denied") return "denied";
     if (
       record === undefined ||
       record.accountId !== accountId ||
@@ -374,9 +375,10 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
     accountId: string,
     fingerprint: string,
     now: Date,
-  ): Promise<"confirmed" | "candidate_changed" | "not_pending"> {
+  ): Promise<"confirmed" | "candidate_changed" | "denied" | "not_pending"> {
     const record = this.records.get(id);
     if (record === undefined || record.accountId !== accountId) return "not_pending";
+    if (record.status === "denied") return "denied";
     if (
       record.status === "approved" &&
       record.submissionPhase === "confirmed" &&

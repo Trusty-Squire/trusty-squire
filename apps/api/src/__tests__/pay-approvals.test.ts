@@ -592,6 +592,31 @@ describe("payment approval relay", () => {
     expect((await deps.pendingPaymentApprovalStore.getById(created.id))?.status).toBe("pending");
   });
 
+  it("returns terminal denial when denial wins confirmation", async () => {
+    const created = await createApproval();
+    const submission = makeSubmission(created);
+    await relaySubmission(created.id, submission);
+    await server.close();
+    server = await buildServer({
+      deps,
+      vouchVerifier: async () => {
+        await deps.pendingPaymentApprovalStore.deny(created.id, new Date(nowMs));
+        return {};
+      },
+    });
+
+    const confirm = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: submission,
+    });
+
+    expect(confirm.statusCode).toBe(409);
+    expect(confirm.json()).toEqual({ error: "payment_approval_denied" });
+    expect((await deps.pendingPaymentApprovalStore.getById(created.id))?.status).toBe("denied");
+  });
+
   it("rejects an expired approved relay before vouch verification", async () => {
     await server.close();
     const verifier = vi.fn(async () => ({}));

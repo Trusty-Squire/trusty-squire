@@ -11634,19 +11634,21 @@ export class BrowserController {
                 };
               };
               const tracked = element as Element & {
-                __tsPaymentSubmitDispatchListener?: {
+                __tsPaymentSubmitDispatchListeners?: Array<{
                   event: "click" | "submit";
                   listener: EventListener;
                   target: Element;
-                };
+                }>;
               };
-              const priorTracking = tracked.__tsPaymentSubmitDispatchListener;
+              const priorTracking = tracked.__tsPaymentSubmitDispatchListeners;
               if (priorTracking !== undefined) {
-                priorTracking.target.removeEventListener(
-                  priorTracking.event,
-                  priorTracking.listener,
-                  true,
-                );
+                for (const registration of priorTracking) {
+                  registration.target.removeEventListener(
+                    registration.event,
+                    registration.listener,
+                    true,
+                  );
+                }
               }
               stateWindow.__trustySquirePaymentSubmitDispatch = {
                 token,
@@ -11654,7 +11656,7 @@ export class BrowserController {
               };
               const listener: EventListener = () => {
                 const state = stateWindow.__trustySquirePaymentSubmitDispatch;
-                if (state?.token !== token) return;
+                if (state?.token !== token || state.dispatched) return;
                 try {
                   const merchantWindow = window.top;
                   if (merchantWindow === null) return;
@@ -11712,17 +11714,27 @@ export class BrowserController {
                 element instanceof HTMLButtonElement || element instanceof HTMLInputElement
                   ? element.form
                   : element.closest("form");
-              const dispatchTarget = form ?? element;
-              const dispatchEvent = form === null ? "click" : "submit";
-              tracked.__tsPaymentSubmitDispatchListener = {
-                event: dispatchEvent,
-                listener,
-                target: dispatchTarget,
-              };
-              dispatchTarget.addEventListener(dispatchEvent, listener, {
-                capture: true,
-                once: true,
-              });
+              const submitTargets =
+                form !== null
+                  ? [form]
+                  : element.matches('[role="button"]')
+                    ? Array.from(document.forms)
+                    : [];
+              const registrations =
+                submitTargets.length > 0
+                  ? submitTargets.map((target) => ({
+                      event: "submit" as const,
+                      listener,
+                      target,
+                    }))
+                  : [{ event: "click" as const, listener, target: element }];
+              tracked.__tsPaymentSubmitDispatchListeners = registrations;
+              for (const registration of registrations) {
+                registration.target.addEventListener(registration.event, registration.listener, {
+                  capture: true,
+                  once: true,
+                });
+              }
             },
             {
               baselineStorageKey: dispatchBaselineStorageKey,
@@ -11816,16 +11828,22 @@ export class BrowserController {
             .evaluate(
               (element) => {
                 const tracked = element as Element & {
-                  __tsPaymentSubmitDispatchListener?: {
+                  __tsPaymentSubmitDispatchListeners?: Array<{
                     event: "click" | "submit";
                     listener: EventListener;
                     target: Element;
-                  };
+                  }>;
                 };
-                const tracking = tracked.__tsPaymentSubmitDispatchListener;
+                const tracking = tracked.__tsPaymentSubmitDispatchListeners;
                 if (tracking !== undefined) {
-                  tracking.target.removeEventListener(tracking.event, tracking.listener, true);
-                  delete tracked.__tsPaymentSubmitDispatchListener;
+                  for (const registration of tracking) {
+                    registration.target.removeEventListener(
+                      registration.event,
+                      registration.listener,
+                      true,
+                    );
+                  }
+                  delete tracked.__tsPaymentSubmitDispatchListeners;
                 }
               },
               undefined,

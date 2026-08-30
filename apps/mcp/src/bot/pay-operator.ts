@@ -518,6 +518,10 @@ function approvalDeniedResult(
   };
 }
 
+function isPaymentApprovalDeniedError(error: unknown): boolean {
+  return error instanceof ApiCallError && error.code === "payment_approval_denied";
+}
+
 // Total additional time (beyond this call's own bounded wait) that a
 // resumed, still-pending decoupled/out-of-band 3DS challenge stays
 // checkable via operate_payment_status before handing back an accurate
@@ -1140,6 +1144,11 @@ export async function executeOperatePay(
                 }
               } catch (error) {
                 candidateCardBytes.fill(0);
+                if (isPaymentApprovalDeniedError(error)) {
+                  resumableState = undefined;
+                  keypairHandedOff = false;
+                  return approvalDeniedResult(approvalId, approvalUrl, checkout);
+                }
                 const failureReason =
                   error instanceof Error && /404|409/.test(error.message)
                     ? "confirm_status"
@@ -1181,11 +1190,22 @@ export async function executeOperatePay(
                 const confirmation = await api.confirmPaymentApproval(approvalId, candidate);
                 if (confirmation.status !== "approved") throw new Error("confirm_status");
               } catch (error) {
+                if (isPaymentApprovalDeniedError(error)) {
+                  candidateCardBytes.fill(0);
+                  resumableState = undefined;
+                  keypairHandedOff = false;
+                  return approvalDeniedResult(approvalId, approvalUrl, checkout);
+                }
                 try {
                   const reconciliation = await api.confirmPaymentApproval(approvalId, candidate);
                   if (reconciliation.status !== "approved") throw error;
-                } catch {
+                } catch (reconciliationError) {
                   candidateCardBytes.fill(0);
+                  if (isPaymentApprovalDeniedError(reconciliationError)) {
+                    resumableState = undefined;
+                    keypairHandedOff = false;
+                    return approvalDeniedResult(approvalId, approvalUrl, checkout);
+                  }
                   // The initial confirm may have actually gone through server-side (its
                   // response was merely lost) even though reconciliation couldn't prove
                   // it. Throwing here would leave resumableState live, and the outer

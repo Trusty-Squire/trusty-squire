@@ -666,6 +666,10 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         return;
       }
       const now = opts.deps.now?.() ?? new Date();
+      if (record.status === "denied") {
+        reply.code(409).send({ error: "payment_approval_denied" });
+        return;
+      }
       if (record.cardRef === null) {
         reply.code(409).send({ error: "card_required" });
         return;
@@ -698,6 +702,12 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
           fingerprint,
           now,
         );
+        if (result === "denied") {
+          candidateLifecycle(record, "review", "confirmation_denied");
+          event("review_confirm_rejected", record, fingerprint, result);
+          reply.code(409).send({ error: "payment_approval_denied" });
+          return;
+        }
         if (result !== "confirmed") {
           candidateLifecycle(record, "review", "confirmation_rejected");
           event("review_confirm_rejected", record, fingerprint, result);
@@ -738,6 +748,11 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         submissionFingerprint(parsed.data),
         opts.deps.now?.() ?? new Date(),
       );
+      if (confirmed === "denied") {
+        candidateLifecycle(record, "approval", "confirmation_denied");
+        reply.code(409).send({ error: "payment_approval_denied" });
+        return;
+      }
       if (confirmed !== "confirmed") {
         candidateLifecycle(record, "approval", "confirmation_rejected");
         reply.code(409).send({ error: "payment_approval_candidate_changed" });

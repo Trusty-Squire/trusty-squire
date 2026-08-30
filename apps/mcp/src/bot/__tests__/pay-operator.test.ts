@@ -53,6 +53,7 @@ type Mode =
   | "review_wrong_issuer"
   | "confirm_response_lost"
   | "confirm_response_lost_changed"
+  | "confirm_denied"
   | "junk_then_happy"
   | "tampered_amount"
   | "tampered_origin"
@@ -222,6 +223,7 @@ async function harness(
           mode === "review_then_happy" ||
           mode === "confirm_response_lost" ||
           mode === "confirm_response_lost_changed" ||
+          mode === "confirm_denied" ||
           mode === "junk_then_happy" ||
           mode === "expired_relay" ||
           mode === "stale_expired_relay"
@@ -254,6 +256,9 @@ async function harness(
       }
       if (mode === "confirm_response_lost_changed") {
         return Response.json({ error: "payment_approval_candidate_changed" }, { status: 409 });
+      }
+      if (mode === "confirm_denied") {
+        return Response.json({ error: "payment_approval_denied" }, { status: 409 });
       }
       confirmedCandidate = body;
       return Response.json({ status: "approved" });
@@ -731,6 +736,20 @@ describe("operate_pay", () => {
       reason: "confirm_failed",
       candidate_kind: "approval",
     });
+    expect(pendingStates).toHaveLength(0);
+    expect(filledCards).toHaveLength(0);
+    expect(auditBodies).toHaveLength(0);
+  });
+
+  it("returns terminal denial when denial wins final candidate confirmation", async () => {
+    const { result, filledCards, auditBodies, pendingStates, confirmationBodies } =
+      await harness("confirm_denied");
+
+    expect(result).toMatchObject({
+      status: "payment_approval_denied",
+      approval_id: "approval_test",
+    });
+    expect(confirmationBodies).toHaveLength(1);
     expect(pendingStates).toHaveLength(0);
     expect(filledCards).toHaveLength(0);
     expect(auditBodies).toHaveLength(0);
