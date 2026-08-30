@@ -24,6 +24,7 @@ import {
   teardownRemoteLoginRig,
   type RemoteLoginRig,
 } from "../remote-login-display.js";
+import { synchronizeSelfManagedChromeTerminationSignalHandlers } from "../browser.js";
 
 function fakeProcess(name: string, ignoreSigterm = false): ChildProcess {
   const child = Object.assign(new EventEmitter(), {
@@ -171,8 +172,14 @@ setInterval(() => undefined, 1000);
       await expect(startRemoteLoginDisplay(rig)).resolves.toBe(":117");
       expect(rig.display).toBe(":117");
       expect(rig.procs).toHaveLength(1);
+      expect(rig.privateDir).toBeDefined();
       expect(rig.authFile).toBeDefined();
+      expect(rig.passFile).toBeDefined();
+      expect(rig.vncPassword).toBeDefined();
+      expect(statSync(rig.privateDir!).mode & 0o777).toBe(0o700);
       expect(statSync(rig.authFile!).mode & 0o777).toBe(0o600);
+      expect(statSync(rig.passFile!).mode & 0o777).toBe(0o600);
+      expect(readFileSync(rig.passFile!, "utf8")).toBe(rig.vncPassword);
       expect(remoteLoginEnvironment(rig, { PATH: "/bin" })).toMatchObject({
         DISPLAY: ":117",
         XAUTHORITY: rig.authFile,
@@ -183,9 +190,13 @@ setInterval(() => undefined, 1000);
       expect(authority.display).toHaveLength(0);
       expect(authority.protocol.toString("ascii")).toBe("MIT-MAGIC-COOKIE-1");
       expect(authority.credential).toHaveLength(16);
+      const privateDir = rig.privateDir!;
       const authFile = rig.authFile!;
+      const passFile = rig.passFile!;
       await teardownRemoteLoginRig(rig, 10);
+      expect(existsSync(privateDir)).toBe(false);
       expect(existsSync(authFile)).toBe(false);
+      expect(existsSync(passFile)).toBe(false);
     } finally {
       await teardownRemoteLoginRig(rig, 10);
       executable.remove();
@@ -302,6 +313,26 @@ setInterval(() => undefined, 1000);
     expect(set).not.toHaveBeenCalled();
     remove();
     expect(handlers.size).toBe(0);
+  });
+
+  it("suspends every self-managed Chrome termination signal together", () => {
+    const runtime = new EventEmitter();
+
+    synchronizeSelfManagedChromeTerminationSignalHandlers(
+      true,
+      runtime as unknown as Pick<NodeJS.Process, "once" | "removeListener">,
+    );
+    expect(runtime.listenerCount("SIGHUP")).toBe(1);
+    expect(runtime.listenerCount("SIGTERM")).toBe(1);
+    expect(runtime.listenerCount("SIGINT")).toBe(1);
+
+    synchronizeSelfManagedChromeTerminationSignalHandlers(
+      false,
+      runtime as unknown as Pick<NodeJS.Process, "once" | "removeListener">,
+    );
+    expect(runtime.listenerCount("SIGHUP")).toBe(0);
+    expect(runtime.listenerCount("SIGTERM")).toBe(0);
+    expect(runtime.listenerCount("SIGINT")).toBe(0);
   });
 
   it("tears down the login rig before exiting on SSH hangup", async () => {

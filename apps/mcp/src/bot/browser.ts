@@ -2663,7 +2663,25 @@ const onSelfManagedSigint = (): void => exitForSelfManagedSignal(2);
 const onSelfManagedSigterm = (): void => exitForSelfManagedSignal(15);
 const onSelfManagedSighup = (): void => exitForSelfManagedSignal(1);
 
-// Whether the self-managed SIGINT/SIGTERM handlers may exit the process.
+const selfManagedTerminationSignalHandlers = [
+  ["SIGHUP", onSelfManagedSighup],
+  ["SIGINT", onSelfManagedSigint],
+  ["SIGTERM", onSelfManagedSigterm],
+] as const;
+
+type SelfManagedSignalRuntime = Pick<NodeJS.Process, "once" | "removeListener">;
+
+export function synchronizeSelfManagedChromeTerminationSignalHandlers(
+  enabled: boolean,
+  runtime: SelfManagedSignalRuntime = process,
+): void {
+  for (const [signal, handler] of selfManagedTerminationSignalHandlers) {
+    if (enabled) runtime.once(signal, handler);
+    else runtime.removeListener(signal, handler);
+  }
+}
+
+// Whether the self-managed termination-signal handlers may exit the process.
 // False means another shutdown owner (the MCP server's disconnect coordinator,
 // or an in-flight interactive login) holds process-exit responsibility.
 export function isSelfManagedChromeTerminationSignalExitEnabled(): boolean {
@@ -2674,13 +2692,7 @@ export function setSelfManagedChromeTerminationSignalExitEnabled(enabled: boolea
   if (selfManagedTerminationSignalExitEnabled === enabled) return;
   selfManagedTerminationSignalExitEnabled = enabled;
   if (!selfManagedCleanupInstalled) return;
-  if (enabled) {
-    process.once("SIGINT", onSelfManagedSigint);
-    process.once("SIGTERM", onSelfManagedSigterm);
-  } else {
-    process.removeListener("SIGINT", onSelfManagedSigint);
-    process.removeListener("SIGTERM", onSelfManagedSigterm);
-  }
+  synchronizeSelfManagedChromeTerminationSignalHandlers(enabled);
 }
 
 function installSelfManagedChromeCleanup(): void {
@@ -2688,10 +2700,8 @@ function installSelfManagedChromeCleanup(): void {
   selfManagedCleanupInstalled = true;
   process.once("exit", cleanupSelfManagedChromes);
   if (selfManagedTerminationSignalExitEnabled) {
-    process.once("SIGINT", onSelfManagedSigint);
-    process.once("SIGTERM", onSelfManagedSigterm);
+    synchronizeSelfManagedChromeTerminationSignalHandlers(true);
   }
-  process.once("SIGHUP", onSelfManagedSighup);
 }
 
 function registerSelfManagedChrome(

@@ -39,9 +39,11 @@ export interface RemoteLoginRig {
   height: number;
   procs: ChildProcess[];
   binaries: RemoteLoginBinaries;
+  privateDir?: string;
   authFile?: string;
   webDir?: string;
   passFile?: string;
+  vncPassword?: string;
 }
 
 export interface RemoteLoginBinaries {
@@ -61,13 +63,10 @@ function encodeXauthorityField(value: Buffer): Buffer {
   return Buffer.concat([length, value]);
 }
 
-function createRemoteLoginXauthority(rig: RemoteLoginRig): string {
+function createRemoteLoginXauthority(privateDir: string): string {
   const familyWild = Buffer.allocUnsafe(2);
   familyWild.writeUInt16BE(0xffff);
-  const authFile = join(
-    tmpdir(),
-    `tsq-xauth-${process.pid}-${randomBytes(8).toString("hex")}`,
-  );
+  const authFile = join(privateDir, "xauthority");
   const contents = Buffer.concat([
     familyWild,
     encodeXauthorityField(Buffer.alloc(0)),
@@ -77,8 +76,27 @@ function createRemoteLoginXauthority(rig: RemoteLoginRig): string {
   ]);
   writeFileSync(authFile, contents, { flag: "wx", mode: 0o600 });
   chmodSync(authFile, 0o600);
-  rig.authFile = authFile;
   return authFile;
+}
+
+function createRemoteLoginSecrets(rig: RemoteLoginRig): void {
+  const privateDir = mkdtempSync(join(tmpdir(), "tsq-login-"));
+  chmodSync(privateDir, 0o700);
+  rig.privateDir = privateDir;
+  try {
+    rig.authFile = createRemoteLoginXauthority(privateDir);
+    rig.vncPassword = generateVncPassword();
+    rig.passFile = join(privateDir, "vnc.pass");
+    writeFileSync(rig.passFile, rig.vncPassword, { flag: "wx", mode: 0o600 });
+    chmodSync(rig.passFile, 0o600);
+  } catch (error) {
+    rmSync(privateDir, { recursive: true, force: true });
+    rig.privateDir = undefined;
+    rig.authFile = undefined;
+    rig.passFile = undefined;
+    rig.vncPassword = undefined;
+    throw error;
+  }
 }
 
 export function remoteLoginEnvironment(
@@ -414,7 +432,8 @@ export function createRemoteLoginRig(): RemoteLoginRig {
 
 export async function startRemoteLoginDisplay(rig: RemoteLoginRig): Promise<string> {
   try {
-    const authFile = createRemoteLoginXauthority(rig);
+    createRemoteLoginSecrets(rig);
+    const authFile = rig.authFile!;
     const xvfb = spawn(
       rig.binaries.xvfb,
       [
@@ -454,12 +473,11 @@ export async function exposeRemoteLoginDisplay(
   const namedTunnel = namedTunnelConfig();
   const vncPort = await findFreeLoginPort();
   const webPort = namedTunnel?.port ?? (await findFreeLoginPort());
-  const password = generateVncPassword();
-
-  const passFile = join(tmpdir(), `tsq-vnc-${process.pid}-${vncPort}.pass`);
-  writeFileSync(passFile, password, { mode: 0o600 });
-  chmodSync(passFile, 0o600);
-  rig.passFile = passFile;
+  const password = rig.vncPassword;
+  const passFile = rig.passFile;
+  if (password === undefined || passFile === undefined) {
+    throw new Error("remote login VNC credentials are not ready");
+  }
   const x11vnc = spawnBackground(
     rig.binaries.x11vnc,
     [
@@ -569,8 +587,12 @@ function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boole
 
 function removeRigFiles(rig: RemoteLoginRig): void {
   if (rig.webDir !== undefined) rmSync(rig.webDir, { recursive: true, force: true });
-  if (rig.passFile !== undefined) rmSync(rig.passFile, { force: true });
-  if (rig.authFile !== undefined) rmSync(rig.authFile, { force: true });
+  if (rig.privateDir !== undefined) rmSync(rig.privateDir, { recursive: true, force: true });
+  rig.webDir = undefined;
+  rig.privateDir = undefined;
+  rig.passFile = undefined;
+  rig.authFile = undefined;
+  rig.vncPassword = undefined;
 }
 
 function releaseChildHandles(child: ChildProcess): void {
