@@ -12,6 +12,7 @@ import {
   BrowserController,
   childProcessIsRunning,
   launchCancellablePersistentContext,
+  launchSelfManagedLoginContext,
   resolvePersistentFallbackIdentity,
   resolveAttachedProfileChildIdentity,
   terminateTrackedProfileChild,
@@ -25,7 +26,7 @@ import {
 } from "../profile.js";
 import { OPERATOR_BROWSER_MARKER_ENV } from "../operator-browser-watchdog.js";
 import { loggedInProviders, markProviderLoggedIn } from "../login-state.js";
-import { readCanonicalIdentityMetadata } from "../session-state.js";
+import { readCanonicalIdentityMetadata, readSessionState } from "../session-state.js";
 import {
   cancelActiveLoginBrowsers,
   captureProfileStorageState,
@@ -48,6 +49,7 @@ import {
   ensureOAuthSession,
   finalizeLoginRun,
   launchPersistentLoginContext,
+  teardownLoginBrowser,
   type PersistentLauncher,
   type RunInBotChromeOpts,
 } from "../google-login.js";
@@ -717,33 +719,30 @@ describe("bot Chrome launch consistency", () => {
       ],
     };
     const storageState = vi.fn(async () => state);
-    const close = vi.fn(async () => undefined);
-    const launcher = {
-      launchPersistentContext: vi.fn(async () => ({ storageState, close }) as never),
-    };
-    const identity = {
-      host: hostname(),
-      pid: 2_147_483_001,
-      start_time: "capture-browser",
-      user_data_dir: "/isolated-profile",
-    };
+    let running = true;
+    const teardown = vi.fn(async () => {
+      running = false;
+    });
+    const launch = vi.fn(async (options: Parameters<typeof launchSelfManagedLoginContext>[0]) => {
+      const browser = { teardown, forceTeardown: vi.fn(), isRunning: () => running };
+      options.onSpawned?.(browser);
+      return { ...browser, context: { storageState } as never, identity: null };
+    });
 
     await expect(
-      captureProfileStorageState("/isolated-profile", launcher, {
-        currentProfileHolderPid: () => identity.pid,
-        profileProcessIdentity: () => identity,
-        reapProfileHolderIfOwned: vi.fn(() => true),
-        teardownLoginBrowser: async (options) => {
-          await options.closeBrowser();
-          return "closed";
-        },
+      captureProfileStorageState("/isolated-profile", {
+        resolveChannelBinary: () => "/unused/chrome",
+        launchSelfManagedLoginContext: launch,
+        teardownLoginBrowser,
       }),
-    ).resolves.toEqual(state);
+    ).resolves.toEqual({ storageState: state });
     expect(storageState).toHaveBeenCalledWith({ indexedDB: true });
-    expect(close).toHaveBeenCalledOnce();
-    expect(launcher.launchPersistentContext).toHaveBeenCalledWith(
-      "/isolated-profile",
-      expect.objectContaining({ headless: true, channel: "chrome" }),
+    expect(teardown).toHaveBeenCalledOnce();
+    expect(launch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        profileDir: "/isolated-profile",
+        extraArgs: expect.arrayContaining(["--headless=new"]),
+      }),
     );
   });
 
@@ -755,22 +754,18 @@ describe("bot Chrome launch consistency", () => {
           rejectStorageState = reject;
         }),
     );
-    const close = vi.fn(async () => {
+    let running = true;
+    const teardown = vi.fn(async () => {
+      running = false;
       rejectStorageState?.(new Error("capture context closed"));
     });
-    const launcher = {
-      launchPersistentContext: vi.fn(async () => ({ storageState, close }) as never),
-    };
-    const identity = {
-      host: hostname(),
-      pid: 2_147_483_002,
-      start_time: "capture-browser",
-      user_data_dir: "/isolated-profile",
-    };
-    const capturing = captureProfileStorageState("/isolated-profile", launcher, {
-      currentProfileHolderPid: () => identity.pid,
-      profileProcessIdentity: () => identity,
-      reapProfileHolderIfOwned: vi.fn(() => true),
+    const capturing = captureProfileStorageState("/isolated-profile", {
+      resolveChannelBinary: () => "/unused/chrome",
+      launchSelfManagedLoginContext: async (options) => {
+        const browser = { teardown, forceTeardown: vi.fn(), isRunning: () => running };
+        options.onSpawned?.(browser);
+        return { ...browser, context: { storageState } as never, identity: null };
+      },
       teardownLoginBrowser: async (options) => {
         await options.closeBrowser();
         return "closed";
@@ -783,73 +778,43 @@ describe("bot Chrome launch consistency", () => {
     await expect(capturing).resolves.toEqual(
       expect.objectContaining({ message: "capture context closed" }),
     );
-    expect(close).toHaveBeenCalledOnce();
+    expect(teardown).toHaveBeenCalledOnce();
   });
 
   it("bounds shutdown cancellation while a capture launch is still pending", async () => {
-    vi.useFakeTimers();
-    let finishLaunch!: (context: {
-      storageState: () => Promise<{ cookies: never[]; origins: never[] }>;
-      close: () => Promise<void>;
-    }) => void;
-    const lateClose = vi.fn(async () => undefined);
-    const launch = new Promise<{
-      storageState: () => Promise<{ cookies: never[]; origins: never[] }>;
-      close: () => Promise<void>;
-    }>((resolve) => {
-      finishLaunch = resolve;
+    let rejectLaunch!: (error: Error) => void;
+    let running = true;
+    const teardown = vi.fn(async () => {
+      running = false;
+      rejectLaunch(new Error("capture launch closed"));
     });
-    const launcher = { launchPersistentContext: vi.fn(async () => await launch) };
-    const identity = {
-      host: hostname(),
-      pid: 2_147_483_003,
-      start_time: "capture-browser-pending",
-      user_data_dir: "/isolated-profile",
-    };
-    let holderPresent = true;
-    const reap = vi.fn(() => {
-      holderPresent = false;
-      return true;
+    const launch = vi.fn(async (options: Parameters<typeof launchSelfManagedLoginContext>[0]) => {
+      const browser = { teardown, forceTeardown: vi.fn(), isRunning: () => running };
+      options.onSpawned?.(browser);
+      await new Promise<never>((_resolve, reject) => {
+        rejectLaunch = reject;
+      });
+      throw new Error("unreachable");
     });
-    const capturing = captureProfileStorageState("/isolated-profile", launcher, {
-      currentProfileHolderPid: () => (holderPresent ? identity.pid : null),
-      profileProcessIdentity: () => identity,
-      reapProfileHolderIfOwned: reap,
+    const capturing = captureProfileStorageState("/isolated-profile", {
+      resolveChannelBinary: () => "/unused/chrome",
+      launchSelfManagedLoginContext: launch,
       teardownLoginBrowser: async (options) => {
         await options.closeBrowser();
-        options.forceClose();
         return "closed";
       },
-      launchTimeoutMs: 25,
-      cancellationSettleMs: 25,
-      cancellationPollMs: 5,
     }).catch((error: unknown) => error);
-    await vi.waitFor(() => expect(launcher.launchPersistentContext).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(launch).toHaveBeenCalledOnce());
 
-    const shutdown = cancelActiveLoginBrowsers();
-    await vi.advanceTimersByTimeAsync(60);
-    await shutdown;
+    await cancelActiveLoginBrowsers();
     await expect(capturing).resolves.toEqual(
       expect.objectContaining({ message: "login browser cancelled during shutdown" }),
     );
-    expect(reap).toHaveBeenCalled();
-
-    finishLaunch({
-      storageState: async () => ({ cookies: [], origins: [] }),
-      close: lateClose,
-    });
-    await vi.advanceTimersByTimeAsync(0);
-    expect(lateClose).toHaveBeenCalledOnce();
+    expect(teardown).toHaveBeenCalledOnce();
   });
 
-  it("captures canonical Google account email as identity metadata", async () => {
+  it("returns canonical Google account email with the captured state", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-google-identity-metadata-"));
-    const identity = {
-      host: hostname(),
-      pid: 2_147_483_004,
-      start_time: "capture-browser-email",
-      user_data_dir: profileDir,
-    };
     const page = {
       goto: vi.fn(async () => undefined),
       url: () => "https://myaccount.google.com/",
@@ -864,23 +829,31 @@ describe("bot Chrome launch consistency", () => {
       close: vi.fn(async () => undefined),
     };
     try {
-      await captureProfileStorageState(
-        profileDir,
-        { launchPersistentContext: vi.fn(async () => context as never) },
-        {
-          currentProfileHolderPid: () => identity.pid,
-          profileProcessIdentity: () => identity,
-          reapProfileHolderIfOwned: vi.fn(() => true),
-          teardownLoginBrowser: async (options) => {
-            await options.closeBrowser();
-            return "closed";
-          },
+      let running = true;
+      const captured = await captureProfileStorageState(profileDir, {
+        resolveChannelBinary: () => "/unused/chrome",
+        launchSelfManagedLoginContext: async (options) => {
+          const browser = {
+            teardown: async () => {
+              running = false;
+            },
+            forceTeardown: vi.fn(),
+            isRunning: () => running,
+          };
+          options.onSpawned?.(browser);
+          return { ...browser, context: context as never, identity: null };
         },
-      );
+        teardownLoginBrowser: async (options) => {
+          await options.closeBrowser();
+          return "closed";
+        },
+      });
 
-      await expect(readCanonicalIdentityMetadata(profileDir)).resolves.toEqual({
+      expect(captured).toEqual({
+        storageState: { cookies: [], origins: [] },
         googleAccountEmail: "worker@example.com",
       });
+      await expect(readCanonicalIdentityMetadata(profileDir)).resolves.toBeUndefined();
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }
@@ -888,25 +861,27 @@ describe("bot Chrome launch consistency", () => {
 
   it("does not return captured identity after an unproven close", async () => {
     const state = { cookies: [], origins: [] };
-    const close = vi.fn(async () => undefined);
-    const launcher = {
-      launchPersistentContext: vi.fn(
-        async () => ({ storageState: async () => state, close }) as never,
-      ),
-    };
+    const teardown = vi.fn(async () => undefined);
 
     await expect(
-      captureProfileStorageState("/isolated-profile", launcher, {
-        currentProfileHolderPid: () => null,
-        profileProcessIdentity: () => null,
-        reapProfileHolderIfOwned: vi.fn(() => false),
+      captureProfileStorageState("/isolated-profile", {
+        resolveChannelBinary: () => "/unused/chrome",
+        launchSelfManagedLoginContext: async (options) => {
+          const browser = { teardown, forceTeardown: vi.fn(), isRunning: () => true };
+          options.onSpawned?.(browser);
+          return {
+            ...browser,
+            context: { storageState: async () => state } as never,
+            identity: null,
+          };
+        },
         teardownLoginBrowser: async (options) => {
           await options.closeBrowser();
           return "unknown";
         },
       }),
     ).rejects.toThrow("login identity capture closed without proof (unknown)");
-    expect(close).toHaveBeenCalledOnce();
+    expect(teardown).toHaveBeenCalledOnce();
   });
 
   it("publishes plain-login identity after closing Chrome and capturing through a context", async () => {
@@ -930,7 +905,7 @@ describe("bot Chrome launch consistency", () => {
     const capture = vi.fn(async (capturedProfileDir: string) => {
       expect(capturedProfileDir).toBe(profileDir);
       events.push("capture");
-      return state;
+      return { storageState: state, googleAccountEmail: "worker@example.com" };
     });
     try {
       const result = await runDisplayedChrome(
@@ -962,12 +937,18 @@ describe("bot Chrome launch consistency", () => {
         },
       );
 
-      expect(result).toEqual({ status: "completed", closeState: "closed", storageState: state });
+      expect(result).toEqual({
+        status: "completed",
+        closeState: "closed",
+        storageState: state,
+        googleAccountEmail: "worker@example.com",
+      });
       expect(events).toEqual(["close", "capture"]);
       await finalizeLoginRun({ profileDir }, result);
-      expect(
-        JSON.parse(readFileSync(join(profileDir, "trusty-squire-session-state.json"), "utf8")),
-      ).toEqual(state);
+      await expect(readSessionState(profileDir)).resolves.toEqual(state);
+      await expect(readCanonicalIdentityMetadata(profileDir)).resolves.toEqual({
+        googleAccountEmail: "worker@example.com",
+      });
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }
@@ -981,18 +962,20 @@ describe("confirmed login finalization", () => {
     expect(() => installClaimPollCompleted("expired")).toThrow(/expired/);
   });
 
-  it("records a confirmed login without overwriting a snapshot that was not captured", async () => {
+  it("refuses to confirm a login without a publishable identity snapshot", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
     try {
-      await finalizeLoginRun(
-        {
-          profileDir,
-          onConfirmedLogin: async () => markProviderLoggedIn("google", profileDir),
-        },
-        { status: "completed", closeState: "unknown" },
-      );
+      await expect(
+        finalizeLoginRun(
+          {
+            profileDir,
+            onConfirmedLogin: async () => markProviderLoggedIn("google", profileDir),
+          },
+          { status: "completed", closeState: "unknown" },
+        ),
+      ).rejects.toThrow("closed without publishable state");
 
-      expect(loggedInProviders(profileDir)).toEqual(["google"]);
+      expect(loggedInProviders(profileDir)).toEqual([]);
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }
@@ -1038,14 +1021,16 @@ describe("confirmed login finalization", () => {
     const prior = '{"cookies":[{"name":"SID"}],"origins":[]}';
     writeFileSync(path, prior, { mode: 0o600 });
     try {
-      await finalizeLoginRun(
-        { profileDir },
-        {
-          status: "completed",
-          closeState: "unknown",
-          storageState: { cookies: [], origins: [] },
-        },
-      );
+      await expect(
+        finalizeLoginRun(
+          { profileDir },
+          {
+            status: "completed",
+            closeState: "unknown",
+            storageState: { cookies: [], origins: [] },
+          },
+        ),
+      ).rejects.toThrow("closed without publishable state");
       expect(readFileSync(path, "utf8")).toBe(prior);
     } finally {
       rmSync(profileDir, { recursive: true, force: true });

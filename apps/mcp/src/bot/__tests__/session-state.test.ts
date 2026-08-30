@@ -6,8 +6,10 @@ import {
   createEphemeralProfile,
   destroyEphemeralProfile,
   MAX_SESSION_STATE_BYTES,
+  readCanonicalIdentityMetadata,
   readSessionState,
   sessionStatePath,
+  writeCanonicalIdentitySnapshot,
   writeSessionState,
 } from "../session-state.js";
 
@@ -46,7 +48,10 @@ describe("operator session storage state", () => {
     await writeSessionState(canonical, state);
 
     await expect(readSessionState(canonical)).resolves.toEqual(state);
-    expect(JSON.parse(readFileSync(sessionStatePath(canonical), "utf8"))).toEqual(state);
+    expect(JSON.parse(readFileSync(sessionStatePath(canonical), "utf8"))).toEqual({
+      version: 1,
+      storageState: state,
+    });
     expect(statSync(sessionStatePath(canonical)).mode & 0o777).toBe(0o600);
   });
 
@@ -116,6 +121,35 @@ describe("operator session storage state", () => {
     await expect(readSessionState(canonical)).resolves.toEqual(prior);
   });
 
+  it("publishes storage state and account metadata as one accepted unit", async () => {
+    const canonical = mkdtempSync(join(tmpdir(), "ts-session-state-identity-"));
+    roots.push(canonical);
+    const prior = { cookies: [], origins: [] };
+    await writeCanonicalIdentitySnapshot(canonical, prior, {
+      googleAccountEmail: "prior@example.com",
+    });
+    const oversized = {
+      cookies: [],
+      origins: [
+        {
+          origin: "https://oversized.example",
+          localStorage: [{ name: "state", value: "x".repeat(MAX_SESSION_STATE_BYTES) }],
+        },
+      ],
+    };
+
+    await expect(
+      writeCanonicalIdentitySnapshot(canonical, oversized, {
+        googleAccountEmail: "replacement@example.com",
+      }),
+    ).resolves.toBe(false);
+
+    await expect(readSessionState(canonical)).resolves.toEqual(prior);
+    await expect(readCanonicalIdentityMetadata(canonical)).resolves.toEqual({
+      googleAccountEmail: "prior@example.com",
+    });
+  });
+
   it("creates distinct 0700 profiles and removes only the finished instance", async () => {
     const first = createEphemeralProfile();
     const second = createEphemeralProfile();
@@ -129,5 +163,4 @@ describe("operator session storage state", () => {
       await destroyEphemeralProfile(second);
     }
   });
-
 });

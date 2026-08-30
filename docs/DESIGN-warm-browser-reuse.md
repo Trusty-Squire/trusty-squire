@@ -24,22 +24,25 @@ storage, and IndexedDB and is atomically stored as
 `<CHROME_PROFILE_DIR>/trusty-squire-session-state.json` with mode `0600`.
 Plain Chrome remains unattached throughout Google OAuth. After its proven close,
 the login flow briefly reopens the canonical authoring profile in a headless
-context, captures the same portable state, closes the context, and publishes the
-snapshot. Snapshots larger than 4 MiB are ignored on read and skipped on write,
-also preserving the prior snapshot.
+context, captures the same portable state and Google account email, closes the
+context, and publishes both in one atomic identity snapshot. Snapshots larger
+than 4 MiB are ignored on read and skipped on write, also preserving the prior
+snapshot and its matching account metadata.
 
 Ordinary operator startup restores the snapshot without Google identity, so two
 parallel profiles cannot hold the same rotating Google session. A Google
-`oauth_login` action waits on the process-local handoff, restores the latest full
-snapshot, completes OAuth, captures the rotated state, proves bounded close,
-publishes it, and restarts the same private profile before releasing the next
-waiter. `require_live_identity` still runs the shared live-provider detector in
-its fresh seeded browser.
+`oauth_login` action waits on the process-local handoff and the cross-process
+canonical-profile operation guard, restores the latest full snapshot, completes
+OAuth, captures the rotated state, proves bounded close, publishes it, and
+restarts the same private profile before releasing the next waiter.
+`require_live_identity` relies on the saved identity markers without preloading
+Google state or probing Google from the ordinary concurrent browser.
 
-Google OAuth publishes at the serialized handoff boundary. A session seeded for
-`require_live_identity` may also publish after an explicitly successful result.
-No-outcome, failed, unconfirmed, payment-active, payment-field-sealed, and
-pending-3DS sessions never publish at finish.
+Google OAuth publishes at the serialized handoff boundary. Every explicitly
+successful non-payment session may also publish its non-Google state at finish;
+the merge retains the latest serialized Google identity. No-outcome, failed,
+unconfirmed, payment-active, payment-field-sealed, and pending-3DS sessions never
+publish at finish.
 
 ## 3. Start and active ownership
 

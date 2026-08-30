@@ -668,6 +668,44 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "runs the approval fence immediately before the charge click",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <form id="checkout">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-exp">
+            <input autocomplete="cc-csc">
+            <input autocomplete="cc-name">
+            <button type="submit">Pay now</button>
+          </form>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>
+        `);
+        const controller = BrowserController.fromHarnessPage(page);
+        const beforeSubmitDispatch = vi.fn(() => {
+          throw new Error("payment_approval_expired");
+        });
+
+        await expect(
+          controller.fillAndSubmitCheckout(CARD, { beforeSubmitDispatch }),
+        ).rejects.toThrow("payment_approval_expired");
+
+        expect(beforeSubmitDispatch).toHaveBeenCalledOnce();
+        expect(await page.locator("body").getAttribute("data-submitted")).toBeNull();
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "types digits into a combined numeric expiry field and lets the site format MM/YY",
     async () => {
       const browser = await chromium.launch({ headless: true });

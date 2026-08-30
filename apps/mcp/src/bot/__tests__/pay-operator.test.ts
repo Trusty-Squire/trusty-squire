@@ -79,7 +79,7 @@ async function harness(
     readCheckoutSummary?: () => Promise<CheckoutSummary>;
     fillAndSubmitCheckout?: (
       card: CheckoutCard,
-      options?: { onSubmitDispatched?: () => void },
+      options?: { onSubmitDispatched?: () => void; beforeSubmitDispatch?: () => void },
     ) => Promise<CheckoutSubmitResult>;
     paymentInstrumentMismatch?: () => CheckoutSubmitResult["payment_instrument_mismatch"];
     now?: () => number;
@@ -286,8 +286,12 @@ async function harness(
     clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
     fillAndSubmitCheckout: vi.fn(
       checkoutOptions.fillAndSubmitCheckout ??
-        (async (card: CheckoutCard, options?: { onSubmitDispatched?: () => void }) => {
+        (async (
+          card: CheckoutCard,
+          options?: { onSubmitDispatched?: () => void; beforeSubmitDispatch?: () => void },
+        ) => {
           filledCards.push(card);
+          options?.beforeSubmitDispatch?.();
           options?.onSubmitDispatched?.();
           pendingAtDispatchCounts.push(pendingThreeDsStates.length);
           return threeDs === undefined
@@ -2251,6 +2255,48 @@ describe("operate_pay non-blocking approval [P0]", () => {
     expect(result).toMatchObject({ status: "payment_submitted" });
     expect(env.browser.fillAndSubmitCheckout).toHaveBeenCalledOnce();
     expect(env.filledCards).toEqual([SYNTHETIC_CARD]);
+  });
+
+  it("refuses the charge when approval expires at the final browser dispatch fence", async () => {
+    const env = buildResumableEnv();
+    let now = Date.now();
+    let pending: PendingApprovalWait | null = null;
+    await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      onApprovalPending: (state) => {
+        pending = state;
+      },
+      pollBudgetMs: 0,
+      now: () => now,
+    });
+    if (pending === null) throw new Error("expected initial resumable approval");
+    env.setPendingApproved();
+    const deadline = Date.parse(env.expiresAt);
+    now = deadline - 1;
+    vi.mocked(env.browser.fillAndSubmitCheckout).mockImplementation(async (_card, options) => {
+      now = deadline;
+      options?.beforeSubmitDispatch?.();
+      throw new Error("charge dispatch should have been refused");
+    });
+
+    const result = await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      resumeFrom: pending,
+      pollBudgetMs: 0,
+      now: () => now,
+    });
+
+    expect(result).toMatchObject({ status: "payment_approval_timeout" });
+    expect(env.browser.fillAndSubmitCheckout).toHaveBeenCalledOnce();
+    expect(env.filledCards).toEqual([]);
   });
 
   it("keeps a zero-budget review candidate distinct, then charges a subsequent final candidate on the same approval", async () => {

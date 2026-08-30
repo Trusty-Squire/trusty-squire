@@ -52,7 +52,7 @@ export interface PaymentBrowser {
   readCheckoutConfirmSummary(approvedCurrency?: string): Promise<CheckoutSummary>;
   fillAndSubmitCheckout(
     card: CheckoutCard,
-    options?: { onSubmitDispatched?: () => void },
+    options?: { onSubmitDispatched?: () => void; beforeSubmitDispatch?: () => void },
   ): Promise<CheckoutSubmitResult>;
   fillCheckoutCardFields(card: CheckoutCard): Promise<void>;
   submitFilledCheckout(): Promise<CheckoutSubmitResult>;
@@ -1453,11 +1453,20 @@ export async function executeOperatePay(
             ? { issuer: args.card_issuer, issuer_source: "bin_metadata" as const }
             : {}),
         },
-        { onSubmitDispatched: retainPendingThreeDs },
+        {
+          onSubmitDispatched: retainPendingThreeDs,
+          beforeSubmitDispatch: () => {
+            if (approvalExpired()) throw new Error("payment_approval_expired");
+          },
+        },
       );
       if (submitResult.three_ds_required) paymentStatus = "payment_3ds_required";
       else if (!submitResult.order_confirmed) paymentStatus = "payment_outcome_unknown";
     } catch (error) {
+      if (error instanceof Error && error.message === "payment_approval_expired") {
+        clearPendingThreeDs();
+        return expiredApprovalResult();
+      }
       const outcomeUnknown = error instanceof PaymentSubmitOutcomeUnknownError;
       paymentStatus = outcomeUnknown ? "payment_outcome_unknown" : "payment_checkout_failed";
       if (outcomeUnknown) {

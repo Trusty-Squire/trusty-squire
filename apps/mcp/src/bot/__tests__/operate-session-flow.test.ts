@@ -857,6 +857,7 @@ import { operatePayTool, operatePaymentStatusTool } from "../../tools/operate-pa
 import { ApiClient } from "../../api-client.js";
 import { dispatchOperatorBrowserProcessTermination } from "../operator-browser-watchdog.js";
 import { BrowserController } from "../browser.js";
+import { acquireProfileOperationGuard } from "../profile.js";
 import {
   startProvisionSession,
   startHarnessProvisionSession,
@@ -3471,6 +3472,59 @@ describe("operate session — OAuth lifecycle", () => {
     await finishProvisionSession(started.session_id);
   });
 
+  it("waits for the cross-process canonical profile guard before Google OAuth", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-google-process-guard";
+    const google = {
+      cookies: [
+        {
+          name: "SID",
+          value: "google-session-before-process-guard",
+          domain: ".google.com",
+          path: "/",
+        },
+      ],
+      origins: [],
+    };
+    const rotated = {
+      cookies: [{ ...google.cookies[0]!, value: "google-session-after-process-guard" }],
+      origins: [],
+    };
+    h.storageStates.set(canonical, google);
+    h.captureStorageStateSequences.set(0, [{ cookies: [], origins: [] }, rotated]);
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+    const externalOperation = acquireProfileOperationGuard(canonical);
+    try {
+      const acting = act(started.session_id, {
+        kind: "oauth_login",
+        target: "Continue with Google",
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      expect(h.oauthLoginCalls).toEqual([]);
+      expect(h.storageStateReads.filter((profileDir) => profileDir === canonical)).toHaveLength(1);
+
+      externalOperation.release();
+      await acting;
+
+      expect(h.oauthLoginCalls).toEqual(["#google-oauth"]);
+      expect(h.storageStateWrites).toEqual([{ profileDir: canonical, state: rotated }]);
+    } finally {
+      externalOperation.release();
+      await finishProvisionSession(started.session_id).catch(() => undefined);
+    }
+  });
+
   it("captures rotated identity before closing the live OAuth browser", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-google-capture-failure";
     const google = {
@@ -6069,6 +6123,47 @@ describe("operate session — ephemeral profile lifecycle", () => {
     expect(h.captureStorageStateCalls).toBe(1);
     expect(h.storageStateWrites).toEqual([]);
     expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
+  });
+
+  it("waits for the cross-process canonical guard before finish-time publication", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-finish-process-guard";
+    h.captureStorageState = {
+      cookies: [
+        {
+          name: "merchant_session",
+          value: "confirmed-session",
+          domain: ".app.example.com",
+          path: "/",
+        },
+      ],
+      origins: [],
+    };
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/signup",
+      profileDir: canonical,
+    });
+    const externalOperation = acquireProfileOperationGuard(canonical);
+    try {
+      const finishing = provisionFinishTool.handler(
+        provisionFinishTool.inputSchema.parse({
+          session_id: started.session_id,
+          outcome: { kind: "result", data: { confirmed: true } },
+        }),
+        null,
+      );
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      expect(h.storageStateWrites).toEqual([]);
+
+      externalOperation.release();
+      await finishing;
+
+      expect(h.storageStateWrites).toEqual([
+        { profileDir: canonical, state: h.captureStorageState },
+      ]);
+    } finally {
+      externalOperation.release();
+      await finishProvisionSession(started.session_id).catch(() => undefined);
+    }
   });
 
   it("destroys without write-back when payment fields remain sealed", async () => {

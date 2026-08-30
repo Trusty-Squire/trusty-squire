@@ -3091,6 +3091,7 @@ export interface SelfLaunchedLogin {
   // running — the zombie-chrome leak). Also reaps the profile lock.
   teardown: () => Promise<void>;
   forceTeardown: () => void;
+  isRunning: () => boolean;
   identity: ProfileProcessIdentity | null;
 }
 
@@ -3164,9 +3165,37 @@ export async function launchSelfManagedLoginContext(params: {
   // falls back to launchPersistentContext for credentialed proxies).
   proxyServer: string | null;
   extraArgs?: readonly string[];
+  onSpawned?: (
+    browser: Pick<SelfLaunchedLogin, "teardown" | "forceTeardown" | "isRunning">,
+  ) => void;
 }): Promise<SelfLaunchedLogin> {
   let child: ChildProcess | null = null;
   let childIdentity: ProfileProcessIdentity | null = null;
+  let browser: Browser | null = null;
+  let torn = false;
+  const isRunning = (): boolean => childProcessIsRunning(child);
+  const forceTeardown = (): void => {
+    if (childIdentity !== null) {
+      const tracked = selfManagedChromes.get(childIdentity.pid);
+      signalOwnedChromeProcessTree(childIdentity, false, "SIGKILL", {
+        ...(tracked === undefined ? {} : { proof: tracked.proof }),
+      });
+      reapProfileHolderIfOwned(params.profileDir, childIdentity);
+      return;
+    }
+    if (childProcessIsRunning(child)) child?.kill("SIGKILL");
+  };
+  const teardown = async (): Promise<void> => {
+    if (torn) return;
+    torn = true;
+    await browser?.close().catch(() => undefined);
+    if (!childProcessIsRunning(child)) return;
+    if (childIdentity !== null) {
+      signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
+    } else {
+      child?.kill("SIGTERM");
+    }
+  };
   const endpoint = await withChromeStartupLock(
     async () => {
       const port = await findFreePort();
@@ -3199,6 +3228,7 @@ export async function launchSelfManagedLoginContext(params: {
         chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
       });
       try {
+        params.onSpawned?.({ teardown, forceTeardown, isRunning });
         const endpoint = await waitForDevtools(port, 30_000, spawned);
         childIdentity = await resolveAttachedProfileChildIdentity(
           spawned,
@@ -3210,6 +3240,7 @@ export async function launchSelfManagedLoginContext(params: {
         }
         return endpoint;
       } catch (err) {
+        forceTeardown();
         childIdentity = await terminateTrackedProfileChild(spawned, params.profileDir, {
           identity: childIdentity,
         });
@@ -3228,37 +3259,26 @@ export async function launchSelfManagedLoginContext(params: {
     throw new Error("self-launched login Chrome lost its process handle");
   }
 
-  const { browser, context } = await attachSelfManagedLoginContext(
-    endpoint,
-    child,
-    params.profileDir,
-    childIdentity,
-  );
-
-  let torn = false;
-  const teardown = async (): Promise<void> => {
-    if (torn) return;
-    torn = true;
-    // Disconnect the CDP browser first; over connectOverCDP this leaves the
-    // real Chrome running, so kill the child explicitly (SIGTERM, then a
-    // hard SIGKILL after a short grace) to avoid the zombie-chrome leak.
-    await browser.close();
-    if (child !== null && childIdentity !== null) {
-      signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
-    }
+  let attached: Awaited<ReturnType<typeof attachSelfManagedLoginContext>>;
+  try {
+    attached = await attachSelfManagedLoginContext(
+      endpoint,
+      child,
+      params.profileDir,
+      childIdentity,
+    );
+  } catch (error) {
+    forceTeardown();
+    throw error;
+  }
+  browser = attached.browser;
+  return {
+    context: attached.context,
+    teardown,
+    forceTeardown,
+    isRunning,
+    identity: childIdentity,
   };
-
-  const forceTeardown = (): void => {
-    if (childIdentity !== null) {
-      const tracked = selfManagedChromes.get(childIdentity.pid);
-      signalOwnedChromeProcessTree(childIdentity, false, "SIGKILL", {
-        ...(tracked === undefined ? {} : { proof: tracked.proof }),
-      });
-    }
-    reapProfileHolderIfOwned(params.profileDir, childIdentity);
-  };
-
-  return { context, teardown, forceTeardown, identity: childIdentity };
 }
 
 export interface PlainLoginBrowser {
@@ -3381,6 +3401,8 @@ export async function launchPlainLoginBrowser(params: {
       signalOwnedChromeProcessTree(childIdentity, false, "SIGKILL", {
         ...(tracked === undefined ? {} : { proof: tracked.proof }),
       });
+    } else if (childProcessIsRunning(child)) {
+      child?.kill("SIGKILL");
     }
     reapProfileHolderIfOwned(params.profileDir, childIdentity);
   };
@@ -3389,6 +3411,8 @@ export async function launchPlainLoginBrowser(params: {
     torn = true;
     if (child !== null && childIdentity !== null) {
       signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
+    } else if (childProcessIsRunning(child)) {
+      child?.kill("SIGTERM");
     }
   };
   return {
@@ -11169,7 +11193,7 @@ export class BrowserController {
 
   async fillAndSubmitCheckout(
     card: CheckoutCard,
-    options: { onSubmitDispatched?: () => void } = {},
+    options: { onSubmitDispatched?: () => void; beforeSubmitDispatch?: () => void } = {},
   ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     this.checkoutCardGroupScope = undefined;
@@ -11211,7 +11235,11 @@ export class BrowserController {
       this.rememberPaymentInstrumentExpectation(card);
       primary = {
         kind: "outcome",
-        value: await this.submitFilledCheckoutInScope(cardGroup, options.onSubmitDispatched),
+        value: await this.submitFilledCheckoutInScope(
+          cardGroup,
+          options.onSubmitDispatched,
+          options.beforeSubmitDispatch,
+        ),
       };
     } catch (error) {
       primary = { kind: "error", value: error };
@@ -11485,6 +11513,7 @@ export class BrowserController {
   private async submitFilledCheckoutInScope(
     cardGroup?: CheckoutCardGroupScope,
     onSubmitDispatched?: () => void,
+    beforeSubmitDispatch?: () => void,
   ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     const savedCardSelection = await this.resolveCompetingSavedCardSelection();
@@ -11783,6 +11812,7 @@ export class BrowserController {
           }
           capturedBaseline = await runCaptureConfirmedPaymentSubmit({
             click: async (markInputDispatchPossible) => {
+              beforeSubmitDispatch?.();
               markInputDispatchPossible();
               await candidate.click({ noWaitAfter: true });
             },
