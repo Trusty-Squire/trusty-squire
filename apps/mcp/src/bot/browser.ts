@@ -62,6 +62,12 @@ import {
   type ProfileCloseState,
 } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
+import { classifyOAuthProviderDestination } from "./oauth-destination.js";
+import {
+  extractOAuthScopes,
+  scopesAreBasic,
+  scrapeGoogleScopePhrases,
+} from "./oauth-scope.js";
 import { GOOGLE_LOGIN_COOKIE_MARKERS, type BrowserStorageState } from "./session-state.js";
 import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
 import {
@@ -1171,6 +1177,7 @@ interface PendingOAuthBoundary {
   productUrl: string;
   providerPage: Page | null;
   destinationUrl: string | null;
+  destinationMethod: string | null;
   releaseObservation: () => Promise<void>;
 }
 
@@ -11665,14 +11672,13 @@ export class BrowserController {
             await route.abort("blockedbyclient");
             return;
           }
-          const nativeChargeDispatch =
+          const chargeDispatch =
             clickDispatchStarted &&
             mutation &&
-            request.isNavigationRequest() &&
             nativeSubmission !== null &&
             method === nativeSubmission.method &&
             request.url() === nativeSubmission.action;
-          if (nativeChargeDispatch) {
+          if (chargeDispatch) {
             dispatchNetworkConfirmed = true;
             dispatchNetworkDeadline = null;
             await frame
@@ -15491,34 +15497,10 @@ export class BrowserController {
     } catch {
       productOrigin = null;
     }
-    const classify = (rawUrl: string): OAuthProviderId | "other" | null => {
-      let url: URL;
-      try {
-        url = new URL(rawUrl, productUrl);
-      } catch {
-        return null;
-      }
-      const host = url.hostname.toLowerCase();
-      const signal = `${host}${url.pathname}${url.search}`;
-      if (
-        /(^|\.)google\.com$/i.test(host) ||
-        /(?:provider|connection|oauth|sso|auth)[=/_-]google\b/i.test(signal)
-      ) {
-        return "google";
-      }
-      if (
-        /(^|\.)(?:github\.com|microsoftonline\.com|live\.com|appleid\.apple\.com|okta\.com|auth0\.com)$/i.test(
-          host,
-        ) ||
-        /(?:provider|connection|oauth|sso|auth)[=/_-](?:github|microsoft|apple|okta|auth0)\b/i.test(
-          signal,
-        )
-      ) {
-        return host === "github.com" || host.endsWith(".github.com") ? "github" : "other";
-      }
-      return null;
-    };
+    const classify = (rawUrl: string): OAuthProviderId | "other" | null =>
+      classifyOAuthProviderDestination(rawUrl, productUrl);
     const observedUrls = new Set<string>();
+    const observedMethods = new Map<string, string>();
     let popup: Page | null = null;
     let boundaryPage: Page | null = null;
     let externalDestination: string | null = null;
@@ -15541,10 +15523,12 @@ export class BrowserController {
       }
       const url = request.url();
       observedUrls.add(url);
+      observedMethods.set(url, request.method().toUpperCase());
       const provider = classify(url);
       const pending = this.pendingOAuthBoundary;
       if (pending?.selector === selector && provider !== null) {
         pending.destinationUrl = url;
+        pending.destinationMethod = request.method().toUpperCase();
       }
       if (requestPage !== product) boundaryPage = requestPage;
       let external = false;
@@ -15567,14 +15551,16 @@ export class BrowserController {
       await context.unroute("**/*", probeRoute).catch(() => undefined);
     };
     const recordPopup = (page: Page): void => {
+      popup = page;
+      boundaryPage = page;
+      observedUrls.add(page.url());
+      page.on("framenavigated", (frame) => observedUrls.add(frame.url()));
       void page
         .opener()
         .then((opener) => {
-          if (opener !== product) return;
-          popup = page;
-          boundaryPage = page;
-          observedUrls.add(page.url());
-          page.on("framenavigated", (frame) => observedUrls.add(frame.url()));
+          if (opener === product) return;
+          if (popup === page) popup = null;
+          if (boundaryPage === page) boundaryPage = null;
         })
         .catch(() => undefined);
     };
@@ -15614,6 +15600,7 @@ export class BrowserController {
               productUrl,
               providerPage: boundaryPage ?? popup,
               destinationUrl: observedUrl,
+              destinationMethod: observedMethods.get(observedUrl) ?? null,
               releaseObservation,
             };
             return provider;
@@ -15635,6 +15622,8 @@ export class BrowserController {
         productUrl,
         providerPage: boundaryPage ?? popup,
         destinationUrl: externalDestination,
+        destinationMethod:
+          externalDestination === null ? null : (observedMethods.get(externalDestination) ?? null),
         releaseObservation,
       };
       retainProbeRoute = true;
@@ -15644,20 +15633,18 @@ export class BrowserController {
         const resolved = [...observedUrls]
           .map((observedUrl) => ({ observedUrl, provider: classify(observedUrl) }))
           .find((entry) => entry.provider !== null);
-        if (
-          resolved === undefined &&
-          externalDestination === null &&
-          boundaryPage === null &&
-          popup === null
-        ) {
-          return null;
-        }
         this.pendingOAuthBoundary = {
           selector,
           product,
           productUrl,
           providerPage: boundaryPage ?? popup,
           destinationUrl: resolved?.observedUrl ?? externalDestination,
+          destinationMethod:
+            resolved !== undefined
+              ? (observedMethods.get(resolved.observedUrl) ?? null)
+              : externalDestination === null
+                ? null
+                : (observedMethods.get(externalDestination) ?? null),
           releaseObservation,
         };
         if (resolved === undefined) retainProbeRoute = true;
@@ -15672,6 +15659,29 @@ export class BrowserController {
       }
       if (!product.isClosed()) await product.bringToFront().catch(() => undefined);
     }
+  }
+
+  async waitForPendingOAuthProviderDestination(
+    selector: string,
+    timeoutMs = 22_000,
+  ): Promise<OAuthProviderId | "other" | null> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const pending = this.pendingOAuthBoundary;
+      if (pending === null || pending.selector !== selector) return null;
+      const destinations = [
+        pending.destinationUrl,
+        pending.providerPage?.isClosed() === false ? pending.providerPage.url() : null,
+        pending.product.isClosed() ? null : pending.product.url(),
+      ];
+      for (const destination of destinations) {
+        if (destination === null) continue;
+        const provider = classifyOAuthProviderDestination(destination, pending.productUrl);
+        if (provider !== null) return provider;
+      }
+      await this.sleep(50);
+    }
+    return null;
   }
 
   // Complete an OAuth handshake without exposing the provider page as the
@@ -15740,15 +15750,16 @@ export class BrowserController {
         }
       } else if (
         pending.destinationUrl !== null &&
-        /(^|\.)google\.com$/i.test(new URL(pending.destinationUrl).hostname) &&
-        providerPage?.isClosed() === true
+        pending.destinationMethod === "GET" &&
+        (providerPage === null || providerPage.isClosed())
       ) {
-        providerPage = await context.newPage();
-        await providerPage.goto(pending.destinationUrl, {
-          waitUntil: "domcontentloaded",
-          timeout: 30_000,
-        });
-      } else if (pending.destinationUrl !== null) {
+        const popupPromise = context.waitForEvent("page", { timeout: 8_000 });
+        await product.evaluate((destination) => {
+          window.open(destination, "_blank");
+        }, pending.destinationUrl);
+        providerPage = await popupPromise;
+        await providerPage.waitForLoadState("domcontentloaded", { timeout: 30_000 });
+      } else if (pending.destinationUrl !== null && pending.destinationMethod === "GET") {
         const boundaryPage = providerPage ?? product;
         if (!boundaryPage.isClosed() && boundaryPage.url() !== pending.destinationUrl) {
           await boundaryPage.goto(pending.destinationUrl, {
@@ -16727,6 +16738,15 @@ export class BrowserController {
       } catch {
         // fall through to the approve-button path
       }
+    }
+    const scopes = extractOAuthScopes(this.page.url());
+    const consentText = await this.page.locator("body").innerText().catch(() => "");
+    if (
+      scopes === null ||
+      !scopesAreBasic(scopes) ||
+      scrapeGoogleScopePhrases(consentText).length > 0
+    ) {
+      return false;
     }
     // Consent screen: the approve control's name varies by Google's
     // consent layout — "Continue", "Allow", "Allow access" (the

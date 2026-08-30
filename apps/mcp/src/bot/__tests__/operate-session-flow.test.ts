@@ -16,6 +16,8 @@ const h = vi.hoisted(() => ({
   oauthStatus: "already_valid" as string,
   oauthLoginCalls: [] as string[],
   oauthDestination: "google" as "google" | "github" | "other" | null,
+  oauthDestinationAfterWait: null as "google" | "github" | "other" | null,
+  oauthConsentProviders: [] as Array<string | undefined>,
   oauthLoginGates: new Map<number, Promise<void>>(),
   oauthResultUrl: "https://app.example.com/dashboard",
   restoredStorageStates: [] as Array<{ browserIndex: number; state: unknown }>,
@@ -77,6 +79,7 @@ const h = vi.hoisted(() => ({
   storageStateReadGate: null as Promise<void> | null,
   storageStateWrites: [] as Array<{ profileDir: string; state: unknown }>,
   pendingStorageStates: [] as Array<{ path: string; profileDir: string; state: unknown }>,
+  pendingStorageStateOversized: false,
   storageStateWriteError: null as Error | null,
   storageStateWriteGate: null as Promise<void> | null,
   storageStateWriteAttempts: 0,
@@ -271,6 +274,7 @@ vi.mock("../session-state.js", async (importOriginal) => {
       canPublish: () => boolean = () => true,
     ) => {
       if (!canPublish()) return undefined;
+      if (h.pendingStorageStateOversized) return undefined;
       const path = `${profileDir}/pending-${h.pendingStorageStates.length}.json`;
       h.pendingStorageStates.push({ path, profileDir, state });
       return path;
@@ -741,8 +745,18 @@ vi.mock("../browser.js", () => ({
     async detectOAuthProviderDestination(): Promise<"google" | "github" | "other" | null> {
       return h.oauthDestination;
     }
-    async loginWithOAuth(selector: string): Promise<void> {
+    async waitForPendingOAuthProviderDestination(): Promise<
+      "google" | "github" | "other" | null
+    > {
+      return h.oauthDestinationAfterWait;
+    }
+    async loginWithOAuth(
+      selector: string,
+      _settleTimeoutMs?: number,
+      provider?: string,
+    ): Promise<void> {
       h.oauthLoginCalls.push(selector);
+      h.oauthConsentProviders.push(provider);
       const gate = h.oauthLoginGates.get(this.index);
       if (gate !== undefined) await gate;
       h.currentUrl = h.oauthResultUrl;
@@ -1071,6 +1085,8 @@ beforeEach(() => {
   h.oauthStatus = "already_valid";
   h.oauthLoginCalls = [];
   h.oauthDestination = "google";
+  h.oauthDestinationAfterWait = null;
+  h.oauthConsentProviders = [];
   h.oauthLoginGates = new Map();
   h.oauthResultUrl = "https://app.example.com/dashboard";
   h.restoredStorageStates = [];
@@ -1126,6 +1142,7 @@ beforeEach(() => {
   h.storageStateReadGate = null;
   h.storageStateWrites = [];
   h.pendingStorageStates = [];
+  h.pendingStorageStateOversized = false;
   h.storageStateWriteError = null;
   h.storageStateWriteGate = null;
   h.storageStateWriteAttempts = 0;
@@ -3520,6 +3537,71 @@ describe("operate session — OAuth lifecycle", () => {
     await googleAct;
     await finishProvisionSession(google.session_id);
     await finishProvisionSession(other.session_id);
+  });
+
+  it("lets a delayed confirmed non-Google destination bypass the Google handoff", async () => {
+    h.visibleText = "Continue";
+    h.elements = [
+      elem({
+        visibleText: "Continue",
+        labelText: "Continue",
+        role: "button",
+        selector: "#oauth",
+      }),
+    ];
+    let releaseGoogle!: () => void;
+    h.oauthLoginGates.set(
+      0,
+      new Promise<void>((resolve) => {
+        releaseGoogle = resolve;
+      }),
+    );
+    const google = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+    const other = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+    const googleAct = act(google.session_id, {
+      kind: "oauth_login",
+      target: "Continue",
+      provider: "google",
+    });
+    await vi.waitFor(() => expect(h.oauthLoginCalls).toEqual(["#oauth"]));
+    h.oauthDestination = null;
+    h.oauthDestinationAfterWait = "other";
+
+    await act(other.session_id, { kind: "oauth_login", target: "Continue" });
+    expect(h.oauthLoginCalls).toEqual(["#oauth", "#oauth"]);
+    expect(h.oauthConsentProviders).toEqual(["google", undefined]);
+    expect(h.restoredStorageStates).toHaveLength(1);
+
+    releaseGoogle();
+    await googleAct;
+    await finishProvisionSession(google.session_id);
+    await finishProvisionSession(other.session_id);
+  });
+
+  it("routes an observed Google destination through the handoff despite a conflicting provider", async () => {
+    h.visibleText = "Continue";
+    h.elements = [
+      elem({
+        visibleText: "Continue",
+        labelText: "Continue",
+        role: "link",
+        selector: "#oauth",
+        href: "https://accounts.google.com/o/oauth2/v2/auth",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+    });
+
+    await act(started.session_id, {
+      kind: "oauth_login",
+      target: "Continue",
+      provider: "github",
+    });
+
+    expect(h.oauthConsentProviders).toEqual(["google"]);
+    expect(h.restoredStorageStates).toHaveLength(1);
+    await finishProvisionSession(started.session_id);
   });
 
   it("routes legacy Google OAuth replay through the identity handoff", async () => {
@@ -6096,6 +6178,31 @@ describe("operate session — ephemeral profile lifecycle", () => {
       await vi.waitFor(() => expect(h.storageStateWrites).toHaveLength(1));
 
       expect(h.storageStateWrites[0]?.profileDir).toBe(canonical);
+      expect(h.pendingStorageStates).toEqual([]);
+    } finally {
+      externalOperation.release();
+    }
+  });
+
+  it("finishes cleanly when an oversized deferred snapshot is skipped", async () => {
+    const canonical = "/tmp/trusty-squire-unit-deferred-publication-oversized";
+    const externalOperation = acquireProfileOperationGuard(canonical);
+    h.pendingStorageStateOversized = true;
+    try {
+      const started = await startProvisionSession({
+        serviceUrl: "https://app.example.com/one",
+        profileDir: canonical,
+        requireLiveIdentity: true,
+      });
+
+      await expect(
+        finishProvisionSessionWithPreparation(
+          started.session_id,
+          async () => "prepared",
+          () => true,
+        ),
+      ).resolves.toMatchObject({ finish: { closed: true }, prepared: "prepared" });
+      expect(h.storageStateWrites).toEqual([]);
       expect(h.pendingStorageStates).toEqual([]);
     } finally {
       externalOperation.release();

@@ -287,9 +287,11 @@ describe("BrowserController OAuth popup lifecycle", () => {
 
     try {
       await expect(controller.detectOAuthProviderDestination("#oauth", 30)).resolves.toBeNull();
-      await product.waitForTimeout(150);
+      await expect(
+        controller.waitForPendingOAuthProviderDestination("#oauth", 2_000),
+      ).resolves.toBe("google");
       await controller.loginWithOAuth("#oauth", 2_000, "google");
-      await expect(product.locator("#clicks")).toHaveText("1");
+      await expect(product.locator("#clicks").textContent()).resolves.toBe("1");
       expect(controller.currentUrl()).toBe("https://product.test/login");
     } finally {
       await context.close().catch(() => undefined);
@@ -309,12 +311,12 @@ describe("BrowserController OAuth popup lifecycle", () => {
       });
     });
     await context.route("https://accounts.google.com/**", async (route) => {
-      const consent = route.request().url().endsWith("/consent");
+      const consent = route.request().url().includes("/consent?");
       await route.fulfill({
         contentType: "text/html",
         body: consent
           ? '<button onclick="location.href=\'https://product.test/callback\'">Continue</button>'
-          : '<button data-identifier="worker@example.com" onclick="location.href=\'https://accounts.google.com/consent\'">worker@example.com</button>',
+          : '<button data-identifier="worker@example.com" onclick="location.href=\'https://accounts.google.com/consent?scope=openid%20email%20profile\'">worker@example.com</button>',
       });
     });
     await product.goto("https://product.test/login");
@@ -322,8 +324,44 @@ describe("BrowserController OAuth popup lifecycle", () => {
 
     try {
       await controller.loginWithOAuth("#oauth", 5_000, "google");
-      await expect(product.locator("#state")).toHaveText("Signed in");
+      await expect(product.locator("#state").textContent()).resolves.toBe("Signed in");
       expect(controller.currentUrl()).toBe("https://product.test/login");
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it.each([
+    "https://accounts.google.com/consent",
+    "https://accounts.google.com/consent?scope=openid%20https://www.googleapis.com/auth/gmail.readonly",
+  ])("never auto-approves unverified Google consent at %s", async (consentUrl) => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    let callbackRequests = 0;
+    await context.route("https://product.test/**", async (route) => {
+      if (route.request().url().endsWith("/callback")) callbackRequests += 1;
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<main id="state">Signed out</main><button id="oauth" onclick="window.open(\'' +
+          consentUrl +
+          "')\">Continue</button>",
+      });
+    });
+    await context.route("https://accounts.google.com/**", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<button onclick="location.href=\'https://product.test/callback\'">Continue</button>',
+      });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 500, "google")).rejects.toThrow(
+        "still awaiting the provider",
+      );
+      await expect(product.locator("#state").textContent()).resolves.toBe("Signed out");
+      expect(callbackRequests).toBe(0);
     } finally {
       await context.close().catch(() => undefined);
     }

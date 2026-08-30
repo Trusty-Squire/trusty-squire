@@ -912,6 +912,57 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "allows 3DS follow-up after an authorized SPA charge dispatch",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const context = await browser.newContext();
+        const page = await context.newPage();
+        let threeDsRequests = 0;
+        await context.route("https://merchant.test/charge", async (route) => {
+          await route.fulfill({ body: "charge accepted" });
+        });
+        await context.route("https://merchant.test/3ds", async (route) => {
+          threeDsRequests += 1;
+          await route.fulfill({ body: "ok" });
+        });
+        await context.route("https://merchant.test/checkout", async (route) => {
+          await route.fulfill({ body: "checkout" });
+        });
+        await page.goto("https://merchant.test/checkout");
+        await page.setContent(`
+          <form action="https://merchant.test/charge" method="post">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-exp">
+            <input autocomplete="cc-csc">
+            <input autocomplete="cc-name">
+            <button type="submit">Pay now</button>
+          </form>
+          <script>
+            document.querySelector("form").addEventListener("submit", async (event) => {
+              event.preventDefault();
+              await fetch(event.currentTarget.action, { method: event.currentTarget.method });
+              setTimeout(async () => {
+                await fetch("https://merchant.test/3ds");
+                history.pushState({}, "", "/thank-you/order-123");
+              }, 150);
+            });
+          </script>
+        `);
+        const controller = BrowserController.fromHarnessPage(page);
+
+        await expect(
+          controller.fillAndSubmitCheckout(APPROVAL_CARD, { beforeSubmitDispatch: () => 100 }),
+        ).resolves.toEqual({ three_ds_required: false, order_confirmed: true });
+        expect(threeDsRequests).toBe(1);
+        await context.close();
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "types digits into a combined numeric expiry field and lets the site format MM/YY",
     async () => {
       const browser = await chromium.launch({ headless: true });

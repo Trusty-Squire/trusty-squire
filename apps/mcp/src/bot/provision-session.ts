@@ -33,6 +33,7 @@ import {
   type PageTargetSafetySignals,
   type ThreeDsResolution,
 } from "./browser.js";
+import { classifyOAuthProviderDestination } from "./oauth-destination.js";
 import type {
   CartCheckoutObservation,
   PendingApprovalWait,
@@ -1144,16 +1145,18 @@ async function closeEphemeralBrowser(
           capturedState,
           canPublish,
         );
-        if (pending === undefined) {
+        if (pending === undefined && !canPublish()) {
           throw new Error("operator browser terminal teardown was forced");
         }
-        void reconcilePendingSessionStates(ephemeral.canonicalProfileDir, canPublish).catch(
-          (publishError: unknown) => {
-            console.error(
-              `[operator] deferred storageState publication failed: ${publishError instanceof Error ? publishError.message : String(publishError)}`,
-            );
-          },
-        );
+        if (pending !== undefined) {
+          void reconcilePendingSessionStates(ephemeral.canonicalProfileDir, canPublish).catch(
+            (publishError: unknown) => {
+              console.error(
+                `[operator] deferred storageState publication failed: ${publishError instanceof Error ? publishError.message : String(publishError)}`,
+              );
+            },
+          );
+        }
       }
     }
     if (owner?.forced) {
@@ -1173,26 +1176,31 @@ async function closeEphemeralBrowser(
   }
 }
 
-function isGoogleOAuthAction(
-  action: Extract<ProvisionAction, { kind: "oauth_click" | "oauth_login" }>,
+function observedOAuthProvider(
   element: InteractiveElement,
-): boolean | null {
-  if (action.provider !== undefined) return action.provider === "google";
-  const destination = element.href ?? "";
-  if (/github\.com|(?:^|[^a-z])github(?:[^a-z]|$)/i.test(destination)) return false;
-  if (/accounts\.google\.com|(?:^|[^a-z])google(?:[^a-z]|$)/i.test(destination)) return true;
-  return null;
+  productUrl: string,
+): "google" | "non_google" | null {
+  if (element.href === undefined) return null;
+  const destination = classifyOAuthProviderDestination(element.href, productUrl);
+  return destination === null ? null : destination === "google" ? "google" : "non_google";
 }
 
-async function googleOAuthBoundaryRequired(
+type OAuthBoundaryDisposition = "google" | "non_google" | "unresolved";
+
+async function oauthBoundaryDisposition(
   browser: BrowserController,
   action: Extract<ProvisionAction, { kind: "oauth_click" | "oauth_login" }>,
   element: InteractiveElement,
-): Promise<boolean> {
-  const classified = isGoogleOAuthAction(action, element);
-  if (classified !== null) return classified;
-  const destination = await browser.detectOAuthProviderDestination(element.selector);
-  return destination !== "github" && destination !== "other";
+): Promise<OAuthBoundaryDisposition> {
+  const observed = observedOAuthProvider(element, browser.currentUrl());
+  if (observed !== null) return observed;
+  if (action.provider === "google") return "google";
+  const initial = await browser.detectOAuthProviderDestination(element.selector);
+  const destination =
+    initial ?? (await browser.waitForPendingOAuthProviderDestination(element.selector));
+  if (destination === "google") return "google";
+  if (destination === "github" || destination === "other") return "non_google";
+  return "unresolved";
 }
 
 async function runSerializedGoogleIdentityOperation<T>(
@@ -1481,14 +1489,15 @@ async function runDetachedGoogleIdentityOperation<T>(
   );
 }
 
-async function runSerializedGoogleOAuth(
+async function runSerializedOAuthBoundary(
   session: Session,
   selector: string,
+  provider: "google" | undefined,
 ): Promise<BrowserController> {
   const completed = await runSerializedGoogleIdentityOperation(session, async (browser) => {
-    await browser.loginWithOAuth(selector, 30_000, "google");
+    await browser.loginWithOAuth(selector, 30_000, provider);
     await settleAfterStateChange(browser);
-  }, { requireFreshAccountEmail: true });
+  }, provider === "google" ? { requireFreshAccountEmail: true } : {});
   return completed.browser;
 }
 
@@ -6778,8 +6787,13 @@ async function executeAct(
           });
         } else {
           assertNoFrameTarget(el, "oauth_click");
-          if (await googleOAuthBoundaryRequired(browser, action, el)) {
-            browser = await runSerializedGoogleOAuth(session, el.selector);
+          const disposition = await oauthBoundaryDisposition(browser, action, el);
+          if (disposition !== "non_google") {
+            browser = await runSerializedOAuthBoundary(
+              session,
+              el.selector,
+              disposition === "google" ? "google" : undefined,
+            );
           } else {
             await browser.startOAuth(el.selector);
           }
@@ -6811,8 +6825,13 @@ async function executeAct(
         }
         resolvedEl = el;
         assertNoFrameTarget(el, "oauth_login");
-        if (await googleOAuthBoundaryRequired(browser, action, el)) {
-          browser = await runSerializedGoogleOAuth(session, el.selector);
+        const disposition = await oauthBoundaryDisposition(browser, action, el);
+        if (disposition !== "non_google") {
+          browser = await runSerializedOAuthBoundary(
+            session,
+            el.selector,
+            disposition === "google" ? "google" : undefined,
+          );
         } else {
           await browser.loginWithOAuth(el.selector);
           await settleAfterStateChange(browser);

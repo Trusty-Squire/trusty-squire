@@ -59,6 +59,11 @@ import {
   startRemoteLoginDisplay,
   teardownRemoteLoginRig,
 } from "./remote-login-display.js";
+export {
+  extractOAuthScopes,
+  scopesAreBasic,
+  scrapeGoogleScopePhrases,
+} from "./oauth-scope.js";
 
 const require = createRequire(import.meta.url);
 
@@ -418,102 +423,6 @@ export function classifyGoogleAuthState(url: string, bodyText: string): GoogleAu
   // Erring toward needs_login is the safe default: it stops the bot
   // rather than risk it proceeding into a page it must not automate.
   return "needs_login";
-}
-
-// --- T7: OAuth consent scope gate --------------------------------------
-// After the bot clicks "Sign in with Google" and lands on a consent
-// screen, the OAuth signup flow auto-approves it ONLY when every scope
-// the service requested is a basic-identity scope. Anything broader
-// (Gmail/Drive/contacts) aborts the run for human review — a
-// prompt-injected or confused agent must not be able to grant a wide
-// OAuth scope on the user's behalf (see the plan's Security Boundary).
-//
-// The allowlist is Google-OIDC vocabulary. GitHub (Phase 2, D7) gets
-// its own provider-aware allowlist when that provider lands.
-const BASIC_OAUTH_SCOPES: ReadonlySet<string> = new Set([
-  "openid",
-  "email",
-  "profile",
-  "https://www.googleapis.com/auth/userinfo.email",
-  "https://www.googleapis.com/auth/userinfo.profile",
-]);
-
-// Pull the OAuth `scope` parameter off a Google consent URL. Robust by
-// design (a spec refinement): a query-param read, never a DOM scrape or
-// a vision call. Google nests the real authorize request inside a
-// `continue=` (or similar) param on the consent/chooser URL, so this
-// walks nested URL-valued params up to a small depth to find `scope`.
-//
-// Returns the parsed scope list, or null when no `scope` param is
-// present anywhere — the caller treats "can't read the scopes" as
-// "can't confirm they're basic" and pauses for human review.
-//
-// Exported for unit testing — the nested-URL walk is the error-prone bit.
-export function extractOAuthScopes(rawUrl: string): string[] | null {
-  const scopes: string[] = [];
-  const visit = (urlStr: string, depth: number): void => {
-    if (scopes.length > 0 || depth > 8) return;
-    let u: URL;
-    try {
-      u = new URL(urlStr);
-    } catch {
-      return;
-    }
-    const scope = u.searchParams.get("scope");
-    if (scope !== null && scope.trim().length > 0) {
-      // Google separates scopes with spaces; tolerate "+" and "," too.
-      for (const s of scope.split(/[\s,+]+/)) {
-        const trimmed = s.trim();
-        if (trimmed.length > 0) scopes.push(trimmed);
-      }
-      return;
-    }
-    // Recurse into any param whose value is itself a URL (Google's
-    // `continue`, `authError`, etc. carry the nested authorize request).
-    for (const value of u.searchParams.values()) {
-      if (/^https?:\/\//i.test(value.trim())) visit(value, depth + 1);
-    }
-  };
-  visit(rawUrl, 0);
-  return scopes.length > 0 ? scopes : null;
-}
-
-// True when EVERY requested scope is in the basic-identity allowlist —
-// the gate for auto-approving a consent screen. An empty list returns
-// false: no scopes parsed means we could not confirm, so we do not
-// auto-approve. Exported for unit testing.
-export function scopesAreBasic(scopes: readonly string[]): boolean {
-  return scopes.length > 0 && scopes.every((s) => BASIC_OAUTH_SCOPES.has(s));
-}
-
-// Defense-in-depth for the case where extractOAuthScopes returns null
-// (no parseable scope= param) but the page IS a real scope-grant
-// consent. Google's consent screen lists each scope visually with a
-// templated verb phrase: "See your", "Manage your", "Edit your", "Send
-// email", etc. A scope-summary / account-chooser / post-grant
-// confirmation does not include these phrases. So when the URL gives
-// us nothing, the visible-text phrases are the next best signal.
-//
-// Returns the list of suspicious phrases found (each capped at 80 chars
-// so a runaway match cannot blow up the response). Empty list = the
-// page does not appear to grant any sensitive scope.
-export function scrapeGoogleScopePhrases(text: string): string[] {
-  const patterns: RegExp[] = [
-    /see\s+(?:and\s+download|and\s+manage)\s+[^.\n]+/gi,
-    /manage\s+(?:your|all|all\s+your)\s+(?:contacts|google\s+drive|photos|calendars?|tasks|mail|gmail|files|account|youtube)[^.\n]*/gi,
-    /edit\s+(?:your|all)\s+(?:contacts|google\s+drive|photos|calendars?|tasks|mail|gmail|files)[^.\n]*/gi,
-    /send\s+(?:email|mail|messages)\s+(?:on\s+your\s+behalf|as\s+you)[^.\n]*/gi,
-    /view\s+(?:your|all|all\s+your)\s+(?:contacts|google\s+drive|photos|calendars?|tasks|mail|gmail|files|youtube|location\s+history)[^.\n]*/gi,
-    /access\s+your\s+(?:google\s+drive|gmail|contacts|calendars?|photos|youtube)[^.\n]*/gi,
-    /delete\s+(?:your|all)\s+[^.\n]+/gi,
-  ];
-  const matches = new Set<string>();
-  for (const p of patterns) {
-    for (const m of text.matchAll(p)) {
-      matches.add(m[0].slice(0, 80).trim());
-    }
-  }
-  return Array.from(matches);
 }
 
 // Google's "number-match" challenge (URL: /signin/challenge/dp) shows
