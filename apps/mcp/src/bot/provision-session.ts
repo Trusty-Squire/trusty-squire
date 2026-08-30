@@ -779,7 +779,7 @@ async function waitForOAuthLeaseCooldown(cooldownMs: number): Promise<void> {
   });
 }
 
-async function withOAuthActionLease<T>(run: () => Promise<T>, releaseCooldownMs = 0): Promise<T> {
+async function withOAuthActionLease<T>(run: () => Promise<T>): Promise<T> {
   let release!: () => void;
   const previous = oauthActionLeaseTail;
   oauthActionLeaseTail = new Promise<void>((resolve) => {
@@ -789,7 +789,6 @@ async function withOAuthActionLease<T>(run: () => Promise<T>, releaseCooldownMs 
   try {
     return await run();
   } finally {
-    await waitForOAuthLeaseCooldown(releaseCooldownMs);
     release();
   }
 }
@@ -1196,7 +1195,6 @@ async function runSerializedGoogleIdentityOperation<T>(
   session: Session,
   operation: (browser: BrowserController) => Promise<T>,
   options: {
-    requireFreshAccountEmail?: boolean;
     resumeUrl?: string;
     releaseCooldownMs?: number;
   } = {},
@@ -1204,10 +1202,13 @@ async function runSerializedGoogleIdentityOperation<T>(
   const browser = session.browser;
   const ephemeral = leasedBrowsers.get(browser);
   if (ephemeral === undefined) {
-    return await withOAuthActionLease(
-      async () => ({ browser, result: await operation(browser) }),
-      options.releaseCooldownMs,
-    );
+    return await withOAuthActionLease(async () => {
+      try {
+        return { browser, result: await operation(browser) };
+      } finally {
+        await waitForOAuthLeaseCooldown(options.releaseCooldownMs ?? 0);
+      }
+    });
   }
   const generation = provisionStartGeneration();
   const ownsSession = (): boolean =>
@@ -1242,10 +1243,6 @@ async function runSerializedGoogleIdentityOperation<T>(
         operationError = error;
       }
       const googleAccountEmail = await browser.detectGoogleAccountEmail();
-      const identityMetadataError =
-        options.requireFreshAccountEmail === true && googleAccountEmail === null
-          ? new Error("Google OAuth completed without account identity metadata")
-          : null;
       let rotatedState: Awaited<ReturnType<BrowserController["captureStorageState"]>> | undefined;
       let captureError: unknown;
       try {
@@ -1270,7 +1267,6 @@ async function runSerializedGoogleIdentityOperation<T>(
           );
         }
         assertOwned();
-        if (identityMetadataError !== null) throw identityMetadataError;
         const priorIdentity = await readCanonicalIdentityState(ephemeral.canonicalProfileDir);
         const published = await writeCanonicalIdentitySnapshot(
           ephemeral.canonicalProfileDir,
@@ -1492,7 +1488,6 @@ async function runSerializedOAuthBoundary(
       await settleAfterStateChange(browser);
     },
     {
-      ...(provider === "google" ? { requireFreshAccountEmail: true } : {}),
       releaseCooldownMs: oauthLoginLeaseCooldownMs(),
     },
   );

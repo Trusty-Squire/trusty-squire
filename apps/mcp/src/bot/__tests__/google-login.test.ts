@@ -1044,7 +1044,7 @@ describe("confirmed login finalization", () => {
     }
   });
 
-  it("refuses a fresh Google login without both live identity and account metadata", async () => {
+  it("requires live Google identity while keeping account metadata best-effort", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
     const liveGoogleState = {
       cookies: [
@@ -1062,12 +1062,11 @@ describe("confirmed login finalization", () => {
       origins: [],
     };
     try {
-      await expect(
-        finalizeLoginRun(
-          { profileDir, seedProvider: "google" },
-          { status: "completed", closeState: "closed", storageState: liveGoogleState },
-        ),
-      ).rejects.toThrow("without account identity metadata");
+      await finalizeLoginRun(
+        { profileDir, seedProvider: "google" },
+        { status: "completed", closeState: "closed", storageState: liveGoogleState },
+      );
+      await expect(readSessionState(profileDir)).resolves.toEqual(liveGoogleState);
       await expect(
         finalizeLoginRun(
           { profileDir, seedProvider: "google" },
@@ -1079,7 +1078,7 @@ describe("confirmed login finalization", () => {
           },
         ),
       ).rejects.toThrow("without a live identity marker");
-      await expect(readSessionState(profileDir)).resolves.toBeUndefined();
+      await expect(readSessionState(profileDir)).resolves.toEqual(liveGoogleState);
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }

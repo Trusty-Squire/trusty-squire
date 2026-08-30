@@ -38,7 +38,7 @@ Keep `CHROME_PROFILE_DIR` only as the interactive `connect`/`login` authoring pr
 
 Add a small `apps/mcp/src/bot/session-state.ts`. Its authoritative state file is `<CHROME_PROFILE_DIR>/trusty-squire-session-state.json`, written with mode `0600` by atomic temp-file + rename. It is Playwright storage-state JSON, not a profile copy.
 
-At start, create a unique `0700` directory with a `trusty-squire-operate-` mkdtemp prefix and restore the JSON snapshot without Google identity. Canonical markers establish Google identity availability without probing Google from the concurrent profile. At a declared or destination-resolved Google OAuth action, restore the latest full snapshot inside the process-local and cross-process handoff. The installed Playwright type exposes restore plus `storageState({ indexedDB: true })` capture (`node_modules/.pnpm/playwright-core@1.59.1/.../types.d.ts:9407-9471`). No Chrome cookie database or profile files are copied.
+At start, create a unique `0700` directory with a `trusty-squire-operate-` mkdtemp prefix and restore the JSON snapshot without Google identity. Canonical markers establish Google identity availability without probing Google from the concurrent profile. Every `oauth_login` and legacy `oauth_click` action acquires the process-local and cross-process action lease at its explicit start, restores the latest full snapshot, and holds the lease through action completion and one tunable release cooldown. Provider destination is never inferred from URLs, requests, brokers, FedCM, subresources, or declarations. The installed Playwright type exposes restore plus `storageState({ indexedDB: true })` capture (`node_modules/.pnpm/playwright-core@1.59.1/.../types.d.ts:9407-9471`). No Chrome cookie database or profile files are copied.
 
 Required coverage:
 
@@ -65,7 +65,9 @@ Remove the `requireLiveIdentity` direct-canonical exception. Preserve the existi
 
 ### Google OAuth handoff
 
-Serialize only the declared or destination-resolved Google-authenticated OAuth moment. The waiter restores the latest full snapshot, completes OAuth, captures the rotated state, proves bounded browser close, atomically publishes, restarts the same private profile, and then releases the next waiter. Ordinary browsing, payments, and non-Google OAuth remain parallel.
+Serialize every `oauth_login` and legacy `oauth_click` action from explicit action start through action completion. The waiter restores the latest full snapshot, completes OAuth, captures the rotated state, proves bounded browser close, atomically publishes, restarts the same private profile, waits one tunable few-second cooldown, and then releases the next waiter. Provider destination inference is not part of admission or routing. Ordinary browsing, payments, observation, and every other non-auth session action remain parallel.
+
+The canonical live-profile handoff alternative was assessed and rejected. It would require closing or invalidating the user's live authoring Chrome session, or restoring the broad shared-profile lock removed with the warm-session design. Portable Playwright `storageState` preserves the supported identity boundary without Chrome database cloning, while the explicit all-OAuth action lease covers rotating identity safely without guessing a provider. The shipped baseline is therefore the action lease, with concurrent ephemeral profiles outside the auth action.
 
 ### Finish
 

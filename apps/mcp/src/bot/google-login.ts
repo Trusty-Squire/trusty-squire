@@ -702,6 +702,16 @@ export interface LoginRunResult {
   googleAccountEmail?: string;
 }
 
+async function captureClosedPlainLoginState(
+  profileDir: string,
+  status: LoginRunResult["status"],
+  closeState: ProfileCloseState,
+  capture: typeof captureProfileStorageState,
+): Promise<Pick<LoginRunResult, "storageState" | "googleAccountEmail">> {
+  if (status !== "completed" || closeState !== "closed") return {};
+  return await capture(profileDir);
+}
+
 export async function finalizeLoginRun(
   opts: Pick<RunInBotChromeOpts, "profileDir" | "onConfirmedLogin" | "seedProvider">,
   result: LoginRunResult,
@@ -716,9 +726,6 @@ export async function finalizeLoginRun(
   if (seedProvider === "google" && result.status === "completed") {
     if (!hasUsableGoogleIdentity(result.storageState)) {
       throw new Error("Google login completed without a live identity marker");
-    }
-    if (result.googleAccountEmail === undefined) {
-      throw new Error("Google login completed without account identity metadata");
     }
   }
   const metadata =
@@ -831,14 +838,16 @@ export async function runDisplayedChrome(
     } finally {
       closeState = await lifecycle.finish();
     }
-    const captured =
-      status === "completed" && closeState === "closed"
-        ? await (runtime.captureProfileStorageState ?? captureProfileStorageState)(opts.profileDir)
-        : undefined;
+    const captured = await captureClosedPlainLoginState(
+      opts.profileDir,
+      status,
+      closeState,
+      runtime.captureProfileStorageState ?? captureProfileStorageState,
+    );
     return {
       status,
       closeState,
-      ...(captured === undefined ? {} : captured),
+      ...captured,
     };
   }
   const chromium = resolveChromium();
@@ -919,7 +928,10 @@ export async function runDisplayedChrome(
   };
 }
 
-export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
+export async function runRemoteLoginChrome(
+  opts: RunInBotChromeOpts,
+  runtime: { captureProfileStorageState?: typeof captureProfileStorageState } = {},
+): Promise<LoginRunResult> {
   const rig = createRemoteLoginRig();
   let activeTeardown: (() => Promise<void>) | undefined;
   let plainBrowserIsRunning: (() => boolean) | undefined;
@@ -1089,10 +1101,20 @@ export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<Lo
         }
       }
       const closeState = await lifecycle.finish();
+      const captured =
+        context === undefined
+          ? await captureClosedPlainLoginState(
+              opts.profileDir,
+              completed ? "completed" : "timeout",
+              closeState,
+              runtime.captureProfileStorageState ?? captureProfileStorageState,
+            )
+          : {};
       return {
         status: completed ? "completed" : "timeout",
         closeState,
         ...(storageState === undefined ? {} : { storageState }),
+        ...captured,
       };
     } finally {
       await lifecycle.finish();
