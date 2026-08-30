@@ -718,6 +718,25 @@ function hostStrings(session: Session): string[] {
   return session.allowedHosts.map((e) => e.host);
 }
 
+const SERVICE_LOGIN_ROUTE_HOSTS: Readonly<Record<string, readonly string[]>> = {
+  "neon.com": ["console.neon.tech"],
+};
+
+function serviceLoginRouteHosts(allowedHosts: readonly string[]): string[] {
+  return [
+    ...new Set(
+      allowedHosts.flatMap(
+        (allowed) => SERVICE_LOGIN_ROUTE_HOSTS[allowed.trim().toLowerCase()] ?? [],
+      ),
+    ),
+  ];
+}
+
+function requestScopeHostStrings(session: Session): string[] {
+  const allowedHosts = hostStrings(session);
+  return [...allowedHosts, ...serviceLoginRouteHosts(allowedHosts)];
+}
+
 // Hosts that may seed credential EGRESS (where a stored key is later sent by
 // the proxy): start + auto_widen, never mid_session task scope — a wide operate
 // scope must not silently over-grant a key's egress allow-list (Codex). The
@@ -843,7 +862,10 @@ async function withOAuthActionBoundary<T>(session: Session, run: () => Promise<T
     }
     return await withCanonicalProfileOperation(
       ephemeral.canonicalProfileDir,
-      run,
+      async () => {
+        await prepareOAuthActionBrowser(session);
+        return await run();
+      },
       canContinue,
       oauthLoginLeaseCooldownMs(),
     );
@@ -1215,6 +1237,138 @@ async function closeEphemeralBrowser(
   }
 }
 
+// Never replace this close/relaunch handoff with restoreStorageState on the
+// running context. Its BrowserContext.setStorageState wait can remain pending,
+// holding the action lease and preventing oauth_login from returning. The
+// regression is pinned by "restarts with the latest portable snapshot instead
+// of hanging on live state restore" in operate-session-flow.test.ts.
+async function prepareOAuthActionBrowser(session: Session): Promise<void> {
+  const browser = session.browser;
+  const ephemeral = leasedBrowsers.get(browser);
+  if (ephemeral === undefined) return;
+  const latestState = await readSessionState(ephemeral.canonicalProfileDir);
+  if (latestState === undefined) return;
+
+  const generation = provisionStartGeneration();
+  const ownsOriginal = (): boolean =>
+    shutdownInProgress === 0 &&
+    generation === shutdownGeneration &&
+    !session.closing &&
+    sessions.get(session.id) === session &&
+    session.browser === browser;
+  const assertOriginalOwned = (): void => {
+    if (!ownsOriginal()) {
+      throw new Error("OAuth action preparation cancelled during operator shutdown");
+    }
+  };
+
+  let originalCloseState: "closed" | "force_closed_unproven" | "unknown" = "unknown";
+  let replacement: BrowserController | null = null;
+  let pending: StartingBrowser | null = null;
+  let replacementCloseState: "closed" | "force_closed_unproven" | "unknown" = "closed";
+  let pendingHandledProfile = false;
+  try {
+    assertOriginalOwned();
+    const currentState = await browser.captureStorageState();
+    const preparedState = mergeGoogleIdentityStorageState(currentState, latestState);
+    const resumeUrl = browser.currentUrl() || session.startUrl;
+    originalCloseState = await closeBrowserBounded(
+      browser,
+      false,
+      "OAuth action preparation browser close timed out",
+    );
+    if (originalCloseState !== "closed") {
+      throw new Error(`OAuth action preparation closed without proof (${originalCloseState})`);
+    }
+    assertOriginalOwned();
+
+    replacement = new BrowserController({
+      profileDir: ephemeral.profileDir,
+      storageState: preparedState,
+      ...(ephemeral.proxyUrl === undefined ? {} : { proxyUrl: ephemeral.proxyUrl }),
+    });
+    pending = {
+      controller: replacement,
+      profileDir: ephemeral.profileDir,
+      canonicalProfileDir: ephemeral.canonicalProfileDir,
+      launch: Promise.resolve(),
+      cancelRequested: false,
+      cleanupPromise: null,
+    };
+    startingBrowsers.add(pending);
+    pending.launch = startBrowserBounded(replacement, session.id, async () => {
+      if (pending !== null) await cancelStartingBrowser(pending);
+    });
+    await pending.launch;
+    if (pending.cancelRequested) {
+      throw new Error("OAuth action preparation replacement startup cancelled");
+    }
+    assertOriginalOwned();
+    startingBrowsers.delete(pending);
+    pending = null;
+
+    leasedBrowsers.delete(browser);
+    leasedBrowsers.set(replacement, { ...ephemeral, controller: replacement });
+    session.browser = replacement;
+    await replacement.setHostScopeAllowedHosts(
+      () => requestScopeHostStrings(session),
+      () => merchantSiblingSeedHosts(session),
+    );
+    if (
+      shutdownInProgress > 0 ||
+      generation !== shutdownGeneration ||
+      session.closing ||
+      sessions.get(session.id) !== session ||
+      session.browser !== replacement
+    ) {
+      throw new Error("OAuth action preparation cancelled during operator shutdown");
+    }
+    if (resumeUrl.length > 0) await replacement.goto(resumeUrl);
+  } catch (error) {
+    let originalCleanupState = originalCloseState;
+    if (originalCleanupState !== "closed") {
+      originalCleanupState = await closeBrowserBounded(
+        browser,
+        true,
+        "OAuth action preparation browser cleanup timed out",
+      ).catch(() => "unknown" as const);
+    }
+    if (pending !== null) {
+      startingBrowsers.delete(pending);
+      replacementCloseState = await cancelStartingBrowser(pending).catch(() => "unknown" as const);
+      pendingHandledProfile = true;
+    } else if (replacement !== null) {
+      replacementCloseState = await closeBrowserBounded(
+        replacement,
+        true,
+        "OAuth action preparation replacement cleanup timed out",
+      ).catch(() => "unknown" as const);
+    }
+    if (leasedBrowsers.get(browser) === ephemeral) leasedBrowsers.delete(browser);
+    if (replacement !== null) {
+      const replacementLease = leasedBrowsers.get(replacement);
+      if (replacementLease?.profileDir === ephemeral.profileDir) leasedBrowsers.delete(replacement);
+    }
+    if (sessions.get(session.id) === session) sessions.delete(session.id);
+    stopSessionWatchdog(session);
+    disposeSessionWatchdog(session);
+    if (
+      originalCleanupState === "closed" &&
+      replacementCloseState === "closed" &&
+      !pendingHandledProfile
+    ) {
+      destroyEphemeralProfileDetached(ephemeral.profileDir);
+    } else if (originalCleanupState !== "closed" || replacementCloseState !== "closed") {
+      console.error(
+        `[operator] retained ephemeral profile after failed OAuth action preparation: ${ephemeral.profileDir}`,
+      );
+    }
+    throw error;
+  } finally {
+    if (pending !== null) startingBrowsers.delete(pending);
+  }
+}
+
 async function runSerializedGoogleIdentityOperation<T>(
   session: Session,
   operation: (browser: BrowserController) => Promise<T>,
@@ -1241,11 +1395,6 @@ async function runSerializedGoogleIdentityOperation<T>(
       }
     };
     assertOwned();
-    const latestState = await readSessionState(ephemeral.canonicalProfileDir);
-    if (latestState !== undefined) {
-      const currentState = await browser.captureStorageState();
-      await browser.restoreStorageState(mergeGoogleIdentityStorageState(currentState, latestState));
-    }
     let operationCompleted = false;
     let operationResult: T | undefined;
     let operationError: unknown;
@@ -1317,7 +1466,7 @@ async function runSerializedGoogleIdentityOperation<T>(
       session.browser = replacement;
       if (typeof replacement.setHostScopeAllowedHosts === "function") {
         await replacement.setHostScopeAllowedHosts(
-          () => hostStrings(session),
+          () => requestScopeHostStrings(session),
           () => merchantSiblingSeedHosts(session),
         );
       }
@@ -2664,8 +2813,9 @@ export function isSquireControlPlaneHost(host: string): boolean {
 }
 
 // Domain-scope check for an agent-initiated goto. Allows the target host, any
-// subdomain of it, the configured auth hosts, and *.firebaseapp.com /
-// *.web.app auth handlers. Organic redirects are NOT routed through here.
+// subdomain of it, exact service-specific login routes, the configured auth
+// hosts, and *.firebaseapp.com / *.web.app auth handlers. Organic redirects
+// are NOT routed through here.
 export function hostAllowed(url: string, allowedHosts: readonly string[]): boolean {
   let host: string;
   try {
@@ -2678,6 +2828,7 @@ export function hostAllowed(url: string, allowedHosts: readonly string[]): boole
   if (isSquireControlPlaneHost(host)) return false;
   const ok = (allowed: string): boolean => host === allowed || host.endsWith(`.${allowed}`);
   if (allowedHosts.some(ok)) return true;
+  if (serviceLoginRouteHosts(allowedHosts).includes(host)) return true;
   if (DEFAULT_AUTH_HOSTS.some(ok)) return true;
   if (host.endsWith(".firebaseapp.com") || host.endsWith(".web.app")) return true;
   return false;
@@ -3637,7 +3788,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
   try {
     if (typeof browser.setHostScopeAllowedHosts === "function") {
       await browser.setHostScopeAllowedHosts(
-        () => hostStrings(session),
+        () => requestScopeHostStrings(session),
         () => merchantSiblingSeedHosts(session),
       );
     }

@@ -181,6 +181,55 @@ describe("operator session storage state", () => {
     });
   });
 
+  it("atomically clears the Google marker when a capture replaces marker-bearing identity", async () => {
+    const canonical = mkdtempSync(join(tmpdir(), "ts-session-state-marker-clear-"));
+    roots.push(canonical);
+    const marker = join(canonical, "logged-in-providers.json");
+    await writeCanonicalIdentitySnapshot(
+      canonical,
+      {
+        cookies: [
+          {
+            name: "SID",
+            value: "live-google-session-before-capture",
+            domain: ".google.com",
+            path: "/",
+            expires: -1,
+            httpOnly: true,
+            secure: true,
+            sameSite: "Lax",
+          },
+        ],
+        origins: [],
+      },
+      undefined,
+    );
+    writeFileSync(marker, JSON.stringify(["google", "github"]));
+
+    const capturedWithoutGoogle = {
+      cookies: [
+        {
+          name: "merchant_session",
+          value: "still-valid-merchant-session",
+          domain: ".merchant.test",
+          path: "/",
+          expires: -1,
+          httpOnly: true,
+          secure: true,
+          sameSite: "Lax" as const,
+        },
+      ],
+      origins: [],
+    };
+    await expect(
+      writeCanonicalIdentitySnapshot(canonical, capturedWithoutGoogle, undefined),
+    ).resolves.toBe(true);
+
+    await expect(readSessionState(canonical)).resolves.toEqual(capturedWithoutGoogle);
+    expect(JSON.parse(readFileSync(marker, "utf8"))).toEqual(["github"]);
+    expect(statSync(marker).mode & 0o777).toBe(0o600);
+  });
+
   it("leaves one complete snapshot after concurrent last-writer-wins publishes", async () => {
     const canonical = mkdtempSync(join(tmpdir(), "ts-session-state-concurrent-"));
     roots.push(canonical);

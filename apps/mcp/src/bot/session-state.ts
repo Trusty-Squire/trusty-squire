@@ -11,6 +11,7 @@ export const SESSION_STATE_FILE = "trusty-squire-session-state.json";
 export const CANONICAL_IDENTITY_METADATA_FILE = "trusty-squire-identity.json";
 export const PENDING_SESSION_STATE_PREFIX = `${SESSION_STATE_FILE}.pending.`;
 const LEGACY_PROVIDER_EMAILS_FILE = "provider-emails.json";
+const LOGGED_IN_PROVIDERS_FILE = "logged-in-providers.json";
 export const MAX_SESSION_STATE_BYTES = 4 * 1024 * 1024;
 const MAX_IDENTITY_METADATA_BYTES = 4 * 1024;
 export const GOOGLE_LOGIN_COOKIE_MARKERS = [
@@ -345,16 +346,45 @@ export async function writeCanonicalIdentitySnapshot(
   await mkdir(profileDir, { recursive: true, mode: 0o700 });
   const destination = sessionStatePath(profileDir);
   const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
+  const markerDestination = join(profileDir, LOGGED_IN_PROVIDERS_FILE);
+  let markerTemporary: string | undefined;
   let published = false;
   try {
     await writeFile(temporary, serialized, { mode: 0o600 });
     await chmod(temporary, 0o600);
+    if (!hasUsableGoogleIdentity(state)) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(await readFile(markerDestination, "utf8"));
+      } catch {
+        // A missing/malformed marker already reads as no logged-in providers.
+      }
+      if (Array.isArray(parsed) && parsed.includes("google")) {
+        markerTemporary = `${markerDestination}.${process.pid}.${randomUUID()}.tmp`;
+        await writeFile(
+          markerTemporary,
+          JSON.stringify(parsed.filter((provider) => provider !== "google")),
+          { mode: 0o600 },
+        );
+        await chmod(markerTemporary, 0o600);
+      }
+    }
     if (!canPublish()) return false;
+    // Clear the positive marker first. A crash between these renames can cause
+    // a conservative false negative, never the stale-positive inconsistency
+    // where an empty portable snapshot still advertises Google as logged in.
+    if (markerTemporary !== undefined) {
+      renameSync(markerTemporary, markerDestination);
+      markerTemporary = undefined;
+    }
     renameSync(temporary, destination);
     published = true;
     return true;
   } finally {
     if (!published) await rm(temporary, { force: true }).catch(() => undefined);
+    if (markerTemporary !== undefined) {
+      await rm(markerTemporary, { force: true }).catch(() => undefined);
+    }
   }
 }
 

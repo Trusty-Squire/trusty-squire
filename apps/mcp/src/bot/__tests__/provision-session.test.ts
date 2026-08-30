@@ -817,6 +817,12 @@ describe("hostAllowed (gates only agent-initiated goto)", () => {
     expect(hostAllowed("https://app.langwatch.ai/x", allowed)).toBe(true);
   });
 
+  it("allows only Neon's exact cross-domain login route for a Neon signup", () => {
+    expect(hostAllowed("https://console.neon.tech", ["neon.com"])).toBe(true);
+    expect(hostAllowed("https://attacker.neon.tech", ["neon.com"])).toBe(false);
+    expect(hostAllowed("https://console.neon.tech", ["example.com"])).toBe(false);
+  });
+
   it("allows default identity-provider hosts", () => {
     expect(hostAllowed("https://accounts.google.com/o/oauth2/auth", allowed)).toBe(true);
     expect(hostAllowed("https://github.com/login/oauth", allowed)).toBe(true);
