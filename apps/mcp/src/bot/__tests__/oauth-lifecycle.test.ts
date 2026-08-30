@@ -200,12 +200,24 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await context.route("https://product.test/login", async (route) => {
       await route.fulfill({ contentType: "text/html", body: "<main>Login</main>" });
     });
+    await context.route("https://accounts.google.com/**", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: "<script>setTimeout(() => window.close(), 20)</script>",
+      });
+    });
     await product.goto("https://product.test/login");
     await product.evaluate(() => {
       const button = document.createElement("button");
       button.id = "oauth";
       button.textContent = "Continue";
-      button.onclick = () => window.open("https://accounts.google.com/o/oauth2/v2/auth");
+      button.onclick = () => {
+        document.body.dataset.oauthClicks = String(
+          Number(document.body.dataset.oauthClicks ?? "0") + 1,
+        );
+        button.disabled = true;
+        window.open("https://accounts.google.com/o/oauth2/v2/auth");
+      };
       document.body.append(button);
     });
     const controller = BrowserController.fromHarnessPage(product);
@@ -214,7 +226,32 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await expect(controller.detectOAuthProviderDestination("#oauth", 2_000)).resolves.toBe(
         "google",
       );
+      await controller.loginWithOAuth("#oauth", 2_000);
       await expect(product.locator("#oauth")).toHaveCount(1);
+      await expect(product.locator("#oauth")).toBeDisabled();
+      await expect(product.locator("body")).toHaveAttribute("data-oauth-clicks", "1");
+      expect(controller.currentUrl()).toBe("https://product.test/login");
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("resolves a same-origin GitHub route without entering Google", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/login", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<form action="/oauth/github"><button id="oauth">Continue</button></form>',
+      });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+
+    try {
+      await expect(controller.detectOAuthProviderDestination("#oauth", 2_000)).resolves.toBe(
+        "github",
+      );
       expect(controller.currentUrl()).toBe("https://product.test/login");
     } finally {
       await context.close().catch(() => undefined);

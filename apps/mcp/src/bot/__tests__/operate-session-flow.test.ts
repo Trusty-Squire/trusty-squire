@@ -66,6 +66,7 @@ const h = vi.hoisted(() => ({
   controllerProviderProbeCalls: 0,
   workerEmail: null as string | null,
   liveGoogleEmail: "default-google@example.com" as string | null,
+  temporaryHostScopes: [] as Array<{ hosts: string[]; phase: "enter" | "exit" }>,
   connections: [] as boolean[],
   profileDirs: [] as Array<string | undefined>,
   proxyUrls: [] as Array<string | undefined>,
@@ -801,6 +802,17 @@ vi.mock("../browser.js", () => ({
     async setHostScopeAllowedHosts(): Promise<void> {
       return undefined;
     }
+    async withTemporaryHostScopeAllowedHosts<T>(
+      hosts: readonly string[],
+      operation: () => Promise<T>,
+    ): Promise<T> {
+      h.temporaryHostScopes.push({ hosts: [...hosts], phase: "enter" });
+      try {
+        return await operation();
+      } finally {
+        h.temporaryHostScopes.push({ hosts: [...hosts], phase: "exit" });
+      }
+    }
     async close(options?: {
       cancelStart?: boolean;
     }): Promise<"closed" | "force_closed_unproven" | "unknown"> {
@@ -1076,6 +1088,7 @@ beforeEach(() => {
   h.controllerProviderProbeCalls = 0;
   h.workerEmail = null;
   h.liveGoogleEmail = "default-google@example.com";
+  h.temporaryHostScopes = [];
   h.connections = [];
   h.profileDirs = [];
   h.proxyUrls = [];
@@ -7064,11 +7077,17 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
       consentInboxRead: true,
       profileDir: canonical,
     });
+    h.currentUrl = "https://app.example.com/verify-email";
     h.visibleText = "Your verification code is 481920.";
     const res = await awaitVerification(obs.session_id, {});
     expect(res.code).toBe("481920");
     expect(res.sealed).toBeUndefined();
     expect(h.restoredStorageStates[0]).toEqual({ browserIndex: 0, state: googleState });
+    expect(h.temporaryHostScopes).toEqual([
+      { hosts: ["mail.google.com"], phase: "enter" },
+      { hosts: ["mail.google.com"], phase: "exit" },
+    ]);
+    expect(h.currentUrl).toBe("https://app.example.com/verify-email");
   });
 
   it("recursively seals delegated verification results in Compact V2 only", async () => {

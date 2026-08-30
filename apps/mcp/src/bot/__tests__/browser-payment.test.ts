@@ -826,8 +826,10 @@ describe("checkout payment parsing", () => {
       const browser = await chromium.launch({ headless: true });
       try {
         const page = await browser.newPage();
+        let analyticsRequests = 0;
         let chargeRequests = 0;
         page.on("request", (request) => {
+          if (request.url() === "https://merchant.test/analytics") analyticsRequests += 1;
           if (request.url() === "https://merchant.test/charge") chargeRequests += 1;
         });
         await page.setContent(`
@@ -841,19 +843,22 @@ describe("checkout payment parsing", () => {
           <script>
             document.querySelector("#checkout").addEventListener("submit", (event) => {
               event.preventDefault();
+              void fetch("https://merchant.test/analytics").catch(() => undefined);
               setTimeout(() => {
                 void fetch("https://merchant.test/charge").catch(() => undefined);
-              }, 25);
-              setTimeout(() => history.pushState({}, "", "/thank-you"), 50);
+              }, 150);
+              setTimeout(() => history.pushState({}, "", "/thank-you"), 200);
             });
           </script>
         `);
         const controller = BrowserController.fromHarnessPage(page);
 
         await expect(
-          controller.fillAndSubmitCheckout(APPROVAL_CARD, { beforeSubmitDispatch: () => 10 }),
-        ).resolves.toEqual({ three_ds_required: false, order_confirmed: true });
+          controller.fillAndSubmitCheckout(APPROVAL_CARD, { beforeSubmitDispatch: () => 100 }),
+        ).rejects.toThrow("payment_approval_expired");
 
+        await page.waitForTimeout(210);
+        expect(analyticsRequests).toBe(1);
         expect(chargeRequests).toBe(0);
       } finally {
         await browser.close();

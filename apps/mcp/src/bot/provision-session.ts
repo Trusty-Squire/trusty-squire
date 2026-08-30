@@ -1161,13 +1161,13 @@ async function googleOAuthBoundaryRequired(
   const classified = isGoogleOAuthAction(action, element);
   if (classified !== null) return classified;
   const destination = await browser.detectOAuthProviderDestination(element.selector);
-  return destination !== "github" && destination !== "other";
+  return destination === "google";
 }
 
 async function runSerializedGoogleIdentityOperation<T>(
   session: Session,
   operation: (browser: BrowserController) => Promise<T>,
-  options: { requireFreshAccountEmail?: boolean } = {},
+  options: { requireFreshAccountEmail?: boolean; resumeUrl?: string } = {},
 ): Promise<{ browser: BrowserController; result: T }> {
   const browser = session.browser;
   const ephemeral = leasedBrowsers.get(browser);
@@ -1295,7 +1295,8 @@ async function runSerializedGoogleIdentityOperation<T>(
         ) {
           throw new Error("Google OAuth identity handoff cancelled during operator shutdown");
         }
-        if (session.startUrl.length > 0) await replacement.goto(session.startUrl);
+        const resumeUrl = options.resumeUrl ?? session.startUrl;
+        if (resumeUrl.length > 0) await replacement.goto(resumeUrl);
         readyReplacement = replacement;
       } catch (error) {
         let replacementCloseState: "closed" | "force_closed_unproven" | "unknown" = "closed";
@@ -9417,37 +9418,40 @@ export async function awaitVerification(
 
   invalidateCompactV2Snapshot(session);
 
+  const resumeUrl = session.browser.currentUrl() || session.startUrl;
   const verification = await runSerializedGoogleIdentityOperation(session, async (browser) => {
-    const query = buildVerificationSearchQuery(opts.sender);
-    const searchUrl = `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
-    const hrefsOf = (els: readonly { href?: string | null }[]): string[] =>
-      els.map((e) => e.href).filter((h): h is string => typeof h === "string" && h.length > 0);
-    let code: string | null = null;
-    let link: string | null = null;
-    let sourceFrom: string | null = null;
-    for (let attempt = 0; attempt < 3 && code === null && link === null; attempt++) {
-      sourceFrom = null;
-      if (attempt > 0) await browser.waitForCaptchaChallengeToSettle(4000, 0).catch(() => false);
-      await browser.goto(searchUrl);
-      let listText = "";
-      for (let i = 0; i < 6; i++) {
-        listText = await browser.extractVisibleText();
-        if (listText.length > 200) break;
-        await browser.waitForCaptchaChallengeToSettle(1200, 0).catch(() => false);
+    return await browser.withTemporaryHostScopeAllowedHosts(["mail.google.com"], async () => {
+      const query = buildVerificationSearchQuery(opts.sender);
+      const searchUrl = `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
+      const hrefsOf = (els: readonly { href?: string | null }[]): string[] =>
+        els.map((e) => e.href).filter((h): h is string => typeof h === "string" && h.length > 0);
+      let code: string | null = null;
+      let link: string | null = null;
+      let sourceFrom: string | null = null;
+      for (let attempt = 0; attempt < 3 && code === null && link === null; attempt++) {
+        sourceFrom = null;
+        if (attempt > 0) await browser.waitForCaptchaChallengeToSettle(4000, 0).catch(() => false);
+        await browser.goto(searchUrl);
+        let listText = "";
+        for (let i = 0; i < 6; i++) {
+          listText = await browser.extractVisibleText();
+          if (listText.length > 200) break;
+          await browser.waitForCaptchaChallengeToSettle(1200, 0).catch(() => false);
+        }
+        const listLinks = hrefsOf(await browser.extractInteractiveElements());
+        const opened = await browser.openFirstMailResult().catch(() => false);
+        if (opened) {
+          const openedText = await browser.extractVisibleText();
+          const openedLinks = hrefsOf(await browser.extractInteractiveElements());
+          sourceFrom = extractSenderEmail(openedText);
+          ({ code, link } = parseVerification(openedText, [...openedLinks, ...listLinks]));
+        } else {
+          ({ code, link } = parseVerification(listText, listLinks));
+        }
       }
-      const listLinks = hrefsOf(await browser.extractInteractiveElements());
-      const opened = await browser.openFirstMailResult().catch(() => false);
-      if (opened) {
-        const openedText = await browser.extractVisibleText();
-        const openedLinks = hrefsOf(await browser.extractInteractiveElements());
-        sourceFrom = extractSenderEmail(openedText);
-        ({ code, link } = parseVerification(openedText, [...openedLinks, ...listLinks]));
-      } else {
-        ({ code, link } = parseVerification(listText, listLinks));
-      }
-    }
-    return { code, link, sourceFrom };
-  });
+      return { code, link, sourceFrom };
+    });
+  }, { resumeUrl });
   const { code, link, sourceFrom } = verification.result;
   const found = code !== null || link !== null;
   audit(sessionId, "await_verification", {

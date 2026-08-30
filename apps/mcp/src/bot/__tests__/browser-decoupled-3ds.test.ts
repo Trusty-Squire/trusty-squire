@@ -204,3 +204,36 @@ describe("requestHostInScope / isFailFastScopeAbort — 3DS ACS network allowlis
     expect(isFailFastScopeAbort(rogue, "fetch", SESSION_ALLOWED_HOSTS)).toBe(true);
   });
 });
+
+describe("operation-scoped host allowances", () => {
+  it.skipIf(!chromiumAvailable)(
+    "allows Gmail only while the sanctioned inbox operation is active",
+    async () => {
+      const mailUrl = "https://mail.google.com/api/messages";
+      const { context, page } = await serveFixture({
+        [`${MERCHANT_ORIGIN}/checkout`]: "<main>Checkout</main>",
+        [mailUrl]: "mail",
+      });
+      try {
+        await page.goto(`${MERCHANT_ORIGIN}/checkout`);
+        const controller = BrowserController.fromHarnessPage(page);
+        await controller.setHostScopeAllowedHosts(
+          () => SESSION_ALLOWED_HOSTS,
+          () => SESSION_ALLOWED_HOSTS,
+        );
+
+        await expect(
+          controller.withTemporaryHostScopeAllowedHosts(["mail.google.com"], async () =>
+            await page.evaluate(async (url) => await (await fetch(url)).text(), mailUrl),
+          ),
+        ).resolves.toBe("mail");
+
+        await expect(
+          page.evaluate(async (url) => await (await fetch(url)).text(), mailUrl),
+        ).rejects.toThrow();
+      } finally {
+        await context.close();
+      }
+    },
+  );
+});

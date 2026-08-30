@@ -1165,6 +1165,14 @@ interface SavedCardSelectionVerification {
   expectedMarkedCount: number;
 }
 
+interface PendingOAuthBoundary {
+  selector: string;
+  product: Page;
+  productUrl: string;
+  providerPage: Page | null;
+  destinationUrl: string | null;
+}
+
 // Descriptor-level PayPal surface classifier retained for callers that need to
 // inventory wallet/card frames. It is not the payment refusal gate: the operator
 // keys that decision off the frame containing the actual visible PAN field.
@@ -3508,6 +3516,7 @@ export class BrowserController {
   private hostScopeAllowedHostsProvider:
     | (() => { allowedHosts: readonly string[]; siblingDomainHosts: readonly string[] })
     | null = null;
+  private readonly operationScopedAllowedHosts = new Map<string, number>();
   private hostScopeGuardInstallation: Promise<void> | null = null;
 
   // Feed the current session's allowed hosts to the request-scope guard. Read
@@ -3520,7 +3529,7 @@ export class BrowserController {
     siblingDomainProvider: () => readonly string[] = provider,
   ): Promise<void> {
     this.hostScopeAllowedHostsProvider = () => ({
-      allowedHosts: provider(),
+      allowedHosts: [...provider(), ...this.operationScopedAllowedHosts.keys()],
       siblingDomainHosts: siblingDomainProvider(),
     });
     this.hostScopeGuardInstallation ??= this.installHostScopeGuard().catch((error: unknown) => {
@@ -3528,6 +3537,28 @@ export class BrowserController {
       throw error;
     });
     await this.hostScopeGuardInstallation;
+  }
+
+  async withTemporaryHostScopeAllowedHosts<T>(
+    hosts: readonly string[],
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const normalized = [...new Set(hosts.map((host) => host.trim().toLowerCase()).filter(Boolean))];
+    for (const host of normalized) {
+      this.operationScopedAllowedHosts.set(
+        host,
+        (this.operationScopedAllowedHosts.get(host) ?? 0) + 1,
+      );
+    }
+    try {
+      return await operation();
+    } finally {
+      for (const host of normalized) {
+        const remaining = (this.operationScopedAllowedHosts.get(host) ?? 1) - 1;
+        if (remaining <= 0) this.operationScopedAllowedHosts.delete(host);
+        else this.operationScopedAllowedHosts.set(host, remaining);
+      }
+    }
   }
 
   // Defect-A fail-fast request-scope guard. Only XHR/fetch subresource API
@@ -3576,6 +3607,7 @@ export class BrowserController {
   private oauthProductPage: Page | null = null;
   private oauthProviderPage: Page | null = null;
   private oauthProviderPageClosed = false;
+  private pendingOAuthBoundary: PendingOAuthBoundary | null = null;
   // Deep-investigation instrumentation (UNIVERSAL_BOT_OAUTH_DEBUG): a ring
   // buffer of OAuth/SSO-relevant network responses, so we can see WHY a Clerk/
   // Stytch SSO callback fails to persist a session (cookie not set, FAPI
@@ -11531,6 +11563,7 @@ export class BrowserController {
     this.checkoutOutcomeBaseline = undefined;
     let submitted = false;
     let clearSubmittedDispatchTracking: (() => Promise<void>) | null = null;
+    let readSubmittedDispatchExpired: (() => Promise<boolean>) | null = null;
     for (const frame of this.page.frames()) {
       const matches = frame.locator('button,input[type="submit"],[role="button"]');
       const count = Math.min(await matches.count().catch(() => 0), 100);
@@ -11604,20 +11637,12 @@ export class BrowserController {
         });
         const dispatchNetworkContext = this.page.context();
         let dispatchNetworkDeadline: number | null = null;
-        let dispatchNetworkArmed = false;
+        let dispatchNetworkExpired = false;
         const dispatchNetworkFence = async (route: Route): Promise<void> => {
           if (dispatchNetworkDeadline !== null && Date.now() >= dispatchNetworkDeadline) {
+            dispatchNetworkExpired = true;
             await route.abort("blockedbyclient");
             return;
-          }
-          if (
-            dispatchNetworkArmed &&
-            dispatchNetworkDeadline !== null &&
-            ["document", "fetch", "xhr", "eventsource", "ping"].includes(
-              route.request().resourceType(),
-            )
-          ) {
-            dispatchNetworkDeadline = null;
           }
           await route.fallback();
         };
@@ -11662,37 +11687,32 @@ export class BrowserController {
                 dispatchState.expired = true;
                 return true;
               };
-              const authorizeNetworkDispatch = (): boolean => {
-                if (expired()) return false;
-                dispatchState.expiresAt = null;
-                return true;
-              };
               const originalFetch = window.fetch;
               const originalXhrSend = XMLHttpRequest.prototype.send;
               const originalSendBeacon = navigator.sendBeacon;
               const originalSubmit = HTMLFormElement.prototype.submit;
               const originalRequestSubmit = HTMLFormElement.prototype.requestSubmit;
               const guardedFetch: typeof window.fetch = function (...args) {
-                if (!authorizeNetworkDispatch()) {
+                if (expired()) {
                   return Promise.reject(new Error("payment_approval_expired"));
                 }
                 return originalFetch.apply(window, args);
               };
               const guardedXhrSend: typeof XMLHttpRequest.prototype.send = function (...args) {
-                if (!authorizeNetworkDispatch()) throw new Error("payment_approval_expired");
+                if (expired()) throw new Error("payment_approval_expired");
                 return originalXhrSend.apply(this, args);
               };
               const guardedSendBeacon: typeof navigator.sendBeacon = function (...args) {
-                if (!authorizeNetworkDispatch()) return false;
+                if (expired()) return false;
                 return originalSendBeacon.apply(navigator, args);
               };
               const guardedSubmit: typeof HTMLFormElement.prototype.submit = function () {
-                if (!authorizeNetworkDispatch()) throw new Error("payment_approval_expired");
+                if (expired()) throw new Error("payment_approval_expired");
                 return originalSubmit.call(this);
               };
               const guardedRequestSubmit: typeof HTMLFormElement.prototype.requestSubmit =
                 function (...args) {
-                  if (!authorizeNetworkDispatch()) throw new Error("payment_approval_expired");
+                  if (expired()) throw new Error("payment_approval_expired");
                   return originalRequestSubmit.apply(this, args);
                 };
               window.fetch = guardedFetch;
@@ -11955,7 +11975,6 @@ export class BrowserController {
                 }
               }, expiresAt);
               markInputDispatchPossible();
-              dispatchNetworkArmed = true;
               await candidate.click({
                 noWaitAfter: true,
                 ...(typeof remainingMs === "number"
@@ -11983,6 +12002,8 @@ export class BrowserController {
             onSubmitDispatched: reportSubmitDispatched,
           });
           clearSubmittedDispatchTracking = clearDispatchTracking;
+          readSubmittedDispatchExpired = async () =>
+            dispatchNetworkExpired || (await readDispatchState())?.expired === true;
         } catch (error) {
           await clearDispatchTracking();
           throw error;
@@ -12005,18 +12026,37 @@ export class BrowserController {
       throw new Error("payment_submit_not_found");
     }
     try {
+      const assertDispatchNotExpired = async (): Promise<void> => {
+        if (await readSubmittedDispatchExpired?.()) {
+          throw new BrowserClickDispatchError(
+            "not_dispatched",
+            new Error("payment_approval_expired"),
+          );
+        }
+      };
       const challengeDeadline = Date.now() + 15_000;
       while (Date.now() < challengeDeadline) {
+        await assertDispatchNotExpired();
         if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) {
+          await assertDispatchNotExpired();
           return { three_ds_required: false, order_confirmed: true };
         }
         const challenge = await this.detectThreeDsChallenge();
-        if (challenge.three_ds_required) return challenge;
+        if (challenge.three_ds_required) {
+          await assertDispatchNotExpired();
+          return challenge;
+        }
         await this.page.waitForTimeout(250).catch(() => undefined);
       }
+      await assertDispatchNotExpired();
       return { three_ds_required: false, order_confirmed: false };
     } catch (error) {
-      if (error instanceof PaymentSubmitOutcomeUnknownError) throw error;
+      if (
+        error instanceof PaymentSubmitOutcomeUnknownError ||
+        error instanceof BrowserClickDispatchError
+      ) {
+        throw error;
+      }
       throw new PaymentSubmitOutcomeUnknownError();
     } finally {
       await clearSubmittedDispatchTracking?.();
@@ -15328,6 +15368,22 @@ export class BrowserController {
   // settleAfterOAuth() restores the product page afterwards.
   async startOAuth(selector: string): Promise<void> {
     if (!this.page || !this.context) throw new Error("Browser not started");
+    const pending = this.takePendingOAuthBoundary(selector);
+    if (pending !== null) {
+      this.maybeAttachOAuthNetListener();
+      this.oauthProductPage = pending.product;
+      this.oauthProviderPage = pending.providerPage;
+      this.oauthProviderPageClosed = pending.providerPage?.isClosed() ?? false;
+      if (pending.providerPage !== null && !pending.providerPage.isClosed()) {
+        this.page = pending.providerPage;
+        this.restoreProductPageWhenOAuthPageCloses(pending.providerPage, pending.product);
+      } else {
+        this.page = pending.product;
+      }
+      this.adoptLivePage();
+      await this.page?.waitForLoadState("domcontentloaded", { timeout: 30_000 }).catch(() => undefined);
+      return;
+    }
     this.maybeAttachOAuthNetListener();
     if (
       !/accounts\.google\.com|github\.com\/login|login\.microsoftonline\.com/i.test(this.page.url())
@@ -15357,6 +15413,13 @@ export class BrowserController {
     }
   }
 
+  private takePendingOAuthBoundary(selector: string): PendingOAuthBoundary | null {
+    const pending = this.pendingOAuthBoundary;
+    if (pending === null || pending.selector !== selector) return null;
+    this.pendingOAuthBoundary = null;
+    return pending;
+  }
+
   async detectOAuthProviderDestination(
     selector: string,
     timeoutMs = 8_000,
@@ -15382,7 +15445,7 @@ export class BrowserController {
       const signal = `${host}${url.pathname}${url.search}`;
       if (
         /(^|\.)google\.com$/i.test(host) ||
-        /(?:provider|connection)[=/_-]google\b/i.test(signal)
+        /(?:provider|connection|oauth|sso|auth)[=/_-]google\b/i.test(signal)
       ) {
         return "google";
       }
@@ -15390,7 +15453,9 @@ export class BrowserController {
         /(^|\.)(?:github\.com|microsoftonline\.com|live\.com|appleid\.apple\.com|okta\.com|auth0\.com)$/i.test(
           host,
         ) ||
-        /(?:provider|connection)[=/_-](?:github|microsoft|apple|okta|auth0)\b/i.test(signal)
+        /(?:provider|connection|oauth|sso|auth)[=/_-](?:github|microsoft|apple|okta|auth0)\b/i.test(
+          signal,
+        )
       ) {
         return host === "github.com" || host.endsWith(".github.com") ? "github" : "other";
       }
@@ -15398,8 +15463,10 @@ export class BrowserController {
     };
     const observedUrls = new Set<string>();
     let popup: Page | null = null;
+    let boundaryPage: Page | null = null;
     let externalDestination: string | null = null;
     let probeRouteInstalled = false;
+    let actionStarted = false;
     const probeRoute = async (route: Route): Promise<void> => {
       const requestPage = route.request().frame().page();
       const opener = requestPage === product ? null : await requestPage.opener().catch(() => null);
@@ -15410,6 +15477,7 @@ export class BrowserController {
       const url = route.request().url();
       observedUrls.add(url);
       const provider = classify(url);
+      if (requestPage !== product) boundaryPage = requestPage;
       let external = false;
       try {
         const origin = new URL(url).origin;
@@ -15418,7 +15486,7 @@ export class BrowserController {
         external = false;
       }
       if (external) externalDestination = url;
-      if (route.request().isNavigationRequest()) {
+      if (provider === "google" && route.request().isNavigationRequest()) {
         await route.abort("blockedbyclient");
         return;
       }
@@ -15430,6 +15498,7 @@ export class BrowserController {
         .then((opener) => {
           if (opener !== product) return;
           popup = page;
+          boundaryPage = page;
           observedUrls.add(page.url());
           page.on("framenavigated", (frame) => observedUrls.add(frame.url()));
         })
@@ -15456,6 +15525,7 @@ export class BrowserController {
         const declared = classify(declaredDestination);
         if (declared !== null) return declared;
       }
+      actionStarted = true;
       await locator.click({ noWaitAfter: true, timeout: timeoutMs });
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
@@ -15463,7 +15533,16 @@ export class BrowserController {
         if (popup !== null && !popup.isClosed()) observedUrls.add(popup.url());
         for (const observedUrl of observedUrls) {
           const provider = classify(observedUrl);
-          if (provider !== null) return provider;
+          if (provider !== null) {
+            this.pendingOAuthBoundary = {
+              selector,
+              product,
+              productUrl,
+              providerPage: boundaryPage ?? popup,
+              destinationUrl: observedUrl,
+            };
+            return provider;
+          }
           try {
             const origin = new URL(observedUrl).origin;
             if (productOrigin !== null && origin !== productOrigin && origin !== "null") {
@@ -15475,13 +15554,43 @@ export class BrowserController {
         }
         await this.sleep(50);
       }
+      this.pendingOAuthBoundary = {
+        selector,
+        product,
+        productUrl,
+        providerPage: boundaryPage ?? popup,
+        destinationUrl: externalDestination,
+      };
       return externalDestination === null ? null : "other";
     } catch {
+      if (actionStarted) {
+        const resolved = [...observedUrls]
+          .map((observedUrl) => ({ observedUrl, provider: classify(observedUrl) }))
+          .find((entry) => entry.provider !== null);
+        if (
+          resolved === undefined &&
+          externalDestination === null &&
+          boundaryPage === null &&
+          popup === null
+        ) {
+          return null;
+        }
+        this.pendingOAuthBoundary = {
+          selector,
+          product,
+          productUrl,
+          providerPage: boundaryPage ?? popup,
+          destinationUrl: resolved?.observedUrl ?? externalDestination,
+        };
+        return resolved?.provider ?? (externalDestination === null ? null : "other");
+      }
       return null;
     } finally {
       context.off("page", recordPopup);
       if (probeRouteInstalled) await context.unroute("**/*", probeRoute).catch(() => undefined);
-      if (popup !== null && !popup.isClosed()) await popup.close().catch(() => undefined);
+      if (!actionStarted && popup !== null && !popup.isClosed()) {
+        await popup.close().catch(() => undefined);
+      }
       if (!product.isClosed()) await product.bringToFront().catch(() => undefined);
     }
   }
@@ -15497,7 +15606,8 @@ export class BrowserController {
   // provider-owned window to finish; no credentials, frames, or consent scopes
   // are read or bypassed here.
   async loginWithOAuth(selector: string, settleTimeoutMs = 12_000): Promise<void> {
-    const product = this.page;
+    const pending = this.takePendingOAuthBoundary(selector);
+    const product = pending?.product ?? this.page;
     const context = this.context;
     if (product === null || product.isClosed() || context === null) {
       throw new Error("OAuth login cannot start because the product page is unavailable");
@@ -15507,9 +15617,9 @@ export class BrowserController {
     this.oauthProductPage = product;
     this.oauthProviderPage = null;
     this.oauthProviderPageClosed = false;
-    const productUrl = product.url();
+    const productUrl = pending?.productUrl ?? product.url();
     let recovery: Page | null = null;
-    let providerPage: Page | null = null;
+    let providerPage: Page | null = pending?.providerPage ?? null;
     let productDeparted = false;
     const onProductNavigation = (frame: Frame): void => {
       if (frame !== product.mainFrame()) return;
@@ -15520,30 +15630,52 @@ export class BrowserController {
       recovery = await context.newPage();
       await recovery.goto(productUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
 
-      let resolvePopup: (page: Page | null) => void = () => undefined;
-      const popupPromise = new Promise<Page | null>((resolve) => {
-        resolvePopup = resolve;
-      });
-      const onPopup = (page: Page): void => {
-        context.off("page", onPopup);
-        resolvePopup(page);
-      };
-      context.on("page", onPopup);
-      try {
+      if (pending === null) {
+        let resolvePopup: (page: Page | null) => void = () => undefined;
+        const popupPromise = new Promise<Page | null>((resolve) => {
+          resolvePopup = resolve;
+        });
+        const onPopup = (page: Page): void => {
+          context.off("page", onPopup);
+          resolvePopup(page);
+        };
+        context.on("page", onPopup);
         try {
-          await this.click(selector);
-        } catch (error) {
-          if (!product.isClosed()) throw error;
+          try {
+            await this.click(selector);
+          } catch (error) {
+            if (!product.isClosed()) throw error;
+          }
+          providerPage = await Promise.race([
+            popupPromise,
+            this.sleep(Math.min(settleTimeoutMs, 2_000)).then(() => null),
+          ]);
+        } finally {
+          context.off("page", onPopup);
+          resolvePopup(null);
         }
-        providerPage = await Promise.race([
-          popupPromise,
-          this.sleep(Math.min(settleTimeoutMs, 2_000)).then(() => null),
-        ]);
-      } finally {
-        context.off("page", onPopup);
-        resolvePopup(null);
+      } else if (
+        pending.destinationUrl !== null &&
+        /(^|\.)google\.com$/i.test(new URL(pending.destinationUrl).hostname) &&
+        providerPage?.isClosed() === true
+      ) {
+        providerPage = await context.newPage();
+        await providerPage.goto(pending.destinationUrl, {
+          waitUntil: "domcontentloaded",
+          timeout: 30_000,
+        });
+      } else if (pending.destinationUrl !== null) {
+        const boundaryPage = providerPage ?? product;
+        if (!boundaryPage.isClosed() && boundaryPage.url() !== pending.destinationUrl) {
+          await boundaryPage.goto(pending.destinationUrl, {
+            waitUntil: "domcontentloaded",
+            timeout: 30_000,
+          });
+        }
       }
       const transient = providerPage ?? product;
+      productDeparted =
+        productDeparted || !this.isOAuthProductUrl(transient.url(), productUrl);
       const durableProduct = providerPage === null ? recovery : product;
       this.oauthProductPage = durableProduct;
       this.oauthProviderPage = transient;
