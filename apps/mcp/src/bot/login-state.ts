@@ -14,6 +14,7 @@ import {
 } from "./profile.js";
 import { isOAuthProviderId, type OAuthProviderId } from "./oauth-providers.js";
 import { invalidateCanonicalGoogleIdentity, isSessionStateArtifact } from "./session-state.js";
+import { registerLocalBrowserLaunch } from "./browser.js";
 
 interface ProviderCookieContext {
   cookies(): Promise<Array<{ name: string; domain: string; path: string }>>;
@@ -173,11 +174,14 @@ export async function clearProviderCookies(
       const { chromium } = await import("patchright");
       context = await launchWithProfileGate(
         profileDir,
-        () =>
-          chromium.launchPersistentContext(profileDir, {
+        () => {
+          const ownership = registerLocalBrowserLaunch(profileDir);
+          return chromium.launchPersistentContext(profileDir, {
             channel: "chrome",
             headless: true,
-          }),
+            env: ownership.env,
+          });
+        },
         { failFast: true },
       );
       const cleared = await clearProviderCookiesFromContext(context, provider);

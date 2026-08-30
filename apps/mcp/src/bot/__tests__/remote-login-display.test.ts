@@ -159,6 +159,7 @@ describe("remote interactive login display", () => {
   it("launches the resolved Xvfb and uses its atomic display allocation", async () => {
     const executable = fakeExecutable(`
 const fs = require("node:fs");
+if (!/^v1:/.test(process.env.TRUSTY_SQUIRE_OWNER_HELPER_MARKER || "")) process.exit(24);
 if (process.argv.includes("-ac")) process.exit(20);
 const authFlag = process.argv.indexOf("-auth");
 if (authFlag < 0 || !fs.existsSync(process.argv[authFlag + 1])) process.exit(22);

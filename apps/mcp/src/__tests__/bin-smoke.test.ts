@@ -343,6 +343,7 @@ describe("owner-death process reaping", () => {
       const profileDir = path.join(caseDir, "operator-profile", "user-data");
       const reaperDir = path.join(caseDir, "reapers");
       const groupFile = path.join(caseDir, "group.json");
+      const helperGroupFile = path.join(caseDir, "helper-group.json");
       const readyFile = path.join(caseDir, "ready.json");
       const fixture = path.join(caseDir, "owner.mjs");
       const processMarker = "v1:1:owner-reaper-smoke";
@@ -355,10 +356,11 @@ describe("owner-death process reaping", () => {
         fixture,
         `import { spawn } from "node:child_process";\n` +
           `import { writeFileSync } from "node:fs";\n` +
-          `import { startOwnerProcessReaper, trackOwnerProcess } from ${JSON.stringify(ownerReaperUrl)};\n` +
+          `import { spawnOwnerTrackedHelper, startOwnerProcessReaper, trackOwnerProcess } from ${JSON.stringify(ownerReaperUrl)};\n` +
           `import { profileProcessIdentity } from ${JSON.stringify(profileUrl)};\n` +
           `const profileDir = ${JSON.stringify(profileDir)};\n` +
           `const groupFile = ${JSON.stringify(groupFile)};\n` +
+          `const helperGroupFile = ${JSON.stringify(helperGroupFile)};\n` +
           `const readyFile = ${JSON.stringify(readyFile)};\n` +
           `startOwnerProcessReaper({ rootDir: ${JSON.stringify(reaperDir)} });\n` +
           `const memberCode = ${JSON.stringify(
@@ -371,7 +373,12 @@ describe("owner-death process reaping", () => {
           `if (identity === null) process.exit(3);\n` +
           `identity.process_marker = ${JSON.stringify(processMarker)};\n` +
           `trackOwnerProcess(identity);\n` +
-          `writeFileSync(readyFile, JSON.stringify({ owner: process.pid, leader: leader.pid }));\n` +
+          `const helperCode = ${JSON.stringify(
+            `const { spawn } = require("node:child_process"); const { writeFileSync } = require("node:fs"); const child = spawn("sleep", ["300"], { stdio: "ignore" }); writeFileSync(${JSON.stringify(helperGroupFile)}, JSON.stringify([process.pid, child.pid])); setInterval(() => {}, 1000);`,
+          )};\n` +
+          `const sessionHelper = spawnOwnerTrackedHelper(process.execPath, ["-e", helperCode], { stdio: "ignore" });\n` +
+          `sessionHelper.unref();\n` +
+          `writeFileSync(readyFile, JSON.stringify({ owner: process.pid, leader: leader.pid, helperLeader: sessionHelper.pid }));\n` +
           `setInterval(() => {}, 1000);\n`,
       );
 
@@ -384,17 +391,25 @@ describe("owner-death process reaping", () => {
         stdio: "ignore",
       });
       let members: number[] = [];
+      let groupLeaders: number[] = [];
       try {
-        await waitUntil(() => existsSync(readyFile) && existsSync(groupFile), 10_000);
-        members = JSON.parse(await fs.readFile(groupFile, "utf8")) as number[];
-        expect(members).toHaveLength(2);
+        await waitUntil(
+          () => existsSync(readyFile) && existsSync(groupFile) && existsSync(helperGroupFile),
+          10_000,
+        );
+        const browserMembers = JSON.parse(await fs.readFile(groupFile, "utf8")) as number[];
+        const helperMembers = JSON.parse(await fs.readFile(helperGroupFile, "utf8")) as number[];
+        members = [...browserMembers, ...helperMembers];
+        groupLeaders = [browserMembers[0]!, helperMembers[0]!];
+        expect(members).toHaveLength(4);
         expect(members.every(processIsRunning)).toBe(true);
 
         // Prove the persisted pgid + exact launch marker can reap the group
         // even after its original leader is already gone.
-        process.kill(members[0]!, "SIGKILL");
-        await waitUntil(() => !processIsRunning(members[0]!), 10_000);
-        expect(processIsRunning(members[1]!)).toBe(true);
+        for (const leader of groupLeaders) process.kill(leader, "SIGKILL");
+        await waitUntil(() => groupLeaders.every((pid) => !processIsRunning(pid)), 10_000);
+        expect(processIsRunning(browserMembers[1]!)).toBe(true);
+        expect(processIsRunning(helperMembers[1]!)).toBe(true);
 
         owner.kill("SIGKILL");
         await waitForExit(owner);
@@ -403,7 +418,7 @@ describe("owner-death process reaping", () => {
         expect(members.filter(processIsRunning)).toEqual([]);
       } finally {
         owner.kill("SIGKILL");
-        for (const pid of members) {
+        for (const pid of groupLeaders) {
           try {
             process.kill(-pid, "SIGKILL");
           } catch {}

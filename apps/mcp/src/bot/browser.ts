@@ -86,6 +86,42 @@ export type StealthProfile = "baseline" | "cdp_hardened";
 
 const OPERATOR_BROWSER_HEADLESS = true;
 
+export function registerLocalBrowserLaunch(
+  profileDir: string,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+  marker = createOperatorBrowserMarker(),
+): { marker: string; env: NodeJS.ProcessEnv } {
+  trackOwnerBrowserLaunch(marker, profileDir);
+  return {
+    marker,
+    env: { ...baseEnv, [OPERATOR_BROWSER_MARKER_ENV]: marker },
+  };
+}
+
+function spawnLocalBrowser(
+  binary: string,
+  args: readonly string[],
+  profileDir: string,
+  options: {
+    env: NodeJS.ProcessEnv;
+    stdio: ["ignore", "ignore", "pipe"];
+    detached: boolean;
+    marker?: string;
+  },
+): ChildProcess {
+  const ownership = registerLocalBrowserLaunch(profileDir, options.env, options.marker);
+  try {
+    return spawn(binary, [...args], {
+      env: ownership.env,
+      stdio: options.stdio,
+      detached: options.detached,
+    });
+  } catch (error) {
+    untrackOwnerBrowserLaunch(ownership.marker);
+    throw error;
+  }
+}
+
 export type ContextInitScriptId = "evaluate-name-shim" | "navigator-webdriver" | "webgl-spoof";
 
 export function contextInitScriptsFor(options: {
@@ -3321,7 +3357,7 @@ export async function launchSelfManagedLoginContext(params: {
         // tell) is never added. That is the whole point of self-launching.
         params.appMode ? `--app=${params.initialUrl}` : params.initialUrl,
       ];
-      const spawned = spawn(params.binary, argv, {
+      const spawned = spawnLocalBrowser(params.binary, argv, params.profileDir, {
         detached: process.platform !== "win32",
         env: params.env,
         stdio: ["ignore", "ignore", "pipe"],
@@ -3442,7 +3478,7 @@ export async function launchPlainLoginBrowser(params: {
         ...(params.proxyServer !== null ? [`--proxy-server=${params.proxyServer}`] : []),
         `--app=${params.url}`,
       ];
-      const spawned = spawn(params.binary, argv, {
+      const spawned = spawnLocalBrowser(params.binary, argv, params.profileDir, {
         detached: process.platform !== "win32",
         env: params.env,
         stdio: ["ignore", "ignore", "pipe"],
@@ -3887,12 +3923,13 @@ export class BrowserController {
         "about:blank",
       ];
       this.commitProfileLaunch();
-      const child = spawn(params.binary, argv, {
+      const child = spawnLocalBrowser(params.binary, argv, this.profileDir, {
         env: params.env,
         stdio: ["ignore", "ignore", "pipe"],
         // A dedicated process group gives the session a single, identity-
         // proven teardown target for Chrome plus every renderer/GPU helper.
         detached: process.platform !== "win32",
+        marker: this.operatorBrowserMarker(),
       });
       this.childChrome = child;
       this.childChromeProcessGroup = process.platform !== "win32";
@@ -4141,7 +4178,7 @@ export class BrowserController {
       );
     }
     if (!remoteMode && !this.ownerLaunchTracked) {
-      trackOwnerBrowserLaunch(this.operatorBrowserMarker(), this.profileDir);
+      registerLocalBrowserLaunch(this.profileDir, process.env, this.operatorBrowserMarker());
       this.ownerLaunchTracked = true;
     }
     // T3.1: probe where this run's traffic actually exits so the

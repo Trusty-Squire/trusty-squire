@@ -32,6 +32,7 @@ import {
   extractGoogleAccountEmail,
   launchPlainLoginBrowser,
   launchSelfManagedLoginContext,
+  registerLocalBrowserLaunch,
   resolveChannelBinary,
   selfLaunchEnabled,
 } from "./browser.js";
@@ -91,8 +92,13 @@ export async function launchPersistentLoginContext(
   userDataDir: string,
   options: Record<string, unknown>,
 ): Promise<BrowserContext> {
+  const ownership = registerLocalBrowserLaunch(
+    userDataDir,
+    (options.env as NodeJS.ProcessEnv | undefined) ?? process.env,
+  );
   return await launcher.launchPersistentContext(userDataDir, {
     ...options,
+    env: ownership.env,
     channel: "chrome",
   });
 }

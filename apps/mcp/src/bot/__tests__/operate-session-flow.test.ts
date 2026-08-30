@@ -315,6 +315,14 @@ vi.mock("../session-state.js", async (importOriginal) => {
 let compactV2ModeBeforeTest: string | undefined;
 
 vi.mock("../browser.js", () => ({
+  registerLocalBrowserLaunch: (
+    _profileDir: string,
+    baseEnv: NodeJS.ProcessEnv = process.env,
+    marker = "v1:1:test-browser",
+  ) => ({
+    marker,
+    env: { ...baseEnv, TRUSTY_SQUIRE_OPERATOR_BROWSER_MARKER: marker },
+  }),
   BrowserController: class {
     private readonly index: number;
     private readonly opts: { profileDir?: string; proxyUrl?: string; storageState?: unknown };
@@ -945,7 +953,15 @@ vi.mock("../google-login.js", async (importOriginal) => {
   };
 });
 
-import { chmodSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  writeFileSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, generateKeyPairSync } from "node:crypto";
@@ -2125,6 +2141,33 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
       expect(h.gotos).not.toContain(url);
     },
   );
+
+  it("refuses process-watchdog ownership while operate_start is initializing", async () => {
+    let releaseObservation: (() => void) | undefined;
+    h.visibleTextGate = new Promise<void>((resolve) => {
+      releaseObservation = resolve;
+    });
+    const starting = startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    try {
+      await vi.waitFor(() => expect(activeSessionCount()).toBe(1));
+      await vi.waitFor(() => expect(h.extractVisibleTextCalls).toBeGreaterThan(0));
+
+      await expect(
+        dispatchOperatorBrowserProcessTermination("v1:1:mock-0", {
+          kind: "cpu_budget_exceeded",
+          cpu_percent: 800,
+          ceiling_percent: 200,
+          consecutive_samples: 3,
+        }),
+      ).resolves.toBe(false);
+      expect(h.closeCalls).toBe(0);
+      expect(activeSessionCount()).toBe(1);
+    } finally {
+      releaseObservation?.();
+      const started = await starting;
+      await finishProvisionSession(started.session_id);
+    }
+  });
 
   it("allows a goto step to a subdomain of the recipe's own domain", async () => {
     h.elements = [];
@@ -7232,17 +7275,33 @@ describe("operate session — ephemeral profile lifecycle", () => {
     }
   });
 
-  it("hard-stops a session when the process watchdog reports maximum lifetime", async () => {
-    await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+  it("clears persisted observation artifacts when watchdog teardown owns an idle session", async () => {
+    vi.useFakeTimers();
+    h.elements = [
+      elem({
+        tag: "button",
+        visibleText: "Continue",
+        screenPath: "main:checkout > button:continue",
+        container: "main:checkout",
+      }),
+    ];
+    h.visibleText = "Checkout ready";
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    expect(started.snapshot_file).toBeTypeOf("string");
+    expect(existsSync(started.snapshot_file!)).toBe(true);
+    vi.setSystemTime(Date.now() + 60 * 60 * 1_000);
 
-    await dispatchOperatorBrowserProcessTermination("v1:1:mock-0", {
-      kind: "max_lifetime",
-      lifetime_ms: 30 * 60 * 1_000,
-      timeout_ms: 30 * 60 * 1_000,
-    });
+    await expect(
+      dispatchOperatorBrowserProcessTermination("v1:1:mock-0", {
+        kind: "max_lifetime",
+        lifetime_ms: 60 * 60 * 1_000,
+        timeout_ms: 30 * 60 * 1_000,
+      }),
+    ).resolves.toBe(true);
 
     expect(h.closeCalls).toBe(1);
     expect(activeSessionCount()).toBe(0);
+    expect(existsSync(started.snapshot_file!)).toBe(false);
   });
 
   it("writes and destroys every explicitly successful non-payment profile", async () => {

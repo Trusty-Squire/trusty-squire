@@ -720,10 +720,16 @@ describe("bot Chrome launch consistency", () => {
         channel: "bundled",
       }),
     ).resolves.toBe(context);
-    expect(launchPersistentContext).toHaveBeenCalledWith("/isolated-profile", {
-      headless: true,
-      channel: "chrome",
-    });
+    expect(launchPersistentContext).toHaveBeenCalledWith(
+      "/isolated-profile",
+      expect.objectContaining({
+        headless: true,
+        channel: "chrome",
+        env: expect.objectContaining({
+          TRUSTY_SQUIRE_OPERATOR_BROWSER_MARKER: expect.stringMatching(/^v1:/),
+        }),
+      }),
+    );
   });
 
   it("captures every browser storage surface from the closed canonical login", async () => {

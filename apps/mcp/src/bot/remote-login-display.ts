@@ -5,7 +5,7 @@
 // calls start this stack, and every process is torn down with that login.
 
 import { randomBytes } from "node:crypto";
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import {
   accessSync,
   chmodSync,
@@ -28,6 +28,10 @@ import {
   isSelfManagedChromeTerminationSignalExitEnabled,
   setSelfManagedChromeTerminationSignalExitEnabled,
 } from "./browser.js";
+import {
+  signalOwnerTrackedHelper,
+  spawnOwnerTrackedHelper,
+} from "./owner-process-reaper.js";
 
 const LOGIN_WIDTH = Number(process.env.BOT_NOVNC_W) || 720;
 const LOGIN_HEIGHT = Number(process.env.BOT_NOVNC_H) || 1280;
@@ -231,7 +235,7 @@ function requireRemoteLoginBinaries(namedTunnel: boolean): RemoteLoginBinaries {
 }
 
 function spawnBackground(command: string, args: string[], env?: NodeJS.ProcessEnv): ChildProcess {
-  return spawn(command, args, {
+  return spawnOwnerTrackedHelper(command, args, {
     stdio: ["ignore", "pipe", "pipe"],
     env: env ?? process.env,
   });
@@ -438,7 +442,7 @@ export async function startRemoteLoginDisplay(rig: RemoteLoginRig): Promise<stri
   try {
     createRemoteLoginSecrets(rig);
     const authFile = rig.authFile!;
-    const xvfb = spawn(
+    const xvfb = spawnOwnerTrackedHelper(
       rig.binaries.xvfb,
       ["-screen", "0", `${rig.width}x${rig.height}x24`, "-auth", authFile, "-displayfd", "3"],
       {
@@ -600,7 +604,7 @@ function releaseChildHandles(child: ChildProcess): void {
 function forceTeardownRemoteLoginRig(rig: RemoteLoginRig): void {
   for (const child of rig.procs) {
     try {
-      if (!childExited(child)) child.kill("SIGKILL");
+      signalOwnerTrackedHelper(child, "SIGKILL");
     } catch {
       // best-effort process-exit cleanup
     }
@@ -616,7 +620,7 @@ export function teardownRemoteLoginRig(rig: RemoteLoginRig, graceMs = 1_000): Pr
     const running = rig.procs.filter((child) => !childExited(child));
     for (const child of running) {
       try {
-        child.kill("SIGTERM");
+        signalOwnerTrackedHelper(child, "SIGTERM");
       } catch {
         // best-effort
       }
@@ -625,7 +629,7 @@ export function teardownRemoteLoginRig(rig: RemoteLoginRig, graceMs = 1_000): Pr
     const resistant = running.filter((child) => !childExited(child));
     for (const child of resistant) {
       try {
-        child.kill("SIGKILL");
+        signalOwnerTrackedHelper(child, "SIGKILL");
       } catch {
         // best-effort
       }

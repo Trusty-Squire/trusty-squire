@@ -221,12 +221,15 @@ export function createEphemeralProfile(): string {
   return profileDir;
 }
 
-export async function destroyEphemeralProfile(profileDir: string): Promise<void> {
-  try {
-    await rm(profileDir, { recursive: true, force: true });
-  } finally {
-    untrackOwnerEphemeralProfile(profileDir);
-  }
+export async function destroyEphemeralProfile(
+  profileDir: string,
+  operations: {
+    remove?: typeof rm;
+    untrack?: typeof untrackOwnerEphemeralProfile;
+  } = {},
+): Promise<void> {
+  await (operations.remove ?? rm)(profileDir, { recursive: true, force: true });
+  (operations.untrack ?? untrackOwnerEphemeralProfile)(profileDir);
 }
 
 /**

@@ -48,7 +48,9 @@ export interface OperatorBrowserWatchdogOptions {
   lastActivityAt: () => number;
   hasActiveCall: () => boolean;
   processMarker: () => string | null;
-  onTerminate: (reason: OperatorBrowserWatchdogReason) => void | Promise<void>;
+  onTerminate: (
+    reason: OperatorBrowserWatchdogReason,
+  ) => boolean | void | Promise<boolean | void>;
   now?: () => number;
   idleTimeoutMs?: number;
   maxLifetimeMs?: number;
@@ -376,6 +378,7 @@ export class OperatorBrowserProcessWatchdog {
       try {
         maySignal = (await this.options.onTerminate(marker, reason)) !== false;
       } catch (error) {
+        maySignal = false;
         const detail = error instanceof Error ? error.message : String(error);
         process.stderr.write(`[operator] process watchdog teardown failed: ${detail}\n`);
       }
@@ -410,7 +413,7 @@ export async function dispatchOperatorBrowserProcessTermination(
   reason: OperatorBrowserWatchdogReason,
 ): Promise<boolean> {
   const callback = processTerminationCallbacks.get(marker);
-  return callback === undefined || (await callback(reason)) !== false;
+  return callback !== undefined && (await callback(reason)) !== false;
 }
 
 export function startGlobalOperatorBrowserProcessWatchdog(): void {
@@ -441,7 +444,7 @@ export class OperatorBrowserWatchdog {
   private timer: NodeJS.Timeout | null = null;
   private unregisterProcessWatchdog: (() => void) | null = null;
   private terminated = false;
-  private terminationPromise: Promise<void> | null = null;
+  private terminationPromise: Promise<boolean> | null = null;
 
   constructor(private readonly options: OperatorBrowserWatchdogOptions) {
     const config = operatorBrowserWatchdogConfig();
@@ -455,19 +458,16 @@ export class OperatorBrowserWatchdog {
       const marker = this.options.processMarker();
       if (marker !== null) {
         this.unregisterProcessWatchdog = (
-          this.options.registerProcessWatchdog ?? registerOperatorBrowserProcessWatchdog
+        this.options.registerProcessWatchdog ?? registerOperatorBrowserProcessWatchdog
         )(marker, async (reason) => {
-          // Process lifetime/CPU thresholds detect orphans; they never outrank
-          // a registered live action or the session's one-hour idle policy.
           if (this.options.hasActiveCall()) return false;
           const idleMs = this.now() - this.options.lastActivityAt();
           if (idleMs < this.idleTimeoutMs) return false;
-          await this.terminateAndWait({
+          return await this.terminateAndWait({
             kind: "idle_timeout",
             idle_ms: idleMs,
             timeout_ms: this.idleTimeoutMs,
           });
-          return true;
         });
       }
     }
@@ -505,20 +505,27 @@ export class OperatorBrowserWatchdog {
     return reason;
   }
 
-  private async terminateAndWait(reason: OperatorBrowserWatchdogReason): Promise<void> {
-    await this.beginTermination(reason);
+  private async terminateAndWait(reason: OperatorBrowserWatchdogReason): Promise<boolean> {
+    return await this.beginTermination(reason);
   }
 
-  private beginTermination(reason: OperatorBrowserWatchdogReason): Promise<void> {
+  private beginTermination(reason: OperatorBrowserWatchdogReason): Promise<boolean> {
     if (this.terminationPromise !== null) return this.terminationPromise;
-    this.terminated = true;
-    this.stop();
-    this.terminationPromise = (async () => await this.options.onTerminate(reason))().catch(
-      (error: unknown) => {
-        const detail = error instanceof Error ? error.message : String(error);
-        process.stderr.write(`[operator] browser watchdog teardown failed: ${detail}\n`);
-      },
-    );
+    this.terminationPromise = (async () => {
+      const accepted = (await this.options.onTerminate(reason)) !== false;
+      if (accepted) {
+        this.terminated = true;
+        this.stop();
+      } else {
+        this.terminationPromise = null;
+      }
+      return accepted;
+    })().catch((error: unknown) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`[operator] browser watchdog teardown failed: ${detail}\n`);
+      this.terminationPromise = null;
+      return false;
+    });
     return this.terminationPromise;
   }
 }

@@ -3,6 +3,7 @@ import {
   OperatorBrowserProcessWatchdog,
   OperatorBrowserWatchdog,
   createOperatorBrowserMarker,
+  dispatchOperatorBrowserProcessTermination,
   isOperatorChromiumCommand,
   operatorBrowserMarkerStartedAt,
   type OperatorBrowserProcessRecord,
@@ -10,6 +11,16 @@ import {
 } from "../operator-browser-watchdog.js";
 
 describe("operator browser process watchdog", () => {
+  it("never grants process signals for an unregistered live-browser marker", async () => {
+    await expect(
+      dispatchOperatorBrowserProcessTermination("v1:1:unregistered-login", {
+        kind: "max_lifetime",
+        lifetime_ms: 30_000,
+        timeout_ms: 30_000,
+      }),
+    ).resolves.toBe(false);
+  });
+
   it("meters reparented Chromium siblings as one marked browser", async () => {
     const marker = createOperatorBrowserMarker(1, "session-a");
     let processes: OperatorBrowserProcessRecord[] = [

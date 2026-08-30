@@ -1746,6 +1746,7 @@ async function forceTerminateProvisionSessionOwned(
       `payment dispatch handoff exceeded ${timeoutMs}ms`,
     ).catch(() => undefined);
   }
+  clearSessionArtifacts(session);
   if (sessions.get(session.id) === session) sessions.delete(session.id);
   let terminalError: unknown;
   if (auditPendingThreeDs && session.pendingThreeDs !== null) {
@@ -1782,10 +1783,16 @@ async function forceTerminateProvisionSessionOwned(
 async function terminateExpiredProvisionSession(
   session: Session,
   reason: OperatorBrowserWatchdogReason,
-): Promise<void> {
-  // The action boundary owns the browser. Re-check at the teardown boundary
-  // because a call may have started after the watchdog sampled the session.
-  if (session.initializing || session.callCount > 0 || session.paymentCallCount > 0) return;
+): Promise<boolean> {
+  if (
+    session.initializing ||
+    session.closing ||
+    session.callCount > 0 ||
+    session.paymentCallCount > 0 ||
+    sessions.get(session.id) !== session
+  ) {
+    return false;
+  }
   const owner =
     session.terminalTeardownOwner ??
     (session.terminalTeardownOwner = {
@@ -1793,7 +1800,11 @@ async function terminateExpiredProvisionSession(
       forcePromise: null,
       routinePromise: null,
     });
-  if (owner.routinePromise !== null) return await owner.routinePromise;
+  if (owner.forcePromise !== null) return false;
+  if (owner.routinePromise !== null) {
+    await owner.routinePromise;
+    return true;
+  }
   session.closing = true;
   stopSessionWatchdog(session);
   owner.routinePromise = (async () => {
@@ -1815,6 +1826,7 @@ async function terminateExpiredProvisionSession(
     await forceTerminateProvisionSession(session, "browser_watchdog_terminate", { ...reason });
   })();
   await owner.routinePromise;
+  return true;
 }
 
 function startSessionWatchdog(session: Session): void {
@@ -1825,7 +1837,8 @@ function startSessionWatchdog(session: Session): void {
   const watchdog = new OperatorBrowserWatchdog({
     startedAt: session.startedAt,
     lastActivityAt: () => session.lastActivityAt,
-    hasActiveCall: () => session.callCount > 0 || session.paymentCallCount > 0,
+    hasActiveCall: () =>
+      session.initializing || session.callCount > 0 || session.paymentCallCount > 0,
     processMarker: () => session.browser.operatorBrowserMarker?.() ?? null,
     onTerminate: async (reason) => await terminateExpiredProvisionSession(session, reason),
   });
@@ -9918,13 +9931,13 @@ async function closeFinishingProvisionSession(
   session.paymentFieldSealActive = false;
   session.pendingThreeDs = null;
   stopSessionWatchdog(session);
-  if (sessions.get(sessionId) === session) sessions.delete(sessionId);
-  clearSessionArtifacts(session);
   await releaseWarmBrowserPage(
     session.browser,
     persistState,
     session.terminalTeardownOwner ?? undefined,
   );
+  if (sessions.get(sessionId) === session) sessions.delete(sessionId);
+  clearSessionArtifacts(session);
   disposeSessionWatchdog(session);
   return { session_id: sessionId, url, closed: true };
 }

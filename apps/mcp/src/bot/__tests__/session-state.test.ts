@@ -373,4 +373,15 @@ describe("operator session storage state", () => {
       await destroyEphemeralProfile(second);
     }
   });
+
+  it("retains owner cleanup custody when recursive profile removal fails", async () => {
+    const remove = vi.fn().mockRejectedValue(new Error("profile busy"));
+    const untrack = vi.fn();
+
+    await expect(
+      destroyEphemeralProfile("/tmp/trusty-squire-operate-failed", { remove, untrack }),
+    ).rejects.toThrow("profile busy");
+
+    expect(untrack).not.toHaveBeenCalled();
+  });
 });
