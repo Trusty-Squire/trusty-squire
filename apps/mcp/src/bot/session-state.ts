@@ -71,6 +71,11 @@ export interface CanonicalIdentityState {
   identityMetadata: CanonicalIdentityMetadata | undefined;
 }
 
+export type CanonicalIdentitySnapshotDisposition =
+  | "accepted"
+  | "invalid_metadata"
+  | "oversized";
+
 function canonicalIdentityMetadataPath(profileDir: string): string {
   return join(profileDir, CANONICAL_IDENTITY_METADATA_FILE);
 }
@@ -324,13 +329,8 @@ export async function writeCanonicalIdentitySnapshot(
   metadata: CanonicalIdentityMetadata | undefined,
   canPublish: () => boolean = () => true,
 ): Promise<boolean> {
-  if (
-    metadata !== undefined &&
-    (!validGoogleAccountEmail(metadata.googleAccountEmail) ||
-      Buffer.byteLength(JSON.stringify(metadata)) > MAX_IDENTITY_METADATA_BYTES)
-  ) {
-    return false;
-  }
+  const disposition = canonicalIdentitySnapshotDisposition(state, metadata);
+  if (disposition === "invalid_metadata") return false;
   const snapshot: CanonicalIdentitySnapshot = {
     version: 1,
     storageState: state,
@@ -338,7 +338,7 @@ export async function writeCanonicalIdentitySnapshot(
   };
   const serialized = JSON.stringify(snapshot);
   const serializedBytes = Buffer.byteLength(serialized);
-  if (serializedBytes > MAX_SESSION_STATE_BYTES) {
+  if (disposition === "oversized") {
     console.error(
       `[operator] storageState snapshot is ${serializedBytes} bytes, exceeding the ${MAX_SESSION_STATE_BYTES}-byte limit; retaining prior snapshot`,
     );
@@ -358,4 +358,25 @@ export async function writeCanonicalIdentitySnapshot(
   } finally {
     if (!published) await rm(temporary, { force: true }).catch(() => undefined);
   }
+}
+
+export function canonicalIdentitySnapshotDisposition(
+  state: BrowserStorageState,
+  metadata: CanonicalIdentityMetadata | undefined,
+): CanonicalIdentitySnapshotDisposition {
+  if (
+    metadata !== undefined &&
+    (!validGoogleAccountEmail(metadata.googleAccountEmail) ||
+      Buffer.byteLength(JSON.stringify(metadata)) > MAX_IDENTITY_METADATA_BYTES)
+  ) {
+    return "invalid_metadata";
+  }
+  const snapshot: CanonicalIdentitySnapshot = {
+    version: 1,
+    storageState: state,
+    ...(metadata === undefined ? {} : { identityMetadata: metadata }),
+  };
+  return Buffer.byteLength(JSON.stringify(snapshot)) > MAX_SESSION_STATE_BYTES
+    ? "oversized"
+    : "accepted";
 }

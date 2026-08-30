@@ -44,6 +44,7 @@ import { markProviderLoggedIn } from "./login-state.js";
 import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
+  canonicalIdentitySnapshotDisposition,
   GOOGLE_LOGIN_COOKIE_MARKERS,
   hasUsableGoogleIdentity,
   readCanonicalIdentityMetadata,
@@ -729,9 +730,16 @@ export async function finalizeLoginRun(
     }
   }
   const metadata =
-    result.googleAccountEmail === undefined
-      ? priorMetadata
-      : { googleAccountEmail: result.googleAccountEmail };
+    result.googleAccountEmail !== undefined
+      ? { googleAccountEmail: result.googleAccountEmail }
+      : seedProvider === "google" && result.status === "completed"
+        ? undefined
+        : priorMetadata;
+  const disposition = canonicalIdentitySnapshotDisposition(result.storageState, metadata);
+  if (disposition === "oversized") {
+    await opts.onConfirmedLogin?.();
+    return;
+  }
   const published = await writeCanonicalIdentitySnapshot(
     opts.profileDir,
     result.storageState,

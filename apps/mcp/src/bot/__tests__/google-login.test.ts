@@ -26,7 +26,11 @@ import {
 } from "../profile.js";
 import { OPERATOR_BROWSER_MARKER_ENV } from "../operator-browser-watchdog.js";
 import { loggedInProviders, markProviderLoggedIn } from "../login-state.js";
-import { readCanonicalIdentityMetadata, readSessionState } from "../session-state.js";
+import {
+  MAX_SESSION_STATE_BYTES,
+  readCanonicalIdentityMetadata,
+  readSessionState,
+} from "../session-state.js";
 import {
   cancelActiveLoginBrowsers,
   captureProfileStorageState,
@@ -1079,6 +1083,39 @@ describe("confirmed login finalization", () => {
         ),
       ).rejects.toThrow("without a live identity marker");
       await expect(readSessionState(profileDir)).resolves.toEqual(liveGoogleState);
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("treats an oversized completed login snapshot as a clean skip", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
+    const prior = { cookies: [], origins: [] };
+    const onConfirmedLogin = vi.fn(async () => undefined);
+    try {
+      await finalizeLoginRun(
+        { profileDir },
+        { status: "completed", closeState: "closed", storageState: prior },
+      );
+      await finalizeLoginRun(
+        { profileDir, onConfirmedLogin },
+        {
+          status: "completed",
+          closeState: "closed",
+          storageState: {
+            cookies: [],
+            origins: [
+              {
+                origin: "https://oversized.example",
+                localStorage: [{ name: "state", value: "x".repeat(MAX_SESSION_STATE_BYTES) }],
+              },
+            ],
+          },
+        },
+      );
+
+      expect(onConfirmedLogin).toHaveBeenCalledOnce();
+      await expect(readSessionState(profileDir)).resolves.toEqual(prior);
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }

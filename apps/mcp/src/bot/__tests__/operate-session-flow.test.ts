@@ -3353,6 +3353,73 @@ describe("3.1 — autocomplete-aware type fill", () => {
 });
 
 describe("operate session — OAuth lifecycle", () => {
+  it("leases concurrent OAuth actions before reading the session browser", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-oauth-action-start";
+    const google = {
+      cookies: [
+        {
+          name: "SID",
+          value: "google-session-before-actions",
+          domain: ".google.com",
+          path: "/",
+        },
+      ],
+      origins: [],
+    };
+    const rotatedOnce = {
+      cookies: [{ ...google.cookies[0]!, value: "google-session-after-first-action" }],
+      origins: [],
+    };
+    const rotatedTwice = {
+      cookies: [{ ...google.cookies[0]!, value: "google-session-after-second-action" }],
+      origins: [],
+    };
+    h.storageStates.set(canonical, google);
+    h.identityMetadata.set(canonical, { googleAccountEmail: "stale@example.com" });
+    h.liveGoogleEmail = null;
+    h.captureStorageStateSequences.set(0, [{ cookies: [], origins: [] }, rotatedOnce]);
+    h.captureStorageStateSequences.set(1, [rotatedOnce, rotatedTwice]);
+    h.visibleText = "Continue";
+    h.elements = [
+      elem({
+        visibleText: "Continue",
+        labelText: "Continue",
+        role: "button",
+        selector: "#oauth",
+      }),
+    ];
+    let releaseFirst!: () => void;
+    h.oauthLoginGates.set(
+      0,
+      new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      }),
+    );
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+
+    const first = act(started.session_id, { kind: "oauth_login", target: "Continue" });
+    await vi.waitFor(() => expect(h.oauthLoginCalls).toHaveLength(1));
+    const readsBeforeSecond = h.extractVisibleTextCalls;
+    const second = act(started.session_id, { kind: "oauth_click", target: "Continue" });
+    await Promise.resolve();
+    expect(h.extractVisibleTextCalls).toBe(readsBeforeSecond);
+
+    releaseFirst();
+    await first;
+    await second;
+
+    expect(h.oauthLoginCalls).toEqual(["#oauth", "#oauth"]);
+    expect(h.storageStateWrites).toEqual([
+      { profileDir: canonical, state: rotatedOnce },
+      { profileDir: canonical, state: rotatedTwice },
+    ]);
+    expect(h.identityMetadata.has(canonical)).toBe(false);
+    await finishProvisionSession(started.session_id);
+  });
+
   it("serializes every OAuth action and restores the freshly published state", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-google-handoff";
     const state0 = {
