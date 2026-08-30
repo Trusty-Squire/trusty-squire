@@ -718,6 +718,25 @@ function hostStrings(session: Session): string[] {
   return session.allowedHosts.map((e) => e.host);
 }
 
+const SERVICE_LOGIN_ROUTE_HOSTS: Readonly<Record<string, readonly string[]>> = {
+  "neon.com": ["console.neon.tech"],
+};
+
+function serviceLoginRouteHosts(allowedHosts: readonly string[]): string[] {
+  return [
+    ...new Set(
+      allowedHosts.flatMap(
+        (allowed) => SERVICE_LOGIN_ROUTE_HOSTS[allowed.trim().toLowerCase()] ?? [],
+      ),
+    ),
+  ];
+}
+
+function requestScopeHostStrings(session: Session): string[] {
+  const allowedHosts = hostStrings(session);
+  return [...allowedHosts, ...serviceLoginRouteHosts(allowedHosts)];
+}
+
 // Hosts that may seed credential EGRESS (where a stored key is later sent by
 // the proxy): start + auto_widen, never mid_session task scope — a wide operate
 // scope must not silently over-grant a key's egress allow-list (Codex). The
@@ -1287,7 +1306,7 @@ async function prepareOAuthActionBrowser(session: Session): Promise<void> {
     leasedBrowsers.set(replacement, { ...ephemeral, controller: replacement });
     session.browser = replacement;
     await replacement.setHostScopeAllowedHosts(
-      () => hostStrings(session),
+      () => requestScopeHostStrings(session),
       () => merchantSiblingSeedHosts(session),
     );
     if (
@@ -1444,7 +1463,7 @@ async function runSerializedGoogleIdentityOperation<T>(
       session.browser = replacement;
       if (typeof replacement.setHostScopeAllowedHosts === "function") {
         await replacement.setHostScopeAllowedHosts(
-          () => hostStrings(session),
+          () => requestScopeHostStrings(session),
           () => merchantSiblingSeedHosts(session),
         );
       }
@@ -2784,14 +2803,6 @@ const SQUIRE_CONTROL_PLANE_HOSTS: readonly string[] = [
   "trusty-squire-api.fly.dev",
 ];
 
-// A small number of services publish their login route on a different
-// registrable domain than their public signup URL. Keep these exceptions exact:
-// they extend only the named service's own login route, not the provider's
-// entire domain or arbitrary hosts supplied later by the operator.
-const SERVICE_LOGIN_ROUTE_HOSTS: Readonly<Record<string, readonly string[]>> = {
-  "neon.com": ["console.neon.tech"],
-};
-
 export function isSquireControlPlaneHost(host: string): boolean {
   const h = host.trim().toLowerCase().replace(/\.$/, "");
   if (h.length === 0) return false;
@@ -2813,13 +2824,7 @@ export function hostAllowed(url: string, allowedHosts: readonly string[]): boole
   if (isSquireControlPlaneHost(host)) return false;
   const ok = (allowed: string): boolean => host === allowed || host.endsWith(`.${allowed}`);
   if (allowedHosts.some(ok)) return true;
-  if (
-    allowedHosts.some((allowed) =>
-      SERVICE_LOGIN_ROUTE_HOSTS[allowed.toLowerCase()]?.includes(host),
-    )
-  ) {
-    return true;
-  }
+  if (serviceLoginRouteHosts(allowedHosts).includes(host)) return true;
   if (DEFAULT_AUTH_HOSTS.some(ok)) return true;
   if (host.endsWith(".firebaseapp.com") || host.endsWith(".web.app")) return true;
   return false;
@@ -3779,7 +3784,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
   try {
     if (typeof browser.setHostScopeAllowedHosts === "function") {
       await browser.setHostScopeAllowedHosts(
-        () => hostStrings(session),
+        () => requestScopeHostStrings(session),
         () => merchantSiblingSeedHosts(session),
       );
     }

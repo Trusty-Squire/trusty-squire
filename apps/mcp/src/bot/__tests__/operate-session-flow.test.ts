@@ -69,6 +69,10 @@ const h = vi.hoisted(() => ({
   workerEmail: null as string | null,
   liveGoogleEmail: "default-google@example.com" as string | null,
   temporaryHostScopes: [] as Array<{ hosts: string[]; phase: "enter" | "exit" }>,
+  hostScopeProviders: [] as Array<{
+    allowedHosts: () => readonly string[];
+    siblingDomainHosts: () => readonly string[];
+  }>,
   connections: [] as boolean[],
   profileDirs: [] as Array<string | undefined>,
   proxyUrls: [] as Array<string | undefined>,
@@ -831,8 +835,11 @@ vi.mock("../browser.js", () => ({
       if (h.restoreStorageStateGate !== null) await h.restoreStorageStateGate;
       h.restoredStorageStates.push({ browserIndex: this.index, state });
     }
-    async setHostScopeAllowedHosts(): Promise<void> {
-      return undefined;
+    async setHostScopeAllowedHosts(
+      allowedHosts: () => readonly string[],
+      siblingDomainHosts: () => readonly string[] = allowedHosts,
+    ): Promise<void> {
+      h.hostScopeProviders.push({ allowedHosts, siblingDomainHosts });
     }
     async withTemporaryHostScopeAllowedHosts<T>(
       hosts: readonly string[],
@@ -1124,6 +1131,7 @@ beforeEach(() => {
   h.workerEmail = null;
   h.liveGoogleEmail = "default-google@example.com";
   h.temporaryHostScopes = [];
+  h.hostScopeProviders = [];
   h.connections = [];
   h.profileDirs = [];
   h.proxyUrls = [];
@@ -5560,6 +5568,17 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
 });
 
 describe("operate session — multi-host allow-set + allow_host", () => {
+  it("feeds only Neon's exact login route into the browser request scope", async () => {
+    await startProvisionSession({ serviceUrl: "https://neon.com/signup" });
+
+    expect(h.hostScopeProviders).toHaveLength(1);
+    expect(h.hostScopeProviders[0]!.allowedHosts()).toEqual([
+      "neon.com",
+      "console.neon.tech",
+    ]);
+    expect(h.hostScopeProviders[0]!.siblingDomainHosts()).toEqual(["neon.com"]);
+  });
+
   it("blocks a goto outside the start scope, then allow_host unblocks it", async () => {
     const obs = await startProvisionSession({
       serviceUrl: "https://console.cloud.google.com/start",
