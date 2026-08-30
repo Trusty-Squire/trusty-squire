@@ -11,10 +11,10 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, readdirSync, promises as fs } from "node:fs";
+import { existsSync, readFileSync, readdirSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { VERSION } from "../version.js";
 
 const pkgRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -335,6 +335,77 @@ describe("launched through a bin symlink", () => {
   }, 30_000);
 });
 
+describe("owner-death process reaping", () => {
+  it.skipIf(process.platform !== "linux")(
+    "leaves no live process-group members after the owning process is SIGKILLed",
+    async () => {
+      const caseDir = path.join(tmpDir, "owner-reaper");
+      const profileDir = path.join(caseDir, "operator-profile", "user-data");
+      const reaperDir = path.join(caseDir, "reapers");
+      const groupFile = path.join(caseDir, "group.json");
+      const readyFile = path.join(caseDir, "ready.json");
+      const fixture = path.join(caseDir, "owner.mjs");
+      await fs.mkdir(profileDir, { recursive: true });
+      const ownerReaperUrl = pathToFileURL(
+        path.join(pkgRoot, "dist", "bot", "owner-process-reaper.js"),
+      ).href;
+      const profileUrl = pathToFileURL(path.join(pkgRoot, "dist", "bot", "profile.js")).href;
+      await fs.writeFile(
+        fixture,
+        `import { spawn } from "node:child_process";\n` +
+          `import { writeFileSync } from "node:fs";\n` +
+          `import { startOwnerProcessReaper, trackOwnerProcess } from ${JSON.stringify(ownerReaperUrl)};\n` +
+          `import { profileProcessIdentity } from ${JSON.stringify(profileUrl)};\n` +
+          `const profileDir = ${JSON.stringify(profileDir)};\n` +
+          `const groupFile = ${JSON.stringify(groupFile)};\n` +
+          `const readyFile = ${JSON.stringify(readyFile)};\n` +
+          `startOwnerProcessReaper({ rootDir: ${JSON.stringify(reaperDir)} });\n` +
+          `const memberCode = ${JSON.stringify(
+            `const { spawn } = require("node:child_process"); const { writeFileSync } = require("node:fs"); const helper = spawn("sleep", ["300"], { stdio: "ignore" }); writeFileSync(${JSON.stringify(groupFile)}, JSON.stringify([process.pid, helper.pid])); setInterval(() => {}, 1000);`,
+          )};\n` +
+          `const leader = spawn(process.execPath, ["-e", memberCode, "--", "--user-data-dir=" + profileDir], { detached: true, stdio: "ignore" });\n` +
+          `leader.unref();\n` +
+          `let identity = null;\n` +
+          `for (let i = 0; i < 100 && identity === null; i += 1) { identity = profileProcessIdentity(leader.pid, profileDir); if (identity === null) await new Promise((r) => setTimeout(r, 10)); }\n` +
+          `if (identity === null) process.exit(3);\n` +
+          `trackOwnerProcess(identity);\n` +
+          `writeFileSync(readyFile, JSON.stringify({ owner: process.pid, leader: leader.pid }));\n` +
+          `setInterval(() => {}, 1000);\n`,
+      );
+
+      const owner = spawn(process.execPath, [fixture], {
+        env: {
+          ...process.env,
+          TRUSTY_SQUIRE_REAPER_POLL_MS: "25",
+          TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS: "50",
+        },
+        stdio: "ignore",
+      });
+      let members: number[] = [];
+      try {
+        await waitUntil(() => existsSync(readyFile) && existsSync(groupFile), 10_000);
+        members = JSON.parse(await fs.readFile(groupFile, "utf8")) as number[];
+        expect(members).toHaveLength(2);
+        expect(members.every(processIsRunning)).toBe(true);
+
+        owner.kill("SIGKILL");
+        await waitForExit(owner);
+        await waitUntil(() => members.every((pid) => !processIsRunning(pid)), 10_000);
+
+        expect(members.filter(processIsRunning)).toEqual([]);
+      } finally {
+        owner.kill("SIGKILL");
+        for (const pid of members) {
+          try {
+            process.kill(-pid, "SIGKILL");
+          } catch {}
+        }
+      }
+    },
+    30_000,
+  );
+});
+
 interface InitResponse {
   result?: { serverInfo?: { name?: string } };
 }
@@ -491,6 +562,25 @@ function waitForExit(
       reject(err);
     });
   });
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("condition did not become true before timeout");
+    await new Promise<void>((resolveWait) => setTimeout(resolveWait, 25));
+  }
+}
+
+function processIsRunning(pid: number): boolean {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const close = stat.lastIndexOf(")");
+    const state = close < 0 ? "?" : stat.slice(close + 2).split(" ")[0];
+    return state !== "Z";
+  } catch {
+    return false;
+  }
 }
 
 // Spawn `node <scriptPath> server`, send an MCP initialize, resolve with

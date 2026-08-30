@@ -17,9 +17,12 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { ApiClient } from "./api-client.js";
 import { setSelfManagedChromeTerminationSignalExitEnabled } from "./bot/browser.js";
 import { cancelActiveLoginBrowsers } from "./bot/google-login.js";
+import { sweepOperatorProfilePoolOrphans } from "./bot/operator-profile-pool.js";
+import { startOwnerProcessReaper } from "./bot/owner-process-reaper.js";
 import {
   activeSessionCount,
   closeAllProvisionSessions,
+  reapIdleProvisionSessions,
   withProvisionSessionCall,
 } from "./bot/provision-session.js";
 import { buildToolRegistry, findTool } from "./tools/index.js";
@@ -50,6 +53,7 @@ const DEFAULT_REGISTRY_BASE =
 const DEFAULT_IDLE_TIMEOUT_MS = 20 * 60 * 1_000; // 20m, no open session
 const DEFAULT_IDLE_TIMEOUT_WITH_SESSION_MS = 12 * 60 * 60 * 1_000; // 12h, session open
 const DEFAULT_IDLE_CHECK_INTERVAL_MS = 5 * 60 * 1_000; // 5m — must stay well under the 20m bound above
+const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 60 * 60 * 1_000; // 1h per browser session
 
 function envMs(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -71,6 +75,10 @@ function idleTimeoutWithSessionMs(): number {
 
 function idleCheckIntervalMs(): number {
   return envMs("TRUSTY_SQUIRE_SERVER_IDLE_CHECK_INTERVAL_MS", DEFAULT_IDLE_CHECK_INTERVAL_MS);
+}
+
+function sessionIdleTimeoutMs(): number {
+  return envMs("TRUSTY_SQUIRE_SESSION_IDLE_TIMEOUT_MS", DEFAULT_SESSION_IDLE_TIMEOUT_MS);
 }
 
 // Exported for unit testing; kept pure so the branches (recent activity,
@@ -116,7 +124,15 @@ Routing rules for THIS server's vault tools:
   user wants the plaintext (e.g. for a .env file), they read it from the
   Trusty Squire web vault themselves.`;
 
-export async function buildServer(api: ApiClient | null): Promise<Server> {
+interface ServerCallLifecycle {
+  started(): void;
+  finished(): void;
+}
+
+export async function buildServer(
+  api: ApiClient | null,
+  callLifecycle?: ServerCallLifecycle,
+): Promise<Server> {
   const tools = buildToolRegistry();
   const server = new Server(
     { name: SERVER_NAME, version: VERSION },
@@ -162,6 +178,7 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
           `Run \`npx @trusty-squire/mcp connect\` to reconnect.`,
       );
     }
+    callLifecycle?.started();
     try {
       api.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
       const invoke = async () =>
@@ -200,6 +217,8 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
             },
           )
         : errorContent(malformedAction ? "invalid_arguments" : "tool_execution_failed", message);
+    } finally {
+      callLifecycle?.finished();
     }
   });
 
@@ -294,6 +313,11 @@ export function installServerProcessGuards(): void {
 export async function runServer(): Promise<void> {
   installServerProcessGuards();
   setSelfManagedChromeTerminationSignalExitEnabled(false);
+  // The detached watchdog survives SIGKILL/parent death. It first sweeps only
+  // manifests bearing Trusty Squire's private owner/process signatures, then
+  // tracks every self-managed browser launched by this server.
+  startOwnerProcessReaper();
+  if (process.platform === "linux") await sweepOperatorProfilePoolOrphans();
   // Startup breadcrumb on stderr (which lands in the host agent's MCP
   // log). A silent no-op was the worst part of the entrypoint-guard
   // bug — this line makes "did the server actually start?" answerable
@@ -317,7 +341,24 @@ export async function runServer(): Promise<void> {
         })
       : null;
 
-  const server = await buildServer(api);
+  let inFlightCalls = 0;
+  const callDrainWaiters = new Set<() => void>();
+  const server = await buildServer(api, {
+    started: () => {
+      inFlightCalls += 1;
+    },
+    finished: () => {
+      inFlightCalls -= 1;
+      if (inFlightCalls === 0) {
+        for (const wake of callDrainWaiters) wake();
+        callDrainWaiters.clear();
+      }
+    },
+  });
+  const waitForCallsToDrain = async (): Promise<void> => {
+    if (inFlightCalls === 0) return;
+    await new Promise<void>((resolveWait) => callDrainWaiters.add(resolveWait));
+  };
   const transport = new StdioServerTransport();
 
   // A stdio client can disappear without sending a signal (for example when
@@ -341,7 +382,10 @@ export async function runServer(): Promise<void> {
       try {
         // The OAuth-bootstrap login Chrome (google-login) is tracked apart
         // from provision sessions — drain it too so it cannot outlive the
-        // server.
+        // server. Its own signal handlers stand down in server mode (see
+        // registerHeadlessRigCleanup), leaving this coordinator as the one
+        // exit owner.
+        await waitForCallsToDrain();
         await cancelActiveLoginBrowsers();
         await closeAllProvisionSessions();
         await server.close();
@@ -380,25 +424,41 @@ export async function runServer(): Promise<void> {
     lastActivityAt = Date.now();
   };
 
+  let idleSweepInFlight = false;
   idleTimer = setInterval(() => {
     if (shutdown !== undefined) return;
-    const sessionCount = activeSessionCount();
-    if (
-      !shouldIdleExit(
-        Date.now(),
-        lastActivityAt,
-        sessionCount,
-        idleTimeoutMs(),
-        idleTimeoutWithSessionMs(),
-      )
-    ) {
-      return;
-    }
-    process.stderr.write(
-      `[trusty-squire] server idle with ${sessionCount} open session(s) and no client ` +
-        `activity past the bound; exiting (this tears down any open session's browser)\n`,
-    );
-    requestShutdown();
+    if (idleSweepInFlight || inFlightCalls > 0) return;
+    idleSweepInFlight = true;
+    void (async () => {
+      try {
+        const now = Date.now();
+        const reaped = await reapIdleProvisionSessions(now, sessionIdleTimeoutMs());
+        if (reaped.length > 0) {
+          process.stderr.write(
+            `[trusty-squire] reaped ${reaped.length} idle operator browser session(s)\n`,
+          );
+        }
+        const sessionCount = activeSessionCount();
+        if (
+          !shouldIdleExit(
+            now,
+            lastActivityAt,
+            sessionCount,
+            idleTimeoutMs(),
+            idleTimeoutWithSessionMs(),
+          )
+        ) {
+          return;
+        }
+        process.stderr.write(
+          `[trusty-squire] server idle with ${sessionCount} open session(s) and no client ` +
+            `activity past the bound; exiting (this tears down any open session's browser)\n`,
+        );
+        requestShutdown();
+      } finally {
+        idleSweepInFlight = false;
+      }
+    })();
   }, idleCheckIntervalMs());
   idleTimer.unref();
 

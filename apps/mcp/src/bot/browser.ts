@@ -69,6 +69,7 @@ import {
   operatorBrowserProcessMatchesMarker,
   startGlobalOperatorBrowserProcessWatchdog,
 } from "./operator-browser-watchdog.js";
+import { trackOwnerProcess, untrackOwnerProcess } from "./owner-process-reaper.js";
 
 // Lazy registration: installing the plugin mutates the chromium singleton
 // from playwright-extra so we only do it once per process. We require()
@@ -2744,6 +2745,7 @@ let selfManagedTerminationSignalExitEnabled = true;
 function cleanupSelfManagedChromes(): void {
   for (const proof of ownedChromeProcessTrees) {
     signalOwnedChromeProcessTree(proof.identity, proof.processGroup, "SIGKILL", { proof });
+    untrackOwnerProcess(proof.identity);
   }
   selfManagedChromes.clear();
 }
@@ -2980,12 +2982,14 @@ function trackOwnedChromeProcessTree(
   const proof = captureOwnedChromeProcessTreeProof(identity, processGroup);
   if (proof === null) return null;
   ownedChromeProcessTrees.add(proof);
+  trackOwnerProcess(identity);
   return proof;
 }
 
 function releaseOwnedChromeProcessTree(proof: OwnedChromeProcessTreeProof | null): void {
   if (proof === null) return;
   ownedChromeProcessTrees.delete(proof);
+  untrackOwnerProcess(proof.identity);
 }
 
 export function ownedChromeProcessTreeState(
@@ -3123,7 +3127,6 @@ export async function terminateTrackedProfileChild(
   }
   return identity;
 }
-
 // Classify an anti-bot interstitial page from its (title + body) text.
 // `onInterstitial` matches the static Cloudflare/Turnstile challenge copy.
 // `verificationPassed` is the signal the challenge SUCCEEDED — but
@@ -3311,6 +3314,7 @@ export async function launchSelfManagedLoginContext(params: {
         params.appMode ? `--app=${params.initialUrl}` : params.initialUrl,
       ];
       const spawned = spawn(params.binary, argv, {
+        detached: process.platform !== "win32",
         env: params.env,
         stdio: ["ignore", "ignore", "pipe"],
       });
@@ -3431,6 +3435,7 @@ export async function launchPlainLoginBrowser(params: {
         `--app=${params.url}`,
       ];
       const spawned = spawn(params.binary, argv, {
+        detached: process.platform !== "win32",
         env: params.env,
         stdio: ["ignore", "ignore", "pipe"],
       });

@@ -18,7 +18,7 @@
 
 import { createHash, createHmac, randomBytes, randomInt, randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
-import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -703,16 +703,20 @@ export interface Session {
   // session-addressed operation always captures the Session object before it
   // awaits, so a later session can never be substituted into an old callback.
   closing: boolean;
+  // The session is visible before operate_start's initial navigation and
+  // observation finish. Idle cleanup must not cross that action boundary.
+  initializing: boolean;
+  // Tool activity is recorded at both entry and terminal completion. An idle
+  // browser is eligible only when no action lease is held.
+  lastActivityAt: number;
   callCount: number;
   callDrainWaiters: Set<() => void>;
   paymentCallCount: number;
   paymentCallDrainWaiters: Set<() => void>;
   paymentDispatchClosed: boolean;
   // Session ownership must be a resource boundary, not merely a convention for
-  // cooperative hosts. The watchdog destroys this browser if its client goes
-  // away without operate_finish, if it lives too long, or if its Chromium tree
-  // exceeds the CPU budget.
-  lastActivityAt: number;
+  // cooperative hosts. The watchdog observes the browser but teardown may only
+  // begin between complete action leases.
   watchdog: OperatorBrowserWatchdog | null;
   terminalTeardownOwner: SessionTerminalTeardownOwner | null;
 }
@@ -1873,6 +1877,7 @@ function acquireSessionCallLease(session: Session): () => void {
     if (released) return;
     released = true;
     session.callCount -= 1;
+    session.lastActivityAt = Date.now();
     if (session.callCount === 0) {
       session.lastActivityAt = Date.now();
       for (const wake of session.callDrainWaiters) wake();
@@ -3773,13 +3778,14 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     cartUrls: new Map(),
     lastCartMutation: null,
     closing: false,
+    initializing: true,
+    lastActivityAt: Date.now(),
     callCount: 0,
     callDrainWaiters: new Set(),
     paymentCallCount: 0,
     paymentCallDrainWaiters: new Set(),
     paymentDispatchClosed: false,
     startedAt: Date.now(),
-    lastActivityAt: Date.now(),
     watchdog: null,
     terminalTeardownOwner: null,
     hintServed: opts.hint !== undefined,
@@ -3829,6 +3835,8 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
       "compact",
       compactV2StartMetadata(opts.hint, loginHint, session.userEmail),
     );
+    session.initializing = false;
+    session.lastActivityAt = Date.now();
     if (observation.format === "compact-v2") return observation;
     return {
       ...observation,
@@ -3838,6 +3846,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
   } catch (err) {
     sessions.delete(id);
     disposeSessionWatchdog(session);
+    clearSessionArtifacts(session);
     await releaseWarmBrowserPage(browser, false);
     throw err;
   }
@@ -3897,13 +3906,14 @@ export async function startHarnessProvisionSession(
     cartUrls: new Map(),
     lastCartMutation: null,
     closing: false,
+    initializing: true,
+    lastActivityAt: Date.now(),
     callCount: 0,
     callDrainWaiters: new Set(),
     paymentCallCount: 0,
     paymentCallDrainWaiters: new Set(),
     paymentDispatchClosed: false,
     startedAt: Date.now(),
-    lastActivityAt: Date.now(),
     watchdog: null,
     terminalTeardownOwner: null,
     hintServed: opts.hint !== undefined,
@@ -3925,11 +3935,14 @@ export async function startHarnessProvisionSession(
       "compact",
       compactV2StartMetadata(opts.hint, "", null),
     );
+    session.initializing = false;
+    session.lastActivityAt = Date.now();
     if (observation.format === "compact-v2") return observation;
     return { ...observation, hint: opts.hint ?? "" };
   } catch (error) {
     sessions.delete(id);
     disposeSessionWatchdog(session);
+    clearSessionArtifacts(session);
     await opts.browser.close().catch(() => undefined);
     throw error;
   }
@@ -9851,6 +9864,14 @@ function profileRequiresDestroy(session: Session): boolean {
   );
 }
 
+function clearSessionArtifacts(session: Session): void {
+  session.prevObserve = null;
+  session.observeSnapshotFile = null;
+  session.secretSlots.clear();
+  session.sealedFieldKeys.clear();
+  rmSync(observeSnapshotDir(session.id), { recursive: true, force: true });
+}
+
 function pendingThreeDsAuditStatus(
   resolution: ThreeDsResolution,
   pending: PendingThreeDsWait,
@@ -9912,12 +9933,13 @@ async function closeFinishingProvisionSession(
   session.paymentFieldSealActive = false;
   session.pendingThreeDs = null;
   stopSessionWatchdog(session);
+  if (sessions.get(sessionId) === session) sessions.delete(sessionId);
+  clearSessionArtifacts(session);
   await releaseWarmBrowserPage(
     session.browser,
     persistState,
     session.terminalTeardownOwner ?? undefined,
   );
-  if (sessions.get(sessionId) === session) sessions.delete(sessionId);
   disposeSessionWatchdog(session);
   return { session_id: sessionId, url, closed: true };
 }
@@ -10049,6 +10071,48 @@ export async function closeAllProvisionSessions(): Promise<void> {
   } finally {
     shutdownInProgress -= 1;
   }
+}
+
+export function shouldReapIdleProvisionSession(
+  now: number,
+  lastActivityAt: number,
+  callCount: number,
+  initializing: boolean,
+  closing: boolean,
+  idleTimeoutMs: number,
+): boolean {
+  return !initializing && !closing && callCount === 0 && now - lastActivityAt >= idleTimeoutMs;
+}
+
+// Atomically closes admission before the first await, so a tool call can never
+// race an idle reap. Incomplete sessions are destroyed rather than returned to
+// the warm pool; the pool remains the authority that removes the profile dir.
+export async function reapIdleProvisionSessions(
+  now: number,
+  idleTimeoutMs: number,
+): Promise<string[]> {
+  const reaped: string[] = [];
+  for (const [id, session] of [...sessions.entries()]) {
+    if (
+      !shouldReapIdleProvisionSession(
+        now,
+        session.lastActivityAt,
+        session.callCount,
+        session.initializing,
+        session.closing,
+        idleTimeoutMs,
+      )
+    ) {
+      continue;
+    }
+    session.closing = true;
+    sessions.delete(id);
+    clearSessionArtifacts(session);
+    audit(id, "idle_reap", { idle_ms: now - session.lastActivityAt });
+    await releaseWarmBrowserPage(session.browser, false).catch(() => undefined);
+    reaped.push(id);
+  }
+  return reaped;
 }
 
 export function activeSessionCount(): number {

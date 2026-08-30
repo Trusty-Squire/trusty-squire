@@ -1095,6 +1095,39 @@ export async function acquireOperatorProfile(
   }
 }
 
+// Server-start sweep for leases left by a dead MCP owner. The same
+// quarantine/process-proof machinery used during acquisition owns every
+// decision here; this merely invokes it before the next operate_start.
+export async function sweepOperatorProfilePoolOrphans(
+  options: {
+    rootDir?: string;
+    now?: () => number;
+  } = {},
+): Promise<void> {
+  assertOperatorProfileRuntimeSupported();
+  const root = resolve(options.rootDir ?? defaultPoolRoot());
+  const namespaceRoot = join(root, "namespaces");
+  const roots =
+    options.rootDir !== undefined
+      ? [root]
+      : existsSync(namespaceRoot)
+        ? readdirSync(namespaceRoot, { withFileTypes: true })
+            .filter((entry) => entry.isDirectory())
+            .map((entry) => join(namespaceRoot, entry.name))
+        : [];
+  for (const candidate of roots) {
+    const p = paths(candidate);
+    if (!existsSync(p.active)) continue;
+    const removals: DeferredProfileRemoval[] = [];
+    await withSeedLock(p, () => {
+      scavengeQuarantinedActive(p, undefined, undefined, (removal) => removals.push(removal));
+      scavengeActiveSlots(p, (options.now ?? Date.now)(), (removal) => removals.push(removal));
+      scavengeDestroyRequired(p);
+    });
+    flushDeferredProfileRemovals(p, removals);
+  }
+}
+
 export function localWorkerIdentity(
   pid: number,
   userDataDir: string,

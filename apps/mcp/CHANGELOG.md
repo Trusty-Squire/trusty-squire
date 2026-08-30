@@ -1,5 +1,14 @@
 # Changelog — @trusty-squire/mcp
 
+## Unreleased
+
+- **Operator browsers are now owner-bound.** Every local launch carries a private Trusty Squire
+  marker recorded by a detached watchdog; owner death and startup sweep exact matching processes,
+  including surviving process groups, with bounded SIGTERM then SIGKILL escalation.
+- **Idle operator sessions are reaped after one hour by default.** The shared timeout never crosses
+  an in-flight action boundary, and crash cleanup durably removes only signed
+  `/tmp/trusty-squire-operate-*` profiles plus their session snapshots.
+
 ## 1.1.13-rc.14 (2026-08-30)
 
 - fix(mcp): preserve authenticated login capture (#611)

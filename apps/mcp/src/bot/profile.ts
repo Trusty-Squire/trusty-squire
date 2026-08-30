@@ -69,6 +69,9 @@ export interface ProfileProcessIdentity {
   pid: number;
   start_time: string;
   user_data_dir: string;
+  // Present only when the browser is the leader of a process group Trusty
+  // Squire created. Older/fallback identities omit it and remain PID-only.
+  process_group_id?: number;
 }
 
 export type ProcessIdentityState = "matching" | "stale" | "unknown";
@@ -124,6 +127,20 @@ function readProcessStartTime(pid: number): ProcessStartTimeRead {
   return { state: "unknown" };
 }
 
+function readLinuxProcessGroupId(pid: number): number | null {
+  if (process.platform !== "linux" || !Number.isSafeInteger(pid) || pid <= 0) return null;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const close = stat.lastIndexOf(")");
+    const processGroup = close < 0 ? undefined : Number(stat.slice(close + 2).split(" ")[2]);
+    return processGroup !== undefined && Number.isSafeInteger(processGroup) && processGroup > 0
+      ? processGroup
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function processExistenceState(pid: number): ProcessStartTimeRead {
   try {
     process.kill(pid, 0);
@@ -169,8 +186,9 @@ function processProfileState(pid: number, profileDir: string): ProcessIdentitySt
     // the original NUL-delimited argv. Keep the launch identity usable only
     // when that title still contains one exact --user-data-dir argument.
     if (candidate === undefined && argv.length === 1) {
-      const match =
-        /(?:^|\s)--user-data-dir=(?:"([^"]+)"|'([^']+)'|([^\s]+))(?=\s|$)/.exec(argv[0]!);
+      const match = /(?:^|\s)--user-data-dir=(?:"([^"]+)"|'([^']+)'|([^\s]+))(?=\s|$)/.exec(
+        argv[0]!,
+      );
       candidate = match?.[1] ?? match?.[2] ?? match?.[3];
     }
     const matches = candidate !== undefined && profilePathIdentity(candidate) === expected;
@@ -189,11 +207,13 @@ export function profileProcessIdentity(
   if (startTime.state !== "present" || processProfileState(pid, profileDir) !== "matching") {
     return null;
   }
+  const processGroupId = readLinuxProcessGroupId(pid);
   return {
     host: hostname(),
     pid,
     start_time: startTime.startTime,
     user_data_dir: profilePathIdentity(profileDir),
+    ...(processGroupId === pid ? { process_group_id: processGroupId } : {}),
   };
 }
 
@@ -224,8 +244,13 @@ export function signalProfileProcess(
   kill: (pid: number, signal: NodeJS.Signals) => unknown = process.kill,
 ): boolean {
   if (!profileProcessMatches(identity, profileDir)) return false;
+  const currentProcessGroupId = readLinuxProcessGroupId(identity.pid);
+  const signalTarget =
+    identity.process_group_id === identity.pid && currentProcessGroupId === identity.pid
+      ? -identity.pid
+      : identity.pid;
   try {
-    kill(identity.pid, signal);
+    kill(signalTarget, signal);
     return true;
   } catch {
     return false;
