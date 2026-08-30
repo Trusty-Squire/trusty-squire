@@ -11808,7 +11808,7 @@ export class BrowserController {
                 );
                 delete tracked.__tsPaymentSubmitDispatchListener;
               }
-            })
+            }, undefined, { timeout: 250 })
             .catch(() => undefined);
           await frame
             .evaluate((token) => {

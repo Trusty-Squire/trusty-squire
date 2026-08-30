@@ -132,6 +132,7 @@ export async function captureProfileStorageState(
   let state: BrowserStorageState | undefined;
   let googleAccountEmail: string | null = null;
   let closeState: ProfileCloseState = "unknown";
+  let captureContextAcquired = false;
   try {
     const binary = runtime.resolveChannelBinary("chrome");
     if (binary === null) throw new Error("no Chrome binary found for identity capture");
@@ -167,10 +168,11 @@ export async function captureProfileStorageState(
     });
     trackBrowser(browser);
     const context = browser.context;
+    captureContextAcquired = true;
     googleAccountEmail = await detectGoogleAccountEmailInContext(context);
     state = await context.storageState({ indexedDB: true });
   } catch (error) {
-    lifecycle.throwIfCancelled();
+    if (!captureContextAcquired) lifecycle.throwIfCancelled();
     throw error;
   } finally {
     closeState = await lifecycle.finish();
