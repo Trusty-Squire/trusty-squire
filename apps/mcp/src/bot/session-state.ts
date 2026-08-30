@@ -9,6 +9,7 @@ export type BrowserStorageState = Awaited<ReturnType<BrowserContext["storageStat
 
 export const SESSION_STATE_FILE = "trusty-squire-session-state.json";
 export const CANONICAL_IDENTITY_METADATA_FILE = "trusty-squire-identity.json";
+const LEGACY_PROVIDER_EMAILS_FILE = "provider-emails.json";
 export const MAX_SESSION_STATE_BYTES = 4 * 1024 * 1024;
 const MAX_IDENTITY_METADATA_BYTES = 4 * 1024;
 export const GOOGLE_LOGIN_COOKIE_MARKERS = [
@@ -63,8 +64,17 @@ interface CanonicalIdentitySnapshot {
   identityMetadata?: CanonicalIdentityMetadata;
 }
 
+export interface CanonicalIdentityState {
+  storageState: BrowserStorageState | undefined;
+  identityMetadata: CanonicalIdentityMetadata | undefined;
+}
+
 function canonicalIdentityMetadataPath(profileDir: string): string {
   return join(profileDir, CANONICAL_IDENTITY_METADATA_FILE);
+}
+
+function legacyProviderEmailsPath(profileDir: string): string {
+  return join(profileDir, LEGACY_PROVIDER_EMAILS_FILE);
 }
 
 function validGoogleAccountEmail(value: unknown): value is string {
@@ -78,15 +88,90 @@ function validGoogleAccountEmail(value: unknown): value is string {
 export async function readCanonicalIdentityMetadata(
   profileDir: string,
 ): Promise<CanonicalIdentityMetadata | undefined> {
-  const snapshot = await readCanonicalIdentitySnapshot(profileDir);
-  if (snapshot?.identityMetadata !== undefined) return snapshot.identityMetadata;
-  if (snapshot !== undefined) return undefined;
+  return (await readCanonicalIdentityState(profileDir)).identityMetadata;
+}
+
+async function readLegacyIdentityMetadata(
+  profileDir: string,
+): Promise<CanonicalIdentityMetadata | undefined> {
+  for (const path of [canonicalIdentityMetadataPath(profileDir), legacyProviderEmailsPath(profileDir)]) {
+    try {
+      const serialized = await readFile(path);
+      if (serialized.byteLength > MAX_IDENTITY_METADATA_BYTES) continue;
+      const parsed = JSON.parse(serialized.toString("utf8")) as Record<string, unknown>;
+      const email = path.endsWith(LEGACY_PROVIDER_EMAILS_FILE)
+        ? parsed.google
+        : parsed.googleAccountEmail;
+      if (validGoogleAccountEmail(email)) return { googleAccountEmail: email };
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+export async function readCanonicalIdentityState(
+  profileDir: string,
+): Promise<CanonicalIdentityState> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const parsed = await readCanonicalIdentityFile(profileDir);
+    if (parsed === undefined) {
+      return { storageState: undefined, identityMetadata: undefined };
+    }
+    if (parsed.kind === "snapshot" && parsed.value.identityMetadata !== undefined) {
+      return {
+        storageState: parsed.value.storageState,
+        identityMetadata: parsed.value.identityMetadata,
+      };
+    }
+    const identityMetadata = await readLegacyIdentityMetadata(profileDir);
+    const confirmed = await readCanonicalIdentityFile(profileDir);
+    if (confirmed?.serialized !== parsed.serialized) continue;
+    return {
+      storageState: parsed.kind === "snapshot" ? parsed.value.storageState : parsed.value,
+      identityMetadata,
+    };
+  }
+  return { storageState: undefined, identityMetadata: undefined };
+}
+
+async function readCanonicalIdentityFile(
+  profileDir: string,
+): Promise<
+  | { kind: "snapshot"; value: CanonicalIdentitySnapshot; serialized: string }
+  | { kind: "legacy"; value: BrowserStorageState; serialized: string }
+  | undefined
+> {
   try {
-    const serialized = await readFile(canonicalIdentityMetadataPath(profileDir));
-    if (serialized.byteLength > MAX_IDENTITY_METADATA_BYTES) return undefined;
-    const parsed = JSON.parse(serialized.toString("utf8")) as Record<string, unknown>;
-    if (!validGoogleAccountEmail(parsed.googleAccountEmail)) return undefined;
-    return { googleAccountEmail: parsed.googleAccountEmail };
+    const serialized = await readFile(sessionStatePath(profileDir));
+    if (serialized.byteLength > MAX_SESSION_STATE_BYTES) return undefined;
+    const text = serialized.toString("utf8");
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    if (parsed.version === 1 && isBrowserStorageState(parsed.storageState)) {
+      const metadata = parsed.identityMetadata;
+      if (metadata !== undefined) {
+        if (metadata === null || typeof metadata !== "object") return undefined;
+        const email = (metadata as Record<string, unknown>).googleAccountEmail;
+        if (!validGoogleAccountEmail(email)) return undefined;
+        return {
+          kind: "snapshot",
+          serialized: text,
+          value: {
+            version: 1,
+            storageState: parsed.storageState,
+            identityMetadata: { googleAccountEmail: email },
+          },
+        };
+      }
+      return {
+        kind: "snapshot",
+        serialized: text,
+        value: { version: 1, storageState: parsed.storageState },
+      };
+    }
+    return isBrowserStorageState(parsed)
+      ? { kind: "legacy", value: parsed, serialized: text }
+      : undefined;
   } catch {
     return undefined;
   }
@@ -120,53 +205,13 @@ export async function destroyEphemeralProfile(profileDir: string): Promise<void>
 export async function readSessionState(
   profileDir: string,
 ): Promise<BrowserStorageState | undefined> {
-  const snapshot = await readCanonicalIdentitySnapshot(profileDir);
-  if (snapshot !== undefined) return snapshot.storageState;
-  const path = sessionStatePath(profileDir);
-  try {
-    const serialized = await readFile(path);
-    if (serialized.byteLength > MAX_SESSION_STATE_BYTES) {
-      console.error(
-        `[operator] storageState snapshot exceeds ${MAX_SESSION_STATE_BYTES} bytes; ignoring saved state`,
-      );
-      return undefined;
-    }
-    const parsed = JSON.parse(serialized.toString("utf8")) as BrowserStorageState;
-    return isBrowserStorageState(parsed) ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
+  return (await readCanonicalIdentityState(profileDir)).storageState;
 }
 
 function isBrowserStorageState(value: unknown): value is BrowserStorageState {
   if (value === null || typeof value !== "object") return false;
   const candidate = value as { cookies?: unknown; origins?: unknown };
   return Array.isArray(candidate.cookies) && Array.isArray(candidate.origins);
-}
-
-async function readCanonicalIdentitySnapshot(
-  profileDir: string,
-): Promise<CanonicalIdentitySnapshot | undefined> {
-  try {
-    const serialized = await readFile(sessionStatePath(profileDir));
-    if (serialized.byteLength > MAX_SESSION_STATE_BYTES) return undefined;
-    const parsed = JSON.parse(serialized.toString("utf8")) as Record<string, unknown>;
-    if (parsed.version !== 1 || !isBrowserStorageState(parsed.storageState)) return undefined;
-    const metadata = parsed.identityMetadata;
-    if (metadata !== undefined) {
-      if (metadata === null || typeof metadata !== "object") return undefined;
-      const email = (metadata as Record<string, unknown>).googleAccountEmail;
-      if (!validGoogleAccountEmail(email)) return undefined;
-      return {
-        version: 1,
-        storageState: parsed.storageState,
-        identityMetadata: { googleAccountEmail: email },
-      };
-    }
-    return { version: 1, storageState: parsed.storageState };
-  } catch {
-    return undefined;
-  }
 }
 
 export function stripGoogleIdentityFromSessionState(

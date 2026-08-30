@@ -163,6 +163,37 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it.each([
+    ["google", "https://accounts.google.com/o/oauth2/v2/auth"],
+    ["other", "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"],
+  ] as const)("resolves a provider-less JavaScript OAuth control as %s", async (expected, url) => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/login", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: `<button id="oauth" onclick="window.open('${url}')">Continue</button>`,
+      });
+    });
+    await context.route("https://accounts.google.com/**", async (route) => {
+      await route.fulfill({ contentType: "text/html", body: "Google OAuth" });
+    });
+    await context.route("https://login.microsoftonline.com/**", async (route) => {
+      await route.fulfill({ contentType: "text/html", body: "Microsoft OAuth" });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+
+    try {
+      await expect(controller.detectOAuthProviderDestination("#oauth", 2_000)).resolves.toBe(
+        expected,
+      );
+      expect(controller.currentUrl()).toBe("https://product.test/login");
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
   it("waits for a same-tab provider round trip to return and settle", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();

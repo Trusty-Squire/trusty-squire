@@ -592,6 +592,34 @@ describe("payment approval relay", () => {
     expect((await deps.pendingPaymentApprovalStore.getById(created.id))?.status).toBe("pending");
   });
 
+  it("rejects an expired approved relay before vouch verification", async () => {
+    await server.close();
+    const verifier = vi.fn(async () => ({}));
+    server = await buildServer({ deps, vouchVerifier: verifier });
+    const created = await createApproval();
+    const submission = makeSubmission(created);
+    await relaySubmission(created.id, submission);
+    const confirmed = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: submission,
+    });
+    expect(confirmed.statusCode).toBe(200);
+    expect(verifier).toHaveBeenCalledTimes(2);
+    nowMs = Date.parse(created.expires_at) + 1;
+
+    const expired = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: submission,
+    });
+    expect(expired.statusCode).toBe(409);
+    expect(expired.json()).toEqual({ error: "payment_approval_expired" });
+    expect(verifier).toHaveBeenCalledTimes(2);
+  });
+
   it.each(["review", "approval"] as const)(
     "peeks at an in-flight %s candidate without consuming delivery state",
     async (binding) => {

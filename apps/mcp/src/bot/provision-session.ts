@@ -69,7 +69,7 @@ import {
   createEphemeralProfile,
   destroyEphemeralProfile,
   hasUsableGoogleIdentity,
-  readCanonicalIdentityMetadata,
+  readCanonicalIdentityState,
   readSessionState,
   stripGoogleIdentityFromSessionState,
   type BrowserStorageState,
@@ -730,6 +730,7 @@ interface EphemeralBrowser {
   controller: BrowserController;
   profileDir: string;
   canonicalProfileDir: string;
+  shutdownGeneration: number;
   proxyUrl?: string;
 }
 
@@ -889,10 +890,8 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
   let googleIdentityAvailable = false;
   let googleAccountEmail: string | null = null;
   try {
-    const [savedStorageState, identityMetadata] = await Promise.all([
-      readSessionState(canonicalProfileDir),
-      readCanonicalIdentityMetadata(canonicalProfileDir),
-    ]);
+    const { storageState: savedStorageState, identityMetadata } =
+      await readCanonicalIdentityState(canonicalProfileDir);
     googleIdentityAvailable = hasUsableGoogleIdentity(savedStorageState);
     googleAccountEmail = identityMetadata?.googleAccountEmail ?? null;
     const storageState =
@@ -921,7 +920,10 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
       if (controller === null) {
         destroyEphemeralProfileDetached(profileDir);
       } else {
-        await closeEphemeralBrowser({ controller, profileDir, canonicalProfileDir }, false);
+        await closeEphemeralBrowser(
+          { controller, profileDir, canonicalProfileDir, shutdownGeneration: generation },
+          false,
+        );
       }
     }
     throw err;
@@ -935,6 +937,7 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
     controller,
     profileDir,
     canonicalProfileDir,
+    shutdownGeneration: generation,
     ...(opts.proxyUrl === undefined ? {} : { proxyUrl: opts.proxyUrl }),
   });
   return {
@@ -1066,26 +1069,36 @@ async function closeEphemeralBrowser(
   if (closeState === "closed") {
     if (state !== undefined) {
       const capturedState = state;
+      const canPublish = (): boolean =>
+        owner?.forced !== true &&
+        ephemeral.shutdownGeneration === shutdownGeneration &&
+        shutdownInProgress === 0;
       const publish = async (): Promise<boolean> =>
         await withCanonicalSnapshotPublication(ephemeral.canonicalProfileDir, async () => {
+          if (!canPublish()) return false;
           const latest = await readSessionState(ephemeral.canonicalProfileDir);
           return await writeSessionState(
             ephemeral.canonicalProfileDir,
             latest === undefined
               ? capturedState
               : mergeGoogleIdentityStorageState(capturedState, latest),
+            canPublish,
           );
         });
       try {
         const lease = await acquireFreeProfileOperationGuard(ephemeral.canonicalProfileDir);
         try {
           const latest = await readSessionState(ephemeral.canonicalProfileDir);
-          await writeSessionState(
+          const published = await writeSessionState(
             ephemeral.canonicalProfileDir,
             latest === undefined
               ? capturedState
               : mergeGoogleIdentityStorageState(capturedState, latest),
+            canPublish,
           );
+          if (!published && !canPublish()) {
+            throw new Error("operator browser terminal teardown was forced");
+          }
         } finally {
           lease.release();
         }
@@ -1118,7 +1131,7 @@ async function closeEphemeralBrowser(
 function isGoogleOAuthAction(
   action: Extract<ProvisionAction, { kind: "oauth_click" | "oauth_login" }>,
   element: InteractiveElement,
-): boolean {
+): boolean | null {
   if (action.provider !== undefined) return action.provider === "google";
   const destination = [element.href, element.id, element.name, element.testId]
     .filter((value): value is string => typeof value === "string")
@@ -1136,7 +1149,17 @@ function isGoogleOAuthAction(
     .join(" ");
   if (/(?:^|[^a-z])github(?:[^a-z]|$)/i.test(legacySignal)) return false;
   if (/(?:^|[^a-z])google(?:[^a-z]|$)/i.test(legacySignal)) return true;
-  return true;
+  return null;
+}
+
+async function googleOAuthBoundaryRequired(
+  browser: BrowserController,
+  action: Extract<ProvisionAction, { kind: "oauth_click" | "oauth_login" }>,
+  element: InteractiveElement,
+): Promise<boolean> {
+  const classified = isGoogleOAuthAction(action, element);
+  if (classified !== null) return classified;
+  return (await browser.detectOAuthProviderDestination(element.selector)) === "google";
 }
 
 async function runSerializedGoogleIdentityOperation<T>(
@@ -6607,7 +6630,7 @@ async function executeAct(
           });
         } else {
           assertNoFrameTarget(el, "oauth_click");
-          if (isGoogleOAuthAction(action, el)) {
+          if (await googleOAuthBoundaryRequired(browser, action, el)) {
             browser = await runSerializedGoogleOAuth(session, el.selector);
           } else {
             await browser.startOAuth(el.selector);
@@ -6640,7 +6663,7 @@ async function executeAct(
         }
         resolvedEl = el;
         assertNoFrameTarget(el, "oauth_login");
-        if (isGoogleOAuthAction(action, el)) {
+        if (await googleOAuthBoundaryRequired(browser, action, el)) {
           browser = await runSerializedGoogleOAuth(session, el.selector);
         } else {
           await browser.loginWithOAuth(el.selector);
@@ -8829,6 +8852,7 @@ export function classifyVouchflowCredentials(text: string): Record<string, strin
 export async function extractCredentials(sessionId: string): Promise<ExtractResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const { browser } = session;
   invalidateCompactV2Snapshot(session);
 
   // The masked-display trap: click reveal/show toggles before reading.

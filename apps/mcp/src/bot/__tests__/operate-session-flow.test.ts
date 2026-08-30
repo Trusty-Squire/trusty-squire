@@ -15,6 +15,7 @@ const h = vi.hoisted(() => ({
   providers: ["google"] as string[] | null,
   oauthStatus: "already_valid" as string,
   oauthLoginCalls: [] as string[],
+  oauthDestination: "google" as "google" | "github" | "other" | null,
   oauthLoginGates: new Map<number, Promise<void>>(),
   oauthResultUrl: "https://app.example.com/dashboard",
   restoredStorageStates: [] as Array<{ browserIndex: number; state: unknown }>,
@@ -223,6 +224,31 @@ vi.mock("../session-state.js", async (importOriginal) => {
     readCanonicalIdentityMetadata: async (profileDir: string) =>
       h.identityMetadata.get(profileDir) ??
       (h.workerEmail === null ? undefined : { googleAccountEmail: h.workerEmail }),
+    readCanonicalIdentityState: async (profileDir: string) => {
+      h.storageStateReads.push(profileDir);
+      if (h.storageStateReadGate !== null) await h.storageStateReadGate;
+      const storageState = h.storageStates.has(profileDir)
+        ? h.storageStates.get(profileDir)
+        : h.providers?.includes("google")
+          ? {
+              cookies: [
+                {
+                  name: "SID",
+                  value: "default-google-session-state",
+                  domain: ".google.com",
+                  path: "/",
+                },
+              ],
+              origins: [],
+            }
+          : undefined;
+      return {
+        storageState,
+        identityMetadata:
+          h.identityMetadata.get(profileDir) ??
+          (h.workerEmail === null ? undefined : { googleAccountEmail: h.workerEmail }),
+      };
+    },
     writeSessionState: async (
       profileDir: string,
       state: unknown,
@@ -667,6 +693,9 @@ vi.mock("../browser.js", () => ({
       h.uploads.push({ selector, filePath });
     }
     async startOAuth(): Promise<void> {}
+    async detectOAuthProviderDestination(): Promise<"google" | "github" | "other" | null> {
+      return h.oauthDestination;
+    }
     async loginWithOAuth(selector: string): Promise<void> {
       h.oauthLoginCalls.push(selector);
       const gate = h.oauthLoginGates.get(this.index);
@@ -985,6 +1014,7 @@ beforeEach(() => {
   h.providers = ["google"];
   h.oauthStatus = "already_valid";
   h.oauthLoginCalls = [];
+  h.oauthDestination = "google";
   h.oauthLoginGates = new Map();
   h.oauthResultUrl = "https://app.example.com/dashboard";
   h.restoredStorageStates = [];
@@ -3389,6 +3419,47 @@ describe("operate session — OAuth lifecycle", () => {
 
     await finishProvisionSession(first.session_id);
     await finishProvisionSession(second.session_id);
+  });
+
+  it("keeps resolved non-Google JavaScript OAuth parallel with Google handoff", async () => {
+    h.visibleText = "Continue";
+    h.elements = [
+      elem({
+        visibleText: "Continue",
+        labelText: "Continue",
+        role: "button",
+        selector: "#oauth",
+      }),
+    ];
+    let releaseGoogle!: () => void;
+    h.oauthLoginGates.set(
+      0,
+      new Promise<void>((resolve) => {
+        releaseGoogle = resolve;
+      }),
+    );
+    const google = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+    });
+    const other = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+    });
+    const googleAct = act(google.session_id, {
+      kind: "oauth_login",
+      target: "Continue",
+      provider: "google",
+    });
+    await vi.waitFor(() => expect(h.oauthLoginCalls).toEqual(["#oauth"]));
+    h.oauthDestination = "other";
+
+    await act(other.session_id, { kind: "oauth_login", target: "Continue" });
+    expect(h.oauthLoginCalls).toEqual(["#oauth", "#oauth"]);
+    expect(h.restoredStorageStates).toHaveLength(1);
+
+    releaseGoogle();
+    await googleAct;
+    await finishProvisionSession(google.session_id);
+    await finishProvisionSession(other.session_id);
   });
 
   it("routes legacy Google OAuth replay through the identity handoff", async () => {
@@ -5926,6 +5997,32 @@ describe("operate session — ephemeral profile lifecycle", () => {
       h.storageStateWriteGate = null;
       vi.unstubAllEnvs();
       vi.useRealTimers();
+    }
+  });
+
+  it("never publishes deferred state after shutdown advances ownership", async () => {
+    const canonical = "/tmp/trusty-squire-unit-deferred-publication-owner";
+    const externalOperation = acquireProfileOperationGuard(canonical);
+    try {
+      const started = await startProvisionSession({
+        serviceUrl: "https://app.example.com/one",
+        profileDir: canonical,
+        requireLiveIdentity: true,
+      });
+      await finishProvisionSessionWithPreparation(
+        started.session_id,
+        async () => "prepared",
+        () => true,
+      );
+      expect(h.storageStateWrites).toEqual([]);
+
+      await closeAllProvisionSessions();
+      externalOperation.release();
+      await new Promise<void>((resolve) => setTimeout(resolve, 150));
+
+      expect(h.storageStateWrites).toEqual([]);
+    } finally {
+      externalOperation.release();
     }
   });
 

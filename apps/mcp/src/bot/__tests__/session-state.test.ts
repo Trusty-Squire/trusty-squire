@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +6,7 @@ import {
   createEphemeralProfile,
   destroyEphemeralProfile,
   MAX_SESSION_STATE_BYTES,
+  readCanonicalIdentityState,
   readCanonicalIdentityMetadata,
   readSessionState,
   sessionStatePath,
@@ -147,6 +148,32 @@ describe("operator session storage state", () => {
     await expect(readSessionState(canonical)).resolves.toEqual(prior);
     await expect(readCanonicalIdentityMetadata(canonical)).resolves.toEqual({
       googleAccountEmail: "prior@example.com",
+    });
+  });
+
+  it("migrates the existing provider email with legacy storage state", async () => {
+    const canonical = mkdtempSync(join(tmpdir(), "ts-session-state-legacy-identity-"));
+    roots.push(canonical);
+    const state = {
+      cookies: [
+        {
+          name: "SID",
+          value: "legacy-google-session",
+          domain: ".google.com",
+          path: "/",
+        },
+      ],
+      origins: [],
+    };
+    writeFileSync(sessionStatePath(canonical), JSON.stringify(state));
+    writeFileSync(
+      join(canonical, "provider-emails.json"),
+      JSON.stringify({ google: "legacy-worker@example.com" }),
+    );
+
+    await expect(readCanonicalIdentityState(canonical)).resolves.toEqual({
+      storageState: state,
+      identityMetadata: { googleAccountEmail: "legacy-worker@example.com" },
     });
   });
 

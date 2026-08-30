@@ -34,6 +34,7 @@ import type {
   JSHandle,
   Locator,
   Page,
+  Route,
 } from "playwright";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
@@ -11600,6 +11601,16 @@ export class BrowserController {
           resolve: resolveBoundDispatch,
           report: reportSubmitDispatched,
         });
+        const dispatchNetworkContext = this.page.context();
+        let dispatchNetworkDeadline: number | null = null;
+        const dispatchNetworkFence = async (route: Route): Promise<void> => {
+          if (dispatchNetworkDeadline !== null && Date.now() >= dispatchNetworkDeadline) {
+            await route.abort("blockedbyclient");
+            return;
+          }
+          await route.fallback();
+        };
+        await dispatchNetworkContext.route("**/*", dispatchNetworkFence);
         const dispatchTrackingInstalled = await candidate
           .evaluate(
             (element, options) => {
@@ -11610,6 +11621,7 @@ export class BrowserController {
                   dispatched: boolean;
                   expired: boolean;
                   expiresAt: number | null;
+                  restoreDispatchFence?: () => void;
                 };
               };
               const tracked = element as Element & {
@@ -11628,11 +11640,75 @@ export class BrowserController {
                 expired: false,
                 expiresAt: null,
               };
+              const dispatchState = stateWindow.__trustySquirePaymentSubmitDispatch;
+              const expired = (): boolean => {
+                if (
+                  dispatchState.expiresAt === null ||
+                  Date.now() < dispatchState.expiresAt
+                ) {
+                  return false;
+                }
+                dispatchState.expired = true;
+                return true;
+              };
+              const originalFetch = window.fetch;
+              const originalXhrSend = XMLHttpRequest.prototype.send;
+              const originalSendBeacon = navigator.sendBeacon;
+              const originalSubmit = HTMLFormElement.prototype.submit;
+              const originalRequestSubmit = HTMLFormElement.prototype.requestSubmit;
+              const guardedFetch: typeof window.fetch = function (...args) {
+                if (expired()) return Promise.reject(new Error("payment_approval_expired"));
+                return originalFetch.apply(window, args);
+              };
+              const guardedXhrSend: typeof XMLHttpRequest.prototype.send = function (...args) {
+                if (expired()) throw new Error("payment_approval_expired");
+                return originalXhrSend.apply(this, args);
+              };
+              const guardedSendBeacon: typeof navigator.sendBeacon = function (...args) {
+                if (expired()) return false;
+                return originalSendBeacon.apply(navigator, args);
+              };
+              const guardedSubmit: typeof HTMLFormElement.prototype.submit = function () {
+                if (expired()) throw new Error("payment_approval_expired");
+                return originalSubmit.call(this);
+              };
+              const guardedRequestSubmit: typeof HTMLFormElement.prototype.requestSubmit =
+                function (...args) {
+                  if (expired()) throw new Error("payment_approval_expired");
+                  return originalRequestSubmit.apply(this, args);
+                };
+              window.fetch = guardedFetch;
+              XMLHttpRequest.prototype.send = guardedXhrSend;
+              try {
+                navigator.sendBeacon = guardedSendBeacon;
+              } catch {
+                void 0;
+              }
+              HTMLFormElement.prototype.submit = guardedSubmit;
+              HTMLFormElement.prototype.requestSubmit = guardedRequestSubmit;
+              dispatchState.restoreDispatchFence = () => {
+                if (window.fetch === guardedFetch) window.fetch = originalFetch;
+                if (XMLHttpRequest.prototype.send === guardedXhrSend) {
+                  XMLHttpRequest.prototype.send = originalXhrSend;
+                }
+                try {
+                  if (navigator.sendBeacon === guardedSendBeacon) {
+                    navigator.sendBeacon = originalSendBeacon;
+                  }
+                } catch {
+                  void 0;
+                }
+                if (HTMLFormElement.prototype.submit === guardedSubmit) {
+                  HTMLFormElement.prototype.submit = originalSubmit;
+                }
+                if (HTMLFormElement.prototype.requestSubmit === guardedRequestSubmit) {
+                  HTMLFormElement.prototype.requestSubmit = originalRequestSubmit;
+                }
+              };
               const listener: EventListener = (event) => {
                 const state = stateWindow.__trustySquirePaymentSubmitDispatch;
                 if (state?.token !== token) return;
-                if (state.expiresAt !== null && Date.now() >= state.expiresAt) {
-                  state.expired = true;
+                if (expired()) {
                   event.preventDefault();
                   event.stopImmediatePropagation();
                   return;
@@ -11706,6 +11782,9 @@ export class BrowserController {
           .catch(() => false);
         if (!dispatchTrackingInstalled) {
           this.checkoutSubmitDispatchWaiters.delete(dispatchToken);
+          await dispatchNetworkContext
+            .unroute("**/*", dispatchNetworkFence)
+            .catch(() => undefined);
           continue;
         }
         const readDispatchOutcomeBaseline = async (): Promise<CheckoutOutcomeBaseline | null> => {
@@ -11785,6 +11864,9 @@ export class BrowserController {
             .catch(() => null);
         const clearDispatchTracking = async (): Promise<void> => {
           this.checkoutSubmitDispatchWaiters.delete(dispatchToken);
+          await dispatchNetworkContext
+            .unroute("**/*", dispatchNetworkFence)
+            .catch(() => undefined);
           await candidate
             .evaluate((element) => {
               const tracked = element as Element & {
@@ -11808,9 +11890,11 @@ export class BrowserController {
                   dispatched: boolean;
                   expired: boolean;
                   expiresAt: number | null;
+                  restoreDispatchFence?: () => void;
                 };
               };
               if (stateWindow.__trustySquirePaymentSubmitDispatch?.token === token) {
+                stateWindow.__trustySquirePaymentSubmitDispatch.restoreDispatchFence?.();
                 delete stateWindow.__trustySquirePaymentSubmitDispatch;
               }
             }, dispatchToken)
@@ -11837,6 +11921,7 @@ export class BrowserController {
               const remainingMs = beforeSubmitDispatch?.();
               const expiresAt =
                 typeof remainingMs === "number" ? Date.now() + Math.max(0, remainingMs) : null;
+              dispatchNetworkDeadline = expiresAt;
               await candidate.evaluate((element, deadline) => {
                 void element;
                 const stateWindow = window as Window & {
@@ -15237,6 +15322,138 @@ export class BrowserController {
       await this.page?.waitForLoadState("domcontentloaded", { timeout: 30000 });
     } catch {
       // best-effort — the agent's consent loop re-reads state regardless
+    }
+  }
+
+  async detectOAuthProviderDestination(
+    selector: string,
+    timeoutMs = 8_000,
+  ): Promise<OAuthProviderId | "other" | null> {
+    const context = this.context;
+    const product = this.page;
+    if (context === null || product === null || product.isClosed()) return null;
+    const productUrl = product.url();
+    let productOrigin: string | null = null;
+    try {
+      productOrigin = new URL(productUrl).origin;
+    } catch {
+      productOrigin = null;
+    }
+    const classify = (rawUrl: string): OAuthProviderId | "other" | null => {
+      let url: URL;
+      try {
+        url = new URL(rawUrl, productUrl);
+      } catch {
+        return null;
+      }
+      const host = url.hostname.toLowerCase();
+      const signal = `${host}${url.pathname}${url.search}`;
+      if (
+        /(^|\.)google\.com$/i.test(host) ||
+        /(?:provider|connection)[=/_-]google\b/i.test(signal)
+      ) {
+        return "google";
+      }
+      if (
+        /(^|\.)(?:github\.com|microsoftonline\.com|live\.com|appleid\.apple\.com|okta\.com|auth0\.com)$/i.test(
+          host,
+        ) ||
+        /(?:provider|connection)[=/_-](?:github|microsoft|apple|okta|auth0)\b/i.test(signal)
+      ) {
+        return host === "github.com" || host.endsWith(".github.com") ? "github" : "other";
+      }
+      return null;
+    };
+    const observedUrls = new Set<string>();
+    let popup: Page | null = null;
+    const probe = await context.newPage();
+    let externalDestination: string | null = null;
+    let probeRouteInstalled = false;
+    const probeRoute = async (route: Route): Promise<void> => {
+      const requestPage = route.request().frame().page();
+      const opener = requestPage === probe ? null : await requestPage.opener().catch(() => null);
+      if (requestPage !== probe && opener !== probe) {
+        await route.fallback();
+        return;
+      }
+      const url = route.request().url();
+      observedUrls.add(url);
+      const provider = classify(url);
+      let external = false;
+      try {
+        const origin = new URL(url).origin;
+        external = productOrigin !== null && origin !== productOrigin && origin !== "null";
+      } catch {
+        external = false;
+      }
+      if (external) externalDestination = url;
+      if (provider !== null) {
+        await route.abort("blockedbyclient");
+        return;
+      }
+      await route.fallback();
+    };
+    const recordPopup = (page: Page): void => {
+      void page
+        .opener()
+        .then((opener) => {
+          if (opener !== probe) return;
+          popup = page;
+          observedUrls.add(page.url());
+          page.on("framenavigated", (frame) => observedUrls.add(frame.url()));
+        })
+        .catch(() => undefined);
+    };
+    context.on("page", recordPopup);
+    try {
+      await probe.goto(productUrl, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+      await context.route("**/*", probeRoute);
+      probeRouteInstalled = true;
+      const locator = probe.locator(selector).first();
+      const declaredDestination = await locator
+        .evaluate((element) => {
+          if (element instanceof HTMLAnchorElement && element.href.length > 0) return element.href;
+          if (element instanceof HTMLButtonElement && element.formAction.length > 0) {
+            return element.formAction;
+          }
+          if (element instanceof HTMLInputElement && element.formAction.length > 0) {
+            return element.formAction;
+          }
+          return element.closest("form")?.action ?? null;
+        })
+        .catch(() => null);
+      if (declaredDestination !== null) {
+        const declared = classify(declaredDestination);
+        if (declared !== null) return declared;
+      }
+      await locator.click({ noWaitAfter: true, timeout: timeoutMs });
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        observedUrls.add(probe.url());
+        if (popup !== null && !popup.isClosed()) observedUrls.add(popup.url());
+        for (const observedUrl of observedUrls) {
+          const provider = classify(observedUrl);
+          if (provider !== null) return provider;
+          try {
+            const origin = new URL(observedUrl).origin;
+            if (productOrigin !== null && origin !== productOrigin && origin !== "null") {
+              externalDestination = observedUrl;
+            }
+          } catch {
+            continue;
+          }
+        }
+        await this.sleep(50);
+      }
+      return externalDestination === null ? null : "other";
+    } catch {
+      return null;
+    } finally {
+      context.off("page", recordPopup);
+      if (probeRouteInstalled) await context.unroute("**/*", probeRoute).catch(() => undefined);
+      if (popup !== null && !popup.isClosed()) await popup.close().catch(() => undefined);
+      if (!probe.isClosed()) await probe.close().catch(() => undefined);
+      if (!product.isClosed()) await product.bringToFront().catch(() => undefined);
     }
   }
 
