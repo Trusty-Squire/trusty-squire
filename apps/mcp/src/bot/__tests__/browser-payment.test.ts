@@ -1239,28 +1239,38 @@ describe("checkout payment parsing", () => {
     async () => {
       const checkoutUrl = "https://merchant.test/checkout";
       const chargeUrl = "https://merchant.test/graphql";
+      const paymentMethodUrl = "https://merchant.test/v1/payment_methods";
       const browser = await chromium.launch({ headless: true });
       try {
         const page = await browser.newPage();
         let chargeRequests = 0;
+        let paymentMethodRequests = 0;
         await page.route(checkoutUrl, async (route) => {
           await route.fulfill({
             contentType: "text/html",
             body: `
               <form><button type="button">Pay now</button></form>
               <script>
-                document.querySelector("button").addEventListener("click", () => {
-                  setTimeout(async () => {
-                    await fetch("/graphql", {
-                      method: "POST",
-                      headers: { "content-type": "application/json" },
-                      body: JSON.stringify({ operationName: "CompleteCheckout" })
-                    });
-                    setTimeout(() => history.pushState({}, "", "/receipt/ORD-DELAY-123"), 100);
-                  }, 300);
+                document.querySelector("button").addEventListener("click", async () => {
+                  await fetch("/v1/payment_methods", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ type: "card" })
+                  });
+                  await fetch("/graphql", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ operationName: "CompleteCheckout" })
+                  });
+                  setTimeout(() => history.pushState({}, "", "/receipt/ORD-DELAY-123"), 100);
                 });
               </script>`,
           });
+        });
+        await page.route(paymentMethodUrl, async (route) => {
+          paymentMethodRequests += 1;
+          await new Promise((resolve) => setTimeout(resolve, 1_500));
+          await route.fulfill({ body: "tokenized" });
         });
         await page.route(chargeUrl, async (route) => {
           chargeRequests += 1;
@@ -1282,6 +1292,7 @@ describe("checkout payment parsing", () => {
         ).resolves.toEqual({ three_ds_required: false, order_confirmed: true });
 
         expect(chargeRequests).toBe(1);
+        expect(paymentMethodRequests).toBe(1);
         expect(onSubmitDispatched).toHaveBeenCalledOnce();
       } finally {
         await browser.close();
@@ -1291,10 +1302,10 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "ignores analytics and background autosave requests after a bare payment click",
+    "ignores payment-named telemetry and background autosave after a bare payment click",
     async () => {
       const checkoutUrl = "https://merchant.test/checkout";
-      const analyticsUrl = "https://merchant.test/analytics";
+      const analyticsUrl = "https://merchant.test/payment";
       const graphqlUrl = "https://merchant.test/graphql";
       const browser = await chromium.launch({ headless: true });
       try {
@@ -1308,10 +1319,10 @@ describe("checkout payment parsing", () => {
               <form><button type="button">Pay now</button></form>
               <script>
                 document.querySelector("button").addEventListener("click", () => {
-                  void fetch("/analytics", {
+                  void fetch("/payment", {
                     method: "POST",
                     headers: { "content-type": "application/json" },
-                    body: JSON.stringify({ event: "pay_now_click" })
+                    body: JSON.stringify({ action: "payment_submit_click" })
                   });
                   setTimeout(() => {
                     void fetch("/graphql", {

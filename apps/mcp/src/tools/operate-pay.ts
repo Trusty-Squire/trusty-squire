@@ -683,13 +683,18 @@ async function threeDsStatusResult(
     (state.outcome === "three_ds" ? "payment_3ds_unresolved" : "payment_outcome_unknown");
   let auditRecorded = true;
   if (terminalStatus === null) {
-    await api.auditPayment({
-      ...state.checkout,
-      last4: state.last4,
-      status: finalStatus,
-      approval_id: state.approval_id,
-      ...(state.mandate_id !== undefined ? { mandate_id: state.mandate_id } : {}),
-    });
+    try {
+      await api.auditPayment({
+        ...state.checkout,
+        last4: state.last4,
+        status: finalStatus,
+        approval_id: state.approval_id,
+        ...(state.mandate_id !== undefined ? { mandate_id: state.mandate_id } : {}),
+      });
+    } catch (error) {
+      if (state.outcome === "three_ds") throw error;
+      auditRecorded = false;
+    }
   } else {
     try {
       await api.auditPayment({

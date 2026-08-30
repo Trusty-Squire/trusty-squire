@@ -905,27 +905,89 @@ function sealedElementSemanticKeys(descriptor: SealedElementDescriptor): string[
 export const CHECKOUT_SUBMIT_LABEL_RE =
   /^(?:pay(?:\s+now)?|place\s+order|complete\s+(?:order|purchase|payment)|submit\s+payment|buy\s+now|confirm\s+(?:order|payment))\b|^ご?注文(?:内容)?[をの]?確定|^ご?注文する|^確定(?:する|$)|^購入(?:する|を確定|$)|^今すぐ(?:購入|注文|支払)|^支払う|^お?支払い(?:を確定|$)/i;
 
-const CHECKOUT_PAYMENT_REQUEST_PATH_RE =
-  /(?:^|[/_.-])(?:charge|charges|authorize|authorization|capture|payment[_-]?intents?|payments?|place[_-]?order|submit[_-]?payment|confirm[_-]?(?:order|payment)|complete[_-]?(?:order|payment|purchase)|purchase)(?:$|[/_.-])/i;
-const CHECKOUT_PRECHARGE_REQUEST_PATH_RE =
-  /(?:^|[/_.-])(?:payment[_-]?methods?|setup[_-]?intents?|tokens?|tokenize|tokenization|options?|configuration)(?:$|[/_.-])/i;
-const CHECKOUT_PAYMENT_REQUEST_PAYLOAD_RE =
-  /(?:complete|place|submit|confirm|create|authorize|capture)[_\s-]*(?:checkout|order|payment|purchase|payment[_\s-]*intent)|(?:checkout|order|payment|purchase)[_\s-]*(?:complete|submit|confirm|authorize|capture)/i;
-const CHECKOUT_PAYMENT_REQUEST_OBSERVATION_MS = 1_000;
+const CHECKOUT_PAYMENT_EXECUTION_OPERATIONS = new Set([
+  "authorization",
+  "authorize",
+  "authorizepayment",
+  "capture",
+  "capturepayment",
+  "charge",
+  "charges",
+  "completecheckout",
+  "completeorder",
+  "completepayment",
+  "completepurchase",
+  "confirmorder",
+  "confirmpayment",
+  "createcharge",
+  "placeorder",
+  "purchase",
+  "submitpayment",
+]);
+const CHECKOUT_PAYMENT_REQUEST_OBSERVATION_MS = 15_000;
+
+function normalizedPaymentOperation(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function hasCheckoutPaymentExecutionPayload(request: Request): boolean {
+  const payload = request.postData();
+  if (payload === null) return false;
+  const candidates: string[] = [];
+  try {
+    const parsed = JSON.parse(payload) as unknown;
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const record = parsed as Record<string, unknown>;
+      for (const key of ["operationName", "action", "command", "operation", "mutation"]) {
+        const value = record[key];
+        if (typeof value === "string") candidates.push(value);
+      }
+      if (typeof record.query === "string") {
+        const mutation = /\bmutation\s+([A-Za-z0-9_-]+)/i.exec(record.query)?.[1];
+        if (mutation !== undefined) candidates.push(mutation);
+      }
+    }
+  } catch {
+    const form = new URLSearchParams(payload);
+    for (const key of ["operationName", "action", "command", "operation", "mutation"]) {
+      const value = form.get(key);
+      if (value !== null) candidates.push(value);
+    }
+    const mutation = /\bmutation\s+([A-Za-z0-9_-]+)/i.exec(payload)?.[1];
+    if (mutation !== undefined) candidates.push(mutation);
+  }
+  return candidates.some((candidate) =>
+    CHECKOUT_PAYMENT_EXECUTION_OPERATIONS.has(normalizedPaymentOperation(candidate)),
+  );
+}
 
 function isCheckoutPaymentRequest(request: Request): boolean {
   if (request.resourceType() !== "fetch" && request.resourceType() !== "xhr") return false;
   const method = request.method().toUpperCase();
   if (method === "GET" || method === "HEAD" || method === "OPTIONS") return false;
   try {
-    const pathname = new URL(request.url()).pathname;
-    if (CHECKOUT_PRECHARGE_REQUEST_PATH_RE.test(pathname)) return false;
-    if (CHECKOUT_PAYMENT_REQUEST_PATH_RE.test(pathname)) return true;
+    const segments = new URL(request.url()).pathname.split("/").filter(Boolean);
+    const lastSegment = segments.at(-1);
+    if (
+      lastSegment !== undefined &&
+      CHECKOUT_PAYMENT_EXECUTION_OPERATIONS.has(normalizedPaymentOperation(lastSegment))
+    ) {
+      return true;
+    }
+    if (
+      lastSegment !== undefined &&
+      (normalizedPaymentOperation(lastSegment) === "confirm" ||
+        normalizedPaymentOperation(lastSegment) === "capture") &&
+      segments.some(
+        (segment) => normalizedPaymentOperation(segment) === "paymentintents",
+      )
+    ) {
+      return true;
+    }
   } catch {
     return false;
   }
-  if (request.headers()["idempotency-key"] !== undefined) return true;
-  return CHECKOUT_PAYMENT_REQUEST_PAYLOAD_RE.test(request.postData() ?? "");
+  return hasCheckoutPaymentExecutionPayload(request);
 }
 
 export function checkoutSubmitLabel(signals: {

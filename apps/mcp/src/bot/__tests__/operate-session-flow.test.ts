@@ -9767,6 +9767,29 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
     ]);
   });
 
+  it("retains reconciliation custody when an unknown-outcome audit fails", async () => {
+    const closeAuditPayment = vi.fn().mockResolvedValue({ id: "audit_close" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: { auditPayment: closeAuditPayment } as unknown as ApiClient,
+    });
+    const unknownState = buildThreeDsState(Date.now() - 1, undefined, "unknown");
+    setActivePendingThreeDs(unknownState);
+    const auditPayment = vi.fn().mockRejectedValue(new Error("audit unavailable"));
+    h.waitForThreeDsResult = "timeout";
+
+    await expect(
+      operatePaymentStatusTool.handler({}, { auditPayment } as unknown as ApiClient),
+    ).resolves.toMatchObject({
+      status: "payment_outcome_unknown",
+      audit_recorded: false,
+      needs_user: { wall: "merchant_reconciliation", resume: "checkout" },
+    });
+    expect(auditPayment).toHaveBeenCalledTimes(1);
+    expect(getActivePendingThreeDs()).toBe(unknownState);
+    await finishProvisionSession(started.session_id);
+  });
+
   it("retains expired 3DS state when its required terminal audit cannot be written", async () => {
     const closeAuditPayment = vi.fn().mockResolvedValue({ id: "audit_close" });
     const started = await startProvisionSession({
