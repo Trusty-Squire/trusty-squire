@@ -11606,6 +11606,10 @@ export class BrowserController {
         const dispatchNonce = randomUUID();
         const dispatchBaselineStorageKey = `__trusty_squire_payment_baseline_${dispatchToken}`;
         const preDispatchFrameUrls = this.page.frames().map((pageFrame) => pageFrame.url());
+        const clickOnlyOutcomeBaseline = checkoutOutcomeBaselineFromDispatchSnapshot({
+          url: this.page.url(),
+          urls: preDispatchFrameUrls,
+        });
         await this.ensureCheckoutSubmitDispatchBinding(this.page);
         let submitDispatchedReported = false;
         const reportSubmitDispatched = (): void => {
@@ -11895,9 +11899,16 @@ export class BrowserController {
               const documentBaseline = await readDispatchOutcomeBaseline();
               const baseline = documentBaseline ?? (await readBoundDispatchOutcomeBaseline());
               const dispatchState = baseline === null ? await readDispatchState() : null;
+              const clickOnlyOutcomeConfirmed =
+                baseline === null &&
+                dispatchState?.dispatched !== true &&
+                (await this.hasConfirmedCheckoutOutcome(clickOnlyOutcomeBaseline));
               return {
-                baseline,
-                dispatched: baseline !== null || dispatchState?.dispatched === true,
+                baseline: clickOnlyOutcomeConfirmed ? clickOnlyOutcomeBaseline : baseline,
+                dispatched:
+                  baseline !== null ||
+                  dispatchState?.dispatched === true ||
+                  clickOnlyOutcomeConfirmed,
               };
             },
             clear: async () => undefined,

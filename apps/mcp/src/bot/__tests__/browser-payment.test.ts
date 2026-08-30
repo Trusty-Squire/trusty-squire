@@ -4863,11 +4863,15 @@ describe("split-checkout card fill (real browser)", () => {
         await page.goto(pageUrl);
         const controller = new BrowserController({ humanize: false });
         (controller as unknown as { page: Page }).page = page;
+        const onSubmitDispatched = vi.fn();
 
-        await expect(controller.fillAndSubmitCheckout(CARD)).resolves.toEqual({
+        await expect(
+          controller.fillAndSubmitCheckout(CARD, { onSubmitDispatched }),
+        ).resolves.toEqual({
           three_ds_required: false,
           order_confirmed: true,
         });
+        expect(onSubmitDispatched).toHaveBeenCalledOnce();
         expect(consoleError).toHaveBeenCalledWith("[payment-cleanup] payment_fields_not_cleared");
         expect(await page.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
         expect(await page.locator("#preview").innerText()).toContain(CARD.pan);
@@ -4876,6 +4880,7 @@ describe("split-checkout card fill (real browser)", () => {
         await browser.close();
       }
     },
+    30_000,
   );
 
   it.skipIf(!chromiumAvailable)(
