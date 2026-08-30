@@ -341,7 +341,10 @@ jobs:
       - name: Replay-engine frozen corpus gate
         if: needs.secret-scan.outputs.replay_eval == 'true'
         run: pnpm -F @trusty-squire/mcp test replay-harness
-      # Per-package test over every package whose suite passes locally.
+      # Per-package test over every package whose suite passes locally. MCP's
+      # required tier keeps all payment/card-sealing coverage, but partitions
+      # the large payment file and defers three long integration suites to the
+      # post-merge/nightly workflow in mcp-slow-tests.yml.
       # (registry + vault were historically excluded; the registry "prisma
       # drift" failures are resolved — both are green and now run here.)
       - name: Test (green packages)
@@ -375,6 +378,10 @@ jobs:
           fi
           for p in "${PKGS[@]}"; do
             echo "::group::$p"
-            pnpm --filter "$p" test
+            if [[ "$p" == "@trusty-squire/mcp" ]]; then
+              pnpm --filter "$p" test:fast
+            else
+              pnpm --filter "$p" test
+            fi
             echo "::endgroup::"
           done

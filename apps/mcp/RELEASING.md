@@ -25,6 +25,15 @@ CI cannot complete an OAuth login. **Run both login paths once per release**:
 ## Publish
 
 [`CLAUDE.md`](../../CLAUDE.md#npm-distribution-the-install-path) owns the
-release SOP. Normal releases use `pnpm release:mcp <version>` and publish through
-CI; follow its emergency fallback only when CI cannot publish. Verify the actual
-registry tarball with `scripts/verify-install.sh` as required by `AGENTS.md`.
+release SOP. The normal RC cut is one command plus one merge:
+
+```bash
+pnpm release:mcp next-rc
+```
+
+The command derives the next RC from `origin/staging`, bumps it, commits, pushes,
+and opens the release PR. Merge after the required checks pass; `release.yml`
+publishes npm `next` automatically. Pass an explicit version only for stable or
+nonstandard cuts. Follow the emergency fallback only when CI cannot publish.
+Verify the actual registry tarball with `scripts/verify-install.sh` as required
+by `AGENTS.md`.

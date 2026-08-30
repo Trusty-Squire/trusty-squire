@@ -48,6 +48,8 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
+    "test:fast": "node scripts/run-test-tier.mjs fast",
+    "test:slow": "node scripts/run-test-tier.mjs slow",
     "test:cov": "vitest run --coverage",
     "eval:replay:capture": "node scripts/capture-replay-baseline.mjs",
     "eval:replay": "tsx src/eval/replay-harness/cli.ts",

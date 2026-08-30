@@ -29,8 +29,8 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write   # create tags + releases
-  id-token: write   # npm provenance (sigstore)
+  contents: write # create tags + releases
+  id-token: write # npm provenance (sigstore)
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -40,16 +40,16 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     outputs:
-      version:        ${{ steps.read.outputs.version }}
-      is_prerelease:  ${{ steps.read.outputs.is_prerelease }}
-      tag_exists:     ${{ steps.read.outputs.tag_exists }}
-      npm_dist_tag:   ${{ steps.read.outputs.npm_dist_tag }}
-      gh_prerelease:  ${{ steps.read.outputs.gh_prerelease }}
+      version: ${{ steps.read.outputs.version }}
+      is_prerelease: ${{ steps.read.outputs.is_prerelease }}
+      tag_exists: ${{ steps.read.outputs.tag_exists }}
+      npm_dist_tag: ${{ steps.read.outputs.npm_dist_tag }}
+      gh_prerelease: ${{ steps.read.outputs.gh_prerelease }}
       should_publish: ${{ steps.read.outputs.should_publish }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # need full history to see existing tags
+          fetch-depth: 0 # need full history to see existing tags
 
       # Most matching pushes are lockfile/workflow edits or retries of a version
       # that is already live. Decide before installs, builds, or Chromium setup;
@@ -67,25 +67,10 @@ jobs:
             echo "already_released=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # The monorepo contains a Next.js app (apps/web) whose
-      # node_modules and .next caches blow past the default runner disk
-      # quota (14GB free of 75GB). pnpm install + tests fail with ENOSPC.
-      # Free ~25GB by removing preinstalled toolchains we don't use.
-      - name: Free disk space on runner
-        if: steps.fast_path.outputs.already_released != 'true'
-        run: |
-          set -euo pipefail
-          echo "Disk before cleanup:"
-          df -h /
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/PyPy /usr/local/share/boost /usr/local/share/powershell || true
-          sudo docker system prune -af --volumes || true
-          echo "Disk after cleanup:"
-          df -h /
-
       - uses: pnpm/action-setup@v4
         if: steps.fast_path.outputs.already_released != 'true'
         with:
-          version: 8.15.0   # match packageManager in root package.json
+          version: 8.15.0 # match packageManager in root package.json
       - uses: actions/setup-node@v4
         if: steps.fast_path.outputs.already_released != 'true'
         with:
@@ -130,14 +115,14 @@ jobs:
       # has pre-existing replay-skill test flakiness that doesn't affect the
       # MCP we're publishing here. Workspace-wide tests still run in ci.yml
       # for signal — they just don't block publishes.
-      - name: Test (MCP package only)
+      - name: Test (MCP fast required tier)
         if: steps.fast_path.outputs.already_released != 'true'
         # Skip the pnpm-pack smoke test — it exhausts inodes on GH runners,
         # and the publish job's own tarball-content verification covers the
         # same ground from real registry bytes.
         env:
           MCP_SKIP_PACK_SMOKE: "1"
-        run: pnpm --filter @trusty-squire/mcp test
+        run: pnpm --filter @trusty-squire/mcp test:fast
 
       # Preflight: refuse to publish mcp unless the exact skill-schema version
       # its tarball will use exists on npm and exports every runtime symbol MCP
@@ -260,12 +245,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Free disk space on runner
-        run: |
-          set -euo pipefail
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/PyPy /usr/local/share/boost /usr/local/share/powershell || true
-          sudo docker system prune -af --volumes || true
 
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v6
