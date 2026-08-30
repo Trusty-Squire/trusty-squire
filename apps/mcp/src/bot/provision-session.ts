@@ -801,6 +801,28 @@ async function withCanonicalProfileOperation<T>(
   });
 }
 
+async function withCanonicalSnapshotPublication<T>(
+  profileDir: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  for (;;) {
+    try {
+      const lease = await acquireFreeProfileOperationGuard(profileDir);
+      try {
+        return await run();
+      } finally {
+        lease.release();
+      }
+    } catch (error) {
+      if (!(error instanceof ProfileBusyError)) throw error;
+    }
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 100);
+      timer.unref();
+    });
+  }
+}
+
 function isGoogleStorageHost(host: unknown): boolean {
   return typeof host === "string" && /(^|\.)google\.com$/i.test(host.replace(/^\./, ""));
 }
@@ -1044,22 +1066,36 @@ async function closeEphemeralBrowser(
   if (closeState === "closed") {
     if (state !== undefined) {
       const capturedState = state;
-      const published = await withCanonicalProfileOperation(
-        ephemeral.canonicalProfileDir,
-        async () => {
+      const publish = async (): Promise<boolean> =>
+        await withCanonicalSnapshotPublication(ephemeral.canonicalProfileDir, async () => {
           const latest = await readSessionState(ephemeral.canonicalProfileDir);
           return await writeSessionState(
             ephemeral.canonicalProfileDir,
             latest === undefined
               ? capturedState
               : mergeGoogleIdentityStorageState(capturedState, latest),
-            () => owner?.forced !== true,
           );
-        },
-        () => owner?.forced !== true,
-      );
-      if (!published && owner?.forced) {
-        throw new Error("operator browser terminal teardown was forced");
+        });
+      try {
+        const lease = await acquireFreeProfileOperationGuard(ephemeral.canonicalProfileDir);
+        try {
+          const latest = await readSessionState(ephemeral.canonicalProfileDir);
+          await writeSessionState(
+            ephemeral.canonicalProfileDir,
+            latest === undefined
+              ? capturedState
+              : mergeGoogleIdentityStorageState(capturedState, latest),
+          );
+        } finally {
+          lease.release();
+        }
+      } catch (error) {
+        if (!(error instanceof ProfileBusyError)) throw error;
+        void publish().catch((publishError: unknown) => {
+          console.error(
+            `[operator] deferred storageState publication failed: ${publishError instanceof Error ? publishError.message : String(publishError)}`,
+          );
+        });
       }
     }
     if (owner?.forced) {
@@ -1084,33 +1120,34 @@ function isGoogleOAuthAction(
   element: InteractiveElement,
 ): boolean {
   if (action.provider !== undefined) return action.provider === "google";
-  const signal = [
+  const destination = [element.href, element.id, element.name, element.testId]
+    .filter((value): value is string => typeof value === "string")
+    .join(" ");
+  if (/github\.com|(?:^|[^a-z])github(?:[^a-z]|$)/i.test(destination)) return false;
+  if (/accounts\.google\.com|(?:^|[^a-z])google(?:[^a-z]|$)/i.test(destination)) return true;
+  const legacySignal = [
     element.visibleText,
     element.labelText,
     element.ariaLabel,
     element.iconLabel,
     element.title,
-    element.href,
-    element.id,
-    element.name,
-    element.testId,
   ]
     .filter((value): value is string => typeof value === "string")
     .join(" ");
-  return /(?:^|[^a-z])google(?:[^a-z]|$)|accounts\.google\.com/i.test(signal);
+  if (/(?:^|[^a-z])github(?:[^a-z]|$)/i.test(legacySignal)) return false;
+  if (/(?:^|[^a-z])google(?:[^a-z]|$)/i.test(legacySignal)) return true;
+  return true;
 }
 
-async function runSerializedGoogleOAuth(
+async function runSerializedGoogleIdentityOperation<T>(
   session: Session,
-  selector: string,
-): Promise<BrowserController> {
+  operation: (browser: BrowserController) => Promise<T>,
+): Promise<{ browser: BrowserController; result: T }> {
   const browser = session.browser;
   const ephemeral = leasedBrowsers.get(browser);
   if (ephemeral === undefined) {
     return await withGoogleOAuthHandoff(async () => {
-      await browser.loginWithOAuth(selector);
-      await settleAfterStateChange(browser);
-      return browser;
+      return { browser, result: await operation(browser) };
     });
   }
   const generation = provisionStartGeneration();
@@ -1136,14 +1173,14 @@ async function runSerializedGoogleOAuth(
           mergeGoogleIdentityStorageState(currentState, latestState),
         );
       }
-      let oauthFailed = false;
-      let oauthError: unknown;
+      let operationCompleted = false;
+      let operationResult: T | undefined;
+      let operationError: unknown;
       try {
-        await browser.loginWithOAuth(selector);
-        await settleAfterStateChange(browser);
+        operationResult = await operation(browser);
+        operationCompleted = true;
       } catch (error) {
-        oauthFailed = true;
-        oauthError = error;
+        operationError = error;
       }
       let rotatedState: Awaited<ReturnType<BrowserController["captureStorageState"]>> | undefined;
       let captureError: unknown;
@@ -1266,11 +1303,22 @@ async function runSerializedGoogleOAuth(
       if (readyReplacement === null) {
         throw new Error("Google OAuth replacement browser was not installed");
       }
-      if (oauthFailed) throw oauthError;
-      return readyReplacement;
+      if (!operationCompleted) throw operationError;
+      return { browser: readyReplacement, result: operationResult as T };
     },
     ownsSession,
   );
+}
+
+async function runSerializedGoogleOAuth(
+  session: Session,
+  selector: string,
+): Promise<BrowserController> {
+  const completed = await runSerializedGoogleIdentityOperation(session, async (browser) => {
+    await browser.loginWithOAuth(selector);
+    await settleAfterStateChange(browser);
+  });
+  return completed.browser;
 }
 
 function stopSessionWatchdog(session: Session): void {
@@ -8782,7 +8830,6 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   invalidateCompactV2Snapshot(session);
-  const { browser } = session;
 
   // The masked-display trap: click reveal/show toggles before reading.
   await browser.revealMaskedCredentials();
@@ -9312,7 +9359,6 @@ export async function awaitVerification(
 ): Promise<VerificationResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const { browser } = session;
 
   // PR3b — JIT consent grant: the host passes grantConsent ONLY after the user
   // agreed in-context. Grant inbox-read for the rest of this session (remembered
@@ -9332,46 +9378,38 @@ export async function awaitVerification(
 
   invalidateCompactV2Snapshot(session);
 
-  const query = buildVerificationSearchQuery(opts.sender);
-  const searchUrl = `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
-  const hrefsOf = (els: readonly { href?: string | null }[]): string[] =>
-    els.map((e) => e.href).filter((h): h is string => typeof h === "string" && h.length > 0);
-
-  // A verification email commonly lands 10–30s AFTER the trigger, so a single
-  // search misses it and hands back "not found" the agent has to re-issue. Re-run
-  // the search up to 3× with a short wait between attempts within this one call.
-  let code: string | null = null;
-  let link: string | null = null;
-  let sourceFrom: string | null = null;
-  for (let attempt = 0; attempt < 3 && code === null && link === null; attempt++) {
-    sourceFrom = null;
-    if (attempt > 0) await browser.waitForCaptchaChallengeToSettle(4000, 0).catch(() => false);
-    // Internal navigation (not an agent goto) — sanctioned read of the user's mail.
-    await browser.goto(searchUrl);
-    // Poll briefly for the result list to render.
-    let listText = "";
-    for (let i = 0; i < 6; i++) {
-      listText = await browser.extractVisibleText();
-      if (listText.length > 200) break;
-      await browser.waitForCaptchaChallengeToSettle(1200, 0).catch(() => false);
+  const verification = await runSerializedGoogleIdentityOperation(session, async (browser) => {
+    const query = buildVerificationSearchQuery(opts.sender);
+    const searchUrl = `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
+    const hrefsOf = (els: readonly { href?: string | null }[]): string[] =>
+      els.map((e) => e.href).filter((h): h is string => typeof h === "string" && h.length > 0);
+    let code: string | null = null;
+    let link: string | null = null;
+    let sourceFrom: string | null = null;
+    for (let attempt = 0; attempt < 3 && code === null && link === null; attempt++) {
+      sourceFrom = null;
+      if (attempt > 0) await browser.waitForCaptchaChallengeToSettle(4000, 0).catch(() => false);
+      await browser.goto(searchUrl);
+      let listText = "";
+      for (let i = 0; i < 6; i++) {
+        listText = await browser.extractVisibleText();
+        if (listText.length > 200) break;
+        await browser.waitForCaptchaChallengeToSettle(1200, 0).catch(() => false);
+      }
+      const listLinks = hrefsOf(await browser.extractInteractiveElements());
+      const opened = await browser.openFirstMailResult().catch(() => false);
+      if (opened) {
+        const openedText = await browser.extractVisibleText();
+        const openedLinks = hrefsOf(await browser.extractInteractiveElements());
+        sourceFrom = extractSenderEmail(openedText);
+        ({ code, link } = parseVerification(openedText, [...openedLinks, ...listLinks]));
+      } else {
+        ({ code, link } = parseVerification(listText, listLinks));
+      }
     }
-    const listLinks = hrefsOf(await browser.extractInteractiveElements());
-    const opened = await browser.openFirstMailResult().catch(() => false);
-    if (opened) {
-      // Parse the OPENED email as the AUTHORITATIVE source. Merging the
-      // results-list snippets let an UNRELATED sender's code (a bank OTP shown in
-      // the list) override the target email's link — a real wrong-code grab
-      // (Brave signup 2026-07-04: a GO2bank "verification code is 580210" beat
-      // Brave's verify LINK). The list snippets stay a fallback only, for when the
-      // mail won't open (an OTP-in-snippet still works then).
-      const openedText = await browser.extractVisibleText();
-      const openedLinks = hrefsOf(await browser.extractInteractiveElements());
-      sourceFrom = extractSenderEmail(openedText);
-      ({ code, link } = parseVerification(openedText, [...openedLinks, ...listLinks]));
-    } else {
-      ({ code, link } = parseVerification(listText, listLinks));
-    }
-  }
+    return { code, link, sourceFrom };
+  });
+  const { code, link, sourceFrom } = verification.result;
   const found = code !== null || link !== null;
   audit(sessionId, "await_verification", {
     sender: opts.sender ?? null,

@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
 import { describe, expect, it, vi } from "vitest";
 import {
+  BrowserClickDispatchError,
   BrowserController,
   CHECKOUT_SUBMIT_LABEL_RE,
   hasPayPalHostedCheckoutFrame,
@@ -26,6 +27,19 @@ import {
 // does not — skip there rather than fail the release. The pure parsing tests
 // below always run.
 let chromiumAvailable = false;
+const APPROVAL_CARD = {
+  pan: "4242424242424242",
+  exp_month: "12",
+  exp_year: "30",
+  cvv: "123",
+  name: "Synthetic Cardholder",
+  billing: {
+    line1: "123 Synthetic Street",
+    city: "Testville",
+    postal_code: "10001",
+    country: "US",
+  },
+};
 try {
   chromiumAvailable = existsSync(chromium.executablePath());
 } catch {
@@ -85,6 +99,27 @@ describe("captured payment submit dispatch", () => {
     ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
 
     expect(onSubmitDispatched).toHaveBeenCalledOnce();
+  });
+
+  it("preserves a proven pre-dispatch approval rejection", async () => {
+    const onSubmitDispatched = vi.fn();
+
+    await expect(
+      runCaptureConfirmedPaymentSubmit({
+        click: async (markInputDispatchPossible) => {
+          markInputDispatchPossible();
+          throw new BrowserClickDispatchError(
+            "not_dispatched",
+            new Error("payment_approval_expired"),
+          );
+        },
+        readEvidence: async () => ({ baseline: null, dispatched: false }),
+        clear: async () => undefined,
+        onSubmitDispatched,
+      }),
+    ).rejects.toThrow("payment_approval_expired");
+
+    expect(onSubmitDispatched).not.toHaveBeenCalled();
   });
 
   it("retains an unknown charge when trusted input completes without observer evidence", async () => {
@@ -694,10 +729,48 @@ describe("checkout payment parsing", () => {
         });
 
         await expect(
-          controller.fillAndSubmitCheckout(CARD, { beforeSubmitDispatch }),
+          controller.fillAndSubmitCheckout(APPROVAL_CARD, { beforeSubmitDispatch }),
         ).rejects.toThrow("payment_approval_expired");
 
         expect(beforeSubmitDispatch).toHaveBeenCalledOnce();
+        expect(await page.locator("body").getAttribute("data-submitted")).toBeNull();
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "blocks a charge at the page event boundary after approval expiry",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <form id="checkout">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-exp">
+            <input autocomplete="cc-csc">
+            <input autocomplete="cc-name">
+            <button type="submit">Pay now</button>
+          </form>
+          <script>
+            document.querySelector("button").addEventListener("pointerdown", () => {
+              const realNow = Date.now;
+              Date.now = () => realNow() + 1000;
+            }, { capture: true });
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>
+        `);
+        const controller = BrowserController.fromHarnessPage(page);
+
+        await expect(
+          controller.fillAndSubmitCheckout(APPROVAL_CARD, { beforeSubmitDispatch: () => 500 }),
+        ).rejects.toThrow("payment_approval_expired");
+
         expect(await page.locator("body").getAttribute("data-submitted")).toBeNull();
       } finally {
         await browser.close();

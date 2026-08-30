@@ -52,7 +52,7 @@ export interface PaymentBrowser {
   readCheckoutConfirmSummary(approvedCurrency?: string): Promise<CheckoutSummary>;
   fillAndSubmitCheckout(
     card: CheckoutCard,
-    options?: { onSubmitDispatched?: () => void; beforeSubmitDispatch?: () => void },
+    options?: { onSubmitDispatched?: () => void; beforeSubmitDispatch?: () => void | number },
   ): Promise<CheckoutSubmitResult>;
   fillCheckoutCardFields(card: CheckoutCard): Promise<void>;
   submitFilledCheckout(): Promise<CheckoutSubmitResult>;
@@ -1457,6 +1457,7 @@ export async function executeOperatePay(
           onSubmitDispatched: retainPendingThreeDs,
           beforeSubmitDispatch: () => {
             if (approvalExpired()) throw new Error("payment_approval_expired");
+            return deadline - deps.now();
           },
         },
       );

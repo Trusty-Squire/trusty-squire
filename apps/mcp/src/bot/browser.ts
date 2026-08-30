@@ -467,6 +467,12 @@ export async function runCaptureConfirmedPaymentSubmit<T>(options: {
   const evidence = await options.readEvidence();
   await options.clear();
   if (!evidence.dispatched) {
+    if (
+      clickError instanceof BrowserClickDispatchError &&
+      clickError.dispatchStatus === "not_dispatched"
+    ) {
+      throw clickError;
+    }
     if (clickError !== undefined && !inputDispatchPossible) throw clickError;
     options.onSubmitDispatched?.();
     throw new PaymentSubmitOutcomeUnknownError();
@@ -11193,7 +11199,7 @@ export class BrowserController {
 
   async fillAndSubmitCheckout(
     card: CheckoutCard,
-    options: { onSubmitDispatched?: () => void; beforeSubmitDispatch?: () => void } = {},
+    options: { onSubmitDispatched?: () => void; beforeSubmitDispatch?: () => void | number } = {},
   ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     this.checkoutCardGroupScope = undefined;
@@ -11513,7 +11519,7 @@ export class BrowserController {
   private async submitFilledCheckoutInScope(
     cardGroup?: CheckoutCardGroupScope,
     onSubmitDispatched?: () => void,
-    beforeSubmitDispatch?: () => void,
+    beforeSubmitDispatch?: () => void | number,
   ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     const savedCardSelection = await this.resolveCompetingSavedCardSelection();
@@ -11602,6 +11608,8 @@ export class BrowserController {
                 __trustySquirePaymentSubmitDispatch?: {
                   token: string;
                   dispatched: boolean;
+                  expired: boolean;
+                  expiresAt: number | null;
                 };
               };
               const tracked = element as Element & {
@@ -11617,10 +11625,18 @@ export class BrowserController {
               stateWindow.__trustySquirePaymentSubmitDispatch = {
                 token,
                 dispatched: false,
+                expired: false,
+                expiresAt: null,
               };
-              const listener: EventListener = () => {
+              const listener: EventListener = (event) => {
                 const state = stateWindow.__trustySquirePaymentSubmitDispatch;
                 if (state?.token !== token) return;
+                if (state.expiresAt !== null && Date.now() >= state.expiresAt) {
+                  state.expired = true;
+                  event.preventDefault();
+                  event.stopImmediatePropagation();
+                  return;
+                }
                 try {
                   const merchantWindow = window.top;
                   if (merchantWindow === null) return;
@@ -11747,6 +11763,7 @@ export class BrowserController {
         const readDispatchState = async (): Promise<{
           sameDocument: boolean;
           dispatched: boolean;
+          expired: boolean;
         } | null> =>
           await frame
             .evaluate((token) => {
@@ -11754,12 +11771,15 @@ export class BrowserController {
                 __trustySquirePaymentSubmitDispatch?: {
                   token: string;
                   dispatched: boolean;
+                  expired: boolean;
+                  expiresAt: number | null;
                 };
               };
               const state = stateWindow.__trustySquirePaymentSubmitDispatch;
               return {
                 sameDocument: state?.token === token,
                 dispatched: state?.token === token && state.dispatched,
+                expired: state?.token === token && state.expired,
               };
             }, dispatchToken)
             .catch(() => null);
@@ -11786,6 +11806,8 @@ export class BrowserController {
                 __trustySquirePaymentSubmitDispatch?: {
                   token: string;
                   dispatched: boolean;
+                  expired: boolean;
+                  expiresAt: number | null;
                 };
               };
               if (stateWindow.__trustySquirePaymentSubmitDispatch?.token === token) {
@@ -11812,9 +11834,37 @@ export class BrowserController {
           }
           capturedBaseline = await runCaptureConfirmedPaymentSubmit({
             click: async (markInputDispatchPossible) => {
-              beforeSubmitDispatch?.();
+              const remainingMs = beforeSubmitDispatch?.();
+              const expiresAt =
+                typeof remainingMs === "number" ? Date.now() + Math.max(0, remainingMs) : null;
+              await candidate.evaluate((element, deadline) => {
+                void element;
+                const stateWindow = window as Window & {
+                  __trustySquirePaymentSubmitDispatch?: {
+                    token: string;
+                    dispatched: boolean;
+                    expired: boolean;
+                    expiresAt: number | null;
+                  };
+                };
+                if (stateWindow.__trustySquirePaymentSubmitDispatch !== undefined) {
+                  stateWindow.__trustySquirePaymentSubmitDispatch.expiresAt = deadline;
+                }
+              }, expiresAt);
               markInputDispatchPossible();
-              await candidate.click({ noWaitAfter: true });
+              await candidate.click({
+                noWaitAfter: true,
+                ...(typeof remainingMs === "number"
+                  ? { timeout: Math.max(1, Math.ceil(remainingMs)) }
+                  : {}),
+              });
+              const dispatchState = await readDispatchState();
+              if (dispatchState?.expired === true) {
+                throw new BrowserClickDispatchError(
+                  "not_dispatched",
+                  new Error("payment_approval_expired"),
+                );
+              }
             },
             readEvidence: async () => {
               const documentBaseline = await readDispatchOutcomeBaseline();

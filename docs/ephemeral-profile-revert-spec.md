@@ -71,8 +71,8 @@ Serialize only the declared or destination-resolved Google-authenticated OAuth m
 
 Preserve the rc.9 call-drain, audit, and payment ordering. Keep the session and
 terminal owner discoverable through capture and atomic write-back so shutdown
-revocation reaches the final rename fence. On an explicit successful
-`requireLiveIdentity` finish:
+revocation reaches the final rename fence. On every explicitly successful
+non-payment finish:
 
 1. Capture `context.storageState({ indexedDB: true })` before close.
 2. Use the rc.9 bounded terminal owner to perform the existing identity-proven browser close.

@@ -3370,7 +3370,6 @@ describe("operate session — OAuth lifecycle", () => {
     const secondAct = act(second.session_id, {
       kind: "oauth_click",
       target: "Continue",
-      provider: "google",
     });
     await Promise.resolve();
     await Promise.resolve();
@@ -6127,7 +6126,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
     expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
   });
 
-  it("waits for the cross-process canonical guard before finish-time publication", async () => {
+  it("finishes without waiting for a busy canonical publication guard", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-finish-process-guard";
     h.captureStorageState = {
       cookies: [
@@ -6155,13 +6154,15 @@ describe("operate session — ephemeral profile lifecycle", () => {
       );
       await new Promise<void>((resolve) => setTimeout(resolve, 25));
       expect(h.storageStateWrites).toEqual([]);
+      await finishing;
+      expect(h.storageStateWrites).toEqual([]);
 
       externalOperation.release();
-      await finishing;
-
-      expect(h.storageStateWrites).toEqual([
-        { profileDir: canonical, state: h.captureStorageState },
-      ]);
+      await vi.waitFor(() => expect(h.storageStateWrites).toHaveLength(1));
+      expect(h.storageStateWrites[0]?.profileDir).toBe(canonical);
+      expect(h.storageStateWrites[0]?.state.cookies).toEqual(
+        expect.arrayContaining(h.captureStorageState.cookies),
+      );
     } finally {
       externalOperation.release();
       await finishProvisionSession(started.session_id).catch(() => undefined);
@@ -6925,14 +6926,29 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
   });
 
   it("returns the code normally when into_slot is NOT requested", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-gmail-read";
+    const googleState = {
+      cookies: [
+        {
+          name: "SID",
+          value: "live-google-session-for-gmail",
+          domain: ".google.com",
+          path: "/",
+        },
+      ],
+      origins: [{ origin: "https://mail.google.com", localStorage: [] }],
+    };
+    h.storageStates.set(canonical, googleState);
     const obs = await startProvisionSession({
       serviceUrl: "https://app.example.com/",
       consentInboxRead: true,
+      profileDir: canonical,
     });
     h.visibleText = "Your verification code is 481920.";
     const res = await awaitVerification(obs.session_id, {});
     expect(res.code).toBe("481920");
     expect(res.sealed).toBeUndefined();
+    expect(h.restoredStorageStates[0]).toEqual({ browserIndex: 0, state: googleState });
   });
 
   it("recursively seals delegated verification results in Compact V2 only", async () => {

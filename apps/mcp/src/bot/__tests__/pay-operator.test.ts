@@ -79,7 +79,7 @@ async function harness(
     readCheckoutSummary?: () => Promise<CheckoutSummary>;
     fillAndSubmitCheckout?: (
       card: CheckoutCard,
-      options?: { onSubmitDispatched?: () => void; beforeSubmitDispatch?: () => void },
+      options?: { onSubmitDispatched?: () => void; beforeSubmitDispatch?: () => void | number },
     ) => Promise<CheckoutSubmitResult>;
     paymentInstrumentMismatch?: () => CheckoutSubmitResult["payment_instrument_mismatch"];
     now?: () => number;
@@ -288,7 +288,10 @@ async function harness(
       checkoutOptions.fillAndSubmitCheckout ??
         (async (
           card: CheckoutCard,
-          options?: { onSubmitDispatched?: () => void; beforeSubmitDispatch?: () => void },
+          options?: {
+            onSubmitDispatched?: () => void;
+            beforeSubmitDispatch?: () => void | number;
+          },
         ) => {
           filledCards.push(card);
           options?.beforeSubmitDispatch?.();

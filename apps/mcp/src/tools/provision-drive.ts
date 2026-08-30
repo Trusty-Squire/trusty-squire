@@ -1435,6 +1435,12 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
       path: { type: "string" },
       url: { type: "string" },
       key: { type: "string" },
+      provider: {
+        type: "string",
+        enum: ["google", "github"],
+        description:
+          "OAuth provider for oauth_login/oauth_click. Declare it for JavaScript-driven controls whose label or destination does not identify the provider.",
+      },
       host: { type: "string" },
       slot: { type: "string" },
       product_identity: { type: "string", minLength: 1 },
