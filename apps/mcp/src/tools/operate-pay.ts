@@ -6,12 +6,14 @@ import {
   claimActivePaymentForOperatePay,
   clearActivePendingCardFill,
   clearActivePendingThreeDsIfCurrent,
+  completeActivePendingApprovalWithTerminalStatus,
   completeActivePaymentLeaseWithPendingApproval,
   completeActivePaymentLeaseWithPendingFill,
   coordinatePaymentDispatchAudit,
   finishPaymentDispatchHandoff,
   getActivePendingApproval,
   getActivePendingThreeDs,
+  getTerminalPaymentApproval,
   recordActivePaymentProvenance,
   releaseActivePaymentLease,
   retainActivePaymentFieldSeal,
@@ -226,6 +228,23 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
     const phase = args.phase === "single" ? undefined : args.phase;
     return await withPaymentSessionCall(args.session_id, async (session) => {
       const paymentClaim = claimActivePaymentForOperatePay(phase, session);
+      if (paymentClaim.kind === "terminal") {
+        const state = paymentClaim.state;
+        return paymentResult(session, {
+          status:
+            paymentClaim.terminalStatus === "denied"
+              ? "payment_approval_denied"
+              : "payment_approval_timeout",
+          approval_id: state.approval_id,
+          approval_url: state.approval_url,
+          merchant: state.checkout.merchant,
+          amount_cents: state.checkout.amount_cents,
+          currency: state.checkout.currency,
+          ...(paymentClaim.terminalStatus === "expired" && state.jit && state.boundCardRef !== null
+            ? { card_persisted: true }
+            : {}),
+        });
+      }
       // Confirm step of a split checkout: the card is already filled (and the
       // mandate already signed), so no card resolution and no PayPal gate.
       // confirm no longer touches the browser or charges anything — it only
@@ -517,7 +536,24 @@ async function readApprovalStatus(
   serverWaitMs?: number,
 ): Promise<Record<string, unknown>> {
   const fetchApproval = waitForSubmission
-    ? api.getPaymentApproval(state.approval_id, "wait-peek", serverWaitMs)
+    ? api
+        .getPaymentApproval(
+          state.approval_id,
+          "wait-peek",
+          serverWaitMs,
+          serverWaitMs === undefined
+            ? undefined
+            : serverWaitMs + PAYMENT_APPROVAL_RESPONSE_RESERVE_MS,
+        )
+        .catch((error: unknown) => {
+          if (
+            error instanceof Error &&
+            (error.name === "AbortError" || error.name === "TimeoutError")
+          ) {
+            return null;
+          }
+          throw error;
+        })
     : api.getPaymentApproval(state.approval_id, "peek");
   const approval =
     serverWaitMs === undefined
@@ -754,7 +790,11 @@ async function paymentStatusResult(
   const state = getActivePendingApproval(session);
   if (state !== null) {
     if (waitSeconds <= 0) {
-      return paymentResult(session, await readApprovalStatus(api, state, session.id, false));
+      const result = await readApprovalStatus(api, state, session.id, false);
+      if (result.status === "denied" || result.status === "expired") {
+        completeActivePendingApprovalWithTerminalStatus(state, result.status, session);
+      }
+      return paymentResult(session, result);
     }
     const callDeadline = Date.now() + Math.min(Math.max(waitSeconds * 1000, 1_000), 60_000);
     let result: Record<string, unknown>;
@@ -771,7 +811,27 @@ async function paymentStatusResult(
       const terminalStatus = result.status !== "pending";
       if (terminalCandidate || terminalStatus || Date.now() >= callDeadline) break;
     }
+    if (result.status === "denied" || result.status === "expired") {
+      completeActivePendingApprovalWithTerminalStatus(state, result.status, session);
+    }
     return paymentResult(session, result);
+  }
+  const terminalApproval = getTerminalPaymentApproval(session);
+  if (terminalApproval !== null) {
+    const state = terminalApproval.state;
+    return paymentResult(session, {
+      status: terminalApproval.terminalStatus,
+      approval_id: state.approval_id,
+      approval_url: state.approval_url,
+      expires_at: new Date(state.deadline).toISOString(),
+      phase: state.phase ?? null,
+      merchant: state.checkout.merchant,
+      amount_cents: state.checkout.amount_cents,
+      currency: state.checkout.currency,
+      candidate_submitted: false,
+      candidate_kind: state.reviewVerified === true ? "review" : "none",
+      ready_to_charge: false,
+    });
   }
   const threeDsState = getActivePendingThreeDs(session);
   if (threeDsState !== null) {

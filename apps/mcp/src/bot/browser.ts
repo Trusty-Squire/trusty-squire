@@ -271,12 +271,6 @@ interface CheckoutOutcomeDispatchSnapshot {
   urls: readonly string[];
 }
 
-interface CheckoutSubmitDispatchWaiter {
-  frame: Frame;
-  nonce: string;
-  resolve: (snapshot: CheckoutOutcomeDispatchSnapshot) => void;
-}
-
 export interface CheckoutSubmitResult {
   three_ds_required: boolean;
   // A dispatched click is not a payment outcome. The submit path sets this
@@ -989,37 +983,52 @@ function isCheckoutPaymentExecutionOperation(value: string): boolean {
   return includesAny(["authoriz", "captur", "complet", "confirm", "execut", "submit"]);
 }
 
+function collectGraphqlMutationCandidates(query: string, candidates: string[]): void {
+  const mutation =
+    /\bmutation\b(?:\s+([A-Za-z_][A-Za-z0-9_-]*))?(?:\s*\([^{}]*\))?(?:\s+@[^{]+)?\s*\{\s*(?:([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*)?([A-Za-z_][A-Za-z0-9_-]*)/gi;
+  for (const match of query.matchAll(mutation)) {
+    if (match[1] !== undefined) candidates.push(match[1]);
+    if (match[3] !== undefined) candidates.push(match[3]);
+  }
+}
+
+function collectPaymentExecutionPayloadCandidates(value: unknown, candidates: string[]): void {
+  if (Array.isArray(value)) {
+    for (const entry of value) collectPaymentExecutionPayloadCandidates(entry, candidates);
+    return;
+  }
+  if (value === null || typeof value !== "object") return;
+  const record = value as Record<string, unknown>;
+  for (const key of ["operationName", "action", "command", "operation", "mutation"]) {
+    const candidate = record[key];
+    if (typeof candidate === "string") candidates.push(candidate);
+  }
+  if (typeof record.query === "string") {
+    collectGraphqlMutationCandidates(record.query, candidates);
+  }
+}
+
 function hasCheckoutPaymentExecutionPayload(request: Request): boolean {
   const payload = request.postData();
   if (payload === null) return false;
   const candidates: string[] = [];
   try {
     const parsed = JSON.parse(payload) as unknown;
-    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-      const record = parsed as Record<string, unknown>;
-      for (const key of ["operationName", "action", "command", "operation", "mutation"]) {
-        const value = record[key];
-        if (typeof value === "string") candidates.push(value);
-      }
-      if (typeof record.query === "string") {
-        const mutation = /\bmutation\s+([A-Za-z0-9_-]+)/i.exec(record.query)?.[1];
-        if (mutation !== undefined) candidates.push(mutation);
-      }
-    }
+    collectPaymentExecutionPayloadCandidates(parsed, candidates);
   } catch {
     const form = new URLSearchParams(payload);
     for (const key of ["operationName", "action", "command", "operation", "mutation"]) {
       const value = form.get(key);
       if (value !== null) candidates.push(value);
     }
-    const mutation = /\bmutation\s+([A-Za-z0-9_-]+)/i.exec(payload)?.[1];
-    if (mutation !== undefined) candidates.push(mutation);
+    const query = form.get("query");
+    collectGraphqlMutationCandidates(query ?? payload, candidates);
   }
   return candidates.some(isCheckoutPaymentExecutionOperation);
 }
 
 function isCheckoutPaymentRequest(request: Request): boolean {
-  if (request.resourceType() !== "fetch" && request.resourceType() !== "xhr") return false;
+  if (!["document", "fetch", "xhr"].includes(request.resourceType())) return false;
   const method = request.method().toUpperCase();
   if (method === "GET" || method === "HEAD" || method === "OPTIONS") return false;
   try {
@@ -3597,9 +3606,6 @@ export class BrowserController {
   private paymentInstrumentExpectation: PaymentInstrumentExpectation | undefined;
   private observedPaymentInstrumentMismatch: PaymentInstrumentMismatch | undefined;
   private checkoutSubmitSequence = 0;
-  private readonly checkoutSubmitDispatchBindingName = `__trustySquirePaymentSubmitDispatch_${randomUUID().replaceAll("-", "")}`;
-  private readonly checkoutSubmitDispatchBindingPages = new WeakSet<Page>();
-  private readonly checkoutSubmitDispatchWaiters = new Map<string, CheckoutSubmitDispatchWaiter>();
   private clickDispatchSequence = 0;
   private sealedDocumentSequence = 0;
   private readonly sealedDocuments = new Map<
@@ -11674,27 +11680,6 @@ export class BrowserController {
     return await this.submitFilledCheckoutInScope(this.checkoutCardGroupScope);
   }
 
-  private async ensureCheckoutSubmitDispatchBinding(page: Page): Promise<void> {
-    if (this.checkoutSubmitDispatchBindingPages.has(page)) return;
-    await page.exposeBinding(this.checkoutSubmitDispatchBindingName, (source, payload: unknown) => {
-      if (payload === null || typeof payload !== "object") return;
-      const candidate = payload as { token?: unknown; nonce?: unknown; snapshot?: unknown };
-      if (typeof candidate.token !== "string" || typeof candidate.nonce !== "string") return;
-      const waiter = this.checkoutSubmitDispatchWaiters.get(candidate.token);
-      if (
-        waiter === undefined ||
-        waiter.frame !== source.frame ||
-        waiter.nonce !== candidate.nonce
-      ) {
-        return;
-      }
-      const snapshot = parseCheckoutOutcomeDispatchSnapshot(candidate.snapshot);
-      if (snapshot === null) return;
-      waiter.resolve(snapshot);
-    });
-    this.checkoutSubmitDispatchBindingPages.add(page);
-  }
-
   private async submitFilledCheckoutInScope(
     cardGroup?: CheckoutCardGroupScope,
     onSubmitDispatched?: () => void,
@@ -11760,37 +11745,23 @@ export class BrowserController {
         const label = checkoutSubmitLabel(labelSignals ?? {});
         if (!CHECKOUT_SUBMIT_LABEL_RE.test(label)) continue;
         const dispatchToken = `ts-payment-submit-${this.checkoutSubmitSequence++}`;
-        const dispatchNonce = randomUUID();
-        const dispatchBaselineStorageKey = `__trusty_squire_payment_baseline_${dispatchToken}`;
         const preDispatchFrameUrls = this.page.frames().map((pageFrame) => pageFrame.url());
         const clickOnlyOutcomeBaseline = checkoutOutcomeBaselineFromDispatchSnapshot({
           url: this.page.url(),
           urls: preDispatchFrameUrls,
         });
-        await this.ensureCheckoutSubmitDispatchBinding(this.page);
         let submitDispatchedReported = false;
         const reportSubmitDispatched = (): void => {
           if (submitDispatchedReported) return;
           onSubmitDispatched?.();
           submitDispatchedReported = true;
         };
-        let resolveBoundDispatch = (_snapshot: CheckoutOutcomeDispatchSnapshot): void => undefined;
-        const boundDispatch = new Promise<CheckoutOutcomeDispatchSnapshot>((resolve) => {
-          resolveBoundDispatch = resolve;
-        });
-        this.checkoutSubmitDispatchWaiters.set(dispatchToken, {
-          frame,
-          nonce: dispatchNonce,
-          resolve: resolveBoundDispatch,
-        });
         const dispatchTrackingInstalled = await candidate
           .evaluate(
-            (element, options) => {
-              const { baselineStorageKey, bindingName, frameUrls, nonce, pageUrl, token } = options;
+            (element, token) => {
               const stateWindow = window as Window & {
                 __trustySquirePaymentSubmitDispatch?: {
                   token: string;
-                  dispatched: boolean;
                   submitObserved: boolean;
                   validationBlocked: boolean;
                 };
@@ -11815,66 +11786,13 @@ export class BrowserController {
               }
               stateWindow.__trustySquirePaymentSubmitDispatch = {
                 token,
-                dispatched: false,
                 submitObserved: false,
                 validationBlocked: false,
               };
-              const listener: EventListener = (event) => {
+              const listener: EventListener = () => {
                 const state = stateWindow.__trustySquirePaymentSubmitDispatch;
                 if (state?.token !== token || state.submitObserved) return;
                 state.submitObserved = true;
-                if (event.defaultPrevented) return;
-                const currentState = stateWindow.__trustySquirePaymentSubmitDispatch;
-                if (currentState?.token !== token || currentState.dispatched) return;
-                const merchantWindow = window.top;
-                if (merchantWindow === null) return;
-                const urls = new Set(frameUrls);
-                const collectFrameUrls = (currentWindow: Window): void => {
-                  try {
-                    urls.add(currentWindow.location.href);
-                    for (let index = 0; index < currentWindow.frames.length; index += 1) {
-                      collectFrameUrls(currentWindow.frames[index]!);
-                    }
-                  } catch (error) {
-                    void error;
-                  }
-                };
-                collectFrameUrls(merchantWindow);
-                const snapshot: CheckoutOutcomeDispatchSnapshot = {
-                  url: pageUrl,
-                  urls: [...urls],
-                };
-                const dispatchBinding = (
-                  window as unknown as Record<
-                    string,
-                    | ((payload: {
-                        token: string;
-                        nonce: string;
-                        snapshot: CheckoutOutcomeDispatchSnapshot;
-                      }) => Promise<void>)
-                    | undefined
-                  >
-                )[bindingName];
-                if (typeof dispatchBinding === "function") {
-                  void dispatchBinding({ token, nonce, snapshot });
-                }
-                const baselineWindow = merchantWindow as Window & {
-                  __trustySquirePaymentDispatchBaselines?: Record<
-                    string,
-                    CheckoutOutcomeDispatchSnapshot
-                  >;
-                };
-                baselineWindow.__trustySquirePaymentDispatchBaselines ??= {};
-                baselineWindow.__trustySquirePaymentDispatchBaselines[token] = snapshot;
-                try {
-                  merchantWindow.sessionStorage.setItem(
-                    baselineStorageKey,
-                    JSON.stringify(snapshot),
-                  );
-                } catch (error) {
-                  void error;
-                }
-                currentState.dispatched = true;
               };
               const form =
                 element instanceof HTMLButtonElement || element instanceof HTMLInputElement
@@ -11913,19 +11831,11 @@ export class BrowserController {
                 });
               }
             },
-            {
-              baselineStorageKey: dispatchBaselineStorageKey,
-              bindingName: this.checkoutSubmitDispatchBindingName,
-              frameUrls: preDispatchFrameUrls,
-              nonce: dispatchNonce,
-              pageUrl: this.page.url(),
-              token: dispatchToken,
-            },
+            dispatchToken,
           )
           .then(() => true)
           .catch(() => false);
         if (!dispatchTrackingInstalled) {
-          this.checkoutSubmitDispatchWaiters.delete(dispatchToken);
           continue;
         }
         let paymentRequestTrackingArmed = false;
@@ -11942,20 +11852,21 @@ export class BrowserController {
           resolveNavigationOutcome = resolve;
         });
         const paymentRequestListener = (request: Request): void => {
-          if (!paymentRequestTrackingArmed || this.page === undefined) return;
+          const activePage = this.page;
+          if (!paymentRequestTrackingArmed || activePage === null) return;
           let sourceFrame: Frame;
           try {
             sourceFrame = request.frame();
           } catch {
             return;
           }
-          if (sourceFrame !== frame && sourceFrame !== this.page.mainFrame()) return;
+          if (sourceFrame !== frame && sourceFrame !== activePage.mainFrame()) return;
           if (!isCheckoutPaymentRequest(request)) return;
           concretePaymentRequestObserved = true;
           resolveConcretePaymentRequest();
         };
         const navigationListener = (): void => {
-          if (!paymentRequestTrackingArmed || this.page === undefined) return;
+          if (!paymentRequestTrackingArmed || this.page === null) return;
           navigationObserved = true;
           void (async () => {
             if (await this.hasConfirmedCheckoutOutcome(clickOnlyOutcomeBaseline)) {
@@ -11972,63 +11883,18 @@ export class BrowserController {
         };
         this.page.on("request", paymentRequestListener);
         this.page.on("framenavigated", navigationListener);
-        const readDispatchOutcomeBaseline = async (): Promise<CheckoutOutcomeBaseline | null> => {
-          const snapshot = await this.page!.mainFrame()
-            .evaluate(
-              ({ baselineStorageKey, token }) => {
-                const baselineWindow = window as Window & {
-                  __trustySquirePaymentDispatchBaselines?: Record<
-                    string,
-                    CheckoutOutcomeDispatchSnapshot
-                  >;
-                };
-                let captured =
-                  baselineWindow.__trustySquirePaymentDispatchBaselines?.[token] ?? null;
-                if (captured !== null) {
-                  delete baselineWindow.__trustySquirePaymentDispatchBaselines?.[token];
-                }
-                if (captured === null) {
-                  try {
-                    const stored = sessionStorage.getItem(baselineStorageKey);
-                    if (stored !== null) {
-                      captured = JSON.parse(stored) as CheckoutOutcomeDispatchSnapshot;
-                    }
-                  } catch {
-                    captured = null;
-                  }
-                }
-                try {
-                  sessionStorage.removeItem(baselineStorageKey);
-                } catch (error) {
-                  void error;
-                }
-                return captured;
-              },
-              { baselineStorageKey: dispatchBaselineStorageKey, token: dispatchToken },
-            )
-            .catch(() => null);
-          const parsedSnapshot = parseCheckoutOutcomeDispatchSnapshot(snapshot);
-          return parsedSnapshot === null
-            ? null
-            : checkoutOutcomeBaselineFromDispatchSnapshot(parsedSnapshot);
+        const waitForDispatchEvidence = async (): Promise<void> => {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          await Promise.race([
+            concretePaymentRequest,
+            navigationOutcome,
+            new Promise<void>((resolve) => {
+              timer = setTimeout(resolve, CHECKOUT_PAYMENT_REQUEST_OBSERVATION_MS);
+            }),
+          ]);
+          if (timer !== undefined) clearTimeout(timer);
         };
-        const readBoundDispatchOutcomeBaseline =
-          async (): Promise<CheckoutOutcomeBaseline | null> => {
-            let timer: ReturnType<typeof setTimeout> | undefined;
-            const snapshot = await Promise.race([
-              boundDispatch,
-              concretePaymentRequest.then(() => null),
-              navigationOutcome.then(() => null),
-              new Promise<null>((resolve) => {
-                timer = setTimeout(() => resolve(null), CHECKOUT_PAYMENT_REQUEST_OBSERVATION_MS);
-              }),
-            ]);
-            if (timer !== undefined) clearTimeout(timer);
-            return snapshot === null ? null : checkoutOutcomeBaselineFromDispatchSnapshot(snapshot);
-          };
         const readDispatchState = async (): Promise<{
-          sameDocument: boolean;
-          dispatched: boolean;
           validationBlocked: boolean;
         } | null> =>
           await frame
@@ -12036,15 +11902,12 @@ export class BrowserController {
               const stateWindow = window as Window & {
                 __trustySquirePaymentSubmitDispatch?: {
                   token: string;
-                  dispatched: boolean;
                   submitObserved: boolean;
                   validationBlocked: boolean;
                 };
               };
               const state = stateWindow.__trustySquirePaymentSubmitDispatch;
               return {
-                sameDocument: state?.token === token,
-                dispatched: state?.token === token && state.dispatched,
                 validationBlocked: state?.token === token && state.validationBlocked,
               };
             }, dispatchToken)
@@ -12053,7 +11916,6 @@ export class BrowserController {
           paymentRequestTrackingArmed = false;
           this.page?.off("request", paymentRequestListener);
           this.page?.off("framenavigated", navigationListener);
-          this.checkoutSubmitDispatchWaiters.delete(dispatchToken);
           await candidate
             .evaluate(
               (element) => {
@@ -12086,7 +11948,6 @@ export class BrowserController {
               const stateWindow = window as Window & {
                 __trustySquirePaymentSubmitDispatch?: {
                   token: string;
-                  dispatched: boolean;
                   submitObserved: boolean;
                   validationBlocked: boolean;
                 };
@@ -12096,7 +11957,6 @@ export class BrowserController {
               }
             }, dispatchToken)
             .catch(() => undefined);
-          await readDispatchOutcomeBaseline();
         };
         // Money-fence boundary: the async pay-button scan above (visibility/
         // enabled/ownership/label checks, dispatch-tracking install) is a real
@@ -12126,17 +11986,12 @@ export class BrowserController {
               });
             },
             readEvidence: async () => {
-              const documentBaseline = await readDispatchOutcomeBaseline();
-              const baseline = documentBaseline ?? (await readBoundDispatchOutcomeBaseline());
-              const dispatchState = baseline === null ? await readDispatchState() : null;
+              await waitForDispatchEvidence();
+              const dispatchState = await readDispatchState();
               const clickOnlyOutcomeConfirmed =
-                baseline === null &&
-                dispatchState?.dispatched !== true &&
                 (navigationTerminalObserved ||
                   (await this.hasConfirmedCheckoutOutcome(clickOnlyOutcomeBaseline)));
               const clickOnlyThreeDsObserved =
-                baseline === null &&
-                dispatchState?.dispatched !== true &&
                 navigationObserved &&
                 (navigationThreeDsObserved ||
                   (await this.detectThreeDsChallenge().catch(() => undefined))
@@ -12146,11 +12001,8 @@ export class BrowserController {
                 clickOnlyOutcomeConfirmed ||
                 clickOnlyThreeDsObserved;
               return {
-                baseline: clickOnlyDispatchObserved ? clickOnlyOutcomeBaseline : baseline,
-                dispatched:
-                  baseline !== null ||
-                  dispatchState?.dispatched === true ||
-                  clickOnlyDispatchObserved,
+                baseline: clickOnlyDispatchObserved ? clickOnlyOutcomeBaseline : null,
+                dispatched: clickOnlyDispatchObserved,
               };
             },
             clear: async () => undefined,

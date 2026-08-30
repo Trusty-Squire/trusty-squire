@@ -273,17 +273,17 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       if (submission !== null) return { record, submission };
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) {
-        const finalRecord =
-          await opts.deps.pendingPaymentApprovalStore.getByIdForAccount(id, accountId);
+        const finalSubmission = await readSubmission(id, accountId, peek);
+        const finalRecord = await opts.deps.pendingPaymentApprovalStore.getByIdForAccount(
+          id,
+          accountId,
+        );
         if (finalRecord === null) return { record: null, submission: null };
         const finalNow = opts.deps.now?.() ?? new Date();
         if (finalRecord.status !== "pending" || finalRecord.expiresAt <= finalNow) {
           return { record: finalRecord, submission: null };
         }
-        return {
-          record: finalRecord,
-          submission: await readSubmission(id, accountId, peek),
-        };
+        return { record: finalRecord, submission: finalSubmission };
       }
       await sleep(Math.min(relayPollIntervalMs, remainingMs));
     }

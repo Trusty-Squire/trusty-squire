@@ -1126,6 +1126,35 @@ describe("operate_pay", () => {
     });
   });
 
+  it.each([
+    ["succeeded", "payment_submitted"],
+    ["failed", "payment_declined"],
+  ] as const)(
+    "maps an immediate %s outcome after a dispatched submit error",
+    async (resolution, expectedStatus) => {
+      const outcome = await harness(
+        "happy",
+        "customer_test",
+        undefined,
+        { resolution },
+        {
+          fillAndSubmitCheckout: async (_card, options) => {
+            options?.onSubmitDispatched?.();
+            throw new PaymentSubmitOutcomeUnknownError();
+          },
+        },
+      );
+
+      expect(outcome.result).toMatchObject({ status: expectedStatus });
+      expect(outcome.result).not.toHaveProperty("reason");
+      expect(outcome.result).not.toHaveProperty("next");
+      expect(outcome.auditBodies).toEqual([
+        expect.objectContaining({ status: expectedStatus }),
+      ]);
+      expect(outcome.activePendingThreeDs).toBeNull();
+    },
+  );
+
   it("does not retain pending 3DS when checkout fails before charge dispatch", async () => {
     const { result, auditBodies, browser, pendingThreeDsStates } = await harness(
       "happy",
@@ -2680,5 +2709,62 @@ describe("operate_pay bounded approval continuation [P0]", () => {
     expect(sleepCalls.length).toBeGreaterThan(0);
     expect(sleepCalls.every((ms) => ms === 3_000)).toBe(true);
     expect(clock).toBeLessThan(13_000);
+  });
+
+  it("returns a resumable approval when the long-poll transport times out", async () => {
+    const env = buildResumableEnv();
+    const getPaymentApproval = vi.spyOn(env.api, "getPaymentApproval").mockImplementation(
+      async (_id, candidateRead) => {
+        if (candidateRead === true) {
+          const error = new Error("approval transport timed out");
+          error.name = "TimeoutError";
+          throw error;
+        }
+        throw new Error("unexpected immediate approval read");
+      },
+    );
+    const onApprovalPending = vi.fn();
+
+    const result = await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      onApprovalPending,
+      pollBudgetMs: 1_000,
+    });
+
+    expect(result).toMatchObject({ status: "approval_pending", approval_id: "appr_resume" });
+    expect(onApprovalPending).toHaveBeenCalledOnce();
+    expect(getPaymentApproval).toHaveBeenCalledWith(
+      "appr_resume",
+      true,
+      expect.any(Number),
+      expect.any(Number),
+    );
+  });
+
+  it("aborts a stalled payment-approval transport at its request bound", async () => {
+    let observedSignal: AbortSignal | undefined;
+    const api = new ApiClient({
+      apiBaseUrl: "https://api.test",
+      registryBaseUrl: "https://registry.test",
+      agentSessionToken: "synthetic-session",
+      fetch: (async (_input, init) => {
+        observedSignal = init?.signal ?? undefined;
+        return await new Promise<Response>((_resolve, reject) => {
+          observedSignal?.addEventListener("abort", () => reject(observedSignal?.reason), {
+            once: true,
+          });
+        });
+      }) as typeof fetch,
+    });
+
+    await expect(api.getPaymentApproval("appr_stalled", true, 5_000, 25)).rejects.toMatchObject({
+      name: "TimeoutError",
+    });
+    expect(observedSignal).toBeDefined();
+    expect(observedSignal?.aborted).toBe(true);
   });
 });

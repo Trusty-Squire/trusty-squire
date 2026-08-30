@@ -647,6 +647,11 @@ export interface Session {
   activePayment:
     | { status: "operating"; lease: ActivePaymentLease }
     | { status: "awaiting_approval"; state: PendingApprovalWait }
+    | {
+        status: "terminal_approval";
+        state: PendingApprovalWait;
+        terminalStatus: "denied" | "expired";
+      }
     | { status: "pending"; pending: PendingCardFill }
     | { status: "confirming"; pending: PendingCardFill; submitStarted: boolean }
     | { status: "sealed" }
@@ -4102,6 +4107,28 @@ export function getActivePendingApproval(selectedSession?: Session): PendingAppr
   return state?.status === "awaiting_approval" ? state.state : null;
 }
 
+export function getTerminalPaymentApproval(
+  selectedSession?: Session,
+): { state: PendingApprovalWait; terminalStatus: "denied" | "expired" } | null {
+  const activePayment = (selectedSession ?? activeProvisionSession()).activePayment;
+  return activePayment?.status === "terminal_approval"
+    ? { state: activePayment.state, terminalStatus: activePayment.terminalStatus }
+    : null;
+}
+
+export function completeActivePendingApprovalWithTerminalStatus(
+  state: PendingApprovalWait,
+  terminalStatus: "denied" | "expired",
+  selectedSession?: Session,
+): boolean {
+  const session = selectedSession ?? activeProvisionSession();
+  const activePayment = session.activePayment;
+  if (activePayment?.status !== "awaiting_approval" || activePayment.state !== state) return false;
+  state.keypair.privateKey = "";
+  session.activePayment = { status: "terminal_approval", state, terminalStatus };
+  return true;
+}
+
 export function getActivePendingThreeDs(selectedSession?: Session): PendingThreeDsWait | null {
   return (selectedSession ?? activeProvisionSession()).pendingThreeDs ?? null;
 }
@@ -4186,6 +4213,11 @@ export interface ActivePaymentLease {
 export type ActivePaymentClaim =
   | { kind: "lease"; lease: ActivePaymentLease; resumeApproval?: PendingApprovalWait }
   | { kind: "confirm"; pending: PendingCardFill }
+  | {
+      kind: "terminal";
+      state: PendingApprovalWait;
+      terminalStatus: "denied" | "expired";
+    }
   | { kind: "missing_confirm" };
 
 export function claimActivePaymentForOperatePay(
@@ -4208,6 +4240,13 @@ export function claimActivePaymentForOperatePay(
   }
   if (state?.status === "sealed") {
     throw new Error("operate_pay refused: payment field cleanup remains unverified");
+  }
+  if (state?.status === "terminal_approval") {
+    return {
+      kind: "terminal",
+      state: state.state,
+      terminalStatus: state.terminalStatus,
+    };
   }
   if (state?.status === "pending") {
     if (phase !== "confirm") {

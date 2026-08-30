@@ -186,6 +186,7 @@ export class ApiClient {
     id: string,
     candidateRead: boolean | "immediate" | "peek" | "wait-peek" = false,
     waitMs?: number,
+    transportTimeoutMs?: number,
   ): Promise<PaymentApproval> {
     const query =
       candidateRead === true
@@ -201,7 +202,14 @@ export class ApiClient {
       waitMs === undefined
         ? ""
         : `${query.length === 0 ? "?" : "&"}wait_ms=${Math.max(0, Math.floor(waitMs))}`;
-    return this.get(`/v1/pay/approvals/${encodeURIComponent(id)}${query}${boundedWait}`);
+    const signal =
+      transportTimeoutMs === undefined
+        ? undefined
+        : AbortSignal.timeout(Math.max(1, Math.floor(transportTimeoutMs)));
+    return this.get(
+      `/v1/pay/approvals/${encodeURIComponent(id)}${query}${boundedWait}`,
+      signal,
+    );
   }
 
   async confirmPaymentApproval(
@@ -573,10 +581,11 @@ export class ApiClient {
     return h;
   }
 
-  private async get<T>(path: string): Promise<T> {
+  private async get<T>(path: string, signal?: AbortSignal): Promise<T> {
     const res = await this.fetchImpl(`${this.config.apiBaseUrl}${path}`, {
       method: "GET",
       headers: this.headers(),
+      ...(signal !== undefined ? { signal } : {}),
     });
     return (await this.handleResponse(res, "GET", path)) as T;
   }

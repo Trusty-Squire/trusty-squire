@@ -987,9 +987,11 @@ import {
   recordActivePaymentProvenance,
   setActivePendingCardFill,
   claimActivePaymentForOperatePay,
+  completeActivePendingApprovalWithTerminalStatus,
   completeActivePaymentLeaseWithPendingApproval,
   completeActivePaymentLeaseWithPendingFill,
   getActivePendingApproval,
+  getTerminalPaymentApproval,
   getActivePendingCardFill,
   releaseActivePaymentLease,
   markActivePendingCardFillSubmitStarted,
@@ -9253,6 +9255,30 @@ describe("awaiting-approval payment lease [P0]", () => {
     if (resumed.kind !== "lease") throw new Error("expected a resumed lease");
     expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(/already in progress/);
     expect(releaseActivePaymentLease(resumed.lease, true)).toBe(true);
+  });
+
+  it("scrubs a terminal approval and never turns it into a fresh lease", async () => {
+    await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const terminalState = {
+      ...approvalState,
+      keypair: { ...approvalState.keypair, privateKey: "terminal-private" },
+    };
+    const claim = claimActivePaymentForOperatePay(undefined);
+    if (claim.kind !== "lease") throw new Error("expected a fresh lease");
+    completeActivePaymentLeaseWithPendingApproval(claim.lease, terminalState);
+
+    expect(completeActivePendingApprovalWithTerminalStatus(terminalState, "denied")).toBe(true);
+    expect(terminalState.keypair.privateKey).toBe("");
+    expect(getActivePendingApproval()).toBeNull();
+    expect(getTerminalPaymentApproval()).toEqual({
+      state: terminalState,
+      terminalStatus: "denied",
+    });
+    expect(claimActivePaymentForOperatePay(undefined)).toEqual({
+      kind: "terminal",
+      state: terminalState,
+      terminalStatus: "denied",
+    });
   });
 });
 

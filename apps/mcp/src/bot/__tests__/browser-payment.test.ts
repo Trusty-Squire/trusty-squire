@@ -1540,6 +1540,119 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "does not treat a submit cancelled by a window handler as dispatch",
+    async () => {
+      const checkoutUrl = "https://merchant.test/checkout";
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.route(checkoutUrl, async (route) => {
+          await route.fulfill({
+            contentType: "text/html",
+            body: `
+              <form id="checkout">
+                <label>Address <input required value="123 Synthetic Street"></label>
+                <button type="submit">Pay now</button>
+              </form>
+              <script>
+                window.addEventListener("submit", (event) => {
+                  event.preventDefault();
+                  document.body.dataset.windowSubmitObserved = "true";
+                  document.body.insertAdjacentHTML(
+                    "beforeend",
+                    '<p id="address-error">Address unavailable</p>'
+                  );
+                });
+              </script>`,
+          });
+        });
+        await page.goto(checkoutUrl);
+        const controller = BrowserController.fromHarnessPage(page);
+        const onSubmitDispatched = vi.fn();
+
+        await expect(
+          (
+            controller as unknown as {
+              submitFilledCheckoutInScope: (
+                cardGroup: undefined,
+                onDispatched: () => void,
+              ) => Promise<CheckoutSubmitResult>;
+            }
+          ).submitFilledCheckoutInScope(undefined, onSubmitDispatched),
+        ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
+
+        await expect(page.locator("body").getAttribute("data-window-submit-observed")).resolves.toBe(
+          "true",
+        );
+        await expect(page.locator("#address-error").textContent()).resolves.toBe(
+          "Address unavailable",
+        );
+        expect(onSubmitDispatched).not.toHaveBeenCalled();
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "tracks an anonymous checkout mutation inside a batched GraphQL request",
+    async () => {
+      const checkoutUrl = "https://merchant.test/checkout";
+      const graphqlUrl = "https://merchant.test/graphql";
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        let chargeRequests = 0;
+        await page.route(checkoutUrl, async (route) => {
+          await route.fulfill({
+            contentType: "text/html",
+            body: `
+              <button type="button">Pay now</button>
+              <script>
+                document.querySelector("button").addEventListener("click", async () => {
+                  await fetch("/graphql", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify([
+                      { query: "query { checkoutStatus { id } }" },
+                      { query: "mutation { completeCheckout(input: {}) { id } }" }
+                    ])
+                  });
+                  history.pushState({}, "", "/receipt/ORD-BATCH-123");
+                });
+              </script>`,
+          });
+        });
+        await page.route(graphqlUrl, async (route) => {
+          chargeRequests += 1;
+          await route.fulfill({ body: "charge accepted" });
+        });
+        await page.goto(checkoutUrl);
+        const controller = BrowserController.fromHarnessPage(page);
+        const onSubmitDispatched = vi.fn();
+
+        await expect(
+          (
+            controller as unknown as {
+              submitFilledCheckoutInScope: (
+                cardGroup: undefined,
+                onDispatched: () => void,
+              ) => Promise<CheckoutSubmitResult>;
+            }
+          ).submitFilledCheckoutInScope(undefined, onSubmitDispatched),
+        ).resolves.toEqual({ three_ds_required: false, order_confirmed: true });
+
+        expect(chargeRequests).toBe(1);
+        expect(onSubmitDispatched).toHaveBeenCalledOnce();
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "tracks a generic charge request after delayed tokenization",
     async () => {
       const checkoutUrl = "https://merchant.test/checkout";

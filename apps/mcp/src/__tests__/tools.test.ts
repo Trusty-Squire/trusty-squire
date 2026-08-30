@@ -35,6 +35,10 @@ const mockRecordActivePaymentProvenance = vi.hoisted(() => vi.fn());
 // state machine so operate_pay's approval_pending path, and
 // operate_payment_status can be exercised against this fake session.
 let mockAwaitingApproval: PendingApprovalWait | null = null;
+let mockTerminalApproval: {
+  state: PendingApprovalWait;
+  terminalStatus: "denied" | "expired";
+} | null = null;
 let mockCartCheckout: CartCheckoutObservation | null = null;
 const PAYMENT_SESSION_A_ID = "00000000-0000-4000-8000-000000000001";
 const PAYMENT_SESSION_B_ID = "00000000-0000-4000-8000-000000000002";
@@ -48,6 +52,10 @@ interface MockPaymentSessionState {
   paymentSealed: boolean;
   paymentSealActive: boolean;
   awaitingApproval: PendingApprovalWait | null;
+  terminalApproval: {
+    state: PendingApprovalWait;
+    terminalStatus: "denied" | "expired";
+  } | null;
   cartCheckout: CartCheckoutObservation | null;
 }
 
@@ -100,6 +108,12 @@ const primaryPaymentState: MockPaymentSessionState = {
   set awaitingApproval(value) {
     mockAwaitingApproval = value;
   },
+  get terminalApproval() {
+    return mockTerminalApproval;
+  },
+  set terminalApproval(value) {
+    mockTerminalApproval = value;
+  },
   get cartCheckout() {
     return mockCartCheckout;
   },
@@ -125,6 +139,7 @@ function createPaymentSessionState(
     paymentSealed: false,
     paymentSealActive: false,
     awaitingApproval: null,
+    terminalApproval: null,
     cartCheckout: null,
     ...overrides,
   };
@@ -189,6 +204,9 @@ vi.mock("../bot/provision-session.js", async (importOriginal) => {
       if (state.paymentSealed) {
         throw new Error("operate_pay refused: payment field cleanup remains unverified");
       }
+      if (state.terminalApproval !== null) {
+        return { kind: "terminal", ...state.terminalApproval };
+      }
       if (state.pending !== null) {
         if (phase !== "confirm") {
           throw new Error(
@@ -242,6 +260,20 @@ vi.mock("../bot/provision-session.js", async (importOriginal) => {
     },
     getActivePendingApproval: (session?: ProvisionSession.Session) =>
       paymentSessionState(session).awaitingApproval,
+    getTerminalPaymentApproval: (session?: ProvisionSession.Session) =>
+      paymentSessionState(session).terminalApproval,
+    completeActivePendingApprovalWithTerminalStatus: (
+      approval: PendingApprovalWait,
+      terminalStatus: "denied" | "expired",
+      session?: ProvisionSession.Session,
+    ) => {
+      const state = paymentSessionState(session);
+      if (state.awaitingApproval !== approval) return false;
+      approval.keypair.privateKey = "";
+      state.awaitingApproval = null;
+      state.terminalApproval = { state: approval, terminalStatus };
+      return true;
+    },
     recordActivePaymentProvenance: mockRecordActivePaymentProvenance,
     releaseActivePaymentLease: (
       lease: { phase: "fill_card" | "single" },
@@ -358,6 +390,7 @@ beforeEach(() => {
   mockPaymentSealActive = false;
   mockRecordActivePaymentProvenance.mockReset();
   mockAwaitingApproval = null;
+  mockTerminalApproval = null;
   mockCartCheckout = null;
   mockPaymentSessions.clear();
   addPaymentSession(PAYMENT_SESSION_A_ID, primaryPaymentState);
@@ -1136,7 +1169,16 @@ describe("operate_payment_status [P0]", () => {
       session_id: PAYMENT_SESSION_B_ID,
       approval_id: "appr_session_b",
     });
-    expect(getWaitApproval).toHaveBeenCalledWith("appr_session_b", "wait-peek", expect.any(Number));
+    expect(getWaitApproval).toHaveBeenCalledWith(
+      "appr_session_b",
+      "wait-peek",
+      expect.any(Number),
+      expect.any(Number),
+    );
+
+    sessionB.terminalApproval = null;
+    sessionB.awaitingApproval = stateB;
+    stateB.keypair.privateKey = "private";
 
     const getPayApproval = vi.fn().mockResolvedValue(approvalRecord(stateB));
     const payApi = makeMockApi({
@@ -1239,7 +1281,12 @@ describe("operate_payment_status [P0]", () => {
       ready_to_charge: true,
       next: { tool: "operate_pay", session_id: paymentSessionId },
     });
-    expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", "wait-peek", expect.any(Number));
+    expect(getPaymentApproval).toHaveBeenCalledWith(
+      "appr_status",
+      "wait-peek",
+      expect.any(Number),
+      expect.any(Number),
+    );
   });
 
   it("keeps a one-minute wait inside one status call until final approval arrives", async () => {
@@ -1278,17 +1325,23 @@ describe("operate_payment_status [P0]", () => {
       "appr_status",
       "wait-peek",
       expect.any(Number),
+      expect.any(Number),
     );
     expect(getPaymentApproval).toHaveBeenNthCalledWith(
       2,
       "appr_status",
       "wait-peek",
       expect.any(Number),
+      expect.any(Number),
     );
   });
 
   it("returns a denied approval as a terminal status without another action", async () => {
-    mockAwaitingApproval = baseState;
+    const deniedState: PendingApprovalWait = {
+      ...baseState,
+      keypair: { ...baseState.keypair, privateKey: "denied-private" },
+    };
+    mockAwaitingApproval = deniedState;
     const getPaymentApproval = vi.fn().mockResolvedValue({
       id: "appr_status",
       status: "denied",
@@ -1309,6 +1362,21 @@ describe("operate_payment_status [P0]", () => {
     >;
     expect(result).toMatchObject({ status: "denied", ready_to_charge: false });
     expect(result).not.toHaveProperty("next");
+    expect(deniedState.keypair.privateKey).toBe("");
+    expect(mockAwaitingApproval).toBeNull();
+    expect(mockTerminalApproval).toEqual({ state: deniedState, terminalStatus: "denied" });
+
+    const createPaymentApproval = vi.fn();
+    await expect(
+      operatePayTool.handler(
+        operatePayTool.inputSchema.parse(PAYMENT_DETAILS),
+        makeMockApi({ createPaymentApproval } as unknown as ApiClient),
+      ),
+    ).resolves.toMatchObject({
+      status: "payment_approval_denied",
+      approval_id: "appr_status",
+    });
+    expect(createPaymentApproval).not.toHaveBeenCalled();
   });
 
   it("reserves response time so a near-deadline denial remains terminal", async () => {
@@ -1345,6 +1413,7 @@ describe("operate_payment_status [P0]", () => {
       expect(getPaymentApproval).toHaveBeenCalledWith(
         "appr_status",
         "wait-peek",
+        expect.any(Number),
         expect.any(Number),
       );
       expect(Number(getPaymentApproval.mock.calls[0]?.[2])).toBe(1_000);
@@ -1394,6 +1463,7 @@ describe("operate_payment_status [P0]", () => {
         "appr_status",
         "wait-peek",
         500,
+        1_000,
       );
     } finally {
       vi.useRealTimers();
@@ -1454,7 +1524,11 @@ describe("operate_payment_status [P0]", () => {
   });
 
   it("reports expired without a next action", async () => {
-    mockAwaitingApproval = baseState;
+    const expiredState: PendingApprovalWait = {
+      ...baseState,
+      keypair: { ...baseState.keypair, privateKey: "expired-private" },
+    };
+    mockAwaitingApproval = expiredState;
     const getPaymentApproval = vi.fn().mockResolvedValue({
       id: "appr_status",
       status: "expired",
@@ -1472,6 +1546,9 @@ describe("operate_payment_status [P0]", () => {
     const result = await operatePaymentStatusTool.handler({ wait_seconds: 5 }, api);
     expect(result).toMatchObject({ status: "expired" });
     expect(result).not.toHaveProperty("next");
+    expect(expiredState.keypair.privateKey).toBe("");
+    expect(mockAwaitingApproval).toBeNull();
+    expect(mockTerminalApproval).toEqual({ state: expiredState, terminalStatus: "expired" });
   });
 
   it("wait never outlasts its own bound even if the server call hangs", async () => {

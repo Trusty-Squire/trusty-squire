@@ -529,6 +529,13 @@ function isPaymentApprovalDeniedError(error: unknown): boolean {
 // their phone, open the banking app, and approve — but bounded, matching
 // the rest of this file's "wait, but never forever" posture.
 const THREE_DS_RESUME_WINDOW_MS = 20 * 60 * 1000;
+const PAYMENT_APPROVAL_RESPONSE_RESERVE_MS = 500;
+
+function isPaymentApprovalTransportTimeout(error: unknown): boolean {
+  return (
+    error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")
+  );
+}
 
 // The cardholder approves 3-D Secure via an app-push in their bank app while
 // the browser's checkout JavaScript owns the native challenge handshake. Fires
@@ -966,10 +973,25 @@ export async function executeOperatePay(
       iteration++;
       const remainingPollMs = Math.max(Math.min(callDeadline, deadline) - deps.now(), 0);
       const candidateRead = remainingPollMs > 0 ? true : "immediate";
-      const approval =
-        candidateRead === true
-          ? await api.getPaymentApproval(approvalId, true, Math.min(remainingPollMs, 15_000))
-          : await api.getPaymentApproval(approvalId, "immediate");
+      let approval: PaymentApproval;
+      try {
+        approval =
+          candidateRead === true
+            ? await api.getPaymentApproval(
+                approvalId,
+                true,
+                Math.min(
+                  Math.max(remainingPollMs - PAYMENT_APPROVAL_RESPONSE_RESERVE_MS, 0),
+                  15_000,
+                ),
+                remainingPollMs,
+              )
+            : await api.getPaymentApproval(approvalId, "immediate");
+      } catch (error) {
+        if (!isPaymentApprovalTransportTimeout(error)) throw error;
+        budgetExhausted = true;
+        break;
+      }
       const liveDeadline = Date.parse(approval.expires_at);
       if (Number.isFinite(liveDeadline)) deadline = Math.min(deadline, liveDeadline);
       boundCardRef = approval.card_ref;
@@ -1531,12 +1553,16 @@ export async function executeOperatePay(
       }
       const outcomeUnknown = error instanceof PaymentSubmitOutcomeUnknownError;
       paymentStatus = outcomeUnknown ? "payment_outcome_unknown" : "payment_checkout_failed";
+      let terminalSubmitOutcome = false;
       if (outcomeUnknown) {
         const resolution = await browser.waitForThreeDsResolution(0).catch(() => undefined);
-        if (resolution === "challenge_pending") {
-          pendingThreeDsHandoff.outcome = "three_ds";
-          submitResult.three_ds_required = true;
-          paymentStatus = "payment_3ds_required";
+        if (resolution !== undefined) {
+          paymentStatus = statusAfterThreeDsResolution(paymentStatus, resolution);
+          terminalSubmitOutcome = resolution === "succeeded" || resolution === "failed";
+          if (resolution === "challenge_pending") {
+            pendingThreeDsHandoff.outcome = "three_ds";
+            submitResult.three_ds_required = true;
+          }
         }
         const mismatch = browser.paymentInstrumentMismatch?.();
         if (mismatch !== undefined) submitResult.payment_instrument_mismatch = mismatch;
@@ -1556,23 +1582,30 @@ export async function executeOperatePay(
       } catch {
         audit_recorded = false;
       }
-      if (outcomeUnknown && retainedPendingThreeDs !== null) retainPendingThreeDs();
-      else if (!outcomeUnknown) clearPendingThreeDs();
+      if (outcomeUnknown && !terminalSubmitOutcome && retainedPendingThreeDs !== null) {
+        retainPendingThreeDs();
+      } else {
+        clearPendingThreeDs();
+      }
       return {
         status: paymentStatus,
         audit_recorded,
-        reason: outcomeUnknown
-          ? paymentStatus === "payment_3ds_required"
-            ? "payment_3ds_required"
-            : "payment_submit_outcome_unknown"
-          : error instanceof Error && /^payment_[a-z_]+(?::[a-z_]+)?$/.test(error.message)
-            ? error.message
-            : "payment_checkout_failed",
+        ...(!terminalSubmitOutcome
+          ? {
+              reason: outcomeUnknown
+                ? paymentStatus === "payment_3ds_required"
+                  ? "payment_3ds_required"
+                  : "payment_submit_outcome_unknown"
+                : error instanceof Error && /^payment_[a-z_]+(?::[a-z_]+)?$/.test(error.message)
+                  ? error.message
+                  : "payment_checkout_failed",
+            }
+          : {}),
         approval_url: approvalUrl,
         ...(submitResult.payment_instrument_mismatch !== undefined
           ? { warning: submitResult.payment_instrument_mismatch }
           : {}),
-        ...(outcomeUnknown && retainedPendingThreeDs !== null
+        ...(outcomeUnknown && !terminalSubmitOutcome && retainedPendingThreeDs !== null
           ? { next: pendingOutcomeNext() }
           : {}),
         ...(paymentStatus === "payment_3ds_required"
@@ -1582,6 +1615,13 @@ export async function executeOperatePay(
                 message: threeDsHandoffMessage(submitResult, undefined),
                 resume: "checkout",
               },
+            }
+          : {}),
+        ...(paymentStatus === "payment_submitted"
+          ? {
+              merchant: checkout.merchant,
+              amount_cents: checkout.amount_cents,
+              currency: checkout.currency,
             }
           : {}),
       };
