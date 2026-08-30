@@ -37,6 +37,7 @@ import { assertApi, type Tool } from "./index.js";
 // longer for JIT). If this bound expires, session state retains the same
 // approval and the next operate_pay call continues waiting on it.
 const OPERATE_PAY_APPROVAL_WAIT_MS = 60_000;
+const PAYMENT_APPROVAL_RESPONSE_RESERVE_MS = 500;
 
 const inputSchema = z
   .object({
@@ -516,8 +517,10 @@ async function readApprovalStatus(
   waitForSubmission: boolean,
   boundMs?: number,
 ): Promise<Record<string, unknown>> {
+  const serverWaitMs =
+    boundMs === undefined ? undefined : Math.max(boundMs - PAYMENT_APPROVAL_RESPONSE_RESERVE_MS, 0);
   const fetchApproval = waitForSubmission
-    ? api.getPaymentApproval(state.approval_id, "wait-peek", boundMs)
+    ? api.getPaymentApproval(state.approval_id, "wait-peek", serverWaitMs)
     : api.getPaymentApproval(state.approval_id, "peek");
   const approval =
     boundMs === undefined

@@ -34,6 +34,7 @@ import type {
   JSHandle,
   Locator,
   Page,
+  Request,
 } from "playwright";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
@@ -903,6 +904,18 @@ function sealedElementSemanticKeys(descriptor: SealedElementDescriptor): string[
 // as 購入手続きへ). 確定 (finalize) is deliberate — 確認 (review) must NOT match.
 export const CHECKOUT_SUBMIT_LABEL_RE =
   /^(?:pay(?:\s+now)?|place\s+order|complete\s+(?:order|purchase|payment)|submit\s+payment|buy\s+now|confirm\s+(?:order|payment))\b|^ご?注文(?:内容)?[をの]?確定|^ご?注文する|^確定(?:する|$)|^購入(?:する|を確定|$)|^今すぐ(?:購入|注文|支払)|^支払う|^お?支払い(?:を確定|$)/i;
+
+const CHECKOUT_PAYMENT_REQUEST_PATH_RE =
+  /(?:^|[/_.-])(?:charge|charges|authorize|authorization|capture|payment[_-]?intents?|payments?|place[_-]?order|submit[_-]?payment|confirm[_-]?(?:order|payment)|complete[_-]?(?:order|payment|purchase)|purchase)(?:$|[/_.-])/i;
+
+function isCheckoutPaymentRequest(request: Request): boolean {
+  if (request.resourceType() !== "fetch" && request.resourceType() !== "xhr") return false;
+  try {
+    return CHECKOUT_PAYMENT_REQUEST_PATH_RE.test(new URL(request.url()).pathname);
+  } catch {
+    return false;
+  }
+}
 
 export function checkoutSubmitLabel(signals: {
   ariaLabel?: string | null;
@@ -11755,6 +11768,21 @@ export class BrowserController {
           this.checkoutSubmitDispatchWaiters.delete(dispatchToken);
           continue;
         }
+        let paymentRequestTrackingArmed = false;
+        let concretePaymentRequestObserved = false;
+        const paymentRequestListener = (request: Request): void => {
+          if (!paymentRequestTrackingArmed || this.page === undefined) return;
+          let sourceFrame: Frame;
+          try {
+            sourceFrame = request.frame();
+          } catch {
+            return;
+          }
+          if (sourceFrame !== frame && sourceFrame !== this.page.mainFrame()) return;
+          if (!request.isNavigationRequest() && !isCheckoutPaymentRequest(request)) return;
+          concretePaymentRequestObserved = true;
+        };
+        this.page.on("request", paymentRequestListener);
         const readDispatchOutcomeBaseline = async (): Promise<CheckoutOutcomeBaseline | null> => {
           const snapshot = await this.page!.mainFrame()
             .evaluate(
@@ -11827,6 +11855,8 @@ export class BrowserController {
             }, dispatchToken)
             .catch(() => null);
         const clearDispatchTracking = async (): Promise<void> => {
+          paymentRequestTrackingArmed = false;
+          this.page?.off("request", paymentRequestListener);
           this.checkoutSubmitDispatchWaiters.delete(dispatchToken);
           await candidate
             .evaluate(
@@ -11887,6 +11917,7 @@ export class BrowserController {
           capturedBaseline = await runCaptureConfirmedPaymentSubmit({
             click: async (markInputDispatchPossible) => {
               const remainingMs = beforeSubmitDispatch?.();
+              paymentRequestTrackingArmed = true;
               markInputDispatchPossible();
               await candidate.click({
                 noWaitAfter: true,
@@ -11903,12 +11934,14 @@ export class BrowserController {
                 baseline === null &&
                 dispatchState?.dispatched !== true &&
                 (await this.hasConfirmedCheckoutOutcome(clickOnlyOutcomeBaseline));
+              const clickOnlyDispatchObserved =
+                concretePaymentRequestObserved || clickOnlyOutcomeConfirmed;
               return {
-                baseline: clickOnlyOutcomeConfirmed ? clickOnlyOutcomeBaseline : baseline,
+                baseline: clickOnlyDispatchObserved ? clickOnlyOutcomeBaseline : baseline,
                 dispatched:
                   baseline !== null ||
                   dispatchState?.dispatched === true ||
-                  clickOnlyOutcomeConfirmed,
+                  clickOnlyDispatchObserved,
               };
             },
             clear: async () => undefined,

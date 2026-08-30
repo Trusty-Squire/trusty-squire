@@ -960,6 +960,58 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "tracks an async click-only charge request before delayed receipt navigation",
+    async () => {
+      const checkoutUrl = "https://merchant.test/checkout";
+      const chargeUrl = "https://merchant.test/charge";
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        let chargeRequests = 0;
+        await page.route(checkoutUrl, async (route) => {
+          await route.fulfill({
+            contentType: "text/html",
+            body: `
+              <form>
+                <button type="button">Pay now</button>
+              </form>
+              <script>
+                document.querySelector("button").addEventListener("click", async () => {
+                  await fetch("/charge");
+                  setTimeout(() => history.pushState({}, "", "/receipt/ORD-ASYNC-123"), 500);
+                });
+              </script>`,
+          });
+        });
+        await page.route(chargeUrl, async (route) => {
+          chargeRequests += 1;
+          await route.fulfill({ body: "charge accepted" });
+        });
+        await page.goto(checkoutUrl);
+        const controller = BrowserController.fromHarnessPage(page);
+        const onSubmitDispatched = vi.fn();
+
+        await expect(
+          (
+            controller as unknown as {
+              submitFilledCheckoutInScope: (
+                cardGroup: undefined,
+                onDispatched: () => void,
+              ) => Promise<CheckoutSubmitResult>;
+            }
+          ).submitFilledCheckoutInScope(undefined, onSubmitDispatched),
+        ).resolves.toEqual({ three_ds_required: false, order_confirmed: true });
+
+        expect(chargeRequests).toBe(1);
+        expect(onSubmitDispatched).toHaveBeenCalledOnce();
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "holds the payment action lease across a submit-associated SPA charge and 3DS follow-up",
     async () => {
       const browser = await chromium.launch({ headless: true });

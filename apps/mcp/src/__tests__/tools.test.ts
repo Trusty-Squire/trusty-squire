@@ -1309,6 +1309,48 @@ describe("operate_payment_status [P0]", () => {
     expect(result).not.toHaveProperty("next");
   });
 
+  it("reserves response time so a near-deadline denial remains terminal", async () => {
+    vi.useFakeTimers();
+    try {
+      mockAwaitingApproval = baseState;
+      const getPaymentApproval = vi.fn(
+        async (_id: string, _candidateRead: string, waitMs?: number) =>
+          await new Promise<Record<string, unknown>>((resolve) => {
+            setTimeout(
+              () =>
+                resolve({
+                  id: "appr_status",
+                  status: "denied",
+                  merchant: "M",
+                  amount_cents: 100,
+                  currency: "USD",
+                  expires_at: new Date(Date.now() + 60_000).toISOString(),
+                  card_ref: "card_1",
+                  operator_pubkey: operatorPublicKey,
+                  jws: null,
+                  sealed_card: null,
+                }),
+              (waitMs ?? 0) + 100,
+            );
+          }),
+      );
+      const api = makeMockApi({ getPaymentApproval } as unknown as ApiClient);
+
+      const result = operatePaymentStatusTool.handler({ wait_seconds: 1 }, api);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      await expect(result).resolves.toMatchObject({ status: "denied", ready_to_charge: false });
+      expect(getPaymentApproval).toHaveBeenCalledWith(
+        "appr_status",
+        "wait-peek",
+        expect.any(Number),
+      );
+      expect(Number(getPaymentApproval.mock.calls[0]?.[2])).toBeLessThan(1_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("distinguishes a review candidate from final charge authorization", async () => {
     mockAwaitingApproval = baseState;
     const getPaymentApproval = vi.fn().mockResolvedValue({
