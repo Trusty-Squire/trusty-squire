@@ -45,7 +45,6 @@ import type { OAuthProviderId } from "./oauth-providers.js";
 import {
   canonicalIdentitySnapshotDisposition,
   GOOGLE_LOGIN_COOKIE_MARKERS,
-  hasUsableGoogleIdentity,
   readCanonicalIdentityMetadata,
   writeCanonicalIdentitySnapshot,
   type BrowserStorageState,
@@ -289,6 +288,46 @@ export async function contextHasProviderSession(
   provider: OAuthProviderId,
 ): Promise<boolean> {
   return hasProviderSession(context, LOGIN_TARGETS[provider]);
+}
+
+function providerIdentityMarkerCount(
+  state: BrowserStorageState,
+  provider: OAuthProviderId,
+  nowSeconds = Date.now() / 1_000,
+): number {
+  if (provider === "google") {
+    return state.cookies.filter((cookie) => {
+      const host = cookie.domain.replace(/^\./, "");
+      return (
+        /(^|\.)google\.com$/i.test(host) &&
+        GOOGLE_LOGIN_COOKIE_MARKERS.includes(
+          cookie.name as (typeof GOOGLE_LOGIN_COOKIE_MARKERS)[number],
+        ) &&
+        cookie.value.length > 10 &&
+        (cookie.expires === undefined || cookie.expires <= 0 || cookie.expires > nowSeconds)
+      );
+    }).length;
+  }
+  return state.cookies.filter((cookie) => {
+    const host = cookie.domain.replace(/^\./, "");
+    return (
+      /(^|\.)github\.com$/i.test(host) &&
+      LOGIN_TARGETS.github.cookies.includes(cookie.name) &&
+      cookie.value.length > 0 &&
+      (cookie.expires === undefined || cookie.expires <= 0 || cookie.expires > nowSeconds)
+    );
+  }).length;
+}
+
+function capturedPageLocations(context: BrowserContext): string[] {
+  return context.pages().flatMap((page) => {
+    try {
+      const url = new URL(page.url());
+      return [`${url.origin}${url.pathname}`];
+    } catch {
+      return [];
+    }
+  });
 }
 
 const PROVIDER_COOKIE_MARKERS: Record<OAuthProviderId, readonly string[]> = {
@@ -713,6 +752,10 @@ export interface RunInBotChromeOpts {
   confirmedProviders?:
     | readonly OAuthProviderId[]
     | (() => readonly OAuthProviderId[]);
+  // Test/local IdP seam for asserting the just-captured live context before
+  // any canonical file is written. Production provider logins use the stricter
+  // seedProvider marker check below.
+  validateCapturedState?: (state: BrowserStorageState) => void | Promise<void>;
 }
 
 const LOGIN_BROWSER_CLOSED_ERROR =
@@ -735,6 +778,8 @@ export interface LoginRunResult {
   closeState: ProfileCloseState;
   storageState?: BrowserStorageState;
   googleAccountEmail?: string;
+  captureSource?: "displayed-live-context" | "remote-live-context";
+  capturedPageLocations?: string[];
 }
 
 async function captureClosedPlainLoginState(
@@ -750,7 +795,11 @@ async function captureClosedPlainLoginState(
 export async function finalizeLoginRun(
   opts: Pick<
     RunInBotChromeOpts,
-    "profileDir" | "onConfirmedLogin" | "seedProvider" | "confirmedProviders"
+    | "profileDir"
+    | "onConfirmedLogin"
+    | "seedProvider"
+    | "confirmedProviders"
+    | "validateCapturedState"
   >,
   result: LoginRunResult,
 ): Promise<void> {
@@ -764,10 +813,29 @@ export async function finalizeLoginRun(
     typeof opts.confirmedProviders === "function"
       ? opts.confirmedProviders()
       : (opts.confirmedProviders ?? []);
+  const providerMarkerCount =
+    seedProvider === undefined || seedProvider === null
+      ? 0
+      : providerIdentityMarkerCount(result.storageState, seedProvider);
+  await opts.validateCapturedState?.(result.storageState);
   const priorMetadata = await readCanonicalIdentityMetadata(opts.profileDir);
-  if (seedProvider === "google" && result.status === "completed") {
-    if (!hasUsableGoogleIdentity(result.storageState)) {
-      throw new Error("Google login completed without a live identity marker");
+  if (seedProvider !== undefined && seedProvider !== null && result.status === "completed") {
+    if (providerMarkerCount === 0) {
+      if (result.captureSource !== undefined) {
+        console.error(
+          `[login:capture] ${JSON.stringify({
+            status: "rejected_missing_provider_cookie",
+            source: result.captureSource,
+            profileDir: opts.profileDir,
+            pages: result.capturedPageLocations ?? [],
+            cookieCount: result.storageState.cookies.length,
+            provider: seedProvider,
+            providerMarkerCount,
+          })}`,
+        );
+      }
+      const label = seedProvider === "google" ? "Google" : "GitHub";
+      throw new Error(`${label} login completed without a live identity marker`);
     }
   }
   const metadata =
@@ -789,6 +857,19 @@ export async function finalizeLoginRun(
     confirmedProviders,
   );
   if (!published) throw new Error("login identity snapshot could not be published");
+  if (result.captureSource !== undefined) {
+    console.error(
+      `[login:capture] ${JSON.stringify({
+        status: "published",
+        source: result.captureSource,
+        profileDir: opts.profileDir,
+        pages: result.capturedPageLocations ?? [],
+        cookieCount: result.storageState.cookies.length,
+        provider: seedProvider ?? null,
+        providerMarkerCount,
+      })}`,
+    );
+  }
   await opts.onConfirmedLogin?.();
 }
 
@@ -909,6 +990,7 @@ export async function runDisplayedChrome(
   let closeState: ProfileCloseState = "unknown";
   let storageState: BrowserStorageState | undefined;
   let googleAccountEmail: string | null = null;
+  let pageLocations: string[] | undefined;
   try {
     const context = await launchWithProfileGate(
       opts.profileDir,
@@ -965,8 +1047,16 @@ export async function runDisplayedChrome(
       status = ok ? "completed" : "timeout";
     }
     if (status === "completed" || status === "preflight_satisfied") {
-      googleAccountEmail = await detectGoogleAccountEmailInContext(context);
+      // Snapshot the exact context whose completion predicate just passed.
+      // Metadata probing opens another Google page and must never get between
+      // the authoritative vault return and the cookie-jar capture.
       storageState = await context.storageState({ indexedDB: true });
+      pageLocations = capturedPageLocations(context);
+      const seedProvider =
+        typeof opts.seedProvider === "function" ? opts.seedProvider() : opts.seedProvider;
+      if (seedProvider === "google") {
+        googleAccountEmail = await detectGoogleAccountEmailInContext(context);
+      }
     }
   } finally {
     closeState = await lifecycle.finish();
@@ -976,6 +1066,12 @@ export async function runDisplayedChrome(
     closeState,
     ...(storageState === undefined ? {} : { storageState }),
     ...(googleAccountEmail === null ? {} : { googleAccountEmail }),
+    ...(storageState === undefined
+      ? {}
+      : {
+          captureSource: "displayed-live-context" as const,
+          capturedPageLocations: pageLocations ?? [],
+        }),
   };
 }
 
@@ -992,6 +1088,7 @@ export async function runRemoteLoginChrome(
   );
   activeTeardown = lifecycle.cancel;
   let storageState: BrowserStorageState | undefined;
+  let pageLocations: string[] | undefined;
 
   try {
     await startRemoteLoginDisplay(rig);
@@ -1109,8 +1206,15 @@ export async function runRemoteLoginChrome(
           (await checkLoginStatusWithin(opts.deadline, () => opts.preflight!(context)));
         if (preflightSatisfied) {
           storageState = await context.storageState({ indexedDB: true });
+          pageLocations = capturedPageLocations(context);
           const closeState = await lifecycle.finish();
-          return { status: "preflight_satisfied", closeState, storageState };
+          return {
+            status: "preflight_satisfied",
+            closeState,
+            storageState,
+            captureSource: "remote-live-context",
+            capturedPageLocations: pageLocations,
+          };
         }
         const page = context.pages()[0] ?? (await context.newPage());
         await page.goto(opts.url, { waitUntil: "domcontentloaded" });
@@ -1143,6 +1247,7 @@ export async function runRemoteLoginChrome(
             }
           }
           storageState = await context.storageState({ indexedDB: true });
+          pageLocations = capturedPageLocations(context);
         } else if (opts.plainOnSuccess !== undefined) {
           try {
             await opts.plainOnSuccess(opts.profileDir);
@@ -1165,6 +1270,12 @@ export async function runRemoteLoginChrome(
         status: completed ? "completed" : "timeout",
         closeState,
         ...(storageState === undefined ? {} : { storageState }),
+        ...(storageState === undefined || context === undefined
+          ? {}
+          : {
+              captureSource: "remote-live-context" as const,
+              capturedPageLocations: pageLocations ?? [],
+            }),
         ...captured,
       };
     } finally {

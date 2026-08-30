@@ -462,6 +462,16 @@ lease from action start through completion and cooldown; all other operator work
 stays parallel. Operators never open the canonical profile or copy Chrome cookie
 databases. The portable-state capture and handoff contract is owned by
 `docs/DESIGN-warm-browser-reuse.md`.
+
+Explicit provider login has the same live-context rule: after the provider cookie
+and Trusty Squire vault return are both observed, call `context.storageState()` on
+that exact context before any metadata navigation or teardown. Do not invalidate
+the last portable identity before opening a fresh login; the live preflight clears
+provider cookies and the prior snapshot remains the fallback until an authenticated
+replacement is captured. Run `pnpm --filter @trusty-squire/mcp build` followed by
+`DISPLAY=<headed-display> node apps/mcp/scripts/live-login-capture-proof.mjs` for a
+credential-free local-IdP proof of this boundary.
+
 ### 14. MCP tests have required-fast and post-merge-slow tiers
 
 `apps/mcp/vitest.tiers.ts` is the static tier manifest. The required `test`

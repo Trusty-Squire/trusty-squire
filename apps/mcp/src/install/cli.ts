@@ -68,7 +68,6 @@ import {
   profilePathIdentity,
   withProfileOperationGuard,
 } from "../bot/profile.js";
-import { invalidateCanonicalGoogleIdentity } from "../bot/session-state.js";
 import { VERSION } from "../version.js";
 import { ensureLatestVersion } from "./version-check.js";
 import * as ui from "./ui.js";
@@ -1332,16 +1331,11 @@ async function loginWithProfileGuard(args: Argv, profileDir: string): Promise<vo
   // An explicit login always means "open a fresh provider login". Requiring a
   // second --force-relogin flag made the command silently short-circuit on any
   // cached cookie, even when the user was deliberately repairing this flow.
-  // Google invalidation publishes the cookie-less snapshot and marker
-  // together; GitHub has no portable-identity precondition, so only its marker
-  // is cleared before the fresh OAuth round trip.
-  if (provider === "google") {
-    const invalidated = await invalidateCanonicalGoogleIdentity(profileDir);
-    if (!invalidated) {
-      ui.fail("I couldn't invalidate the previous Google identity snapshot.");
-      process.exit(1);
-    }
-  } else {
+  // Keep the last portable Google identity until this fresh OAuth round trip
+  // has produced and closed a replacement context. forceOpen clears the live
+  // browser's provider cookies, so deleting the portable fallback here was
+  // redundant and burned a good login whenever the new attempt timed out.
+  if (provider !== "google") {
     clearProviderLoggedIn(provider, profileDir);
   }
   const result = await ensureOAuthSession({

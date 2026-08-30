@@ -265,6 +265,8 @@ export async function invalidateCanonicalGoogleIdentity(
     stripGoogleIdentityFromSessionState(current),
     undefined,
     canPublish,
+    [],
+    { allowGoogleIdentityDowngrade: true },
   );
 }
 
@@ -342,9 +344,22 @@ export async function writeCanonicalIdentitySnapshot(
   metadata: CanonicalIdentityMetadata | undefined,
   canPublish: () => boolean = () => true,
   confirmedProviders: readonly OAuthProviderId[] = [],
+  options: { allowGoogleIdentityDowngrade?: boolean } = {},
 ): Promise<boolean> {
   const disposition = canonicalIdentitySnapshotDisposition(state, metadata);
   if (disposition === "invalid_metadata") return false;
+  const wouldDropUsableGoogleIdentity = async (): Promise<boolean> => {
+    if (options.allowGoogleIdentityDowngrade === true || hasUsableGoogleIdentity(state)) {
+      return false;
+    }
+    return hasUsableGoogleIdentity(await readSessionState(profileDir));
+  };
+  if (await wouldDropUsableGoogleIdentity()) {
+    console.error(
+      "[operator] refusing to replace a usable Google identity snapshot with a cookie-less capture; retaining prior snapshot",
+    );
+    return false;
+  }
   await mkdir(profileDir, { recursive: true, mode: 0o700 });
   const destination = sessionStatePath(profileDir);
   const markerDestination = join(profileDir, LOGGED_IN_PROVIDERS_FILE);
@@ -388,6 +403,9 @@ export async function writeCanonicalIdentitySnapshot(
       await chmod(markerTemporary, 0o600);
     }
     if (!canPublish()) return false;
+    // Re-check immediately before the atomic rename. Another capture may have
+    // published a good identity while this writer prepared its temporary file.
+    if (await wouldDropUsableGoogleIdentity()) return false;
     // The snapshot carries the authoritative provider markers. Its single
     // rename publishes cookies + markers together; the legacy marker mirror is
     // renamed second for older readers.
