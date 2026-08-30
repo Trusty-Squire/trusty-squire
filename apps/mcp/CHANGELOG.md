@@ -1,5 +1,10 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.13-rc.13 (2026-08-30)
+
+- fix(mcp): restore explicit login vault handoff (#609)
+- fix(ci): install Chromium for MCP slow tests (#608)
+
 ## 1.1.13-rc.12 (2026-08-30)
 
 - fix(mcp): prevent OAuth handoff hangs (#606)
