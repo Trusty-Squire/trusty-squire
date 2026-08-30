@@ -709,17 +709,35 @@ describe("pollUntil phase-aware heartbeat", () => {
 });
 
 describe("bot Chrome launch consistency", () => {
-  it("forces the system Chrome channel through the executable launcher", async () => {
-    const context = {};
+  it("keeps persistent launch custody through bounded terminal teardown", async () => {
+    const context = { close: vi.fn(async () => undefined) };
     const launchPersistentContext = vi.fn().mockResolvedValue(context);
     const launcher = { launchPersistentContext } as unknown as PersistentLauncher;
+    const marker = "v1:1:persistent-login";
+    const markTerminal = vi.fn();
+    const terminate = vi.fn(async () => true);
+    const untrack = vi.fn();
 
-    await expect(
-      launchPersistentLoginContext(launcher, "/isolated-profile", {
+    const persistent = await launchPersistentLoginContext(
+      launcher,
+      "/isolated-profile",
+      {
         headless: true,
         channel: "bundled",
-      }),
-    ).resolves.toBe(context);
+      },
+      {
+        registerLocalBrowserLaunch: (_profileDir, env) => ({
+          marker,
+          env: { ...env, [OPERATOR_BROWSER_MARKER_ENV]: marker },
+        }),
+        markTerminal,
+        terminate,
+        untrack,
+      },
+    );
+
+    expect(persistent.context).toBe(context);
+    expect(markTerminal).not.toHaveBeenCalled();
     expect(launchPersistentContext).toHaveBeenCalledWith(
       "/isolated-profile",
       expect.objectContaining({
@@ -730,6 +748,35 @@ describe("bot Chrome launch consistency", () => {
         }),
       }),
     );
+
+    await persistent.close();
+
+    expect(markTerminal).toHaveBeenCalledWith(marker);
+    expect(context.close).toHaveBeenCalledOnce();
+    expect(terminate).toHaveBeenCalledWith(marker);
+    expect(untrack).toHaveBeenCalledWith(marker);
+  });
+
+  it("retains persistent launch custody when exact-marker closure is unproven", async () => {
+    const context = { close: vi.fn(async () => undefined) };
+    const untrack = vi.fn();
+    const persistent = await launchPersistentLoginContext(
+      { launchPersistentContext: vi.fn(async () => context as never) },
+      "/isolated-profile",
+      {},
+      {
+        registerLocalBrowserLaunch: (_profileDir, env) => ({
+          marker: "v1:1:unproven-login",
+          env,
+        }),
+        markTerminal: vi.fn(),
+        terminate: vi.fn(async () => false),
+        untrack,
+      },
+    );
+
+    await expect(persistent.close()).rejects.toThrow("persistent login browser closure unproven");
+    expect(untrack).not.toHaveBeenCalled();
   });
 
   it("captures every browser storage surface from the closed canonical login", async () => {

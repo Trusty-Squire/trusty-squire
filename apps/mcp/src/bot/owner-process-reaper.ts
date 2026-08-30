@@ -16,10 +16,11 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   operatorBrowserProcessCommandState,
-  operatorBrowserProcessMarker,
+  operatorBrowserProcessMarkerState,
   operatorBrowserProcessMatchesMarker,
   registerOperatorBrowserLaunchWatchdog,
   type OperatorBrowserLaunchWatchdogRegistration,
+  type OperatorBrowserProcessMarkerState,
 } from "./operator-browser-watchdog.js";
 import { sweepOperatorProfilePoolOrphans } from "./operator-profile-pool.js";
 import {
@@ -160,10 +161,7 @@ function readManifest(path: string): OwnerReaperManifest | null {
       helpers?: unknown[];
     };
     if (
-      (value.version !== 1 &&
-        value.version !== 2 &&
-        value.version !== 3 &&
-        value.version !== 4) ||
+      (value.version !== 1 && value.version !== 2 && value.version !== 3 && value.version !== 4) ||
       typeof value.token !== "string" ||
       value.owner === undefined ||
       !Number.isSafeInteger(value.owner.pid) ||
@@ -247,57 +245,100 @@ function linuxProcessGroupId(pid: number): number | null {
   }
 }
 
-function processHasHelperMarker(pid: number, marker: string): boolean {
+function helperProcessMarkerState(
+  pid: number,
+  marker: string,
+  readEnvironment: (pid: number) => string = (processId) =>
+    readFileSync(`/proc/${processId}/environ`, "utf8"),
+): ProcessIdentityState {
   try {
-    return readFileSync(`/proc/${pid}/environ`, "utf8")
-      .split("\0")
-      .includes(`${OWNER_HELPER_MARKER_ENV}=${marker}`);
-  } catch {
-    return false;
+    return readEnvironment(pid).split("\0").includes(`${OWNER_HELPER_MARKER_ENV}=${marker}`)
+      ? "matching"
+      : "stale";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ESRCH" ? "stale" : "unknown";
   }
 }
 
-function helperGroupHasMarker(processGroupId: number, marker: string): boolean {
-  if (process.platform !== "linux") return false;
+interface HelperIdentityReaders {
+  readProcessIds?: () => number[];
+  readProcessGroupId?: (pid: number) => number | null;
+  readMarkerState?: (pid: number, marker: string) => ProcessIdentityState;
+  readBirthState?: (identity: OwnerHelperIdentity) => ProcessIdentityState;
+}
+
+function helperGroupMarkerState(
+  processGroupId: number,
+  marker: string,
+  options: HelperIdentityReaders = {},
+): ProcessIdentityState {
+  if (process.platform !== "linux" && options.readProcessIds === undefined) return "stale";
+  let unknown = false;
   try {
-    for (const entry of readdirSync("/proc")) {
-      if (!/^\d+$/.test(entry)) continue;
-      const pid = Number(entry);
-      if (linuxProcessGroupId(pid) === processGroupId && processHasHelperMarker(pid, marker)) {
-        return true;
-      }
+    const processIds =
+      options.readProcessIds?.() ??
+      readdirSync("/proc")
+        .filter((entry) => /^\d+$/.test(entry))
+        .map(Number);
+    for (const pid of processIds) {
+      if ((options.readProcessGroupId ?? linuxProcessGroupId)(pid) !== processGroupId) continue;
+      const state = (options.readMarkerState ?? helperProcessMarkerState)(pid, marker);
+      if (state === "matching") return "matching";
+      if (state === "unknown") unknown = true;
     }
   } catch {
-    return false;
+    return "unknown";
   }
-  return false;
+  return unknown ? "unknown" : "stale";
+}
+
+function exactHelperMarkerProcessScan(
+  marker: string,
+  options: HelperIdentityReaders = {},
+): { matching: number[]; unknown: boolean } {
+  if (process.platform !== "linux" && options.readProcessIds === undefined) {
+    return { matching: [], unknown: false };
+  }
+  const matching: number[] = [];
+  let unknown = false;
+  try {
+    const processIds =
+      options.readProcessIds?.() ??
+      readdirSync("/proc")
+        .filter((entry) => /^\d+$/.test(entry))
+        .map(Number);
+    for (const pid of processIds) {
+      const state = (options.readMarkerState ?? helperProcessMarkerState)(pid, marker);
+      if (state === "matching") matching.push(pid);
+      else if (state === "unknown") unknown = true;
+    }
+  } catch {
+    unknown = true;
+  }
+  return { matching, unknown };
 }
 
 function exactHelperMarkerProcessIds(marker: string): number[] {
-  if (process.platform !== "linux") return [];
-  try {
-    return readdirSync("/proc")
-      .filter((entry) => /^\d+$/.test(entry))
-      .map(Number)
-      .filter((pid) => processHasHelperMarker(pid, marker));
-  } catch {
-    return [];
-  }
+  return exactHelperMarkerProcessScan(marker).matching;
 }
 
-export function ownerHelperIdentityState(identity: OwnerHelperRecord): ProcessIdentityState {
+export function ownerHelperIdentityState(
+  identity: OwnerHelperRecord,
+  options: HelperIdentityReaders = {},
+): ProcessIdentityState {
   if ("state" in identity) {
-    return exactHelperMarkerProcessIds(identity.marker).length > 0 ? "matching" : "stale";
+    const scan = exactHelperMarkerProcessScan(identity.marker, options);
+    if (scan.matching.length > 0) return "matching";
+    return scan.unknown ? "unknown" : "stale";
   }
-  if (
-    identity.process_group_id !== undefined &&
-    helperGroupHasMarker(identity.process_group_id, identity.marker)
-  ) {
-    return "matching";
+  if (identity.process_group_id !== undefined) {
+    const groupState = helperGroupMarkerState(identity.process_group_id, identity.marker, options);
+    if (groupState !== "stale") return groupState;
   }
-  const birth = processBirthIdentityState(identity);
+  const birth = options.readBirthState?.(identity) ?? processBirthIdentityState(identity);
   if (birth !== "matching") return birth;
-  return processHasHelperMarker(identity.pid, identity.marker) ? "matching" : "stale";
+  return (options.readMarkerState ?? helperProcessMarkerState)(identity.pid, identity.marker);
 }
 
 function signalOwnerHelper(identity: OwnerHelperRecord, signal: NodeJS.Signals): boolean {
@@ -307,7 +348,9 @@ function signalOwnerHelper(identity: OwnerHelperRecord, signal: NodeJS.Signals):
     const groups = new Set(
       exactHelperMarkerProcessIds(identity.marker).flatMap((pid) => {
         const groupId = linuxProcessGroupId(pid);
-        return groupId === null || !helperGroupHasMarker(groupId, identity.marker) ? [] : [groupId];
+        return groupId === null || helperGroupMarkerState(groupId, identity.marker) !== "matching"
+          ? []
+          : [groupId];
       }),
     );
     for (const groupId of groups) {
@@ -320,7 +363,7 @@ function signalOwnerHelper(identity: OwnerHelperRecord, signal: NodeJS.Signals):
   }
   const groupId = identity.process_group_id;
   const target =
-    groupId !== undefined && helperGroupHasMarker(groupId, identity.marker)
+    groupId !== undefined && helperGroupMarkerState(groupId, identity.marker) === "matching"
       ? -groupId
       : ownerHelperIdentityState(identity) === "matching"
         ? identity.pid
@@ -339,6 +382,7 @@ function exactMarkerProcessScan(
   options: {
     readProcessIds?: () => number[];
     readMarker?: (pid: number) => string | null;
+    readMarkerState?: (pid: number) => OperatorBrowserProcessMarkerState;
     readCommandState?: (pid: number) => ProcessIdentityState;
   } = {},
 ): { matching: number[]; unknown: boolean } {
@@ -354,10 +398,25 @@ function exactMarkerProcessScan(
         .filter((entry) => /^\d+$/.test(entry))
         .map(Number);
     for (const pid of processIds) {
-      if ((options.readMarker ?? operatorBrowserProcessMarker)(pid) !== marker) continue;
-      const state = (options.readCommandState ?? operatorBrowserProcessCommandState)(pid);
-      if (state === "matching") matching.push(pid);
-      else if (state === "unknown") unknown = true;
+      const commandState = (options.readCommandState ?? operatorBrowserProcessCommandState)(pid);
+      if (commandState === "stale") continue;
+      const markerState =
+        options.readMarkerState?.(pid) ??
+        (options.readMarker !== undefined
+          ? (() => {
+              const value = options.readMarker!(pid);
+              return value === null
+                ? ({ state: "missing" } as const)
+                : ({ state: "present", marker: value } as const);
+            })()
+          : operatorBrowserProcessMarkerState(pid));
+      if (markerState.state === "unknown") {
+        unknown = true;
+        continue;
+      }
+      if (markerState.state !== "present" || markerState.marker !== marker) continue;
+      if (commandState === "matching") matching.push(pid);
+      else unknown = true;
     }
   } catch {
     unknown = true;
@@ -398,9 +457,9 @@ export async function terminateOwnerBrowserLaunch(
   const wait =
     options.wait ??
     (async (ms) => await new Promise<void>((resolveWait) => setTimeout(resolveWait, ms)));
-  const graceMs = options.graceMs ?? envPositiveMs("TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS", DEFAULT_TERM_GRACE_MS);
-  const matching = (): number[] =>
-    readProcessIds().filter((pid) => processMatches(pid, marker));
+  const graceMs =
+    options.graceMs ?? envPositiveMs("TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS", DEFAULT_TERM_GRACE_MS);
+  const matching = (): number[] => readProcessIds().filter((pid) => processMatches(pid, marker));
   const signal = (pids: readonly number[], signalName: NodeJS.Signals): void => {
     for (const pid of pids) {
       if (!processMatches(pid, marker)) continue;
@@ -422,8 +481,7 @@ export async function terminateOwnerBrowserLaunch(
   signal(resistant, "SIGKILL");
   await wait(graceMs);
   return (
-    matching().length === 0 &&
-    (!usesDefaultIdentity || ownerBrowserLaunchState(marker) === "stale")
+    matching().length === 0 && (!usesDefaultIdentity || ownerBrowserLaunchState(marker) === "stale")
   );
 }
 
@@ -489,35 +547,11 @@ function signedStagedEphemeralProfile(record: OwnerProfileRecord): boolean {
   return profileSignatureMatches(record, stagingPath);
 }
 
-function pendingEmptyStagingProfile(record: OwnerProfileRecord): boolean {
-  if (record.state !== "pending" || record.staging_path === undefined) return false;
-  const stagingPath = resolve(record.staging_path);
-  if (
-    dirname(stagingPath) !== resolve(tmpdir()) ||
-    !basename(stagingPath).startsWith(".trusty-squire-profile-staging-")
-  ) {
-    return false;
-  }
-  try {
-    return (
-      lstatSync(stagingPath).isDirectory() &&
-      !lstatSync(stagingPath).isSymbolicLink() &&
-      readdirSync(stagingPath).length === 0
-    );
-  } catch {
-    return false;
-  }
-}
-
 function ownerProfileState(record: OwnerProfileRecord): ProcessIdentityState {
   const finalExists = existsSync(record.path);
   const stagingExists = record.staging_path !== undefined && existsSync(record.staging_path);
   if (!finalExists && !stagingExists) return "stale";
-  if (
-    signedEphemeralProfile(record) ||
-    signedStagedEphemeralProfile(record) ||
-    pendingEmptyStagingProfile(record)
-  ) {
+  if (signedEphemeralProfile(record) || signedStagedEphemeralProfile(record)) {
     return "matching";
   }
   return "unknown";
@@ -533,10 +567,7 @@ function cleanTrackedProfiles(manifest: OwnerReaperManifest): void {
     if (signedEphemeralProfile(profile)) {
       rmSync(profile.path, { recursive: true, force: true });
     }
-    if (
-      profile.staging_path !== undefined &&
-      (signedStagedEphemeralProfile(profile) || pendingEmptyStagingProfile(profile))
-    ) {
+    if (profile.staging_path !== undefined && signedStagedEphemeralProfile(profile)) {
       rmSync(profile.staging_path, { recursive: true, force: true });
     }
   }
@@ -808,8 +839,7 @@ export function createOwnerEphemeralProfile(
     operations.path?.() ?? join(tmpdir(), `${EPHEMERAL_PROFILE_PREFIX}${randomUUID()}`),
   );
   const stagingDir = resolve(
-    operations.stagingPath?.() ??
-      join(tmpdir(), `.trusty-squire-profile-staging-${randomUUID()}`),
+    operations.stagingPath?.() ?? join(tmpdir(), `.trusty-squire-profile-staging-${randomUUID()}`),
   );
   const token = randomUUID();
   reaper?.reserveProfile(profileDir, stagingDir, token);
@@ -895,10 +925,7 @@ export function spawnOwnerTrackedHelper(
   return child;
 }
 
-export function signalOwnerTrackedHelper(
-  child: ChildProcess,
-  signal: NodeJS.Signals,
-): boolean {
+export function signalOwnerTrackedHelper(child: ChildProcess, signal: NodeJS.Signals): boolean {
   const identity = trackedHelperProcesses.get(child);
   if (identity !== undefined) return signalOwnerHelper(identity, signal);
   try {

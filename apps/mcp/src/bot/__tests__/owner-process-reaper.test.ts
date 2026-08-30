@@ -11,6 +11,7 @@ import {
   ensureOwnerProcessReaper,
   markOwnerBrowserLaunchTerminal,
   ownerBrowserLaunchState,
+  ownerHelperIdentityState,
   reconcileOwnerBrowserLaunchAfterLeaderExit,
   spawnOwnerTrackedHelper,
   stopOwnerProcessReaper,
@@ -19,7 +20,10 @@ import {
   trackOwnerBrowserLaunch,
   untrackOwnerBrowserLaunch,
 } from "../owner-process-reaper.js";
-import { dispatchOperatorBrowserProcessTermination } from "../operator-browser-watchdog.js";
+import {
+  dispatchOperatorBrowserProcessTermination,
+  operatorBrowserProcessMarkerState,
+} from "../operator-browser-watchdog.js";
 
 const cleanup: string[] = [];
 
@@ -91,12 +95,17 @@ describe("owner process startup sweep", () => {
     let atSpawn: { helpers: Array<{ marker: string; state?: string }> } | undefined;
 
     expect(() =>
-      spawnOwnerTrackedHelper("missing-helper", [], {}, {
-        spawn: (() => {
-          atSpawn = JSON.parse(readFileSync(reaper!.manifestPath, "utf8")) as typeof atSpawn;
-          throw new Error("spawn failed");
-        }) as never,
-      }),
+      spawnOwnerTrackedHelper(
+        "missing-helper",
+        [],
+        {},
+        {
+          spawn: (() => {
+            atSpawn = JSON.parse(readFileSync(reaper!.manifestPath, "utf8")) as typeof atSpawn;
+            throw new Error("spawn failed");
+          }) as never,
+        },
+      ),
     ).toThrow("spawn failed");
 
     expect(atSpawn?.helpers).toEqual([
@@ -159,9 +168,7 @@ describe("owner process startup sweep", () => {
     };
 
     expect(signature.path).toBe(profile);
-    expect(manifest.profiles).toEqual([
-      { path: profile, token: signature.token, state: "ready" },
-    ]);
+    expect(manifest.profiles).toEqual([{ path: profile, token: signature.token, state: "ready" }]);
   });
 
   it("retains launch custody when an exact marker has ambiguous process identity", () => {
@@ -173,6 +180,38 @@ describe("owner process startup sweep", () => {
         readCommandState: () => "unknown",
       }),
     ).toBe("unknown");
+  });
+
+  it("retains browser and pending-helper custody when marker identity is unreadable", () => {
+    expect(
+      ownerBrowserLaunchState("v1:1:unreadable-browser", {
+        readProcessIds: () => [42],
+        readCommandState: () => "matching",
+        readMarkerState: () => ({ state: "unknown" }),
+      }),
+    ).toBe("unknown");
+    expect(
+      ownerHelperIdentityState(
+        { marker: "v1:unreadable-helper", state: "pending" },
+        {
+          readProcessIds: () => [42],
+          readMarkerState: () => "unknown",
+        },
+      ),
+    ).toBe("unknown");
+  });
+
+  it("distinguishes a missing process marker from an unreadable identity", () => {
+    expect(
+      operatorBrowserProcessMarkerState(42, () => {
+        throw Object.assign(new Error("gone"), { code: "ENOENT" });
+      }),
+    ).toEqual({ state: "missing" });
+    expect(
+      operatorBrowserProcessMarkerState(42, () => {
+        throw Object.assign(new Error("unreadable"), { code: "EACCES" });
+      }),
+    ).toEqual({ state: "unknown" });
   });
 
   it("keeps launch cleanup blocked when the original leader exits before its marked descendants", async () => {
@@ -221,11 +260,17 @@ describe("owner process startup sweep", () => {
     vi.stubEnv("TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS", "1");
     const root = await mkdtemp(join(tmpdir(), "trusty-squire-reaper-test-"));
     const signed = await mkdtemp(join(tmpdir(), "trusty-squire-operate-"));
-    const pending = await mkdtemp(join(tmpdir(), ".trusty-squire-profile-staging-"));
-    const pendingFinal = join(tmpdir(), `trusty-squire-operate-pending-${Date.now()}`);
+    const signedPending = await mkdtemp(join(tmpdir(), ".trusty-squire-profile-staging-"));
+    const signedPendingFinal = join(tmpdir(), `trusty-squire-operate-signed-pending-${Date.now()}`);
+    const unsignedPending = await mkdtemp(join(tmpdir(), ".trusty-squire-profile-staging-"));
+    const unsignedPendingFinal = join(
+      tmpdir(),
+      `trusty-squire-operate-unsigned-pending-${Date.now()}`,
+    );
     const foreign = await mkdtemp(join(tmpdir(), "trusty-squire-operate-"));
-    cleanup.push(root, signed, pending, foreign);
+    cleanup.push(root, signed, signedPending, unsignedPending, foreign);
     const token = "signed-profile-token";
+    const pendingToken = "signed-pending-token";
     await writeFile(
       join(signed, OWNER_PROFILE_SIGNATURE_FILE),
       `${JSON.stringify({ version: 1, token, path: signed })}\n`,
@@ -233,6 +278,10 @@ describe("owner process startup sweep", () => {
     await writeFile(
       join(foreign, OWNER_PROFILE_SIGNATURE_FILE),
       `${JSON.stringify({ version: 1, token: "someone-else", path: foreign })}\n`,
+    );
+    await writeFile(
+      join(signedPending, OWNER_PROFILE_SIGNATURE_FILE),
+      `${JSON.stringify({ version: 1, token: pendingToken, path: signedPendingFinal })}\n`,
     );
     await mkdir(root, { recursive: true });
     await writeFile(
@@ -246,9 +295,15 @@ describe("owner process startup sweep", () => {
         profiles: [
           { path: signed, token, state: "ready" },
           {
-            path: pendingFinal,
-            staging_path: pending,
-            token: "pending-token",
+            path: signedPendingFinal,
+            staging_path: signedPending,
+            token: pendingToken,
+            state: "pending",
+          },
+          {
+            path: unsignedPendingFinal,
+            staging_path: unsignedPending,
+            token: "unsigned-pending-token",
             state: "pending",
           },
           { path: foreign, token, state: "ready" },
@@ -260,8 +315,10 @@ describe("owner process startup sweep", () => {
     await sweepOrphanedOwnerProcesses(root);
 
     expect(existsSync(signed)).toBe(false);
-    expect(existsSync(pending)).toBe(false);
+    expect(existsSync(signedPending)).toBe(false);
+    expect(existsSync(unsignedPending)).toBe(true);
     expect(existsSync(foreign)).toBe(true);
+    expect(existsSync(join(root, "stale.json"))).toBe(true);
     expect(await readFile(join(foreign, OWNER_PROFILE_SIGNATURE_FILE), "utf8")).toContain(
       "someone-else",
     );

@@ -48,9 +48,7 @@ export interface OperatorBrowserWatchdogOptions {
   lastActivityAt: () => number;
   hasActiveCall: () => boolean;
   processMarker: () => string | null;
-  onTerminate: (
-    reason: OperatorBrowserWatchdogReason,
-  ) => boolean | void | Promise<boolean | void>;
+  onTerminate: (reason: OperatorBrowserWatchdogReason) => boolean | void | Promise<boolean | void>;
   now?: () => number;
   idleTimeoutMs?: number;
   maxLifetimeMs?: number;
@@ -215,8 +213,7 @@ export function isOperatorChromiumCommand(command: string): boolean {
   const firstEntry = entries[0] ?? "";
   const rewrittenTitle = entries.length === 1 && /\s/.test(firstEntry);
   const executable = rewrittenTitle
-    ? (/^(?:"([^"]+)"|'([^']+)'|(\S+))(?:\s|$)/.exec(firstEntry)?.slice(1).find(Boolean) ??
-      "")
+    ? (/^(?:"([^"]+)"|'([^']+)'|(\S+))(?:\s|$)/.exec(firstEntry)?.slice(1).find(Boolean) ?? "")
     : firstEntry;
   return isOperatorChromiumExecutable(executable);
 }
@@ -231,8 +228,7 @@ export function operatorBrowserProcessCommandState(
   } = {},
 ): OperatorBrowserProcessCommandState {
   const readCommand =
-    readers.readCommand ??
-    ((processId) => readFileSync(`/proc/${processId}/cmdline`, "utf8"));
+    readers.readCommand ?? ((processId) => readFileSync(`/proc/${processId}/cmdline`, "utf8"));
   const readExecutable =
     readers.readExecutable ?? ((processId) => readlinkSync(`/proc/${processId}/exe`));
   let commandDefinitive = false;
@@ -254,16 +250,32 @@ export function operatorBrowserProcessCommandState(
   }
 }
 
-export function operatorBrowserProcessMarker(pid: number): string | null {
+export type OperatorBrowserProcessMarkerState =
+  | { state: "present"; marker: string }
+  | { state: "missing" | "unknown" };
+
+export function operatorBrowserProcessMarkerState(
+  pid: number,
+  readEnvironment: (pid: number) => string = (processId) =>
+    readFileSync(`/proc/${processId}/environ`, "utf8"),
+): OperatorBrowserProcessMarkerState {
   try {
     const prefix = `${OPERATOR_BROWSER_MARKER_ENV}=`;
-    for (const entry of readFileSync(`/proc/${pid}/environ`, "utf8").split("\0")) {
-      if (entry.startsWith(prefix)) return entry.slice(prefix.length);
+    for (const entry of readEnvironment(pid).split("\0")) {
+      if (entry.startsWith(prefix)) {
+        return { state: "present", marker: entry.slice(prefix.length) };
+      }
     }
-  } catch {
-    return null;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return { state: code === "ENOENT" || code === "ESRCH" ? "missing" : "unknown" };
   }
-  return null;
+  return { state: "missing" };
+}
+
+export function operatorBrowserProcessMarker(pid: number): string | null {
+  const result = operatorBrowserProcessMarkerState(pid);
+  return result.state === "present" ? result.marker : null;
 }
 
 function readOperatorBrowserProcess(pid: number): OperatorBrowserProcessRecord | null {
@@ -525,7 +537,7 @@ export class OperatorBrowserWatchdog {
       const marker = this.options.processMarker();
       if (marker !== null) {
         this.unregisterProcessWatchdog = (
-        this.options.registerProcessWatchdog ?? registerOperatorBrowserProcessWatchdog
+          this.options.registerProcessWatchdog ?? registerOperatorBrowserProcessWatchdog
         )(marker, async (reason) => {
           if (this.options.hasActiveCall()) return false;
           const idleMs = this.now() - this.options.lastActivityAt();
