@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.13-rc.14 (2026-08-30)
+
+- fix(mcp): preserve authenticated login capture (#611)
+
 ## 1.1.13-rc.13 (2026-08-30)
 
 - fix(mcp): restore explicit login vault handoff (#609)
