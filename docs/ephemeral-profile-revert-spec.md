@@ -38,7 +38,7 @@ Keep `CHROME_PROFILE_DIR` only as the interactive `connect`/`login` authoring pr
 
 Add a small `apps/mcp/src/bot/session-state.ts`. Its authoritative state file is `<CHROME_PROFILE_DIR>/trusty-squire-session-state.json`, written with mode `0600` by atomic temp-file + rename. It is Playwright storage-state JSON, not a profile copy.
 
-At start, create a unique `0700` directory with a `trusty-squire-operate-` mkdtemp prefix and restore the JSON snapshot without Google identity. Canonical markers establish Google identity availability without probing Google from the concurrent profile. Every `oauth_login` and legacy `oauth_click` action acquires the process-local and cross-process action lease at its explicit start, restores the latest full snapshot, and holds the lease through action completion and one tunable release cooldown. Provider destination is never inferred from URLs, requests, brokers, FedCM, subresources, or declarations. The installed Playwright type exposes restore plus `storageState({ indexedDB: true })` capture (`node_modules/.pnpm/playwright-core@1.59.1/.../types.d.ts:9407-9471`). No Chrome cookie database or profile files are copied.
+At start, create a unique `0700` directory with a `trusty-squire-operate-` mkdtemp prefix and restore the JSON snapshot without Google identity. Canonical markers establish Google identity availability without probing Google from the concurrent profile. Every `oauth_login` and legacy `oauth_click` action acquires the process-local and cross-process action lease at its explicit start, relaunches the private browser with its current non-Google state merged with the latest saved Google identity, and holds the lease through action completion and one tunable release cooldown. Provider destination is never inferred from URLs, requests, brokers, FedCM, subresources, or declarations. The installed Playwright type exposes restore plus `storageState({ indexedDB: true })` capture (`node_modules/.pnpm/playwright-core@1.59.1/.../types.d.ts:9407-9471`). No Chrome cookie database or profile files are copied.
 
 Required coverage:
 
@@ -65,7 +65,7 @@ Remove the `requireLiveIdentity` direct-canonical exception. Preserve the existi
 
 ### Google OAuth handoff
 
-Serialize every `oauth_login` and legacy `oauth_click` action from explicit action start through action completion. The waiter restores the latest full snapshot, completes OAuth, captures the rotated state, proves bounded browser close, atomically publishes, restarts the same private profile, waits one tunable few-second cooldown, and then releases the next waiter. Provider destination inference is not part of admission or routing. Ordinary browsing, payments, observation, and every other non-auth session action remain parallel.
+Serialize every `oauth_login` and legacy `oauth_click` action from explicit action start through action completion. The waiter relaunches the private browser with its current non-Google state merged with the latest saved Google identity, completes OAuth, captures the rotated state, proves bounded browser close, atomically publishes, restarts the same private profile, waits one tunable few-second cooldown, and then releases the next waiter. Provider destination inference is not part of admission or routing. Ordinary browsing, payments, observation, and every other non-auth session action remain parallel. The current close/relaunch sequence is owned by [`DESIGN-warm-browser-reuse.md`](DESIGN-warm-browser-reuse.md#2-portable-login-state).
 
 The canonical live-profile handoff alternative was assessed and rejected. It would require closing or invalidating the user's live authoring Chrome session, or restoring the broad shared-profile lock removed with the warm-session design. Portable Playwright `storageState` preserves the supported identity boundary without Chrome database cloning, while the explicit all-OAuth action lease covers rotating identity safely without guessing a provider. The shipped baseline is therefore the action lease, with concurrent ephemeral profiles outside the auth action.
 
@@ -168,8 +168,9 @@ reflected in the sections above:
    Removing it is simpler AND more robust. No cookie-DB seed path, no Google cookie-marker filter.
 
 2. **Restore Google identity only at the serialized OAuth moment.**
-   Ordinary startup restores non-Google state. Google OAuth reads the latest full snapshot only after
-   its predecessor publishes and releases, then publishes its own rotated state after proven close.
+   Ordinary startup restores non-Google state. Google OAuth reads the latest saved Google identity
+   only after its predecessor publishes and releases, relaunches with that identity merged into the
+   private profile's current non-Google state, then publishes its own rotated state after proven close.
    Reuse the existing live-provider detector; do not add a session-freshness service.
 
 Everything else in the spec remains: remove the pool + shared seed lock + `operator-direct-identity.ts`,

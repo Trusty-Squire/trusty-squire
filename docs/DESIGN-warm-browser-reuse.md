@@ -33,12 +33,22 @@ Ordinary operator startup restores the snapshot without Google identity, so two
 parallel profiles cannot hold the same rotating Google session. Every
 `oauth_login` and legacy `oauth_click` waits on the process-local handoff and the
 cross-process canonical-profile operation guard from explicit action start through
-completion and one release cooldown. At that boundary the action restores the
-latest full snapshot, completes OAuth, captures the rotated state, proves bounded
-close, publishes it, and restarts the same private profile before releasing the
-next waiter.
+completion and one release cooldown. At that boundary the action captures the
+private profile's current non-Google state, proves bounded close, and relaunches
+the same private profile with the latest Google identity supplied as startup
+state. It never mutates the live browser context with `setStorageState`. The
+action then completes OAuth, captures the rotated state, proves bounded close,
+publishes it, and restarts the same private profile before releasing the next
+waiter.
 `require_live_identity` relies on the saved identity markers without preloading
 Google state or probing Google from the ordinary concurrent browser.
+
+Canonical snapshot publication keeps the positive Google provider marker
+consistent with the portable state. If the replacement snapshot has no usable
+Google cookie, publication removes only `google` from
+`logged-in-providers.json` before committing the snapshot. That ordering may
+produce a conservative false negative after a crash, but never a stale positive
+marker paired with a Google-less snapshot.
 
 Google OAuth publishes at the serialized handoff boundary. Every explicitly
 successful non-payment session may also publish its non-Google state at finish;

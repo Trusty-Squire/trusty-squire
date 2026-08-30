@@ -1237,6 +1237,11 @@ async function closeEphemeralBrowser(
   }
 }
 
+// Never replace this close/relaunch handoff with restoreStorageState on the
+// running context. Its BrowserContext.setStorageState wait can remain pending,
+// holding the action lease and preventing oauth_login from returning. The
+// regression is pinned by "restarts with the latest portable snapshot instead
+// of hanging on live state restore" in operate-session-flow.test.ts.
 async function prepareOAuthActionBrowser(session: Session): Promise<void> {
   const browser = session.browser;
   const ephemeral = leasedBrowsers.get(browser);
@@ -1330,9 +1335,7 @@ async function prepareOAuthActionBrowser(session: Session): Promise<void> {
     }
     if (pending !== null) {
       startingBrowsers.delete(pending);
-      replacementCloseState = await cancelStartingBrowser(pending).catch(
-        () => "unknown" as const,
-      );
+      replacementCloseState = await cancelStartingBrowser(pending).catch(() => "unknown" as const);
       pendingHandledProfile = true;
     } else if (replacement !== null) {
       replacementCloseState = await closeBrowserBounded(
@@ -2810,8 +2813,9 @@ export function isSquireControlPlaneHost(host: string): boolean {
 }
 
 // Domain-scope check for an agent-initiated goto. Allows the target host, any
-// subdomain of it, the configured auth hosts, and *.firebaseapp.com /
-// *.web.app auth handlers. Organic redirects are NOT routed through here.
+// subdomain of it, exact service-specific login routes, the configured auth
+// hosts, and *.firebaseapp.com / *.web.app auth handlers. Organic redirects
+// are NOT routed through here.
 export function hostAllowed(url: string, allowedHosts: readonly string[]): boolean {
   let host: string;
   try {

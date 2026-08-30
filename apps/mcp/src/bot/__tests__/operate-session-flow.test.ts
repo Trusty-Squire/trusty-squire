@@ -5572,10 +5572,7 @@ describe("operate session — multi-host allow-set + allow_host", () => {
     await startProvisionSession({ serviceUrl: "https://neon.com/signup" });
 
     expect(h.hostScopeProviders).toHaveLength(1);
-    expect(h.hostScopeProviders[0]!.allowedHosts()).toEqual([
-      "neon.com",
-      "console.neon.tech",
-    ]);
+    expect(h.hostScopeProviders[0]!.allowedHosts()).toEqual(["neon.com", "console.neon.tech"]);
     expect(h.hostScopeProviders[0]!.siblingDomainHosts()).toEqual(["neon.com"]);
   });
 
