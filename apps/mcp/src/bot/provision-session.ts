@@ -69,6 +69,7 @@ import {
   createEphemeralProfile,
   destroyEphemeralProfile,
   GOOGLE_LOGIN_COOKIE_MARKERS,
+  readCanonicalIdentityMetadata,
   readSessionState,
   stripGoogleIdentityFromSessionState,
   type BrowserStorageState,
@@ -698,7 +699,6 @@ export interface Session {
   lastActivityAt: number;
   watchdog: OperatorBrowserWatchdog | null;
   terminalTeardownOwner: SessionTerminalTeardownOwner | null;
-  persistIdentityStateOnFinish: boolean;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -733,6 +733,7 @@ interface AcquiredBrowser {
   profileDir: string;
   shutdownGeneration: number;
   googleIdentityAvailable: boolean;
+  googleAccountEmail: string | null;
 }
 
 interface StartingBrowser {
@@ -741,7 +742,7 @@ interface StartingBrowser {
   canonicalProfileDir: string;
   launch: Promise<void>;
   cancelRequested: boolean;
-  cleanupPromise: Promise<void> | null;
+  cleanupPromise: Promise<"closed" | "force_closed_unproven" | "unknown"> | null;
 }
 
 const leasedBrowsers = new Map<BrowserController, EphemeralBrowser>();
@@ -847,9 +848,14 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
   startingBrowsers.add(pending);
   let controller: BrowserController | null = null;
   let googleIdentityAvailable = false;
+  let googleAccountEmail: string | null = null;
   try {
-    const savedStorageState = await readSessionState(canonicalProfileDir);
+    const [savedStorageState, identityMetadata] = await Promise.all([
+      readSessionState(canonicalProfileDir),
+      readCanonicalIdentityMetadata(canonicalProfileDir),
+    ]);
     googleIdentityAvailable = hasUsableGoogleIdentity(savedStorageState);
+    googleAccountEmail = identityMetadata?.googleAccountEmail ?? null;
     const storageState =
       savedStorageState === undefined
         ? undefined
@@ -892,7 +898,13 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
     canonicalProfileDir,
     ...(opts.proxyUrl === undefined ? {} : { proxyUrl: opts.proxyUrl }),
   });
-  return { controller, profileDir, shutdownGeneration: generation, googleIdentityAvailable };
+  return {
+    controller,
+    profileDir,
+    shutdownGeneration: generation,
+    googleIdentityAvailable,
+    googleAccountEmail,
+  };
 }
 
 async function releaseWarmBrowserPage(
@@ -966,13 +978,15 @@ async function closeBrowserBounded(
   ).catch(() => "unknown" as const);
 }
 
-async function cancelStartingBrowser(pending: StartingBrowser): Promise<void> {
+async function cancelStartingBrowser(
+  pending: StartingBrowser,
+): Promise<"closed" | "force_closed_unproven" | "unknown"> {
   pending.cancelRequested = true;
   if (pending.cleanupPromise !== null) return await pending.cleanupPromise;
   pending.cleanupPromise = (async () => {
     if (pending.controller === null) {
       destroyEphemeralProfileDetached(pending.profileDir);
-      return;
+      return "closed" as const;
     }
     const closeState = await closeBrowserBounded(
       pending.controller,
@@ -980,6 +994,7 @@ async function cancelStartingBrowser(pending: StartingBrowser): Promise<void> {
       "operator browser startup cancellation timed out",
     );
     if (closeState === "closed") destroyEphemeralProfileDetached(pending.profileDir);
+    return closeState;
   })();
   return await pending.cleanupPromise;
 }
@@ -1072,6 +1087,19 @@ async function runSerializedGoogleOAuth(
       await settleAfterStateChange(browser);
       return browser;
     }
+    const generation = provisionStartGeneration();
+    const ownsSession = (): boolean =>
+      shutdownInProgress === 0 &&
+      generation === shutdownGeneration &&
+      !session.closing &&
+      sessions.get(session.id) === session &&
+      session.browser === browser;
+    const assertOwned = (): void => {
+      if (!ownsSession()) {
+        throw new Error("Google OAuth identity handoff cancelled during operator shutdown");
+      }
+    };
+    assertOwned();
     const latestState = await readSessionState(ephemeral.canonicalProfileDir);
     if (latestState !== undefined) {
       const currentState = await browser.captureStorageState();
@@ -1086,7 +1114,6 @@ async function runSerializedGoogleOAuth(
       oauthFailed = true;
       oauthError = error;
     }
-    const resumeUrl = browser.currentUrl();
     let rotatedState: Awaited<ReturnType<BrowserController["captureStorageState"]>> | undefined;
     let captureError: unknown;
     try {
@@ -1094,51 +1121,122 @@ async function runSerializedGoogleOAuth(
     } catch (error) {
       captureError = error;
     }
-    const closeState = await closeBrowserBounded(
-      browser,
-      false,
-      "Google OAuth browser close timed out",
-    );
-    if (closeState !== "closed") {
-      throw new Error(`Google OAuth identity handoff closed without proof (${closeState})`);
-    }
     if (rotatedState === undefined) throw captureError;
-    const published = await writeSessionState(ephemeral.canonicalProfileDir, rotatedState);
-    if (!published)
-      throw new Error("Google OAuth identity handoff could not publish session state");
-
-    const replacement = new BrowserController({
-      profileDir: ephemeral.profileDir,
-      ...(ephemeral.proxyUrl === undefined ? {} : { proxyUrl: ephemeral.proxyUrl }),
-    });
+    let originalCloseState: "closed" | "force_closed_unproven" | "unknown" = "unknown";
+    let replacement: BrowserController | null = null;
+    let replacementPending: StartingBrowser | null = null;
+    let readyReplacement: BrowserController | null = null;
     try {
-      await startBrowserBounded(replacement, session.id, async () => {
-        await closeBrowserBounded(
+      originalCloseState = await closeBrowserBounded(
+        browser,
+        false,
+        "Google OAuth browser close timed out",
+      );
+      if (originalCloseState !== "closed") {
+        throw new Error(
+          `Google OAuth identity handoff closed without proof (${originalCloseState})`,
+        );
+      }
+      assertOwned();
+      const published = await writeSessionState(ephemeral.canonicalProfileDir, rotatedState, () =>
+        ownsSession(),
+      );
+      if (!published) {
+        throw new Error("Google OAuth identity handoff could not publish session state");
+      }
+      assertOwned();
+
+      replacement = new BrowserController({
+        profileDir: ephemeral.profileDir,
+        storageState: rotatedState,
+        ...(ephemeral.proxyUrl === undefined ? {} : { proxyUrl: ephemeral.proxyUrl }),
+      });
+      replacementPending = {
+        controller: replacement,
+        profileDir: ephemeral.profileDir,
+        canonicalProfileDir: ephemeral.canonicalProfileDir,
+        launch: Promise.resolve(),
+        cancelRequested: false,
+        cleanupPromise: null,
+      };
+      startingBrowsers.add(replacementPending);
+      replacementPending.launch = startBrowserBounded(replacement, session.id, async () => {
+        if (replacementPending !== null) await cancelStartingBrowser(replacementPending);
+      });
+      await replacementPending.launch;
+      if (replacementPending.cancelRequested) {
+        throw new Error("Google OAuth replacement browser startup cancelled");
+      }
+      assertOwned();
+      startingBrowsers.delete(replacementPending);
+      replacementPending = null;
+
+      leasedBrowsers.delete(browser);
+      leasedBrowsers.set(replacement, { ...ephemeral, controller: replacement });
+      session.browser = replacement;
+      if (typeof replacement.setHostScopeAllowedHosts === "function") {
+        await replacement.setHostScopeAllowedHosts(
+          () => hostStrings(session),
+          () => merchantSiblingSeedHosts(session),
+        );
+      }
+      if (
+        shutdownInProgress > 0 ||
+        generation !== shutdownGeneration ||
+        session.closing ||
+        sessions.get(session.id) !== session ||
+        session.browser !== replacement
+      ) {
+        throw new Error("Google OAuth identity handoff cancelled during operator shutdown");
+      }
+      if (session.startUrl.length > 0) await replacement.goto(session.startUrl);
+      readyReplacement = replacement;
+    } catch (error) {
+      let replacementCloseState: "closed" | "force_closed_unproven" | "unknown" = "closed";
+      let pendingHandledProfile = false;
+      if (replacementPending !== null) {
+        startingBrowsers.delete(replacementPending);
+        replacementCloseState = await cancelStartingBrowser(replacementPending).catch(
+          () => "unknown" as const,
+        );
+        pendingHandledProfile = true;
+      } else if (replacement !== null) {
+        replacementCloseState = await closeBrowserBounded(
           replacement,
           true,
-          "Google OAuth replacement browser startup cancellation timed out",
+          "Google OAuth replacement browser cleanup timed out",
+        ).catch(() => "unknown" as const);
+      }
+      if (leasedBrowsers.get(browser) === ephemeral) leasedBrowsers.delete(browser);
+      if (replacement !== null) {
+        const replacementLease = leasedBrowsers.get(replacement);
+        if (replacementLease?.profileDir === ephemeral.profileDir) {
+          leasedBrowsers.delete(replacement);
+        }
+      }
+      if (sessions.get(session.id) === session) sessions.delete(session.id);
+      stopSessionWatchdog(session);
+      disposeSessionWatchdog(session);
+      if (
+        originalCloseState === "closed" &&
+        replacementCloseState === "closed" &&
+        !pendingHandledProfile
+      ) {
+        destroyEphemeralProfileDetached(ephemeral.profileDir);
+      } else if (originalCloseState !== "closed" || replacementCloseState !== "closed") {
+        console.error(
+          `[operator] retained ephemeral profile after failed Google OAuth handoff: ${ephemeral.profileDir}`,
         );
-      });
-    } catch (error) {
-      await closeBrowserBounded(
-        replacement,
-        true,
-        "Google OAuth replacement browser cleanup timed out",
-      ).catch(() => undefined);
+      }
       throw error;
+    } finally {
+      if (replacementPending !== null) startingBrowsers.delete(replacementPending);
     }
-    leasedBrowsers.delete(browser);
-    leasedBrowsers.set(replacement, { ...ephemeral, controller: replacement });
-    session.browser = replacement;
-    if (typeof replacement.setHostScopeAllowedHosts === "function") {
-      await replacement.setHostScopeAllowedHosts(
-        () => hostStrings(session),
-        () => merchantSiblingSeedHosts(session),
-      );
+    if (readyReplacement === null) {
+      throw new Error("Google OAuth replacement browser was not installed");
     }
-    if (resumeUrl.length > 0) await replacement.goto(resumeUrl);
     if (oauthFailed) throw oauthError;
-    return replacement;
+    return readyReplacement;
   });
 }
 
@@ -3179,10 +3277,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     (provider) => provider !== "google",
   );
   if (acquired.googleIdentityAvailable) liveProviders.push("google");
-  workerEmail =
-    typeof browser.detectGoogleAccountEmail === "function"
-      ? await browser.detectGoogleAccountEmail().catch(() => null)
-      : null;
+  workerEmail = acquired.googleAccountEmail;
   try {
     assertProvisionStartAdmitted(acquired.shutdownGeneration);
   } catch (error) {
@@ -3265,7 +3360,6 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     lastActivityAt: Date.now(),
     watchdog: null,
     terminalTeardownOwner: null,
-    persistIdentityStateOnFinish: opts.requireLiveIdentity === true,
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
     consentInboxRead: opts.consentInboxRead === true,
@@ -3390,7 +3484,6 @@ export async function startHarnessProvisionSession(
     lastActivityAt: Date.now(),
     watchdog: null,
     terminalTeardownOwner: null,
-    persistIdentityStateOnFinish: false,
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
     consentInboxRead: false,
@@ -9384,10 +9477,7 @@ export async function finishProvisionSessionWithPreparation<T>(
     if (owner.forced || sessions.get(sessionId) !== session) {
       throw new Error(`provision session ${sessionId} terminal transition was forced`);
     }
-    const persistState =
-      successfulOutcome() &&
-      !profileRequiresDestroy(session) &&
-      session.persistIdentityStateOnFinish;
+    const persistState = successfulOutcome() && !profileRequiresDestroy(session);
     try {
       const finish = await closeFinishingProvisionSession(session, persistState);
       return { finish, prepared };

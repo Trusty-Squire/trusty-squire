@@ -16,6 +16,7 @@ const h = vi.hoisted(() => ({
   oauthStatus: "already_valid" as string,
   oauthLoginCalls: [] as string[],
   oauthLoginGates: new Map<number, Promise<void>>(),
+  oauthResultUrl: "https://app.example.com/dashboard",
   restoredStorageStates: [] as Array<{ browserIndex: number; state: unknown }>,
   oauthReadError: null as string | null,
   oauthTransition: null as null | {
@@ -56,6 +57,7 @@ const h = vi.hoisted(() => ({
   started: 0,
   startCalls: 0,
   startGate: null as Promise<void> | null,
+  startGates: new Map<number, Promise<void>>(),
   closeCalls: 0,
   forceCloseCalls: 0,
   closeState: "closed" as "closed" | "force_closed_unproven" | "unknown",
@@ -67,6 +69,7 @@ const h = vi.hoisted(() => ({
   proxyUrls: [] as Array<string | undefined>,
   seededStorageStates: [] as unknown[],
   storageStates: new Map<string, unknown>(),
+  identityMetadata: new Map<string, { googleAccountEmail: string }>(),
   storageStateReads: [] as string[],
   storageStateReadGate: null as Promise<void> | null,
   storageStateWrites: [] as Array<{ profileDir: string; state: unknown }>,
@@ -217,6 +220,9 @@ vi.mock("../session-state.js", async (importOriginal) => {
           }
         : undefined;
     },
+    readCanonicalIdentityMetadata: async (profileDir: string) =>
+      h.identityMetadata.get(profileDir) ??
+      (h.workerEmail === null ? undefined : { googleAccountEmail: h.workerEmail }),
     writeSessionState: async (
       profileDir: string,
       state: unknown,
@@ -253,6 +259,8 @@ vi.mock("../browser.js", () => ({
     async start(): Promise<void> {
       h.started += 1;
       h.startCalls += 1;
+      const gate = h.startGates.get(this.index);
+      if (gate !== undefined) await gate;
       if (h.startGate !== null) await h.startGate;
     }
     isConnected(): boolean {
@@ -663,7 +671,7 @@ vi.mock("../browser.js", () => ({
       h.oauthLoginCalls.push(selector);
       const gate = h.oauthLoginGates.get(this.index);
       if (gate !== undefined) await gate;
-      h.currentUrl = "https://app.example.com/dashboard";
+      h.currentUrl = h.oauthResultUrl;
       h.visibleText = "Signed in";
     }
     async settleAfterOAuth(): Promise<void> {}
@@ -734,7 +742,11 @@ vi.mock("../browser.js", () => ({
       if (h.captureStorageStateGate !== null) await h.captureStorageStateGate;
       if (h.captureStorageStateError !== null) throw h.captureStorageStateError;
       const sequence = h.captureStorageStateSequences.get(this.index);
-      if (sequence !== undefined && sequence.length > 0) return sequence.shift();
+      if (sequence !== undefined && sequence.length > 0) {
+        const next = sequence.shift();
+        if (next instanceof Error) throw next;
+        return next;
+      }
       return h.captureStorageStates.get(this.index) ?? h.captureStorageState;
     }
     async restoreStorageState(state: unknown): Promise<void> {
@@ -747,7 +759,11 @@ vi.mock("../browser.js", () => ({
       cancelStart?: boolean;
     }): Promise<"closed" | "force_closed_unproven" | "unknown"> {
       h.closeCalls += 1;
-      if (options?.cancelStart === true && h.startGate !== null) await h.startGate;
+      if (options?.cancelStart === true) {
+        const gate = h.startGates.get(this.index);
+        if (gate !== undefined) await gate;
+        if (h.startGate !== null) await h.startGate;
+      }
       if (h.connections[this.index] === true) h.started -= 1;
       h.connections[this.index] = false;
       return h.closeState;
@@ -969,6 +985,7 @@ beforeEach(() => {
   h.oauthStatus = "already_valid";
   h.oauthLoginCalls = [];
   h.oauthLoginGates = new Map();
+  h.oauthResultUrl = "https://app.example.com/dashboard";
   h.restoredStorageStates = [];
   h.oauthReadError = null;
   h.oauthTransition = null;
@@ -1003,6 +1020,7 @@ beforeEach(() => {
   h.started = 0;
   h.startCalls = 0;
   h.startGate = null;
+  h.startGates = new Map();
   h.closeCalls = 0;
   h.forceCloseCalls = 0;
   h.closeState = "closed";
@@ -1014,6 +1032,7 @@ beforeEach(() => {
   h.proxyUrls = [];
   h.seededStorageStates = [];
   h.storageStates = new Map();
+  h.identityMetadata = new Map();
   h.storageStateReads = [];
   h.storageStateReadGate = null;
   h.storageStateWrites = [];
@@ -3364,6 +3383,7 @@ describe("operate session — OAuth lifecycle", () => {
       { profileDir: canonical, state: state1 },
       { profileDir: canonical, state: state2 },
     ]);
+    expect(h.seededStorageStates.slice(2)).toEqual([state1, state2]);
 
     await finishProvisionSession(first.session_id);
     await finishProvisionSession(second.session_id);
@@ -3447,13 +3467,158 @@ describe("operate session — OAuth lifecycle", () => {
     expect(h.oauthLoginCalls).toEqual(["#google-oauth"]);
     expect(h.restoredStorageStates).toEqual([{ browserIndex: 0, state: merged }]);
     expect(h.storageStateWrites).toEqual([{ profileDir: canonical, state: rotated }]);
+    expect(h.seededStorageStates[1]).toEqual(rotated);
     await finishProvisionSession(started.session_id);
+  });
+
+  it("captures rotated identity before closing the live OAuth browser", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-google-capture-failure";
+    const google = {
+      cookies: [
+        {
+          name: "SID",
+          value: "google-session-before-capture-failure",
+          domain: ".google.com",
+          path: "/",
+        },
+      ],
+      origins: [],
+    };
+    const current = { cookies: [], origins: [] };
+    h.storageStates.set(canonical, google);
+    h.captureStorageStateSequences.set(0, [current, new Error("capture failed")]);
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+
+    await expect(
+      act(started.session_id, { kind: "oauth_login", target: "Continue with Google" }),
+    ).rejects.toThrow("capture failed");
+
+    expect(h.closeCalls).toBe(0);
+    expect(activeSessionCount()).toBe(1);
+    expect(h.storageStateWrites).toEqual([]);
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("terminally removes a session when rotated identity cannot publish", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-google-publish-failure";
+    const google = {
+      cookies: [
+        {
+          name: "SID",
+          value: "google-session-before-publish-failure",
+          domain: ".google.com",
+          path: "/",
+        },
+      ],
+      origins: [],
+    };
+    const rotated = {
+      cookies: [{ ...google.cookies[0]!, value: "google-session-after-publish-failure" }],
+      origins: [],
+    };
+    h.storageStates.set(canonical, google);
+    h.captureStorageStateSequences.set(0, [{ cookies: [], origins: [] }, rotated]);
+    h.storageStateWriteError = new Error("publish failed");
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+
+    await expect(
+      act(started.session_id, { kind: "oauth_login", target: "Continue with Google" }),
+    ).rejects.toThrow("publish failed");
+
+    expect(activeSessionCount()).toBe(0);
+    expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
+    await expect(finishProvisionSession(started.session_id)).rejects.toThrow(
+      "unknown provision session",
+    );
+  });
+
+  it("rejects a replacement browser that settles after operator shutdown", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-google-shutdown";
+    const google = {
+      cookies: [
+        {
+          name: "SID",
+          value: "google-session-before-shutdown",
+          domain: ".google.com",
+          path: "/",
+        },
+      ],
+      origins: [],
+    };
+    const rotated = {
+      cookies: [{ ...google.cookies[0]!, value: "google-session-after-shutdown" }],
+      origins: [],
+    };
+    h.storageStates.set(canonical, google);
+    h.captureStorageStateSequences.set(0, [{ cookies: [], origins: [] }, rotated]);
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    let releaseReplacement!: () => void;
+    h.startGates.set(
+      1,
+      new Promise<void>((resolve) => {
+        releaseReplacement = resolve;
+      }),
+    );
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+    const acting = act(started.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+    }).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(h.startCalls).toBe(2));
+
+    const shutdown = closeAllProvisionSessions();
+    await vi.waitFor(() => expect(h.connections[1]).toBe(false));
+    releaseReplacement();
+    const actionError = await acting;
+    await shutdown;
+
+    expect(actionError).toEqual(
+      expect.objectContaining({ message: expect.stringMatching(/cancelled|shutdown/) }),
+    );
+    expect(activeSessionCount()).toBe(0);
+    expect(h.connections[1]).toBe(false);
   });
 
   it("completes oauth_login in one action and returns the settled product observation", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verified-recipe-atomic-oauth-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
     h.visibleText = "Continue with Google";
+    h.oauthResultUrl = "https://app.example.com/oauth/callback?code=one-time&state=opaque";
     h.elements = [
       elem({
         visibleText: "Continue with Google",
@@ -3470,9 +3635,10 @@ describe("operate session — OAuth lifecycle", () => {
     });
 
     expect(h.oauthLoginCalls).toEqual(["#google-oauth"]);
-    expect(result.url).toBe("https://app.example.com/dashboard");
+    expect(result.url).toBe("https://app.example.com/login");
     expect(result.text).toBe("Signed in");
     expect(result.oauth).toBeUndefined();
+    expect(h.gotos).not.toContain(h.oauthResultUrl);
     try {
       await provisionRememberTool.handler(
         {
@@ -5944,14 +6110,16 @@ describe("operate session — ephemeral profile lifecycle", () => {
     expect(h.createdProfiles).toEqual([h.profileDirs[0]]);
   });
 
-  it("uses the claimed worker's live email instead of seed-derived profile metadata", async () => {
+  it("uses canonical Google identity metadata without preloading Google state", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-email";
-    h.workerEmail = "live-worker@example.com";
+    h.workerEmail = "anonymous-probe@example.com";
+    h.identityMetadata.set(canonical, { googleAccountEmail: "live-worker@example.com" });
     const session = await startProvisionSession({
       serviceUrl: "https://app.example.com/",
       profileDir: canonical,
     });
     expect(getSessionUserEmail(session.session_id)).toBe("live-worker@example.com");
+    expect(h.seededStorageStates[0]).toEqual({ cookies: [], origins: [] });
     await finishProvisionSession(session.session_id);
   });
 
@@ -6570,11 +6738,10 @@ describe("operate session — ephemeral profile lifecycle", () => {
     expect(activeSessionCount()).toBe(0);
   });
 
-  it("writes and destroys each explicitly successful closed profile", async () => {
+  it("writes and destroys every explicitly successful non-payment profile", async () => {
     for (let index = 0; index < 3; index += 1) {
       const session = await startProvisionSession({
         serviceUrl: `https://app.example.com/task-${index}`,
-        requireLiveIdentity: true,
       });
       await provisionFinishTool.handler(
         provisionFinishTool.inputSchema.parse({

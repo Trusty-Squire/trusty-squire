@@ -29,12 +29,14 @@ import {
   withProfileOperationGuard,
 } from "./profile.js";
 import {
+  extractGoogleAccountEmail,
+  launchCancellablePersistentContext,
   launchPlainLoginBrowser,
   launchSelfManagedLoginContext,
   resolveChannelBinary,
   selfLaunchEnabled,
 } from "./browser.js";
-export { extractGoogleAccountEmail } from "./browser.js";
+export { extractGoogleAccountEmail };
 import {
   startInstallCompletionListener,
   withInstallCompletionCallback,
@@ -44,6 +46,7 @@ import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
   GOOGLE_LOGIN_COOKIE_MARKERS,
+  writeCanonicalIdentityMetadata,
   writeSessionState,
   type BrowserStorageState,
 } from "./session-state.js";
@@ -115,6 +118,9 @@ export async function captureProfileStorageState(
     profileProcessIdentity: typeof profileProcessIdentity;
     reapProfileHolderIfOwned: typeof reapProfileHolderIfOwned;
     teardownLoginBrowser: typeof teardownLoginBrowser;
+    launchTimeoutMs?: number;
+    cancellationSettleMs?: number;
+    cancellationPollMs?: number;
   } = {
     currentProfileHolderPid,
     profileProcessIdentity,
@@ -124,30 +130,64 @@ export async function captureProfileStorageState(
 ): Promise<BrowserStorageState> {
   const lifecycle = createTrackedLoginBrowserLifecycle();
   let state: BrowserStorageState | undefined;
+  let googleAccountEmail: string | null = null;
   let closeState: ProfileCloseState = "unknown";
   try {
-    const context = await launchWithProfileGate(
-      profileDir,
-      () =>
-        launchPersistentLoginContext(launcher, profileDir, {
-          headless: true,
-          ignoreDefaultArgs: ["--enable-automation"],
-          args: ["--no-sandbox", "--disable-dev-shm-usage"],
-        }),
-      { failFast: true },
-    );
-    const holderPid = runtime.currentProfileHolderPid(profileDir);
-    const identity =
-      holderPid === null ? null : runtime.profileProcessIdentity(holderPid, profileDir);
-    lifecycle.browserLaunched(
-      async () =>
-        await runtime.teardownLoginBrowser({
+    const cleanupContext = async (context: BrowserContext): Promise<ProfileCloseState> => {
+      const holderPid = runtime.currentProfileHolderPid(profileDir);
+      const identity =
+        holderPid === null ? null : runtime.profileProcessIdentity(holderPid, profileDir);
+      return await runtime.teardownLoginBrowser({
+        profileDir,
+        identity,
+        closeBrowser: () => context.close(),
+        forceClose: () => runtime.reapProfileHolderIfOwned(profileDir, identity),
+      });
+    };
+    const cleanupRejected = async (): Promise<ProfileCloseState> => {
+      const holderPid = runtime.currentProfileHolderPid(profileDir);
+      if (holderPid === null) return "closed";
+      const identity = runtime.profileProcessIdentity(holderPid, profileDir);
+      if (identity === null) return "unknown";
+      return await runtime.teardownLoginBrowser({
+        profileDir,
+        identity,
+        closeBrowser: async () => undefined,
+        forceClose: () => runtime.reapProfileHolderIfOwned(profileDir, identity),
+      });
+    };
+    const outcome = await launchCancellablePersistentContext({
+      launch: (options) =>
+        launchWithProfileGate(
           profileDir,
-          identity,
-          closeBrowser: () => context.close(),
-          forceClose: () => runtime.reapProfileHolderIfOwned(profileDir, identity),
-        }),
-    );
+          () => launchPersistentLoginContext(launcher, profileDir, options),
+          { failFast: true },
+        ),
+      options: {
+        headless: true,
+        ignoreDefaultArgs: ["--enable-automation"],
+        args: ["--no-sandbox", "--disable-dev-shm-usage"],
+      },
+      cancellation: lifecycle.cancellation,
+      cleanupCancelled: cleanupContext,
+      cleanupRejected,
+      ...(runtime.launchTimeoutMs === undefined
+        ? {}
+        : { launchTimeoutMs: runtime.launchTimeoutMs }),
+      ...(runtime.cancellationSettleMs === undefined
+        ? {}
+        : { cancellationSettleMs: runtime.cancellationSettleMs }),
+      ...(runtime.cancellationPollMs === undefined
+        ? {}
+        : { cancellationPollMs: runtime.cancellationPollMs }),
+    });
+    if (outcome.status === "cancelled") {
+      lifecycle.throwIfCancelled();
+      throw new Error(`login identity capture cancelled (${outcome.closeState})`);
+    }
+    const context = outcome.value;
+    lifecycle.browserLaunched(async () => await cleanupContext(context));
+    googleAccountEmail = await detectGoogleAccountEmailInContext(context);
     state = await context.storageState({ indexedDB: true });
   } finally {
     closeState = await lifecycle.finish();
@@ -156,7 +196,36 @@ export async function captureProfileStorageState(
   if (closeState !== "closed") {
     throw new Error(`login identity capture closed without proof (${closeState})`);
   }
+  if (googleAccountEmail !== null) {
+    await writeCanonicalIdentityMetadata(profileDir, { googleAccountEmail });
+  }
   return state!;
+}
+
+async function detectGoogleAccountEmailInContext(context: BrowserContext): Promise<string | null> {
+  let page: Awaited<ReturnType<BrowserContext["newPage"]>> | null = null;
+  try {
+    page = await context.newPage();
+    await page.goto("https://myaccount.google.com/", {
+      waitUntil: "domcontentloaded",
+      timeout: 20_000,
+    });
+    if (new URL(page.url()).hostname !== "myaccount.google.com") return null;
+    const labels = await page
+      .locator("[aria-label]")
+      .evaluateAll((elements) =>
+        elements.map((element) => element.getAttribute("aria-label") ?? ""),
+      );
+    for (const label of labels) {
+      const email = extractGoogleAccountEmail(label.trim());
+      if (email !== null) return email;
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    await page?.close().catch(() => undefined);
+  }
 }
 
 // --- config ------------------------------------------------------------
@@ -560,6 +629,7 @@ export async function cancelActiveLoginBrowsers(): Promise<void> {
 }
 
 interface TrackedLoginBrowserLifecycle {
+  cancellation: Promise<void>;
   cancel(): Promise<void>;
   throwIfCancelled(): void;
   browserLaunched(teardown: () => Promise<ProfileCloseState>): void;
@@ -579,6 +649,10 @@ function createTrackedLoginBrowserLifecycle(
   let browserTeardown: Promise<ProfileCloseState> | undefined;
   let runTeardown: Promise<void> | undefined;
   let cancellation: Promise<void> | undefined;
+  let resolveCancellation!: () => void;
+  const cancellationSignal = new Promise<void>((resolve) => {
+    resolveCancellation = resolve;
+  });
   let finishing: Promise<ProfileCloseState> | undefined;
 
   const settleLaunch = (): void => {
@@ -599,8 +673,10 @@ function createTrackedLoginBrowserLifecycle(
   let lifecycle!: TrackedLoginBrowserLifecycle;
   const untrack = trackActiveLoginBrowser(async () => await lifecycle.cancel());
   lifecycle = {
+    cancellation: cancellationSignal,
     cancel: (): Promise<void> => {
       cancelled = true;
+      resolveCancellation();
       cancellation ??= (async () => {
         await launchSettlement;
         try {
@@ -710,6 +786,7 @@ export interface LoginRunResult {
   status: "completed" | "preflight_satisfied" | "timeout";
   closeState: ProfileCloseState;
   storageState?: BrowserStorageState;
+  googleAccountEmail?: string;
 }
 
 export async function finalizeLoginRun(
@@ -721,6 +798,11 @@ export async function finalizeLoginRun(
   }
   if (result.closeState === "closed" && result.storageState !== undefined) {
     await writeSessionState(opts.profileDir, result.storageState);
+  }
+  if (result.closeState === "closed" && result.googleAccountEmail !== undefined) {
+    await writeCanonicalIdentityMetadata(opts.profileDir, {
+      googleAccountEmail: result.googleAccountEmail,
+    });
   }
 }
 
@@ -833,6 +915,7 @@ export async function runDisplayedChrome(
   let status: LoginRunResult["status"] = "timeout";
   let closeState: ProfileCloseState = "unknown";
   let storageState: BrowserStorageState | undefined;
+  let googleAccountEmail: string | null = null;
   try {
     const context = await launchWithProfileGate(
       opts.profileDir,
@@ -889,12 +972,18 @@ export async function runDisplayedChrome(
       status = ok ? "completed" : "timeout";
     }
     if (status === "completed" || status === "preflight_satisfied") {
+      googleAccountEmail = await detectGoogleAccountEmailInContext(context);
       storageState = await context.storageState({ indexedDB: true });
     }
   } finally {
     closeState = await lifecycle.finish();
   }
-  return { status, closeState, ...(storageState === undefined ? {} : { storageState }) };
+  return {
+    status,
+    closeState,
+    ...(storageState === undefined ? {} : { storageState }),
+    ...(googleAccountEmail === null ? {} : { googleAccountEmail }),
+  };
 }
 
 export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
