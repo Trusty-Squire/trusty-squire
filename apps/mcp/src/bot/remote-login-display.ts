@@ -91,10 +91,10 @@ function createRemoteLoginSecrets(rig: RemoteLoginRig): void {
     chmodSync(rig.passFile, 0o600);
   } catch (error) {
     rmSync(privateDir, { recursive: true, force: true });
-    rig.privateDir = undefined;
-    rig.authFile = undefined;
-    rig.passFile = undefined;
-    rig.vncPassword = undefined;
+    delete rig.privateDir;
+    delete rig.authFile;
+    delete rig.passFile;
+    delete rig.vncPassword;
     throw error;
   }
 }
@@ -286,7 +286,11 @@ function waitForTunnelUrl(cloudflared: ChildProcess, timeoutMs: number): Promise
 function waitForXvfbDisplay(xvfb: ChildProcess, timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const displayOutput = xvfb.stdio[3];
-    if (displayOutput === null || typeof displayOutput.on !== "function") {
+    if (
+      displayOutput === undefined ||
+      displayOutput === null ||
+      typeof displayOutput.on !== "function"
+    ) {
       reject(new Error("Xvfb display allocation pipe is unavailable"));
       return;
     }
@@ -588,11 +592,11 @@ function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boole
 function removeRigFiles(rig: RemoteLoginRig): void {
   if (rig.webDir !== undefined) rmSync(rig.webDir, { recursive: true, force: true });
   if (rig.privateDir !== undefined) rmSync(rig.privateDir, { recursive: true, force: true });
-  rig.webDir = undefined;
-  rig.privateDir = undefined;
-  rig.passFile = undefined;
-  rig.authFile = undefined;
-  rig.vncPassword = undefined;
+  delete rig.webDir;
+  delete rig.privateDir;
+  delete rig.passFile;
+  delete rig.authFile;
+  delete rig.vncPassword;
 }
 
 function releaseChildHandles(child: ChildProcess): void {
