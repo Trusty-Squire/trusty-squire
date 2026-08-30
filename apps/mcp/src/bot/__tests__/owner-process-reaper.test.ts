@@ -188,6 +188,7 @@ describe("owner process startup sweep", () => {
         readProcessIds: () => [42],
         readCommandState: () => "matching",
         readMarkerState: () => ({ state: "unknown" }),
+        readUidState: () => "matching",
       }),
     ).toBe("unknown");
     expect(
@@ -196,10 +197,43 @@ describe("owner process startup sweep", () => {
         {
           readProcessIds: () => [42],
           readMarkerState: () => "unknown",
+          readUidState: () => "matching",
         },
       ),
     ).toBe("unknown");
   });
+
+  it("ignores unreadable marker identities owned by another user", () => {
+    expect(
+      ownerBrowserLaunchState("v1:1:local-browser", {
+        readProcessIds: () => [42],
+        readCommandState: () => "matching",
+        readMarkerState: () => ({ state: "unknown" }),
+        readUidState: () => "stale",
+      }),
+    ).toBe("stale");
+    expect(
+      ownerHelperIdentityState(
+        { marker: "v1:local-helper", state: "pending" },
+        {
+          readProcessIds: () => [42],
+          readMarkerState: () => "unknown",
+          readUidState: () => "stale",
+        },
+      ),
+    ).toBe("stale");
+  });
+
+  it.skipIf(process.platform !== "linux")(
+    "refuses local browser custody when the durable reaper is unavailable",
+    () => {
+      expect(() =>
+        trackOwnerBrowserLaunch("v1:1:unowned-browser", "/isolated-profile", {
+          ensureReaper: () => null,
+        }),
+      ).toThrow("owner process reaper unavailable for local browser launch");
+    },
+  );
 
   it("distinguishes a missing process marker from an unreadable identity", () => {
     expect(

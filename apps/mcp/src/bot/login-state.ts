@@ -15,6 +15,11 @@ import {
 import { isOAuthProviderId, type OAuthProviderId } from "./oauth-providers.js";
 import { invalidateCanonicalGoogleIdentity, isSessionStateArtifact } from "./session-state.js";
 import { registerLocalBrowserLaunch } from "./browser.js";
+import {
+  markOwnerBrowserLaunchTerminal,
+  terminateOwnerBrowserLaunch,
+  untrackOwnerBrowserLaunch,
+} from "./owner-process-reaper.js";
 
 interface ProviderCookieContext {
   cookies(): Promise<Array<{ name: string; domain: string; path: string }>>;
@@ -167,15 +172,30 @@ export function clearAllProviderMarkers(profileDir: string = CHROME_PROFILE_DIR)
 export async function clearProviderCookies(
   profileDir: string = CHROME_PROFILE_DIR,
   provider?: OAuthProviderId,
+  runtime: {
+    loadChromium?: () => Promise<{
+      launchPersistentContext(
+        profileDir: string,
+        options: Record<string, unknown>,
+      ): Promise<ProviderCookieContext>;
+    }>;
+    registerLaunch?: typeof registerLocalBrowserLaunch;
+    markTerminal?: typeof markOwnerBrowserLaunchTerminal;
+    terminate?: typeof terminateOwnerBrowserLaunch;
+    untrack?: typeof untrackOwnerBrowserLaunch;
+  } = {},
 ): Promise<boolean> {
   return await withProfileOperationGuard(profileDir, async () => {
     let context: ProviderCookieContext | null = null;
+    let ownership: { marker: string; env: NodeJS.ProcessEnv } | null = null;
+    let cleared = false;
+    let lifecycleClosed = true;
     try {
-      const { chromium } = await import("patchright");
+      const chromium = (await runtime.loadChromium?.()) ?? (await import("patchright")).chromium;
       context = await launchWithProfileGate(
         profileDir,
         () => {
-          const ownership = registerLocalBrowserLaunch(profileDir);
+          ownership = (runtime.registerLaunch ?? registerLocalBrowserLaunch)(profileDir);
           return chromium.launchPersistentContext(profileDir, {
             channel: "chrome",
             headless: true,
@@ -184,18 +204,28 @@ export async function clearProviderCookies(
         },
         { failFast: true },
       );
-      const cleared = await clearProviderCookiesFromContext(context, provider);
+      cleared = await clearProviderCookiesFromContext(context, provider);
       if (!cleared) return false;
       if (provider === undefined || provider === "google") {
-        return await invalidateCanonicalGoogleIdentity(profileDir);
+        cleared = await invalidateCanonicalGoogleIdentity(profileDir);
       }
-      return true;
     } catch (err) {
       if (err instanceof ProfileBusyError) throw err;
-      return false;
+      cleared = false;
     } finally {
-      await context?.close().catch(() => undefined);
+      if (ownership === null) {
+        await context?.close().catch(() => undefined);
+      } else {
+        const marker = ownership.marker;
+        (runtime.markTerminal ?? markOwnerBrowserLaunchTerminal)(marker);
+        await context?.close().catch(() => undefined);
+        lifecycleClosed = await (runtime.terminate ?? terminateOwnerBrowserLaunch)(marker).catch(
+          () => false,
+        );
+        if (lifecycleClosed) (runtime.untrack ?? untrackOwnerBrowserLaunch)(marker);
+      }
     }
+    return cleared && lifecycleClosed;
   });
 }
 

@@ -245,6 +245,20 @@ function linuxProcessGroupId(pid: number): number | null {
   }
 }
 
+function linuxProcessUidState(pid: number): ProcessIdentityState {
+  const ownerUid = typeof process.getuid === "function" ? process.getuid() : null;
+  if (ownerUid === null) return "unknown";
+  try {
+    const match = /^Uid:\s+(.+)$/m.exec(readFileSync(`/proc/${pid}/status`, "utf8"));
+    if (match === null) return "unknown";
+    const uids = match[1]!.trim().split(/\s+/).map(Number).filter(Number.isSafeInteger);
+    return uids.includes(ownerUid) ? "matching" : "stale";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ESRCH" ? "stale" : "unknown";
+  }
+}
+
 function helperProcessMarkerState(
   pid: number,
   marker: string,
@@ -266,6 +280,7 @@ interface HelperIdentityReaders {
   readProcessGroupId?: (pid: number) => number | null;
   readMarkerState?: (pid: number, marker: string) => ProcessIdentityState;
   readBirthState?: (identity: OwnerHelperIdentity) => ProcessIdentityState;
+  readUidState?: (pid: number) => ProcessIdentityState;
 }
 
 function helperGroupMarkerState(
@@ -311,7 +326,12 @@ function exactHelperMarkerProcessScan(
     for (const pid of processIds) {
       const state = (options.readMarkerState ?? helperProcessMarkerState)(pid, marker);
       if (state === "matching") matching.push(pid);
-      else if (state === "unknown") unknown = true;
+      else if (
+        state === "unknown" &&
+        (options.readUidState ?? linuxProcessUidState)(pid) !== "stale"
+      ) {
+        unknown = true;
+      }
     }
   } catch {
     unknown = true;
@@ -384,6 +404,7 @@ function exactMarkerProcessScan(
     readMarker?: (pid: number) => string | null;
     readMarkerState?: (pid: number) => OperatorBrowserProcessMarkerState;
     readCommandState?: (pid: number) => ProcessIdentityState;
+    readUidState?: (pid: number) => ProcessIdentityState;
   } = {},
 ): { matching: number[]; unknown: boolean } {
   if (process.platform !== "linux" && options.readProcessIds === undefined) {
@@ -411,7 +432,7 @@ function exactMarkerProcessScan(
             })()
           : operatorBrowserProcessMarkerState(pid));
       if (markerState.state === "unknown") {
-        unknown = true;
+        if ((options.readUidState ?? linuxProcessUidState)(pid) !== "stale") unknown = true;
         continue;
       }
       if (markerState.state !== "present" || markerState.marker !== marker) continue;
@@ -801,11 +822,19 @@ export function untrackOwnerProcess(identity: ProfileProcessIdentity): void {
   activeReaper?.untrack(identity);
 }
 const trackedLaunchWatchdogs = new Map<string, OperatorBrowserLaunchWatchdogRegistration>();
-export function trackOwnerBrowserLaunch(marker: string, profileDir: string): void {
+export function trackOwnerBrowserLaunch(
+  marker: string,
+  profileDir: string,
+  runtime: { ensureReaper?: typeof ensureOwnerProcessReaper } = {},
+): void {
+  const reaper = (runtime.ensureReaper ?? ensureOwnerProcessReaper)();
+  if (process.platform === "linux" && reaper === null) {
+    throw new Error("owner process reaper unavailable for local browser launch");
+  }
   if (!trackedLaunchWatchdogs.has(marker)) {
     trackedLaunchWatchdogs.set(marker, registerOperatorBrowserLaunchWatchdog(marker));
   }
-  ensureOwnerProcessReaper()?.trackLaunch(marker, profileDir);
+  reaper?.trackLaunch(marker, profileDir);
 }
 export function markOwnerBrowserLaunchTerminal(marker: string): void {
   trackedLaunchWatchdogs.get(marker)?.permitTerminalCleanup();
