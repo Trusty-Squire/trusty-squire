@@ -275,7 +275,6 @@ interface CheckoutSubmitDispatchWaiter {
   frame: Frame;
   nonce: string;
   resolve: (snapshot: CheckoutOutcomeDispatchSnapshot) => void;
-  report: () => void;
 }
 
 export interface CheckoutSubmitResult {
@@ -962,27 +961,32 @@ function isCheckoutPaymentExecutionOperation(value: string): boolean {
   ) {
     return false;
   }
-  const hasCheckoutExecutionSubject = ["charge", "checkout", "order", "purchase"].some(
-    (subject) => operation.includes(subject),
-  );
+  const includesAny = (values: readonly string[]): boolean =>
+    values.some((candidate) => operation.includes(candidate));
+  const hasChargeSubject = operation.includes("charge");
+  const hasOrderSubject = includesAny(["checkout", "order", "purchase"]);
   if (
-    !hasCheckoutExecutionSubject &&
-    ["paymentmethod", "setupintent", "tokeniz"].some((marker) => operation.includes(marker))
+    (hasChargeSubject &&
+      includesAny(["authoriz", "captur", "complet", "confirm", "creat", "execut", "submit"])) ||
+    (hasOrderSubject &&
+      includesAny(["complet", "confirm", "creat", "execut", "plac", "submit"]))
+  ) {
+    return true;
+  }
+  if (!operation.includes("payment")) return false;
+  if (
+    includesAny([
+      "initializ",
+      "paymentmethod",
+      "prepar",
+      "session",
+      "setup",
+      "tokeniz",
+    ])
   ) {
     return false;
   }
-  const hasExecutionSubject = hasCheckoutExecutionSubject || operation.includes("payment");
-  const hasExecutionVerb = [
-    "authorize",
-    "capture",
-    "complete",
-    "confirm",
-    "create",
-    "execute",
-    "place",
-    "submit",
-  ].some((verb) => operation.includes(verb));
-  return hasExecutionSubject && hasExecutionVerb;
+  return includesAny(["authoriz", "captur", "complet", "confirm", "execut", "submit"]);
 }
 
 function hasCheckoutPaymentExecutionPayload(request: Request): boolean {
@@ -11687,7 +11691,6 @@ export class BrowserController {
       const snapshot = parseCheckoutOutcomeDispatchSnapshot(candidate.snapshot);
       if (snapshot === null) return;
       waiter.resolve(snapshot);
-      waiter.report();
     });
     this.checkoutSubmitDispatchBindingPages.add(page);
   }
@@ -11779,7 +11782,6 @@ export class BrowserController {
           frame,
           nonce: dispatchNonce,
           resolve: resolveBoundDispatch,
-          report: reportSubmitDispatched,
         });
         const dispatchTrackingInstalled = await candidate
           .evaluate(
@@ -11789,11 +11791,13 @@ export class BrowserController {
                 __trustySquirePaymentSubmitDispatch?: {
                   token: string;
                   dispatched: boolean;
+                  submitObserved: boolean;
                   validationBlocked: boolean;
                 };
               };
               const tracked = element as Element & {
                 __tsPaymentSubmitDispatchListeners?: Array<{
+                  capture: boolean;
                   event: "invalid" | "submit";
                   listener: EventListener;
                   target: Element;
@@ -11805,70 +11809,72 @@ export class BrowserController {
                   registration.target.removeEventListener(
                     registration.event,
                     registration.listener,
-                    true,
+                    registration.capture,
                   );
                 }
               }
               stateWindow.__trustySquirePaymentSubmitDispatch = {
                 token,
                 dispatched: false,
+                submitObserved: false,
                 validationBlocked: false,
               };
-              const listener: EventListener = () => {
+              const listener: EventListener = (event) => {
                 const state = stateWindow.__trustySquirePaymentSubmitDispatch;
-                if (state?.token !== token || state.dispatched) return;
-                try {
-                  const merchantWindow = window.top;
-                  if (merchantWindow === null) return;
-                  const urls = new Set(frameUrls);
-                  const collectFrameUrls = (currentWindow: Window): void => {
-                    try {
-                      urls.add(currentWindow.location.href);
-                      for (let index = 0; index < currentWindow.frames.length; index += 1) {
-                        collectFrameUrls(currentWindow.frames[index]!);
-                      }
-                    } catch (error) {
-                      void error;
-                    }
-                  };
-                  collectFrameUrls(merchantWindow);
-                  const snapshot: CheckoutOutcomeDispatchSnapshot = {
-                    url: pageUrl,
-                    urls: [...urls],
-                  };
-                  const dispatchBinding = (
-                    window as unknown as Record<
-                      string,
-                      | ((payload: {
-                          token: string;
-                          nonce: string;
-                          snapshot: CheckoutOutcomeDispatchSnapshot;
-                        }) => Promise<void>)
-                      | undefined
-                    >
-                  )[bindingName];
-                  if (typeof dispatchBinding === "function") {
-                    void dispatchBinding({ token, nonce, snapshot });
-                  }
-                  const baselineWindow = merchantWindow as Window & {
-                    __trustySquirePaymentDispatchBaselines?: Record<
-                      string,
-                      CheckoutOutcomeDispatchSnapshot
-                    >;
-                  };
-                  baselineWindow.__trustySquirePaymentDispatchBaselines ??= {};
-                  baselineWindow.__trustySquirePaymentDispatchBaselines[token] = snapshot;
+                if (state?.token !== token || state.submitObserved) return;
+                state.submitObserved = true;
+                if (event.defaultPrevented) return;
+                const currentState = stateWindow.__trustySquirePaymentSubmitDispatch;
+                if (currentState?.token !== token || currentState.dispatched) return;
+                const merchantWindow = window.top;
+                if (merchantWindow === null) return;
+                const urls = new Set(frameUrls);
+                const collectFrameUrls = (currentWindow: Window): void => {
                   try {
-                    merchantWindow.sessionStorage.setItem(
-                      baselineStorageKey,
-                      JSON.stringify(snapshot),
-                    );
+                    urls.add(currentWindow.location.href);
+                    for (let index = 0; index < currentWindow.frames.length; index += 1) {
+                      collectFrameUrls(currentWindow.frames[index]!);
+                    }
                   } catch (error) {
                     void error;
                   }
-                } finally {
-                  state.dispatched = true;
+                };
+                collectFrameUrls(merchantWindow);
+                const snapshot: CheckoutOutcomeDispatchSnapshot = {
+                  url: pageUrl,
+                  urls: [...urls],
+                };
+                const dispatchBinding = (
+                  window as unknown as Record<
+                    string,
+                    | ((payload: {
+                        token: string;
+                        nonce: string;
+                        snapshot: CheckoutOutcomeDispatchSnapshot;
+                      }) => Promise<void>)
+                    | undefined
+                  >
+                )[bindingName];
+                if (typeof dispatchBinding === "function") {
+                  void dispatchBinding({ token, nonce, snapshot });
                 }
+                const baselineWindow = merchantWindow as Window & {
+                  __trustySquirePaymentDispatchBaselines?: Record<
+                    string,
+                    CheckoutOutcomeDispatchSnapshot
+                  >;
+                };
+                baselineWindow.__trustySquirePaymentDispatchBaselines ??= {};
+                baselineWindow.__trustySquirePaymentDispatchBaselines[token] = snapshot;
+                try {
+                  merchantWindow.sessionStorage.setItem(
+                    baselineStorageKey,
+                    JSON.stringify(snapshot),
+                  );
+                } catch (error) {
+                  void error;
+                }
+                currentState.dispatched = true;
               };
               const form =
                 element instanceof HTMLButtonElement || element instanceof HTMLInputElement
@@ -11877,10 +11883,12 @@ export class BrowserController {
               const submitTargets =
                 form !== null ? [form] : Array.from(document.forms);
               const registrations: Array<{
+                capture: boolean;
                 event: "invalid" | "submit";
                 listener: EventListener;
                 target: Element;
               }> = submitTargets.map((target) => ({
+                capture: false,
                 event: "submit" as const,
                 listener,
                 target,
@@ -11891,6 +11899,7 @@ export class BrowserController {
               };
               registrations.push(
                 ...submitTargets.map((target) => ({
+                  capture: true,
                   event: "invalid" as const,
                   listener: invalidListener,
                   target,
@@ -11899,7 +11908,7 @@ export class BrowserController {
               tracked.__tsPaymentSubmitDispatchListeners = registrations;
               for (const registration of registrations) {
                 registration.target.addEventListener(registration.event, registration.listener, {
-                  capture: true,
+                  capture: registration.capture,
                   once: true,
                 });
               }
@@ -11926,9 +11935,11 @@ export class BrowserController {
           resolveConcretePaymentRequest = resolve;
         });
         let navigationObserved = false;
-        let resolveNavigation = (): void => undefined;
-        const navigation = new Promise<void>((resolve) => {
-          resolveNavigation = resolve;
+        let navigationTerminalObserved = false;
+        let navigationThreeDsObserved = false;
+        let resolveNavigationOutcome = (): void => undefined;
+        const navigationOutcome = new Promise<void>((resolve) => {
+          resolveNavigationOutcome = resolve;
         });
         const paymentRequestListener = (request: Request): void => {
           if (!paymentRequestTrackingArmed || this.page === undefined) return;
@@ -11943,11 +11954,21 @@ export class BrowserController {
           concretePaymentRequestObserved = true;
           resolveConcretePaymentRequest();
         };
-        const navigationListener = (navigatedFrame: Frame): void => {
+        const navigationListener = (): void => {
           if (!paymentRequestTrackingArmed || this.page === undefined) return;
-          if (navigatedFrame !== frame && navigatedFrame !== this.page.mainFrame()) return;
           navigationObserved = true;
-          resolveNavigation();
+          void (async () => {
+            if (await this.hasConfirmedCheckoutOutcome(clickOnlyOutcomeBaseline)) {
+              navigationTerminalObserved = true;
+              resolveNavigationOutcome();
+              return;
+            }
+            const challenge = await this.detectThreeDsChallenge().catch(() => undefined);
+            if (challenge?.three_ds_required === true) {
+              navigationThreeDsObserved = true;
+              resolveNavigationOutcome();
+            }
+          })();
         };
         this.page.on("request", paymentRequestListener);
         this.page.on("framenavigated", navigationListener);
@@ -11997,7 +12018,7 @@ export class BrowserController {
             const snapshot = await Promise.race([
               boundDispatch,
               concretePaymentRequest.then(() => null),
-              navigation.then(() => null),
+              navigationOutcome.then(() => null),
               new Promise<null>((resolve) => {
                 timer = setTimeout(() => resolve(null), CHECKOUT_PAYMENT_REQUEST_OBSERVATION_MS);
               }),
@@ -12016,6 +12037,7 @@ export class BrowserController {
                 __trustySquirePaymentSubmitDispatch?: {
                   token: string;
                   dispatched: boolean;
+                  submitObserved: boolean;
                   validationBlocked: boolean;
                 };
               };
@@ -12037,6 +12059,7 @@ export class BrowserController {
               (element) => {
                 const tracked = element as Element & {
                   __tsPaymentSubmitDispatchListeners?: Array<{
+                    capture: boolean;
                     event: "invalid" | "submit";
                     listener: EventListener;
                     target: Element;
@@ -12048,7 +12071,7 @@ export class BrowserController {
                     registration.target.removeEventListener(
                       registration.event,
                       registration.listener,
-                      true,
+                      registration.capture,
                     );
                   }
                   delete tracked.__tsPaymentSubmitDispatchListeners;
@@ -12064,6 +12087,7 @@ export class BrowserController {
                 __trustySquirePaymentSubmitDispatch?: {
                   token: string;
                   dispatched: boolean;
+                  submitObserved: boolean;
                   validationBlocked: boolean;
                 };
               };
@@ -12108,13 +12132,15 @@ export class BrowserController {
               const clickOnlyOutcomeConfirmed =
                 baseline === null &&
                 dispatchState?.dispatched !== true &&
-                (await this.hasConfirmedCheckoutOutcome(clickOnlyOutcomeBaseline));
+                (navigationTerminalObserved ||
+                  (await this.hasConfirmedCheckoutOutcome(clickOnlyOutcomeBaseline)));
               const clickOnlyThreeDsObserved =
                 baseline === null &&
                 dispatchState?.dispatched !== true &&
                 navigationObserved &&
-                (await this.detectThreeDsChallenge().catch(() => undefined))?.three_ds_required ===
-                  true;
+                (navigationThreeDsObserved ||
+                  (await this.detectThreeDsChallenge().catch(() => undefined))
+                    ?.three_ds_required === true);
               const clickOnlyDispatchObserved =
                 (concretePaymentRequestObserved && dispatchState?.validationBlocked !== true) ||
                 clickOnlyOutcomeConfirmed ||
