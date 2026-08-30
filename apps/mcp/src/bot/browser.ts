@@ -72,7 +72,7 @@ import {
 } from "./operator-browser-watchdog.js";
 import {
   markOwnerBrowserLaunchTerminal,
-  ownerBrowserLaunchState,
+  reconcileOwnerBrowserLaunchAfterLeaderExit,
   terminateOwnerBrowserLaunch,
   trackOwnerBrowserLaunch,
   trackOwnerProcess,
@@ -119,13 +119,10 @@ function spawnLocalBrowser(
       stdio: options.stdio,
       detached: options.detached,
     });
+    localBrowserLaunchMarkers.set(child, ownership.marker);
     child.once("exit", () => {
       setTimeout(() => {
-        if (ownerBrowserLaunchState(ownership.marker) === "stale") {
-          untrackOwnerBrowserLaunch(ownership.marker);
-        } else {
-          markOwnerBrowserLaunchTerminal(ownership.marker);
-        }
+        reconcileOwnerBrowserLaunchAfterLeaderExit(ownership.marker);
       }, 0).unref();
     });
     return child;
@@ -133,6 +130,14 @@ function spawnLocalBrowser(
     untrackOwnerBrowserLaunch(ownership.marker);
     throw error;
   }
+}
+
+const localBrowserLaunchMarkers = new WeakMap<ChildProcess, string>();
+
+function markLocalBrowserLaunchTerminal(child: ChildProcess | null): void {
+  if (child === null) return;
+  const marker = localBrowserLaunchMarkers.get(child);
+  if (marker !== undefined) markOwnerBrowserLaunchTerminal(marker);
 }
 
 export type ContextInitScriptId = "evaluate-name-shim" | "navigator-webdriver" | "webgl-spoof";
@@ -3328,6 +3333,7 @@ export async function launchSelfManagedLoginContext(params: {
   let torn = false;
   const isRunning = (): boolean => childProcessIsRunning(child);
   const forceTeardown = (): void => {
+    markLocalBrowserLaunchTerminal(child);
     if (childIdentity !== null) {
       const tracked = selfManagedChromes.get(childIdentity.pid);
       signalOwnedChromeProcessTree(childIdentity, false, "SIGKILL", {
@@ -3341,6 +3347,7 @@ export async function launchSelfManagedLoginContext(params: {
   const teardown = async (): Promise<void> => {
     if (torn) return;
     torn = true;
+    markLocalBrowserLaunchTerminal(child);
     await browser?.close().catch(() => undefined);
     if (!childProcessIsRunning(child)) return;
     if (childIdentity !== null) {
@@ -3551,6 +3558,7 @@ export async function launchPlainLoginBrowser(params: {
 
   let torn = false;
   const forceTeardown = (): void => {
+    markLocalBrowserLaunchTerminal(child);
     if (childIdentity !== null) {
       const tracked = selfManagedChromes.get(childIdentity.pid);
       signalOwnedChromeProcessTree(childIdentity, false, "SIGKILL", {
@@ -3564,6 +3572,7 @@ export async function launchPlainLoginBrowser(params: {
   const teardown = async (): Promise<void> => {
     if (torn) return;
     torn = true;
+    markLocalBrowserLaunchTerminal(child);
     if (child !== null && childIdentity !== null) {
       signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
     } else if (childProcessIsRunning(child)) {

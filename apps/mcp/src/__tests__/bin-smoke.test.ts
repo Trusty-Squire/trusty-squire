@@ -356,13 +356,17 @@ describe("owner-death process reaping", () => {
         fixture,
         `import { spawn } from "node:child_process";\n` +
           `import { writeFileSync } from "node:fs";\n` +
-          `import { spawnOwnerTrackedHelper, startOwnerProcessReaper, trackOwnerProcess } from ${JSON.stringify(ownerReaperUrl)};\n` +
+          `import { spawnOwnerTrackedHelper, trackOwnerProcess } from ${JSON.stringify(ownerReaperUrl)};\n` +
           `import { profileProcessIdentity } from ${JSON.stringify(profileUrl)};\n` +
           `const profileDir = ${JSON.stringify(profileDir)};\n` +
           `const groupFile = ${JSON.stringify(groupFile)};\n` +
           `const helperGroupFile = ${JSON.stringify(helperGroupFile)};\n` +
           `const readyFile = ${JSON.stringify(readyFile)};\n` +
-          `startOwnerProcessReaper({ rootDir: ${JSON.stringify(reaperDir)} });\n` +
+          `const helperCode = ${JSON.stringify(
+            `const { spawn } = require("node:child_process"); const { writeFileSync } = require("node:fs"); const child = spawn("sleep", ["300"], { stdio: "ignore" }); writeFileSync(${JSON.stringify(helperGroupFile)}, JSON.stringify([process.pid, child.pid])); setInterval(() => {}, 1000);`,
+          )};\n` +
+          `const sessionHelper = spawnOwnerTrackedHelper(process.execPath, ["-e", helperCode], { stdio: "ignore" });\n` +
+          `sessionHelper.unref();\n` +
           `const memberCode = ${JSON.stringify(
             `const { spawn } = require("node:child_process"); const { writeFileSync } = require("node:fs"); const helper = spawn("sleep", ["300"], { stdio: "ignore" }); writeFileSync(${JSON.stringify(groupFile)}, JSON.stringify([process.pid, helper.pid])); setInterval(() => {}, 1000);`,
           )};\n` +
@@ -373,11 +377,6 @@ describe("owner-death process reaping", () => {
           `if (identity === null) process.exit(3);\n` +
           `identity.process_marker = ${JSON.stringify(processMarker)};\n` +
           `trackOwnerProcess(identity);\n` +
-          `const helperCode = ${JSON.stringify(
-            `const { spawn } = require("node:child_process"); const { writeFileSync } = require("node:fs"); const child = spawn("sleep", ["300"], { stdio: "ignore" }); writeFileSync(${JSON.stringify(helperGroupFile)}, JSON.stringify([process.pid, child.pid])); setInterval(() => {}, 1000);`,
-          )};\n` +
-          `const sessionHelper = spawnOwnerTrackedHelper(process.execPath, ["-e", helperCode], { stdio: "ignore" });\n` +
-          `sessionHelper.unref();\n` +
           `writeFileSync(readyFile, JSON.stringify({ owner: process.pid, leader: leader.pid, helperLeader: sessionHelper.pid }));\n` +
           `setInterval(() => {}, 1000);\n`,
       );
@@ -387,6 +386,7 @@ describe("owner-death process reaping", () => {
           ...process.env,
           TRUSTY_SQUIRE_REAPER_POLL_MS: "25",
           TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS: "50",
+          TRUSTY_SQUIRE_REAPER_DIR: reaperDir,
         },
         stdio: "ignore",
       });

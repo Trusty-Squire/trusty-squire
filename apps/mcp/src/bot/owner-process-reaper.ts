@@ -420,7 +420,7 @@ export function startOwnerProcessReaper(
   options: { rootDir?: string; workerPath?: string } = {},
 ): OwnerProcessReaper | null {
   if (process.platform !== "linux") return null;
-  activeReaper?.stop();
+  if (activeReaper !== null) return activeReaper;
   const rootDir = resolve(options.rootDir ?? defaultRootDir());
   ensurePrivateDir(rootDir);
   void sweepOrphanedOwnerProcesses(rootDir).catch(() => undefined);
@@ -565,8 +565,16 @@ export function startOwnerProcessReaper(
   return reaper;
 }
 
+export function ensureOwnerProcessReaper(): OwnerProcessReaper | null {
+  return activeReaper ?? startOwnerProcessReaper();
+}
+
+export function stopOwnerProcessReaper(): void {
+  activeReaper?.stop();
+}
+
 export function trackOwnerProcess(identity: ProfileProcessIdentity): void {
-  activeReaper?.track(identity);
+  ensureOwnerProcessReaper()?.track(identity);
 }
 export function untrackOwnerProcess(identity: ProfileProcessIdentity): void {
   activeReaper?.untrack(identity);
@@ -576,7 +584,7 @@ export function trackOwnerBrowserLaunch(marker: string, profileDir: string): voi
   if (!trackedLaunchWatchdogs.has(marker)) {
     trackedLaunchWatchdogs.set(marker, registerOperatorBrowserLaunchWatchdog(marker));
   }
-  activeReaper?.trackLaunch(marker, profileDir);
+  ensureOwnerProcessReaper()?.trackLaunch(marker, profileDir);
 }
 export function markOwnerBrowserLaunchTerminal(marker: string): void {
   trackedLaunchWatchdogs.get(marker)?.permitTerminalCleanup();
@@ -586,8 +594,14 @@ export function untrackOwnerBrowserLaunch(marker: string): void {
   trackedLaunchWatchdogs.delete(marker);
   activeReaper?.untrackLaunch(marker);
 }
+export function reconcileOwnerBrowserLaunchAfterLeaderExit(
+  marker: string,
+  launchState: (marker: string) => ProcessIdentityState = ownerBrowserLaunchState,
+): void {
+  if (launchState(marker) === "stale") untrackOwnerBrowserLaunch(marker);
+}
 export function trackOwnerEphemeralProfile(profileDir: string): void {
-  activeReaper?.trackProfile(profileDir);
+  ensureOwnerProcessReaper()?.trackProfile(profileDir);
 }
 export function untrackOwnerEphemeralProfile(profileDir: string): void {
   activeReaper?.untrackProfile(profileDir);
@@ -600,6 +614,7 @@ export function spawnOwnerTrackedHelper(
   args: readonly string[],
   options: SpawnOptions = {},
 ): ChildProcess {
+  const reaper = ensureOwnerProcessReaper();
   const marker = `v1:${randomUUID()}`;
   const child = spawn(command, [...args], {
     ...options,
@@ -618,7 +633,7 @@ export function spawnOwnerTrackedHelper(
         process_group_id: child.pid,
       };
       trackedHelperProcesses.set(child, identity);
-      activeReaper?.trackHelper(identity);
+      reaper?.trackHelper(identity);
       child.once("exit", () => {
         setTimeout(() => {
           if (ownerHelperIdentityState(identity) !== "stale") return;

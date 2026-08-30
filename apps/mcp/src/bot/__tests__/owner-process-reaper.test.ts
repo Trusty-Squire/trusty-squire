@@ -5,13 +5,20 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   OWNER_PROFILE_SIGNATURE_FILE,
+  markOwnerBrowserLaunchTerminal,
+  reconcileOwnerBrowserLaunchAfterLeaderExit,
+  stopOwnerProcessReaper,
   sweepOrphanedOwnerProcesses,
   terminateOwnerBrowserLaunch,
+  trackOwnerBrowserLaunch,
+  untrackOwnerBrowserLaunch,
 } from "../owner-process-reaper.js";
+import { dispatchOperatorBrowserProcessTermination } from "../operator-browser-watchdog.js";
 
 const cleanup: string[] = [];
 
 afterEach(async () => {
+  stopOwnerProcessReaper();
   vi.unstubAllEnvs();
   await Promise.all(
     cleanup.splice(0).map(async (path) => await rm(path, { recursive: true, force: true })),
@@ -19,6 +26,26 @@ afterEach(async () => {
 });
 
 describe("owner process startup sweep", () => {
+  it("keeps launch cleanup blocked when the original leader exits before its marked descendants", async () => {
+    const root = await mkdtemp(join(tmpdir(), "trusty-squire-reaper-test-"));
+    cleanup.push(root);
+    vi.stubEnv("TRUSTY_SQUIRE_REAPER_DIR", root);
+    const marker = "v1:1:active-descendant";
+    const reason = {
+      kind: "max_lifetime" as const,
+      lifetime_ms: 30_000,
+      timeout_ms: 30_000,
+    };
+
+    trackOwnerBrowserLaunch(marker, join(root, "profile"));
+    reconcileOwnerBrowserLaunchAfterLeaderExit(marker, () => "matching");
+
+    await expect(dispatchOperatorBrowserProcessTermination(marker, reason)).resolves.toBe(false);
+    markOwnerBrowserLaunchTerminal(marker);
+    await expect(dispatchOperatorBrowserProcessTermination(marker, reason)).resolves.toBe(true);
+    untrackOwnerBrowserLaunch(marker);
+  });
+
   it("re-enumerates and kills a late exact-marker browser descendant", async () => {
     let phase = 0;
     const killed: Array<{ pid: number; signal: NodeJS.Signals }> = [];
