@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   OWNER_PROFILE_SIGNATURE_FILE,
   sweepOrphanedOwnerProcesses,
+  terminateOwnerBrowserLaunch,
 } from "../owner-process-reaper.js";
 
 const cleanup: string[] = [];
@@ -18,6 +19,28 @@ afterEach(async () => {
 });
 
 describe("owner process startup sweep", () => {
+  it("re-enumerates and kills a late exact-marker browser descendant", async () => {
+    let phase = 0;
+    const killed: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+
+    await expect(
+      terminateOwnerBrowserLaunch("v1:1:late-descendant", {
+        graceMs: 1,
+        readProcessIds: () => (phase === 0 ? [11, 99] : phase === 1 ? [12, 99] : [99]),
+        processMatches: (pid) => pid !== 99,
+        kill: (pid, signal) => killed.push({ pid, signal }),
+        wait: async () => {
+          phase += 1;
+        },
+      }),
+    ).resolves.toBe(true);
+
+    expect(killed).toEqual([
+      { pid: 11, signal: "SIGTERM" },
+      { pid: 12, signal: "SIGKILL" },
+    ]);
+  });
+
   it("removes only an exactly signed Trusty Squire ephemeral profile", async () => {
     vi.stubEnv("TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS", "1");
     const root = await mkdtemp(join(tmpdir(), "trusty-squire-reaper-test-"));

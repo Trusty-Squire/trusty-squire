@@ -6,6 +6,7 @@ import {
   dispatchOperatorBrowserProcessTermination,
   isOperatorChromiumCommand,
   operatorBrowserMarkerStartedAt,
+  registerOperatorBrowserLaunchWatchdog,
   type OperatorBrowserProcessRecord,
   type OperatorBrowserWatchdogReason,
 } from "../operator-browser-watchdog.js";
@@ -19,6 +20,22 @@ describe("operator browser process watchdog", () => {
         timeout_ms: 30_000,
       }),
     ).resolves.toBe(false);
+  });
+
+  it("grants orphan cleanup only after the launch reaches its terminal boundary", async () => {
+    const marker = createOperatorBrowserMarker(1, "launch-boundary");
+    const registration = registerOperatorBrowserLaunchWatchdog(marker);
+    const reason = {
+      kind: "max_lifetime" as const,
+      lifetime_ms: 30_000,
+      timeout_ms: 30_000,
+    };
+
+    await expect(dispatchOperatorBrowserProcessTermination(marker, reason)).resolves.toBe(false);
+    registration.permitTerminalCleanup();
+    await expect(dispatchOperatorBrowserProcessTermination(marker, reason)).resolves.toBe(true);
+    registration.dispose();
+    await expect(dispatchOperatorBrowserProcessTermination(marker, reason)).resolves.toBe(false);
   });
 
   it("meters reparented Chromium siblings as one marked browser", async () => {

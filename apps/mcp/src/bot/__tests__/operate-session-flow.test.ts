@@ -989,6 +989,7 @@ import {
   withProvisionSessionCall,
   paymentSession,
   closeAllProvisionSessions,
+  reapIdleProvisionSessions,
   activeSessionCount,
   getSessionUserEmail,
   parseElementsTable,
@@ -7300,6 +7301,28 @@ describe("operate session — ephemeral profile lifecycle", () => {
     ).resolves.toBe(true);
 
     expect(h.closeCalls).toBe(1);
+    expect(activeSessionCount()).toBe(0);
+    expect(existsSync(started.snapshot_file!)).toBe(false);
+  });
+
+  it("routes server idle reaping through terminal teardown ownership", async () => {
+    h.elements = [
+      elem({
+        tag: "button",
+        visibleText: "Continue",
+        screenPath: "main:checkout > button:continue",
+        container: "main:checkout",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    const session = paymentSession(started.session_id);
+    expect(started.snapshot_file).toBeTypeOf("string");
+
+    await expect(
+      reapIdleProvisionSessions(session.lastActivityAt + 60 * 60 * 1_000, 60 * 60 * 1_000),
+    ).resolves.toEqual([started.session_id]);
+
+    expect(session.watchdog).toBeNull();
     expect(activeSessionCount()).toBe(0);
     expect(existsSync(started.snapshot_file!)).toBe(false);
   });

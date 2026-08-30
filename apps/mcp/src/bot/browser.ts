@@ -71,6 +71,9 @@ import {
   startGlobalOperatorBrowserProcessWatchdog,
 } from "./operator-browser-watchdog.js";
 import {
+  markOwnerBrowserLaunchTerminal,
+  ownerBrowserLaunchState,
+  terminateOwnerBrowserLaunch,
   trackOwnerBrowserLaunch,
   trackOwnerProcess,
   untrackOwnerBrowserLaunch,
@@ -111,11 +114,21 @@ function spawnLocalBrowser(
 ): ChildProcess {
   const ownership = registerLocalBrowserLaunch(profileDir, options.env, options.marker);
   try {
-    return spawn(binary, [...args], {
+    const child = spawn(binary, [...args], {
       env: ownership.env,
       stdio: options.stdio,
       detached: options.detached,
     });
+    child.once("exit", () => {
+      setTimeout(() => {
+        if (ownerBrowserLaunchState(ownership.marker) === "stale") {
+          untrackOwnerBrowserLaunch(ownership.marker);
+        } else {
+          markOwnerBrowserLaunchTerminal(ownership.marker);
+        }
+      }, 0).unref();
+    });
+    return child;
   } catch (error) {
     untrackOwnerBrowserLaunch(ownership.marker);
     throw error;
@@ -16529,6 +16542,8 @@ export class BrowserController {
     this.startCancellationRequested = true;
     this.resolveStartCancellation?.();
     this.resolveStartCancellation = null;
+    const marker = this.operatorBrowserMarker();
+    if (this.ownerLaunchTracked) markOwnerBrowserLaunchTerminal(marker);
     const proof = this.ownedChromeProcessTreeProof;
     const identity = proof?.identity ?? this.currentOwnedProfileIdentity();
     if (identity !== null) {
@@ -16547,7 +16562,13 @@ export class BrowserController {
       if (tracked?.proof === proof) selfManagedChromes.delete(proof.identity.pid);
       if (this.ownedChromeProcessTreeProof === proof) this.ownedChromeProcessTreeProof = null;
     }
-    return closed ? "closed" : "unknown";
+    const markerClosed =
+      !this.ownerLaunchTracked || (await terminateOwnerBrowserLaunch(marker));
+    if (closed && markerClosed && this.ownerLaunchTracked) {
+      untrackOwnerBrowserLaunch(marker);
+      this.ownerLaunchTracked = false;
+    }
+    return closed && markerClosed ? "closed" : "unknown";
   }
 
   private async closeCancelledStart(): Promise<ProfileCloseState> {
@@ -16686,6 +16707,8 @@ export class BrowserController {
       this.context = null;
       return "closed";
     }
+    const marker = this.operatorBrowserMarker();
+    if (this.ownerLaunchTracked) markOwnerBrowserLaunchTerminal(marker);
     // Each step is best-effort and independent: a throw closing the page
     // or context must NOT skip the browser reap below, or an un-closed Chrome
     // keeps the profile's
@@ -16773,11 +16796,13 @@ export class BrowserController {
         this.ownedChromeProcessTreeProof = null;
       }
     }
-    if (closeState === "closed" && this.ownerLaunchTracked) {
-      untrackOwnerBrowserLaunch(this.operatorBrowserMarker());
+    const markerClosed =
+      !this.ownerLaunchTracked || (await terminateOwnerBrowserLaunch(marker));
+    if (markerClosed && this.ownerLaunchTracked) {
+      untrackOwnerBrowserLaunch(marker);
       this.ownerLaunchTracked = false;
     }
-    return closeState;
+    return closeState === "closed" && !markerClosed ? "force_closed_unproven" : closeState;
   }
 }
 

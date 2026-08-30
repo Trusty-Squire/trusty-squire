@@ -15,8 +15,9 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  linuxOperatorBrowserProcesses,
   operatorBrowserProcessMatchesMarker,
+  registerOperatorBrowserLaunchWatchdog,
+  type OperatorBrowserLaunchWatchdogRegistration,
 } from "./operator-browser-watchdog.js";
 import { sweepOperatorProfilePoolOrphans } from "./operator-profile-pool.js";
 import {
@@ -269,21 +270,71 @@ function signalOwnerHelper(identity: OwnerHelperIdentity, signal: NodeJS.Signals
   }
 }
 
+function exactMarkerProcessIds(marker: string): number[] {
+  if (process.platform !== "linux") return [];
+  try {
+    return readdirSync("/proc")
+      .filter((entry) => /^\d+$/.test(entry))
+      .map(Number)
+      .filter((pid) => operatorBrowserProcessMatchesMarker(pid, marker));
+  } catch {
+    return [];
+  }
+}
+
+export function ownerBrowserLaunchState(marker: string): ProcessIdentityState {
+  return exactMarkerProcessIds(marker).length === 0 ? "stale" : "matching";
+}
+
+export async function terminateOwnerBrowserLaunch(
+  marker: string,
+  options: {
+    graceMs?: number;
+    readProcessIds?: () => number[];
+    processMatches?: (pid: number, marker: string) => boolean;
+    kill?: (pid: number, signal: NodeJS.Signals) => void;
+    wait?: (ms: number) => Promise<void>;
+  } = {},
+): Promise<boolean> {
+  const readProcessIds = options.readProcessIds ?? (() => exactMarkerProcessIds(marker));
+  const processMatches =
+    options.processMatches ?? ((pid, expectedMarker) => operatorBrowserProcessMatchesMarker(pid, expectedMarker));
+  const kill = options.kill ?? ((pid, signal) => process.kill(pid, signal));
+  const wait =
+    options.wait ??
+    (async (ms) => await new Promise<void>((resolveWait) => setTimeout(resolveWait, ms)));
+  const graceMs = options.graceMs ?? envPositiveMs("TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS", DEFAULT_TERM_GRACE_MS);
+  const matching = (): number[] =>
+    readProcessIds().filter((pid) => processMatches(pid, marker));
+  const signal = (pids: readonly number[], signalName: NodeJS.Signals): void => {
+    for (const pid of pids) {
+      if (!processMatches(pid, marker)) continue;
+      try {
+        kill(pid, signalName);
+      } catch {}
+    }
+  };
+  const initial = matching();
+  if (initial.length === 0) return true;
+  signal(initial, "SIGTERM");
+  await wait(graceMs);
+  const resistant = matching();
+  if (resistant.length === 0) return true;
+  signal(resistant, "SIGKILL");
+  await wait(graceMs);
+  return matching().length === 0;
+}
+
 function signalTrackedResources(manifest: OwnerReaperManifest, signal: NodeJS.Signals): number {
   let signalled = 0;
   for (const identity of manifest.resources) {
     if (signalProfileProcess(identity, identity.user_data_dir, signal)) signalled += 1;
   }
   for (const launch of manifest.launches) {
-    for (const processRecord of linuxOperatorBrowserProcesses()) {
-      if (
-        processRecord.marker !== launch.marker ||
-        !operatorBrowserProcessMatchesMarker(processRecord.pid, launch.marker)
-      ) {
-        continue;
-      }
+    for (const pid of exactMarkerProcessIds(launch.marker)) {
+      if (!operatorBrowserProcessMatchesMarker(pid, launch.marker)) continue;
       try {
-        process.kill(processRecord.pid, signal);
+        process.kill(pid, signal);
         signalled += 1;
       } catch {
         // It exited between discovery and the signal.
@@ -501,6 +552,10 @@ export function startOwnerProcessReaper(
     stop: () => {
       if (stopped) return;
       stopped = true;
+      for (const launch of manifest.launches) {
+        trackedLaunchWatchdogs.get(launch.marker)?.dispose();
+        trackedLaunchWatchdogs.delete(launch.marker);
+      }
       rmSync(manifestPath, { force: true });
       worker.kill("SIGTERM");
       if (activeReaper === reaper) activeReaper = null;
@@ -516,10 +571,19 @@ export function trackOwnerProcess(identity: ProfileProcessIdentity): void {
 export function untrackOwnerProcess(identity: ProfileProcessIdentity): void {
   activeReaper?.untrack(identity);
 }
+const trackedLaunchWatchdogs = new Map<string, OperatorBrowserLaunchWatchdogRegistration>();
 export function trackOwnerBrowserLaunch(marker: string, profileDir: string): void {
+  if (!trackedLaunchWatchdogs.has(marker)) {
+    trackedLaunchWatchdogs.set(marker, registerOperatorBrowserLaunchWatchdog(marker));
+  }
   activeReaper?.trackLaunch(marker, profileDir);
 }
+export function markOwnerBrowserLaunchTerminal(marker: string): void {
+  trackedLaunchWatchdogs.get(marker)?.permitTerminalCleanup();
+}
 export function untrackOwnerBrowserLaunch(marker: string): void {
+  trackedLaunchWatchdogs.get(marker)?.dispose();
+  trackedLaunchWatchdogs.delete(marker);
   activeReaper?.untrackLaunch(marker);
 }
 export function trackOwnerEphemeralProfile(profileDir: string): void {
@@ -578,4 +642,32 @@ export function signalOwnerTrackedHelper(
   } catch {
     return false;
   }
+}
+
+export function ownerTrackedHelperState(child: ChildProcess): ProcessIdentityState {
+  const identity = trackedHelperProcesses.get(child);
+  if (identity !== undefined) return ownerHelperIdentityState(identity);
+  return child.exitCode !== null || child.signalCode !== null ? "stale" : "matching";
+}
+
+export async function waitForOwnerTrackedHelperExit(
+  child: ChildProcess,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (ownerTrackedHelperState(child) !== "stale" && Date.now() < deadline) {
+    await new Promise<void>((resolveWait) => {
+      const timer = setTimeout(resolveWait, Math.min(25, Math.max(1, deadline - Date.now())));
+      timer.unref();
+    });
+  }
+  return ownerTrackedHelperState(child) === "stale";
+}
+
+export function releaseOwnerTrackedHelper(child: ChildProcess): boolean {
+  const identity = trackedHelperProcesses.get(child);
+  if (identity === undefined || ownerHelperIdentityState(identity) !== "stale") return false;
+  activeReaper?.untrackHelper(identity);
+  trackedHelperProcesses.delete(child);
+  return true;
 }

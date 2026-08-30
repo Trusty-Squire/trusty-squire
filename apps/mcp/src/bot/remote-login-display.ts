@@ -29,8 +29,11 @@ import {
   setSelfManagedChromeTerminationSignalExitEnabled,
 } from "./browser.js";
 import {
+  ownerTrackedHelperState,
+  releaseOwnerTrackedHelper,
   signalOwnerTrackedHelper,
   spawnOwnerTrackedHelper,
+  waitForOwnerTrackedHelperExit,
 } from "./owner-process-reaper.js";
 
 const LOGIN_WIDTH = Number(process.env.BOT_NOVNC_W) || 720;
@@ -571,20 +574,6 @@ export function assertRemoteLoginRigLive(rig: RemoteLoginRig): void {
   }
 }
 
-function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
-  if (childExited(child)) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    const onExit = (): void => finish(true);
-    const timer = setTimeout(() => finish(childExited(child)), timeoutMs);
-    const finish = (exited: boolean): void => {
-      clearTimeout(timer);
-      child.removeListener("exit", onExit);
-      resolve(exited);
-    };
-    child.once("exit", onExit);
-  });
-}
-
 function removeRigFiles(rig: RemoteLoginRig): void {
   if (rig.webDir !== undefined) rmSync(rig.webDir, { recursive: true, force: true });
   if (rig.privateDir !== undefined) rmSync(rig.privateDir, { recursive: true, force: true });
@@ -617,16 +606,17 @@ export function teardownRemoteLoginRig(rig: RemoteLoginRig, graceMs = 1_000): Pr
   const existing = rigTeardowns.get(rig);
   if (existing !== undefined) return existing;
   const teardown = (async (): Promise<void> => {
-    const running = rig.procs.filter((child) => !childExited(child));
-    for (const child of running) {
+    for (const child of rig.procs) {
       try {
         signalOwnerTrackedHelper(child, "SIGTERM");
       } catch {
         // best-effort
       }
     }
-    await Promise.all(running.map((child) => waitForChildExit(child, graceMs)));
-    const resistant = running.filter((child) => !childExited(child));
+    await Promise.all(
+      rig.procs.map((child) => waitForOwnerTrackedHelperExit(child, graceMs)),
+    );
+    const resistant = rig.procs.filter((child) => ownerTrackedHelperState(child) !== "stale");
     for (const child of resistant) {
       try {
         signalOwnerTrackedHelper(child, "SIGKILL");
@@ -634,8 +624,13 @@ export function teardownRemoteLoginRig(rig: RemoteLoginRig, graceMs = 1_000): Pr
         // best-effort
       }
     }
-    await Promise.all(resistant.map((child) => waitForChildExit(child, graceMs)));
-    for (const child of rig.procs) releaseChildHandles(child);
+    await Promise.all(
+      resistant.map((child) => waitForOwnerTrackedHelperExit(child, graceMs)),
+    );
+    for (const child of rig.procs) {
+      releaseOwnerTrackedHelper(child);
+      releaseChildHandles(child);
+    }
     removeRigFiles(rig);
   })();
   rigTeardowns.set(rig, teardown);

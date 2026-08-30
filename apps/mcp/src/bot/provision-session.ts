@@ -10063,11 +10063,14 @@ export async function reapIdleProvisionSessions(
     ) {
       continue;
     }
-    session.closing = true;
-    sessions.delete(id);
-    clearSessionArtifacts(session);
-    audit(id, "idle_reap", { idle_ms: now - session.lastActivityAt });
-    await releaseWarmBrowserPage(session.browser, false).catch(() => undefined);
+    const idleMs = now - session.lastActivityAt;
+    const terminated = await terminateExpiredProvisionSession(session, {
+      kind: "idle_timeout",
+      idle_ms: idleMs,
+      timeout_ms: idleTimeoutMs,
+    });
+    if (!terminated) continue;
+    audit(id, "idle_reap", { idle_ms: idleMs });
     reaped.push(id);
   }
   return reaped;

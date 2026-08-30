@@ -25,6 +25,25 @@ import {
   type RemoteLoginRig,
 } from "../remote-login-display.js";
 import { synchronizeSelfManagedChromeTerminationSignalHandlers } from "../browser.js";
+import { spawnOwnerTrackedHelper } from "../owner-process-reaper.js";
+
+function processIsLive(pid: number): boolean {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const closeParen = stat.lastIndexOf(")");
+    return closeParen >= 0 && stat.slice(closeParen + 2).trim().split(/\s+/)[0] !== "Z";
+  } catch {
+    return false;
+  }
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  if (!predicate()) throw new Error("condition did not become true");
+}
 
 function fakeProcess(name: string, ignoreSigterm = false): ChildProcess {
   const child = Object.assign(new EventEmitter(), {
@@ -143,6 +162,50 @@ describe("remote interactive login display", () => {
     for (const child of processes) {
       expect(child.kill).toHaveBeenNthCalledWith(1, "SIGTERM");
       expect(child.kill).toHaveBeenNthCalledWith(2, "SIGKILL");
+    }
+  });
+
+  it("reaps a marked helper group after its original leader exits", async () => {
+    if (process.platform !== "linux") return;
+    const dir = mkdtempSync(join(tmpdir(), "ts-remote-login-group-"));
+    const childFile = join(dir, "child.pid");
+    const leader = spawnOwnerTrackedHelper(
+      process.execPath,
+      [
+        "-e",
+        `const { spawn } = require("node:child_process"); const { writeFileSync } = require("node:fs"); const child = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], { stdio: "ignore" }); child.unref(); writeFileSync(${JSON.stringify(childFile)}, String(child.pid));`,
+      ],
+      { stdio: "ignore" },
+    );
+    const leaderPid = leader.pid;
+    if (leaderPid === undefined) throw new Error("helper leader did not expose a pid");
+    let childPid = 0;
+    const rig: RemoteLoginRig = {
+      display: ":99",
+      width: 720,
+      height: 1280,
+      procs: [leader],
+      binaries: {
+        xvfb: "/unused/Xvfb",
+        x11vnc: "/unused/x11vnc",
+        websockify: "/unused/websockify",
+      },
+    };
+    try {
+      await waitUntil(() => existsSync(childFile));
+      childPid = Number(readFileSync(childFile, "utf8"));
+      await waitUntil(() => leader.exitCode !== null || leader.signalCode !== null);
+      expect(processIsLive(childPid)).toBe(true);
+
+      await teardownRemoteLoginRig(rig, 50);
+      await waitUntil(() => !processIsLive(childPid));
+
+      expect(processIsLive(childPid)).toBe(false);
+    } finally {
+      try {
+        process.kill(-leaderPid, "SIGKILL");
+      } catch {}
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
