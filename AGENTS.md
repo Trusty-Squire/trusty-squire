@@ -535,9 +535,13 @@ virgin signup succeeds on an UNCOVERED service (no active skill in registry)
 - Interactive human login is the deliberate exception. When `mcp login`,
   install/connect, or provider reconnect runs without a user-visible display,
   `apps/mcp/src/bot/remote-login-display.ts` starts an on-demand Xvfb + noVNC
-  tunnel and tears the entire rig down with that login. Keep this module scoped
-  to login flows. SSH/TTY sessions must not treat an inherited virtual
-  `DISPLAY` as a user-visible desktop; route those logins through noVNC.
+  quick tunnel and tears the entire owned rig down with that login. Keep this
+  module scoped to login flows. SSH/TTY sessions must not treat an inherited
+  virtual `DISPLAY` as a user-visible desktop; route those logins through noVNC.
+  When both `TS_LOGIN_PUBLIC_HOSTNAME` and `TS_LOGIN_LOCAL_PORT` select a named
+  tunnel, that tunnel is operator-managed external infrastructure: the login
+  owns and tears down its per-login display and websockify listener, but never
+  creates, owns, or stops the external tunnel.
 - Keep self-launch + `connectOverCDP` and Patchright as the defaults. The
   2026-08-28 read-only A/B used serial, fresh-profile trials against Exa, Groq,
   Cartesia, Replit, Runpod, and Turso from egress `172.93.111.86`:

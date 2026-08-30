@@ -7,17 +7,20 @@
 import { randomBytes } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import {
+  accessSync,
   chmodSync,
+  constants,
   cpSync,
   existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
-import { createServer } from "node:net";
+import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import boxen from "boxen";
 import chalk from "chalk";
@@ -31,23 +34,24 @@ const LOGIN_HEIGHT = Number(process.env.BOT_NOVNC_H) || 1280;
 const NOVNC_INSTALL_DIR = "/usr/share/novnc";
 
 export interface RemoteLoginRig {
-  display: string;
+  display?: string;
   width: number;
   height: number;
   procs: ChildProcess[];
+  binaries: RemoteLoginBinaries;
   webDir?: string;
   passFile?: string;
 }
 
-function loginAssetPath(name: string): string {
-  return fileURLToPath(new URL(`../../assets/login/${name}`, import.meta.url));
+export interface RemoteLoginBinaries {
+  xvfb: string;
+  x11vnc: string;
+  websockify: string;
+  cloudflared?: string;
 }
 
-function pickFreeDisplay(): string {
-  for (let n = 99; n <= 120; n++) {
-    if (!existsSync(`/tmp/.X11-unix/X${n}`)) return `:${n}`;
-  }
-  throw new Error("no free X display number in :99..:120");
+function loginAssetPath(name: string): string {
+  return fileURLToPath(new URL(`../../assets/login/${name}`, import.meta.url));
 }
 
 export function findFreeLoginPort(): Promise<number> {
@@ -75,9 +79,27 @@ const STANDARD_BIN_DIRS = [
   "/sbin",
 ] as const;
 
+export function resolveLoginBinary(
+  binary: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const dirs = [...(env.PATH ?? "").split(delimiter), ...STANDARD_BIN_DIRS];
+  for (const dir of dirs) {
+    if (dir.length === 0) continue;
+    const candidate = resolve(dir, binary);
+    try {
+      if (!statSync(candidate).isFile()) continue;
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 export function loginBinaryAvailable(binary: string): boolean {
-  const dirs = [...(process.env.PATH ?? "").split(":"), ...STANDARD_BIN_DIRS];
-  return dirs.some((dir) => dir.length > 0 && existsSync(join(dir, binary)));
+  return resolveLoginBinary(binary) !== null;
 }
 
 function cloudflaredDebArch(): string {
@@ -127,14 +149,15 @@ function namedTunnelConfig(): { hostname: string; port: number } | null {
   return { hostname, port };
 }
 
-function requireRemoteLoginBinaries(namedTunnel: boolean): void {
+function requireRemoteLoginBinaries(namedTunnel: boolean): RemoteLoginBinaries {
   const required = [
     "Xvfb",
     "x11vnc",
     "websockify",
     ...(namedTunnel ? [] : ["cloudflared"]),
   ] as const;
-  const missing = required.filter((binary) => !loginBinaryAvailable(binary));
+  const resolved = new Map(required.map((binary) => [binary, resolveLoginBinary(binary)]));
+  const missing = required.filter((binary) => resolved.get(binary) === null);
   if (missing.length > 0) {
     throw new Error(
       `headless login needs these not-installed binaries: ${missing.join(", ")}.\n` +
@@ -144,37 +167,176 @@ function requireRemoteLoginBinaries(namedTunnel: boolean): void {
   if (!existsSync(NOVNC_INSTALL_DIR)) {
     throw new Error("noVNC web assets not found at /usr/share/novnc — install the `novnc` package");
   }
+  return {
+    xvfb: resolved.get("Xvfb")!,
+    x11vnc: resolved.get("x11vnc")!,
+    websockify: resolved.get("websockify")!,
+    ...(namedTunnel ? {} : { cloudflared: resolved.get("cloudflared")! }),
+  };
 }
 
 function spawnBackground(command: string, args: string[], env?: NodeJS.ProcessEnv): ChildProcess {
-  const child = spawn(command, args, {
+  return spawn(command, args, {
     stdio: ["ignore", "pipe", "pipe"],
     env: env ?? process.env,
   });
-  child.on("error", (error) =>
-    console.error(`[login] ${command} failed to spawn: ${String(error)}`),
-  );
-  return child;
 }
 
 function waitForTunnelUrl(cloudflared: ChildProcess, timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error("cloudflared did not produce a URL in time")),
-      timeoutMs,
-    );
+    let settled = false;
     let output = "";
+    const finish = (error: Error | null, url?: string): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      cloudflared.removeListener("error", onError);
+      cloudflared.removeListener("exit", onExit);
+      cloudflared.stdout?.removeListener("data", scan);
+      cloudflared.stderr?.removeListener("data", scan);
+      if (error !== null) reject(error);
+      else resolve(url!);
+    };
+    const onError = (error: Error): void =>
+      finish(new Error(`cloudflared failed to spawn: ${error.message}`));
+    const onExit = (code: number | null, signal: NodeJS.Signals | null): void =>
+      finish(
+        new Error(
+          `cloudflared exited before producing a URL (${code === null ? `signal ${signal ?? "unknown"}` : `code ${code}`})`,
+        ),
+      );
     const scan = (chunk: Buffer): void => {
       output += chunk.toString();
       const match = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
       if (match !== null) {
-        clearTimeout(timer);
-        resolve(match[0]);
+        finish(null, match[0]);
       }
       if (output.length > 65_536) output = output.slice(-4_096);
     };
+    const timer = setTimeout(
+      () => finish(new Error("cloudflared did not produce a URL in time")),
+      timeoutMs,
+    );
+    cloudflared.once("error", onError);
+    cloudflared.once("exit", onExit);
+    if (childExited(cloudflared)) {
+      onExit(cloudflared.exitCode, cloudflared.signalCode);
+      return;
+    }
     cloudflared.stdout?.on("data", scan);
     cloudflared.stderr?.on("data", scan);
+  });
+}
+
+function waitForXvfbDisplay(xvfb: ChildProcess, timeoutMs: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const displayOutput = xvfb.stdio[3];
+    if (displayOutput === null || typeof displayOutput.on !== "function") {
+      reject(new Error("Xvfb display allocation pipe is unavailable"));
+      return;
+    }
+    let settled = false;
+    let output = "";
+    const finish = (error: Error | null, display?: string): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      xvfb.removeListener("error", onError);
+      xvfb.removeListener("exit", onExit);
+      displayOutput.removeListener("data", onData);
+      if (error !== null) reject(error);
+      else resolve(display!);
+    };
+    const onError = (error: Error): void =>
+      finish(new Error(`Xvfb failed to spawn: ${error.message}`));
+    const onExit = (code: number | null, signal: NodeJS.Signals | null): void =>
+      finish(
+        new Error(
+          `Xvfb exited before becoming ready (${code === null ? `signal ${signal ?? "unknown"}` : `code ${code}`})`,
+        ),
+      );
+    const onData = (chunk: Buffer): void => {
+      output += chunk.toString();
+      const match = output.match(/^(\d+)\s/);
+      if (match === null) return;
+      const displayNumber = Number(match[1]);
+      if (!Number.isInteger(displayNumber) || displayNumber < 0) {
+        finish(new Error(`Xvfb returned an invalid display number: ${JSON.stringify(match[1])}`));
+        return;
+      }
+      if (childExited(xvfb)) {
+        onExit(xvfb.exitCode, xvfb.signalCode);
+        return;
+      }
+      finish(null, `:${displayNumber}`);
+    };
+    const timer = setTimeout(
+      () => finish(new Error("Xvfb did not allocate a display in time")),
+      timeoutMs,
+    );
+    xvfb.once("error", onError);
+    xvfb.once("exit", onExit);
+    if (childExited(xvfb)) {
+      onExit(xvfb.exitCode, xvfb.signalCode);
+      return;
+    }
+    displayOutput.on("data", onData);
+  });
+}
+
+function waitForListeningPort(
+  child: ChildProcess,
+  port: number,
+  label: string,
+  timeoutMs: number,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    let settled = false;
+    let retryTimer: NodeJS.Timeout | undefined;
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
+      child.removeListener("error", onError);
+      child.removeListener("exit", onExit);
+      if (error !== undefined) reject(error);
+      else resolve();
+    };
+    const onError = (error: Error): void =>
+      finish(new Error(`${label} failed to spawn: ${error.message}`));
+    const onExit = (code: number | null, signal: NodeJS.Signals | null): void =>
+      finish(
+        new Error(
+          `${label} exited before becoming ready (${code === null ? `signal ${signal ?? "unknown"}` : `code ${code}`})`,
+        ),
+      );
+    const probe = (): void => {
+      if (settled) return;
+      if (childExited(child)) {
+        onExit(child.exitCode, child.signalCode);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        finish(new Error(`${label} did not listen on 127.0.0.1:${port} in time`));
+        return;
+      }
+      const socket = createConnection({ host: "127.0.0.1", port });
+      socket.once("connect", () => {
+        socket.destroy();
+        retryTimer = setTimeout(() => {
+          if (childExited(child)) onExit(child.exitCode, child.signalCode);
+          else finish();
+        }, 100);
+      });
+      socket.once("error", () => {
+        socket.destroy();
+        retryTimer = setTimeout(probe, 50);
+      });
+    };
+    child.once("error", onError);
+    child.once("exit", onExit);
+    probe();
   });
 }
 
@@ -199,27 +361,35 @@ function buildVncWebDir(): string {
 
 export function createRemoteLoginRig(): RemoteLoginRig {
   const namedTunnel = namedTunnelConfig();
-  requireRemoteLoginBinaries(namedTunnel !== null);
+  const binaries = requireRemoteLoginBinaries(namedTunnel !== null);
   return {
-    display: pickFreeDisplay(),
     width: LOGIN_WIDTH,
     height: LOGIN_HEIGHT,
     procs: [],
+    binaries,
   };
 }
 
-export async function startRemoteLoginDisplay(rig: RemoteLoginRig): Promise<void> {
+export async function startRemoteLoginDisplay(rig: RemoteLoginRig): Promise<string> {
   try {
-    rig.procs.push(
-      spawnBackground("Xvfb", [
-        rig.display,
+    const xvfb = spawn(
+      rig.binaries.xvfb,
+      [
         "-screen",
         "0",
         `${rig.width}x${rig.height}x24`,
         "-ac",
-      ]),
+        "-displayfd",
+        "3",
+      ],
+      {
+        stdio: ["ignore", "pipe", "pipe", "pipe"],
+        env: process.env,
+      },
     );
-    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    rig.procs.push(xvfb);
+    rig.display = await waitForXvfbDisplay(xvfb, 5_000);
+    return rig.display;
   } catch (error) {
     await teardownRemoteLoginRig(rig);
     throw error;
@@ -230,6 +400,9 @@ export async function exposeRemoteLoginDisplay(
   rig: RemoteLoginRig,
   label: string,
 ): Promise<string> {
+  if (rig.display === undefined) {
+    throw new Error("remote login display has not been started");
+  }
   const namedTunnel = namedTunnelConfig();
   const vncPort = await findFreeLoginPort();
   const webPort = namedTunnel?.port ?? (await findFreeLoginPort());
@@ -239,38 +412,40 @@ export async function exposeRemoteLoginDisplay(
   writeFileSync(passFile, password, { mode: 0o600 });
   chmodSync(passFile, 0o600);
   rig.passFile = passFile;
-  rig.procs.push(
-    spawnBackground("x11vnc", [
-      "-display",
-      rig.display,
-      "-rfbport",
-      String(vncPort),
-      "-passwdfile",
-      `rm:${passFile}`,
-      "-localhost",
-      "-forever",
-      "-shared",
-      "-noshm",
-      "-quiet",
-    ]),
-  );
-  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  const x11vnc = spawnBackground(rig.binaries.x11vnc, [
+    "-display",
+    rig.display,
+    "-rfbport",
+    String(vncPort),
+    "-passwdfile",
+    `rm:${passFile}`,
+    "-localhost",
+    "-forever",
+    "-shared",
+    "-noshm",
+    "-quiet",
+  ]);
+  rig.procs.push(x11vnc);
+  await waitForListeningPort(x11vnc, vncPort, "x11vnc", 5_000);
 
   rig.webDir = buildVncWebDir();
-  rig.procs.push(
-    spawnBackground("websockify", [
-      `--web=${rig.webDir}`,
-      `127.0.0.1:${webPort}`,
-      `localhost:${vncPort}`,
-    ]),
-  );
-  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  const websockify = spawnBackground(rig.binaries.websockify, [
+    `--web=${rig.webDir}`,
+    `127.0.0.1:${webPort}`,
+    `localhost:${vncPort}`,
+  ]);
+  rig.procs.push(websockify);
+  await waitForListeningPort(websockify, webPort, "websockify", 5_000);
 
   let publicUrl: string;
   if (namedTunnel !== null) {
     publicUrl = `https://${namedTunnel.hostname}/#p=${password}`;
   } else {
-    const cloudflared = spawnBackground("cloudflared", fallbackCloudflaredArgs(webPort));
+    const cloudflaredBinary = rig.binaries.cloudflared;
+    if (cloudflaredBinary === undefined) {
+      throw new Error("cloudflared was not resolved for the per-login quick tunnel");
+    }
+    const cloudflared = spawnBackground(cloudflaredBinary, fallbackCloudflaredArgs(webPort));
     rig.procs.push(cloudflared);
     const tunnelUrl = await waitForTunnelUrl(cloudflared, 30_000);
     publicUrl = `${tunnelUrl}/#p=${password}`;

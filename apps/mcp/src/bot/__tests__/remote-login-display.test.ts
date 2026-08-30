@@ -1,10 +1,15 @@
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   fallbackCloudflaredArgs,
   registerRemoteLoginRigCleanup,
   remoteLoginInstallHint,
+  resolveLoginBinary,
+  startRemoteLoginDisplay,
   teardownRemoteLoginRig,
   type RemoteLoginRig,
 } from "../remote-login-display.js";
@@ -37,8 +42,40 @@ function rigWithProcesses(ignoreSigterm = false): {
     fakeProcess(name, ignoreSigterm),
   );
   return {
-    rig: { display: ":99", width: 720, height: 1280, procs: processes },
+    rig: {
+      display: ":99",
+      width: 720,
+      height: 1280,
+      procs: processes,
+      binaries: {
+        xvfb: "/usr/bin/Xvfb",
+        x11vnc: "/usr/bin/x11vnc",
+        websockify: "/usr/bin/websockify",
+        cloudflared: "/usr/bin/cloudflared",
+      },
+    },
     processes,
+  };
+}
+
+function fakeExecutable(body: string): { path: string; remove(): void } {
+  const dir = mkdtempSync(join(tmpdir(), "ts-remote-login-test-"));
+  const path = join(dir, "fake-binary");
+  writeFileSync(path, `#!${process.execPath}\n${body}\n`, { mode: 0o700 });
+  chmodSync(path, 0o700);
+  return { path, remove: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+function emptyRig(xvfb: string): RemoteLoginRig {
+  return {
+    width: 720,
+    height: 1280,
+    procs: [],
+    binaries: {
+      xvfb,
+      x11vnc: "/unused/x11vnc",
+      websockify: "/unused/websockify",
+    },
   };
 }
 
@@ -77,6 +114,50 @@ describe("remote interactive login display", () => {
       "--url",
       "http://127.0.0.1:4567",
     ]);
+  });
+
+  it("launches the resolved Xvfb and uses its atomic display allocation", async () => {
+    const executable = fakeExecutable(`
+const fs = require("node:fs");
+const flag = process.argv.indexOf("-displayfd");
+if (flag < 0) process.exit(21);
+fs.writeSync(Number(process.argv[flag + 1]), "117\\n");
+setInterval(() => undefined, 1000);
+`);
+    const rig = emptyRig(executable.path);
+    try {
+      await expect(startRemoteLoginDisplay(rig)).resolves.toBe(":117");
+      expect(rig.display).toBe(":117");
+      expect(rig.procs).toHaveLength(1);
+    } finally {
+      await teardownRemoteLoginRig(rig, 10);
+      executable.remove();
+    }
+  });
+
+  it("rejects when Xvfb exits before allocating its display", async () => {
+    const executable = fakeExecutable("process.exit(23);");
+    const rig = emptyRig(executable.path);
+    try {
+      await expect(startRemoteLoginDisplay(rig)).rejects.toThrow(
+        "Xvfb exited before becoming ready (code 23)",
+      );
+    } finally {
+      executable.remove();
+    }
+  });
+
+  it("resolves an executable to the absolute path that will be spawned", () => {
+    const executable = fakeExecutable("setInterval(() => undefined, 1000);");
+    try {
+      expect(
+        resolveLoginBinary("fake-binary", {
+          PATH: executable.path.replace(/\/[^/]+$/, ""),
+        }),
+      ).toBe(executable.path);
+    } finally {
+      executable.remove();
+    }
   });
 
   it("provides actionable installation guidance for the login-only stack", () => {

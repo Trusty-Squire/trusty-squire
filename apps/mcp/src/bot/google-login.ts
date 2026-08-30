@@ -852,7 +852,7 @@ export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<Lo
   let storageState: BrowserStorageState | undefined;
 
   try {
-    await startRemoteLoginDisplay(rig);
+    const display = await startRemoteLoginDisplay(rig);
     lifecycle.throwIfCancelled();
 
     const proxyOpt = loginProxyOption();
@@ -867,7 +867,7 @@ export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<Lo
       "--no-sandbox",
       "--disable-dev-shm-usage",
     ] as const;
-    const browserEnv = { ...process.env, DISPLAY: rig.display };
+    const browserEnv = { ...process.env, DISPLAY: display };
     let context: BrowserContext | undefined;
 
     if (opts.plainProfileLogin === true) {
