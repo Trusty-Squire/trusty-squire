@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 import {
   chmodSync,
   existsSync,
@@ -76,6 +77,7 @@ interface OwnerReaperManifest {
 
 export interface OwnerProcessReaper {
   readonly manifestPath: string;
+  isAvailable(): boolean;
   track(identity: ProfileProcessIdentity): void;
   untrack(identity: ProfileProcessIdentity): void;
   trackLaunch(marker: string, profileDir: string): void;
@@ -94,6 +96,10 @@ export const OWNER_HELPER_MARKER_ENV = "TRUSTY_SQUIRE_OWNER_HELPER_MARKER";
 const EPHEMERAL_PROFILE_PREFIX = "trusty-squire-operate-";
 const DEFAULT_POLL_MS = 1_000;
 const DEFAULT_TERM_GRACE_MS = 2_000;
+const DEFAULT_WORKER_READY_TIMEOUT_MS = 2_000;
+const DEFAULT_WORKER_STABILITY_MS = 25;
+const workerReadyWait = new Int32Array(new SharedArrayBuffer(4));
+const moduleRequire = createRequire(import.meta.url);
 let activeReaper: OwnerProcessReaper | null = null;
 
 function defaultRootDir(): string {
@@ -648,11 +654,19 @@ export async function sweepOrphanedOwnerProcesses(rootDir = defaultRootDir()): P
   return reaped;
 }
 
-export async function runOwnerProcessReaperWorker(manifestPath: string): Promise<void> {
+export async function runOwnerProcessReaperWorker(
+  manifestPath: string,
+  onReady: () => void = () => undefined,
+): Promise<void> {
   const pollMs = envPositiveMs("TRUSTY_SQUIRE_REAPER_POLL_MS", DEFAULT_POLL_MS);
+  let ready = false;
   for (;;) {
     const manifest = readManifest(manifestPath);
     if (manifest === null) return;
+    if (!ready) {
+      onReady();
+      ready = true;
+    }
     if (shouldReapOwner(ownerState(manifest))) {
       await reapManifest(manifestPath, manifest);
       if (!existsSync(manifestPath)) return;
@@ -661,11 +675,54 @@ export async function runOwnerProcessReaperWorker(manifestPath: string): Promise
   }
 }
 
+function ownerReaperWorkerRunning(identity: OwnerIdentity): boolean {
+  if (processBirthIdentityState(identity) !== "matching") return false;
+  try {
+    const stat = readFileSync(`/proc/${identity.pid}/stat`, "utf8");
+    const close = stat.lastIndexOf(")");
+    const state = close < 0 ? undefined : stat.slice(close + 2).split(" ")[0];
+    return state !== undefined && state !== "Z" && state !== "X";
+  } catch {
+    return false;
+  }
+}
+
+function waitForOwnerReaperWorker(
+  worker: ChildProcess,
+  readyPath: string,
+  token: string,
+): OwnerIdentity | null {
+  if (worker.pid === undefined) return null;
+  const timeoutMs = envPositiveMs(
+    "TRUSTY_SQUIRE_REAPER_READY_TIMEOUT_MS",
+    DEFAULT_WORKER_READY_TIMEOUT_MS,
+  );
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const ready = JSON.parse(readFileSync(readyPath, "utf8")) as {
+        version?: unknown;
+        token?: unknown;
+        pid?: unknown;
+      };
+      if (ready.version === 1 && ready.token === token && ready.pid === worker.pid) {
+        const identity = processBirthIdentity(worker.pid);
+        if (identity === null) return null;
+        Atomics.wait(workerReadyWait, 0, 0, DEFAULT_WORKER_STABILITY_MS);
+        return ownerReaperWorkerRunning(identity) ? identity : null;
+      }
+    } catch {}
+    Atomics.wait(workerReadyWait, 0, 0, 5);
+  }
+  return null;
+}
+
 export function startOwnerProcessReaper(
   options: { rootDir?: string; workerPath?: string } = {},
+  runtime: { spawn?: typeof spawn } = {},
 ): OwnerProcessReaper | null {
   if (process.platform !== "linux") return null;
-  if (activeReaper !== null) return activeReaper;
+  if (activeReaper !== null) return activeReaper.isAvailable() ? activeReaper : null;
   const rootDir = resolve(options.rootDir ?? defaultRootDir());
   ensurePrivateDir(rootDir);
   void sweepOrphanedOwnerProcesses(rootDir).catch(() => undefined);
@@ -692,29 +749,61 @@ export function startOwnerProcessReaper(
   );
   const workerPath =
     options.workerPath ?? (existsSync(compiledWorkerPath) ? compiledWorkerPath : sourceWorkerPath);
-  const workerExecArgs = workerPath.endsWith(".ts") ? process.execArgv : [];
+  if (!existsSync(workerPath)) {
+    rmSync(manifestPath, { force: true });
+    return null;
+  }
+  const workerExecArgs = workerPath.endsWith(".ts")
+    ? ["--import", moduleRequire.resolve("tsx")]
+    : [];
+  const readyPath = join(rootDir, `${owner.pid}-${token}.ready`);
   let worker: ChildProcess;
   try {
-    worker = spawn(process.execPath, [...workerExecArgs, workerPath, manifestPath], {
-      detached: true,
-      stdio: "ignore",
-      env: process.env,
-    });
+    worker = (runtime.spawn ?? spawn)(
+      process.execPath,
+      [...workerExecArgs, workerPath, manifestPath, readyPath, token],
+      {
+        detached: true,
+        stdio: "ignore",
+        env: process.env,
+      },
+    );
     worker.unref();
-  } catch (error) {
+  } catch {
     rmSync(manifestPath, { force: true });
-    throw error;
+    rmSync(readyPath, { force: true });
+    return null;
   }
 
   let stopped = false;
+  let workerExited = false;
+  worker.once("error", () => {
+    workerExited = true;
+  });
+  worker.once("exit", () => {
+    workerExited = true;
+  });
+  const workerIdentity = waitForOwnerReaperWorker(worker, readyPath, token);
+  rmSync(readyPath, { force: true });
+  if (workerIdentity === null || workerExited) {
+    worker.kill("SIGTERM");
+    rmSync(manifestPath, { force: true });
+    return null;
+  }
+  const isAvailable = (): boolean =>
+    !stopped && !workerExited && ownerReaperWorkerRunning(workerIdentity);
+  const requireAvailable = (): void => {
+    if (!isAvailable()) throw new Error("owner process reaper worker unavailable");
+  };
   const update = (next: OwnerReaperManifest): void => {
     manifest = next;
     writeManifest(manifestPath, manifest);
   };
   const reaper: OwnerProcessReaper = {
     manifestPath,
+    isAvailable,
     track: (identity) => {
-      if (stopped) return;
+      requireAvailable();
       update({
         ...manifest,
         resources: [...manifest.resources.filter((entry) => entry.pid !== identity.pid), identity],
@@ -730,7 +819,7 @@ export function startOwnerProcessReaper(
       });
     },
     trackLaunch: (marker, profileDir) => {
-      if (stopped) return;
+      requireAvailable();
       update({
         ...manifest,
         launches: [
@@ -747,7 +836,7 @@ export function startOwnerProcessReaper(
       });
     },
     reserveProfile: (profileDir, stagingDir, profileToken) => {
-      if (stopped) return;
+      requireAvailable();
       const path = resolve(profileDir);
       const stagingPath = resolve(stagingDir);
       if (
@@ -766,7 +855,7 @@ export function startOwnerProcessReaper(
       });
     },
     commitProfile: (profileDir, profileToken) => {
-      if (stopped) return;
+      requireAvailable();
       const path = resolve(profileDir);
       const reserved = manifest.profiles.some(
         (entry) => entry.path === path && entry.token === profileToken && entry.state === "pending",
@@ -786,7 +875,7 @@ export function startOwnerProcessReaper(
       update({ ...manifest, profiles: manifest.profiles.filter((entry) => entry.path !== path) });
     },
     reserveHelper: (marker) => {
-      if (stopped) return;
+      requireAvailable();
       update({
         ...manifest,
         helpers: [
@@ -796,7 +885,8 @@ export function startOwnerProcessReaper(
       });
     },
     bindHelper: (marker, identity) => {
-      if (stopped || !manifest.helpers.some((entry) => entry.marker === marker)) return;
+      requireAvailable();
+      if (!manifest.helpers.some((entry) => entry.marker === marker)) return;
       update({
         ...manifest,
         helpers: [...manifest.helpers.filter((entry) => entry.marker !== marker), identity],
@@ -826,7 +916,8 @@ export function startOwnerProcessReaper(
 }
 
 export function ensureOwnerProcessReaper(): OwnerProcessReaper | null {
-  return activeReaper ?? startOwnerProcessReaper();
+  if (activeReaper !== null) return activeReaper.isAvailable() ? activeReaper : null;
+  return startOwnerProcessReaper();
 }
 
 export function stopOwnerProcessReaper(): void {
@@ -849,10 +940,10 @@ export function trackOwnerBrowserLaunch(
   if (process.platform === "linux" && reaper === null) {
     throw new Error("owner process reaper unavailable for local browser launch");
   }
+  reaper?.trackLaunch(marker, profileDir);
   if (!trackedLaunchWatchdogs.has(marker)) {
     trackedLaunchWatchdogs.set(marker, registerOperatorBrowserLaunchWatchdog(marker));
   }
-  reaper?.trackLaunch(marker, profileDir);
 }
 export function markOwnerBrowserLaunchTerminal(marker: string): void {
   trackedLaunchWatchdogs.get(marker)?.permitTerminalCleanup();

@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -14,6 +15,7 @@ import {
   ownerHelperIdentityState,
   reconcileOwnerBrowserLaunchAfterLeaderExit,
   spawnOwnerTrackedHelper,
+  startOwnerProcessReaper,
   stopOwnerProcessReaper,
   sweepOrphanedOwnerProcesses,
   terminateOwnerBrowserLaunch,
@@ -36,6 +38,118 @@ afterEach(async () => {
 });
 
 describe("owner process startup sweep", () => {
+  it.skipIf(process.platform !== "linux")(
+    "does not publish a reaper when worker spawn throws",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "trusty-squire-reaper-test-"));
+      cleanup.push(root);
+
+      const reaper = startOwnerProcessReaper(
+        { rootDir: root },
+        {
+          spawn: (() => {
+            throw new Error("spawn failed");
+          }) as never,
+        },
+      );
+
+      expect(reaper).toBeNull();
+      expect(() =>
+        trackOwnerBrowserLaunch("v1:1:worker-spawn-failed", join(root, "profile"), {
+          ensureReaper: () => reaper,
+        }),
+      ).toThrow("owner process reaper unavailable for local browser launch");
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "does not publish a reaper after an asynchronous spawn error",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "trusty-squire-reaper-test-"));
+      cleanup.push(root);
+      const worker = Object.assign(new EventEmitter(), {
+        pid: undefined,
+        unref: () => worker,
+        kill: () => true,
+      }) as unknown as ChildProcess;
+
+      const reaper = startOwnerProcessReaper(
+        { rootDir: root },
+        {
+          spawn: (() => {
+            queueMicrotask(() => worker.emit("error", new Error("spawn failed")));
+            return worker;
+          }) as never,
+        },
+      );
+      await Promise.resolve();
+
+      expect(reaper).toBeNull();
+      expect(() =>
+        trackOwnerBrowserLaunch("v1:1:worker-spawn-error", join(root, "profile"), {
+          ensureReaper: () => reaper,
+        }),
+      ).toThrow("owner process reaper unavailable for local browser launch");
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "does not spawn a missing worker entrypoint",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "trusty-squire-reaper-test-"));
+      cleanup.push(root);
+      const spawnWorker = vi.fn();
+
+      expect(
+        startOwnerProcessReaper(
+          { rootDir: root, workerPath: join(root, "missing-worker.mjs") },
+          { spawn: spawnWorker as never },
+        ),
+      ).toBeNull();
+      expect(spawnWorker).not.toHaveBeenCalled();
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "rejects a worker that acknowledges readiness and exits immediately",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "trusty-squire-reaper-test-"));
+      cleanup.push(root);
+      const workerPath = join(root, "early-exit-worker.mjs");
+      await writeFile(
+        workerPath,
+        `import { writeFileSync } from "node:fs";\nwriteFileSync(process.argv[3], JSON.stringify({ version: 1, token: process.argv[4], pid: process.pid }) + "\\n");\n`,
+      );
+
+      expect(startOwnerProcessReaper({ rootDir: root, workerPath })).toBeNull();
+      expect(() =>
+        trackOwnerBrowserLaunch("v1:1:worker-exited-early", join(root, "profile"), {
+          ensureReaper: () => null,
+        }),
+      ).toThrow("owner process reaper unavailable for local browser launch");
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "rejects later registrations after the ready worker exits",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "trusty-squire-reaper-test-"));
+      cleanup.push(root);
+      const workerPath = join(root, "later-exit-worker.mjs");
+      await writeFile(
+        workerPath,
+        `import { writeFileSync } from "node:fs";\nwriteFileSync(process.argv[3], JSON.stringify({ version: 1, token: process.argv[4], pid: process.pid }) + "\\n");\nsetTimeout(() => process.exit(0), 100);\n`,
+      );
+
+      expect(startOwnerProcessReaper({ rootDir: root, workerPath })).not.toBeNull();
+      await new Promise<void>((resolveWait) => setTimeout(resolveWait, 200));
+
+      expect(() =>
+        trackOwnerBrowserLaunch("v1:1:worker-exited-later", join(root, "profile")),
+      ).toThrow("owner process reaper unavailable for local browser launch");
+    },
+  );
+
   it.skipIf(process.platform !== "linux")(
     "reaps a helper from its pending exact-marker record",
     async () => {
