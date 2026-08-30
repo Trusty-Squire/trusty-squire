@@ -4,8 +4,10 @@
 // session. This is the one-time interactive login; every signup after
 // it is fully automated.
 //
-// Interactive login requires a user-visible Chrome window; virtual-display and
-// remote-VNC support is intentionally absent.
+// Interactive login uses a local visible Chrome window when one exists. On a
+// headless host it starts a login-scoped Xvfb + noVNC tunnel so a human can
+// drive that same browser remotely. Automated operator sessions do not use
+// this module's display stack and remain on Chrome's new-headless path.
 
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
@@ -26,7 +28,12 @@ import {
   waitForProfileFree,
   withProfileOperationGuard,
 } from "./profile.js";
-import { launchPlainLoginBrowser, resolveChannelBinary } from "./browser.js";
+import {
+  launchPlainLoginBrowser,
+  launchSelfManagedLoginContext,
+  resolveChannelBinary,
+  selfLaunchEnabled,
+} from "./browser.js";
 export { extractGoogleAccountEmail } from "./browser.js";
 import {
   startInstallCompletionListener,
@@ -40,6 +47,15 @@ import {
   writeSessionState,
   type BrowserStorageState,
 } from "./session-state.js";
+import {
+  assertRemoteLoginRigLive,
+  createRemoteLoginRig,
+  exposeRemoteLoginDisplay,
+  registerRemoteLoginRigCleanup,
+  remoteLoginEnvironment,
+  startRemoteLoginDisplay,
+  teardownRemoteLoginRig,
+} from "./remote-login-display.js";
 
 const require = createRequire(import.meta.url);
 
@@ -669,12 +685,20 @@ async function runInBotChromeWithProfileGuard(opts: RunInBotChromeOpts): Promise
   if (!free) {
     throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
   }
-  if (!hasDisplay()) {
-    throw new Error(
-      "interactive login requires a user-visible display; headless remote login is no longer supported",
-    );
-  }
-  return await runDisplayedChrome(opts);
+  return await runLoginBrowserForEnvironment(opts);
+}
+
+export async function runLoginBrowserForEnvironment(
+  opts: RunInBotChromeOpts,
+  runtime: {
+    hasDisplay: () => boolean;
+    runDisplayedChrome: (opts: RunInBotChromeOpts) => Promise<LoginRunResult>;
+    runRemoteLoginChrome: (opts: RunInBotChromeOpts) => Promise<LoginRunResult>;
+  } = { hasDisplay, runDisplayedChrome, runRemoteLoginChrome },
+): Promise<LoginRunResult> {
+  return runtime.hasDisplay()
+    ? await runtime.runDisplayedChrome(opts)
+    : await runtime.runRemoteLoginChrome(opts);
 }
 
 export async function runDisplayedChrome(
@@ -818,10 +842,199 @@ export async function runDisplayedChrome(
   return { status, closeState, ...(storageState === undefined ? {} : { storageState }) };
 }
 
+export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
+  const rig = createRemoteLoginRig();
+  let activeTeardown: (() => Promise<void>) | undefined;
+  let plainBrowserIsRunning: (() => boolean) | undefined;
+  const removeRigCleanup = registerRemoteLoginRigCleanup(rig, () => activeTeardown);
+  const lifecycle = createTrackedLoginBrowserLifecycle(
+    async () => await teardownRemoteLoginRig(rig),
+  );
+  activeTeardown = lifecycle.cancel;
+  let storageState: BrowserStorageState | undefined;
+
+  try {
+    await startRemoteLoginDisplay(rig);
+    lifecycle.throwIfCancelled();
+
+    const proxyOpt = loginProxyOption();
+    const chromeBinary = resolveChannelBinary("chrome");
+    const useSelfLaunch =
+      selfLaunchEnabled() &&
+      chromeBinary !== null &&
+      (proxyOpt === undefined || proxyOpt.password === undefined);
+    const sharedChromeArgs = [
+      "--disable-blink-features=AutomationControlled",
+      "--test-type",
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+    ] as const;
+    const browserEnv = remoteLoginEnvironment(rig);
+    let context: BrowserContext | undefined;
+
+    if (opts.plainProfileLogin === true) {
+      if (opts.plainPollUntilDone === undefined) {
+        throw new Error("plainProfileLogin set without plainPollUntilDone");
+      }
+      if (chromeBinary === null) {
+        throw new Error("no Chrome binary found for the plain login browser");
+      }
+      const proxyDisposition =
+        proxyOpt !== undefined && proxyOpt.password === undefined
+          ? selfLaunchProxyDisposition(proxyOpt)
+          : null;
+      opts.onProxyDisposition?.(proxyDisposition);
+      const browser = await launchPlainLoginBrowser({
+        binary: chromeBinary,
+        profileDir: opts.profileDir,
+        url: opts.url,
+        window: { width: rig.width, height: rig.height },
+        env: browserEnv,
+        proxyServer: proxyDisposition?.server ?? null,
+        extraArgs: sharedChromeArgs,
+      });
+      lifecycle.browserLaunched(
+        async () =>
+          await teardownLoginBrowser({
+            profileDir: opts.profileDir,
+            identity: browser.identity,
+            closeBrowser: browser.teardown,
+            forceClose: browser.forceTeardown,
+          }),
+      );
+      plainBrowserIsRunning = browser.isRunning;
+    } else if (useSelfLaunch && chromeBinary !== null) {
+      const proxyDisposition = selfLaunchProxyDisposition(proxyOpt);
+      opts.onProxyDisposition?.(proxyDisposition);
+      const browser = await launchSelfManagedLoginContext({
+        binary: chromeBinary,
+        profileDir: opts.profileDir,
+        initialUrl: opts.url,
+        appMode: true,
+        window: { width: rig.width, height: rig.height },
+        env: browserEnv,
+        proxyServer: proxyDisposition?.server ?? null,
+        extraArgs: sharedChromeArgs,
+      });
+      lifecycle.browserLaunched(
+        async () =>
+          await teardownLoginBrowser({
+            profileDir: opts.profileDir,
+            identity: browser.identity,
+            closeBrowser: browser.teardown,
+            forceClose: browser.forceTeardown,
+          }),
+      );
+      context = browser.context;
+    } else {
+      const chromium = resolveChromium();
+      opts.onProxyDisposition?.(proxyOpt ?? null);
+      const persistent = await launchWithProfileGate(
+        opts.profileDir,
+        () =>
+          launchPersistentLoginContext(chromium, opts.profileDir, {
+            headless: false,
+            viewport: null,
+            env: browserEnv,
+            ignoreDefaultArgs: ["--enable-automation"],
+            ...(proxyOpt !== undefined ? { proxy: proxyOpt } : {}),
+            args: [
+              "--window-position=0,0",
+              `--window-size=${rig.width},${rig.height}`,
+              `--app=${opts.url}`,
+              ...sharedChromeArgs,
+            ],
+          }),
+        { failFast: true },
+      );
+      const holderPid = currentProfileHolderPid(opts.profileDir);
+      const identity =
+        holderPid === null ? null : profileProcessIdentity(holderPid, opts.profileDir);
+      lifecycle.browserLaunched(
+        async () =>
+          await teardownLoginBrowser({
+            profileDir: opts.profileDir,
+            identity,
+            closeBrowser: () => persistent.close(),
+            forceClose: () => reapProfileHolderIfOwned(opts.profileDir, identity),
+          }),
+      );
+      context = persistent;
+    }
+
+    try {
+      if (context !== undefined) {
+        const preflightSatisfied =
+          opts.preflight !== undefined &&
+          (await checkLoginStatusWithin(opts.deadline, () => opts.preflight!(context)));
+        if (preflightSatisfied) {
+          storageState = await context.storageState({ indexedDB: true });
+          const closeState = await lifecycle.finish();
+          return { status: "preflight_satisfied", closeState, storageState };
+        }
+        const page = context.pages()[0] ?? (await context.newPage());
+        await page.goto(opts.url, { waitUntil: "domcontentloaded" });
+      }
+
+      await exposeRemoteLoginDisplay(rig, opts.bannerLabel);
+      lifecycle.throwIfCancelled();
+
+      const completed = await pollUntil(
+        opts.deadline,
+        () =>
+          context !== undefined
+            ? opts.pollUntilDone(context)
+            : opts.plainPollUntilDone!(opts.profileDir),
+        opts.heartbeatMessage,
+        () => {
+          assertRemoteLoginRigLive(rig);
+          if (plainBrowserIsRunning !== undefined && !plainBrowserIsRunning()) {
+            throw new Error(LOGIN_BROWSER_CLOSED_ERROR);
+          }
+        },
+      );
+      if (completed) {
+        if (context !== undefined) {
+          if (opts.onSuccess !== undefined) {
+            try {
+              await opts.onSuccess(context);
+            } catch {
+              // best-effort success metadata
+            }
+          }
+          storageState = await context.storageState({ indexedDB: true });
+        } else if (opts.plainOnSuccess !== undefined) {
+          try {
+            await opts.plainOnSuccess(opts.profileDir);
+          } catch {
+            // best-effort success metadata
+          }
+        }
+      }
+      const closeState = await lifecycle.finish();
+      return {
+        status: completed ? "completed" : "timeout",
+        closeState,
+        ...(storageState === undefined ? {} : { storageState }),
+      };
+    } finally {
+      await lifecycle.finish();
+      activeTeardown = undefined;
+    }
+  } finally {
+    try {
+      await lifecycle.finish();
+    } finally {
+      activeTeardown = undefined;
+      removeRigCleanup();
+    }
+  }
+}
+
 // Shared timed-poll helper. `check` is invoked every 3s until it
 // resolves true or the deadline passes.
-// Emits a heartbeat to stderr every ~20s while waiting. After the Chrome window
-// opens, this loop is otherwise silent for up to the full
+// Emits a heartbeat to stderr every ~20s while waiting. After the local Chrome
+// window or remote noVNC URL opens, this loop is otherwise silent for up to the full
 // deadline — which is the connect-hang report: a headless box printed the
 // sign-in URL and then sat on a blank cursor, looking frozen. The heartbeat
 // (with remaining time) makes it obviously alive; quick completions (< 20s,

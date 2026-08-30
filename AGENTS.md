@@ -529,8 +529,19 @@ virgin signup succeeds on an UNCOVERED service (no active skill in registry)
 ## Browser launch posture
 
 - `BrowserController` local launches are new-headless only; do not reintroduce
-  virtual-display launch or remote-VNC login machinery. `apps/mcp/src/bot/browser.ts`
-  owns the supported local-headless and remote-CDP paths.
+  virtual-display selection or `DISPLAY` plumbing into automated operator runs.
+  `apps/mcp/src/bot/browser.ts` owns the supported local-headless and remote-CDP
+  operator paths.
+- Interactive human login is the deliberate exception. When `mcp login`,
+  install/connect, or provider reconnect runs without a user-visible display,
+  `apps/mcp/src/bot/remote-login-display.ts` starts an on-demand Xvfb + noVNC
+  quick tunnel and tears the entire owned rig down with that login. Keep this
+  module scoped to login flows. SSH/TTY sessions must not treat an inherited
+  virtual `DISPLAY` as a user-visible desktop; route those logins through noVNC.
+  When both `TS_LOGIN_PUBLIC_HOSTNAME` and `TS_LOGIN_LOCAL_PORT` select a named
+  tunnel, that tunnel is operator-managed external infrastructure: the login
+  owns and tears down its per-login display and websockify listener, but never
+  creates, owns, or stops the external tunnel.
 - Keep self-launch + `connectOverCDP` and Patchright as the defaults. The
   2026-08-28 read-only A/B used serial, fresh-profile trials against Exa, Groq,
   Cartesia, Replit, Runpod, and Turso from egress `172.93.111.86`:

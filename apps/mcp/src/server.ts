@@ -333,6 +333,7 @@ export async function runServer(): Promise<void> {
     shutdown = (async () => {
       process.stdin.removeListener("end", requestShutdown);
       process.stdin.removeListener("close", requestShutdown);
+      process.removeListener("SIGHUP", requestShutdown);
       process.removeListener("SIGTERM", requestShutdown);
       process.removeListener("SIGINT", requestShutdown);
       if (idleTimer !== undefined) clearInterval(idleTimer);
@@ -366,6 +367,7 @@ export async function runServer(): Promise<void> {
   transport.onclose = requestShutdown;
   process.stdin.once("end", requestShutdown);
   process.stdin.once("close", requestShutdown);
+  process.once("SIGHUP", requestShutdown);
   process.once("SIGTERM", requestShutdown);
   process.once("SIGINT", requestShutdown);
 
