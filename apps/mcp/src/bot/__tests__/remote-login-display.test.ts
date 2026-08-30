@@ -1,12 +1,23 @@
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
+  assertRemoteLoginRigLive,
   fallbackCloudflaredArgs,
+  generateVncPassword,
   registerRemoteLoginRigCleanup,
+  remoteLoginEnvironment,
   remoteLoginInstallHint,
   resolveLoginBinary,
   startRemoteLoginDisplay,
@@ -21,6 +32,7 @@ function fakeProcess(name: string, ignoreSigterm = false): ChildProcess {
     stdout: { destroy: vi.fn() },
     stderr: { destroy: vi.fn() },
     unref: vi.fn(),
+    spawnfile: name,
     spawnargs: [name],
     kill: vi.fn(),
   });
@@ -79,6 +91,33 @@ function emptyRig(xvfb: string): RemoteLoginRig {
   };
 }
 
+function decodeXauthority(path: string): {
+  family: number;
+  address: Buffer;
+  display: Buffer;
+  protocol: Buffer;
+  credential: Buffer;
+} {
+  const contents = readFileSync(path);
+  let offset = 0;
+  const family = contents.readUInt16BE(offset);
+  offset += 2;
+  const field = (): Buffer => {
+    const length = contents.readUInt16BE(offset);
+    offset += 2;
+    const value = contents.subarray(offset, offset + length);
+    offset += length;
+    return value;
+  };
+  return {
+    family,
+    address: field(),
+    display: field(),
+    protocol: field(),
+    credential: field(),
+  };
+}
+
 describe("remote interactive login display", () => {
   it("tears down every per-login process exactly once", async () => {
     const { rig, processes } = rigWithProcesses();
@@ -119,6 +158,9 @@ describe("remote interactive login display", () => {
   it("launches the resolved Xvfb and uses its atomic display allocation", async () => {
     const executable = fakeExecutable(`
 const fs = require("node:fs");
+if (process.argv.includes("-ac")) process.exit(20);
+const authFlag = process.argv.indexOf("-auth");
+if (authFlag < 0 || !fs.existsSync(process.argv[authFlag + 1])) process.exit(22);
 const flag = process.argv.indexOf("-displayfd");
 if (flag < 0) process.exit(21);
 fs.writeSync(Number(process.argv[flag + 1]), "117\\n");
@@ -129,6 +171,21 @@ setInterval(() => undefined, 1000);
       await expect(startRemoteLoginDisplay(rig)).resolves.toBe(":117");
       expect(rig.display).toBe(":117");
       expect(rig.procs).toHaveLength(1);
+      expect(rig.authFile).toBeDefined();
+      expect(statSync(rig.authFile!).mode & 0o777).toBe(0o600);
+      expect(remoteLoginEnvironment(rig, { PATH: "/bin" })).toMatchObject({
+        DISPLAY: ":117",
+        XAUTHORITY: rig.authFile,
+      });
+      const authority = decodeXauthority(rig.authFile!);
+      expect(authority.family).toBe(0xffff);
+      expect(authority.address).toHaveLength(0);
+      expect(authority.display).toHaveLength(0);
+      expect(authority.protocol.toString("ascii")).toBe("MIT-MAGIC-COOKIE-1");
+      expect(authority.credential).toHaveLength(16);
+      const authFile = rig.authFile!;
+      await teardownRemoteLoginRig(rig, 10);
+      expect(existsSync(authFile)).toBe(false);
     } finally {
       await teardownRemoteLoginRig(rig, 10);
       executable.remove();
@@ -158,6 +215,44 @@ setInterval(() => undefined, 1000);
     } finally {
       executable.remove();
     }
+  });
+
+  it("generates maximum-length URL-safe VNC passwords beyond hexadecimal", () => {
+    const passwords = Array.from({ length: 64 }, () => generateVncPassword());
+    expect(passwords.every((password) => /^[A-Za-z0-9_-]{8}$/.test(password))).toBe(true);
+    expect(passwords.some((password) => /[^0-9a-f]/.test(password))).toBe(true);
+  });
+
+  it("reports helper failure after initial readiness", () => {
+    const { rig, processes } = rigWithProcesses();
+    Object.assign(processes[2]!, { exitCode: 17 });
+
+    expect(() => assertRemoteLoginRigLive(rig)).toThrow(
+      "remote login helper websockify exited (code 17)",
+    );
+  });
+
+  it("maps non-Latin mobile input through the noVNC keysym lookup", async () => {
+    const moduleUrl = new URL("../../../assets/login/vnc-input.js", import.meta.url);
+    const input = (await import(moduleUrl.href)) as {
+      sendTextAsKeysyms(
+        rfb: { sendKey: (keysym: number, code: null, down: boolean) => void },
+        value: string,
+        keysyms: { lookup: (codePoint: number) => number },
+      ): void;
+    };
+    const rfb = { sendKey: vi.fn() };
+    const keysyms = { lookup: vi.fn((codePoint: number) => 0x01000000 | codePoint) };
+
+    input.sendTextAsKeysyms(rfb, "你😀", keysyms);
+
+    expect(keysyms.lookup.mock.calls).toEqual([[0x4f60], [0x1f600]]);
+    expect(rfb.sendKey.mock.calls).toEqual([
+      [0x01004f60, null, true],
+      [0x01004f60, null, false],
+      [0x0101f600, null, true],
+      [0x0101f600, null, false],
+    ]);
   });
 
   it("provides actionable installation guidance for the login-only stack", () => {
@@ -195,11 +290,51 @@ setInterval(() => undefined, 1000);
     });
 
     expect(handlers.has("exit")).toBe(true);
-    for (const event of ["SIGTERM", "SIGINT", "uncaughtException", "unhandledRejection"]) {
+    for (const event of [
+      "SIGHUP",
+      "SIGTERM",
+      "SIGINT",
+      "uncaughtException",
+      "unhandledRejection",
+    ]) {
       expect(handlers.has(event)).toBe(false);
     }
     expect(set).not.toHaveBeenCalled();
     remove();
     expect(handlers.size).toBe(0);
+  });
+
+  it("tears down the login rig before exiting on SSH hangup", async () => {
+    const { rig, processes } = rigWithProcesses();
+    const handlers = new Map<string, (...args: never[]) => void>();
+    const runtime = {
+      on: vi.fn((event: string, listener: (...args: never[]) => void) => {
+        handlers.set(event, listener);
+        return runtime;
+      }),
+      once: vi.fn((event: string, listener: (...args: never[]) => void) => {
+        handlers.set(event, listener);
+        return runtime;
+      }),
+      removeListener: vi.fn((event: string) => {
+        handlers.delete(event);
+        return runtime;
+      }),
+      exit: vi.fn(),
+    } as unknown as Parameters<typeof registerRemoteLoginRigCleanup>[2];
+    const set = vi.fn();
+
+    registerRemoteLoginRigCleanup(rig, () => undefined, runtime, {
+      enabled: () => true,
+      set,
+    });
+    handlers.get("SIGHUP")!();
+
+    await vi.waitFor(() => expect(runtime.exit).toHaveBeenCalledWith(129));
+    for (const child of processes) {
+      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    }
+    expect(set).toHaveBeenNthCalledWith(1, false);
+    expect(set).toHaveBeenLastCalledWith(true);
   });
 });

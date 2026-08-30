@@ -143,6 +143,8 @@
     <button id="kb" type="button" aria-label="Show keyboard">⌨</button>
     <script type="module">
       import RFB from "./core/rfb.js";
+      import keysyms from "./core/input/keysymdef.js";
+      import { sendTextAsKeysyms } from "./vnc-input.js";
 
       const params = new URLSearchParams(location.hash.replace(/^#/, ""));
       const password = params.get("p") || params.get("password") || "";
@@ -204,14 +206,7 @@
         };
 
         kbInput.addEventListener("input", () => {
-          const value = kbInput.value;
-          for (const character of value) {
-            const keysym = character.codePointAt(0);
-            if (keysym !== undefined) {
-              rfb.sendKey(keysym, null, true);
-              rfb.sendKey(keysym, null, false);
-            }
-          }
+          sendTextAsKeysyms(rfb, kbInput.value, keysyms);
           kbInput.value = "";
         });
 

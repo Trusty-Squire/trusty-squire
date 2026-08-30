@@ -48,9 +48,11 @@ import {
   type BrowserStorageState,
 } from "./session-state.js";
 import {
+  assertRemoteLoginRigLive,
   createRemoteLoginRig,
   exposeRemoteLoginDisplay,
   registerRemoteLoginRigCleanup,
+  remoteLoginEnvironment,
   startRemoteLoginDisplay,
   teardownRemoteLoginRig,
 } from "./remote-login-display.js";
@@ -852,7 +854,7 @@ export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<Lo
   let storageState: BrowserStorageState | undefined;
 
   try {
-    const display = await startRemoteLoginDisplay(rig);
+    await startRemoteLoginDisplay(rig);
     lifecycle.throwIfCancelled();
 
     const proxyOpt = loginProxyOption();
@@ -867,7 +869,7 @@ export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<Lo
       "--no-sandbox",
       "--disable-dev-shm-usage",
     ] as const;
-    const browserEnv = { ...process.env, DISPLAY: display };
+    const browserEnv = remoteLoginEnvironment(rig);
     let context: BrowserContext | undefined;
 
     if (opts.plainProfileLogin === true) {
@@ -985,6 +987,7 @@ export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<Lo
             : opts.plainPollUntilDone!(opts.profileDir),
         opts.heartbeatMessage,
         () => {
+          assertRemoteLoginRigLive(rig);
           if (plainBrowserIsRunning !== undefined && !plainBrowserIsRunning()) {
             throw new Error(LOGIN_BROWSER_CLOSED_ERROR);
           }

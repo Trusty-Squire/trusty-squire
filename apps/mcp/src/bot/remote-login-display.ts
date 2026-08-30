@@ -20,7 +20,7 @@ import {
 } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { delimiter, join, resolve } from "node:path";
+import { basename, delimiter, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import boxen from "boxen";
 import chalk from "chalk";
@@ -39,6 +39,7 @@ export interface RemoteLoginRig {
   height: number;
   procs: ChildProcess[];
   binaries: RemoteLoginBinaries;
+  authFile?: string;
   webDir?: string;
   passFile?: string;
 }
@@ -52,6 +53,42 @@ export interface RemoteLoginBinaries {
 
 function loginAssetPath(name: string): string {
   return fileURLToPath(new URL(`../../assets/login/${name}`, import.meta.url));
+}
+
+function encodeXauthorityField(value: Buffer): Buffer {
+  const length = Buffer.allocUnsafe(2);
+  length.writeUInt16BE(value.length);
+  return Buffer.concat([length, value]);
+}
+
+function createRemoteLoginXauthority(rig: RemoteLoginRig): string {
+  const familyWild = Buffer.allocUnsafe(2);
+  familyWild.writeUInt16BE(0xffff);
+  const authFile = join(
+    tmpdir(),
+    `tsq-xauth-${process.pid}-${randomBytes(8).toString("hex")}`,
+  );
+  const contents = Buffer.concat([
+    familyWild,
+    encodeXauthorityField(Buffer.alloc(0)),
+    encodeXauthorityField(Buffer.alloc(0)),
+    encodeXauthorityField(Buffer.from("MIT-MAGIC-COOKIE-1", "ascii")),
+    encodeXauthorityField(randomBytes(16)),
+  ]);
+  writeFileSync(authFile, contents, { flag: "wx", mode: 0o600 });
+  chmodSync(authFile, 0o600);
+  rig.authFile = authFile;
+  return authFile;
+}
+
+export function remoteLoginEnvironment(
+  rig: RemoteLoginRig,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  if (rig.display === undefined || rig.authFile === undefined) {
+    throw new Error("remote login display authorization is not ready");
+  }
+  return { ...baseEnv, DISPLAY: rig.display, XAUTHORITY: rig.authFile };
 }
 
 export function findFreeLoginPort(): Promise<number> {
@@ -347,15 +384,20 @@ export function fallbackCloudflaredArgs(webPort: number): string[] {
 function buildVncWebDir(): string {
   const webDir = mkdtempSync(join(tmpdir(), "ts-novnc-"));
   cpSync(NOVNC_INSTALL_DIR, webDir, { recursive: true });
-  if (!existsSync(join(webDir, "core", "rfb.js"))) {
+  const requiredCoreAssets = [
+    join(webDir, "core", "rfb.js"),
+    join(webDir, "core", "input", "keysymdef.js"),
+  ];
+  if (requiredCoreAssets.some((path) => !existsSync(path))) {
     rmSync(webDir, { recursive: true, force: true });
     throw new Error(
-      `noVNC core not found at ${NOVNC_INSTALL_DIR}/core/rfb.js — the installed novnc package has an unexpected layout`,
+      `noVNC core assets not found under ${NOVNC_INSTALL_DIR}/core — the installed novnc package has an unexpected layout`,
     );
   }
   const brandedPage = readFileSync(loginAssetPath("vnc.html"), "utf8");
   writeFileSync(join(webDir, "vnc.html"), brandedPage);
   writeFileSync(join(webDir, "index.html"), brandedPage);
+  cpSync(loginAssetPath("vnc-input.js"), join(webDir, "vnc-input.js"));
   return webDir;
 }
 
@@ -372,13 +414,15 @@ export function createRemoteLoginRig(): RemoteLoginRig {
 
 export async function startRemoteLoginDisplay(rig: RemoteLoginRig): Promise<string> {
   try {
+    const authFile = createRemoteLoginXauthority(rig);
     const xvfb = spawn(
       rig.binaries.xvfb,
       [
         "-screen",
         "0",
         `${rig.width}x${rig.height}x24`,
-        "-ac",
+        "-auth",
+        authFile,
         "-displayfd",
         "3",
       ],
@@ -396,6 +440,10 @@ export async function startRemoteLoginDisplay(rig: RemoteLoginRig): Promise<stri
   }
 }
 
+export function generateVncPassword(): string {
+  return randomBytes(6).toString("base64url");
+}
+
 export async function exposeRemoteLoginDisplay(
   rig: RemoteLoginRig,
   label: string,
@@ -406,25 +454,29 @@ export async function exposeRemoteLoginDisplay(
   const namedTunnel = namedTunnelConfig();
   const vncPort = await findFreeLoginPort();
   const webPort = namedTunnel?.port ?? (await findFreeLoginPort());
-  const password = randomBytes(4).toString("hex");
+  const password = generateVncPassword();
 
   const passFile = join(tmpdir(), `tsq-vnc-${process.pid}-${vncPort}.pass`);
   writeFileSync(passFile, password, { mode: 0o600 });
   chmodSync(passFile, 0o600);
   rig.passFile = passFile;
-  const x11vnc = spawnBackground(rig.binaries.x11vnc, [
-    "-display",
-    rig.display,
-    "-rfbport",
-    String(vncPort),
-    "-passwdfile",
-    `rm:${passFile}`,
-    "-localhost",
-    "-forever",
-    "-shared",
-    "-noshm",
-    "-quiet",
-  ]);
+  const x11vnc = spawnBackground(
+    rig.binaries.x11vnc,
+    [
+      "-display",
+      rig.display,
+      "-rfbport",
+      String(vncPort),
+      "-passwdfile",
+      `rm:${passFile}`,
+      "-localhost",
+      "-forever",
+      "-shared",
+      "-noshm",
+      "-quiet",
+    ],
+    remoteLoginEnvironment(rig),
+  );
   rig.procs.push(x11vnc);
   await waitForListeningPort(x11vnc, vncPort, "x11vnc", 5_000);
 
@@ -489,6 +541,18 @@ function childExited(child: ChildProcess): boolean {
   return child.exitCode !== null || child.signalCode !== null;
 }
 
+export function assertRemoteLoginRigLive(rig: RemoteLoginRig): void {
+  for (const child of rig.procs) {
+    if (!childExited(child)) continue;
+    const command = child.spawnfile || child.spawnargs[0] || "unknown-helper";
+    const status =
+      child.exitCode === null
+        ? `signal ${child.signalCode ?? "unknown"}`
+        : `code ${child.exitCode}`;
+    throw new Error(`remote login helper ${basename(command)} exited (${status})`);
+  }
+}
+
 function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
   if (childExited(child)) return Promise.resolve(true);
   return new Promise((resolve) => {
@@ -506,6 +570,7 @@ function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boole
 function removeRigFiles(rig: RemoteLoginRig): void {
   if (rig.webDir !== undefined) rmSync(rig.webDir, { recursive: true, force: true });
   if (rig.passFile !== undefined) rmSync(rig.passFile, { force: true });
+  if (rig.authFile !== undefined) rmSync(rig.authFile, { force: true });
 }
 
 function releaseChildHandles(child: ChildProcess): void {
@@ -609,6 +674,7 @@ export function registerRemoteLoginRigCleanup(
     });
   };
   const onExit = (): void => forceTeardownRemoteLoginRig(rig);
+  const onSighup = (): void => exitAfterCleanup(129);
   const onSigterm = (): void => exitAfterCleanup(143);
   const onSigint = (): void => exitAfterCleanup(130);
   const onUncaughtException = (error: Error): void => {
@@ -625,6 +691,7 @@ export function registerRemoteLoginRigCleanup(
   if (ownsTerminationExit) {
     signalExit.set(false);
     signalExitSuspended = true;
+    runtime.on("SIGHUP", onSighup);
     runtime.on("SIGTERM", onSigterm);
     runtime.on("SIGINT", onSigint);
     runtime.once("uncaughtException", onUncaughtException);
@@ -635,6 +702,7 @@ export function registerRemoteLoginRigCleanup(
     if (finishing) return;
     runtime.removeListener("exit", onExit);
     if (!ownsTerminationExit) return;
+    runtime.removeListener("SIGHUP", onSighup);
     runtime.removeListener("SIGTERM", onSigterm);
     runtime.removeListener("SIGINT", onSigint);
     runtime.removeListener("uncaughtException", onUncaughtException);
