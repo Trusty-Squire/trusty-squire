@@ -22,6 +22,7 @@ const m = vi.hoisted(() => ({
   loggedInProviders: vi.fn(() => [] as string[]),
   clearAllProviderMarkers: vi.fn(),
   clearProviderCookies: vi.fn(async () => true),
+  invalidateCanonicalGoogleIdentity: vi.fn(async () => true),
 }));
 
 // Spread the real module (oauth-providers.ts + agent.ts pull other
@@ -39,6 +40,14 @@ vi.mock("../../bot/login-state.js", () => ({
   clearAllProviderMarkers: m.clearAllProviderMarkers,
   clearProviderCookies: m.clearProviderCookies,
 }));
+
+vi.mock("../../bot/session-state.js", async (importActual) => {
+  const actual = await importActual<typeof import("../../bot/session-state.js")>();
+  return {
+    ...actual,
+    invalidateCanonicalGoogleIdentity: m.invalidateCanonicalGoogleIdentity,
+  };
+});
 
 const { runCli } = await import("../cli.js");
 
@@ -78,6 +87,17 @@ describe("login --force-relogin marker honesty", () => {
     ).rejects.toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(m.clearProviderLoggedIn).not.toHaveBeenCalled();
+    expect(m.invalidateCanonicalGoogleIdentity).not.toHaveBeenCalled();
+  });
+
+  it("invalidates portable Google identity before a forced login can time out", async () => {
+    m.ensureOAuthSession.mockResolvedValue({ status: "timeout" });
+    await expect(
+      runCli(["login", "--provider=google", "--force-relogin", `--profile-dir=${profileDir}`]),
+    ).rejects.toThrow("process.exit");
+
+    expect(m.invalidateCanonicalGoogleIdentity).toHaveBeenCalledWith(profileDir);
+    expect(m.ensureOAuthSession).toHaveBeenCalled();
   });
 
   it("exits non-zero when another Trusty Squire session owns the browser", async () => {

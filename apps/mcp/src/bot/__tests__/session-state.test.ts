@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createEphemeralProfile,
   destroyEphemeralProfile,
+  invalidateCanonicalGoogleIdentity,
   MAX_SESSION_STATE_BYTES,
   readCanonicalIdentityState,
   readCanonicalIdentityMetadata,
@@ -77,6 +78,34 @@ describe("operator session storage state", () => {
     await expect(writeSessionState(canonical, replacement, () => false)).resolves.toBe(false);
 
     await expect(readSessionState(canonical)).resolves.toEqual(prior);
+  });
+
+  it("invalidates only Google identity before a forced re-login", async () => {
+    const canonical = mkdtempSync(join(tmpdir(), "ts-session-state-google-invalidate-"));
+    roots.push(canonical);
+    const state = {
+      cookies: [
+        { name: "SID", value: "google-session", domain: ".google.com", path: "/" },
+        { name: "rp_session", value: "merchant-session", domain: ".merchant.test", path: "/" },
+      ],
+      origins: [
+        { origin: "https://accounts.google.com", localStorage: [] },
+        { origin: "https://merchant.test", localStorage: [{ name: "session", value: "live" }] },
+      ],
+    };
+    await writeCanonicalIdentitySnapshot(canonical, state, {
+      googleAccountEmail: "old-account@example.com",
+    });
+
+    await expect(invalidateCanonicalGoogleIdentity(canonical)).resolves.toBe(true);
+
+    await expect(readCanonicalIdentityState(canonical)).resolves.toEqual({
+      storageState: {
+        cookies: [state.cookies[1]],
+        origins: [state.origins[1]],
+      },
+      identityMetadata: undefined,
+    });
   });
 
   it("leaves one complete snapshot after concurrent last-writer-wins publishes", async () => {

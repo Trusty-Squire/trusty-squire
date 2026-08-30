@@ -821,6 +821,47 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "keeps the expiry fence through an asynchronous merchant submit handler",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        let chargeRequests = 0;
+        page.on("request", (request) => {
+          if (request.url() === "https://merchant.test/charge") chargeRequests += 1;
+        });
+        await page.setContent(`
+          <form id="checkout">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-exp">
+            <input autocomplete="cc-csc">
+            <input autocomplete="cc-name">
+            <button type="submit">Pay now</button>
+          </form>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              setTimeout(() => {
+                void fetch("https://merchant.test/charge").catch(() => undefined);
+              }, 25);
+              setTimeout(() => history.pushState({}, "", "/thank-you"), 50);
+            });
+          </script>
+        `);
+        const controller = BrowserController.fromHarnessPage(page);
+
+        await expect(
+          controller.fillAndSubmitCheckout(APPROVAL_CARD, { beforeSubmitDispatch: () => 10 }),
+        ).resolves.toEqual({ three_ds_required: false, order_confirmed: true });
+
+        expect(chargeRequests).toBe(0);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "types digits into a combined numeric expiry field and lets the site format MM/YY",
     async () => {
       const browser = await chromium.launch({ headless: true });

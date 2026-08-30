@@ -194,6 +194,33 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it("resolves a provider from a control that exists only in live SPA state", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/login", async (route) => {
+      await route.fulfill({ contentType: "text/html", body: "<main>Login</main>" });
+    });
+    await product.goto("https://product.test/login");
+    await product.evaluate(() => {
+      const button = document.createElement("button");
+      button.id = "oauth";
+      button.textContent = "Continue";
+      button.onclick = () => window.open("https://accounts.google.com/o/oauth2/v2/auth");
+      document.body.append(button);
+    });
+    const controller = BrowserController.fromHarnessPage(product);
+
+    try {
+      await expect(controller.detectOAuthProviderDestination("#oauth", 2_000)).resolves.toBe(
+        "google",
+      );
+      await expect(product.locator("#oauth")).toHaveCount(1);
+      expect(controller.currentUrl()).toBe("https://product.test/login");
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
   it("waits for a same-tab provider round trip to return and settle", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();

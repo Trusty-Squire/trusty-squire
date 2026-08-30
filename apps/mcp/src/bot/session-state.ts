@@ -232,6 +232,20 @@ export function stripGoogleIdentityFromSessionState(
   };
 }
 
+export async function invalidateCanonicalGoogleIdentity(
+  profileDir: string,
+  canPublish: () => boolean = () => true,
+): Promise<boolean> {
+  const current = await readSessionState(profileDir);
+  if (current === undefined) return true;
+  return await writeCanonicalIdentitySnapshot(
+    profileDir,
+    stripGoogleIdentityFromSessionState(current),
+    undefined,
+    canPublish,
+  );
+}
+
 /** Last completed snapshot wins. Rename keeps concurrent writers from corrupting it. */
 export async function writeSessionState(
   profileDir: string,

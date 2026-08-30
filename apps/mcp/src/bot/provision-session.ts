@@ -73,6 +73,7 @@ import {
   readSessionState,
   stripGoogleIdentityFromSessionState,
   type BrowserStorageState,
+  writeCanonicalIdentitySnapshot,
   writeSessionState,
 } from "./session-state.js";
 import {
@@ -1159,12 +1160,14 @@ async function googleOAuthBoundaryRequired(
 ): Promise<boolean> {
   const classified = isGoogleOAuthAction(action, element);
   if (classified !== null) return classified;
-  return (await browser.detectOAuthProviderDestination(element.selector)) === "google";
+  const destination = await browser.detectOAuthProviderDestination(element.selector);
+  return destination !== "github" && destination !== "other";
 }
 
 async function runSerializedGoogleIdentityOperation<T>(
   session: Session,
   operation: (browser: BrowserController) => Promise<T>,
+  options: { requireFreshAccountEmail?: boolean } = {},
 ): Promise<{ browser: BrowserController; result: T }> {
   const browser = session.browser;
   const ephemeral = leasedBrowsers.get(browser);
@@ -1205,6 +1208,11 @@ async function runSerializedGoogleIdentityOperation<T>(
       } catch (error) {
         operationError = error;
       }
+      const googleAccountEmail = await browser.detectGoogleAccountEmail();
+      const identityMetadataError =
+        options.requireFreshAccountEmail === true && googleAccountEmail === null
+          ? new Error("Google OAuth completed without account identity metadata")
+          : null;
       let rotatedState: Awaited<ReturnType<BrowserController["captureStorageState"]>> | undefined;
       let captureError: unknown;
       try {
@@ -1229,8 +1237,15 @@ async function runSerializedGoogleIdentityOperation<T>(
           );
         }
         assertOwned();
-        const published = await writeSessionState(ephemeral.canonicalProfileDir, rotatedState, () =>
-          ownsSession(),
+        if (identityMetadataError !== null) throw identityMetadataError;
+        const priorIdentity = await readCanonicalIdentityState(ephemeral.canonicalProfileDir);
+        const published = await writeCanonicalIdentitySnapshot(
+          ephemeral.canonicalProfileDir,
+          rotatedState,
+          googleAccountEmail === null
+            ? priorIdentity.identityMetadata
+            : { googleAccountEmail },
+          () => ownsSession(),
         );
         if (!published) {
           throw new Error("Google OAuth identity handoff could not publish session state");
@@ -1340,7 +1355,7 @@ async function runSerializedGoogleOAuth(
   const completed = await runSerializedGoogleIdentityOperation(session, async (browser) => {
     await browser.loginWithOAuth(selector);
     await settleAfterStateChange(browser);
-  });
+  }, { requireFreshAccountEmail: true });
   return completed.browser;
 }
 

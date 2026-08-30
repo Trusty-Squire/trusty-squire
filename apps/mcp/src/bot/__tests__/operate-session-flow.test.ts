@@ -65,6 +65,7 @@ const h = vi.hoisted(() => ({
   profileProbeCalls: 0,
   controllerProviderProbeCalls: 0,
   workerEmail: null as string | null,
+  liveGoogleEmail: "default-google@example.com" as string | null,
   connections: [] as boolean[],
   profileDirs: [] as Array<string | undefined>,
   proxyUrls: [] as Array<string | undefined>,
@@ -262,6 +263,22 @@ vi.mock("../session-state.js", async (importOriginal) => {
       h.storageStates.set(profileDir, state);
       return true;
     },
+    writeCanonicalIdentitySnapshot: async (
+      profileDir: string,
+      state: unknown,
+      metadata: { googleAccountEmail: string } | undefined,
+      canPublish: () => boolean = () => true,
+    ) => {
+      h.storageStateWriteAttempts += 1;
+      if (h.storageStateWriteGate !== null) await h.storageStateWriteGate;
+      if (!canPublish()) return false;
+      if (h.storageStateWriteError !== null) throw h.storageStateWriteError;
+      h.storageStateWrites.push({ profileDir, state });
+      h.storageStates.set(profileDir, state);
+      if (metadata === undefined) h.identityMetadata.delete(profileDir);
+      else h.identityMetadata.set(profileDir, metadata);
+      return true;
+    },
   };
 });
 
@@ -300,7 +317,7 @@ vi.mock("../browser.js", () => ({
       return cookies?.some((cookie) => cookie.name === "__Secure-1PSID") ? ["google"] : [];
     }
     async detectGoogleAccountEmail(): Promise<string | null> {
-      return h.workerEmail;
+      return h.liveGoogleEmail;
     }
     async goto(url: string): Promise<void> {
       h.gotos.push(url);
@@ -1058,6 +1075,7 @@ beforeEach(() => {
   h.profileProbeCalls = 0;
   h.controllerProviderProbeCalls = 0;
   h.workerEmail = null;
+  h.liveGoogleEmail = "default-google@example.com";
   h.connections = [];
   h.profileDirs = [];
   h.proxyUrls = [];
@@ -3501,6 +3519,8 @@ describe("operate session — OAuth lifecycle", () => {
       origins: merged.origins,
     };
     h.storageStates.set(canonical, google);
+    h.identityMetadata.set(canonical, { googleAccountEmail: "account-a@example.com" });
+    h.liveGoogleEmail = "account-b@example.com";
     h.captureStorageStateSequences.set(0, [relyingParty, rotated]);
     h.visibleText = "Continue with Google";
     h.elements = [
@@ -3540,6 +3560,9 @@ describe("operate session — OAuth lifecycle", () => {
     expect(h.oauthLoginCalls).toEqual(["#google-oauth"]);
     expect(h.restoredStorageStates).toEqual([{ browserIndex: 0, state: merged }]);
     expect(h.storageStateWrites).toEqual([{ profileDir: canonical, state: rotated }]);
+    expect(h.identityMetadata.get(canonical)).toEqual({
+      googleAccountEmail: "account-b@example.com",
+    });
     expect(h.seededStorageStates[1]).toEqual(rotated);
     await finishProvisionSession(started.session_id);
   });
