@@ -33,13 +33,31 @@ Ordinary operator startup restores the snapshot without Google identity, so two
 parallel profiles cannot hold the same rotating Google session. Every
 `oauth_login` and legacy `oauth_click` waits on the process-local handoff and the
 cross-process canonical-profile operation guard from explicit action start through
-completion and one release cooldown. At that boundary the action captures the
-private profile's current non-Google state, proves bounded close, and relaunches
-the same private profile with the latest Google identity supplied as startup
-state. It never mutates the live browser context with `setStorageState`. The
-action then completes OAuth, captures the rotated state, proves bounded close,
-publishes it, and restarts the same private profile before releasing the next
-waiter.
+completion and one release cooldown. Queueing, guard acquisition, browser
+replacement, provider completion, identity attestation, publication, and resume
+share one absolute 30-second public action budget. At that boundary the action
+captures the private profile's current non-Google state, proves close, and
+relaunches the same private profile with the latest Google identity supplied as
+startup state. It never mutates the live browser context with `setStorageState`.
+On success, the action captures the rotated state, proves close, publishes it,
+and restarts the same private profile before releasing the next waiter.
+
+Google account selection and post-completion attestation are bound to the sealed
+account email. The chooser accepts either its `data-identifier` form or the current
+semantic account row, but clicks only one exact match. GitHub OAuth preserves the
+existing sealed Google metadata instead of replacing it from a generic Google
+probe.
+
+If any preparation, provider, attestation, publication, or replacement step
+fails, the session is terminalized and the prior canonical snapshot is preserved.
+A provider that does not emit its known completion signal within the budget
+returns `google_session` re-login guidance without a post-failure identity probe,
+publication, or replacement. The public call returns at its deadline while the
+shared terminal owner retains the OAuth/profile leases, completes any payment or
+pending-3DS finalization, and continues identity-proven browser cleanup. A later
+OAuth waiter cannot acquire the handoff until that work is quiescent and the full
+cooldown has elapsed; an unknown close never releases custody or deletes the
+profile.
 `require_live_identity` relies on the saved identity markers without preloading
 Google state or probing Google from the ordinary concurrent browser.
 

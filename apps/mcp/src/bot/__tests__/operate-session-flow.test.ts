@@ -10,6 +10,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { constants, publicEncrypt } from "node:crypto";
 import type * as GoogleLoginModule from "../google-login.js";
+import type * as ProfileModule from "../profile.js";
 import type * as SessionState from "../session-state.js";
 
 const h = vi.hoisted(() => ({
@@ -990,7 +991,7 @@ vi.mock("../google-login.js", async (importOriginal) => {
 });
 
 vi.mock("../profile.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../profile.js")>();
+  const actual = await importOriginal<typeof ProfileModule>();
   return {
     ...actual,
     acquireFreeProfileOperationGuard: async (
@@ -4645,9 +4646,9 @@ describe("operate session — OAuth lifecycle", () => {
       await vi.waitFor(() => expect(activeSessionCount()).toBe(0));
       await vi.waitFor(() => expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]));
       expect(h.connections[0]).toBe(false);
-      await expect(
-        act(started.session_id, { kind: "press", key: "Enter" }),
-      ).rejects.toThrow(/unknown provision session/i);
+      await expect(act(started.session_id, { kind: "press", key: "Enter" })).rejects.toThrow(
+        /unknown provision session/i,
+      );
       await expect(finishProvisionSession(started.session_id)).rejects.toThrow(
         /unknown provision session/i,
       );

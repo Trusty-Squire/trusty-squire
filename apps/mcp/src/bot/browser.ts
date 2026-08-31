@@ -16666,8 +16666,7 @@ export class BrowserController {
               return emails.some((email) => email.toLowerCase() === expectedEmail);
             });
           });
-    const accountRowIndex =
-      matchingAccountRows.length === 1 ? matchingAccountRows[0]!.index : -1;
+    const accountRowIndex = matchingAccountRows.length === 1 ? matchingAccountRows[0]!.index : -1;
     if (accountRowIndex >= 0) {
       if (!hasBudget()) return false;
       try {

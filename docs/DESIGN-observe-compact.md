@@ -99,6 +99,15 @@ session; results remain screened `safe_table` tuples. An empty query consumes an
 trusted start hint spans more than one page. Secret-, OTP-, email-, and
 card-shaped query material is rejected from matching rather than echoed.
 
+An exact, cursorless `Google` or `GitHub` lookup has a narrow bounded hydration
+repair for auth shells that mount or label their provider controls after the
+initial observation. Each refresh rebuilds and revalidates the complete sealed
+action map. A privately matched, initially unlabeled control may receive only the
+queried provider name in the screened result; its returned ref is still the
+current indexed safe handle. Explicit cursors remain immutable and stale on DOM
+change, arbitrary queries do not receive this wait, and the repair never clicks
+or falls back to a generic locator.
+
 Action refs are opaque snapshot indexes of the form
 `@e:<base36-generation>.<base36-position>`. Authorization requires every one of
 these checks before the private legacy target is resolved:

@@ -865,7 +865,7 @@ function expireOAuthAction(deadline: OAuthActionDeadline): void {
   for (const cancel of deadline.cancellations) {
     try {
       const result = cancel();
-      if (result instanceof Promise) trackOAuthActionPromise(deadline, result);
+      if (result instanceof Promise) void trackOAuthActionPromise(deadline, result);
     } catch {}
   }
 }
@@ -2145,10 +2145,7 @@ async function forceTerminateProvisionSessionOwned(
         .map(async (pending) => await quiesceStartingBrowser(pending, true)),
     );
   }
-  await forceReleaseWarmBrowserPage(
-    session.browser,
-    terminalOwner,
-  ).catch((error: unknown) => {
+  await forceReleaseWarmBrowserPage(session.browser, terminalOwner).catch((error: unknown) => {
     if (terminalError === undefined) terminalError = error;
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(
