@@ -1102,6 +1102,7 @@ export async function sweepOperatorProfilePoolOrphans(
   options: {
     rootDir?: string;
     now?: () => number;
+    deadline?: number;
   } = {},
 ): Promise<void> {
   assertOperatorProfileRuntimeSupported();
@@ -1114,17 +1115,24 @@ export async function sweepOperatorProfilePoolOrphans(
         ? readdirSync(namespaceRoot, { withFileTypes: true })
             .filter((entry) => entry.isDirectory())
             .map((entry) => join(namespaceRoot, entry.name))
+            .sort()
         : [];
   for (const candidate of roots) {
-    const p = paths(candidate);
-    if (!existsSync(p.active)) continue;
-    const removals: DeferredProfileRemoval[] = [];
-    await withSeedLock(p, () => {
-      scavengeQuarantinedActive(p, undefined, undefined, (removal) => removals.push(removal));
-      scavengeActiveSlots(p, (options.now ?? Date.now)(), (removal) => removals.push(removal));
-      scavengeDestroyRequired(p);
-    });
-    flushDeferredProfileRemovals(p, removals);
+    try {
+      const p = paths(candidate);
+      if (!existsSync(p.active)) continue;
+      const removals: DeferredProfileRemoval[] = [];
+      await withSeedLock(
+        p,
+        () => {
+          scavengeQuarantinedActive(p, undefined, undefined, (removal) => removals.push(removal));
+          scavengeActiveSlots(p, (options.now ?? Date.now)(), (removal) => removals.push(removal));
+          scavengeDestroyRequired(p);
+        },
+        options.deadline === undefined ? {} : { deadline: options.deadline },
+      );
+      flushDeferredProfileRemovals(p, removals);
+    } catch {}
   }
 }
 

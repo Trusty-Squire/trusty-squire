@@ -23,6 +23,7 @@ import {
   operatorProfilePoolTest,
   OPERATOR_SEED_GOOGLE_COOKIE_NAMES,
   publishOperatorProfileSeed,
+  sweepOperatorProfilePoolOrphans,
 } from "../operator-profile-pool.js";
 import { profilePathIdentity } from "../profile.js";
 
@@ -118,6 +119,63 @@ afterEach(() => {
   vi.restoreAllMocks();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   operatorProfilePoolTest.resetDefaultPool();
+});
+
+describe("operator profile startup sweep", () => {
+  it("stops waiting at its startup deadline when a live seed lock is held", async () => {
+    const { root, source } = fixture();
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+    const p = operatorProfilePoolTest.paths(root);
+    let releaseHolder!: () => void;
+    const holder = operatorProfilePoolTest.withSeedLock(
+      p,
+      async () =>
+        await new Promise<void>((resolve) => {
+          releaseHolder = resolve;
+        }),
+    );
+    await vi.waitFor(() => expect(existsSync(p.seedLock)).toBe(true));
+    const started = Date.now();
+    try {
+      await sweepOperatorProfilePoolOrphans({ rootDir: root, deadline: Date.now() + 40 });
+      expect(Date.now() - started).toBeLessThan(500);
+    } finally {
+      releaseHolder();
+      await holder;
+    }
+  });
+
+  it("continues across default namespaces after one namespace fails", async () => {
+    const defaultRoot = operatorProfilePoolTest.paths().root;
+    const namespaceRoot = join(defaultRoot, "namespaces");
+    const broken = join(namespaceRoot, "a-broken");
+    const healthy = join(namespaceRoot, "b-healthy");
+    mkdirSync(broken, { recursive: true });
+    writeFileSync(join(broken, "active"), "not a directory");
+    const healthyPaths = operatorProfilePoolTest.paths(healthy);
+    for (const path of [
+      healthyPaths.root,
+      healthyPaths.seed,
+      healthyPaths.generations,
+      healthyPaths.profiles,
+      healthyPaths.active,
+      healthyPaths.activeClaims,
+      healthyPaths.warm,
+      healthyPaths.tombstones,
+    ]) {
+      mkdirSync(path, { recursive: true, mode: 0o700 });
+    }
+    const staleClaim = `${healthyPaths.seedLock}.claim-stale`;
+    writeFileSync(
+      staleClaim,
+      `${JSON.stringify({ host: hostname(), pid: deadPid(), start_time: "1", token: "stale" })}\n`,
+      { mode: 0o600 },
+    );
+
+    await expect(sweepOperatorProfilePoolOrphans()).resolves.toBeUndefined();
+
+    expect(existsSync(staleClaim)).toBe(false);
+  });
 });
 
 describe("operator profile pool migration stage", () => {
