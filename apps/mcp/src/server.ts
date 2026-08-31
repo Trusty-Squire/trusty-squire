@@ -345,9 +345,9 @@ export function installServerProcessGuards(): void {
 export async function runServer(): Promise<void> {
   installServerProcessGuards();
   setSelfManagedChromeTerminationSignalExitEnabled(false);
-  // The detached watchdog survives SIGKILL/parent death. It first sweeps only
-  // manifests bearing Trusty Squire's private owner/process signatures, then
-  // tracks every self-managed browser launched by this server.
+  // The detached Linux watchdog survives SIGKILL/parent death. It asynchronously
+  // sweeps strict process-only manifests, then tracks exact local browser and
+  // session-helper identities for launches owned by this server.
   startOwnerProcessReaper();
   if (process.platform === "linux") {
     const timeoutMs = envMs(
