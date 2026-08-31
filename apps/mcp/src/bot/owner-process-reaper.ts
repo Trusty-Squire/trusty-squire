@@ -3,12 +3,18 @@ import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import {
   chmodSync,
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
+  rmdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -54,6 +60,7 @@ interface OwnerProfileRecord {
 
 interface OwnerArtifactRecord {
   path: string;
+  root_path?: string;
   token: string;
   state: "pending" | "ready";
   reservation_path?: string;
@@ -109,7 +116,12 @@ export interface OwnerProcessReaper {
   reserveHelper(marker: string): void;
   bindHelper(marker: string, identity: OwnerHelperIdentity): void;
   untrackHelper(marker: string): void;
-  reserveArtifact(artifactDir: string, reservationPath: string, token: string): void;
+  reserveArtifact(
+    artifactDir: string,
+    artifactRoot: string,
+    reservationPath: string,
+    token: string,
+  ): void;
   commitArtifact(artifactDir: string, token: string): void;
   untrackArtifact(artifactDir: string): void;
   stop(): void;
@@ -117,7 +129,9 @@ export interface OwnerProcessReaper {
 
 export const OWNER_PROFILE_SIGNATURE_FILE = ".trusty-squire-owner-profile.json";
 export const OWNER_ARTIFACT_SIGNATURE_FILE = ".trusty-squire-owner-artifact.json";
+export const OWNER_ARTIFACT_ROOT_SIGNATURE_FILE = ".trusty-squire-owner-artifact-root.json";
 export const OWNER_HELPER_MARKER_ENV = "TRUSTY_SQUIRE_OWNER_HELPER_MARKER";
+export const OWNER_REAPER_WORKER_MARKER_ENV = "TRUSTY_SQUIRE_OWNER_REAPER_WORKER_MARKER";
 const EPHEMERAL_PROFILE_PREFIX = "trusty-squire-operate-";
 const DEFAULT_POLL_MS = 1_000;
 const DEFAULT_TERM_GRACE_MS = 2_000;
@@ -127,6 +141,7 @@ const PROFILE_RESERVATION_PREFIX = ".trusty-squire-profile-reservation-";
 const ARTIFACT_RESERVATION_PREFIX = ".trusty-squire-artifact-reservation-";
 const DEFAULT_WORKER_RECOVERY_BACKOFF_MS = 100;
 const MAX_WORKER_RECOVERY_BACKOFF_MS = 5_000;
+const REQUIRED_OWNER_REAPER_WORKERS = 2;
 const workerReadyWait = new Int32Array(new SharedArrayBuffer(4));
 const moduleRequire = createRequire(import.meta.url);
 let activeReaper: OwnerProcessReaper | null = null;
@@ -191,6 +206,7 @@ function isArtifact(value: unknown): value is OwnerArtifactRecord {
   return (
     typeof artifact.path === "string" &&
     typeof artifact.token === "string" &&
+    (artifact.root_path === undefined || typeof artifact.root_path === "string") &&
     (artifact.reservation_path === undefined || typeof artifact.reservation_path === "string") &&
     (artifact.state === undefined || artifact.state === "pending" || artifact.state === "ready")
   );
@@ -289,6 +305,8 @@ export function shouldReapOwner(ownerState: ProcessIdentityState): boolean {
 }
 
 function ownerState(manifest: OwnerReaperManifest): ProcessIdentityState {
+  const running = linuxProcessRunningState(manifest.owner.pid);
+  if (running !== "matching") return running;
   return processBirthIdentityState(manifest.owner);
 }
 
@@ -323,6 +341,19 @@ function linuxProcessUidState(pid: number): ProcessIdentityState {
   }
 }
 
+function linuxProcessRunningState(pid: number): ProcessIdentityState {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const close = stat.lastIndexOf(")");
+    if (close < 0) return "unknown";
+    const state = stat.slice(close + 2).split(" ")[0];
+    return state === "Z" || state === "X" ? "stale" : "matching";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ESRCH" ? "stale" : "unknown";
+  }
+}
+
 function helperProcessMarkerState(
   pid: number,
   marker: string,
@@ -342,6 +373,7 @@ function helperProcessMarkerState(
 interface HelperIdentityReaders {
   readProcessIds?: () => number[];
   readProcessGroupId?: (pid: number) => number | null;
+  readRunningState?: (pid: number) => ProcessIdentityState;
   readMarkerState?: (pid: number, marker: string) => ProcessIdentityState;
   readBirthState?: (identity: OwnerHelperIdentity) => ProcessIdentityState;
   readUidState?: (pid: number) => ProcessIdentityState;
@@ -362,6 +394,14 @@ function helperGroupMarkerState(
         .map(Number);
     for (const pid of processIds) {
       if ((options.readProcessGroupId ?? linuxProcessGroupId)(pid) !== processGroupId) continue;
+      const runningState =
+        options.readRunningState?.(pid) ??
+        (options.readProcessIds === undefined ? linuxProcessRunningState(pid) : "matching");
+      if (runningState === "stale") continue;
+      if (runningState === "unknown") {
+        unknown = true;
+        continue;
+      }
       const state = (options.readMarkerState ?? helperProcessMarkerState)(pid, marker);
       if (state === "matching") return "matching";
       if (state === "unknown") unknown = true;
@@ -388,6 +428,14 @@ function exactHelperMarkerProcessScan(
         .filter((entry) => /^\d+$/.test(entry))
         .map(Number);
     for (const pid of processIds) {
+      const runningState =
+        options.readRunningState?.(pid) ??
+        (options.readProcessIds === undefined ? linuxProcessRunningState(pid) : "matching");
+      if (runningState === "stale") continue;
+      if (runningState === "unknown") {
+        if ((options.readUidState ?? linuxProcessUidState)(pid) !== "stale") unknown = true;
+        continue;
+      }
       const state = (options.readMarkerState ?? helperProcessMarkerState)(pid, marker);
       if (state === "matching") matching.push(pid);
       else if (
@@ -420,6 +468,10 @@ export function ownerHelperIdentityState(
     const groupState = helperGroupMarkerState(identity.process_group_id, identity.marker, options);
     if (groupState !== "stale") return groupState;
   }
+  const running =
+    options.readRunningState?.(identity.pid) ??
+    (options.readBirthState === undefined ? linuxProcessRunningState(identity.pid) : "matching");
+  if (running !== "matching") return running;
   const birth = options.readBirthState?.(identity) ?? processBirthIdentityState(identity);
   if (birth !== "matching") return birth;
   return (options.readMarkerState ?? helperProcessMarkerState)(identity.pid, identity.marker);
@@ -683,23 +735,77 @@ function ownerProfileState(record: OwnerProfileRecord): ProcessIdentityState {
   return "unknown";
 }
 
-function artifactSignatureMatches(record: OwnerArtifactRecord, ownerToken: string): boolean {
+function privateDirectoryMatches(path: string): boolean {
   try {
-    const path = resolve(record.path);
     const stat = lstatSync(path);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
-    const signature = JSON.parse(
-      readFileSync(join(path, OWNER_ARTIFACT_SIGNATURE_FILE), "utf8"),
-    ) as {
+    if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) return false;
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) return false;
+    return realpathSync(path) === resolve(path);
+  } catch {
+    return false;
+  }
+}
+
+function readExactArtifactSignature(signaturePath: string): {
+  version?: unknown;
+  token?: unknown;
+  path?: unknown;
+  root_path?: unknown;
+  owner_token?: unknown;
+} | null {
+  try {
+    const stat = lstatSync(signaturePath);
+    if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) return null;
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) return null;
+    return JSON.parse(readFileSync(signaturePath, "utf8")) as {
       version?: unknown;
       token?: unknown;
       path?: unknown;
+      root_path?: unknown;
       owner_token?: unknown;
     };
+  } catch {
+    return null;
+  }
+}
+
+function artifactRootSignatureMatches(record: OwnerArtifactRecord, ownerToken: string): boolean {
+  if (record.root_path === undefined) return false;
+  const rootPath = resolve(record.root_path);
+  if (!privateDirectoryMatches(rootPath)) return false;
+  const signature = readExactArtifactSignature(join(rootPath, OWNER_ARTIFACT_ROOT_SIGNATURE_FILE));
+  return (
+    signature?.version === 1 &&
+    signature.token === record.token &&
+    signature.path === rootPath &&
+    signature.owner_token === ownerToken
+  );
+}
+
+function artifactLayoutMatches(record: OwnerArtifactRecord): boolean {
+  if (record.root_path === undefined) return false;
+  const path = resolve(record.path);
+  const rootPath = resolve(record.root_path);
+  return (
+    dirname(path) === rootPath && basename(rootPath) === `.trusty-squire-owner-${record.token}`
+  );
+}
+
+function artifactSignatureMatches(record: OwnerArtifactRecord, ownerToken: string): boolean {
+  try {
+    const path = resolve(record.path);
+    if (!artifactLayoutMatches(record) || !artifactRootSignatureMatches(record, ownerToken)) {
+      return false;
+    }
+    const stat = lstatSync(path);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) return false;
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) return false;
+    const signature = readExactArtifactSignature(join(path, OWNER_ARTIFACT_SIGNATURE_FILE));
     return (
-      signature.version === 1 &&
+      signature?.version === 1 &&
       signature.token === record.token &&
       signature.path === path &&
+      signature.root_path === resolve(record.root_path!) &&
       signature.owner_token === ownerToken
     );
   } catch {
@@ -708,7 +814,14 @@ function artifactSignatureMatches(record: OwnerArtifactRecord, ownerToken: strin
 }
 
 function artifactReservationMatches(record: OwnerArtifactRecord, ownerToken: string): boolean {
-  if (record.state !== "pending" || record.reservation_path === undefined) return false;
+  if (
+    record.state !== "pending" ||
+    record.root_path === undefined ||
+    record.reservation_path === undefined ||
+    !artifactLayoutMatches(record)
+  ) {
+    return false;
+  }
   const reservationPath = resolve(record.reservation_path);
   if (!basename(reservationPath).startsWith(ARTIFACT_RESERVATION_PREFIX)) return false;
   try {
@@ -718,12 +831,14 @@ function artifactReservationMatches(record: OwnerArtifactRecord, ownerToken: str
       version?: unknown;
       token?: unknown;
       path?: unknown;
+      root_path?: unknown;
       owner_token?: unknown;
     };
     return (
       reservation.version === 1 &&
       reservation.token === record.token &&
       reservation.path === resolve(record.path) &&
+      reservation.root_path === resolve(record.root_path) &&
       reservation.owner_token === ownerToken
     );
   } catch {
@@ -733,9 +848,10 @@ function artifactReservationMatches(record: OwnerArtifactRecord, ownerToken: str
 
 function ownerArtifactState(record: OwnerArtifactRecord, ownerToken: string): ProcessIdentityState {
   const artifactExists = existsSync(record.path);
+  const rootExists = record.root_path !== undefined && existsSync(record.root_path);
   const reservationExists =
     record.reservation_path !== undefined && existsSync(record.reservation_path);
-  if (!artifactExists && !reservationExists) return "stale";
+  if (!artifactExists && !rootExists && !reservationExists) return "stale";
   if (
     artifactSignatureMatches(record, ownerToken) ||
     artifactReservationMatches(record, ownerToken)
@@ -762,10 +878,7 @@ function profileProcessesAreStale(
   );
 }
 
-type OwnerReaperRemove = (
-  path: string,
-  options: { recursive?: boolean; force?: boolean },
-) => void;
+type OwnerReaperRemove = (path: string, options: { recursive?: boolean; force?: boolean }) => void;
 
 function removeTrackedPath(
   removePath: OwnerReaperRemove,
@@ -810,13 +923,23 @@ function cleanTrackedArtifacts(
 ): void {
   for (const artifact of manifest.artifacts) {
     const reservationMatches = artifactReservationMatches(artifact, manifest.token);
-    if (artifactSignatureMatches(artifact, manifest.token) || reservationMatches) {
+    const rootMatches = artifactRootSignatureMatches(artifact, manifest.token);
+    const reservedLeafMatches =
+      reservationMatches &&
+      rootMatches &&
+      artifactLayoutMatches(artifact) &&
+      privateDirectoryMatches(resolve(artifact.path));
+    if (artifactSignatureMatches(artifact, manifest.token) || reservedLeafMatches) {
       removeTrackedPath(removePath, artifact.path, { recursive: true, force: true });
+    }
+    if (artifact.root_path !== undefined && rootMatches && !existsSync(artifact.path)) {
+      removeTrackedPath(removePath, artifact.root_path, { recursive: true, force: true });
     }
     if (
       artifact.reservation_path !== undefined &&
       reservationMatches &&
-      !existsSync(artifact.path)
+      !existsSync(artifact.path) &&
+      (artifact.root_path === undefined || !existsSync(artifact.root_path))
     ) {
       removeTrackedPath(removePath, artifact.reservation_path, { force: true });
     }
@@ -831,9 +954,7 @@ function manifestCleanupComplete(manifest: OwnerReaperManifest): boolean {
     manifest.launches.every((launch) => ownerBrowserLaunchState(launch.marker) === "stale") &&
     manifest.helpers.every((helper) => ownerHelperIdentityState(helper) === "stale") &&
     manifest.profiles.every((profile) => ownerProfileState(profile) === "stale") &&
-    manifest.artifacts.every(
-      (artifact) => ownerArtifactState(artifact, manifest.token) === "stale",
-    )
+    manifest.artifacts.every((artifact) => ownerArtifactState(artifact, manifest.token) === "stale")
   );
 }
 
@@ -943,7 +1064,7 @@ function waitForOwnerReaperWorker(
 
 interface OwnerReaperWorkerHandle {
   isAvailable(): boolean;
-  stop(): void;
+  stop(): boolean;
 }
 
 function launchOwnerReaperWorker(
@@ -958,6 +1079,7 @@ function launchOwnerReaperWorker(
     ? ["--import", moduleRequire.resolve("tsx")]
     : [];
   const readyPath = join(rootDir, `${process.pid}-${token}-${randomUUID()}.ready`);
+  const workerMarker = `v1:reaper:${token}:${randomUUID()}`;
   let worker: ChildProcess;
   try {
     worker = spawnWorker(
@@ -966,7 +1088,11 @@ function launchOwnerReaperWorker(
       {
         detached: true,
         stdio: "ignore",
-        env: process.env,
+        env: {
+          ...process.env,
+          [OWNER_HELPER_MARKER_ENV]: workerMarker,
+          [OWNER_REAPER_WORKER_MARKER_ENV]: workerMarker,
+        },
       },
     );
     worker.unref();
@@ -974,6 +1100,16 @@ function launchOwnerReaperWorker(
     rmSync(readyPath, { force: true });
     return null;
   }
+
+  let workerRecord: OwnerHelperRecord = { marker: workerMarker, state: "pending" };
+  if (worker.pid !== undefined) {
+    const birth = processBirthIdentity(worker.pid);
+    const processGroupId = linuxProcessGroupId(worker.pid);
+    if (birth !== null && processGroupId !== null) {
+      workerRecord = { ...birth, marker: workerMarker, process_group_id: processGroupId };
+    }
+  }
+  trackedHelperProcesses.set(worker, workerRecord);
 
   let exited = false;
   let ready = false;
@@ -989,7 +1125,10 @@ function launchOwnerReaperWorker(
   rmSync(readyPath, { force: true });
   if (identity === null || exited) {
     stopping = true;
-    worker.kill("SIGTERM");
+    if (!terminateOwnerHelperAfterRegistrationFailure(worker, workerRecord)) {
+      throw new Error("owner process reaper worker group did not terminate");
+    }
+    trackedHelperProcesses.delete(worker);
     return null;
   }
   ready = true;
@@ -998,7 +1137,9 @@ function launchOwnerReaperWorker(
     stop: () => {
       stopping = true;
       exited = true;
-      worker.kill("SIGTERM");
+      const terminated = terminateOwnerHelperAfterRegistrationFailure(worker, workerRecord);
+      if (terminated) trackedHelperProcesses.delete(worker);
+      return terminated;
     },
   };
 }
@@ -1046,14 +1187,14 @@ export function startOwnerProcessReaper(
   let recovering = false;
   let recoveryAttempt = 0;
   let recoveryTimer: ReturnType<typeof setTimeout> | null = null;
-  let workerHandle: OwnerReaperWorkerHandle | null = null;
+  const workerHandles = new Map<number, OwnerReaperWorkerHandle>();
   function clearRecoveryTimer(): void {
     if (recoveryTimer === null) return;
     clearTimeout(recoveryTimer);
     recoveryTimer = null;
   }
-  function scheduleWorkerRecovery(generation: number, immediate = false): void {
-    if (stopped || recovering || recoveryTimer !== null || generation !== workerGeneration) return;
+  function scheduleWorkerRecovery(immediate = false): void {
+    if (stopped || recovering || recoveryTimer !== null) return;
     const read = readManifest(manifestPath);
     if (
       read.state === "missing" ||
@@ -1071,47 +1212,68 @@ export function startOwnerProcessReaper(
     recoveryAttempt += 1;
     recoveryTimer = setTimeout(() => {
       recoveryTimer = null;
-      if (stopped || recovering || generation !== workerGeneration) return;
+      if (stopped || recovering) return;
       recovering = true;
-      workerHandle = launchWorker();
+      const launched = launchWorker();
       recovering = false;
-      if (workerHandle === null) scheduleWorkerRecovery(workerGeneration);
-      else recoveryAttempt = 0;
+      if (launched === null || workerHandles.size < REQUIRED_OWNER_REAPER_WORKERS) {
+        scheduleWorkerRecovery();
+      } else {
+        recoveryAttempt = 0;
+      }
     }, delay);
     recoveryTimer.unref();
   }
   function launchWorker(): OwnerReaperWorkerHandle | null {
     const generation = ++workerGeneration;
-    return launchOwnerReaperWorker(
+    const handle = launchOwnerReaperWorker(
       workerPath,
       manifestPath,
       rootDir,
       token,
       spawnWorker,
       () => {
-        workerHandle = null;
-        scheduleWorkerRecovery(generation, true);
+        workerHandles.delete(generation);
+        scheduleWorkerRecovery(true);
       },
     );
+    if (handle !== null) workerHandles.set(generation, handle);
+    return handle;
   }
-  workerHandle = launchWorker();
-  if (workerHandle === null) {
+  if (launchWorker() === null) {
     rmSync(manifestPath, { force: true });
     return null;
   }
-  const isAvailable = (): boolean => !stopped && workerHandle?.isAvailable() === true;
-  const restart = (): boolean => {
+  const discardUnavailableWorkers = (): void => {
+    for (const [generation, handle] of workerHandles) {
+      if (handle.isAvailable()) continue;
+      handle.stop();
+      workerHandles.delete(generation);
+    }
+  };
+  const isAvailable = (): boolean => {
     if (stopped) return false;
-    if (isAvailable()) return true;
+    discardUnavailableWorkers();
+    return workerHandles.size > 0;
+  };
+  const ensureRequiredWorkers = (): boolean => {
+    if (stopped) return false;
     clearRecoveryTimer();
-    workerHandle?.stop();
-    workerHandle = launchWorker();
-    if (workerHandle === null) scheduleWorkerRecovery(workerGeneration);
-    else recoveryAttempt = 0;
-    return workerHandle !== null;
+    discardUnavailableWorkers();
+    while (workerHandles.size < REQUIRED_OWNER_REAPER_WORKERS) {
+      if (launchWorker() === null) {
+        if (workerHandles.size > 0) scheduleWorkerRecovery();
+        return false;
+      }
+    }
+    recoveryAttempt = 0;
+    return true;
+  };
+  const restart = (): boolean => {
+    return ensureRequiredWorkers();
   };
   const requireAvailable = (): void => {
-    if (!restart()) throw new Error("owner process reaper worker unavailable");
+    if (!ensureRequiredWorkers()) throw new Error("owner process reaper worker unavailable");
   };
   const update = (next: OwnerReaperManifest): void => {
     manifest = next;
@@ -1228,9 +1390,10 @@ export function startOwnerProcessReaper(
         helpers: manifest.helpers.filter((entry) => entry.marker !== marker),
       });
     },
-    reserveArtifact: (artifactDir, reservationPath, artifactToken) => {
+    reserveArtifact: (artifactDir, artifactRoot, reservationPath, artifactToken) => {
       requireAvailable();
       const path = resolve(artifactDir);
+      const rootPath = resolve(artifactRoot);
       const durableReservationPath = resolve(reservationPath);
       if (
         dirname(durableReservationPath) !== rootDir ||
@@ -1244,6 +1407,7 @@ export function startOwnerProcessReaper(
           ...manifest.artifacts.filter((entry) => entry.path !== path),
           {
             path,
+            root_path: rootPath,
             token: artifactToken,
             state: "pending",
             reservation_path: durableReservationPath,
@@ -1254,15 +1418,16 @@ export function startOwnerProcessReaper(
     commitArtifact: (artifactDir, artifactToken) => {
       requireAvailable();
       const path = resolve(artifactDir);
-      const reserved = manifest.artifacts.some(
-        (entry) => entry.path === path && entry.token === artifactToken && entry.state === "pending",
+      const reserved = manifest.artifacts.find(
+        (entry) =>
+          entry.path === path && entry.token === artifactToken && entry.state === "pending",
       );
       if (!reserved) return;
       update({
         ...manifest,
         artifacts: [
           ...manifest.artifacts.filter((entry) => entry.path !== path),
-          { path, token: artifactToken, state: "ready" },
+          { path, root_path: reserved.root_path, token: artifactToken, state: "ready" },
         ],
       });
     },
@@ -1282,10 +1447,13 @@ export function startOwnerProcessReaper(
         trackedLaunchWatchdogs.get(launch.marker)?.dispose();
         trackedLaunchWatchdogs.delete(launch.marker);
       }
-      for (const artifact of manifest.artifacts) trackedSessionArtifacts.delete(artifact.path);
-      rmSync(manifestPath, { force: true });
-      workerHandle?.stop();
-      workerHandle = null;
+      trackedSessionArtifacts.clear();
+      let workersStopped = true;
+      for (const handle of workerHandles.values()) {
+        if (!handle.stop()) workersStopped = false;
+      }
+      workerHandles.clear();
+      if (workersStopped) rmSync(manifestPath, { force: true });
       if (activeReaper === reaper) activeReaper = null;
     },
   };
@@ -1410,58 +1578,172 @@ export function untrackOwnerEphemeralProfile(profileDir: string): void {
   activeReaper?.untrackProfile(profileDir);
 }
 
-const trackedSessionArtifacts = new Map<string, string>();
+interface TrackedSessionArtifact {
+  path: string;
+  rootPath: string;
+  token: string;
+  ownerToken: string;
+}
 
-export function trackOwnerSessionArtifact(artifactDir: string): void {
-  const path = resolve(artifactDir);
-  if (process.platform !== "linux") {
-    ensurePrivateDir(path);
-    return;
+const trackedSessionArtifacts = new Map<string, TrackedSessionArtifact>();
+
+function writeExclusivePrivateFile(path: string, contents: string): void {
+  const descriptor = openSync(
+    path,
+    fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0),
+    0o600,
+  );
+  try {
+    const stat = fstatSync(descriptor);
+    if (!stat.isFile() || (stat.mode & 0o077) !== 0) throw new Error("unsafe artifact signature");
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+      throw new Error("artifact signature owner mismatch");
+    }
+    writeFileSync(descriptor, contents, { encoding: "utf8" });
+  } finally {
+    closeSync(descriptor);
   }
-  if (trackedSessionArtifacts.has(path) && existsSync(path)) return;
-  trackedSessionArtifacts.delete(path);
+}
+
+function trackedArtifactMatches(record: TrackedSessionArtifact): boolean {
+  return artifactSignatureMatches(
+    {
+      path: record.path,
+      root_path: record.rootPath,
+      token: record.token,
+      state: "ready",
+    },
+    record.ownerToken,
+  );
+}
+
+export function trackOwnerSessionArtifact(artifactDir: string): string {
+  const requestedPath = resolve(artifactDir);
+  if (process.platform !== "linux") {
+    ensurePrivateDir(requestedPath);
+    return requestedPath;
+  }
+  const existing = trackedSessionArtifacts.get(requestedPath);
+  if (existing !== undefined) {
+    if (!trackedArtifactMatches(existing)) {
+      throw new Error("session artifact ownership changed");
+    }
+    return existing.path;
+  }
+  if (existsSync(requestedPath)) throw new Error("session artifact path already exists");
+  const parent = dirname(requestedPath);
+  mkdirSync(parent, { recursive: true, mode: 0o700 });
+  if (!privateDirectoryMatches(parent)) throw new Error("unsafe session artifact parent");
   const reaper = ensureOwnerProcessReaper();
   if (reaper === null) throw new Error("owner process reaper unavailable for session artifact");
   const token = randomUUID();
+  const rootPath = join(parent, `.trusty-squire-owner-${token}`);
+  const path = join(rootPath, basename(requestedPath));
   const reservationPath = join(
     dirname(reaper.manifestPath),
     `${ARTIFACT_RESERVATION_PREFIX}${token}.json`,
   );
-  reaper.reserveArtifact(path, reservationPath, token);
+  reaper.reserveArtifact(path, rootPath, reservationPath, token);
   let reservationCreated = false;
-  let directoryCreated = false;
+  let rootCreated = false;
+  let leafCreated = false;
   try {
-    writeFileSync(
+    writeExclusivePrivateFile(
       reservationPath,
-      `${JSON.stringify({ version: 1, token, path, owner_token: reaper.token })}\n`,
-      { mode: 0o600, flag: "wx" },
+      `${JSON.stringify({
+        version: 1,
+        token,
+        path,
+        root_path: rootPath,
+        owner_token: reaper.token,
+      })}\n`,
     );
     reservationCreated = true;
-    mkdirSync(path, { recursive: true, mode: 0o700 });
-    directoryCreated = true;
-    chmodSync(path, 0o700);
-    writeFileSync(
+    mkdirSync(rootPath, { mode: 0o700 });
+    rootCreated = true;
+    if (!privateDirectoryMatches(rootPath)) throw new Error("unsafe artifact owner directory");
+    writeExclusivePrivateFile(
+      join(rootPath, OWNER_ARTIFACT_ROOT_SIGNATURE_FILE),
+      `${JSON.stringify({ version: 1, token, path: rootPath, owner_token: reaper.token })}\n`,
+    );
+    mkdirSync(path, { mode: 0o700 });
+    leafCreated = true;
+    if (!privateDirectoryMatches(path) || dirname(realpathSync(path)) !== realpathSync(rootPath)) {
+      throw new Error("unsafe session artifact directory");
+    }
+    writeExclusivePrivateFile(
       join(path, OWNER_ARTIFACT_SIGNATURE_FILE),
-      `${JSON.stringify({ version: 1, token, path, owner_token: reaper.token })}\n`,
-      { mode: 0o600, flag: "wx" },
+      `${JSON.stringify({
+        version: 1,
+        token,
+        path,
+        root_path: rootPath,
+        owner_token: reaper.token,
+      })}\n`,
     );
     rmSync(reservationPath, { force: true });
     reservationCreated = false;
     reaper.commitArtifact(path, token);
-    trackedSessionArtifacts.set(path, token);
+    trackedSessionArtifacts.set(requestedPath, {
+      path,
+      rootPath,
+      token,
+      ownerToken: reaper.token,
+    });
+    return path;
   } catch (error) {
-    if (directoryCreated) rmSync(path, { recursive: true, force: true });
+    if (leafCreated) {
+      try {
+        rmdirSync(path);
+      } catch {}
+    }
+    if (rootCreated) {
+      const record: OwnerArtifactRecord = {
+        path,
+        root_path: rootPath,
+        token,
+        state: "pending",
+      };
+      if (artifactRootSignatureMatches(record, reaper.token) && !existsSync(path)) {
+        rmSync(rootPath, { recursive: true, force: true });
+      } else {
+        try {
+          rmdirSync(rootPath);
+        } catch {}
+      }
+    }
     if (reservationCreated) rmSync(reservationPath, { force: true });
     reaper.untrackArtifact(path);
     throw error;
   }
 }
 
+export function removeOwnerSessionArtifact(artifactDir: string): void {
+  const requestedPath = resolve(artifactDir);
+  if (process.platform !== "linux") {
+    rmSync(requestedPath, { recursive: true, force: true });
+    return;
+  }
+  const tracked = trackedSessionArtifacts.get(requestedPath);
+  if (tracked === undefined) return;
+  if (!trackedArtifactMatches(tracked)) throw new Error("session artifact ownership changed");
+  rmSync(tracked.path, { recursive: true, force: true });
+  const record: OwnerArtifactRecord = {
+    path: tracked.path,
+    root_path: tracked.rootPath,
+    token: tracked.token,
+    state: "ready",
+  };
+  if (!artifactRootSignatureMatches(record, tracked.ownerToken)) {
+    throw new Error("session artifact owner changed");
+  }
+  rmSync(tracked.rootPath, { recursive: true, force: true });
+  trackedSessionArtifacts.delete(requestedPath);
+  activeReaper?.untrackArtifact(tracked.path);
+}
+
 export function untrackOwnerSessionArtifact(artifactDir: string): void {
-  const path = resolve(artifactDir);
-  if (existsSync(path)) return;
-  trackedSessionArtifacts.delete(path);
-  activeReaper?.untrackArtifact(path);
+  removeOwnerSessionArtifact(artifactDir);
 }
 
 const trackedHelperProcesses = new WeakMap<ChildProcess, OwnerHelperRecord>();

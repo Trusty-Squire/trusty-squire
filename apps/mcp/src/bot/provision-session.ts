@@ -161,10 +161,7 @@ import {
   OperatorBrowserWatchdog,
   type OperatorBrowserWatchdogReason,
 } from "./operator-browser-watchdog.js";
-import {
-  trackOwnerSessionArtifact,
-  untrackOwnerSessionArtifact,
-} from "./owner-process-reaper.js";
+import { trackOwnerSessionArtifact, removeOwnerSessionArtifact } from "./owner-process-reaper.js";
 
 // Identity-provider + auth-handler hosts a signup legitimately bounces
 // through. Used to widen domain-scope so an OAuth `goto` (rare) isn't blocked.
@@ -4994,12 +4991,12 @@ function persistObserveSnapshot(
   elements: ObservedElement[],
 ): string | null {
   let temporaryFile: string | null = null;
-  const dir = observeSnapshotDir(session.id);
-  const file = join(dir, `observe-${session.id}.json`);
+  const requestedDir = observeSnapshotDir(session.id);
+  let dir = requestedDir;
+  let file = join(dir, `observe-${session.id}.json`);
   try {
-    trackOwnerSessionArtifact(dir);
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    chmodSync(dir, 0o700);
+    dir = trackOwnerSessionArtifact(requestedDir);
+    file = join(dir, `observe-${session.id}.json`);
     temporaryFile = join(dir, `.observe-${session.id}-${generation}.tmp`);
     writeFileSync(
       temporaryFile,
@@ -9870,9 +9867,7 @@ function clearSessionArtifacts(session: Session): void {
   session.secretSlots.clear();
   session.sealedFieldKeys.clear();
   try {
-    const artifactDir = observeSnapshotDir(session.id);
-    rmSync(artifactDir, { recursive: true, force: true });
-    untrackOwnerSessionArtifact(artifactDir);
+    removeOwnerSessionArtifact(observeSnapshotDir(session.id));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(

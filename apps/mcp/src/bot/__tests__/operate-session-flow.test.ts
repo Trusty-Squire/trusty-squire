@@ -208,10 +208,7 @@ vi.mock("node:fs", async (importOriginal) => {
   return {
     ...actual,
     rmSync: (...args: Parameters<typeof actual.rmSync>) => {
-      if (
-        h.artifactRemovalPath !== null &&
-        String(args[0]).startsWith(h.artifactRemovalPath)
-      ) {
+      if (h.artifactRemovalPath !== null && String(args[0]).startsWith(h.artifactRemovalPath)) {
         throw new Error("simulated observation artifact removal failure");
       }
       return actual.rmSync(...args);
@@ -220,8 +217,16 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 
 vi.mock("../owner-process-reaper.js", () => ({
-  trackOwnerSessionArtifact: (path: string) => h.ownerArtifactTracks.push(path),
-  untrackOwnerSessionArtifact: (path: string) => h.ownerArtifactUntracks.push(path),
+  trackOwnerSessionArtifact: (path: string) => {
+    h.ownerArtifactTracks.push(path);
+    mkdirSync(path, { recursive: true, mode: 0o700 });
+    chmodSync(path, 0o700);
+    return path;
+  },
+  removeOwnerSessionArtifact: (path: string) => {
+    h.ownerArtifactUntracks.push(path);
+    rmSync(path, { recursive: true, force: true });
+  },
 }));
 
 vi.mock("../session-state.js", async (importOriginal) => {
@@ -981,6 +986,7 @@ import {
   chmodSync,
   existsSync,
   mkdtempSync,
+  mkdirSync,
   writeFileSync,
   readFileSync,
   readdirSync,
@@ -4070,9 +4076,7 @@ describe("operate session — OAuth lifecycle", () => {
   it("clears artifacts when OAuth action preparation replacement startup fails", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-oauth-replacement-failure";
     h.storageStates.set(canonical, {
-      cookies: [
-        { name: "SID", value: "google-session", domain: ".google.com", path: "/" },
-      ],
+      cookies: [{ name: "SID", value: "google-session", domain: ".google.com", path: "/" }],
       origins: [],
     });
     h.visibleText = "Continue with Google";
