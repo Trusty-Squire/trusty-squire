@@ -883,26 +883,29 @@ function sealedElementSemanticKeys(descriptor: SealedElementDescriptor): string[
 export const CHECKOUT_SUBMIT_LABEL_RE =
   /^(?:pay(?:\s+now)?|place\s+order|complete\s+(?:order|purchase|payment)|submit\s+payment|buy\s+now|confirm\s+(?:order|payment))\b|^ご?注文(?:内容)?[をの]?確定|^ご?注文する|^確定(?:する|$)|^購入(?:する|を確定|$)|^今すぐ(?:購入|注文|支払)|^支払う|^お?支払い(?:を確定|$)/i;
 
-const CHECKOUT_PAYMENT_EXECUTION_OPERATIONS = new Set([
-  "authorization",
+const CHECKOUT_PAYMENT_EXECUTION_PATHS = new Set([
   "authorize",
-  "authorizepayment",
   "capture",
-  "capturepayment",
   "charge",
   "charges",
   "completecheckout",
   "completeorder",
+  "confirmpayment",
+  "orders",
+  "placeorder",
+  "purchase",
+]);
+const CHECKOUT_PAYMENT_EXECUTION_MUTATIONS = new Set([
+  "authorizepayment",
+  "capturepayment",
+  "completecheckout",
+  "completeorder",
   "completepayment",
-  "completepurchase",
-  "confirmorder",
   "confirmpayment",
   "createcharge",
   "placeorder",
-  "purchase",
   "submitpayment",
 ]);
-const CHECKOUT_PAYMENT_EXECUTION_COLLECTIONS = new Set(["charges", "orders", "purchases"]);
 const CHECKOUT_PAYMENT_EXCLUDED_PATH_SEGMENTS = new Set([
   "analytics",
   "collect",
@@ -923,39 +926,7 @@ function normalizedPaymentOperation(value: string): string {
 }
 
 function isCheckoutPaymentExecutionOperation(value: string): boolean {
-  const operation = normalizedPaymentOperation(value);
-  if (CHECKOUT_PAYMENT_EXECUTION_OPERATIONS.has(operation)) return true;
-  if (
-    [
-      "analytics",
-      "autosave",
-      "click",
-      "event",
-      "impression",
-      "metric",
-      "telemetry",
-      "track",
-      "view",
-    ].some((marker) => operation.includes(marker))
-  ) {
-    return false;
-  }
-  const includesAny = (values: readonly string[]): boolean =>
-    values.some((candidate) => operation.includes(candidate));
-  const hasChargeSubject = operation.includes("charge");
-  const hasOrderSubject = includesAny(["checkout", "order", "purchase"]);
-  if (
-    (hasChargeSubject &&
-      includesAny(["authoriz", "captur", "complet", "confirm", "creat", "execut", "submit"])) ||
-    (hasOrderSubject && includesAny(["complet", "confirm", "creat", "execut", "plac", "submit"]))
-  ) {
-    return true;
-  }
-  if (!operation.includes("payment")) return false;
-  if (includesAny(["initializ", "paymentmethod", "prepar", "session", "setup", "tokeniz"])) {
-    return false;
-  }
-  return includesAny(["authoriz", "captur", "complet", "confirm", "execut", "submit"]);
+  return CHECKOUT_PAYMENT_EXECUTION_MUTATIONS.has(normalizedPaymentOperation(value));
 }
 
 function collectGraphqlMutationCandidates(query: string, candidates: string[]): void {
@@ -967,35 +938,21 @@ function collectGraphqlMutationCandidates(query: string, candidates: string[]): 
   }
 }
 
-function collectPaymentExecutionPayloadCandidates(value: unknown, candidates: string[]): void {
-  if (Array.isArray(value)) {
-    for (const entry of value) collectPaymentExecutionPayloadCandidates(entry, candidates);
-    return;
-  }
-  if (value === null || typeof value !== "object") return;
-  const record = value as Record<string, unknown>;
-  for (const key of ["operationName", "action", "command", "operation", "mutation"]) {
-    const candidate = record[key];
-    if (typeof candidate === "string") candidates.push(candidate);
-  }
-  if (typeof record.query === "string") {
-    collectGraphqlMutationCandidates(record.query, candidates);
-  }
-}
-
 function hasCheckoutPaymentExecutionPayload(request: Request): boolean {
   const payload = request.postData();
   if (payload === null) return false;
   const candidates: string[] = [];
   try {
     const parsed = JSON.parse(payload) as unknown;
-    collectPaymentExecutionPayloadCandidates(parsed, candidates);
+    if (parsed === null || Array.isArray(parsed) || typeof parsed !== "object") return false;
+    const record = parsed as Record<string, unknown>;
+    if (typeof record.operationName === "string") candidates.push(record.operationName);
+    if (typeof record.query === "string")
+      collectGraphqlMutationCandidates(record.query, candidates);
   } catch {
     const form = new URLSearchParams(payload);
-    for (const key of ["operationName", "action", "command", "operation", "mutation"]) {
-      const value = form.get(key);
-      if (value !== null) candidates.push(value);
-    }
+    const operationName = form.get("operationName");
+    if (operationName !== null) candidates.push(operationName);
     const query = form.get("query");
     collectGraphqlMutationCandidates(query ?? payload, candidates);
   }
@@ -1016,15 +973,8 @@ function isCheckoutPaymentRequest(request: Request): boolean {
     }
     const lastSegment = segments.at(-1);
     if (
-      method === "POST" &&
       lastSegment !== undefined &&
-      CHECKOUT_PAYMENT_EXECUTION_COLLECTIONS.has(normalizedPaymentOperation(lastSegment))
-    ) {
-      return true;
-    }
-    if (
-      lastSegment !== undefined &&
-      CHECKOUT_PAYMENT_EXECUTION_OPERATIONS.has(normalizedPaymentOperation(lastSegment))
+      CHECKOUT_PAYMENT_EXECUTION_PATHS.has(normalizedPaymentOperation(lastSegment))
     ) {
       return true;
     }
@@ -11732,14 +11682,13 @@ export class BrowserController {
             const stateWindow = window as Window & {
               __trustySquirePaymentSubmitDispatch?: {
                 token: string;
-                submitObserved: boolean;
                 validationBlocked: boolean;
               };
             };
             const tracked = element as Element & {
               __tsPaymentSubmitDispatchListeners?: Array<{
                 capture: boolean;
-                event: "invalid" | "submit";
+                event: "invalid";
                 listener: EventListener;
                 target: Element;
               }>;
@@ -11756,13 +11705,7 @@ export class BrowserController {
             }
             stateWindow.__trustySquirePaymentSubmitDispatch = {
               token,
-              submitObserved: false,
               validationBlocked: false,
-            };
-            const listener: EventListener = () => {
-              const state = stateWindow.__trustySquirePaymentSubmitDispatch;
-              if (state?.token !== token || state.submitObserved) return;
-              state.submitObserved = true;
             };
             const form =
               element instanceof HTMLButtonElement || element instanceof HTMLInputElement
@@ -11771,15 +11714,10 @@ export class BrowserController {
             const submitTargets = form !== null ? [form] : Array.from(document.forms);
             const registrations: Array<{
               capture: boolean;
-              event: "invalid" | "submit";
+              event: "invalid";
               listener: EventListener;
               target: Element;
-            }> = submitTargets.map((target) => ({
-              capture: false,
-              event: "submit" as const,
-              listener,
-              target,
-            }));
+            }> = [];
             const invalidListener: EventListener = () => {
               const state = stateWindow.__trustySquirePaymentSubmitDispatch;
               if (state?.token === token) state.validationBlocked = true;
@@ -11869,7 +11807,6 @@ export class BrowserController {
               const stateWindow = window as Window & {
                 __trustySquirePaymentSubmitDispatch?: {
                   token: string;
-                  submitObserved: boolean;
                   validationBlocked: boolean;
                 };
               };
@@ -11889,7 +11826,7 @@ export class BrowserController {
                 const tracked = element as Element & {
                   __tsPaymentSubmitDispatchListeners?: Array<{
                     capture: boolean;
-                    event: "invalid" | "submit";
+                    event: "invalid";
                     listener: EventListener;
                     target: Element;
                   }>;
@@ -11915,7 +11852,6 @@ export class BrowserController {
               const stateWindow = window as Window & {
                 __trustySquirePaymentSubmitDispatch?: {
                   token: string;
-                  submitObserved: boolean;
                   validationBlocked: boolean;
                 };
               };

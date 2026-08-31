@@ -38,6 +38,7 @@ import type {
   PendingApprovalWait,
   PendingCardFill,
   PendingThreeDsWait,
+  TerminalPaymentApprovalStatus,
 } from "./pay-operator.js";
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import {
@@ -649,7 +650,7 @@ export interface Session {
     | {
         status: "terminal_approval";
         state: PendingApprovalWait;
-        terminalStatus: "denied" | "expired";
+        terminalStatus: TerminalPaymentApprovalStatus;
       }
     | { status: "pending"; pending: PendingCardFill }
     | { status: "confirming"; pending: PendingCardFill; submitStarted: boolean }
@@ -4108,7 +4109,7 @@ export function getActivePendingApproval(selectedSession?: Session): PendingAppr
 
 export function getTerminalPaymentApproval(
   selectedSession?: Session,
-): { state: PendingApprovalWait; terminalStatus: "denied" | "expired" } | null {
+): { state: PendingApprovalWait; terminalStatus: TerminalPaymentApprovalStatus } | null {
   const activePayment = (selectedSession ?? activeProvisionSession()).activePayment;
   return activePayment?.status === "terminal_approval"
     ? { state: activePayment.state, terminalStatus: activePayment.terminalStatus }
@@ -4131,7 +4132,7 @@ export function completeActivePendingApprovalWithTerminalStatus(
 export function completeActivePaymentLeaseWithTerminalApproval(
   lease: ActivePaymentLease,
   state: PendingApprovalWait,
-  terminalStatus: "denied" | "expired",
+  terminalStatus: TerminalPaymentApprovalStatus,
   selectedSession?: Session,
 ): void {
   const session = selectedSession ?? activeProvisionSession();
@@ -4232,7 +4233,7 @@ export type ActivePaymentClaim =
   | {
       kind: "terminal";
       state: PendingApprovalWait;
-      terminalStatus: "denied" | "expired";
+      terminalStatus: TerminalPaymentApprovalStatus;
     }
   | { kind: "missing_confirm" };
 

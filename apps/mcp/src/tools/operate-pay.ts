@@ -33,6 +33,7 @@ import {
 } from "../bot/pay-operator.js";
 import type { ThreeDsResolution } from "../bot/browser.js";
 import type { ApiClient } from "../api-client.js";
+import { isPaymentApprovalTransportTimeout } from "../api-client.js";
 import { assertApi, type Tool } from "./index.js";
 
 // Long enough for a ready human to approve without making the MCP request as
@@ -139,42 +140,18 @@ export const listPaymentCardsTool: Tool = {
 export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
   name: "operate_pay",
   description:
-    "Pay the checkout in the addressed operate_start browser session. session_id is required " +
-    "when multiple operator sessions are active (and optional only for a sole local session). " +
-    'phase="single" (the default, also implied by omitting phase) is an ordinary one-step checkout. ' +
-    "Reads the live merchant and checkout total independently of informational checkout_state. " +
-    "When the live total cannot be machine-read, caller-supplied amount_cents and currency become " +
-    "the authoritative approval amount and take precedence over a prior cart observation. " +
-    "creates and immediately surfaces a phone approval link, then waits server-side for up to " +
-    "one minute for approval, denial, or expiry before returning. Approval proceeds directly " +
-    "to charge in this same call. If that bounded wait ends first, calling operate_pay once more " +
-    "with the same arguments resumes the same approval and waits again; never poll approval in " +
-    "an agent-side loop. " +
-    "verifies the passkey-signed purchase mandate, opens the card only in this process, " +
-    "fills common checkout fields, submits, and audits only the last four digits. Never " +
-    "solves 3-D Secure; waits for user completion, then returns a needs_user handoff if unresolved " +
-    "— including a decoupled/out-of-band app-push challenge that had not resolved yet, in which " +
-    "case call operate_payment_status (not operate_pay again) to keep checking the same already-" +
-    "submitted charge. If the issuer/app challenge shows issuer, network, or last-four evidence " +
-    "for a different card, returns a structured payment_instrument_mismatch warning without " +
-    "altering or cancelling the challenge; the cardholder retains the decision. " +
-    "With no card_ref/card_label and no card on file, the approval link becomes a first-time " +
-    "add-card ceremony and the card is bound server-side before the mandate is signed. " +
-    "On approval resume, an unreadable live checkout reuses the original mandate-bound checkout; " +
-    "a successfully-read checkout with a different amount, currency, merchant, or origin returns " +
-    "payment_amount_mismatch without filling the card. " +
-    "For a SPLIT checkout (a card-entry step with no visible total, e.g. Rakuten): call with " +
-    'phase="fill_card" on that step — the approval amount is sourced from the most recent real ' +
-    "total this session observed (e.g. the cart page) only when the card-entry page itself shows " +
-    "none and amount_cents plus currency were not supplied, and releases the card into recognized " +
-    "payment-provider fields without charging. Then drive the checkout to the order-confirmation " +
-    "step, VERIFY the live final total there matches the returned approved amount_cents and " +
-    "currency, and place the order yourself via operate_act, handling any 3-D Secure challenge " +
-    "directly — Trusty Squire never re-reads the total or clicks the pay/place-order control. Call " +
-    'phase="confirm" any time after the fill to close out the approval; it is not a prerequisite ' +
-    "to placing the order. Exactly one human approval per purchase. If the payment gets stuck or " +
-    "the card is declined, recover with operate_finish and start a fresh session — operate_pay " +
-    "does not support refilling a different card mid-session.",
+    "Pay the live checkout in an operate_start session (session_id is required when more than one " +
+    "session exists). The default single phase reads the merchant and total, surfaces one phone " +
+    "approval, and waits server-side for up to one minute; re-calling after a pending result resumes " +
+    "that same approval. It verifies the signed mandate, opens the card only in this process, " +
+    "rechecks approval immediately before the charge click, and reports submitted, 3-D Secure, or " +
+    "unknown outcomes truthfully. Use operate_payment_status for an unresolved submitted charge. " +
+    "Without a stored card, the approval link performs first-time card binding. A resumed approval " +
+    "keeps its original terms and fails closed if a readable live checkout differs. For split " +
+    'checkouts, phase="fill_card" fills recognized provider fields without charging; verify the ' +
+    'final total and place the order with operate_act, then phase="confirm" closes the approval. ' +
+    "Exactly one human approval is valid per purchase attempt; finish the session before retrying " +
+    "a stuck, denied, expired, or ambiguous attempt.",
   inputSchema,
   jsonInputSchema: {
     type: "object",
@@ -235,7 +212,9 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
           status:
             paymentClaim.terminalStatus === "denied"
               ? "payment_approval_denied"
-              : "payment_approval_timeout",
+              : paymentClaim.terminalStatus === "expired"
+                ? "payment_approval_timeout"
+                : "payment_confirmation_failed",
           approval_id: state.approval_id,
           approval_url: state.approval_url,
           merchant: state.checkout.merchant,
@@ -536,8 +515,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
 // [P0] Used by operate_payment_status: maps the LIVE server record
 // (never the locally-cached approval terms) to a status the host can act on.
 // Never opens the sealed card or calls confirm — read-only, no side effects.
-// `serverWaitMs`, when given, races the server call with a bounded response
-// grace after the server-side observation window.
+// `serverWaitMs`, when given, uses one server wait plus one transport grace.
 async function readApprovalStatus(
   api: ApiClient,
   state: PendingApprovalWait,
@@ -556,24 +534,11 @@ async function readApprovalStatus(
             : serverWaitMs + PAYMENT_APPROVAL_RESPONSE_RESERVE_MS,
         )
         .catch((error: unknown) => {
-          if (
-            error instanceof Error &&
-            (error.name === "AbortError" || error.name === "TimeoutError")
-          ) {
-            return null;
-          }
+          if (isPaymentApprovalTransportTimeout(error)) return null;
           throw error;
         })
     : api.getPaymentApproval(state.approval_id, "peek");
-  const approval =
-    serverWaitMs === undefined
-      ? await fetchApproval
-      : await Promise.race([
-          fetchApproval,
-          new Promise<null>((resolve) =>
-            setTimeout(() => resolve(null), serverWaitMs + PAYMENT_APPROVAL_RESPONSE_RESERVE_MS),
-          ),
-        ]);
+  const approval = await fetchApproval;
   if (approval === null) {
     return {
       status: "pending",
@@ -785,10 +750,7 @@ async function threeDsStatusResult(
   };
 }
 
-// Backs operate_payment_status: an immediate peek (waitSeconds <= 0) never
-// blocks, a positive waitSeconds bound-waits (clamped to [1s, 15s] — the
-// server's wait-peek window is a fixed ~15s regardless of what's requested,
-// and threeDsStatusResult clamps to the same shape for its own live check).
+// Backs operate_payment_status with an immediate peek or one server wait.
 async function paymentStatusResult(
   api: ApiClient,
   session: Session,
@@ -803,21 +765,13 @@ async function paymentStatusResult(
       }
       return paymentResult(session, result);
     }
-    const callDeadline = Date.now() + Math.min(Math.max(waitSeconds * 1000, 1_000), 60_000);
-    let result: Record<string, unknown>;
-    for (;;) {
-      const remainingMs = Math.max(callDeadline - Date.now(), 0);
-      result = await readApprovalStatus(
-        api,
-        state,
-        session.id,
-        true,
-        Math.min(remainingMs, 15_000),
-      );
-      const terminalCandidate = result.ready_to_charge === true;
-      const terminalStatus = result.status !== "pending";
-      if (terminalCandidate || terminalStatus || Date.now() >= callDeadline) break;
-    }
+    const result = await readApprovalStatus(
+      api,
+      state,
+      session.id,
+      true,
+      Math.min(Math.max(waitSeconds * 1000, 1_000), 15_000),
+    );
     if (result.status === "denied" || result.status === "expired") {
       completeActivePendingApprovalWithTerminalStatus(state, result.status, session);
     }
@@ -858,24 +812,11 @@ const paymentStatusInputSchema = z.object({
 export const operatePaymentStatusTool: Tool<z.infer<typeof paymentStatusInputSchema>> = {
   name: "operate_payment_status",
   description:
-    "Report the status of the addressed session's payment approval currently awaiting " +
-    "the human's phone tap, if any — started by an operate_pay call whose bounded server wait " +
-    "returned approval_pending. Prefer re-calling operate_pay so approval proceeds directly to " +
-    "charge; this status tool is a read-only alternative that also waits server-side. " +
-    "Also covers an already-submitted charge whose 3-D Secure challenge (including a decoupled/" +
-    "out-of-band app-push) had not resolved when a prior operate_pay call's own wait ended (that " +
-    "call returns payment_3ds_required or payment_outcome_unknown with a next hint pointing " +
-    "here) — call this again to keep checking rather than re-calling " +
-    "operate_pay, which does not resume a post-submit outcome wait; reports payment_3ds_pending " +
-    "only after actual 3DS evidence and otherwise preserves payment_outcome_unknown. Never " +
-    "re-releases the card or creates a new approval. Pass `wait_seconds` " +
-    "(0-60, default 0) to bound-wait for a change instead of an instant peek; never blocks longer " +
-    "than that. Never verifies a mandate or opens a card. Only candidate_kind=approval with " +
-    "ready_to_charge=true is a final authorization; a review candidate still requires final " +
-    "approval. Preserves any passively observed payment_instrument_mismatch warning from issuer/" +
-    "app evidence without altering the challenge. When a pending 3-D Secure outcome resolves or " +
-    "reaches its deadline, this records " +
-    "a terminal payment audit and clears that session's pending tracking.",
+    "Read the addressed session's pending approval or already-submitted outcome without opening a " +
+    "card, confirming a mandate, or creating another approval. Prefer re-calling operate_pay for a " +
+    "pending approval; this tool performs only one server wait. Use it repeatedly only for a " +
+    "submitted 3-D Secure or unknown outcome. It reports 3DS only from observed evidence, preserves " +
+    "instrument-mismatch warnings, and retains custody until a terminal audit or reconciliation.",
   inputSchema: paymentStatusInputSchema,
   jsonInputSchema: {
     type: "object",
@@ -890,7 +831,7 @@ export const operatePaymentStatusTool: Tool<z.infer<typeof paymentStatusInputSch
         minimum: 0,
         maximum: 60,
         description:
-          "Upper bound on this call's server-side wait. 0 (default) is an instant peek; 1-60 waits for approval, expiry, or the bound.",
+          "Upper bound in seconds. Approval status uses one wait of at most 15 seconds; 0 is an instant peek.",
       },
     },
   },

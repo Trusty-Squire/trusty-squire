@@ -25,6 +25,10 @@ export class ApiCallError extends Error {
   }
 }
 
+export function isPaymentApprovalTransportTimeout(error: unknown): boolean {
+  return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
+}
+
 export interface ApiClientConfig {
   apiBaseUrl: string;
   registryBaseUrl: string;

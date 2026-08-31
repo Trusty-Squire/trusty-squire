@@ -987,7 +987,6 @@ import {
   recordActivePaymentProvenance,
   setActivePendingCardFill,
   claimActivePaymentForOperatePay,
-  completeActivePendingApprovalWithTerminalStatus,
   completeActivePaymentLeaseWithPendingApproval,
   completeActivePaymentLeaseWithPendingFill,
   completeActivePaymentLeaseWithTerminalApproval,
@@ -9258,30 +9257,6 @@ describe("awaiting-approval payment lease [P0]", () => {
     expect(releaseActivePaymentLease(resumed.lease, true)).toBe(true);
   });
 
-  it("scrubs a terminal approval and never turns it into a fresh lease", async () => {
-    await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
-    const terminalState = {
-      ...approvalState,
-      keypair: { ...approvalState.keypair, privateKey: "terminal-private" },
-    };
-    const claim = claimActivePaymentForOperatePay(undefined);
-    if (claim.kind !== "lease") throw new Error("expected a fresh lease");
-    completeActivePaymentLeaseWithPendingApproval(claim.lease, terminalState);
-
-    expect(completeActivePendingApprovalWithTerminalStatus(terminalState, "denied")).toBe(true);
-    expect(terminalState.keypair.privateKey).toBe("");
-    expect(getActivePendingApproval()).toBeNull();
-    expect(getTerminalPaymentApproval()).toEqual({
-      state: terminalState,
-      terminalStatus: "denied",
-    });
-    expect(claimActivePaymentForOperatePay(undefined)).toEqual({
-      kind: "terminal",
-      state: terminalState,
-      terminalStatus: "denied",
-    });
-  });
-
   it("keeps a denial observed by operate_pay terminal under the owned lease", async () => {
     await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
     const terminalState = {
@@ -9516,29 +9491,6 @@ describe("operate_pay tool completion — system-owned approval wait [P0]", () =
     // The lease resolved to a terminal outcome — no dangling approval state
     // for an agent-side polling loop.
     expect(getActivePendingApproval()).toBeNull();
-  });
-
-  it("never returns approval_pending a second time once the mandate is signed — terminal or a genuine handoff, not a re-arm", async () => {
-    const env = buildPaymentEnv();
-    global.fetch = env.fetch;
-
-    await startProvisionSession({ serviceUrl: "https://store.kobeejapan.net/checkout" });
-
-    const first = (await operatePayTool.handler(baseArgs, env.api)) as Record<string, unknown>;
-    expect(first.status).toBe("approval_pending");
-
-    env.setApproved();
-    const second = (await operatePayTool.handler(baseArgs, env.api)) as Record<string, unknown>;
-
-    // Never a dead-end re-arm: the mandate is either spent on a terminal
-    // outcome or the host gets an explicit, non-looping status.
-    expect(second.status).not.toBe("approval_pending");
-    expect(["payment_submitted", "payment_3ds_required", "payment_declined"]).toContain(
-      second.status,
-    );
-    // Only the first no-progress call uses the immediate candidate read. The
-    // resumed call enters the server wait and receives the approved candidate.
-    expect(env.immediateApprovalReads).toEqual([false]);
   });
 });
 

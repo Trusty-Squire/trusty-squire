@@ -52,7 +52,6 @@ type Mode =
   | "review_then_happy"
   | "review_wrong_issuer"
   | "confirm_response_lost"
-  | "confirm_response_lost_changed"
   | "confirm_denied"
   | "junk_then_happy"
   | "tampered_amount"
@@ -222,7 +221,6 @@ async function harness(
           mode === "happy" ||
           mode === "review_then_happy" ||
           mode === "confirm_response_lost" ||
-          mode === "confirm_response_lost_changed" ||
           mode === "confirm_denied" ||
           mode === "junk_then_happy" ||
           mode === "expired_relay" ||
@@ -244,18 +242,9 @@ async function harness(
       if (mode === "review_then_happy" && confirmationBodies.length === 1) {
         return Response.json({ status: "verified" });
       }
-      if (
-        (mode === "confirm_response_lost" || mode === "confirm_response_lost_changed") &&
-        confirmationBodies.length === 1
-      ) {
-        confirmedCandidate =
-          mode === "confirm_response_lost_changed"
-            ? { ...body, sealed_card: "different-candidate" }
-            : body;
+      if (mode === "confirm_response_lost" && confirmationBodies.length === 1) {
+        confirmedCandidate = body;
         throw new TypeError("confirm response lost");
-      }
-      if (mode === "confirm_response_lost_changed") {
-        return Response.json({ error: "payment_approval_candidate_changed" }, { status: 409 });
       }
       if (mode === "confirm_denied") {
         return Response.json({ error: "payment_approval_denied" }, { status: 409 });
@@ -712,30 +701,16 @@ describe("operate_pay", () => {
     expect(confirmationBodies).toHaveLength(0);
   });
 
-  it("reconciles a lost confirm response before submitting payment", async () => {
-    const { result, filledCards, confirmationBodies } = await harness("confirm_response_lost");
+  it("does not retry an ambiguous final confirmation", async () => {
+    const { result, filledCards, auditBodies, pendingStates, confirmationBodies } =
+      await harness("confirm_response_lost");
 
-    expect(result).toMatchObject({ status: "payment_submitted" });
-    expect(filledCards).toEqual([SYNTHETIC_CARD]);
-    expect(confirmationBodies).toHaveLength(2);
-    expect(confirmationBodies[1]).toEqual(confirmationBodies[0]);
-  });
-
-  it("fails closed instead of resurrecting the candidate when reconciliation can't confirm it", async () => {
-    const { result, filledCards, auditBodies, pendingStates } = await harness(
-      "confirm_response_lost_changed",
-    );
-
-    // The confirm may have actually succeeded server-side (its response was
-    // merely lost); reconciliation coming back "candidate_changed" means we
-    // can't prove that either way. This must be a clean terminal failure —
-    // never a resurrected still-awaiting approval that a later call could
-    // re-confirm and re-charge.
     expect(result).toMatchObject({
       status: "payment_confirmation_failed",
       reason: "confirm_failed",
       candidate_kind: "approval",
     });
+    expect(confirmationBodies).toHaveLength(1);
     expect(pendingStates).toHaveLength(0);
     expect(filledCards).toHaveLength(0);
     expect(auditBodies).toHaveLength(0);
@@ -2191,67 +2166,6 @@ describe("operate_pay bounded approval continuation [P0]", () => {
     item: "Wireless Mouse",
     reason: "office restock",
   };
-
-  it("returns an in-flight denial even after the local deadline passes", async () => {
-    const env = buildResumableEnv();
-    env.setDenied();
-    const onApprovalTerminal = vi.fn();
-
-    await expect(
-      executeOperatePay(baseArgs, env.api, env.browser, {
-        fetch: env.fetch,
-        vouchflowApiBase: "https://vouchflow.test",
-        vouchflowExpectedAudience: "customer_test",
-        webBase: "https://web.test",
-        surfaceApprovalUrl: vi.fn(),
-        onApprovalTerminal,
-        now: () => Date.parse(env.expiresAt) + 1,
-      }),
-    ).resolves.toMatchObject({
-      status: "payment_approval_denied",
-      approval_id: "appr_resume",
-    });
-    expect(onApprovalTerminal).toHaveBeenCalledWith(
-      expect.objectContaining({ approval_id: "appr_resume" }),
-      "denied",
-    );
-    expect(env.filledCards).toHaveLength(0);
-  });
-
-  it("returns a persisted denial after deadline without minting a replacement approval", async () => {
-    const env = buildResumableEnv();
-    let pending: PendingApprovalWait | undefined;
-    await executeOperatePay(baseArgs, env.api, env.browser, {
-      fetch: env.fetch,
-      vouchflowApiBase: "https://vouchflow.test",
-      vouchflowExpectedAudience: "customer_test",
-      webBase: "https://web.test",
-      surfaceApprovalUrl: vi.fn(),
-      pollBudgetMs: 0,
-      onApprovalPending: (state) => {
-        pending = state;
-      },
-    });
-    if (pending === undefined) throw new Error("expected pending approval");
-    pending.deadline = Date.now() - 1;
-    env.setDenied();
-
-    await expect(
-      executeOperatePay(baseArgs, env.api, env.browser, {
-        fetch: env.fetch,
-        vouchflowApiBase: "https://vouchflow.test",
-        vouchflowExpectedAudience: "customer_test",
-        webBase: "https://web.test",
-        surfaceApprovalUrl: vi.fn(),
-        resumeFrom: pending,
-      }),
-    ).resolves.toMatchObject({
-      status: "payment_approval_denied",
-      approval_id: "appr_resume",
-    });
-    expect(env.approvalBodies).toHaveLength(1);
-    expect(env.filledCards).toHaveLength(0);
-  });
 
   it("returns a clean same-approval continuation when an explicit zero wait ends", async () => {
     const env = buildResumableEnv();

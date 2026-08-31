@@ -7,7 +7,12 @@ import {
 import canonicalize from "canonicalize";
 import { createLocalJWKSet, decodeJwt, jwtVerify, type JSONWebKeySet, type JWTPayload } from "jose";
 import { z } from "zod";
-import { ApiCallError, type ApiClient, type PaymentApproval } from "../api-client.js";
+import {
+  ApiCallError,
+  isPaymentApprovalTransportTimeout,
+  type ApiClient,
+  type PaymentApproval,
+} from "../api-client.js";
 import type {
   CheckoutCard,
   CheckoutSubmitResult,
@@ -45,6 +50,8 @@ export interface OperatePayArgs {
   // Absent = the single-page fill+charge.
   phase?: "fill_card";
 }
+
+export type TerminalPaymentApprovalStatus = "denied" | "expired" | "payment_confirmation_failed";
 
 export interface PaymentBrowser {
   isPayPalHostedCheckout(): Promise<boolean>;
@@ -168,10 +175,12 @@ interface PayDependencies {
   // [P0] Fired when a call ends still-pending (poll budget exhausted, human
   // hasn't responded yet) so the session layer can persist resumable state.
   onApprovalPending: (state: PendingApprovalWait) => void;
-  // Fired when a denial or expiry becomes terminal while this call owns the
-  // payment lease. The session layer keeps that attempt terminal instead of
-  // releasing custody into an automatic replacement-approval path.
-  onApprovalTerminal: (state: PendingApprovalWait, terminalStatus: "denied" | "expired") => void;
+  // Terminal approval outcomes retain session custody so a later call cannot
+  // automatically mint another approval for the same attempt.
+  onApprovalTerminal: (
+    state: PendingApprovalWait,
+    terminalStatus: TerminalPaymentApprovalStatus,
+  ) => void;
   onThreeDsHandoffArmed: (state: PendingThreeDsWait) => void;
   coordinateThreeDsAudit: (state: PendingThreeDsWait, audit: () => Promise<void>) => Promise<void>;
   // Fired when the submit-time outcome wait exhausts its budget with no
@@ -546,10 +555,6 @@ function isPaymentApprovalDeniedError(error: unknown): boolean {
 // the rest of this file's "wait, but never forever" posture.
 const THREE_DS_RESUME_WINDOW_MS = 20 * 60 * 1000;
 const PAYMENT_APPROVAL_RESPONSE_RESERVE_MS = 500;
-
-function isPaymentApprovalTransportTimeout(error: unknown): boolean {
-  return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
-}
 
 // The cardholder approves 3-D Secure via an app-push in their bank app while
 // the browser's checkout JavaScript owns the native challenge handshake. Fires
@@ -934,15 +939,11 @@ export async function executeOperatePay(
     });
     await deps.surfaceApprovalUrl(approvalUrl);
 
-    // [P0] This call's own wait budget, bounded by the server approval expiry.
-    // Undefined pollBudgetMs (direct executeOperatePay callers) = no additional
-    // bound, i.e. the legacy full-deadline blocking behavior.
+    // This call's wait is bounded by both its client budget and server expiry.
     const callDeadline =
       deps.pollBudgetMs === undefined
         ? deadline
         : Math.min(deadline, deps.now() + deps.pollBudgetMs);
-    // True once this call's (not the overall) budget is exhausted with no
-    // resolution — distinguishes "still pending, ask again" from "expired".
     let budgetExhausted = false;
     const shouldKeepPolling = (): boolean => {
       const now = deps.now();
@@ -954,10 +955,8 @@ export async function executeOperatePay(
       return true;
     };
 
-    // In the JIT branch, the approval starts card-less; the card is bound
-    // server-side mid-ceremony. Track the latest binding so a timeout/expiry
-    // can distinguish "no card was ever added" (card_required) from "card was
-    // stored but never approved" (payment_approval_timeout, card persists).
+    // A JIT approval that expires before binding still needs a card; a bound
+    // card remains stored even though the approval itself is terminal.
     const timeoutResult = (): Record<string, unknown> => {
       if (jit && !hasBoundCard(boundCardRef)) {
         return cardRequiredResult(
@@ -966,8 +965,6 @@ export async function executeOperatePay(
           "the add-card link expired before a card was added",
         );
       }
-      // JIT + a bound card = the user added a card but never approved. The card
-      // stays in the vault even though this approval attempt is terminal.
       return approvalExpiredResult(approvalUrl, checkout, jit, boundCardRef);
     };
     const approvalExpired = (): boolean => deps.now() >= deadline;
@@ -987,16 +984,7 @@ export async function executeOperatePay(
 
     let approved: { jws: string; sealed_card: string; card_ref: string | null } | undefined;
     let claims: JWTPayload | undefined;
-    // Always runs at least once — a fresh call must make one live check
-    // before ever reporting pending, and a resumed call with a zero poll
-    // budget must too. Two things gate every re-entry to the top: (1) right
-    // before each sleep, shouldKeepPolling() skips the sleep entirely when
-    // the budget is already exhausted, so a not-yet-resolved call never
-    // blocks on a real wait before returning; (2) the iteration>0 check
-    // here re-validates AFTER that sleep (real time — or a mocked clock —
-    // may have advanced past the deadline during it) so the loop never
-    // spends one more live poll call past the budget it just decided to
-    // respect.
+    // Always make one live read; later iterations recheck the budget after sleep.
     let iteration = 0;
     let immediateReviewFollowup = false;
     while (true) {
@@ -1240,42 +1228,30 @@ export async function executeOperatePay(
                 const confirmation = await api.confirmPaymentApproval(approvalId, candidate);
                 if (confirmation.status !== "approved") throw new Error("confirm_status");
               } catch (error) {
+                candidateCardBytes.fill(0);
                 if (isPaymentApprovalDeniedError(error)) {
-                  candidateCardBytes.fill(0);
                   return terminalApprovalResult("denied");
                 }
-                try {
-                  const reconciliation = await api.confirmPaymentApproval(approvalId, candidate);
-                  if (reconciliation.status !== "approved") throw error;
-                } catch (reconciliationError) {
-                  candidateCardBytes.fill(0);
-                  if (isPaymentApprovalDeniedError(reconciliationError)) {
-                    return terminalApprovalResult("denied");
-                  }
-                  // The initial confirm may have actually gone through server-side (its
-                  // response was merely lost) even though reconciliation couldn't prove
-                  // it. Throwing here would leave resumableState live, and the outer
-                  // catch would resurrect this candidate as still-awaiting — letting a
-                  // later call re-confirm and re-charge a purchase that may already be
-                  // spent. Fail closed with a terminal result instead, mirroring the
-                  // review-candidate branch above.
-                  const failureReason =
-                    error instanceof Error && /404|409/.test(error.message)
-                      ? "confirm_status"
-                      : "confirm_failed";
-                  logPaymentCandidateLifecycle(
-                    approvalId,
-                    "approval",
-                    "confirmation_failed",
-                    failureReason,
-                  );
-                  return {
-                    status: "payment_confirmation_failed",
-                    reason: failureReason,
-                    candidate_kind: "approval",
-                    approval_url: approvalUrl,
-                  };
-                }
+                const failureReason =
+                  error instanceof Error && /404|409/.test(error.message)
+                    ? "confirm_status"
+                    : "confirm_failed";
+                const state = resumableState();
+                deps.onApprovalTerminal(state, "payment_confirmation_failed");
+                resumableState = undefined;
+                keypairHandedOff = false;
+                logPaymentCandidateLifecycle(
+                  approvalId,
+                  "approval",
+                  "confirmation_failed",
+                  failureReason,
+                );
+                return {
+                  status: "payment_confirmation_failed",
+                  reason: failureReason,
+                  candidate_kind: "approval",
+                  approval_url: approvalUrl,
+                };
               }
             }
             if (approvalExpired()) {
