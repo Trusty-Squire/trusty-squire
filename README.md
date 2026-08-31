@@ -311,8 +311,10 @@ URLs, DOM values, and snapshot files are not part of that format. Use
 `operate_observe_query` with task words or `overflow.next_cursor` to retrieve a
 named or paged control while matching stays inside the live browser. A browser
 action invalidates the current handles; on `reobserve_required`, observe again
-and select a new handle. `detail:"full"` remains inside the V2 seal. Maintainers
-can select the legacy V1 `el_table`/snapshot contract with
+and select a new handle. Exact cursorless `Google` and `GitHub` queries briefly
+refresh controls that hydrate or gain labels after the initial observation, but
+still return only a current sealed handle. `detail:"full"` remains inside the V2
+seal. Maintainers can select the legacy V1 `el_table`/snapshot contract with
 `TRUSTY_SQUIRE_OBSERVE_V2=off`, or exercise V2 without emitting it with
 `shadow`; the detailed wire and migration contract lives in
 [DESIGN-observe-compact.md](docs/DESIGN-observe-compact.md).
@@ -368,7 +370,11 @@ can select the legacy V1 `el_table`/snapshot contract with
   redirects and closes, then returns the post-login product observation even if
   `detail` is `none`. Every `oauth_login` and legacy `oauth_click` is serialized
   from action start through completion and a short release cooldown; other
-  session work remains parallel. `oauth_click` and `oauth_settle` remain for
+  session work remains parallel. The whole serialized action has a 30-second
+  deadline. If Google does not complete in time, the call returns
+  `google_session` re-login guidance and closes that operator session without
+  replacing the saved identity; start a fresh session after reconnecting.
+  `oauth_click` and `oauth_settle` remain for
   legacy replay compatibility. If an observation races that legacy transition,
   the response reports `oauth.state: "in_progress"` and directs the host to
   observe again.

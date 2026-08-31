@@ -202,9 +202,11 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
-  it("completes Google account choice and consent inside one OAuth operation", async () => {
+  it("selects only the sealed data-identifier account", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();
+    let selectedAccount: string | null = null;
+    let identityAuthUser: string | null = null;
     await context.route("https://product.test/**", async (route) => {
       const callback = route.request().url().endsWith("/callback");
       await route.fulfill({
@@ -215,21 +217,140 @@ describe("BrowserController OAuth popup lifecycle", () => {
       });
     });
     await context.route("https://accounts.google.com/**", async (route) => {
-      const consent = route.request().url().includes("/consent?");
+      const requestUrl = route.request().url();
+      const consent = requestUrl.includes("/consent?");
+      if (consent) selectedAccount = new URL(requestUrl).searchParams.get("account");
       await route.fulfill({
         contentType: "text/html",
         body: consent
           ? "<button onclick=\"location.href='https://product.test/callback'\">Continue</button>"
-          : '<button data-identifier="worker@example.com" onclick="location.href=\'https://accounts.google.com/consent?scope=openid%20email%20profile\'">worker@example.com</button>',
+          : `<button data-identifier="other@example.com" onclick="location.href='https://accounts.google.com/consent?account=other@example.com&amp;scope=openid'">other@example.com</button>
+             <button data-identifier="worker@example.com" onclick="location.href='https://accounts.google.com/consent?account=worker@example.com&amp;scope=openid'">worker@example.com</button>`,
+      });
+    });
+    await context.route("https://myaccount.google.com/**", async (route) => {
+      identityAuthUser = new URL(route.request().url()).searchParams.get("authuser");
+      await route.fulfill({
+        contentType: "text/html",
+        body: `<button aria-label="Google Account: Selected (${identityAuthUser ?? "default@example.com"})"></button>`,
       });
     });
     await product.goto("https://product.test/login");
     const controller = BrowserController.fromHarnessPage(product);
 
     try {
-      await controller.loginWithOAuth("#oauth", 5_000, "google");
+      await controller.loginWithOAuth("#oauth", 5_000, "google", "worker@example.com");
       await expect(product.locator("#state").textContent()).resolves.toBe("Signed in");
+      expect(selectedAccount).toBe("worker@example.com");
+      await expect(controller.detectGoogleAccountEmail("worker@example.com")).resolves.toBe(
+        "worker@example.com",
+      );
+      expect(identityAuthUser).toBe("worker@example.com");
       expect(controller.currentUrl()).toBe("https://product.test/login");
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("selects only the sealed Google account row without data-identifier", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    let selectedAccount: string | null = null;
+    await context.route("https://product.test/**", async (route) => {
+      const callback = route.request().url().endsWith("/callback");
+      await route.fulfill({
+        contentType: "text/html",
+        body: callback
+          ? '<script>window.opener.document.querySelector("#state").textContent="Signed in"; window.close()</script>'
+          : '<main id="state">Signed out</main><button id="oauth" onclick="window.open(\'https://accounts.google.com/v3/signin/accountchooser\')">Continue</button>',
+      });
+    });
+    await context.route("https://accounts.google.com/**", async (route) => {
+      const requestUrl = route.request().url();
+      const consent = requestUrl.includes("/consent?");
+      if (consent) selectedAccount = new URL(requestUrl).searchParams.get("account");
+      await route.fulfill({
+        contentType: "text/html",
+        body: consent
+          ? "<button onclick=\"location.href='https://product.test/callback'\">Continue</button>"
+          : `<button onclick="location.href='https://accounts.google.com/consent?account=other@example.com&amp;scope=openid'">
+               <span>Other User</span><span>other@example.com</span>
+             </button>
+             <button onclick="location.href='https://accounts.google.com/consent?account=worker@example.com&amp;scope=openid'">
+               <span>Example User</span><span>worker@example.com</span>
+             </button>
+             <button>Use another account</button>`,
+      });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+
+    try {
+      await controller.loginWithOAuth("#oauth", 5_000, "google", "worker@example.com");
+      await expect(product.locator("#state").textContent()).resolves.toBe("Signed in");
+      expect(selectedAccount).toBe("worker@example.com");
+      expect(controller.currentUrl()).toBe("https://product.test/login");
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("does not dispatch a DOM fallback click after its consent budget expires", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await product.setContent(`
+      <a id="consent" href="#approved">Continue</a>
+      <script>
+        const consent = document.querySelector("#consent");
+        consent.addEventListener("click", (event) => {
+          event.preventDefault();
+          document.body.dataset.consentClicks = String(
+            Number(document.body.dataset.consentClicks || "0") + 1
+          );
+        });
+        consent.getBoundingClientRect = () => {
+          const end = Date.now() + 30;
+          while (Date.now() < end) {}
+          return { x: 0, y: 0, top: 0, left: 0, right: 100, bottom: 30, width: 100, height: 30 };
+        };
+      </script>
+    `);
+    const controller = BrowserController.fromHarnessPage(product);
+
+    try {
+      await expect(controller.advanceOAuthConsent("google", 5)).resolves.toBe(false);
+      await expect(product.locator("body").getAttribute("data-consent-clicks")).resolves.toBeNull();
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("returns a re-login result when Google never reaches its OAuth completion signal", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/**", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<button id="oauth" onclick="window.open(\'https://accounts.google.com/provider\')">Continue</button>',
+      });
+    });
+    await context.route("https://accounts.google.com/**", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: "<main>Provider did not settle</main>",
+      });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    const startedAt = Date.now();
+
+    try {
+      const rejected = controller.loginWithOAuth("#oauth", 1_000, "google");
+      await expect(rejected).rejects.toMatchObject({
+        code: "google_session",
+        message: expect.stringMatching(/session may have expired.*re-login/i),
+      });
+      expect(Date.now() - startedAt).toBeLessThan(5_000);
     } finally {
       await context.close().catch(() => undefined);
     }

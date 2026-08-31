@@ -10,13 +10,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { constants, publicEncrypt } from "node:crypto";
 import type * as GoogleLoginModule from "../google-login.js";
+import type * as ProfileModule from "../profile.js";
 import type * as SessionState from "../session-state.js";
 
 const h = vi.hoisted(() => ({
   providers: ["google"] as string[] | null,
   oauthStatus: "already_valid" as string,
   oauthLoginCalls: [] as string[],
+  oauthLoginTimeouts: [] as number[],
+  oauthLoginError: null as Error | null,
   oauthConsentProviders: [] as Array<string | undefined>,
+  oauthExpectedGoogleAccountEmails: [] as Array<string | null | undefined>,
   oauthLoginGates: new Map<number, Promise<void>>(),
   oauthResultUrl: "https://app.example.com/dashboard",
   restoredStorageStates: [] as Array<{ browserIndex: number; state: unknown }>,
@@ -64,10 +68,15 @@ const h = vi.hoisted(() => ({
   closeCalls: 0,
   forceCloseCalls: 0,
   closeState: "closed" as "closed" | "force_closed_unproven" | "unknown",
+  closeStates: new Map<number, "closed" | "force_closed_unproven" | "unknown">(),
+  closeGates: new Map<number, Promise<void>>(),
   profileProbeCalls: 0,
   controllerProviderProbeCalls: 0,
   workerEmail: null as string | null,
   liveGoogleEmail: "default-google@example.com" as string | null,
+  identityProbeCalls: 0,
+  identityProbeExpectedGoogleAccountEmails: [] as Array<string | undefined>,
+  googleIdentityByExpectedEmail: new Map<string, string | null>(),
   temporaryHostScopes: [] as Array<{ hosts: string[]; phase: "enter" | "exit" }>,
   hostScopeProviders: [] as Array<{
     allowedHosts: () => readonly string[];
@@ -88,6 +97,7 @@ const h = vi.hoisted(() => ({
   storageStateWriteGate: null as Promise<void> | null,
   storageStateWriteAttempts: 0,
   profileDestroyGate: null as Promise<void> | null,
+  profileOperationProbeGate: null as Promise<void> | null,
   ephemeralSerial: 0,
   createdProfiles: [] as string[],
   destroyedProfiles: [] as string[],
@@ -355,7 +365,15 @@ vi.mock("../browser.js", () => ({
         ?.cookies;
       return cookies?.some((cookie) => cookie.name === "__Secure-1PSID") ? ["google"] : [];
     }
-    async detectGoogleAccountEmail(): Promise<string | null> {
+    async detectGoogleAccountEmail(expectedGoogleAccountEmail?: string): Promise<string | null> {
+      h.identityProbeCalls += 1;
+      h.identityProbeExpectedGoogleAccountEmails.push(expectedGoogleAccountEmail);
+      if (
+        expectedGoogleAccountEmail !== undefined &&
+        h.googleIdentityByExpectedEmail.has(expectedGoogleAccountEmail)
+      ) {
+        return h.googleIdentityByExpectedEmail.get(expectedGoogleAccountEmail) ?? null;
+      }
       return h.liveGoogleEmail;
     }
     async goto(url: string): Promise<void> {
@@ -754,13 +772,17 @@ vi.mock("../browser.js", () => ({
     async startOAuth(): Promise<void> {}
     async loginWithOAuth(
       selector: string,
-      _settleTimeoutMs?: number,
+      settleTimeoutMs?: number,
       provider?: string,
+      expectedGoogleAccountEmail?: string | null,
     ): Promise<void> {
       h.oauthLoginCalls.push(selector);
+      h.oauthLoginTimeouts.push(settleTimeoutMs ?? 0);
       h.oauthConsentProviders.push(provider);
+      h.oauthExpectedGoogleAccountEmails.push(expectedGoogleAccountEmail);
       const gate = h.oauthLoginGates.get(this.index);
       if (gate !== undefined) await gate;
+      if (h.oauthLoginError !== null) throw h.oauthLoginError;
       h.currentUrl = h.oauthResultUrl;
       h.visibleText = "Signed in";
     }
@@ -866,6 +888,8 @@ vi.mock("../browser.js", () => ({
       cancelStart?: boolean;
     }): Promise<"closed" | "force_closed_unproven" | "unknown"> {
       h.closeCalls += 1;
+      const closeGate = h.closeGates.get(this.index);
+      if (closeGate !== undefined) await closeGate;
       if (options?.cancelStart === true) {
         const gate = h.startGates.get(this.index);
         if (gate !== undefined) await gate;
@@ -873,13 +897,20 @@ vi.mock("../browser.js", () => ({
       }
       if (h.connections[this.index] === true) h.started -= 1;
       h.connections[this.index] = false;
-      return h.closeState;
+      return h.closeStates.get(this.index) ?? h.closeState;
+    }
+    async waitForCancelledStartQuiescence(): Promise<void> {
+      const gate = h.startGates.get(this.index);
+      if (gate !== undefined) await gate;
+      if (h.startGate !== null) await h.startGate;
     }
     async forceCloseOwnedProcessTree(): Promise<"closed" | "force_closed_unproven" | "unknown"> {
       h.forceCloseCalls += 1;
+      const closeGate = h.closeGates.get(this.index);
+      if (closeGate !== undefined) await closeGate;
       if (h.connections[this.index] === true) h.started -= 1;
       h.connections[this.index] = false;
-      return h.closeState;
+      return h.closeStates.get(this.index) ?? h.closeState;
     }
   },
   // Mirrors the real export — the pending-card-fill charge guard reads it.
@@ -950,6 +981,19 @@ vi.mock("../google-login.js", async (importOriginal) => {
       return h.providers;
     },
     ensureOAuthSession: async () => ({ status: h.oauthStatus }),
+  };
+});
+
+vi.mock("../profile.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof ProfileModule>();
+  return {
+    ...actual,
+    acquireFreeProfileOperationGuard: async (
+      ...args: Parameters<typeof actual.acquireFreeProfileOperationGuard>
+    ) => {
+      if (h.profileOperationProbeGate !== null) await h.profileOperationProbeGate;
+      return await actual.acquireFreeProfileOperationGuard(...args);
+    },
   };
 });
 
@@ -1105,7 +1149,10 @@ beforeEach(() => {
   h.providers = ["google"];
   h.oauthStatus = "already_valid";
   h.oauthLoginCalls = [];
+  h.oauthLoginTimeouts = [];
+  h.oauthLoginError = null;
   h.oauthConsentProviders = [];
+  h.oauthExpectedGoogleAccountEmails = [];
   h.oauthLoginGates = new Map();
   h.oauthResultUrl = "https://app.example.com/dashboard";
   h.restoredStorageStates = [];
@@ -1147,10 +1194,15 @@ beforeEach(() => {
   h.closeCalls = 0;
   h.forceCloseCalls = 0;
   h.closeState = "closed";
+  h.closeStates = new Map();
+  h.closeGates = new Map();
   h.profileProbeCalls = 0;
   h.controllerProviderProbeCalls = 0;
   h.workerEmail = null;
   h.liveGoogleEmail = "default-google@example.com";
+  h.identityProbeCalls = 0;
+  h.identityProbeExpectedGoogleAccountEmails = [];
+  h.googleIdentityByExpectedEmail = new Map();
   h.temporaryHostScopes = [];
   h.hostScopeProviders = [];
   h.connections = [];
@@ -1168,6 +1220,7 @@ beforeEach(() => {
   h.storageStateWriteGate = null;
   h.storageStateWriteAttempts = 0;
   h.profileDestroyGate = null;
+  h.profileOperationProbeGate = null;
   h.ephemeralSerial = 0;
   h.createdProfiles = [];
   h.destroyedProfiles = [];
@@ -3064,7 +3117,9 @@ describe("verified recipe recording", () => {
 afterEach(async () => {
   vi.useRealTimers();
   await closeAllProvisionSessions();
+  delete process.env.BOT_START_TIMEOUT_MS;
   delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+  delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
   if (compactV2ModeBeforeTest === undefined) delete process.env.TRUSTY_SQUIRE_OBSERVE_V2;
   else process.env.TRUSTY_SQUIRE_OBSERVE_V2 = compactV2ModeBeforeTest;
 });
@@ -3414,7 +3469,7 @@ describe("3.1 — autocomplete-aware type fill", () => {
 });
 
 describe("operate session — OAuth lifecycle", () => {
-  it("restarts with the latest portable snapshot instead of hanging on live state restore", async () => {
+  it("restarts with the latest portable snapshot inside the OAuth lease", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-oauth-live-restore-hang";
     const google = {
       cookies: [
@@ -3471,9 +3526,524 @@ describe("operate session — OAuth lifecycle", () => {
 
     expect(outcome).toBe("terminal");
     expect(h.restoredStorageStates).toEqual([]);
+    expect(h.profileDirs[1]).toBe(h.profileDirs[0]);
     expect(h.seededStorageStates[1]).toEqual(prepared);
     expect(h.oauthLoginCalls).toEqual(["#google-oauth"]);
     await finishProvisionSession(started.session_id);
+  });
+
+  it("quarantines a failed OAuth browser before a successor can use the identity", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-oauth-failure-budget";
+    const google = {
+      cookies: [
+        {
+          name: "SID",
+          value: "google-session-before-failed-action",
+          domain: ".google.com",
+          path: "/",
+        },
+      ],
+      origins: [],
+    };
+    const relyingParty = {
+      cookies: [
+        {
+          name: "rp_session",
+          value: "relying-party-before-failed-action",
+          domain: ".app.example.com",
+          path: "/",
+        },
+      ],
+      origins: [],
+    };
+    const rotated = {
+      cookies: [...relyingParty.cookies, ...google.cookies],
+      origins: [],
+    };
+    h.storageStates.set(canonical, google);
+    h.identityMetadata.set(canonical, { googleAccountEmail: "confirmed@example.com" });
+    h.liveGoogleEmail = "confirmed@example.com";
+    h.captureStorageStateSequences.set(0, [relyingParty]);
+    h.captureStorageStateSequences.set(1, [rotated]);
+    h.oauthLoginError = new Error("provider did not settle");
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    let releaseCleanup!: () => void;
+    h.closeGates.set(
+      2,
+      new Promise<void>((resolve) => {
+        releaseCleanup = resolve;
+      }),
+    );
+    let releaseSuccessor!: () => void;
+    h.oauthLoginGates.set(
+      3,
+      new Promise<void>((resolve) => {
+        releaseSuccessor = resolve;
+      }),
+    );
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+    const successor = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+
+    const failingAction = act(started.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+      provider: "google",
+    });
+    const failure = failingAction.catch((error: unknown) => error);
+    await vi.waitFor(() => expect(h.closeCalls).toBe(2));
+    h.oauthLoginError = null;
+    const successorAction = act(successor.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+      provider: "google",
+    }).catch((error: unknown) => error);
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    expect(h.oauthLoginCalls).toEqual(["#google-oauth"]);
+    expect(h.connections[2]).toBe(true);
+
+    releaseCleanup();
+    const providerError = await failure;
+    expect(providerError).toBeInstanceOf(Error);
+    expect((providerError as Error).message).toBe("provider did not settle");
+    await vi.waitFor(() => expect(h.oauthLoginCalls).toEqual(["#google-oauth", "#google-oauth"]));
+
+    expect(h.connections[2]).toBe(false);
+    expect(h.identityProbeCalls).toBe(0);
+    expect(h.identityMetadata.get(canonical)).toEqual({
+      googleAccountEmail: "confirmed@example.com",
+    });
+    expect(h.storageStateWrites).toEqual([]);
+    await expect(finishProvisionSession(started.session_id)).rejects.toThrow(
+      /unknown provision session/i,
+    );
+
+    releaseSuccessor();
+    expect(await successorAction).not.toBeInstanceOf(Error);
+    await finishProvisionSession(successor.session_id);
+  });
+
+  it("surfaces an OAuth completion timeout with re-login guidance", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.oauthLoginError = Object.assign(new Error("google_session: session expired; re-login"), {
+      code: "google_session",
+    });
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: "/tmp/trusty-squire-unit-canonical-google-session-wall",
+    });
+    const target = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+
+    await expect(
+      act(started.session_id, { kind: "oauth_login", target, provider: "google" }),
+    ).rejects.toThrow(/google_session.*session expired.*re-login/i);
+    expect(h.identityProbeCalls).toBe(0);
+    await expect(finishProvisionSession(started.session_id)).rejects.toThrow(
+      /unknown provision session/i,
+    );
+  });
+
+  it("returns at the OAuth deadline while the shared payment terminal owner finishes", async () => {
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "500";
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
+    let releaseAudit!: () => void;
+    const auditGate = new Promise<void>((resolve) => {
+      releaseAudit = resolve;
+    });
+    const auditPayment = vi.fn(async () => {
+      await auditGate;
+      return { id: "audit_oauth_terminal" };
+    });
+    const pendingThreeDs = {
+      approval_id: "appr_oauth_terminal",
+      approval_url: "https://web.test/vault/pay/appr_oauth_terminal",
+      checkout: {
+        merchant: "Example",
+        checkout_origin: "https://app.example.com",
+        amount_cents: 4_200,
+        currency: "USD",
+      },
+      last4: "4242",
+      mandate_id: "mandate_oauth_terminal",
+      deadline: Date.now() + 60_000,
+      outcome: "unknown" as const,
+    };
+    h.oauthLoginError = new Error("provider did not settle");
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      api: { auditPayment } as unknown as ApiClient,
+    });
+    const successor = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+    });
+    const session = paymentSession(started.session_id);
+    armPaymentDispatchHandoff(pendingThreeDs, session);
+
+    const startedAt = Date.now();
+    const acting = act(started.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+      provider: "google",
+    }).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(session.paymentDispatchHandoff?.terminalizing).toBe(true));
+    const actionError = await acting;
+    expect(actionError).toEqual(
+      expect.objectContaining({ message: expect.stringMatching(/google_session.*re-login/i) }),
+    );
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+
+    h.oauthLoginError = null;
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "3000";
+    const successorAction = act(successor.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+      provider: "google",
+    });
+    setActivePendingThreeDs(pendingThreeDs, session);
+    await vi.waitFor(() => expect(auditPayment).toHaveBeenCalledOnce());
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    expect(h.oauthLoginCalls).toHaveLength(1);
+
+    releaseAudit();
+    await successorAction;
+    expect(h.waitForThreeDsCalls).toEqual([0]);
+    expect(auditPayment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approval_id: "appr_oauth_terminal",
+        status: "payment_outcome_unknown",
+      }),
+    );
+    expect(session.paymentDispatchHandoff?.terminalComplete).toBe(true);
+    expect(activeSessionCount()).toBe(1);
+    await finishProvisionSession(successor.session_id);
+  });
+
+  it("retains OAuth custody until an unproven browser close becomes proven", async () => {
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "150";
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
+    const canonical = "/tmp/trusty-squire-unit-canonical-oauth-unproven-close";
+    h.storageStates.set(canonical, { cookies: [], origins: [] });
+    h.identityMetadata.set(canonical, { googleAccountEmail: "worker@example.com" });
+    h.liveGoogleEmail = "worker@example.com";
+    h.oauthLoginError = new Error("provider did not settle");
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    let releaseProvider!: () => void;
+    h.oauthLoginGates.set(
+      2,
+      new Promise<void>((resolve) => {
+        releaseProvider = resolve;
+      }),
+    );
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+    const successor = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+    const failedAction = act(started.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+      provider: "google",
+    });
+    await vi.waitFor(() => expect(h.oauthLoginCalls).toEqual(["#google-oauth"]));
+    h.closeState = "unknown";
+    releaseProvider();
+
+    await expect(failedAction).rejects.toThrow(/google_session.*re-login/i);
+    h.oauthLoginError = null;
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "3000";
+    const successorAction = act(successor.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+      provider: "google",
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    expect(h.oauthLoginCalls).toEqual(["#google-oauth"]);
+
+    h.closeState = "closed";
+    await successorAction;
+    expect(h.oauthLoginCalls).toEqual(["#google-oauth", "#google-oauth"]);
+    await expect(finishProvisionSession(started.session_id)).rejects.toThrow(
+      /unknown provision session/i,
+    );
+    await finishProvisionSession(successor.session_id);
+  });
+
+  it("retains unknown startup custody across terminal-owner scans", async () => {
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1000";
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
+    process.env.BOT_START_TIMEOUT_MS = "100";
+    const canonical = "/tmp/trusty-squire-unit-canonical-oauth-preparation-deadline";
+    h.storageStates.set(canonical, { cookies: [], origins: [] });
+    h.identityMetadata.set(canonical, { googleAccountEmail: "canonical@example.com" });
+    h.liveGoogleEmail = "canonical@example.com";
+    let releasePendingStart!: () => void;
+    h.startGates.set(
+      2,
+      new Promise<void>((resolve) => {
+        releasePendingStart = resolve;
+      }),
+    );
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+    const successor = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+    const session = paymentSession(started.session_id);
+    const pendingThreeDs = {
+      approval_id: "appr_oauth_startup",
+      approval_url: "https://web.test/vault/pay/appr_oauth_startup",
+      checkout: {
+        merchant: "Example",
+        checkout_origin: "https://app.example.com",
+        amount_cents: 4_200,
+        currency: "USD",
+      },
+      last4: "4242",
+      mandate_id: "mandate_oauth_startup",
+      deadline: Date.now() + 60_000,
+      outcome: "unknown" as const,
+    };
+    armPaymentDispatchHandoff(pendingThreeDs, session);
+    h.closeStates.set(2, "unknown");
+    const startedAt = Date.now();
+
+    const timedOutAction = act(started.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+      provider: "google",
+    }).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(h.startCalls).toBe(3));
+    const timeoutError = await timedOutAction;
+
+    expect(timeoutError).toEqual(
+      expect.objectContaining({ message: expect.stringMatching(/google_session.*re-login/i) }),
+    );
+    expect(Date.now() - startedAt).toBeLessThan(1_500);
+    expect(h.oauthLoginCalls).toEqual([]);
+
+    releasePendingStart();
+    await vi.waitFor(() => expect(h.forceCloseCalls).toBeGreaterThanOrEqual(3));
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "3000";
+    const successorAction = act(successor.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+      provider: "google",
+    }).catch((error: unknown) => error);
+    setActivePendingThreeDs(pendingThreeDs, session);
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    expect(h.startCalls).toBe(3);
+    expect(h.oauthLoginCalls).toEqual([]);
+
+    h.closeStates.set(2, "closed");
+    await successorAction;
+    expect(h.startCalls).toBeGreaterThan(3);
+    expect(h.oauthExpectedGoogleAccountEmails).toEqual(["canonical@example.com"]);
+    await finishProvisionSession(successor.session_id).catch(() => undefined);
+  });
+
+  it("prevents a timed-out identity publication from mutating later", async () => {
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1000";
+    const canonical = "/tmp/trusty-squire-unit-canonical-oauth-publication-deadline";
+    let releaseWrite!: () => void;
+    h.storageStateWriteGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+    const acting = act(started.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+      provider: "google",
+    });
+    const terminalFailure = expect(acting).rejects.toThrow(/google_session.*re-login/i);
+
+    await vi.waitFor(() => expect(h.storageStateWriteAttempts).toBe(1));
+    await terminalFailure;
+    expect(h.storageStateWrites).toEqual([]);
+    expect(() => acquireProfileOperationGuard(canonical)).toThrow(/another Trusty Squire session/i);
+
+    releaseWrite();
+    await vi.waitFor(() => {
+      const lease = acquireProfileOperationGuard(canonical);
+      lease.release();
+    });
+    expect(h.storageStateWrites).toEqual([]);
+  });
+
+  it("keeps successors behind the owner when a queued OAuth action times out", async () => {
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1000";
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    let releaseOwner!: () => void;
+    h.oauthLoginGates.set(
+      0,
+      new Promise<void>((resolve) => {
+        releaseOwner = resolve;
+      }),
+    );
+    const owner = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+    const abandoned = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+    });
+    const successor = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+    });
+    const owningAction = act(owner.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+      provider: "google",
+    }).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(h.oauthLoginCalls).toEqual(["#google-oauth"]));
+
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "50";
+    await expect(
+      act(abandoned.session_id, {
+        kind: "oauth_login",
+        target: "Continue with Google",
+        provider: "google",
+      }),
+    ).rejects.toThrow(/google_session.*re-login/i);
+
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "3000";
+    const successorAction = act(successor.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+      provider: "google",
+    }).catch((error: unknown) => error);
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    expect(h.oauthLoginCalls).toEqual(["#google-oauth"]);
+
+    releaseOwner();
+    expect(await owningAction).not.toBeInstanceOf(Error);
+    expect(await successorAction).not.toBeInstanceOf(Error);
+    expect(h.oauthLoginCalls).toEqual(["#google-oauth", "#google-oauth"]);
+
+    await finishProvisionSession(owner.session_id);
+    await expect(finishProvisionSession(abandoned.session_id)).rejects.toThrow(
+      /unknown provision session/i,
+    );
+    await finishProvisionSession(successor.session_id);
+  });
+
+  it("re-resolves the exact authorized OAuth handle after preparation", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-oauth-sealed-handle";
+    h.storageStates.set(canonical, { cookies: [], origins: [] });
+    h.visibleText = "Continue";
+    h.elements = [
+      elem({
+        visibleText: "Continue",
+        labelText: "Continue",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    let releaseReplacement!: () => void;
+    h.startGates.set(
+      1,
+      new Promise<void>((resolve) => {
+        releaseReplacement = resolve;
+      }),
+    );
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+    const acting = act(started.session_id, {
+      kind: "oauth_login",
+      target: "Continue",
+      provider: "google",
+    });
+    await vi.waitFor(() => expect(h.startCalls).toBe(2));
+
+    h.elements = [
+      elem({
+        visibleText: "Continue",
+        labelText: "Continue",
+        role: "button",
+        selector: "#newsletter",
+      }),
+    ];
+    releaseReplacement();
+
+    await expect(acting).rejects.toThrow(/target changed.*re-observe/i);
+    expect(h.oauthLoginCalls).toEqual([]);
+    await expect(finishProvisionSession(started.session_id)).rejects.toThrow(
+      /unknown provision session/i,
+    );
   });
 
   it("leases concurrent OAuth actions before reading the session browser", async () => {
@@ -3499,7 +4069,7 @@ describe("operate session — OAuth lifecycle", () => {
     };
     h.storageStates.set(canonical, google);
     h.identityMetadata.set(canonical, { googleAccountEmail: "stale@example.com" });
-    h.liveGoogleEmail = null;
+    h.liveGoogleEmail = "stale@example.com";
     h.captureStorageStateSequences.set(0, [{ cookies: [], origins: [] }]);
     h.captureStorageStateSequences.set(1, [rotatedOnce]);
     h.captureStorageStateSequences.set(2, [rotatedOnce]);
@@ -3541,11 +4111,13 @@ describe("operate session — OAuth lifecycle", () => {
       { profileDir: canonical, state: rotatedOnce },
       { profileDir: canonical, state: rotatedTwice },
     ]);
-    expect(h.identityMetadata.has(canonical)).toBe(false);
+    expect(h.identityMetadata.get(canonical)).toEqual({
+      googleAccountEmail: "stale@example.com",
+    });
     await finishProvisionSession(started.session_id);
   });
 
-  it("serializes every OAuth action and restarts from the freshly published state", async () => {
+  it("serializes every OAuth action and publishes each rotated result", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-google-handoff";
     const state0 = {
       cookies: [
@@ -3662,12 +4234,14 @@ describe("operate session — OAuth lifecycle", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(h.restoredStorageStates).toEqual([]);
+    expect(h.profileDirs[2]).toBe(h.profileDirs[0]);
     expect(h.seededStorageStates[2]).toEqual(merged0);
     expect(h.oauthLoginCalls).toHaveLength(1);
 
     releaseFirst();
     await firstAct;
-    await vi.waitFor(() => expect(h.seededStorageStates[4]).toEqual(merged1));
+    await vi.waitFor(() => expect(h.profileDirs[4]).toBe(h.profileDirs[1]));
+    expect(h.seededStorageStates[4]).toEqual(merged1);
     await secondAct;
     expect(h.storageStateWrites).toEqual([
       { profileDir: canonical, state: state1 },
@@ -3725,6 +4299,59 @@ describe("operate session — OAuth lifecycle", () => {
     await finishProvisionSession(second.session_id);
   });
 
+  it("holds the full cooldown after a timed-out owner quiesces", async () => {
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1000";
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "120";
+    h.visibleText = "Continue";
+    h.elements = [
+      elem({
+        visibleText: "Continue",
+        labelText: "Continue",
+        role: "button",
+        selector: "#oauth",
+      }),
+    ];
+    let releaseOwner!: () => void;
+    h.oauthLoginGates.set(
+      2,
+      new Promise<void>((resolve) => {
+        releaseOwner = resolve;
+      }),
+    );
+    const owner = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+    const successor = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+    });
+    const owningAction = act(owner.session_id, {
+      kind: "oauth_login",
+      target: "Continue",
+      provider: "google",
+    });
+    const owningFailure = owningAction.catch((error: unknown) => error);
+    await vi.waitFor(() => expect(h.oauthLoginCalls).toEqual(["#oauth"]));
+
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "3000";
+    const successorAction = act(successor.session_id, {
+      kind: "oauth_login",
+      target: "Continue",
+      provider: "github",
+    });
+    const terminalError = await owningFailure;
+    expect(terminalError).toBeInstanceOf(Error);
+    expect((terminalError as Error).message).toMatch(/google_session.*re-login/i);
+    const quiescedAt = Date.now();
+    releaseOwner();
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 75));
+    expect(h.oauthLoginCalls).toEqual(["#oauth"]);
+    await vi.waitFor(() => expect(h.oauthLoginCalls).toEqual(["#oauth", "#oauth"]));
+    expect(Date.now() - quiescedAt).toBeGreaterThanOrEqual(100);
+
+    await successorAction;
+    await finishProvisionSession(owner.session_id).catch(() => undefined);
+    await finishProvisionSession(successor.session_id);
+  });
+
   it("does not infer a provider from destination URLs inside the leased action", async () => {
     h.visibleText = "Continue";
     h.elements = [
@@ -3751,7 +4378,7 @@ describe("operate session — OAuth lifecycle", () => {
     await finishProvisionSession(started.session_id);
   });
 
-  it("routes legacy Google OAuth replay through the identity handoff", async () => {
+  it("rejects a completed OAuth identity that differs from the sealed account", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-google-replay";
     const google = {
       cookies: [
@@ -3792,6 +4419,7 @@ describe("operate session — OAuth lifecycle", () => {
     h.storageStates.set(canonical, google);
     h.identityMetadata.set(canonical, { googleAccountEmail: "account-a@example.com" });
     h.liveGoogleEmail = "account-b@example.com";
+    h.googleIdentityByExpectedEmail.set("account-a@example.com", "account-b@example.com");
     h.captureStorageStateSequences.set(0, [relyingParty]);
     h.captureStorageStateSequences.set(1, [rotated]);
     h.visibleText = "Continue with Google";
@@ -3808,35 +4436,108 @@ describe("operate session — OAuth lifecycle", () => {
       profileDir: canonical,
     });
 
-    const result = await replayOperatorRecipe(
-      started.session_id,
-      replayRecipe({
-        trace: [
-          {
-            action: {
-              kind: "oauth_click",
-              target: {
-                visible_text: "Continue with Google",
-                accessible_name: "Continue with Google",
-                css: "#google-oauth",
-              },
-            },
-          },
-          { action: { kind: "oauth_settle" } },
-        ],
+    await expect(
+      act(started.session_id, {
+        kind: "oauth_login",
+        target: "Continue with Google",
       }),
-      {},
-    );
+    ).rejects.toThrow(/different account.*sealed identity/i);
 
-    expect(result.status).toBe("complete");
     expect(h.oauthLoginCalls).toEqual(["#google-oauth"]);
     expect(h.restoredStorageStates).toEqual([]);
-    expect(h.storageStateWrites).toEqual([{ profileDir: canonical, state: rotated }]);
+    expect(h.storageStateWrites).toEqual([]);
     expect(h.identityMetadata.get(canonical)).toEqual({
-      googleAccountEmail: "account-b@example.com",
+      googleAccountEmail: "account-a@example.com",
     });
     expect(h.seededStorageStates[1]).toEqual(merged);
-    expect(h.seededStorageStates[2]).toEqual(rotated);
+    expect(h.seededStorageStates).toHaveLength(2);
+    await expect(finishProvisionSession(started.session_id)).rejects.toThrow(
+      /unknown provision session/i,
+    );
+  });
+
+  it("attests the sealed selected account instead of the default Google account", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-google-selected-account";
+    h.storageStates.set(canonical, {
+      cookies: [
+        {
+          name: "SID",
+          value: "google-selected-account-session",
+          domain: ".google.com",
+          path: "/",
+        },
+      ],
+      origins: [],
+    });
+    h.identityMetadata.set(canonical, { googleAccountEmail: "selected@example.com" });
+    h.liveGoogleEmail = "default@example.com";
+    h.googleIdentityByExpectedEmail.set("selected@example.com", "selected@example.com");
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+
+    await act(started.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+      provider: "google",
+    });
+
+    expect(h.identityProbeExpectedGoogleAccountEmails).toEqual(["selected@example.com"]);
+    expect(h.identityMetadata.get(canonical)).toEqual({
+      googleAccountEmail: "selected@example.com",
+    });
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("preserves sealed Google metadata during GitHub OAuth", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-github-preserves-google";
+    h.storageStates.set(canonical, {
+      cookies: [
+        {
+          name: "SID",
+          value: "stale-but-sealed-google-session",
+          domain: ".google.com",
+          path: "/",
+        },
+      ],
+      origins: [],
+    });
+    h.identityMetadata.set(canonical, { googleAccountEmail: "sealed@example.com" });
+    h.liveGoogleEmail = null;
+    h.visibleText = "Continue with GitHub";
+    h.elements = [
+      elem({
+        visibleText: "Continue with GitHub",
+        labelText: "Continue with GitHub",
+        role: "button",
+        selector: "#github-oauth",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+
+    await act(started.session_id, {
+      kind: "oauth_login",
+      target: "Continue with GitHub",
+      provider: "github",
+    });
+
+    expect(h.identityProbeCalls).toBe(0);
+    expect(h.identityMetadata.get(canonical)).toEqual({
+      googleAccountEmail: "sealed@example.com",
+    });
     await finishProvisionSession(started.session_id);
   });
 
@@ -3891,6 +4592,66 @@ describe("operate session — OAuth lifecycle", () => {
     } finally {
       externalOperation.release();
       await finishProvisionSession(started.session_id).catch(() => undefined);
+    }
+  });
+
+  it("terminalizes a session that times out waiting for the canonical profile guard", async () => {
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "10";
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
+    const canonical = "/tmp/trusty-squire-unit-canonical-google-busy-timeout";
+    h.storageStates.set(canonical, {
+      cookies: [
+        {
+          name: "SID",
+          value: "google-session-before-busy-timeout",
+          domain: ".google.com",
+          path: "/",
+        },
+      ],
+      origins: [],
+    });
+    h.identityMetadata.set(canonical, { googleAccountEmail: "worker@example.com" });
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+    const externalOperation = acquireProfileOperationGuard(canonical);
+    let releaseProfileProbe!: () => void;
+    h.profileOperationProbeGate = new Promise<void>((resolve) => {
+      releaseProfileProbe = resolve;
+    });
+    try {
+      const acting = act(started.session_id, {
+        kind: "oauth_login",
+        target: "Continue with Google",
+        provider: "google",
+      });
+      const terminalFailure = expect(acting).rejects.toThrow(/google_session.*re-login/i);
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      releaseProfileProbe();
+      await terminalFailure;
+
+      await vi.waitFor(() => expect(activeSessionCount()).toBe(0));
+      await vi.waitFor(() => expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]));
+      expect(h.connections[0]).toBe(false);
+      await expect(act(started.session_id, { kind: "press", key: "Enter" })).rejects.toThrow(
+        /unknown provision session/i,
+      );
+      await expect(finishProvisionSession(started.session_id)).rejects.toThrow(
+        /unknown provision session/i,
+      );
+    } finally {
+      releaseProfileProbe();
+      externalOperation.release();
     }
   });
 
@@ -4621,6 +5382,32 @@ describe("Compact V2 action-map boundary", () => {
         expect.stringContaining("Continue"),
       ]),
     ]);
+  });
+
+  it("queries and re-resolves Resend's existing Google control", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "button",
+        role: "button",
+        visibleText: "Log in with Google",
+        selector: 'form[action="google"] button',
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://resend.com/signup" });
+
+    const query = await observeQuery(started.session_id, "Google");
+    const handle = (query.safe_table as Array<[string]>)[0]?.[0];
+    expect(handle).toMatch(/^@e:/);
+
+    await act(started.session_id, {
+      kind: "oauth_login",
+      target: handle!,
+      provider: "google",
+    });
+
+    expect(h.oauthLoginCalls).toEqual(['form[action="google"] button']);
+    await finishProvisionSession(started.session_id);
   });
 
   it("matches private merchant labels while returning only sealed rows", async () => {

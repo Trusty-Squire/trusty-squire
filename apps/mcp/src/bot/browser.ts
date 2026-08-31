@@ -3822,12 +3822,6 @@ export class BrowserController {
   private oauthProductPage: Page | null = null;
   private oauthProviderPage: Page | null = null;
   private oauthProviderPageClosed = false;
-  // Deep-investigation instrumentation (UNIVERSAL_BOT_OAUTH_DEBUG): a ring
-  // buffer of OAuth/SSO-relevant network responses, so we can see WHY a Clerk/
-  // Stytch SSO callback fails to persist a session (cookie not set, FAPI
-  // rejection, etc.) without guessing. Off by default; zero cost when unset.
-  private oauthNetLog: Array<{ url: string; status: number; setCookie: boolean; ct: string }> = [];
-  private oauthNetListenerAttached = false;
 
   // Surfaced in the run trail so operators can distinguish local, remote,
   // and headless launches without retaining a virtual-display mode.
@@ -8802,12 +8796,6 @@ export class BrowserController {
         },
         { tok: token, key: responseKey },
       );
-      if (process.env.UNIVERSAL_BOT_OAUTH_DEBUG) {
-        console.error(
-          `[captcha] hCaptcha inject diag: ok=${diag.ok} textareas=${diag.textareas} ` +
-            `widgets=${diag.widgets} callbackFired=${diag.callbackFired} hcaptchaGlobal=${diag.hasHcaptchaGlobal}`,
-        );
-      }
       return diag.ok;
     } catch {
       return false;
@@ -15440,7 +15428,6 @@ export class BrowserController {
   // settleAfterOAuth() restores the product page afterwards.
   async startOAuth(selector: string): Promise<void> {
     if (!this.page || !this.context) throw new Error("Browser not started");
-    this.maybeAttachOAuthNetListener();
     if (
       !/accounts\.google\.com|github\.com\/login|login\.microsoftonline\.com/i.test(this.page.url())
     ) {
@@ -15483,6 +15470,7 @@ export class BrowserController {
     selector: string,
     settleTimeoutMs = 12_000,
     consentProvider?: OAuthProviderId,
+    expectedGoogleAccountEmail?: string | null,
   ): Promise<void> {
     const product = this.page;
     const context = this.context;
@@ -15490,11 +15478,25 @@ export class BrowserController {
       throw new Error("OAuth login cannot start because the product page is unavailable");
     }
 
-    this.maybeAttachOAuthNetListener();
     this.oauthProductPage = product;
     this.oauthProviderPage = null;
     this.oauthProviderPageClosed = false;
+    const oauthBudgetMs = Math.max(1, settleTimeoutMs);
     const productUrl = product.url();
+    const oauthDeadline = Date.now() + oauthBudgetMs;
+    const remainingBudgetMs = (): number => Math.max(1, oauthDeadline - Date.now());
+    const deadlineError = (): Error =>
+      consentProvider === "google"
+        ? Object.assign(
+            new Error(
+              `google_session: OAuth did not complete within ${Math.ceil(oauthBudgetMs / 1000)} seconds; ` +
+                "the saved session may have expired, so re-login before retrying",
+            ),
+            { code: "google_session" },
+          )
+        : new Error(
+            `OAuth login is still awaiting the provider after ${Math.ceil(oauthBudgetMs / 1000)} seconds. Retry oauth_login; do not read or close the browser session.`,
+          );
     let recovery: Page | null = null;
     let providerPage: Page | null = null;
     let productDeparted = false;
@@ -15505,7 +15507,10 @@ export class BrowserController {
     product.on("framenavigated", onProductNavigation);
     try {
       recovery = await context.newPage();
-      await recovery.goto(productUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
+      await recovery.goto(productUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: remainingBudgetMs(),
+      });
 
       let resolvePopup: (page: Page | null) => void = () => undefined;
       const popupPromise = new Promise<Page | null>((resolve) => {
@@ -15517,6 +15522,7 @@ export class BrowserController {
       };
       context.on("page", onPopup);
       try {
+        if (Date.now() >= oauthDeadline) throw deadlineError();
         try {
           await this.click(selector);
         } catch (error) {
@@ -15524,7 +15530,7 @@ export class BrowserController {
         }
         providerPage = await Promise.race([
           popupPromise,
-          this.sleep(Math.min(settleTimeoutMs, 2_000)).then(() => null),
+          this.sleep(Math.min(remainingBudgetMs(), 2_000)).then(() => null),
         ]);
       } finally {
         context.off("page", onPopup);
@@ -15543,12 +15549,12 @@ export class BrowserController {
         settled = await this.waitForOAuthLifecycle(
           transient,
           productUrl,
-          settleTimeoutMs,
+          remainingBudgetMs(),
           providerPage === null,
           productDeparted,
         );
       } else {
-        const deadline = Date.now() + settleTimeoutMs;
+        const deadline = oauthDeadline;
         while (settled === null && Date.now() < deadline) {
           const remaining = deadline - Date.now();
           settled = await this.waitForOAuthLifecycle(
@@ -15560,17 +15566,25 @@ export class BrowserController {
           );
           if (settled !== null || transient.isClosed()) break;
           productDeparted = productDeparted || !this.isOAuthProductUrl(transient.url(), productUrl);
-          const advanced = await this.advanceOAuthConsent(consentProvider).catch(() => false);
-          if (!advanced) await this.sleep(Math.min(250, Math.max(1, deadline - Date.now())));
+          if (Date.now() >= deadline) break;
+          const consentBudgetMs = deadline - Date.now();
+          const advanced = await this.advanceOAuthConsent(
+            consentProvider,
+            consentBudgetMs,
+            expectedGoogleAccountEmail,
+          ).catch(() => false);
+          if (!advanced) await this.sleep(Math.min(250, remainingBudgetMs()));
         }
       }
       if (settled === null) {
-        throw new Error(
-          `OAuth login is still awaiting the provider after ${Math.ceil(settleTimeoutMs / 1000)} seconds. Retry oauth_login; do not read or close the browser session.`,
-        );
+        throw deadlineError();
       }
       if (providerPage === null && product.isClosed()) {
-        await recovery.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
+        if (Date.now() >= oauthDeadline) throw deadlineError();
+        await recovery.reload({
+          waitUntil: "domcontentloaded",
+          timeout: remainingBudgetMs(),
+        });
       }
     } finally {
       product.off("framenavigated", onProductNavigation);
@@ -15588,7 +15602,9 @@ export class BrowserController {
       if (this.page !== null && !this.page.isClosed()) {
         await this.page.bringToFront().catch(() => undefined);
         await this.page
-          .waitForLoadState("domcontentloaded", { timeout: 30_000 })
+          .waitForLoadState("domcontentloaded", {
+            timeout: remainingBudgetMs(),
+          })
           .catch(() => undefined);
       }
     }
@@ -15647,130 +15663,6 @@ export class BrowserController {
       await this.sleep(50);
     }
     return page.isClosed() ? "closed" : null;
-  }
-
-  // ── OAuth/SSO debug instrumentation (UNIVERSAL_BOT_OAUTH_DEBUG) ──
-  // Attach a context-level response recorder ONCE. Records SSO-relevant
-  // responses (the service host + Clerk/Stytch/WorkOS FAPI hosts) with their
-  // status + whether they set a cookie — the signal for "did the callback's
-  // session-establish request succeed and set the session cookie?"
-  private maybeAttachOAuthNetListener(): void {
-    if (this.oauthNetListenerAttached) return;
-    if (!/^(1|true|on)$/i.test(process.env.UNIVERSAL_BOT_OAUTH_DEBUG ?? "")) return;
-    if (!this.context) return;
-    this.oauthNetListenerAttached = true;
-    const RELEVANT =
-      /clerk|stytch|workos|accounts\.|\/sso|\/oauth|\/session|\/sign|callback|\/v1\/client/i;
-    this.context.on("response", (res) => {
-      void (async () => {
-        try {
-          const url = res.url();
-          if (!RELEVANT.test(url)) return;
-          const headers = res.headers();
-          if (this.oauthNetLog.length >= 200) return;
-          const entry: {
-            url: string;
-            status: number;
-            setCookie: boolean;
-            ct: string;
-            body?: string;
-          } = {
-            url: url.slice(0, 200),
-            status: res.status(),
-            setCookie: "set-cookie" in headers || "Set-Cookie" in headers,
-            ct: (headers["content-type"] ?? "").slice(0, 40),
-          };
-          // Capture the body of a Clerk/Stytch/WorkOS sign-in/up/callback error
-          // (>=400) — its error code is the definitive tell (captcha_invalid vs
-          // transfer vs identifier_*). JSON only, bounded.
-          if (
-            res.status() >= 400 &&
-            /\/v1\/client\/(sign_ins|sign_ups)|oauth_callback|\/session/i.test(url)
-          ) {
-            entry.body = (await res.text().catch(() => "")).slice(0, 800);
-          }
-          this.oauthNetLog.push(entry);
-        } catch {
-          // best-effort observability — never perturb the run
-        }
-      })();
-    });
-  }
-
-  // Dump cookies + the SSO network log to a file for post-mortem. Called at the
-  // oauth_session_not_persisted decision point when UNIVERSAL_BOT_OAUTH_DEBUG.
-  async dumpOAuthDebug(service: string, label: string): Promise<void> {
-    if (!/^(1|true|on)$/i.test(process.env.UNIVERSAL_BOT_OAUTH_DEBUG ?? "")) return;
-    if (!this.context) return;
-    try {
-      const cookies = await this.context.cookies();
-      const cookieSummary = cookies.map((c) => ({
-        name: c.name,
-        domain: c.domain,
-        path: c.path,
-        len: c.value.length,
-        httpOnly: c.httpOnly,
-        secure: c.secure,
-        sameSite: c.sameSite,
-      }));
-      const url = this.page ? this.page.url() : "(no page)";
-      // Capture the live Clerk SDK state — the definitive read on whether a
-      // sign-up transfer is available (the new-user-OAuth fix hinges on this).
-      const clerkState = this.page
-        ? await this.page
-            .evaluate(() => {
-              const w = window as unknown as { Clerk?: Record<string, unknown> };
-              const c = w.Clerk;
-              if (c === undefined) return { present: false };
-              const client = (c as { client?: Record<string, unknown> }).client;
-              const si = client?.["signIn"] as Record<string, unknown> | undefined;
-              const su = client?.["signUp"] as Record<string, unknown> | undefined;
-              const ffv = si?.["firstFactorVerification"] as Record<string, unknown> | undefined;
-              return {
-                present: true,
-                loaded: (c as { loaded?: unknown }).loaded ?? null,
-                signInStatus: si?.["status"] ?? null,
-                signInFFVStatus: ffv?.["status"] ?? null,
-                signInFFVError: ffv?.["error"] ?? null,
-                signUpStatus: su?.["status"] ?? null,
-                signUpMissingFields: su?.["missingFields"] ?? null,
-                hasSignUpCreate: typeof (su as { create?: unknown })?.create === "function",
-              };
-            })
-            .catch((e: unknown) => ({ present: "evalError", err: String(e).slice(0, 120) }))
-        : { present: false };
-      const consoleText = await this.extractText().catch(() => "");
-      const { writeFileSync, mkdirSync } = await import("node:fs");
-      const { join } = await import("node:path");
-      const { homedir } = await import("node:os");
-      const dir = join(homedir(), ".trusty-squire", "oauth-debug");
-      mkdirSync(dir, { recursive: true });
-      const ts = process.env.OAUTH_DEBUG_TS ?? String(this.oauthNetLog.length);
-      const path = join(dir, `${service}-${label}-${ts}.json`);
-      writeFileSync(
-        path,
-        JSON.stringify(
-          {
-            service,
-            label,
-            finalUrl: url,
-            clerkState,
-            cookies: cookieSummary,
-            netLog: this.oauthNetLog,
-            pageText: consoleText.slice(0, 600),
-          },
-          null,
-          2,
-        ),
-      );
-      console.error(
-        `[oauth-debug] wrote ${path} (${cookieSummary.length} cookies, ${this.oauthNetLog.length} net entries)`,
-      );
-    } catch (err) {
-      console.error(
-        `[oauth-debug] dump failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
   }
 
   // Read the page's Rails/OmniAuth CSRF token (<meta name="csrf-token">).
@@ -16315,12 +16207,17 @@ export class BrowserController {
     }
   }
 
-  async detectGoogleAccountEmail(): Promise<string | null> {
+  async detectGoogleAccountEmail(expectedGoogleAccountEmail?: string): Promise<string | null> {
     if (this.context === null) return null;
     let identityPage: Page | null = null;
     try {
       identityPage = await this.context.newPage();
-      await identityPage.goto("https://myaccount.google.com/", {
+      const identityUrl = new URL("https://myaccount.google.com/");
+      const expectedEmail = expectedGoogleAccountEmail?.trim();
+      if (expectedEmail !== undefined && expectedEmail.length > 0) {
+        identityUrl.searchParams.set("authuser", expectedEmail);
+      }
+      await identityPage.goto(identityUrl.href, {
         waitUntil: "domcontentloaded",
         timeout: 20_000,
       });
@@ -16347,8 +16244,17 @@ export class BrowserController {
   // Returns false when no
   // approve control is present — the agent then aborts rather than
   // hang. Clicks only; never types (the critical guarantee holds here).
-  async advanceOAuthConsent(provider: OAuthProviderId): Promise<boolean> {
+  async advanceOAuthConsent(
+    provider: OAuthProviderId,
+    timeoutMs = 8_000,
+    expectedGoogleAccountEmail?: string | null,
+  ): Promise<boolean> {
     if (!this.page) throw new Error("Browser not started");
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    const hasBudget = (): boolean => Date.now() < deadline;
+    const boundedTimeout = (limitMs: number): number =>
+      Math.max(1, Math.min(limitMs, deadline - Date.now()));
+    if (!hasBudget()) return false;
     if (provider === "github") {
       // GitHub App install flow can include an account target chooser before
       // the Install/Authorize screen:
@@ -16358,8 +16264,10 @@ export class BrowserController {
       // consent loop re-classify the next GitHub page.
       if (/\/apps\/[^/]+\/installations\/select_target\b/.test(new URL(this.page.url()).pathname)) {
         const startUrl = this.page.url();
+        if (!hasBudget()) return false;
         const clicked = await this.page
-          .evaluate(() => {
+          .evaluate((expiresAt) => {
+            if (Date.now() >= expiresAt) return false;
             const visible = (el: HTMLElement): boolean => {
               const r = el.getBoundingClientRect();
               const s = window.getComputedStyle(el);
@@ -16390,13 +16298,16 @@ export class BrowserController {
                 return true;
               });
             if (target === undefined) return false;
+            if (Date.now() >= expiresAt) return false;
             target.click();
             return true;
-          })
+          }, deadline)
           .catch(() => false);
         if (clicked) {
           const advanced = await this.page
-            .waitForFunction((s) => window.location.href !== s, startUrl, { timeout: 8000 })
+            .waitForFunction((s) => window.location.href !== s, startUrl, {
+              timeout: boundedTimeout(8_000),
+            })
             .then(() => true)
             .catch(() => false);
           if (advanced) return true;
@@ -16429,7 +16340,7 @@ export class BrowserController {
         // (MEASURED 2026-06-11: defang's "Authorize DefangLabs"). Poll up to
         // 12s for it to enable before clicking.
         {
-          const deadline = Date.now() + 12_000;
+          const deadline = Date.now() + boundedTimeout(12_000);
           while (Date.now() < deadline) {
             const disabled = await btn
               .evaluate((el) => {
@@ -16444,8 +16355,9 @@ export class BrowserController {
             await this.sleep(400);
           }
         }
+        if (!hasBudget()) return false;
         try {
-          await btn.click({ timeout: 8000 });
+          await btn.click({ timeout: boundedTimeout(8_000) });
         } catch {
           continue;
         }
@@ -16454,7 +16366,9 @@ export class BrowserController {
         // click silently failed (wrong element, or button disabled
         // behind a hidden iframe). Return false so the caller knows.
         const advanced = await this.page
-          .waitForFunction((s) => window.location.href !== s, startUrl, { timeout: 4000 })
+          .waitForFunction((s) => window.location.href !== s, startUrl, {
+            timeout: boundedTimeout(4_000),
+          })
           .then(() => true)
           .catch(() => false);
         if (advanced) return true;
@@ -16490,10 +16404,88 @@ export class BrowserController {
     }
     // Google. Account chooser: Google renders each account with a
     // stable data-identifier attribute (the account email).
-    const tile = this.page.locator("[data-identifier]").first();
-    if ((await tile.count().catch(() => 0)) > 0) {
+    const tiles = this.page.locator("[data-identifier]");
+    const expectedEmail = expectedGoogleAccountEmail?.trim().toLowerCase() ?? null;
+    const matchingTileIndexes = await tiles
+      .evaluateAll((elements, expected) => {
+        if (expected === null) return [];
+        return elements.flatMap((element, index) => {
+          const html = element as HTMLElement;
+          const rect = html.getBoundingClientRect();
+          const style = window.getComputedStyle(html);
+          const identifier = element.getAttribute("data-identifier")?.trim().toLowerCase();
+          return rect.width >= 2 &&
+            rect.height >= 2 &&
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            identifier === expected
+            ? [index]
+            : [];
+        });
+      }, expectedEmail)
+      .catch(() => [] as number[]);
+    if (matchingTileIndexes.length === 1) {
+      if (!hasBudget()) return false;
       try {
-        await tile.click({ timeout: 8000 });
+        await tiles.nth(matchingTileIndexes[0]!).click({ timeout: boundedTimeout(1_000) });
+        return true;
+      } catch {
+        // fall through to the approve-button path
+      }
+    }
+    // Google's current account chooser also renders an identity as
+    // an ordinary semantic button/link without data-identifier. Select only a
+    // visible account-shaped row carrying an email address, and exclude only
+    // account-management alternatives. Authentication state is not inferred
+    // from provider-page content; completion remains the OAuth lifecycle signal.
+    // The identity text stays inside the provider page and is never returned.
+    const accountRows = this.page.locator('button, [role="button"], [role="link"], a[href]');
+    const accountRowLabels = await accountRows
+      .evaluateAll((elements) => {
+        const EXCLUDED = /(?:\buse another account|\bremove an account|\bmanage accounts?\b)/i;
+        return elements.map((element, index) => {
+          const html = element as HTMLElement;
+          const rect = html.getBoundingClientRect();
+          const style = window.getComputedStyle(html);
+          if (
+            rect.width < 2 ||
+            rect.height < 2 ||
+            style.display === "none" ||
+            style.visibility === "hidden"
+          ) {
+            return null;
+          }
+          const labels = [
+            element.getAttribute("aria-label") ?? "",
+            element.textContent ?? "",
+            ...Array.from(element.querySelectorAll<HTMLElement>("[aria-label], *")).flatMap(
+              (descendant) => [
+                descendant.getAttribute("aria-label") ?? "",
+                descendant.textContent ?? "",
+              ],
+            ),
+          ]
+            .map((label) => label.replace(/\s+/g, " ").trim())
+            .filter((label) => label.length > 0);
+          return labels.some((label) => EXCLUDED.test(label)) ? null : { index, labels };
+        });
+      })
+      .catch(() => [] as Array<{ index: number; labels: string[] } | null>);
+    const matchingAccountRows =
+      expectedEmail === null
+        ? []
+        : accountRowLabels.filter((candidate) => {
+            if (candidate === null) return false;
+            return candidate.labels.some((label) => {
+              const emails = label.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? [];
+              return emails.some((email) => email.toLowerCase() === expectedEmail);
+            });
+          });
+    const accountRowIndex = matchingAccountRows.length === 1 ? matchingAccountRows[0]!.index : -1;
+    if (accountRowIndex >= 0) {
+      if (!hasBudget()) return false;
+      try {
+        await accountRows.nth(accountRowIndex).click({ timeout: boundedTimeout(1_000) });
         return true;
       } catch {
         // fall through to the approve-button path
@@ -16510,13 +16502,14 @@ export class BrowserController {
     const APPROVE_NAME = /^(?:continue|allow|accept|agree)\b/i;
     const approve = this.page.getByRole("button", { name: APPROVE_NAME }).first();
     try {
-      await approve.waitFor({ state: "visible", timeout: 8000 });
+      await approve.waitFor({ state: "visible", timeout: boundedTimeout(1_000) });
     } catch {
       // not visible within the window — fall through to the DOM-scan path
     }
     if ((await approve.count().catch(() => 0)) > 0) {
+      if (!hasBudget()) return false;
       try {
-        await approve.click({ timeout: 8000 });
+        await approve.click({ timeout: boundedTimeout(1_000) });
         return true;
       } catch {
         // fall through to the DOM-scan fallback
@@ -16527,8 +16520,10 @@ export class BrowserController {
     // <div role>/<span> or an <input type=submit value="Allow access">).
     // Click the first visible candidate whose text is an approve verb and
     // is NOT a cancel/deny/back. Log what was visible on failure.
+    if (!hasBudget()) return false;
     const clicked = await this.page
-      .evaluate(() => {
+      .evaluate((expiresAt) => {
+        if (Date.now() >= expiresAt) return null;
         const APPROVE = /^(?:continue|allow|accept|agree)\b/i;
         const DENY = /\b(?:cancel|deny|back|no\b|not now|reject)\b/i;
         const els = Array.from(
@@ -16541,12 +16536,13 @@ export class BrowserController {
           if (t.length === 0 || t.length > 40) continue;
           if (DENY.test(t)) continue;
           if (APPROVE.test(t)) {
+            if (Date.now() >= expiresAt) return null;
             (el as HTMLElement).click();
             return t.slice(0, 40);
           }
         }
         return null;
-      })
+      }, deadline)
       .catch(() => null);
     if (clicked !== null) return true;
     const seen = await this.page
@@ -16637,6 +16633,15 @@ export class BrowserController {
     }
     this.closePromise ??= this.closeAfterStart();
     return await this.closePromise;
+  }
+
+  async waitForCancelledStartQuiescence(): Promise<void> {
+    if (!this.startCancellationRequested) return;
+    await Promise.allSettled([
+      this.startPromise ?? Promise.resolve(),
+      this.reapCancelledStartProcess(),
+    ]);
+    await this.persistentFallbackOwnershipMonitor?.catch(() => undefined);
   }
 
   async forceCloseOwnedProcessTree(): Promise<ProfileCloseState> {
@@ -16822,7 +16827,6 @@ export class BrowserController {
       this.oauthProductPage = null;
       this.oauthProviderPage = null;
       this.oauthProviderPageClosed = false;
-      this.oauthNetLog = [];
       this.context = null;
       return "closed";
     }
@@ -16860,7 +16864,6 @@ export class BrowserController {
     this.oauthProductPage = null;
     this.oauthProviderPage = null;
     this.oauthProviderPageClosed = false;
-    this.oauthNetLog = [];
     this.context = null;
     this.cdpBrowser = null;
     this.childChrome = null;

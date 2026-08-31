@@ -65,7 +65,11 @@ Remove the `requireLiveIdentity` direct-canonical exception. Preserve the existi
 
 ### Google OAuth handoff
 
-Serialize every `oauth_login` and legacy `oauth_click` action from explicit action start through action completion. The waiter relaunches the private browser with its current non-Google state merged with the latest saved Google identity, completes OAuth, captures the rotated state, proves bounded browser close, atomically publishes, restarts the same private profile, waits one tunable few-second cooldown, and then releases the next waiter. Provider destination inference is not part of admission or routing. Ordinary browsing, payments, observation, and every other non-auth session action remain parallel. The current close/relaunch sequence is owned by [`DESIGN-warm-browser-reuse.md`](DESIGN-warm-browser-reuse.md#2-portable-login-state).
+The implemented serialized handoff, deadline, failure terminalization, custody,
+and close/relaunch sequence are owned by
+[`DESIGN-warm-browser-reuse.md`](DESIGN-warm-browser-reuse.md#2-portable-login-state).
+This implementation retained the decision that provider destination inference is
+not part of admission or routing and that non-auth session actions stay parallel.
 
 The canonical live-profile handoff alternative was assessed and rejected. It would require closing or invalidating the user's live authoring Chrome session, or restoring the broad shared-profile lock removed with the warm-session design. Portable Playwright `storageState` preserves the supported identity boundary without Chrome database cloning, while the explicit all-OAuth action lease covers rotating identity safely without guessing a provider. The shipped baseline is therefore the action lease, with concurrent ephemeral profiles outside the auth action.
 

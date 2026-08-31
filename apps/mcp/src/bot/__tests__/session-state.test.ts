@@ -304,6 +304,30 @@ describe("operator session storage state", () => {
     });
   });
 
+  it("refuses an aborted canonical identity publication", async () => {
+    const canonical = mkdtempSync(join(tmpdir(), "ts-session-state-aborted-identity-"));
+    roots.push(canonical);
+    const prior = {
+      cookies: [],
+      origins: [{ origin: "https://prior.example", localStorage: [] }],
+    };
+    const replacement = {
+      cookies: [],
+      origins: [{ origin: "https://replacement.example", localStorage: [] }],
+    };
+    await writeCanonicalIdentitySnapshot(canonical, prior, undefined);
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      writeCanonicalIdentitySnapshot(canonical, replacement, undefined, () => true, [], {
+        signal: controller.signal,
+      }),
+    ).resolves.toBe(false);
+
+    await expect(readSessionState(canonical)).resolves.toEqual(prior);
+  });
+
   it("migrates the existing provider email with legacy storage state", async () => {
     const canonical = mkdtempSync(join(tmpdir(), "ts-session-state-legacy-identity-"));
     roots.push(canonical);
