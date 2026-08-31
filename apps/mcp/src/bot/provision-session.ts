@@ -18,7 +18,15 @@
 
 import { createHash, createHmac, randomBytes, randomInt, randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
-import { chmodSync, mkdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  renameSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9859,14 +9867,59 @@ function profileRequiresDestroy(session: Session): boolean {
   );
 }
 
+const OBSERVE_SNAPSHOT_CLEANUP_RETRY_MS = 250;
+const pendingObserveSnapshotCleanup = new Set<string>();
+let observeSnapshotCleanupTimer: ReturnType<typeof setTimeout> | null = null;
+
+function observeSnapshotPathState(path: string): "present" | "missing" | "unknown" {
+  try {
+    lstatSync(path);
+    return "present";
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unknown";
+  }
+}
+
+function scheduleObserveSnapshotCleanup(): void {
+  if (observeSnapshotCleanupTimer !== null || pendingObserveSnapshotCleanup.size === 0) return;
+  observeSnapshotCleanupTimer = setTimeout(() => {
+    observeSnapshotCleanupTimer = null;
+    for (const path of pendingObserveSnapshotCleanup) {
+      try {
+        rmSync(path, { recursive: true, force: true });
+      } catch {}
+      if (observeSnapshotPathState(path) === "missing") {
+        pendingObserveSnapshotCleanup.delete(path);
+      }
+    }
+    scheduleObserveSnapshotCleanup();
+  }, OBSERVE_SNAPSHOT_CLEANUP_RETRY_MS);
+  observeSnapshotCleanupTimer.unref();
+}
+
+function removeObserveSnapshotDirectory(path: string): unknown | undefined {
+  let failure: unknown;
+  try {
+    rmSync(path, { recursive: true, force: true });
+  } catch (error) {
+    failure = error;
+  }
+  if (observeSnapshotPathState(path) === "missing") {
+    pendingObserveSnapshotCleanup.delete(path);
+  } else {
+    pendingObserveSnapshotCleanup.add(path);
+    scheduleObserveSnapshotCleanup();
+  }
+  return failure;
+}
+
 function clearSessionArtifacts(session: Session): void {
   session.prevObserve = null;
   session.observeSnapshotFile = null;
   session.secretSlots.clear();
   session.sealedFieldKeys.clear();
-  try {
-    rmSync(observeSnapshotDir(session.id), { recursive: true, force: true });
-  } catch (error) {
+  const error = removeObserveSnapshotDirectory(observeSnapshotDir(session.id));
+  if (error !== undefined) {
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(
       `[operator] session artifact cleanup failed session=${session.id}: ${message}\n`,

@@ -69,9 +69,7 @@ export interface ProfileProcessIdentity {
   pid: number;
   start_time: string;
   user_data_dir: string;
-  // Present only when the browser is the leader of a process group Trusty
-  // Squire created. Older/fallback identities omit it and remain PID-only.
-  process_group_id?: number;
+  process_group_id?: number | "unknown";
   // Exact per-launch marker inherited by every browser process. It lets the
   // owner reaper prove a detached process group still belongs to this launch
   // after the group's original leader has exited.
@@ -131,17 +129,20 @@ function readProcessStartTime(pid: number): ProcessStartTimeRead {
   return { state: "unknown" };
 }
 
-function readLinuxProcessGroupId(pid: number): number | null {
-  if (process.platform !== "linux" || !Number.isSafeInteger(pid) || pid <= 0) return null;
+type LinuxProcessGroupIdRead = number | "stale" | "unknown";
+
+function readLinuxProcessGroupId(pid: number): LinuxProcessGroupIdRead {
+  if (process.platform !== "linux" || !Number.isSafeInteger(pid) || pid <= 0) return "unknown";
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
     const close = stat.lastIndexOf(")");
     const processGroup = close < 0 ? undefined : Number(stat.slice(close + 2).split(" ")[2]);
     return processGroup !== undefined && Number.isSafeInteger(processGroup) && processGroup > 0
       ? processGroup
-      : null;
-  } catch {
-    return null;
+      : "unknown";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ESRCH" ? "stale" : "unknown";
   }
 }
 
@@ -174,7 +175,7 @@ export function processBirthIdentityState(
   return actual.startTime === identity.start_time ? "matching" : "stale";
 }
 
-function processProfileState(pid: number, profileDir: string): ProcessIdentityState {
+export function processProfileState(pid: number, profileDir: string): ProcessIdentityState {
   if (process.platform !== "linux") return "unknown";
   try {
     const expected = profilePathIdentity(profileDir);
@@ -217,21 +218,90 @@ export function profileProcessIdentity(
     pid,
     start_time: startTime.startTime,
     user_data_dir: profilePathIdentity(profileDir),
-    ...(processGroupId === pid ? { process_group_id: processGroupId } : {}),
+    ...(process.platform === "linux"
+      ? { process_group_id: processGroupId === pid ? processGroupId : "unknown" }
+      : {}),
   };
+}
+
+interface ProfileProcessIdentityReaders {
+  readBirthState?: (identity: ProfileProcessIdentity) => ProcessIdentityState;
+  readGroupMarkerState?: (identity: ProfileProcessIdentity) => ProcessIdentityState;
+}
+
+function linuxOperatorMarkerState(pid: number, marker: string): ProcessIdentityState {
+  try {
+    const entries = readFileSync(`/proc/${pid}/environ`, "utf8").split("\0");
+    return entries.includes(`TRUSTY_SQUIRE_OPERATOR_BROWSER_MARKER=${marker}`)
+      ? "matching"
+      : "stale";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ESRCH" ? "stale" : "unknown";
+  }
+}
+
+function linuxProcessUidState(pid: number): ProcessIdentityState {
+  const currentUid = typeof process.getuid === "function" ? process.getuid() : null;
+  if (currentUid === null) return "unknown";
+  try {
+    const match = /^Uid:\s+(.+)$/m.exec(readFileSync(`/proc/${pid}/status`, "utf8"));
+    if (match === null) return "unknown";
+    const uids = match[1]!.trim().split(/\s+/).map(Number).filter(Number.isSafeInteger);
+    return uids.includes(currentUid) ? "matching" : "stale";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ESRCH" ? "stale" : "unknown";
+  }
+}
+
+function linuxProfileProcessGroupMarkerState(
+  identity: ProfileProcessIdentity,
+): ProcessIdentityState {
+  if (process.platform !== "linux" || identity.process_marker === undefined) return "stale";
+  let unknown = false;
+  try {
+    for (const entry of readdirSync("/proc")) {
+      if (!/^\d+$/.test(entry)) continue;
+      const pid = Number(entry);
+      const markerState = linuxOperatorMarkerState(pid, identity.process_marker);
+      if (markerState === "stale") continue;
+      if (markerState === "unknown") {
+        if (linuxProcessUidState(pid) !== "stale") unknown = true;
+        continue;
+      }
+      const profileState = processProfileState(pid, identity.user_data_dir);
+      if (profileState !== "matching") {
+        unknown = true;
+        continue;
+      }
+      const groupId = readLinuxProcessGroupId(pid);
+      if (identity.process_group_id === "unknown") return "unknown";
+      if (groupId === identity.process_group_id) return "matching";
+      if (groupId === "unknown") unknown = true;
+    }
+  } catch {
+    return "unknown";
+  }
+  return unknown ? "unknown" : "stale";
 }
 
 export function profileProcessIdentityState(
   identity: ProfileProcessIdentity,
   profileDir: string,
+  readers: ProfileProcessIdentityReaders = {},
 ): ProcessIdentityState {
   if (identity.host !== hostname()) return "unknown";
   if (profilePathIdentity(identity.user_data_dir) !== profilePathIdentity(profileDir)) {
     return "stale";
   }
-  const birth = processBirthIdentityState(identity);
-  if (birth !== "matching") return birth;
-  return processProfileState(identity.pid, profileDir);
+  const birth = readers.readBirthState?.(identity) ?? processBirthIdentityState(identity);
+  if (birth === "matching") return processProfileState(identity.pid, profileDir);
+  if (birth === "unknown") return "unknown";
+  if (identity.process_marker === undefined || identity.process_group_id === undefined) {
+    return "stale";
+  }
+  return readers.readGroupMarkerState?.(identity) ?? linuxProfileProcessGroupMarkerState(identity);
 }
 
 export function profileProcessMatches(
@@ -248,9 +318,10 @@ export function signalProfileProcess(
   kill: (pid: number, signal: NodeJS.Signals) => unknown = process.kill,
 ): boolean {
   const leaderMatches = profileProcessMatches(identity, profileDir);
-  const currentProcessGroupId = leaderMatches ? readLinuxProcessGroupId(identity.pid) : null;
+  const currentProcessGroupId = leaderMatches ? readLinuxProcessGroupId(identity.pid) : "stale";
   const markedGroupSurvives =
     !leaderMatches &&
+    typeof identity.process_group_id === "number" &&
     identity.process_group_id === identity.pid &&
     identity.process_marker !== undefined &&
     linuxProcessGroupHasMarker(identity.process_group_id, identity.process_marker);

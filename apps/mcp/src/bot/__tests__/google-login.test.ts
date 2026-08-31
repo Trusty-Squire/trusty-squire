@@ -755,7 +755,7 @@ describe("bot Chrome launch consistency", () => {
 
     expect(markTerminal).toHaveBeenCalledWith(marker);
     expect(context.close).toHaveBeenCalledOnce();
-    expect(terminate).toHaveBeenCalledWith(marker);
+    expect(terminate).toHaveBeenCalledWith(marker, "/isolated-profile");
     expect(untrack).toHaveBeenCalledWith(marker);
   });
 
@@ -809,7 +809,7 @@ describe("bot Chrome launch consistency", () => {
     await vi.advanceTimersByTimeAsync(10);
     await closing;
 
-    expect(terminate).toHaveBeenCalledWith("v1:1:hung-persistent-login");
+    expect(terminate).toHaveBeenCalledWith("v1:1:hung-persistent-login", "/isolated-profile");
     expect(untrack).toHaveBeenCalledWith("v1:1:hung-persistent-login");
   });
 
@@ -817,7 +817,7 @@ describe("bot Chrome launch consistency", () => {
     const events: string[] = [];
 
     await expect(
-      closeLocalBrowserLaunch("v1:1:surviving-login-renderer", {
+      closeLocalBrowserLaunch("v1:1:surviving-login-renderer", "/isolated-profile", {
         markTerminal: () => {
           events.push("terminal");
         },

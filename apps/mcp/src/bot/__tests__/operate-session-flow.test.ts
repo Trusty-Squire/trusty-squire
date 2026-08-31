@@ -963,7 +963,7 @@ import {
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import canonicalize from "canonicalize";
 import { exportJWK, SignJWT } from "jose";
@@ -7304,6 +7304,30 @@ describe("operate session — ephemeral profile lifecycle", () => {
     expect(h.closeCalls).toBe(1);
     expect(activeSessionCount()).toBe(0);
     expect(existsSync(started.snapshot_file!)).toBe(false);
+  });
+
+  it("retries snapshot cleanup after session teardown releases browser custody", async () => {
+    const root = mkdtempSync(join(tmpdir(), "trusty-squire-observe-cleanup-"));
+    const previousObserveDir = process.env.TRUSTY_SQUIRE_OBSERVE_DIR;
+    process.env.TRUSTY_SQUIRE_OBSERVE_DIR = root;
+    let snapshotDir: string | null = null;
+    try {
+      const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+      snapshotDir = dirname(started.snapshot_file!);
+      chmodSync(snapshotDir, 0o000);
+
+      await finishProvisionSession(started.session_id);
+
+      expect(activeSessionCount()).toBe(0);
+      expect(existsSync(snapshotDir)).toBe(true);
+      chmodSync(snapshotDir, 0o700);
+      await vi.waitFor(() => expect(existsSync(snapshotDir!)).toBe(false), { timeout: 2_000 });
+    } finally {
+      if (previousObserveDir === undefined) delete process.env.TRUSTY_SQUIRE_OBSERVE_DIR;
+      else process.env.TRUSTY_SQUIRE_OBSERVE_DIR = previousObserveDir;
+      if (snapshotDir !== null && existsSync(snapshotDir)) chmodSync(snapshotDir, 0o700);
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("writes and destroys every explicitly successful non-payment profile", async () => {

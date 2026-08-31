@@ -142,7 +142,7 @@ function spawnLocalBrowser(
     localBrowserLaunchMarkers.set(child, ownership.marker);
     child.once("exit", () => {
       setTimeout(() => {
-        reconcileOwnerBrowserLaunchAfterLeaderExit(ownership.marker);
+        reconcileOwnerBrowserLaunchAfterLeaderExit(ownership.marker, profileDir);
       }, 0).unref();
     });
     return child;
@@ -162,6 +162,7 @@ function markLocalBrowserLaunchTerminal(child: ChildProcess | null): void {
 
 export async function closeLocalBrowserLaunch(
   marker: string | undefined,
+  profileDir: string,
   runtime: {
     markTerminal?: typeof markOwnerBrowserLaunchTerminal;
     terminate?: typeof terminateOwnerBrowserLaunch;
@@ -170,7 +171,7 @@ export async function closeLocalBrowserLaunch(
 ): Promise<void> {
   if (marker === undefined) return;
   (runtime.markTerminal ?? markOwnerBrowserLaunchTerminal)(marker);
-  if (!(await (runtime.terminate ?? terminateOwnerBrowserLaunch)(marker))) {
+  if (!(await (runtime.terminate ?? terminateOwnerBrowserLaunch)(marker, profileDir))) {
     throw new Error("local login browser closure unproven");
   }
   (runtime.untrack ?? untrackOwnerBrowserLaunch)(marker);
@@ -3393,7 +3394,7 @@ export async function launchSelfManagedLoginContext(params: {
           child?.kill("SIGTERM");
         }
       }
-      await closeLocalBrowserLaunch(launchMarker);
+      await closeLocalBrowserLaunch(launchMarker, params.profileDir);
     })();
     return teardownPromise;
   };
@@ -3633,7 +3634,7 @@ export async function launchPlainLoginBrowser(params: {
       } else if (childProcessIsRunning(child)) {
         child?.kill("SIGTERM");
       }
-      await closeLocalBrowserLaunch(launchMarker);
+      await closeLocalBrowserLaunch(launchMarker, params.profileDir);
     })();
     return teardownPromise;
   };
@@ -16630,7 +16631,8 @@ export class BrowserController {
       if (tracked?.proof === proof) selfManagedChromes.delete(proof.identity.pid);
       if (this.ownedChromeProcessTreeProof === proof) this.ownedChromeProcessTreeProof = null;
     }
-    const markerClosed = !this.ownerLaunchTracked || (await terminateOwnerBrowserLaunch(marker));
+    const markerClosed =
+      !this.ownerLaunchTracked || (await terminateOwnerBrowserLaunch(marker, this.profileDir));
     if (closed && markerClosed && this.ownerLaunchTracked) {
       untrackOwnerBrowserLaunch(marker);
       this.ownerLaunchTracked = false;
@@ -16863,7 +16865,8 @@ export class BrowserController {
         this.ownedChromeProcessTreeProof = null;
       }
     }
-    const markerClosed = !this.ownerLaunchTracked || (await terminateOwnerBrowserLaunch(marker));
+    const markerClosed =
+      !this.ownerLaunchTracked || (await terminateOwnerBrowserLaunch(marker, this.profileDir));
     if (markerClosed && this.ownerLaunchTracked) {
       untrackOwnerBrowserLaunch(marker);
       this.ownerLaunchTracked = false;

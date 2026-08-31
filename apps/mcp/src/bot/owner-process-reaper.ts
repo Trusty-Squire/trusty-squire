@@ -24,6 +24,8 @@ import { sweepOperatorProfilePoolOrphans } from "./operator-profile-pool.js";
 import {
   processBirthIdentity,
   processBirthIdentityState,
+  processProfileState,
+  profilePathIdentity,
   profileProcessIdentityState,
   signalProfileProcess,
   type ProcessIdentityState,
@@ -134,7 +136,9 @@ function isProfileProcessIdentity(value: unknown): value is ProfileProcessIdenti
     (identity.pid ?? 0) > 0 &&
     typeof identity.start_time === "string" &&
     typeof identity.user_data_dir === "string" &&
-    (identity.process_group_id === undefined || Number.isSafeInteger(identity.process_group_id)) &&
+    (identity.process_group_id === undefined ||
+      identity.process_group_id === "unknown" ||
+      Number.isSafeInteger(identity.process_group_id)) &&
     (identity.process_marker === undefined || typeof identity.process_marker === "string")
   );
 }
@@ -428,11 +432,13 @@ interface BrowserIdentityReaders {
   readMarker?: (pid: number) => string | null;
   readMarkerState?: (pid: number) => OperatorBrowserProcessMarkerState;
   readCommandState?: (pid: number) => ProcessIdentityState;
+  readProfileState?: (pid: number, profileDir: string) => ProcessIdentityState;
   readUidState?: (pid: number) => ProcessIdentityState;
 }
 
 function exactMarkerProcessScan(
   marker: string,
+  profileDir: string,
   readers: BrowserIdentityReaders = {},
 ): { matching: number[]; unknown: boolean } {
   if (process.platform !== "linux" && readers.readProcessIds === undefined) {
@@ -459,7 +465,12 @@ function exactMarkerProcessScan(
         continue;
       }
       if (markerState.state !== "present" || markerState.marker !== marker) continue;
-      if (commandState === "matching") matching.push(pid);
+      if (commandState !== "matching") {
+        unknown = true;
+        continue;
+      }
+      const profileState = (readers.readProfileState ?? processProfileState)(pid, profileDir);
+      if (profileState === "matching") matching.push(pid);
       else unknown = true;
     }
   } catch {
@@ -468,45 +479,55 @@ function exactMarkerProcessScan(
   return { matching, unknown };
 }
 
-function exactMarkerProcessIds(marker: string): number[] {
-  return exactMarkerProcessScan(marker).matching;
+function exactMarkerProcessIds(marker: string, profileDir: string): number[] {
+  return exactMarkerProcessScan(marker, profileDir).matching;
 }
 
 export function ownerBrowserLaunchState(
   marker: string,
+  profileDir: string,
   readers: BrowserIdentityReaders = {},
 ): ProcessIdentityState {
-  const scan = exactMarkerProcessScan(marker, readers);
+  const scan = exactMarkerProcessScan(marker, profileDir, readers);
   if (scan.matching.length > 0) return "matching";
   return scan.unknown ? "unknown" : "stale";
 }
 
 export async function terminateOwnerBrowserLaunch(
   marker: string,
+  profileDir: string,
   options: {
     graceMs?: number;
     readProcessIds?: () => number[];
-    processMatches?: (pid: number, marker: string) => boolean;
+    readMarkerState?: (pid: number) => OperatorBrowserProcessMarkerState;
+    readCommandState?: (pid: number) => ProcessIdentityState;
+    readProfileState?: (pid: number, profileDir: string) => ProcessIdentityState;
+    readUidState?: (pid: number) => ProcessIdentityState;
     kill?: (pid: number, signal: NodeJS.Signals) => void;
     wait?: (ms: number) => Promise<void>;
   } = {},
 ): Promise<boolean> {
-  const usesDefaultIdentity =
-    options.readProcessIds === undefined && options.processMatches === undefined;
-  const readProcessIds = options.readProcessIds ?? (() => exactMarkerProcessIds(marker));
-  const processMatches =
-    options.processMatches ??
-    ((pid, expectedMarker) => operatorBrowserProcessMatchesMarker(pid, expectedMarker));
+  const readers: BrowserIdentityReaders = {
+    ...(options.readProcessIds === undefined ? {} : { readProcessIds: options.readProcessIds }),
+    ...(options.readMarkerState === undefined ? {} : { readMarkerState: options.readMarkerState }),
+    ...(options.readCommandState === undefined
+      ? {}
+      : { readCommandState: options.readCommandState }),
+    ...(options.readProfileState === undefined
+      ? {}
+      : { readProfileState: options.readProfileState }),
+    ...(options.readUidState === undefined ? {} : { readUidState: options.readUidState }),
+  };
   const kill = options.kill ?? ((pid, signal) => process.kill(pid, signal));
   const wait =
     options.wait ??
     (async (ms) => await new Promise<void>((resolveWait) => setTimeout(resolveWait, ms)));
   const graceMs =
     options.graceMs ?? envPositiveMs("TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS", DEFAULT_TERM_GRACE_MS);
-  const matching = (): number[] => readProcessIds().filter((pid) => processMatches(pid, marker));
+  const matching = (): number[] => exactMarkerProcessScan(marker, profileDir, readers).matching;
   const signal = (pids: readonly number[], signalName: NodeJS.Signals): void => {
     for (const pid of pids) {
-      if (!processMatches(pid, marker)) continue;
+      if (!matching().includes(pid)) continue;
       try {
         kill(pid, signalName);
       } catch {}
@@ -514,18 +535,18 @@ export async function terminateOwnerBrowserLaunch(
   };
   const initial = matching();
   if (initial.length === 0) {
-    return !usesDefaultIdentity || ownerBrowserLaunchState(marker) === "stale";
+    return ownerBrowserLaunchState(marker, profileDir, readers) === "stale";
   }
   signal(initial, "SIGTERM");
   await wait(graceMs);
   const resistant = matching();
   if (resistant.length === 0) {
-    return !usesDefaultIdentity || ownerBrowserLaunchState(marker) === "stale";
+    return ownerBrowserLaunchState(marker, profileDir, readers) === "stale";
   }
   signal(resistant, "SIGKILL");
   await wait(graceMs);
   return (
-    matching().length === 0 && (!usesDefaultIdentity || ownerBrowserLaunchState(marker) === "stale")
+    matching().length === 0 && ownerBrowserLaunchState(marker, profileDir, readers) === "stale"
   );
 }
 
@@ -535,8 +556,13 @@ function signalTrackedResources(manifest: OwnerReaperManifest, signal: NodeJS.Si
     if (signalProfileProcess(identity, identity.user_data_dir, signal)) signalled += 1;
   }
   for (const launch of manifest.launches) {
-    for (const pid of exactMarkerProcessIds(launch.marker)) {
-      if (!operatorBrowserProcessMatchesMarker(pid, launch.marker)) continue;
+    for (const pid of exactMarkerProcessIds(launch.marker, launch.user_data_dir)) {
+      if (
+        !operatorBrowserProcessMatchesMarker(pid, launch.marker) ||
+        processProfileState(pid, launch.user_data_dir) !== "matching"
+      ) {
+        continue;
+      }
       try {
         process.kill(pid, signal);
         signalled += 1;
@@ -554,7 +580,9 @@ function manifestCleanupComplete(manifest: OwnerReaperManifest): boolean {
     manifest.resources.every(
       (identity) => profileProcessIdentityState(identity, identity.user_data_dir) === "stale",
     ) &&
-    manifest.launches.every((launch) => ownerBrowserLaunchState(launch.marker) === "stale") &&
+    manifest.launches.every(
+      (launch) => ownerBrowserLaunchState(launch.marker, launch.user_data_dir) === "stale",
+    ) &&
     manifest.helpers.every((helper) => ownerHelperIdentityState(helper) === "stale")
   );
 }
@@ -883,7 +911,7 @@ export function startOwnerProcessReaper(
         ...manifest,
         launches: [
           ...manifest.launches.filter((entry) => entry.marker !== marker),
-          { marker, user_data_dir: resolve(profileDir) },
+          { marker, user_data_dir: profilePathIdentity(profileDir) },
         ],
       });
     },
@@ -973,9 +1001,13 @@ export function untrackOwnerBrowserLaunch(marker: string): void {
 
 export function reconcileOwnerBrowserLaunchAfterLeaderExit(
   marker: string,
-  launchState: (marker: string) => ProcessIdentityState = ownerBrowserLaunchState,
+  profileDir: string,
+  launchState: (
+    marker: string,
+    profileDir: string,
+  ) => ProcessIdentityState = ownerBrowserLaunchState,
 ): void {
-  if (launchState(marker) === "stale") untrackOwnerBrowserLaunch(marker);
+  if (launchState(marker, profileDir) === "stale") untrackOwnerBrowserLaunch(marker);
 }
 
 export function spawnOwnerTrackedHelper(

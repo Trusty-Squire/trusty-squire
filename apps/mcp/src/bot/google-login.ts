@@ -128,7 +128,9 @@ export async function launchPersistentLoginContext(
     });
   } catch (error) {
     markTerminal(ownership.marker);
-    if (await terminate(ownership.marker).catch(() => false)) untrack(ownership.marker);
+    if (await terminate(ownership.marker, userDataDir).catch(() => false)) {
+      untrack(ownership.marker);
+    }
     throw error;
   }
   let closing: Promise<void> | undefined;
@@ -139,7 +141,7 @@ export async function launchPersistentLoginContext(
       closing ??= (async () => {
         markTerminal(ownership.marker);
         await closeBrowserContextWithin(context, runtime.closeTimeoutMs);
-        const terminated = await terminate(ownership.marker).catch(() => false);
+        const terminated = await terminate(ownership.marker, userDataDir).catch(() => false);
         if (!terminated) throw new Error("persistent login browser closure unproven");
         untrack(ownership.marker);
       })();

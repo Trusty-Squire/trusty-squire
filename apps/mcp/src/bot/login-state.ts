@@ -224,9 +224,10 @@ export async function clearProviderCookies(
         const marker = registeredOwnership.marker;
         (runtime.markTerminal ?? markOwnerBrowserLaunchTerminal)(marker);
         if (context !== null) await closeBrowserContextWithin(context, runtime.closeTimeoutMs);
-        lifecycleClosed = await (runtime.terminate ?? terminateOwnerBrowserLaunch)(marker).catch(
-          () => false,
-        );
+        lifecycleClosed = await (runtime.terminate ?? terminateOwnerBrowserLaunch)(
+          marker,
+          profileDir,
+        ).catch(() => false);
         if (lifecycleClosed) (runtime.untrack ?? untrackOwnerBrowserLaunch)(marker);
       }
     }

@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -13,8 +13,10 @@ import {
   startOwnerProcessReaper,
   stopOwnerProcessReaper,
   sweepOrphanedOwnerProcesses,
+  terminateOwnerBrowserLaunch,
   trackOwnerBrowserLaunch,
 } from "../owner-process-reaper.js";
+import { profileProcessIdentityState } from "../profile.js";
 
 const testRequire = createRequire(import.meta.url);
 const cleanupDirs: string[] = [];
@@ -67,23 +69,37 @@ describe("owner process reaper contracts", () => {
     expect(shouldReapOwner("unknown")).toBe(false);
   });
 
-  it("retains a browser marker when command or marker identity is unreadable", () => {
+  it("retains a browser marker when command, marker, or profile identity is untrusted", async () => {
     expect(
-      ownerBrowserLaunchState("v1:browser", {
+      ownerBrowserLaunchState("v1:browser", "/expected-profile", {
         readProcessIds: () => [101],
         readCommandState: () => "unknown",
         readMarkerState: () => ({ state: "present", marker: "v1:browser" }),
+        readProfileState: () => "matching",
         readUidState: () => "matching",
       }),
     ).toBe("unknown");
     expect(
-      ownerBrowserLaunchState("v1:browser", {
+      ownerBrowserLaunchState("v1:browser", "/expected-profile", {
         readProcessIds: () => [101],
         readCommandState: () => "matching",
         readMarkerState: () => ({ state: "unknown" }),
+        readProfileState: () => "matching",
         readUidState: () => "matching",
       }),
     ).toBe("unknown");
+    const signals: Array<[number, NodeJS.Signals]> = [];
+    await expect(
+      terminateOwnerBrowserLaunch("v1:browser", "/expected-profile", {
+        readProcessIds: () => [101],
+        readCommandState: () => "matching",
+        readMarkerState: () => ({ state: "present", marker: "v1:browser" }),
+        readProfileState: () => "stale",
+        kill: (pid, signal) => signals.push([pid, signal]),
+        wait: async () => undefined,
+      }),
+    ).resolves.toBe(false);
+    expect(signals).toEqual([]);
   });
 
   it("retains helper custody when its process group cannot be read", () => {
@@ -97,6 +113,23 @@ describe("owner process reaper contracts", () => {
           readMarkerState: () => "unknown",
           readBirthState: () => "matching",
           readUidState: () => "matching",
+        },
+      ),
+    ).toBe("unknown");
+    expect(
+      profileProcessIdentityState(
+        {
+          host: hostname(),
+          pid: 101,
+          start_time: "10",
+          user_data_dir: "/expected-profile",
+          process_group_id: "unknown",
+          process_marker: "v1:browser",
+        },
+        "/expected-profile",
+        {
+          readBirthState: () => "stale",
+          readGroupMarkerState: () => "unknown",
         },
       ),
     ).toBe("unknown");

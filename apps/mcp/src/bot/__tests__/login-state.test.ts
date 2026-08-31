@@ -135,7 +135,7 @@ describe("provider cookie clearing", () => {
         }),
       ).resolves.toBe(false);
       expect(markTerminal).toHaveBeenCalledWith(marker);
-      expect(terminate).toHaveBeenCalledWith(marker);
+      expect(terminate).toHaveBeenCalledWith(marker, dir);
       expect(untrack).toHaveBeenCalledWith(marker);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -162,7 +162,7 @@ describe("provider cookie clearing", () => {
           closeTimeoutMs: 1,
         }),
       ).resolves.toBe(true);
-      expect(terminate).toHaveBeenCalledWith("v1:1:hung-cookie-clear");
+      expect(terminate).toHaveBeenCalledWith("v1:1:hung-cookie-clear", dir);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
