@@ -3647,9 +3647,13 @@ describe("operate session — OAuth lifecycle", () => {
     await vi.waitFor(() => expect(h.storageStateWriteAttempts).toBe(1));
     await terminalFailure;
     expect(h.storageStateWrites).toEqual([]);
+    expect(() => acquireProfileOperationGuard(canonical)).toThrow(/another Trusty Squire session/i);
 
     releaseWrite();
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await vi.waitFor(() => {
+      const lease = acquireProfileOperationGuard(canonical);
+      lease.release();
+    });
     expect(h.storageStateWrites).toEqual([]);
   });
 
@@ -4007,6 +4011,59 @@ describe("operate session — OAuth lifecycle", () => {
     await Promise.all([firstAct, secondAct]);
     await finishProvisionSession(first.session_id);
     await finishProvisionSession(second.session_id);
+  });
+
+  it("holds the full cooldown after a timed-out owner quiesces", async () => {
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1000";
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "120";
+    h.visibleText = "Continue";
+    h.elements = [
+      elem({
+        visibleText: "Continue",
+        labelText: "Continue",
+        role: "button",
+        selector: "#oauth",
+      }),
+    ];
+    let releaseOwner!: () => void;
+    h.oauthLoginGates.set(
+      2,
+      new Promise<void>((resolve) => {
+        releaseOwner = resolve;
+      }),
+    );
+    const owner = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+    const successor = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+    });
+    const owningAction = act(owner.session_id, {
+      kind: "oauth_login",
+      target: "Continue",
+      provider: "google",
+    });
+    const owningFailure = owningAction.catch((error: unknown) => error);
+    await vi.waitFor(() => expect(h.oauthLoginCalls).toEqual(["#oauth"]));
+
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "3000";
+    const successorAction = act(successor.session_id, {
+      kind: "oauth_login",
+      target: "Continue",
+      provider: "github",
+    });
+    const terminalError = await owningFailure;
+    expect(terminalError).toBeInstanceOf(Error);
+    expect((terminalError as Error).message).toMatch(/google_session.*re-login/i);
+    const quiescedAt = Date.now();
+    releaseOwner();
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 75));
+    expect(h.oauthLoginCalls).toEqual(["#oauth"]);
+    await vi.waitFor(() => expect(h.oauthLoginCalls).toEqual(["#oauth", "#oauth"]));
+    expect(Date.now() - quiescedAt).toBeGreaterThanOrEqual(100);
+
+    await successorAction;
+    await finishProvisionSession(owner.session_id).catch(() => undefined);
+    await finishProvisionSession(successor.session_id);
   });
 
   it("does not infer a provider from destination URLs inside the leased action", async () => {

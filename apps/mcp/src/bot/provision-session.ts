@@ -929,15 +929,10 @@ function oauthLoginLeaseCooldownMs(): number {
     : DEFAULT_OAUTH_LOGIN_LEASE_COOLDOWN_MS;
 }
 
-async function waitForOAuthLeaseCooldown(
-  cooldownMs: number,
-  deadline?: OAuthActionDeadline,
-): Promise<void> {
-  const boundedMs =
-    deadline === undefined ? cooldownMs : Math.min(cooldownMs, oauthActionRemainingMs(deadline));
-  if (boundedMs <= 0) return;
+async function waitForOAuthLeaseCooldown(cooldownMs: number): Promise<void> {
+  if (cooldownMs <= 0) return;
   await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, boundedMs);
+    const timer = setTimeout(resolve, cooldownMs);
     timer.unref();
   });
 }
@@ -945,6 +940,7 @@ async function waitForOAuthLeaseCooldown(
 async function withOAuthActionLease<T>(
   deadline: OAuthActionDeadline | undefined,
   run: () => Promise<T>,
+  releaseCooldownMs = 0,
 ): Promise<T> {
   let release!: () => void;
   const previous = oauthActionLeaseTail;
@@ -964,7 +960,9 @@ async function withOAuthActionLease<T>(
     } else if (!acquired) {
       void previous.then(release, release);
     } else {
-      void waitForOAuthActionQuiescence(deadline).then(release, release);
+      void waitForOAuthActionQuiescence(deadline)
+        .then(() => waitForOAuthLeaseCooldown(releaseCooldownMs))
+        .then(release, release);
     }
   }
 }
@@ -991,33 +989,25 @@ async function withCanonicalProfileOperation<T>(
       if (!(error instanceof ProfileBusyError)) throw error;
     }
     if (lease !== undefined) {
-      let operation: Promise<T> | undefined;
-      let operationSettled = false;
-      const releaseLease = async (): Promise<void> => {
-        await waitForOAuthLeaseCooldown(releaseCooldownMs, deadline);
+      let released = false;
+      const release = (): void => {
+        if (released) return;
+        released = true;
         lease.release();
       };
+      const releaseLease = async (): Promise<void> => {
+        if (deadline !== undefined) await waitForOAuthActionQuiescence(deadline);
+        await waitForOAuthLeaseCooldown(releaseCooldownMs);
+        release();
+      };
       try {
-        operation = Promise.resolve().then(run);
-        void operation.then(
-          () => {
-            operationSettled = true;
-          },
-          () => {
-            operationSettled = true;
-          },
-        );
+        const operation = Promise.resolve().then(run);
         return deadline === undefined
           ? await operation
           : await withinOAuthActionDeadline(operation, deadline);
       } finally {
-        if (deadline !== undefined && operation !== undefined && !operationSettled) {
-          const deferredRelease = operation.then(releaseLease, releaseLease);
-          trackOAuthActionPromise(deadline, deferredRelease);
-          void deferredRelease.catch(() => undefined);
-        } else {
-          await releaseLease();
-        }
+        if (deadline === undefined) await releaseLease();
+        else void releaseLease().catch(release);
       }
     }
     const retryMs = deadline === undefined ? 100 : Math.min(100, oauthActionRemainingMs(deadline));
@@ -1035,36 +1025,38 @@ async function withOAuthActionBoundary<T>(
   run: (deadline: OAuthActionDeadline) => Promise<T>,
 ): Promise<T> {
   const deadline = oauthActionDeadline(provider);
-  return await withOAuthActionLease(deadline, async () => {
-    const unregisterCancellation = registerOAuthActionCancellation(deadline, () =>
-      quiesceOAuthActionBrowser(session.browser),
-    );
-    const generation = provisionStartGeneration();
-    const canContinue = (): boolean =>
-      oauthActionCanMutate(deadline) &&
-      shutdownInProgress === 0 &&
-      generation === shutdownGeneration &&
-      !session.closing &&
-      sessions.get(session.id) === session;
-    const ephemeral = leasedBrowsers.get(session.browser);
-    try {
-      if (ephemeral === undefined) {
-        return await withinOAuthActionDeadline(run(deadline), deadline);
-      }
-      return await withCanonicalProfileOperation(
-        ephemeral.canonicalProfileDir,
-        () => run(deadline),
-        canContinue,
-        oauthLoginLeaseCooldownMs(),
-        deadline,
+  const releaseCooldownMs = oauthLoginLeaseCooldownMs();
+  return await withOAuthActionLease(
+    deadline,
+    async () => {
+      const unregisterCancellation = registerOAuthActionCancellation(deadline, () =>
+        quiesceOAuthActionBrowser(session.browser),
       );
-    } finally {
-      if (ephemeral === undefined) {
-        await waitForOAuthLeaseCooldown(oauthLoginLeaseCooldownMs(), deadline);
+      const generation = provisionStartGeneration();
+      const canContinue = (): boolean =>
+        oauthActionCanMutate(deadline) &&
+        shutdownInProgress === 0 &&
+        generation === shutdownGeneration &&
+        !session.closing &&
+        sessions.get(session.id) === session;
+      const ephemeral = leasedBrowsers.get(session.browser);
+      try {
+        if (ephemeral === undefined) {
+          return await withinOAuthActionDeadline(run(deadline), deadline);
+        }
+        return await withCanonicalProfileOperation(
+          ephemeral.canonicalProfileDir,
+          () => run(deadline),
+          canContinue,
+          releaseCooldownMs,
+          deadline,
+        );
+      } finally {
+        unregisterCancellation();
       }
-      unregisterCancellation();
-    }
-  });
+    },
+    releaseCooldownMs,
+  );
 }
 
 async function withCanonicalSnapshotPublication<T>(

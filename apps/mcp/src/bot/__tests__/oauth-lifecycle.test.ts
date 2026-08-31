@@ -271,6 +271,36 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it("does not dispatch a DOM fallback click after its consent budget expires", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await product.setContent(`
+      <a id="consent" href="#approved">Continue</a>
+      <script>
+        const consent = document.querySelector("#consent");
+        consent.addEventListener("click", (event) => {
+          event.preventDefault();
+          document.body.dataset.consentClicks = String(
+            Number(document.body.dataset.consentClicks || "0") + 1
+          );
+        });
+        consent.getBoundingClientRect = () => {
+          const end = Date.now() + 30;
+          while (Date.now() < end) {}
+          return { x: 0, y: 0, top: 0, left: 0, right: 100, bottom: 30, width: 100, height: 30 };
+        };
+      </script>
+    `);
+    const controller = BrowserController.fromHarnessPage(product);
+
+    try {
+      await expect(controller.advanceOAuthConsent("google", 5)).resolves.toBe(false);
+      await expect(product.locator("body").getAttribute("data-consent-clicks")).resolves.toBeNull();
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
   it("returns a re-login result when Google never reaches its OAuth completion signal", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();

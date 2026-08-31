@@ -15509,6 +15509,12 @@ export class BrowserController {
     const productUrl = product.url();
     const oauthStartedAt = Date.now();
     const oauthDeadline = oauthStartedAt + oauthBudgetMs;
+    const deadlineError = (): Error =>
+      consentProvider === "google"
+        ? new OAuthSessionExpiredError(oauthBudgetMs)
+        : new Error(
+            `OAuth login is still awaiting the provider after ${Math.ceil(oauthBudgetMs / 1000)} seconds. Retry oauth_login; do not read or close the browser session.`,
+          );
     this.traceOAuthPhase("login_start", { page: productUrl });
     let recovery: Page | null = null;
     let providerPage: Page | null = null;
@@ -15539,6 +15545,7 @@ export class BrowserController {
       };
       context.on("page", onPopup);
       try {
+        if (Date.now() >= oauthDeadline) throw deadlineError();
         try {
           await this.click(selector);
         } catch (error) {
@@ -15587,7 +15594,8 @@ export class BrowserController {
           );
           if (settled !== null || transient.isClosed()) break;
           productDeparted = productDeparted || !this.isOAuthProductUrl(transient.url(), productUrl);
-          const consentBudgetMs = Math.max(1, deadline - Date.now());
+          if (Date.now() >= deadline) break;
+          const consentBudgetMs = deadline - Date.now();
           const advanced = await this.advanceOAuthConsent(consentProvider, consentBudgetMs).catch(
             () => false,
           );
@@ -15605,18 +15613,14 @@ export class BrowserController {
           transport: providerPage === null ? "same_tab" : "popup",
           page: transient.isClosed() ? "closed" : transient.url(),
         });
-        if (consentProvider === "google") {
-          throw new OAuthSessionExpiredError(oauthBudgetMs);
-        }
-        throw new Error(
-          `OAuth login is still awaiting the provider after ${Math.ceil(oauthBudgetMs / 1000)} seconds. Retry oauth_login; do not read or close the browser session.`,
-        );
+        throw deadlineError();
       }
       this.traceOAuthPhase("login_settled", {
         elapsed_ms: Date.now() - oauthStartedAt,
         result: settled,
       });
       if (providerPage === null && product.isClosed()) {
+        if (Date.now() >= oauthDeadline) throw deadlineError();
         await recovery.reload({
           waitUntil: "domcontentloaded",
           timeout: Math.max(1, oauthDeadline - Date.now()),
@@ -16419,9 +16423,11 @@ export class BrowserController {
   // hang. Clicks only; never types (the critical guarantee holds here).
   async advanceOAuthConsent(provider: OAuthProviderId, timeoutMs = 8_000): Promise<boolean> {
     if (!this.page) throw new Error("Browser not started");
-    const deadline = Date.now() + Math.max(1, timeoutMs);
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    const hasBudget = (): boolean => Date.now() < deadline;
     const boundedTimeout = (limitMs: number): number =>
       Math.max(1, Math.min(limitMs, deadline - Date.now()));
+    if (!hasBudget()) return false;
     if (provider === "github") {
       // GitHub App install flow can include an account target chooser before
       // the Install/Authorize screen:
@@ -16431,8 +16437,10 @@ export class BrowserController {
       // consent loop re-classify the next GitHub page.
       if (/\/apps\/[^/]+\/installations\/select_target\b/.test(new URL(this.page.url()).pathname)) {
         const startUrl = this.page.url();
+        if (!hasBudget()) return false;
         const clicked = await this.page
-          .evaluate(() => {
+          .evaluate((expiresAt) => {
+            if (Date.now() >= expiresAt) return false;
             const visible = (el: HTMLElement): boolean => {
               const r = el.getBoundingClientRect();
               const s = window.getComputedStyle(el);
@@ -16463,9 +16471,10 @@ export class BrowserController {
                 return true;
               });
             if (target === undefined) return false;
+            if (Date.now() >= expiresAt) return false;
             target.click();
             return true;
-          })
+          }, deadline)
           .catch(() => false);
         if (clicked) {
           const advanced = await this.page
@@ -16519,6 +16528,7 @@ export class BrowserController {
             await this.sleep(400);
           }
         }
+        if (!hasBudget()) return false;
         try {
           await btn.click({ timeout: boundedTimeout(8_000) });
         } catch {
@@ -16569,6 +16579,7 @@ export class BrowserController {
     // stable data-identifier attribute (the account email).
     const tile = this.page.locator("[data-identifier]").first();
     if ((await tile.count().catch(() => 0)) > 0) {
+      if (!hasBudget()) return false;
       try {
         await tile.click({ timeout: boundedTimeout(1_000) });
         return true;
@@ -16608,6 +16619,7 @@ export class BrowserController {
       })
       .catch(() => -1);
     if (accountRowIndex >= 0) {
+      if (!hasBudget()) return false;
       try {
         await accountRows.nth(accountRowIndex).click({ timeout: boundedTimeout(1_000) });
         return true;
@@ -16631,6 +16643,7 @@ export class BrowserController {
       // not visible within the window — fall through to the DOM-scan path
     }
     if ((await approve.count().catch(() => 0)) > 0) {
+      if (!hasBudget()) return false;
       try {
         await approve.click({ timeout: boundedTimeout(1_000) });
         return true;
@@ -16643,8 +16656,10 @@ export class BrowserController {
     // <div role>/<span> or an <input type=submit value="Allow access">).
     // Click the first visible candidate whose text is an approve verb and
     // is NOT a cancel/deny/back. Log what was visible on failure.
+    if (!hasBudget()) return false;
     const clicked = await this.page
-      .evaluate(() => {
+      .evaluate((expiresAt) => {
+        if (Date.now() >= expiresAt) return null;
         const APPROVE = /^(?:continue|allow|accept|agree)\b/i;
         const DENY = /\b(?:cancel|deny|back|no\b|not now|reject)\b/i;
         const els = Array.from(
@@ -16657,12 +16672,13 @@ export class BrowserController {
           if (t.length === 0 || t.length > 40) continue;
           if (DENY.test(t)) continue;
           if (APPROVE.test(t)) {
+            if (Date.now() >= expiresAt) return null;
             (el as HTMLElement).click();
             return t.slice(0, 40);
           }
         }
         return null;
-      })
+      }, deadline)
       .catch(() => null);
     if (clicked !== null) return true;
     const seen = await this.page
