@@ -1309,7 +1309,7 @@ async function runJit(cfg: {
   let clock = 0;
   let summaryReads = 0;
   const serverExpiresAt = new Date(
-    (cfg.cardRefArg === undefined ? cfg.jitApprovalTimeoutMs : cfg.approvalTimeoutMs) ?? 8.64e15,
+    (cfg.cardRefArg === undefined ? cfg.jitApprovalTimeoutMs : cfg.approvalTimeoutMs) ?? 86_400_000,
   ).toISOString();
 
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -2197,6 +2197,7 @@ describe("operate_pay bounded approval continuation [P0]", () => {
   it("returns an in-flight denial even after the local deadline passes", async () => {
     const env = buildResumableEnv();
     env.setDenied();
+    const onApprovalTerminal = vi.fn();
 
     await expect(
       executeOperatePay(baseArgs, env.api, env.browser, {
@@ -2205,12 +2206,17 @@ describe("operate_pay bounded approval continuation [P0]", () => {
         vouchflowExpectedAudience: "customer_test",
         webBase: "https://web.test",
         surfaceApprovalUrl: vi.fn(),
+        onApprovalTerminal,
         now: () => Date.parse(env.expiresAt) + 1,
       }),
     ).resolves.toMatchObject({
       status: "payment_approval_denied",
       approval_id: "appr_resume",
     });
+    expect(onApprovalTerminal).toHaveBeenCalledWith(
+      expect.objectContaining({ approval_id: "appr_resume" }),
+      "denied",
+    );
     expect(env.filledCards).toHaveLength(0);
   });
 
@@ -2390,6 +2396,7 @@ describe("operate_pay bounded approval continuation [P0]", () => {
     env.setPendingApproved();
     const deadline = Date.parse(env.expiresAt);
     now = deadline - 1;
+    const onApprovalTerminal = vi.fn();
     vi.mocked(env.browser.fillAndSubmitCheckout).mockImplementation(async (_card, options) => {
       now = deadline;
       options?.beforeSubmitDispatch?.();
@@ -2404,10 +2411,15 @@ describe("operate_pay bounded approval continuation [P0]", () => {
       surfaceApprovalUrl: vi.fn(),
       resumeFrom: pending,
       pollBudgetMs: 0,
+      onApprovalTerminal,
       now: () => now,
     });
 
     expect(result).toMatchObject({ status: "payment_approval_timeout" });
+    expect(onApprovalTerminal).toHaveBeenCalledWith(
+      expect.objectContaining({ approval_id: "appr_resume" }),
+      "expired",
+    );
     expect(env.browser.fillAndSubmitCheckout).toHaveBeenCalledOnce();
     expect(env.filledCards).toEqual([]);
   });

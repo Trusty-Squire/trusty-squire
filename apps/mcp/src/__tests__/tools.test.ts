@@ -258,6 +258,22 @@ vi.mock("../bot/provision-session.js", async (importOriginal) => {
       state.paymentLease = null;
       state.awaitingApproval = approval;
     },
+    completeActivePaymentLeaseWithTerminalApproval: (
+      lease: { phase: "fill_card" | "single" },
+      approval: PendingApprovalWait,
+      terminalStatus: "denied" | "expired",
+      session?: ProvisionSession.Session,
+    ) => {
+      const state = paymentSessionState(session);
+      if (state.paymentLease !== lease) {
+        throw new Error(
+          "operate_pay terminal approval completed without ownership of the active payment lease",
+        );
+      }
+      approval.keypair.privateKey = "";
+      state.paymentLease = null;
+      state.terminalApproval = { state: approval, terminalStatus };
+    },
     getActivePendingApproval: (session?: ProvisionSession.Session) =>
       paymentSessionState(session).awaitingApproval,
     getTerminalPaymentApproval: (session?: ProvisionSession.Session) =>
@@ -710,7 +726,7 @@ describe("operate_pay server-owned approval wait [P0] — tool wiring", () => {
     );
   });
 
-  it("replaces an expired approval with a new notified approval whose resource exists", async () => {
+  it("keeps an approval terminal when it expires between continuation calls", async () => {
     const createPaymentApproval = vi
       .fn()
       .mockResolvedValueOnce({
@@ -756,22 +772,22 @@ describe("operate_pay server-owned approval wait [P0] — tool wiring", () => {
       notifyUser,
       paymentApprovalWaitMs: 0,
     })) as Record<string, unknown>;
+    const expiredState = mockAwaitingApproval;
     const second = (await operatePayTool.handler(args, api, {
       notifyUser,
       paymentApprovalWaitMs: 0,
     })) as Record<string, unknown>;
 
     expect(first).toMatchObject({ status: "approval_pending", approval_id: "appr_expired" });
-    expect(second).toMatchObject({ status: "approval_pending", approval_id: "appr_fresh" });
-    expect(createPaymentApproval).toHaveBeenCalledTimes(2);
+    expect(second).toMatchObject({ status: "payment_approval_timeout" });
+    expect(createPaymentApproval).toHaveBeenCalledOnce();
     expect(getPaymentApproval).toHaveBeenNthCalledWith(1, "appr_expired", "immediate");
     expect(getPaymentApproval).toHaveBeenNthCalledWith(2, "appr_expired");
-    expect(getPaymentApproval).toHaveBeenNthCalledWith(3, "appr_fresh", "immediate");
-    expect(notifyUser).toHaveBeenCalledTimes(2);
-    expect(notifyUser).toHaveBeenLastCalledWith(
-      "Approve payment using Personal on your phone: https://trustysquire.ai/vault/pay/appr_fresh",
-      { approval_url: "https://trustysquire.ai/vault/pay/appr_fresh" },
-    );
+    expect(notifyUser).toHaveBeenCalledOnce();
+    expect(expiredState?.keypair.privateKey).toBe("");
+    expect(mockAwaitingApproval).toBeNull();
+    expect(mockTerminalApproval).toEqual({ state: expiredState, terminalStatus: "expired" });
+    expect(mockPaymentLease).toBeNull();
   });
 
   it("replaces a missing resumed approval and only returns the existing replacement", async () => {
@@ -1019,6 +1035,72 @@ describe("operate_pay server-owned approval wait [P0] — tool wiring", () => {
     expect(resumeApproval.keypair.privateKey).toBe("");
     expect(mockPaymentLease).toBeNull();
   });
+
+  it.each([
+    ["denied", "payment_approval_denied"],
+    ["expired", "payment_approval_timeout"],
+  ] as const)(
+    "keeps a resumed %s approval terminal instead of minting another approval",
+    async (terminalStatus, resultStatus) => {
+      const resumeApproval: PendingApprovalWait = {
+        approval_id: `appr_${terminalStatus}`,
+        approval_url: `https://web.test/pay/appr_${terminalStatus}`,
+        nonce: `nonce_${terminalStatus}`,
+        agent: `agent_${terminalStatus}`,
+        checkout: {
+          merchant: "M",
+          checkout_origin: "https://m.test",
+          amount_cents: 100,
+          currency: "USD",
+        },
+        jit: false,
+        boundCardRef: "card_1",
+        deadline: Date.now() + 600_000,
+        rejectedCandidates: [],
+        keypair: { publicKey: "public", privateKey: "private" },
+        item: PAYMENT_DETAILS.item,
+        reason: PAYMENT_DETAILS.reason,
+        cardRef: "card_1",
+      };
+      mockAwaitingApproval = resumeApproval;
+      const createPaymentApproval = vi.fn();
+      const api = makeMockApi({
+        listPaymentCards: vi.fn().mockResolvedValue([{ id: "card_1", label: "Personal" }]),
+        getPaymentConfig: vi.fn().mockResolvedValue({ vouchflow_audience: "cust" }),
+        createPaymentApproval,
+        getPaymentApproval: vi.fn(async () => ({
+          id: resumeApproval.approval_id,
+          status: terminalStatus,
+          merchant: "M",
+          checkout_origin: "https://m.test",
+          amount_cents: 100,
+          currency: "USD",
+          nonce: resumeApproval.nonce,
+          card_ref: "card_1",
+          operator_pubkey: "public",
+          jws: null,
+          sealed_card: null,
+          expires_at: new Date(
+            terminalStatus === "expired" ? Date.now() - 1_000 : Date.now() + 600_000,
+          ).toISOString(),
+        })),
+      } as unknown as ApiClient);
+
+      const result = await operatePayTool.handler(
+        operatePayTool.inputSchema.parse(PAYMENT_DETAILS),
+        api,
+      );
+      expect(result).toMatchObject({ status: resultStatus });
+      if (terminalStatus === "denied") {
+        expect(result).toMatchObject({ approval_id: resumeApproval.approval_id });
+      }
+      expect(createPaymentApproval).not.toHaveBeenCalled();
+      expect(resumeApproval.keypair.privateKey).toBe("");
+      expect(mockAwaitingApproval).toBeNull();
+      expect(mockTerminalApproval).toEqual({ state: resumeApproval, terminalStatus });
+      expect(mockPaymentLease).toBeNull();
+    },
+  );
 
   it("returns the persisted cart URL with the safe total-observation action", async () => {
     mockCartCheckout = {

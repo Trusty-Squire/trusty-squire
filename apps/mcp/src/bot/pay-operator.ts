@@ -172,6 +172,10 @@ interface PayDependencies {
   // [P0] Fired when a call ends still-pending (poll budget exhausted, human
   // hasn't responded yet) so the session layer can persist resumable state.
   onApprovalPending: (state: PendingApprovalWait) => void;
+  // Fired when a denial or expiry becomes terminal while this call owns the
+  // payment lease. The session layer keeps that attempt terminal instead of
+  // releasing custody into an automatic replacement-approval path.
+  onApprovalTerminal: (state: PendingApprovalWait, terminalStatus: "denied" | "expired") => void;
   onThreeDsHandoffArmed: (state: PendingThreeDsWait) => void;
   coordinateThreeDsAudit: (state: PendingThreeDsWait, audit: () => Promise<void>) => Promise<void>;
   // Fired when the submit-time waitForThreeDsResolution wait exhausts its
@@ -518,6 +522,22 @@ function approvalDeniedResult(
   };
 }
 
+function approvalExpiredResult(
+  approvalUrl: string,
+  checkout: CheckoutSummary,
+  jit: boolean,
+  boundCardRef: string | null,
+): Record<string, unknown> {
+  const base: Record<string, unknown> = {
+    status: "payment_approval_timeout",
+    approval_url: approvalUrl,
+    merchant: checkout.merchant,
+    amount_cents: checkout.amount_cents,
+    currency: checkout.currency,
+  };
+  return jit && hasBoundCard(boundCardRef) ? { ...base, card_persisted: true } : base;
+}
+
 function isPaymentApprovalDeniedError(error: unknown): boolean {
   return error instanceof ApiCallError && error.code === "payment_approval_denied";
 }
@@ -702,6 +722,7 @@ function defaultDependencies(): PayDependencies {
     onCardFillCleanupFailed: () => undefined,
     onSubmitStarted: () => undefined,
     onApprovalPending: () => undefined,
+    onApprovalTerminal: () => undefined,
     onThreeDsHandoffArmed: () => undefined,
     coordinateThreeDsAudit: async (_state, audit) => await audit(),
     onThreeDsPending: () => undefined,
@@ -780,10 +801,26 @@ export async function executeOperatePay(
       let reusable = false;
       try {
         const live = await api.getPaymentApproval(resume.approval_id);
-        if (live.status === "denied") {
+        const liveDeadline = Date.parse(live.expires_at);
+        const terminalStatus =
+          live.status === "denied"
+            ? "denied"
+            : live.status === "expired" ||
+                (Number.isFinite(liveDeadline) ? liveDeadline : resume.deadline) <= deps.now()
+              ? "expired"
+              : null;
+        if (terminalStatus !== null) {
+          deps.onApprovalTerminal(resume, terminalStatus);
           resumableState = undefined;
           keypairHandedOff = false;
-          return approvalDeniedResult(resume.approval_id, resume.approval_url, resume.checkout);
+          return terminalStatus === "denied"
+            ? approvalDeniedResult(resume.approval_id, resume.approval_url, resume.checkout)
+            : approvalExpiredResult(
+                resume.approval_url,
+                resume.checkout,
+                resume.jit,
+                resume.boundCardRef,
+              );
         }
         reusable = isLiveResumableApproval(live, resume, deps.now());
       } catch (error) {
@@ -935,23 +972,24 @@ export async function executeOperatePay(
           "the add-card link expired before a card was added",
         );
       }
-      const base: Record<string, unknown> = {
-        status: "payment_approval_timeout",
-        approval_url: approvalUrl,
-        merchant: checkout.merchant,
-        amount_cents: checkout.amount_cents,
-        currency: checkout.currency,
-      };
       // JIT + a bound card = the user added a card but never approved. The card
-      // stays in the vault, so the retry is a fast has-card approval.
-      return jit ? { ...base, card_persisted: true } : base;
+      // stays in the vault even though this approval attempt is terminal.
+      return approvalExpiredResult(approvalUrl, checkout, jit, boundCardRef);
     };
     const approvalExpired = (): boolean => deps.now() >= deadline;
-    const expiredApprovalResult = (): Record<string, unknown> => {
+    let terminalApprovalState: PendingApprovalWait | undefined;
+    const terminalApprovalResult = (
+      terminalStatus: "denied" | "expired",
+    ): Record<string, unknown> => {
+      const state = resumableState?.() ?? terminalApprovalState;
+      if (state !== undefined) deps.onApprovalTerminal(state, terminalStatus);
       resumableState = undefined;
       keypairHandedOff = false;
-      return timeoutResult();
+      return terminalStatus === "denied"
+        ? approvalDeniedResult(approvalId, approvalUrl, checkout)
+        : timeoutResult();
     };
+    const expiredApprovalResult = (): Record<string, unknown> => terminalApprovalResult("expired");
 
     let approved: { jws: string; sealed_card: string; card_ref: string | null } | undefined;
     let claims: JWTPayload | undefined;
@@ -996,9 +1034,7 @@ export async function executeOperatePay(
       if (Number.isFinite(liveDeadline)) deadline = Math.min(deadline, liveDeadline);
       boundCardRef = approval.card_ref;
       if (approval.status === "denied") {
-        resumableState = undefined;
-        keypairHandedOff = false;
-        return approvalDeniedResult(approvalId, approvalUrl, checkout);
+        return terminalApprovalResult("denied");
       }
       if (approval.status === "expired" || approvalExpired()) {
         return expiredApprovalResult();
@@ -1167,9 +1203,7 @@ export async function executeOperatePay(
               } catch (error) {
                 candidateCardBytes.fill(0);
                 if (isPaymentApprovalDeniedError(error)) {
-                  resumableState = undefined;
-                  keypairHandedOff = false;
-                  return approvalDeniedResult(approvalId, approvalUrl, checkout);
+                  return terminalApprovalResult("denied");
                 }
                 const failureReason =
                   error instanceof Error && /404|409/.test(error.message)
@@ -1214,9 +1248,7 @@ export async function executeOperatePay(
               } catch (error) {
                 if (isPaymentApprovalDeniedError(error)) {
                   candidateCardBytes.fill(0);
-                  resumableState = undefined;
-                  keypairHandedOff = false;
-                  return approvalDeniedResult(approvalId, approvalUrl, checkout);
+                  return terminalApprovalResult("denied");
                 }
                 try {
                   const reconciliation = await api.confirmPaymentApproval(approvalId, candidate);
@@ -1224,9 +1256,7 @@ export async function executeOperatePay(
                 } catch (reconciliationError) {
                   candidateCardBytes.fill(0);
                   if (isPaymentApprovalDeniedError(reconciliationError)) {
-                    resumableState = undefined;
-                    keypairHandedOff = false;
-                    return approvalDeniedResult(approvalId, approvalUrl, checkout);
+                    return terminalApprovalResult("denied");
                   }
                   // The initial confirm may have actually gone through server-side (its
                   // response was merely lost) even though reconciliation couldn't prove
@@ -1325,9 +1355,7 @@ export async function executeOperatePay(
           boundCardRef = final.card_ref;
         } catch {}
       }
-      resumableState = undefined;
-      keypairHandedOff = false;
-      return timeoutResult();
+      return expiredApprovalResult();
     }
 
     if (claims === undefined || card === undefined) {
@@ -1335,6 +1363,7 @@ export async function executeOperatePay(
       keypairHandedOff = false;
       return timeoutResult();
     }
+    terminalApprovalState = resumableState?.();
     resumableState = undefined;
     keypairHandedOff = false;
 

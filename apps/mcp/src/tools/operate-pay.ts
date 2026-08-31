@@ -9,6 +9,7 @@ import {
   completeActivePendingApprovalWithTerminalStatus,
   completeActivePaymentLeaseWithPendingApproval,
   completeActivePaymentLeaseWithPendingFill,
+  completeActivePaymentLeaseWithTerminalApproval,
   coordinatePaymentDispatchAudit,
   finishPaymentDispatchHandoff,
   getActivePendingApproval,
@@ -429,6 +430,15 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
             },
             onApprovalPending: (state) => {
               approvalPending = state;
+            },
+            onApprovalTerminal: (state, terminalStatus) => {
+              completeActivePaymentLeaseWithTerminalApproval(
+                paymentLease,
+                state,
+                terminalStatus,
+                session,
+              );
+              paymentLeaseCompleted = true;
             },
             onThreeDsHandoffArmed: (state) => {
               paymentDispatchHandoff = state;

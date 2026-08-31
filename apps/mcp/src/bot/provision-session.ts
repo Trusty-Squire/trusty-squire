@@ -4129,6 +4129,23 @@ export function completeActivePendingApprovalWithTerminalStatus(
   return true;
 }
 
+export function completeActivePaymentLeaseWithTerminalApproval(
+  lease: ActivePaymentLease,
+  state: PendingApprovalWait,
+  terminalStatus: "denied" | "expired",
+  selectedSession?: Session,
+): void {
+  const session = selectedSession ?? activeProvisionSession();
+  const activePayment = session.activePayment;
+  if (activePayment?.status !== "operating" || activePayment.lease !== lease) {
+    throw new Error(
+      "operate_pay terminal approval completed without ownership of the active payment lease",
+    );
+  }
+  state.keypair.privateKey = "";
+  session.activePayment = { status: "terminal_approval", state, terminalStatus };
+}
+
 export function getActivePendingThreeDs(selectedSession?: Session): PendingThreeDsWait | null {
   return (selectedSession ?? activeProvisionSession()).pendingThreeDs ?? null;
 }
