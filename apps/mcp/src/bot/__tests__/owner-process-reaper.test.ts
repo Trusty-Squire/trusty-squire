@@ -171,7 +171,7 @@ describe("owner process startup sweep", () => {
   );
 
   it.skipIf(process.platform !== "linux")(
-    "restarts a ready worker immediately while existing custody remains registered",
+    "restarts a ready worker immediately while live custody remains registered",
     async () => {
       const root = await mkdtemp(join(tmpdir(), "trusty-squire-reaper-test-"));
       cleanup.push(root);
@@ -184,22 +184,36 @@ describe("owner process startup sweep", () => {
 
       const reaper = startOwnerProcessReaper({ rootDir: root, workerPath });
       expect(reaper).not.toBeNull();
-      trackOwnerBrowserLaunch("v1:1:worker-restarted", join(root, "profile"));
-      expect(readFileSync(join(root, "worker-count"), "utf8")).toBe("2");
-      const firstWorkerPid = Number(readFileSync(join(root, "worker-1.pid"), "utf8"));
-      process.kill(firstWorkerPid, "SIGKILL");
-      await vi.waitFor(() => expect(processIsGone(firstWorkerPid)).toBe(true), { timeout: 2_000 });
-      await vi.waitFor(() => expect(readFileSync(join(root, "worker-count"), "utf8")).toBe("3"), {
-        timeout: 5_000,
-      });
-
-      expect(reaper!.isAvailable()).toBe(true);
-      const manifest = JSON.parse(readFileSync(reaper!.manifestPath, "utf8")) as {
-        launches: Array<{ marker: string }>;
-      };
-      expect(manifest.launches).toEqual([
-        expect.objectContaining({ marker: "v1:1:worker-restarted" }),
+      const helper = spawnOwnerTrackedHelper(process.execPath, [
+        "-e",
+        "setInterval(() => undefined, 1000)",
       ]);
+      try {
+        expect(ownerTrackedHelperState(helper)).toBe("matching");
+        expect(readFileSync(join(root, "worker-count"), "utf8")).toBe("2");
+        const firstWorkerPid = Number(readFileSync(join(root, "worker-1.pid"), "utf8"));
+        process.kill(firstWorkerPid, "SIGKILL");
+        await vi.waitFor(() => expect(processIsGone(firstWorkerPid)).toBe(true), {
+          timeout: 2_000,
+        });
+        await vi.waitFor(
+          () => expect(readFileSync(join(root, "worker-count"), "utf8")).toBe("3"),
+          { timeout: 5_000 },
+        );
+
+        expect(reaper!.isAvailable()).toBe(true);
+        expect(ownerTrackedHelperState(helper)).toBe("matching");
+        const manifest = JSON.parse(readFileSync(reaper!.manifestPath, "utf8")) as {
+          helpers: unknown[];
+        };
+        expect(manifest.helpers).toHaveLength(1);
+      } finally {
+        if (helper.pid !== undefined) {
+          try {
+            process.kill(-helper.pid, "SIGKILL");
+          } catch {}
+        }
+      }
     },
     15_000,
   );
