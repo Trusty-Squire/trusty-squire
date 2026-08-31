@@ -9868,6 +9868,7 @@ function profileRequiresDestroy(session: Session): boolean {
 }
 
 const OBSERVE_SNAPSHOT_CLEANUP_RETRY_MS = 250;
+const OBSERVE_SNAPSHOT_SHUTDOWN_DRAIN_MS = 500;
 const pendingObserveSnapshotCleanup = new Set<string>();
 let observeSnapshotCleanupTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -9884,17 +9885,38 @@ function scheduleObserveSnapshotCleanup(): void {
   if (observeSnapshotCleanupTimer !== null || pendingObserveSnapshotCleanup.size === 0) return;
   observeSnapshotCleanupTimer = setTimeout(() => {
     observeSnapshotCleanupTimer = null;
-    for (const path of pendingObserveSnapshotCleanup) {
-      try {
-        rmSync(path, { recursive: true, force: true });
-      } catch {}
-      if (observeSnapshotPathState(path) === "missing") {
-        pendingObserveSnapshotCleanup.delete(path);
-      }
-    }
+    retryPendingObserveSnapshotCleanup();
     scheduleObserveSnapshotCleanup();
   }, OBSERVE_SNAPSHOT_CLEANUP_RETRY_MS);
   observeSnapshotCleanupTimer.unref();
+}
+
+function retryPendingObserveSnapshotCleanup(): void {
+  for (const path of pendingObserveSnapshotCleanup) {
+    try {
+      rmSync(path, { recursive: true, force: true });
+    } catch {}
+    if (observeSnapshotPathState(path) === "missing") {
+      pendingObserveSnapshotCleanup.delete(path);
+    }
+  }
+}
+
+async function drainPendingObserveSnapshotCleanup(): Promise<void> {
+  if (observeSnapshotCleanupTimer !== null) {
+    clearTimeout(observeSnapshotCleanupTimer);
+    observeSnapshotCleanupTimer = null;
+  }
+  const deadline = Date.now() + OBSERVE_SNAPSHOT_SHUTDOWN_DRAIN_MS;
+  do {
+    retryPendingObserveSnapshotCleanup();
+    if (pendingObserveSnapshotCleanup.size === 0) return;
+    await new Promise<void>((resolveWait) => {
+      setTimeout(resolveWait, Math.min(25, Math.max(1, deadline - Date.now())));
+    });
+  } while (Date.now() < deadline);
+  retryPendingObserveSnapshotCleanup();
+  scheduleObserveSnapshotCleanup();
 }
 
 function removeObserveSnapshotDirectory(path: string): unknown | undefined {
@@ -10088,6 +10110,7 @@ export async function closeAllProvisionSessions(): Promise<void> {
       if (closeError !== undefined) throw closeError;
     })();
   } finally {
+    await drainPendingObserveSnapshotCleanup();
     shutdownInProgress -= 1;
   }
 }

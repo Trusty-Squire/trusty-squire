@@ -175,7 +175,12 @@ export function processBirthIdentityState(
   return actual.startTime === identity.start_time ? "matching" : "stale";
 }
 
-export function processProfileState(pid: number, profileDir: string): ProcessIdentityState {
+export type ProcessProfileArgumentState = ProcessIdentityState | "missing";
+
+export function processProfileArgumentState(
+  pid: number,
+  profileDir: string,
+): ProcessProfileArgumentState {
   if (process.platform !== "linux") return "unknown";
   try {
     const expected = profilePathIdentity(profileDir);
@@ -196,12 +201,17 @@ export function processProfileState(pid: number, profileDir: string): ProcessIde
       );
       candidate = match?.[1] ?? match?.[2] ?? match?.[3];
     }
-    const matches = candidate !== undefined && profilePathIdentity(candidate) === expected;
-    return matches ? "matching" : "stale";
+    if (candidate === undefined) return "missing";
+    return profilePathIdentity(candidate) === expected ? "matching" : "stale";
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     return code === "ENOENT" || code === "ESRCH" ? "stale" : "unknown";
   }
+}
+
+export function processProfileState(pid: number, profileDir: string): ProcessIdentityState {
+  const state = processProfileArgumentState(pid, profileDir);
+  return state === "missing" ? "stale" : state;
 }
 
 export function profileProcessIdentity(

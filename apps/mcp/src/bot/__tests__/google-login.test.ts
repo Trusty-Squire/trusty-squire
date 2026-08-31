@@ -719,6 +719,7 @@ describe("bot Chrome launch consistency", () => {
     const markTerminal = vi.fn();
     const terminate = vi.fn(async () => true);
     const untrack = vi.fn();
+    const bindLaunch = vi.fn(() => true);
 
     const persistent = await launchPersistentLoginContext(
       launcher,
@@ -735,10 +736,12 @@ describe("bot Chrome launch consistency", () => {
         markTerminal,
         terminate,
         untrack,
+        bindLaunch,
       },
     );
 
     expect(persistent.context).toBe(context);
+    expect(bindLaunch).toHaveBeenCalledWith(marker, "/isolated-profile");
     expect(markTerminal).not.toHaveBeenCalled();
     expect(launchPersistentContext).toHaveBeenCalledWith(
       "/isolated-profile",
@@ -774,6 +777,7 @@ describe("bot Chrome launch consistency", () => {
         markTerminal: vi.fn(),
         terminate: vi.fn(async () => false),
         untrack,
+        bindLaunch: () => true,
       },
     );
 
@@ -801,6 +805,7 @@ describe("bot Chrome launch consistency", () => {
         markTerminal: vi.fn(),
         terminate,
         untrack,
+        bindLaunch: () => true,
         closeTimeoutMs: 10,
       },
     );

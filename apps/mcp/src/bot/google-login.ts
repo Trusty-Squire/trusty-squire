@@ -43,6 +43,7 @@ import {
   withInstallCompletionCallback,
 } from "./install-completion.js";
 import {
+  bindOwnerBrowserLaunch,
   markOwnerBrowserLaunchTerminal,
   terminateOwnerBrowserLaunch,
   untrackOwnerBrowserLaunch,
@@ -108,6 +109,7 @@ export async function launchPersistentLoginContext(
     markTerminal?: typeof markOwnerBrowserLaunchTerminal;
     terminate?: typeof terminateOwnerBrowserLaunch;
     untrack?: typeof untrackOwnerBrowserLaunch;
+    bindLaunch?: (marker: string, profileDir: string) => boolean;
     closeTimeoutMs?: number;
   } = {},
 ): Promise<PersistentLoginContext> {
@@ -119,28 +121,41 @@ export async function launchPersistentLoginContext(
     userDataDir,
     (options.env as NodeJS.ProcessEnv | undefined) ?? process.env,
   );
-  let context: BrowserContext;
+  let context: BrowserContext | null = null;
   try {
     context = await launcher.launchPersistentContext(userDataDir, {
       ...options,
       env: ownership.env,
       channel: "chrome",
     });
+    const bindLaunch =
+      runtime.bindLaunch ??
+      ((marker: string, profileDir: string): boolean => {
+        const holderPid = currentProfileHolderPid(profileDir);
+        const identity = holderPid === null ? null : profileProcessIdentity(holderPid, profileDir);
+        return identity !== null && bindOwnerBrowserLaunch(marker, identity);
+      });
+    if (!bindLaunch(ownership.marker, userDataDir)) {
+      throw new Error("persistent login browser identity could not be bound to owner custody");
+    }
   } catch (error) {
     markTerminal(ownership.marker);
+    if (context !== null) await closeBrowserContextWithin(context, runtime.closeTimeoutMs);
     if (await terminate(ownership.marker, userDataDir).catch(() => false)) {
       untrack(ownership.marker);
     }
     throw error;
   }
+  if (context === null) throw new Error("persistent login browser did not start");
+  const boundContext = context;
   let closing: Promise<void> | undefined;
   return {
-    context,
+    context: boundContext,
     marker: ownership.marker,
     close: (): Promise<void> => {
       closing ??= (async () => {
         markTerminal(ownership.marker);
-        await closeBrowserContextWithin(context, runtime.closeTimeoutMs);
+        await closeBrowserContextWithin(boundContext, runtime.closeTimeoutMs);
         const terminated = await terminate(ownership.marker, userDataDir).catch(() => false);
         if (!terminated) throw new Error("persistent login browser closure unproven");
         untrack(ownership.marker);

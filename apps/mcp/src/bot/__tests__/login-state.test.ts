@@ -96,6 +96,10 @@ describe("provider cookie clearing", () => {
             launchPersistentContext: async () => context,
           }),
           registerLaunch: () => ({ marker, env: {} }),
+          bindLaunch: () => {
+            events.push("bind");
+            return true;
+          },
           markTerminal: () => {
             events.push("terminal");
           },
@@ -108,7 +112,7 @@ describe("provider cookie clearing", () => {
           },
         }),
       ).resolves.toBe(true);
-      expect(events).toEqual(["terminal", "close", "terminate", "untrack"]);
+      expect(events).toEqual(["bind", "terminal", "close", "terminate", "untrack"]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -129,6 +133,7 @@ describe("provider cookie clearing", () => {
             },
           }),
           registerLaunch: () => ({ marker, env: {} }),
+          bindLaunch: () => true,
           markTerminal,
           terminate,
           untrack,
@@ -156,6 +161,7 @@ describe("provider cookie clearing", () => {
             }),
           }),
           registerLaunch: () => ({ marker: "v1:1:hung-cookie-clear", env: {} }),
+          bindLaunch: () => true,
           markTerminal: vi.fn(),
           terminate,
           untrack: vi.fn(),

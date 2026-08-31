@@ -71,6 +71,7 @@ import {
   startGlobalOperatorBrowserProcessWatchdog,
 } from "./operator-browser-watchdog.js";
 import {
+  bindOwnerBrowserLaunch,
   markOwnerBrowserLaunchTerminal,
   reconcileOwnerBrowserLaunchAfterLeaderExit,
   terminateOwnerBrowserLaunch,
@@ -2905,7 +2906,14 @@ function registerSelfManagedChrome(
   const identity = child.pid === undefined ? null : profileProcessIdentity(child.pid, profileDir);
   if (identity !== null) {
     const proof = trackOwnedChromeProcessTree(identity, processGroup);
-    if (proof !== null) selfManagedChromes.set(identity.pid, { identity, processGroup, proof });
+    if (proof !== null) {
+      const marker = proof.identity.process_marker;
+      if (marker !== undefined && !bindOwnerBrowserLaunch(marker, proof.identity)) {
+        releaseOwnedChromeProcessTree(proof);
+        throw new Error("local browser launch identity could not be bound to owner custody");
+      }
+      selfManagedChromes.set(identity.pid, { identity, processGroup, proof });
+    }
   }
   child.once("exit", () => {
     if (child.pid === undefined) return;
@@ -3891,6 +3899,12 @@ export class BrowserController {
       tracked?.identity.start_time === identity.start_time
         ? tracked.proof
         : trackOwnedChromeProcessTree(identity, processGroup);
+    if (proof !== null && this.ownerLaunchTracked) {
+      if (!bindOwnerBrowserLaunch(this.operatorBrowserMarker(), proof.identity)) {
+        releaseOwnedChromeProcessTree(proof);
+        throw new Error("local browser launch identity could not be bound to owner custody");
+      }
+    }
     if (proof !== null) this.ownedChromeProcessTreeProof = proof;
     return proof;
   }

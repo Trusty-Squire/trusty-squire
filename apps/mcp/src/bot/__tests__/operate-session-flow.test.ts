@@ -7306,7 +7306,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
     expect(existsSync(started.snapshot_file!)).toBe(false);
   });
 
-  it("retries snapshot cleanup after session teardown releases browser custody", async () => {
+  it("drains snapshot cleanup custody during normal shutdown", async () => {
     const root = mkdtempSync(join(tmpdir(), "trusty-squire-observe-cleanup-"));
     const previousObserveDir = process.env.TRUSTY_SQUIRE_OBSERVE_DIR;
     process.env.TRUSTY_SQUIRE_OBSERVE_DIR = root;
@@ -7321,7 +7321,8 @@ describe("operate session — ephemeral profile lifecycle", () => {
       expect(activeSessionCount()).toBe(0);
       expect(existsSync(snapshotDir)).toBe(true);
       chmodSync(snapshotDir, 0o700);
-      await vi.waitFor(() => expect(existsSync(snapshotDir!)).toBe(false), { timeout: 2_000 });
+      await closeAllProvisionSessions();
+      expect(existsSync(snapshotDir)).toBe(false);
     } finally {
       if (previousObserveDir === undefined) delete process.env.TRUSTY_SQUIRE_OBSERVE_DIR;
       else process.env.TRUSTY_SQUIRE_OBSERVE_DIR = previousObserveDir;

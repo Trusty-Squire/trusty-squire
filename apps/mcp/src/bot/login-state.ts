@@ -8,7 +8,9 @@ import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "nod
 import { join } from "node:path";
 import {
   CHROME_PROFILE_DIR,
+  currentProfileHolderPid,
   launchWithProfileGate,
+  profileProcessIdentity,
   ProfileBusyError,
   withProfileOperationGuard,
 } from "./profile.js";
@@ -16,6 +18,7 @@ import { isOAuthProviderId, type OAuthProviderId } from "./oauth-providers.js";
 import { invalidateCanonicalGoogleIdentity, isSessionStateArtifact } from "./session-state.js";
 import { closeBrowserContextWithin, registerLocalBrowserLaunch } from "./browser.js";
 import {
+  bindOwnerBrowserLaunch,
   markOwnerBrowserLaunchTerminal,
   terminateOwnerBrowserLaunch,
   untrackOwnerBrowserLaunch,
@@ -183,6 +186,7 @@ export async function clearProviderCookies(
     markTerminal?: typeof markOwnerBrowserLaunchTerminal;
     terminate?: typeof terminateOwnerBrowserLaunch;
     untrack?: typeof untrackOwnerBrowserLaunch;
+    bindLaunch?: (marker: string, profileDir: string) => boolean;
     closeTimeoutMs?: number;
   } = {},
 ): Promise<boolean> {
@@ -205,6 +209,22 @@ export async function clearProviderCookies(
         },
         { failFast: true },
       );
+      const registeredOwnership = ownership as {
+        marker: string;
+        env: NodeJS.ProcessEnv;
+      } | null;
+      const bindLaunch =
+        runtime.bindLaunch ??
+        ((marker: string, ownedProfileDir: string): boolean => {
+          if (process.platform !== "linux") return true;
+          const holderPid = currentProfileHolderPid(ownedProfileDir);
+          const identity =
+            holderPid === null ? null : profileProcessIdentity(holderPid, ownedProfileDir);
+          return identity !== null && bindOwnerBrowserLaunch(marker, identity);
+        });
+      if (registeredOwnership === null || !bindLaunch(registeredOwnership.marker, profileDir)) {
+        throw new Error("cookie-clear browser identity could not be bound to owner custody");
+      }
       cleared = await clearProviderCookiesFromContext(context, provider);
       if (!cleared) return false;
       if (provider === undefined || provider === "google") {

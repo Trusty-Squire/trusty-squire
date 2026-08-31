@@ -100,6 +100,33 @@ describe("owner process reaper contracts", () => {
       }),
     ).resolves.toBe(false);
     expect(signals).toEqual([]);
+
+    const anchoredReaders = {
+      anchor: { pid: 100, start_time: "10" },
+      readProcessIds: () => [101],
+      readBirthState: () => "stale" as const,
+      readRunningState: () => "stale" as const,
+      readCommandState: () => "matching" as const,
+      readMarkerState: () => ({ state: "present" as const, marker: "v1:browser" }),
+      readProfileState: () => "missing" as const,
+    };
+    expect(ownerBrowserLaunchState("v1:browser", "/expected-profile", anchoredReaders)).toBe(
+      "matching",
+    );
+    let rendererRunning = true;
+    const anchoredSignals: Array<[number, NodeJS.Signals]> = [];
+    await expect(
+      terminateOwnerBrowserLaunch("v1:browser", "/expected-profile", {
+        ...anchoredReaders,
+        readProcessIds: () => (rendererRunning ? [101] : []),
+        kill: (pid, signal) => {
+          anchoredSignals.push([pid, signal]);
+          rendererRunning = false;
+        },
+        wait: async () => undefined,
+      }),
+    ).resolves.toBe(true);
+    expect(anchoredSignals).toEqual([[101, "SIGTERM"]]);
   });
 
   it("retains helper custody when its process group cannot be read", () => {
