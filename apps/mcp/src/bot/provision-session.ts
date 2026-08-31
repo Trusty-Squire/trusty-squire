@@ -792,6 +792,8 @@ interface StartingBrowser {
   launch: Promise<void>;
   cancelRequested: boolean;
   cleanupPromise: Promise<"closed" | "force_closed_unproven" | "unknown"> | null;
+  quiescencePromise: Promise<"closed" | "force_closed_unproven" | "unknown"> | null;
+  retainProfileUntilQuiescent: boolean;
 }
 
 const leasedBrowsers = new Map<BrowserController, EphemeralBrowser>();
@@ -1165,6 +1167,8 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
     launch: Promise.resolve(),
     cancelRequested: false,
     cleanupPromise: null,
+    quiescencePromise: null,
+    retainProfileUntilQuiescent: false,
   };
   startingBrowsers.add(pending);
   let controller: BrowserController | null = null;
@@ -1352,10 +1356,38 @@ async function cancelStartingBrowser(
       "operator browser startup cancellation timed out",
       maximumTimeoutMs,
     );
-    if (closeState === "closed") destroyEphemeralProfileDetached(pending.profileDir);
+    if (closeState === "closed" && !pending.retainProfileUntilQuiescent) {
+      destroyEphemeralProfileDetached(pending.profileDir);
+    }
     return closeState;
   })();
   return await pending.cleanupPromise;
+}
+
+async function quiesceStartingBrowser(
+  pending: StartingBrowser,
+): Promise<"closed" | "force_closed_unproven" | "unknown"> {
+  pending.retainProfileUntilQuiescent = true;
+  if (pending.quiescencePromise !== null) return await pending.quiescencePromise;
+  pending.quiescencePromise = (async () => {
+    let closeState = await cancelStartingBrowser(pending);
+    if (pending.controller === null) return closeState;
+    await pending.controller.waitForCancelledStartQuiescence();
+    if (closeState !== "closed") {
+      closeState = await closeBrowserBounded(
+        pending.controller,
+        true,
+        "operator browser startup cancellation did not quiesce",
+      );
+    }
+    if (closeState === "closed") destroyEphemeralProfileDetached(pending.profileDir);
+    return closeState;
+  })();
+  void pending.quiescencePromise.then(
+    () => startingBrowsers.delete(pending),
+    () => startingBrowsers.delete(pending),
+  );
+  return await pending.quiescencePromise;
 }
 
 async function closeEphemeralBrowser(
@@ -1514,13 +1546,15 @@ async function prepareOAuthActionBrowser(
       launch: Promise.resolve(),
       cancelRequested: false,
       cleanupPromise: null,
+      quiescencePromise: null,
+      retainProfileUntilQuiescent: false,
     };
     startingBrowsers.add(pending);
     pending.launch = startBrowserBounded(
       replacement,
       session.id,
       async () => {
-        if (pending !== null) await cancelStartingBrowser(pending);
+        if (pending !== null) await quiesceStartingBrowser(pending);
       },
       oauthActionRemainingMs(deadline),
     );
@@ -1565,9 +1599,8 @@ async function prepareOAuthActionBrowser(
       ).catch(() => "unknown" as const);
     }
     if (pending !== null) {
-      startingBrowsers.delete(pending);
       replacementCloseState = await withinOAuthActionDeadline(
-        cancelStartingBrowser(pending, oauthActionRemainingMs(deadline)),
+        quiesceStartingBrowser(pending),
         deadline,
       ).catch(() => "unknown" as const);
       pendingHandledProfile = true;
@@ -1602,8 +1635,6 @@ async function prepareOAuthActionBrowser(
       throw oauthActionDeadlineError(deadline);
     }
     throw error;
-  } finally {
-    if (pending !== null) startingBrowsers.delete(pending);
   }
 }
 
@@ -1733,13 +1764,15 @@ async function runSerializedGoogleIdentityOperation<T>(
         launch: Promise.resolve(),
         cancelRequested: false,
         cleanupPromise: null,
+        quiescencePromise: null,
+        retainProfileUntilQuiescent: false,
       };
       startingBrowsers.add(replacementPending);
       replacementPending.launch = startBrowserBounded(
         replacement,
         session.id,
         async () => {
-          if (replacementPending !== null) await cancelStartingBrowser(replacementPending);
+          if (replacementPending !== null) await quiesceStartingBrowser(replacementPending);
         },
         options.deadline === undefined ? undefined : oauthActionRemainingMs(options.deadline),
       );
@@ -1794,11 +1827,7 @@ async function runSerializedGoogleIdentityOperation<T>(
       let replacementCloseState: "closed" | "force_closed_unproven" | "unknown" = "closed";
       let pendingHandledProfile = false;
       if (replacementPending !== null) {
-        startingBrowsers.delete(replacementPending);
-        const cancellation = cancelStartingBrowser(
-          replacementPending,
-          options.deadline === undefined ? undefined : oauthActionRemainingMs(options.deadline),
-        );
+        const cancellation = quiesceStartingBrowser(replacementPending);
         replacementCloseState = await (
           options.deadline === undefined
             ? cancellation
@@ -1841,8 +1870,6 @@ async function runSerializedGoogleIdentityOperation<T>(
         throw oauthActionDeadlineError(options.deadline);
       }
       throw error;
-    } finally {
-      if (replacementPending !== null) startingBrowsers.delete(replacementPending);
     }
     if (readyReplacement === null) {
       throw new Error("Google OAuth replacement browser was not installed");
@@ -1890,6 +1917,8 @@ async function runDetachedGoogleIdentityOperation<T>(
         launch: Promise.resolve(),
         cancelRequested: false,
         cleanupPromise: null,
+        quiescencePromise: null,
+        retainProfileUntilQuiescent: false,
       };
       startingBrowsers.add(pending);
       let closeState: "closed" | "force_closed_unproven" | "unknown" = "unknown";
@@ -1983,7 +2012,12 @@ async function runSerializedOAuthBoundary(
           "OAuth action target changed during the identity handoff; re-observe before retrying",
         );
       }
-      await browser.loginWithOAuth(resolved.selector, oauthActionRemainingMs(deadline), provider);
+      await browser.loginWithOAuth(
+        resolved.selector,
+        oauthActionRemainingMs(deadline),
+        provider,
+        provider === "google" ? session.userEmail : undefined,
+      );
       await settleAfterStateChange(browser);
     },
     { deadline },

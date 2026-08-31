@@ -19,6 +19,7 @@ const h = vi.hoisted(() => ({
   oauthLoginTimeouts: [] as number[],
   oauthLoginError: null as Error | null,
   oauthConsentProviders: [] as Array<string | undefined>,
+  oauthExpectedGoogleAccountEmails: [] as Array<string | null | undefined>,
   oauthLoginGates: new Map<number, Promise<void>>(),
   oauthResultUrl: "https://app.example.com/dashboard",
   restoredStorageStates: [] as Array<{ browserIndex: number; state: unknown }>,
@@ -767,10 +768,12 @@ vi.mock("../browser.js", () => ({
       selector: string,
       settleTimeoutMs?: number,
       provider?: string,
+      expectedGoogleAccountEmail?: string | null,
     ): Promise<void> {
       h.oauthLoginCalls.push(selector);
       h.oauthLoginTimeouts.push(settleTimeoutMs ?? 0);
       h.oauthConsentProviders.push(provider);
+      h.oauthExpectedGoogleAccountEmails.push(expectedGoogleAccountEmail);
       const gate = h.oauthLoginGates.get(this.index);
       if (gate !== undefined) await gate;
       if (h.oauthLoginError !== null) throw h.oauthLoginError;
@@ -889,6 +892,11 @@ vi.mock("../browser.js", () => ({
       if (h.connections[this.index] === true) h.started -= 1;
       h.connections[this.index] = false;
       return h.closeState;
+    }
+    async waitForCancelledStartQuiescence(): Promise<void> {
+      const gate = h.startGates.get(this.index);
+      if (gate !== undefined) await gate;
+      if (h.startGate !== null) await h.startGate;
     }
     async forceCloseOwnedProcessTree(): Promise<"closed" | "force_closed_unproven" | "unknown"> {
       h.forceCloseCalls += 1;
@@ -1125,6 +1133,7 @@ beforeEach(() => {
   h.oauthLoginTimeouts = [];
   h.oauthLoginError = null;
   h.oauthConsentProviders = [];
+  h.oauthExpectedGoogleAccountEmails = [];
   h.oauthLoginGates = new Map();
   h.oauthResultUrl = "https://app.example.com/dashboard";
   h.restoredStorageStates = [];
@@ -3631,11 +3640,19 @@ describe("operate session — OAuth lifecycle", () => {
     await finishProvisionSession(started.session_id);
   });
 
-  it("bounds browser preparation with the action deadline", async () => {
-    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "50";
+  it("retains OAuth custody while timed-out browser startup quiesces", async () => {
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1000";
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
     const canonical = "/tmp/trusty-squire-unit-canonical-oauth-preparation-deadline";
     h.storageStates.set(canonical, { cookies: [], origins: [] });
-    h.startGates.set(1, new Promise<void>(() => undefined));
+    h.identityMetadata.set(canonical, { googleAccountEmail: "canonical@example.com" });
+    let releasePendingStart!: () => void;
+    h.startGates.set(
+      2,
+      new Promise<void>((resolve) => {
+        releasePendingStart = resolve;
+      }),
+    );
     h.visibleText = "Continue with Google";
     h.elements = [
       elem({
@@ -3649,18 +3666,40 @@ describe("operate session — OAuth lifecycle", () => {
       serviceUrl: "https://app.example.com/login",
       profileDir: canonical,
     });
+    const successor = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
     const startedAt = Date.now();
 
-    await expect(
-      act(started.session_id, {
+    const timedOutAction = act(started.session_id, {
         kind: "oauth_login",
         target: "Continue with Google",
         provider: "google",
-      }),
-    ).rejects.toThrow(/google_session.*re-login/i);
+      }).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(h.startCalls).toBe(3));
+    const timeoutError = await timedOutAction;
 
-    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(timeoutError).toEqual(
+      expect.objectContaining({ message: expect.stringMatching(/google_session.*re-login/i) }),
+    );
+    expect(Date.now() - startedAt).toBeLessThan(1_500);
     expect(h.oauthLoginCalls).toEqual([]);
+
+    const successorAction = act(successor.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+      provider: "google",
+    }).catch((error: unknown) => error);
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    expect(h.startCalls).toBe(3);
+    expect(h.oauthLoginCalls).toEqual([]);
+
+    releasePendingStart();
+    await successorAction;
+    expect(h.startCalls).toBeGreaterThan(3);
+    expect(h.oauthExpectedGoogleAccountEmails).toEqual(["canonical@example.com"]);
+    await finishProvisionSession(successor.session_id).catch(() => undefined);
   });
 
   it("prevents a timed-out identity publication from mutating later", async () => {

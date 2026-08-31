@@ -15494,6 +15494,7 @@ export class BrowserController {
     selector: string,
     settleTimeoutMs = 12_000,
     consentProvider?: OAuthProviderId,
+    expectedGoogleAccountEmail?: string | null,
   ): Promise<void> {
     const product = this.page;
     const context = this.context;
@@ -15596,9 +15597,11 @@ export class BrowserController {
           productDeparted = productDeparted || !this.isOAuthProductUrl(transient.url(), productUrl);
           if (Date.now() >= deadline) break;
           const consentBudgetMs = deadline - Date.now();
-          const advanced = await this.advanceOAuthConsent(consentProvider, consentBudgetMs).catch(
-            () => false,
-          );
+          const advanced = await this.advanceOAuthConsent(
+            consentProvider,
+            consentBudgetMs,
+            expectedGoogleAccountEmail,
+          ).catch(() => false);
           this.traceOAuthPhase("consent_step", {
             elapsed_ms: Date.now() - oauthStartedAt,
             advanced,
@@ -16421,7 +16424,11 @@ export class BrowserController {
   // Returns false when no
   // approve control is present — the agent then aborts rather than
   // hang. Clicks only; never types (the critical guarantee holds here).
-  async advanceOAuthConsent(provider: OAuthProviderId, timeoutMs = 8_000): Promise<boolean> {
+  async advanceOAuthConsent(
+    provider: OAuthProviderId,
+    timeoutMs = 8_000,
+    expectedGoogleAccountEmail?: string | null,
+  ): Promise<boolean> {
     if (!this.page) throw new Error("Browser not started");
     const deadline = Date.now() + Math.max(0, timeoutMs);
     const hasBudget = (): boolean => Date.now() < deadline;
@@ -16594,11 +16601,10 @@ export class BrowserController {
     // from provider-page content; completion remains the OAuth lifecycle signal.
     // The identity text stays inside the provider page and is never returned.
     const accountRows = this.page.locator('button, [role="button"], [role="link"], a[href]');
-    const accountRowIndex = await accountRows
+    const accountRowLabels = await accountRows
       .evaluateAll((elements) => {
-        const EMAIL = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
         const EXCLUDED = /(?:\buse another account|\bremove an account|\bmanage accounts?\b)/i;
-        return elements.findIndex((element) => {
+        return elements.map((element, index) => {
           const html = element as HTMLElement;
           const rect = html.getBoundingClientRect();
           const style = window.getComputedStyle(html);
@@ -16608,16 +16614,37 @@ export class BrowserController {
             style.display === "none" ||
             style.visibility === "hidden"
           ) {
-            return false;
+            return null;
           }
-          const label = [element.getAttribute("aria-label") ?? "", element.textContent ?? ""]
-            .join(" ")
-            .replace(/\s+/g, " ")
-            .trim();
-          return !EXCLUDED.test(label) && EMAIL.test(label);
+          const labels = [
+            element.getAttribute("aria-label") ?? "",
+            element.textContent ?? "",
+            ...Array.from(element.querySelectorAll<HTMLElement>("[aria-label], *")).flatMap(
+              (descendant) => [
+                descendant.getAttribute("aria-label") ?? "",
+                descendant.textContent ?? "",
+              ],
+            ),
+          ]
+            .map((label) => label.replace(/\s+/g, " ").trim())
+            .filter((label) => label.length > 0);
+          return labels.some((label) => EXCLUDED.test(label)) ? null : { index, labels };
         });
       })
-      .catch(() => -1);
+      .catch(() => [] as Array<{ index: number; labels: string[] } | null>);
+    const expectedEmail = expectedGoogleAccountEmail?.trim().toLowerCase() ?? null;
+    const matchingAccountRows =
+      expectedEmail === null
+        ? []
+        : accountRowLabels.filter((candidate) => {
+            if (candidate === null) return false;
+            return candidate.labels.some((label) => {
+              const emails = label.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? [];
+              return emails.some((email) => email.toLowerCase() === expectedEmail);
+            });
+          });
+    const accountRowIndex =
+      matchingAccountRows.length === 1 ? matchingAccountRows[0]!.index : -1;
     if (accountRowIndex >= 0) {
       if (!hasBudget()) return false;
       try {
@@ -16769,6 +16796,15 @@ export class BrowserController {
     }
     this.closePromise ??= this.closeAfterStart();
     return await this.closePromise;
+  }
+
+  async waitForCancelledStartQuiescence(): Promise<void> {
+    if (!this.startCancellationRequested) return;
+    await Promise.allSettled([
+      this.startPromise ?? Promise.resolve(),
+      this.reapCancelledStartProcess(),
+    ]);
+    await this.persistentFallbackOwnershipMonitor?.catch(() => undefined);
   }
 
   async forceCloseOwnedProcessTree(): Promise<ProfileCloseState> {
