@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   OWNER_PROFILE_SIGNATURE_FILE,
+  OWNER_ARTIFACT_SIGNATURE_FILE,
   OWNER_HELPER_MARKER_ENV,
   createOwnerEphemeralProfile,
   ensureOwnerProcessReaper,
@@ -21,7 +22,9 @@ import {
   stopOwnerProcessReaper,
   sweepOrphanedOwnerProcesses,
   terminateOwnerBrowserLaunch,
+  trackOwnerSessionArtifact,
   trackOwnerBrowserLaunch,
+  untrackOwnerSessionArtifact,
   untrackOwnerBrowserLaunch,
 } from "../owner-process-reaper.js";
 import {
@@ -160,16 +163,17 @@ describe("owner process startup sweep", () => {
   );
 
   it.skipIf(process.platform !== "linux")(
-    "fail-safe reaps existing exact helper custody when replacement cannot start",
+    "keeps live custody intact while retrying worker replacement",
     async () => {
       const root = await mkdtemp(join(tmpdir(), "trusty-squire-reaper-test-"));
       cleanup.push(root);
       vi.stubEnv("TRUSTY_SQUIRE_REAPER_READY_TIMEOUT_MS", "100");
       vi.stubEnv("TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS", "5");
+      vi.stubEnv("TRUSTY_SQUIRE_REAPER_RECOVERY_BACKOFF_MS", "5");
       const workerPath = join(root, "failed-replacement-worker.mjs");
       await writeFile(
         workerPath,
-        `import { existsSync, readFileSync, writeFileSync } from "node:fs";\nconst countPath = new URL("./worker-count", import.meta.url);\nconst count = existsSync(countPath) ? Number(readFileSync(countPath, "utf8")) + 1 : 1;\nwriteFileSync(countPath, String(count));\nif (count === 1) {\n  writeFileSync(process.argv[3], JSON.stringify({ version: 1, token: process.argv[4], pid: process.pid }) + "\\n");\n  setTimeout(() => process.exit(0), 250);\n} else {\n  setInterval(() => undefined, 1000);\n}\n`,
+        `import { existsSync, readFileSync, writeFileSync } from "node:fs";\nconst countPath = new URL("./worker-count", import.meta.url);\nconst count = existsSync(countPath) ? Number(readFileSync(countPath, "utf8")) + 1 : 1;\nwriteFileSync(countPath, String(count));\nif (count === 1 || count >= 4) {\n  writeFileSync(process.argv[3], JSON.stringify({ version: 1, token: process.argv[4], pid: process.pid }) + "\\n");\n}\nif (count === 1) setTimeout(() => process.exit(0), 250);\nelse setInterval(() => undefined, 1000);\n`,
       );
 
       const reaper = startOwnerProcessReaper({ rootDir: root, workerPath });
@@ -179,11 +183,11 @@ describe("owner process startup sweep", () => {
         'process.on("SIGTERM", () => undefined); setInterval(() => undefined, 1000)',
       ]);
       try {
-        await vi.waitFor(() => expect(ownerTrackedHelperState(helper)).toBe("stale"), {
+        await vi.waitFor(() => expect(readFileSync(join(root, "worker-count"), "utf8")).toBe("4"), {
           timeout: 2_000,
         });
-        expect(readFileSync(join(root, "worker-count"), "utf8")).toBe("2");
-        expect(reaper!.isAvailable()).toBe(false);
+        expect(ownerTrackedHelperState(helper)).toBe("matching");
+        expect(reaper!.isAvailable()).toBe(true);
       } finally {
         if (helper.pid !== undefined) {
           try {
@@ -727,5 +731,105 @@ describe("owner process startup sweep", () => {
     await sweepOrphanedOwnerProcesses(root);
     expect(existsSync(retained)).toBe(false);
     expect(existsSync(join(root, "stale.json"))).toBe(false);
+  });
+
+  it.skipIf(process.platform !== "linux")(
+    "persists and releases an exact session artifact descriptor",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "trusty-squire-reaper-test-"));
+      const artifact = join(tmpdir(), `trusty-squire-observe-artifact-${Date.now()}`);
+      cleanup.push(root, artifact);
+      const reaper = startOwnerProcessReaper({ rootDir: root });
+      expect(reaper).not.toBeNull();
+
+      trackOwnerSessionArtifact(artifact);
+
+      const signature = JSON.parse(
+        readFileSync(join(artifact, OWNER_ARTIFACT_SIGNATURE_FILE), "utf8"),
+      ) as { token: string; path: string };
+      const tracked = JSON.parse(readFileSync(reaper!.manifestPath, "utf8")) as {
+        artifacts: Array<{ path: string; token: string; state: string }>;
+      };
+      expect(signature.path).toBe(artifact);
+      expect(tracked.artifacts).toEqual([
+        { path: artifact, token: signature.token, state: "ready" },
+      ]);
+
+      rmSync(artifact, { recursive: true, force: true });
+      untrackOwnerSessionArtifact(artifact);
+      const released = JSON.parse(readFileSync(reaper!.manifestPath, "utf8")) as {
+        artifacts: unknown[];
+      };
+      expect(released.artifacts).toEqual([]);
+    },
+  );
+
+  it("removes only exactly reserved or signed session artifacts", async () => {
+    vi.stubEnv("TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS", "1");
+    const root = await mkdtemp(join(tmpdir(), "trusty-squire-reaper-test-"));
+    const signed = await mkdtemp(join(tmpdir(), "trusty-squire-observe-owned-"));
+    const foreign = await mkdtemp(join(tmpdir(), "trusty-squire-observe-foreign-"));
+    const pending = await mkdtemp(join(tmpdir(), "trusty-squire-observe-pending-"));
+    const pendingToken = "pending-artifact-token";
+    const reservation = join(root, `.trusty-squire-artifact-reservation-${pendingToken}.json`);
+    cleanup.push(root, signed, foreign, pending);
+    const signedToken = "signed-artifact-token";
+    await writeFile(
+      join(signed, OWNER_ARTIFACT_SIGNATURE_FILE),
+      `${JSON.stringify({
+        version: 1,
+        token: signedToken,
+        path: signed,
+        owner_token: "manifest",
+      })}\n`,
+    );
+    await writeFile(
+      join(foreign, OWNER_ARTIFACT_SIGNATURE_FILE),
+      `${JSON.stringify({
+        version: 1,
+        token: "foreign-token",
+        path: foreign,
+        owner_token: "manifest",
+      })}\n`,
+    );
+    await writeFile(
+      reservation,
+      `${JSON.stringify({
+        version: 1,
+        token: pendingToken,
+        path: pending,
+        owner_token: "manifest",
+      })}\n`,
+    );
+    await writeFile(
+      join(root, "stale-artifacts.json"),
+      `${JSON.stringify({
+        version: 5,
+        token: "manifest",
+        owner: { pid: 999_999_999, start_time: "1" },
+        resources: [],
+        launches: [],
+        profiles: [],
+        helpers: [],
+        artifacts: [
+          { path: signed, token: signedToken, state: "ready" },
+          { path: foreign, token: signedToken, state: "ready" },
+          {
+            path: pending,
+            token: pendingToken,
+            state: "pending",
+            reservation_path: reservation,
+          },
+        ],
+      })}\n`,
+    );
+
+    await sweepOrphanedOwnerProcesses(root);
+
+    expect(existsSync(signed)).toBe(false);
+    expect(existsSync(pending)).toBe(false);
+    expect(existsSync(reservation)).toBe(false);
+    expect(existsSync(foreign)).toBe(true);
+    expect(existsSync(join(root, "stale-artifacts.json"))).toBe(true);
   });
 });

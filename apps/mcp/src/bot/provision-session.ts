@@ -161,6 +161,10 @@ import {
   OperatorBrowserWatchdog,
   type OperatorBrowserWatchdogReason,
 } from "./operator-browser-watchdog.js";
+import {
+  trackOwnerSessionArtifact,
+  untrackOwnerSessionArtifact,
+} from "./owner-process-reaper.js";
 
 // Identity-provider + auth-handler hosts a signup legitimately bounces
 // through. Used to widen domain-scope so an OAuth `goto` (rare) isn't blocked.
@@ -1358,7 +1362,7 @@ async function prepareOAuthActionBrowser(session: Session): Promise<void> {
       const replacementLease = leasedBrowsers.get(replacement);
       if (replacementLease?.profileDir === ephemeral.profileDir) leasedBrowsers.delete(replacement);
     }
-    if (sessions.get(session.id) === session) sessions.delete(session.id);
+    deregisterProvisionSession(session);
     stopSessionWatchdog(session);
     disposeSessionWatchdog(session);
     if (
@@ -1522,7 +1526,7 @@ async function runSerializedGoogleIdentityOperation<T>(
           leasedBrowsers.delete(replacement);
         }
       }
-      if (sessions.get(session.id) === session) sessions.delete(session.id);
+      deregisterProvisionSession(session);
       stopSessionWatchdog(session);
       disposeSessionWatchdog(session);
       if (
@@ -1746,8 +1750,7 @@ async function forceTerminateProvisionSessionOwned(
       `payment dispatch handoff exceeded ${timeoutMs}ms`,
     ).catch(() => undefined);
   }
-  clearSessionArtifacts(session);
-  if (sessions.get(session.id) === session) sessions.delete(session.id);
+  deregisterProvisionSession(session);
   let terminalError: unknown;
   if (auditPendingThreeDs && session.pendingThreeDs !== null) {
     try {
@@ -3842,9 +3845,8 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
       ...(session.userEmail !== null ? { user_email: session.userEmail } : {}),
     };
   } catch (err) {
-    sessions.delete(id);
+    deregisterProvisionSession(session);
     disposeSessionWatchdog(session);
-    clearSessionArtifacts(session);
     await releaseWarmBrowserPage(browser, false);
     throw err;
   }
@@ -3938,9 +3940,8 @@ export async function startHarnessProvisionSession(
     if (observation.format === "compact-v2") return observation;
     return { ...observation, hint: opts.hint ?? "" };
   } catch (error) {
-    sessions.delete(id);
+    deregisterProvisionSession(session);
     disposeSessionWatchdog(session);
-    clearSessionArtifacts(session);
     await opts.browser.close().catch(() => undefined);
     throw error;
   }
@@ -4996,6 +4997,7 @@ function persistObserveSnapshot(
   const dir = observeSnapshotDir(session.id);
   const file = join(dir, `observe-${session.id}.json`);
   try {
+    trackOwnerSessionArtifact(dir);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     chmodSync(dir, 0o700);
     temporaryFile = join(dir, `.observe-${session.id}-${generation}.tmp`);
@@ -9868,13 +9870,20 @@ function clearSessionArtifacts(session: Session): void {
   session.secretSlots.clear();
   session.sealedFieldKeys.clear();
   try {
-    rmSync(observeSnapshotDir(session.id), { recursive: true, force: true });
+    const artifactDir = observeSnapshotDir(session.id);
+    rmSync(artifactDir, { recursive: true, force: true });
+    untrackOwnerSessionArtifact(artifactDir);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(
       `[operator] session artifact cleanup failed session=${session.id}: ${message}\n`,
     );
   }
+}
+
+function deregisterProvisionSession(session: Session): void {
+  clearSessionArtifacts(session);
+  if (sessions.get(session.id) === session) sessions.delete(session.id);
 }
 
 function pendingThreeDsAuditStatus(
@@ -9943,8 +9952,7 @@ async function closeFinishingProvisionSession(
     persistState,
     session.terminalTeardownOwner ?? undefined,
   );
-  if (sessions.get(sessionId) === session) sessions.delete(sessionId);
-  clearSessionArtifacts(session);
+  deregisterProvisionSession(session);
   disposeSessionWatchdog(session);
   return { session_id: sessionId, url, closed: true };
 }

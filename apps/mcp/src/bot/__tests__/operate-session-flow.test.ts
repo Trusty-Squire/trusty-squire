@@ -199,6 +199,8 @@ const h = vi.hoisted(() => ({
     };
   },
   artifactRemovalPath: null as string | null,
+  ownerArtifactTracks: [] as string[],
+  ownerArtifactUntracks: [] as string[],
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -216,6 +218,11 @@ vi.mock("node:fs", async (importOriginal) => {
     },
   };
 });
+
+vi.mock("../owner-process-reaper.js", () => ({
+  trackOwnerSessionArtifact: (path: string) => h.ownerArtifactTracks.push(path),
+  untrackOwnerSessionArtifact: (path: string) => h.ownerArtifactUntracks.push(path),
+}));
 
 vi.mock("../session-state.js", async (importOriginal) => {
   const actual = await importOriginal<typeof SessionState>();
@@ -980,7 +987,7 @@ import {
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import canonicalize from "canonicalize";
 import { exportJWK, SignJWT } from "jose";
@@ -1244,6 +1251,8 @@ beforeEach(() => {
   h.waitForThreeDsCalls = [];
   h.paymentInstrumentMismatch = null;
   h.artifactRemovalPath = null;
+  h.ownerArtifactTracks = [];
+  h.ownerArtifactUntracks = [];
 });
 
 const replayRecipe = (overrides: Partial<OperatorRecipe> = {}): OperatorRecipe => ({
@@ -4041,16 +4050,66 @@ describe("operate session — OAuth lifecycle", () => {
       serviceUrl: "https://app.example.com/login",
       profileDir: canonical,
     });
+    const artifactDir = dirname(started.snapshot_file!);
+    expect(existsSync(started.snapshot_file!)).toBe(true);
 
     await expect(
       act(started.session_id, { kind: "oauth_login", target: "Continue with Google" }),
     ).rejects.toThrow("publish failed");
 
     expect(activeSessionCount()).toBe(0);
+    expect(existsSync(started.snapshot_file!)).toBe(false);
+    expect(h.ownerArtifactTracks).toContain(artifactDir);
+    expect(h.ownerArtifactUntracks).toContain(artifactDir);
     expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
     await expect(finishProvisionSession(started.session_id)).rejects.toThrow(
       "unknown provision session",
     );
+  });
+
+  it("clears artifacts when OAuth action preparation replacement startup fails", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-oauth-replacement-failure";
+    h.storageStates.set(canonical, {
+      cookies: [
+        { name: "SID", value: "google-session", domain: ".google.com", path: "/" },
+      ],
+      origins: [],
+    });
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    let rejectReplacement!: (error: Error) => void;
+    h.startGates.set(
+      1,
+      new Promise<void>((_resolve, reject) => {
+        rejectReplacement = reject;
+      }),
+    );
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+    const artifactDir = dirname(started.snapshot_file!);
+    const acting = act(started.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+    }).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(h.startCalls).toBe(2));
+
+    rejectReplacement(new Error("replacement startup failed"));
+
+    await expect(acting).resolves.toEqual(
+      expect.objectContaining({ message: "replacement startup failed" }),
+    );
+    expect(activeSessionCount()).toBe(0);
+    expect(existsSync(started.snapshot_file!)).toBe(false);
+    expect(h.ownerArtifactUntracks).toContain(artifactDir);
   });
 
   it("rejects a replacement browser that settles after operator shutdown", async () => {
