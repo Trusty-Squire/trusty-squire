@@ -61,7 +61,7 @@ export interface PaymentBrowser {
     card: CheckoutCard,
     options?: { onSubmitDispatched?: () => void; beforeSubmitDispatch?: () => void | number },
   ): Promise<CheckoutSubmitResult>;
-  fillCheckoutCardFields(card: CheckoutCard): Promise<void>;
+  fillCheckoutCardFields(card: CheckoutCard, options?: { deadline?: number }): Promise<void>;
   submitFilledCheckout(): Promise<CheckoutSubmitResult>;
   clearSealedPaymentFields(): Promise<void>;
   clearCheckoutCardFields?(): Promise<void>;
@@ -1415,8 +1415,11 @@ export async function executeOperatePay(
       if (approvalExpired()) return expiredApprovalResult();
       deps.onCardResolved(cardRef);
       try {
-        await browser.fillCheckoutCardFields(card);
+        await browser.fillCheckoutCardFields(card, { deadline });
       } catch (error) {
+        if (error instanceof Error && error.message === "payment_approval_expired") {
+          return expiredApprovalResult();
+        }
         const frameOrigin =
           error instanceof UnrecognizedPaymentFrameError
             ? error.frameOrigin

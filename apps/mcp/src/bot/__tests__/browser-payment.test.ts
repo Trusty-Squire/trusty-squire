@@ -3386,6 +3386,62 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "waits for Shopify's trusted PCI PAN instead of an earlier untrusted checkout-frame decoy",
+    async () => {
+      const pageUrl = "https://whitejade.example.test/checkout";
+      const transientShopifyFrameUrl = "https://checkout.shopify.com/payment-shell";
+      const pciUrl = "https://checkout.pci.shopifyinc.com/build/number-ltr.html";
+      const hydrationUrl = "https://whitejade.example.test/checkout-hydration";
+      let releaseHydration!: () => void;
+      const hydrationPending = new Promise<void>((resolve) => {
+        releaseHydration = resolve;
+      });
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <title>White Jade checkout</title>
+          <iframe src="${transientShopifyFrameUrl}"></iframe>
+          <script>
+            void fetch(${JSON.stringify(hydrationUrl)});
+          </script>`,
+        // Shopify's checkout shell is not an approved card-egress surface. It
+        // can transiently expose card-shaped controls while it hydrates the
+        // actual checkout.pci.shopifyinc.com hosted fields.
+        [transientShopifyFrameUrl]: '<input autocomplete="cc-number">',
+        [pciUrl]: FRAME_FORM,
+      });
+      try {
+        await page.route(hydrationUrl, async (route) => {
+          await hydrationPending;
+          await route.fulfill({ status: 204 });
+        });
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        const fill = controller.fillCheckoutCardFields(CARD);
+        await page.evaluate((url) => {
+          const frame = document.createElement("iframe");
+          frame.src = url;
+          document.body.append(frame);
+        }, pciUrl);
+        await fill;
+        releaseHydration();
+
+        const pciFrame = page.frames().find((frame) => frame.url() === pciUrl)!;
+        expect(await pciFrame.locator('[autocomplete="cc-number"]').inputValue()).toBe(CARD.pan);
+        expect(await pciFrame.locator('[autocomplete="cc-csc"]').inputValue()).toBe(CARD.cvv);
+        const transientFrame = page
+          .frames()
+          .find((frame) => frame.url() === transientShopifyFrameUrl)!;
+        expect(await transientFrame.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "fills the more complete Shopify card form coherently when two variants are mounted",
     async () => {
       const pageUrl = "https://store.kobeejapan.net/checkout";
