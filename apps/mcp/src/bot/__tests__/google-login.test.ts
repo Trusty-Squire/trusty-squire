@@ -728,7 +728,7 @@ describe("bot Chrome launch consistency", () => {
         channel: "bundled",
       },
       {
-        registerLocalBrowserLaunch: (_profileDir, env) => ({
+        registerLocalBrowserLaunch: (_profileDir, env = {}) => ({
           marker,
           env: { ...env, [OPERATOR_BROWSER_MARKER_ENV]: marker },
         }),
@@ -767,7 +767,7 @@ describe("bot Chrome launch consistency", () => {
       "/isolated-profile",
       {},
       {
-        registerLocalBrowserLaunch: (_profileDir, env) => ({
+        registerLocalBrowserLaunch: (_profileDir, env = {}) => ({
           marker: "v1:1:unproven-login",
           env,
         }),
@@ -794,7 +794,7 @@ describe("bot Chrome launch consistency", () => {
       "/isolated-profile",
       {},
       {
-        registerLocalBrowserLaunch: (_profileDir, env) => ({
+        registerLocalBrowserLaunch: (_profileDir, env = {}) => ({
           marker: "v1:1:hung-persistent-login",
           env,
         }),

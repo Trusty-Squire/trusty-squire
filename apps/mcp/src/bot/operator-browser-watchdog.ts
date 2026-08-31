@@ -538,7 +538,7 @@ export class OperatorBrowserWatchdog {
       if (marker !== null) {
         this.unregisterProcessWatchdog = (
           this.options.registerProcessWatchdog ?? registerOperatorBrowserProcessWatchdog
-        )(marker, async (reason) => {
+        )(marker, async (_reason) => {
           if (this.options.hasActiveCall()) return false;
           const idleMs = this.now() - this.options.lastActivityAt();
           if (idleMs < this.idleTimeoutMs) return false;

@@ -322,9 +322,7 @@ function linuxProcessGroupId(pid: number): ProcessGroupIdRead {
         .trim()
         .split(/\s+/)[2],
     );
-    return Number.isSafeInteger(processGroupId) && processGroupId > 0
-      ? processGroupId
-      : "unknown";
+    return Number.isSafeInteger(processGroupId) && processGroupId > 0 ? processGroupId : "unknown";
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     return code === "ENOENT" || code === "ESRCH" ? "stale" : "unknown";
@@ -998,12 +996,9 @@ function cleanTrackedArtifacts(
     const rootState =
       artifact.root_path === undefined ? "stale" : readPathState(artifact.root_path);
     const reservationState =
-      artifact.reservation_path === undefined
-        ? "stale"
-        : readPathState(artifact.reservation_path);
+      artifact.reservation_path === undefined ? "stale" : readPathState(artifact.reservation_path);
     const reservationMatches =
-      reservationState === "matching" &&
-      artifactReservationMatches(artifact, manifest.token);
+      reservationState === "matching" && artifactReservationMatches(artifact, manifest.token);
     const rootMatches =
       rootState === "matching" && artifactRootSignatureMatches(artifact, manifest.token);
     const reservedRootMatches =
@@ -1074,10 +1069,7 @@ async function reapManifest(
   cleanTrackedProfiles(latest, operations.removePath, readPathState);
   cleanTrackedArtifacts(latest, operations.removePath, readPathState);
   await sweepOperatorProfilePoolOrphans().catch(() => undefined);
-  if (
-    latestRead.state === "present" &&
-    manifestCleanupComplete(latest, readPathState)
-  ) {
+  if (latestRead.state === "present" && manifestCleanupComplete(latest, readPathState)) {
     removeTrackedPath(operations.removePath ?? rmSync, path, { force: true });
   }
   return signalled;
@@ -1803,9 +1795,12 @@ export function trackOwnerSessionArtifact(
     );
     rmSync(reservationPath, { force: true });
     reservationCreated = false;
-    (operations.commitArtifact ?? ((ownerReaper, ownedPath, artifactToken) => {
-      ownerReaper.commitArtifact(ownedPath, artifactToken);
-    }))(reaper, path, token);
+    (
+      operations.commitArtifact ??
+      ((ownerReaper, ownedPath, artifactToken) => {
+        ownerReaper.commitArtifact(ownedPath, artifactToken);
+      })
+    )(reaper, path, token);
     trackedSessionArtifacts.set(requestedPath, {
       path,
       rootPath,
@@ -1822,18 +1817,16 @@ export function trackOwnerSessionArtifact(
       reservation_path: reservationPath,
     };
     if (rootCreated || leafCreated) {
-      cleanTrackedArtifacts(
-        {
-          version: 5,
-          token: reaper.token,
-          owner: { pid: process.pid, start_time: "rollback" },
-          resources: [],
-          launches: [],
-          profiles: [],
-          helpers: [],
-          artifacts: [record],
-        },
-      );
+      cleanTrackedArtifacts({
+        version: 5,
+        token: reaper.token,
+        owner: { pid: process.pid, start_time: "rollback" },
+        resources: [],
+        launches: [],
+        profiles: [],
+        helpers: [],
+        artifacts: [record],
+      });
     } else if (reservationCreated) {
       removeTrackedPath(rmSync, reservationPath, { force: true });
     }

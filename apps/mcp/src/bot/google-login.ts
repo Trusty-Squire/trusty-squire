@@ -807,9 +807,7 @@ export interface RunInBotChromeOpts {
   onProxyDisposition?: (proxy: LoginProxyDisposition) => void;
   onConfirmedLogin?: () => Promise<void>;
   seedProvider?: OAuthProviderId | (() => OAuthProviderId | null);
-  confirmedProviders?:
-    | readonly OAuthProviderId[]
-    | (() => readonly OAuthProviderId[]);
+  confirmedProviders?: readonly OAuthProviderId[] | (() => readonly OAuthProviderId[]);
   // Test/local IdP seam for asserting the just-captured live context before
   // any canonical file is written. Production provider logins use the stricter
   // seedProvider marker check below.

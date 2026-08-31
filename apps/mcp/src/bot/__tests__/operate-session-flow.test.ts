@@ -9,6 +9,7 @@
 //   - credential egress seed excludes mid_session task scope
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { constants, publicEncrypt } from "node:crypto";
+import type * as NodeFs from "node:fs";
 import type * as GoogleLoginModule from "../google-login.js";
 import type * as SessionState from "../session-state.js";
 
@@ -204,7 +205,7 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs")>();
+  const actual = await importOriginal<typeof NodeFs>();
   return {
     ...actual,
     rmSync: (...args: Parameters<typeof actual.rmSync>) => {

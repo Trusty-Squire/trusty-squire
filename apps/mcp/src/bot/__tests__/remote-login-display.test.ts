@@ -31,7 +31,13 @@ function processIsLive(pid: number): boolean {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
     const closeParen = stat.lastIndexOf(")");
-    return closeParen >= 0 && stat.slice(closeParen + 2).trim().split(/\s+/)[0] !== "Z";
+    return (
+      closeParen >= 0 &&
+      stat
+        .slice(closeParen + 2)
+        .trim()
+        .split(/\s+/)[0] !== "Z"
+    );
   } catch {
     return false;
   }

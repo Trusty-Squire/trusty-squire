@@ -613,9 +613,7 @@ export function teardownRemoteLoginRig(rig: RemoteLoginRig, graceMs = 1_000): Pr
         // best-effort
       }
     }
-    await Promise.all(
-      rig.procs.map((child) => waitForOwnerTrackedHelperExit(child, graceMs)),
-    );
+    await Promise.all(rig.procs.map((child) => waitForOwnerTrackedHelperExit(child, graceMs)));
     const resistant = rig.procs.filter((child) => ownerTrackedHelperState(child) !== "stale");
     for (const child of resistant) {
       try {
@@ -624,9 +622,7 @@ export function teardownRemoteLoginRig(rig: RemoteLoginRig, graceMs = 1_000): Pr
         // best-effort
       }
     }
-    await Promise.all(
-      resistant.map((child) => waitForOwnerTrackedHelperExit(child, graceMs)),
-    );
+    await Promise.all(resistant.map((child) => waitForOwnerTrackedHelperExit(child, graceMs)));
     for (const child of rig.procs) {
       releaseOwnerTrackedHelper(child);
       releaseChildHandles(child);
