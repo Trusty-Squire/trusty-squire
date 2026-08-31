@@ -3822,12 +3822,6 @@ export class BrowserController {
   private oauthProductPage: Page | null = null;
   private oauthProviderPage: Page | null = null;
   private oauthProviderPageClosed = false;
-  // Deep-investigation instrumentation (UNIVERSAL_BOT_OAUTH_DEBUG): a ring
-  // buffer of OAuth/SSO-relevant network responses, so we can see WHY a Clerk/
-  // Stytch SSO callback fails to persist a session (cookie not set, FAPI
-  // rejection, etc.) without guessing. Off by default; zero cost when unset.
-  private oauthNetLog: Array<{ url: string; status: number; setCookie: boolean; ct: string }> = [];
-  private oauthNetListenerAttached = false;
 
   // Surfaced in the run trail so operators can distinguish local, remote,
   // and headless launches without retaining a virtual-display mode.
@@ -8802,12 +8796,6 @@ export class BrowserController {
         },
         { tok: token, key: responseKey },
       );
-      if (process.env.UNIVERSAL_BOT_OAUTH_DEBUG) {
-        console.error(
-          `[captcha] hCaptcha inject diag: ok=${diag.ok} textareas=${diag.textareas} ` +
-            `widgets=${diag.widgets} callbackFired=${diag.callbackFired} hcaptchaGlobal=${diag.hasHcaptchaGlobal}`,
-        );
-      }
       return diag.ok;
     } catch {
       return false;
@@ -15440,7 +15428,6 @@ export class BrowserController {
   // settleAfterOAuth() restores the product page afterwards.
   async startOAuth(selector: string): Promise<void> {
     if (!this.page || !this.context) throw new Error("Browser not started");
-    this.maybeAttachOAuthNetListener();
     if (
       !/accounts\.google\.com|github\.com\/login|login\.microsoftonline\.com/i.test(this.page.url())
     ) {
@@ -15491,7 +15478,6 @@ export class BrowserController {
       throw new Error("OAuth login cannot start because the product page is unavailable");
     }
 
-    this.maybeAttachOAuthNetListener();
     this.oauthProductPage = product;
     this.oauthProviderPage = null;
     this.oauthProviderPageClosed = false;
@@ -15677,130 +15663,6 @@ export class BrowserController {
       await this.sleep(50);
     }
     return page.isClosed() ? "closed" : null;
-  }
-
-  // ── OAuth/SSO debug instrumentation (UNIVERSAL_BOT_OAUTH_DEBUG) ──
-  // Attach a context-level response recorder ONCE. Records SSO-relevant
-  // responses (the service host + Clerk/Stytch/WorkOS FAPI hosts) with their
-  // status + whether they set a cookie — the signal for "did the callback's
-  // session-establish request succeed and set the session cookie?"
-  private maybeAttachOAuthNetListener(): void {
-    if (this.oauthNetListenerAttached) return;
-    if (!/^(1|true|on)$/i.test(process.env.UNIVERSAL_BOT_OAUTH_DEBUG ?? "")) return;
-    if (!this.context) return;
-    this.oauthNetListenerAttached = true;
-    const RELEVANT =
-      /clerk|stytch|workos|accounts\.|\/sso|\/oauth|\/session|\/sign|callback|\/v1\/client/i;
-    this.context.on("response", (res) => {
-      void (async () => {
-        try {
-          const url = res.url();
-          if (!RELEVANT.test(url)) return;
-          const headers = res.headers();
-          if (this.oauthNetLog.length >= 200) return;
-          const entry: {
-            url: string;
-            status: number;
-            setCookie: boolean;
-            ct: string;
-            body?: string;
-          } = {
-            url: url.slice(0, 200),
-            status: res.status(),
-            setCookie: "set-cookie" in headers || "Set-Cookie" in headers,
-            ct: (headers["content-type"] ?? "").slice(0, 40),
-          };
-          // Capture the body of a Clerk/Stytch/WorkOS sign-in/up/callback error
-          // (>=400) — its error code is the definitive tell (captcha_invalid vs
-          // transfer vs identifier_*). JSON only, bounded.
-          if (
-            res.status() >= 400 &&
-            /\/v1\/client\/(sign_ins|sign_ups)|oauth_callback|\/session/i.test(url)
-          ) {
-            entry.body = (await res.text().catch(() => "")).slice(0, 800);
-          }
-          this.oauthNetLog.push(entry);
-        } catch {
-          // best-effort observability — never perturb the run
-        }
-      })();
-    });
-  }
-
-  // Dump cookies + the SSO network log to a file for post-mortem. Called at the
-  // oauth_session_not_persisted decision point when UNIVERSAL_BOT_OAUTH_DEBUG.
-  async dumpOAuthDebug(service: string, label: string): Promise<void> {
-    if (!/^(1|true|on)$/i.test(process.env.UNIVERSAL_BOT_OAUTH_DEBUG ?? "")) return;
-    if (!this.context) return;
-    try {
-      const cookies = await this.context.cookies();
-      const cookieSummary = cookies.map((c) => ({
-        name: c.name,
-        domain: c.domain,
-        path: c.path,
-        len: c.value.length,
-        httpOnly: c.httpOnly,
-        secure: c.secure,
-        sameSite: c.sameSite,
-      }));
-      const url = this.page ? this.page.url() : "(no page)";
-      // Capture the live Clerk SDK state — the definitive read on whether a
-      // sign-up transfer is available (the new-user-OAuth fix hinges on this).
-      const clerkState = this.page
-        ? await this.page
-            .evaluate(() => {
-              const w = window as unknown as { Clerk?: Record<string, unknown> };
-              const c = w.Clerk;
-              if (c === undefined) return { present: false };
-              const client = (c as { client?: Record<string, unknown> }).client;
-              const si = client?.["signIn"] as Record<string, unknown> | undefined;
-              const su = client?.["signUp"] as Record<string, unknown> | undefined;
-              const ffv = si?.["firstFactorVerification"] as Record<string, unknown> | undefined;
-              return {
-                present: true,
-                loaded: (c as { loaded?: unknown }).loaded ?? null,
-                signInStatus: si?.["status"] ?? null,
-                signInFFVStatus: ffv?.["status"] ?? null,
-                signInFFVError: ffv?.["error"] ?? null,
-                signUpStatus: su?.["status"] ?? null,
-                signUpMissingFields: su?.["missingFields"] ?? null,
-                hasSignUpCreate: typeof (su as { create?: unknown })?.create === "function",
-              };
-            })
-            .catch((e: unknown) => ({ present: "evalError", err: String(e).slice(0, 120) }))
-        : { present: false };
-      const consoleText = await this.extractText().catch(() => "");
-      const { writeFileSync, mkdirSync } = await import("node:fs");
-      const { join } = await import("node:path");
-      const { homedir } = await import("node:os");
-      const dir = join(homedir(), ".trusty-squire", "oauth-debug");
-      mkdirSync(dir, { recursive: true });
-      const ts = process.env.OAUTH_DEBUG_TS ?? String(this.oauthNetLog.length);
-      const path = join(dir, `${service}-${label}-${ts}.json`);
-      writeFileSync(
-        path,
-        JSON.stringify(
-          {
-            service,
-            label,
-            finalUrl: url,
-            clerkState,
-            cookies: cookieSummary,
-            netLog: this.oauthNetLog,
-            pageText: consoleText.slice(0, 600),
-          },
-          null,
-          2,
-        ),
-      );
-      console.error(
-        `[oauth-debug] wrote ${path} (${cookieSummary.length} cookies, ${this.oauthNetLog.length} net entries)`,
-      );
-    } catch (err) {
-      console.error(
-        `[oauth-debug] dump failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
   }
 
   // Read the page's Rails/OmniAuth CSRF token (<meta name="csrf-token">).
@@ -16965,7 +16827,6 @@ export class BrowserController {
       this.oauthProductPage = null;
       this.oauthProviderPage = null;
       this.oauthProviderPageClosed = false;
-      this.oauthNetLog = [];
       this.context = null;
       return "closed";
     }
@@ -17003,7 +16864,6 @@ export class BrowserController {
     this.oauthProductPage = null;
     this.oauthProviderPage = null;
     this.oauthProviderPageClosed = false;
-    this.oauthNetLog = [];
     this.context = null;
     this.cdpBrowser = null;
     this.childChrome = null;
