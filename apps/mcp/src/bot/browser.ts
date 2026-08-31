@@ -3376,7 +3376,12 @@ export async function launchSelfManagedLoginContext(params: {
   let child: ChildProcess | null = null;
   let childIdentity: ProfileProcessIdentity | null = null;
   let browser: Browser | null = null;
-  let launchMarker: string | undefined;
+  // Reserve the marker before entering the launch sequence, as BrowserController
+  // does for operate_start. The spawned Chrome inherits this exact marker, so
+  // the owner reaper can bind its birth identity without an unanchored window.
+  const ownership = registerLocalBrowserLaunch(params.profileDir, params.env);
+  const launchMarker = ownership.marker;
+  let spawned = false;
   let teardownPromise: Promise<void> | undefined;
   const isRunning = (): boolean => childProcessIsRunning(child);
   const forceTeardown = (): void => {
@@ -3406,75 +3411,76 @@ export async function launchSelfManagedLoginContext(params: {
     })();
     return teardownPromise;
   };
-  const endpoint = await withChromeStartupLock(
-    async () => {
-      const port = await findFreePort();
-      clearStaleSingletonLock(params.profileDir);
-      const argv = [
-        `--remote-debugging-port=${port}`,
-        "--remote-debugging-address=127.0.0.1",
-        `--user-data-dir=${params.profileDir}`,
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--password-store=basic",
-        "--window-position=0,0",
-        `--window-size=${params.window.width},${params.window.height}`,
-        "--lang=en-US",
-        ...(params.extraArgs ?? []),
-        ...(params.proxyServer !== null ? [`--proxy-server=${params.proxyServer}`] : []),
-        // NB: we build argv ourselves, so Playwright's --enable-automation
-        // (and the rest of its launch instrumentation — the actual Turnstile
-        // tell) is never added. That is the whole point of self-launching.
-        params.appMode ? `--app=${params.initialUrl}` : params.initialUrl,
-      ];
-      const spawned = spawnLocalBrowser(params.binary, argv, params.profileDir, {
-        detached: process.platform !== "win32",
-        env: params.env,
-        stdio: ["ignore", "ignore", "pipe"],
-      });
-      child = spawned;
-      launchMarker = localBrowserLaunchMarkers.get(spawned);
-      if (launchMarker === undefined) {
-        throw new Error("self-launched login Chrome lost its ownership marker");
-      }
-      childIdentity = registerSelfManagedChrome(spawned, params.profileDir);
-      let chromeStderr = "";
-      spawned.stderr?.on("data", (chunk: Buffer) => {
-        chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
-      });
-      try {
-        params.onSpawned?.({ teardown, forceTeardown, isRunning, marker: launchMarker });
-        const endpoint = await waitForDevtools(port, 30_000, spawned);
-        childIdentity = await resolveAttachedProfileChildIdentity(
-          spawned,
-          params.profileDir,
-          childIdentity,
-        );
-        if (process.platform === "linux" && childIdentity === null) {
-          throw new Error("self-launched login Chrome exited before identity was proven");
-        }
-        return endpoint;
-      } catch (err) {
-        forceTeardown();
-        childIdentity = await terminateTrackedProfileChild(spawned, params.profileDir, {
-          identity: childIdentity,
+  let endpoint: string;
+  try {
+    endpoint = await withChromeStartupLock(
+      async () => {
+        const port = await findFreePort();
+        clearStaleSingletonLock(params.profileDir);
+        const argv = [
+          `--remote-debugging-port=${port}`,
+          "--remote-debugging-address=127.0.0.1",
+          `--user-data-dir=${params.profileDir}`,
+          "--no-first-run",
+          "--no-default-browser-check",
+          "--password-store=basic",
+          "--window-position=0,0",
+          `--window-size=${params.window.width},${params.window.height}`,
+          "--lang=en-US",
+          ...(params.extraArgs ?? []),
+          ...(params.proxyServer !== null ? [`--proxy-server=${params.proxyServer}`] : []),
+          // NB: we build argv ourselves, so Playwright's --enable-automation
+          // (and the rest of its launch instrumentation — the actual Turnstile
+          // tell) is never added. That is the whole point of self-launching.
+          params.appMode ? `--app=${params.initialUrl}` : params.initialUrl,
+        ];
+        const launched = spawnLocalBrowser(params.binary, argv, params.profileDir, {
+          detached: process.platform !== "win32",
+          env: ownership.env,
+          stdio: ["ignore", "ignore", "pipe"],
+          marker: launchMarker,
         });
-        const detail = chromeStderr.trim();
-        const collision = profileCollisionFromStderr(detail);
-        if (collision !== null) throw collision;
-        throw new Error(
-          `${err instanceof Error ? err.message : String(err)}` +
-            `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
-        );
-      }
-    },
-    { deadlineMs: 0 },
-  );
+        child = launched;
+        spawned = true;
+        let chromeStderr = "";
+        launched.stderr?.on("data", (chunk: Buffer) => {
+          chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
+        });
+        try {
+          params.onSpawned?.({ teardown, forceTeardown, isRunning, marker: launchMarker });
+          const endpoint = await waitForDevtools(port, 30_000, launched);
+          childIdentity = await resolveAttachedProfileChildIdentity(
+            launched,
+            params.profileDir,
+            childIdentity,
+          );
+          if (process.platform === "linux" && childIdentity === null) {
+            throw new Error("self-launched login Chrome exited before identity was proven");
+          }
+          childIdentity = registerSelfManagedChrome(launched, params.profileDir) ?? childIdentity;
+          return endpoint;
+        } catch (err) {
+          forceTeardown();
+          childIdentity = await terminateTrackedProfileChild(launched, params.profileDir, {
+            identity: childIdentity,
+          });
+          const detail = chromeStderr.trim();
+          const collision = profileCollisionFromStderr(detail);
+          if (collision !== null) throw collision;
+          throw new Error(
+            `${err instanceof Error ? err.message : String(err)}` +
+              `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
+          );
+        }
+      },
+      { deadlineMs: 0 },
+    );
+  } catch (error) {
+    if (!spawned) untrackOwnerBrowserLaunch(launchMarker);
+    throw error;
+  }
   if (child === null) {
     throw new Error("self-launched login Chrome lost its process handle");
-  }
-  if (launchMarker === undefined) {
-    throw new Error("self-launched login Chrome lost its ownership marker");
   }
 
   let attached: Awaited<ReturnType<typeof attachSelfManagedLoginContext>>;
@@ -3542,83 +3548,91 @@ export async function launchPlainLoginBrowser(params: {
 }): Promise<PlainLoginBrowser> {
   let child: ChildProcess | null = null;
   let childIdentity: ProfileProcessIdentity | null = null;
-  let launchMarker: string | undefined;
-  await withChromeStartupLock(
-    async () => {
-      clearStaleSingletonLock(params.profileDir);
-      const argv = [
-        `--user-data-dir=${params.profileDir}`,
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--password-store=basic",
-        "--window-position=0,0",
-        `--window-size=${params.window.width},${params.window.height}`,
-        "--lang=en-US",
-        ...(params.extraArgs ?? []),
-        ...(params.proxyServer !== null ? [`--proxy-server=${params.proxyServer}`] : []),
-        `--app=${params.url}`,
-      ];
-      const spawned = spawnLocalBrowser(params.binary, argv, params.profileDir, {
-        detached: process.platform !== "win32",
-        env: params.env,
-        stdio: ["ignore", "ignore", "pipe"],
-      });
-      child = spawned;
-      launchMarker = localBrowserLaunchMarkers.get(spawned);
-      childIdentity = registerSelfManagedChrome(spawned, params.profileDir);
-      let chromeStderr = "";
-      spawned.stderr?.on("data", (chunk: Buffer) => {
-        chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
-      });
-      // Give Chrome a moment to actually come up (or die). Unlike the CDP path
-      // there is no devtools endpoint to poll — but a crash-on-launch (bad
-      // profile, missing lib) should surface here, not 15min later as a blank
-      // browser. If the process is already dead, throw with its stderr.
-      await new Promise((r) => setTimeout(r, 1_200));
-      childIdentity ??=
-        spawned.pid === undefined ? null : profileProcessIdentity(spawned.pid, params.profileDir);
-      childIdentity = await resolveAttachedProfileChildIdentity(
-        spawned,
-        params.profileDir,
-        childIdentity,
-      );
-      if (childIdentity !== null) {
-        const existing = selfManagedChromes.get(childIdentity.pid);
-        const proof =
-          existing?.identity.start_time === childIdentity.start_time
-            ? existing.proof
-            : trackOwnedChromeProcessTree(childIdentity, false);
-        if (proof !== null) {
-          selfManagedChromes.set(childIdentity.pid, {
-            identity: childIdentity,
-            processGroup: false,
-            proof,
-          });
-        }
-      }
-      if (!childProcessIsRunning(spawned)) {
-        reapProfileHolderIfOwned(params.profileDir, childIdentity);
-        const detail = chromeStderr.trim();
-        const collision = profileCollisionFromStderr(detail);
-        if (collision !== null) throw collision;
-        const termination =
-          spawned.exitCode !== null
-            ? `code ${spawned.exitCode}`
-            : `signal ${spawned.signalCode ?? "unknown"}`;
-        throw new Error(
-          `plain login Chrome exited immediately (${termination})` +
-            `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
+  // Login's plain browser is the no-CDP path used for Google sign-in. Reserve
+  // its marker before launch so the rc.15 fail-closed reaper bind is legitimate.
+  const ownership = registerLocalBrowserLaunch(params.profileDir, params.env);
+  const launchMarker = ownership.marker;
+  let spawned = false;
+  try {
+    await withChromeStartupLock(
+      async () => {
+        clearStaleSingletonLock(params.profileDir);
+        const argv = [
+          `--user-data-dir=${params.profileDir}`,
+          "--no-first-run",
+          "--no-default-browser-check",
+          "--password-store=basic",
+          "--window-position=0,0",
+          `--window-size=${params.window.width},${params.window.height}`,
+          "--lang=en-US",
+          ...(params.extraArgs ?? []),
+          ...(params.proxyServer !== null ? [`--proxy-server=${params.proxyServer}`] : []),
+          `--app=${params.url}`,
+        ];
+        const launched = spawnLocalBrowser(params.binary, argv, params.profileDir, {
+          detached: process.platform !== "win32",
+          env: ownership.env,
+          stdio: ["ignore", "ignore", "pipe"],
+          marker: launchMarker,
+        });
+        child = launched;
+        spawned = true;
+        let chromeStderr = "";
+        launched.stderr?.on("data", (chunk: Buffer) => {
+          chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
+        });
+        // Give Chrome a moment to actually come up (or die). Unlike the CDP path
+        // there is no devtools endpoint to poll — but a crash-on-launch (bad
+        // profile, missing lib) should surface here, not 15min later as a blank
+        // browser. If the process is already dead, throw with its stderr.
+        await new Promise((r) => setTimeout(r, 1_200));
+        childIdentity ??=
+          launched.pid === undefined
+            ? null
+            : profileProcessIdentity(launched.pid, params.profileDir);
+        childIdentity = await resolveAttachedProfileChildIdentity(
+          launched,
+          params.profileDir,
+          childIdentity,
         );
-      }
-      if (process.platform === "linux" && childIdentity === null) {
-        throw new Error("plain login Chrome identity could not be proven");
-      }
-    },
-    { deadlineMs: 0 },
-  );
-
-  if (launchMarker === undefined) {
-    throw new Error("plain login Chrome lost its ownership marker");
+        childIdentity = registerSelfManagedChrome(launched, params.profileDir) ?? childIdentity;
+        if (childIdentity !== null) {
+          const existing = selfManagedChromes.get(childIdentity.pid);
+          const proof =
+            existing?.identity.start_time === childIdentity.start_time
+              ? existing.proof
+              : trackOwnedChromeProcessTree(childIdentity, false);
+          if (proof !== null) {
+            selfManagedChromes.set(childIdentity.pid, {
+              identity: childIdentity,
+              processGroup: false,
+              proof,
+            });
+          }
+        }
+        if (!childProcessIsRunning(launched)) {
+          reapProfileHolderIfOwned(params.profileDir, childIdentity);
+          const detail = chromeStderr.trim();
+          const collision = profileCollisionFromStderr(detail);
+          if (collision !== null) throw collision;
+          const termination =
+            launched.exitCode !== null
+              ? `code ${launched.exitCode}`
+              : `signal ${launched.signalCode ?? "unknown"}`;
+          throw new Error(
+            `plain login Chrome exited immediately (${termination})` +
+              `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
+          );
+        }
+        if (process.platform === "linux" && childIdentity === null) {
+          throw new Error("plain login Chrome identity could not be proven");
+        }
+      },
+      { deadlineMs: 0 },
+    );
+  } catch (error) {
+    if (!spawned) untrackOwnerBrowserLaunch(launchMarker);
+    throw error;
   }
 
   let teardownPromise: Promise<void> | undefined;
