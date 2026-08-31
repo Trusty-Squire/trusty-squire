@@ -235,6 +235,73 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it("selects the current Google account row without data-identifier", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/**", async (route) => {
+      const callback = route.request().url().endsWith("/callback");
+      await route.fulfill({
+        contentType: "text/html",
+        body: callback
+          ? '<script>window.opener.document.querySelector("#state").textContent="Signed in"; window.close()</script>'
+          : '<main id="state">Signed out</main><button id="oauth" onclick="window.open(\'https://accounts.google.com/v3/signin/accountchooser\')">Continue</button>',
+      });
+    });
+    await context.route("https://accounts.google.com/**", async (route) => {
+      const consent = route.request().url().includes("/consent?");
+      await route.fulfill({
+        contentType: "text/html",
+        body: consent
+          ? "<button onclick=\"location.href='https://product.test/callback'\">Continue</button>"
+          : `<button onclick="location.href='https://accounts.google.com/consent?scope=openid'">
+               <span>Example User</span><span>worker@example.com</span>
+             </button>
+             <button>Use another account</button>`,
+      });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+
+    try {
+      await controller.loginWithOAuth("#oauth", 5_000, "google");
+      await expect(product.locator("#state").textContent()).resolves.toBe("Signed in");
+      expect(controller.currentUrl()).toBe("https://product.test/login");
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("returns a re-login result when Google never reaches its OAuth completion signal", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/**", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<button id="oauth" onclick="window.open(\'https://accounts.google.com/provider\')">Continue</button>',
+      });
+    });
+    await context.route("https://accounts.google.com/**", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: "<main>Provider did not settle</main>",
+      });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    const startedAt = Date.now();
+
+    try {
+      const rejected = controller.loginWithOAuth("#oauth", 1_000, "google");
+      await expect(rejected).rejects.toMatchObject({
+        code: "google_session",
+        message: expect.stringMatching(/session may have expired.*re-login/i),
+      });
+      expect(Date.now() - startedAt).toBeLessThan(5_000);
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
   it("waits for a same-tab provider round trip to return and settle", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();

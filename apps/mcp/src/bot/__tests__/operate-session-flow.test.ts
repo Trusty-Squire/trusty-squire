@@ -16,6 +16,7 @@ const h = vi.hoisted(() => ({
   providers: ["google"] as string[] | null,
   oauthStatus: "already_valid" as string,
   oauthLoginCalls: [] as string[],
+  oauthLoginError: null as Error | null,
   oauthConsentProviders: [] as Array<string | undefined>,
   oauthLoginGates: new Map<number, Promise<void>>(),
   oauthResultUrl: "https://app.example.com/dashboard",
@@ -68,6 +69,7 @@ const h = vi.hoisted(() => ({
   controllerProviderProbeCalls: 0,
   workerEmail: null as string | null,
   liveGoogleEmail: "default-google@example.com" as string | null,
+  identityProbeCalls: 0,
   temporaryHostScopes: [] as Array<{ hosts: string[]; phase: "enter" | "exit" }>,
   hostScopeProviders: [] as Array<{
     allowedHosts: () => readonly string[];
@@ -323,6 +325,12 @@ vi.mock("../browser.js", () => ({
     marker,
     env: { ...baseEnv, TRUSTY_SQUIRE_OPERATOR_BROWSER_MARKER: marker },
   }),
+  OAuthSessionExpiredError: class OAuthSessionExpiredError extends Error {
+    readonly code = "google_session";
+    constructor() {
+      super("google_session: session expired; re-login");
+    }
+  },
   BrowserController: class {
     private readonly index: number;
     private readonly opts: { profileDir?: string; proxyUrl?: string; storageState?: unknown };
@@ -356,6 +364,7 @@ vi.mock("../browser.js", () => ({
       return cookies?.some((cookie) => cookie.name === "__Secure-1PSID") ? ["google"] : [];
     }
     async detectGoogleAccountEmail(): Promise<string | null> {
+      h.identityProbeCalls += 1;
       return h.liveGoogleEmail;
     }
     async goto(url: string): Promise<void> {
@@ -761,6 +770,7 @@ vi.mock("../browser.js", () => ({
       h.oauthConsentProviders.push(provider);
       const gate = h.oauthLoginGates.get(this.index);
       if (gate !== undefined) await gate;
+      if (h.oauthLoginError !== null) throw h.oauthLoginError;
       h.currentUrl = h.oauthResultUrl;
       h.visibleText = "Signed in";
     }
@@ -1105,6 +1115,7 @@ beforeEach(() => {
   h.providers = ["google"];
   h.oauthStatus = "already_valid";
   h.oauthLoginCalls = [];
+  h.oauthLoginError = null;
   h.oauthConsentProviders = [];
   h.oauthLoginGates = new Map();
   h.oauthResultUrl = "https://app.example.com/dashboard";
@@ -1151,6 +1162,7 @@ beforeEach(() => {
   h.controllerProviderProbeCalls = 0;
   h.workerEmail = null;
   h.liveGoogleEmail = "default-google@example.com";
+  h.identityProbeCalls = 0;
   h.temporaryHostScopes = [];
   h.hostScopeProviders = [];
   h.connections = [];
@@ -3414,7 +3426,7 @@ describe("3.1 — autocomplete-aware type fill", () => {
 });
 
 describe("operate session — OAuth lifecycle", () => {
-  it("restarts with the latest portable snapshot instead of hanging on live state restore", async () => {
+  it("restarts with the latest portable snapshot inside the OAuth lease", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-oauth-live-restore-hang";
     const google = {
       cookies: [
@@ -3471,8 +3483,101 @@ describe("operate session — OAuth lifecycle", () => {
 
     expect(outcome).toBe("terminal");
     expect(h.restoredStorageStates).toEqual([]);
+    expect(h.profileDirs[1]).toBe(h.profileDirs[0]);
     expect(h.seededStorageStates[1]).toEqual(prepared);
     expect(h.oauthLoginCalls).toEqual(["#google-oauth"]);
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("returns a failed OAuth operation without post-failure identity work", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-oauth-failure-budget";
+    const google = {
+      cookies: [
+        {
+          name: "SID",
+          value: "google-session-before-failed-action",
+          domain: ".google.com",
+          path: "/",
+        },
+      ],
+      origins: [],
+    };
+    const relyingParty = {
+      cookies: [
+        {
+          name: "rp_session",
+          value: "relying-party-before-failed-action",
+          domain: ".app.example.com",
+          path: "/",
+        },
+      ],
+      origins: [],
+    };
+    const rotated = {
+      cookies: [...relyingParty.cookies, ...google.cookies],
+      origins: [],
+    };
+    h.storageStates.set(canonical, google);
+    h.identityMetadata.set(canonical, { googleAccountEmail: "confirmed@example.com" });
+    h.liveGoogleEmail = "unconfirmed@example.com";
+    h.captureStorageStateSequences.set(0, [relyingParty]);
+    h.captureStorageStateSequences.set(1, [rotated]);
+    h.oauthLoginError = new Error("provider did not settle");
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+
+    await expect(
+      act(started.session_id, {
+        kind: "oauth_login",
+        target: "Continue with Google",
+        provider: "google",
+      }),
+    ).rejects.toThrow("provider did not settle");
+
+    expect(h.identityProbeCalls).toBe(0);
+    expect(h.identityMetadata.get(canonical)).toEqual({
+      googleAccountEmail: "confirmed@example.com",
+    });
+    expect(h.storageStateWrites).toEqual([]);
+    expect(h.profileDirs).toHaveLength(2);
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("surfaces an OAuth completion timeout as google_session", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const { OAuthSessionExpiredError } = await import("../browser.js");
+    h.oauthLoginError = new OAuthSessionExpiredError(30_000);
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: "/tmp/trusty-squire-unit-canonical-google-session-wall",
+    });
+    const target = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+
+    await expect(
+      act(started.session_id, { kind: "oauth_login", target, provider: "google" }),
+    ).rejects.toThrow("google_session");
+    expect(h.identityProbeCalls).toBe(0);
     await finishProvisionSession(started.session_id);
   });
 
@@ -3545,7 +3650,7 @@ describe("operate session — OAuth lifecycle", () => {
     await finishProvisionSession(started.session_id);
   });
 
-  it("serializes every OAuth action and restarts from the freshly published state", async () => {
+  it("serializes every OAuth action and publishes each rotated result", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-google-handoff";
     const state0 = {
       cookies: [
@@ -3662,12 +3767,14 @@ describe("operate session — OAuth lifecycle", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(h.restoredStorageStates).toEqual([]);
+    expect(h.profileDirs[2]).toBe(h.profileDirs[0]);
     expect(h.seededStorageStates[2]).toEqual(merged0);
     expect(h.oauthLoginCalls).toHaveLength(1);
 
     releaseFirst();
     await firstAct;
-    await vi.waitFor(() => expect(h.seededStorageStates[4]).toEqual(merged1));
+    await vi.waitFor(() => expect(h.profileDirs[4]).toBe(h.profileDirs[1]));
+    expect(h.seededStorageStates[4]).toEqual(merged1);
     await secondAct;
     expect(h.storageStateWrites).toEqual([
       { profileDir: canonical, state: state1 },
@@ -4621,6 +4728,88 @@ describe("Compact V2 action-map boundary", () => {
         expect.stringContaining("Continue"),
       ]),
     ]);
+  });
+
+  it("refreshes a cursorless provider query after async auth navigation and names its handle", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [];
+    const started = await startProvisionSession({
+      serviceUrl: "https://play.example.com/sign-up",
+    });
+    expect(started).toMatchObject({ stage: "browse", safe_table: [] });
+
+    h.mainDocumentEpoch += 1;
+    h.elements = [
+      elem({
+        tag: "button",
+        role: "button",
+        visibleText: "Continue with Google securely",
+        selector: "#google-oauth",
+      }),
+      elem({
+        index: 1,
+        tag: "input",
+        type: "password",
+        role: "textbox",
+        labelText: "Password",
+        selector: "#password",
+      }),
+    ];
+
+    const result = await observeQuery(started.session_id, "Google");
+
+    expect(result).toMatchObject({
+      stage: "auth",
+      safe_table: [
+        expect.arrayContaining([
+          expect.stringMatching(/^@e:/),
+          "b",
+          expect.stringContaining("Google"),
+        ]),
+      ],
+    });
+  });
+
+  it("waits a bounded beat for a cursorless provider query while auth controls hydrate", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [elem({ tag: "button", role: "button", selector: "#social-login-placeholder" })];
+    const started = await startProvisionSession({
+      serviceUrl: "https://play.example.com/sign-up",
+    });
+    const hydration = setTimeout(() => {
+      h.elements = [
+        elem({
+          tag: "button",
+          role: "button",
+          visibleText: "Google",
+          selector: "#google-oauth",
+        }),
+        elem({
+          index: 1,
+          tag: "input",
+          type: "password",
+          role: "textbox",
+          labelText: "Password",
+          selector: "#password",
+        }),
+      ];
+    }, 50);
+
+    try {
+      await expect(observeQuery(started.session_id, "Google")).resolves.toMatchObject({
+        stage: "auth",
+        safe_table: [
+          expect.arrayContaining([
+            expect.stringMatching(/^@e:/),
+            "b",
+            expect.stringContaining("Google"),
+          ]),
+        ],
+      });
+    } finally {
+      clearTimeout(hydration);
+      await finishProvisionSession(started.session_id);
+    }
   });
 
   it("matches private merchant labels while returning only sealed rows", async () => {
