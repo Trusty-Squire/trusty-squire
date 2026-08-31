@@ -18,7 +18,15 @@
 
 import { createHash, createHmac, randomBytes, randomInt, randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
-import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  renameSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -703,16 +711,20 @@ export interface Session {
   // session-addressed operation always captures the Session object before it
   // awaits, so a later session can never be substituted into an old callback.
   closing: boolean;
+  // The session is visible before operate_start's initial navigation and
+  // observation finish. Idle cleanup must not cross that action boundary.
+  initializing: boolean;
+  // Tool activity is recorded at both entry and terminal completion. An idle
+  // browser is eligible only when no action lease is held.
+  lastActivityAt: number;
   callCount: number;
   callDrainWaiters: Set<() => void>;
   paymentCallCount: number;
   paymentCallDrainWaiters: Set<() => void>;
   paymentDispatchClosed: boolean;
   // Session ownership must be a resource boundary, not merely a convention for
-  // cooperative hosts. The watchdog destroys this browser if its client goes
-  // away without operate_finish, if it lives too long, or if its Chromium tree
-  // exceeds the CPU budget.
-  lastActivityAt: number;
+  // cooperative hosts. The watchdog observes the browser but teardown may only
+  // begin between complete action leases.
   watchdog: OperatorBrowserWatchdog | null;
   terminalTeardownOwner: SessionTerminalTeardownOwner | null;
 }
@@ -1354,7 +1366,7 @@ async function prepareOAuthActionBrowser(session: Session): Promise<void> {
       const replacementLease = leasedBrowsers.get(replacement);
       if (replacementLease?.profileDir === ephemeral.profileDir) leasedBrowsers.delete(replacement);
     }
-    if (sessions.get(session.id) === session) sessions.delete(session.id);
+    deregisterProvisionSession(session);
     stopSessionWatchdog(session);
     disposeSessionWatchdog(session);
     if (
@@ -1518,7 +1530,7 @@ async function runSerializedGoogleIdentityOperation<T>(
           leasedBrowsers.delete(replacement);
         }
       }
-      if (sessions.get(session.id) === session) sessions.delete(session.id);
+      deregisterProvisionSession(session);
       stopSessionWatchdog(session);
       disposeSessionWatchdog(session);
       if (
@@ -1668,7 +1680,6 @@ function disposeSessionWatchdog(session: Session): void {
   session.watchdog = null;
 }
 
-const DEFAULT_SESSION_TERMINAL_DRAIN_TIMEOUT_MS = 5_000;
 const DEFAULT_PENDING_THREE_DS_FINALIZE_TIMEOUT_MS = 3_000;
 const DEFAULT_SESSION_TERMINAL_TRANSITION_TIMEOUT_MS = 30_000;
 const DEFAULT_OPERATOR_FORCE_CLOSE_TIMEOUT_MS = 3_000;
@@ -1743,7 +1754,7 @@ async function forceTerminateProvisionSessionOwned(
       `payment dispatch handoff exceeded ${timeoutMs}ms`,
     ).catch(() => undefined);
   }
-  if (sessions.get(session.id) === session) sessions.delete(session.id);
+  deregisterProvisionSession(session);
   let terminalError: unknown;
   if (auditPendingThreeDs && session.pendingThreeDs !== null) {
     try {
@@ -1779,7 +1790,16 @@ async function forceTerminateProvisionSessionOwned(
 async function terminateExpiredProvisionSession(
   session: Session,
   reason: OperatorBrowserWatchdogReason,
-): Promise<void> {
+): Promise<boolean> {
+  if (
+    session.initializing ||
+    session.closing ||
+    session.callCount > 0 ||
+    session.paymentCallCount > 0 ||
+    sessions.get(session.id) !== session
+  ) {
+    return false;
+  }
   const owner =
     session.terminalTeardownOwner ??
     (session.terminalTeardownOwner = {
@@ -1787,7 +1807,11 @@ async function terminateExpiredProvisionSession(
       forcePromise: null,
       routinePromise: null,
     });
-  if (owner.routinePromise !== null) return await owner.routinePromise;
+  if (owner.forcePromise !== null) return false;
+  if (owner.routinePromise !== null) {
+    await owner.routinePromise;
+    return true;
+  }
   session.closing = true;
   stopSessionWatchdog(session);
   owner.routinePromise = (async () => {
@@ -1809,6 +1833,7 @@ async function terminateExpiredProvisionSession(
     await forceTerminateProvisionSession(session, "browser_watchdog_terminate", { ...reason });
   })();
   await owner.routinePromise;
+  return true;
 }
 
 function startSessionWatchdog(session: Session): void {
@@ -1819,7 +1844,8 @@ function startSessionWatchdog(session: Session): void {
   const watchdog = new OperatorBrowserWatchdog({
     startedAt: session.startedAt,
     lastActivityAt: () => session.lastActivityAt,
-    hasActiveCall: () => session.callCount > 0,
+    hasActiveCall: () =>
+      session.initializing || session.callCount > 0 || session.paymentCallCount > 0,
     processMarker: () => session.browser.operatorBrowserMarker?.() ?? null,
     onTerminate: async (reason) => await terminateExpiredProvisionSession(session, reason),
   });
@@ -1873,6 +1899,7 @@ function acquireSessionCallLease(session: Session): () => void {
     if (released) return;
     released = true;
     session.callCount -= 1;
+    session.lastActivityAt = Date.now();
     if (session.callCount === 0) {
       session.lastActivityAt = Date.now();
       for (const wake of session.callDrainWaiters) wake();
@@ -1902,28 +1929,11 @@ async function waitForPaymentCallsToDrain(session: Session): Promise<void> {
   });
 }
 
-async function waitForSessionCallsToDrain(session: Session): Promise<boolean> {
-  if (session.callCount === 0) return true;
-  const timeoutMs = positiveTimeout(
-    "TRUSTY_SQUIRE_OPERATOR_TERMINAL_DRAIN_TIMEOUT_MS",
-    DEFAULT_SESSION_TERMINAL_DRAIN_TIMEOUT_MS,
-  );
-  let timer: NodeJS.Timeout | undefined;
-  let wake: (() => void) | undefined;
-  try {
-    return await Promise.race([
-      new Promise<true>((resolve) => {
-        wake = () => resolve(true);
-        session.callDrainWaiters.add(wake);
-      }),
-      new Promise<false>((resolve) => {
-        timer = setTimeout(() => resolve(false), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-    if (wake !== undefined) session.callDrainWaiters.delete(wake);
-  }
+async function waitForSessionCallsToDrain(session: Session): Promise<void> {
+  if (session.callCount === 0) return;
+  await new Promise<void>((resolve) => {
+    session.callDrainWaiters.add(resolve);
+  });
 }
 
 async function withSelectedProvisionSessionCall<T>(
@@ -3773,13 +3783,14 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     cartUrls: new Map(),
     lastCartMutation: null,
     closing: false,
+    initializing: true,
+    lastActivityAt: Date.now(),
     callCount: 0,
     callDrainWaiters: new Set(),
     paymentCallCount: 0,
     paymentCallDrainWaiters: new Set(),
     paymentDispatchClosed: false,
     startedAt: Date.now(),
-    lastActivityAt: Date.now(),
     watchdog: null,
     terminalTeardownOwner: null,
     hintServed: opts.hint !== undefined,
@@ -3829,6 +3840,8 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
       "compact",
       compactV2StartMetadata(opts.hint, loginHint, session.userEmail),
     );
+    session.initializing = false;
+    session.lastActivityAt = Date.now();
     if (observation.format === "compact-v2") return observation;
     return {
       ...observation,
@@ -3836,7 +3849,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
       ...(session.userEmail !== null ? { user_email: session.userEmail } : {}),
     };
   } catch (err) {
-    sessions.delete(id);
+    deregisterProvisionSession(session);
     disposeSessionWatchdog(session);
     await releaseWarmBrowserPage(browser, false);
     throw err;
@@ -3897,13 +3910,14 @@ export async function startHarnessProvisionSession(
     cartUrls: new Map(),
     lastCartMutation: null,
     closing: false,
+    initializing: true,
+    lastActivityAt: Date.now(),
     callCount: 0,
     callDrainWaiters: new Set(),
     paymentCallCount: 0,
     paymentCallDrainWaiters: new Set(),
     paymentDispatchClosed: false,
     startedAt: Date.now(),
-    lastActivityAt: Date.now(),
     watchdog: null,
     terminalTeardownOwner: null,
     hintServed: opts.hint !== undefined,
@@ -3925,10 +3939,12 @@ export async function startHarnessProvisionSession(
       "compact",
       compactV2StartMetadata(opts.hint, "", null),
     );
+    session.initializing = false;
+    session.lastActivityAt = Date.now();
     if (observation.format === "compact-v2") return observation;
     return { ...observation, hint: opts.hint ?? "" };
   } catch (error) {
-    sessions.delete(id);
+    deregisterProvisionSession(session);
     disposeSessionWatchdog(session);
     await opts.browser.close().catch(() => undefined);
     throw error;
@@ -9851,6 +9867,93 @@ function profileRequiresDestroy(session: Session): boolean {
   );
 }
 
+const OBSERVE_SNAPSHOT_CLEANUP_RETRY_MS = 250;
+const OBSERVE_SNAPSHOT_SHUTDOWN_DRAIN_MS = 500;
+const pendingObserveSnapshotCleanup = new Set<string>();
+let observeSnapshotCleanupTimer: ReturnType<typeof setTimeout> | null = null;
+
+function observeSnapshotPathState(path: string): "present" | "missing" | "unknown" {
+  try {
+    lstatSync(path);
+    return "present";
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unknown";
+  }
+}
+
+function scheduleObserveSnapshotCleanup(): void {
+  if (observeSnapshotCleanupTimer !== null || pendingObserveSnapshotCleanup.size === 0) return;
+  observeSnapshotCleanupTimer = setTimeout(() => {
+    observeSnapshotCleanupTimer = null;
+    retryPendingObserveSnapshotCleanup();
+    scheduleObserveSnapshotCleanup();
+  }, OBSERVE_SNAPSHOT_CLEANUP_RETRY_MS);
+  observeSnapshotCleanupTimer.unref();
+}
+
+function retryPendingObserveSnapshotCleanup(): void {
+  for (const path of pendingObserveSnapshotCleanup) {
+    try {
+      rmSync(path, { recursive: true, force: true });
+    } catch {}
+    if (observeSnapshotPathState(path) === "missing") {
+      pendingObserveSnapshotCleanup.delete(path);
+    }
+  }
+}
+
+async function drainPendingObserveSnapshotCleanup(): Promise<void> {
+  if (observeSnapshotCleanupTimer !== null) {
+    clearTimeout(observeSnapshotCleanupTimer);
+    observeSnapshotCleanupTimer = null;
+  }
+  const deadline = Date.now() + OBSERVE_SNAPSHOT_SHUTDOWN_DRAIN_MS;
+  do {
+    retryPendingObserveSnapshotCleanup();
+    if (pendingObserveSnapshotCleanup.size === 0) return;
+    await new Promise<void>((resolveWait) => {
+      setTimeout(resolveWait, Math.min(25, Math.max(1, deadline - Date.now())));
+    });
+  } while (Date.now() < deadline);
+  retryPendingObserveSnapshotCleanup();
+  scheduleObserveSnapshotCleanup();
+}
+
+function removeObserveSnapshotDirectory(path: string): unknown | undefined {
+  let failure: unknown;
+  try {
+    rmSync(path, { recursive: true, force: true });
+  } catch (error) {
+    failure = error;
+  }
+  if (observeSnapshotPathState(path) === "missing") {
+    pendingObserveSnapshotCleanup.delete(path);
+  } else {
+    pendingObserveSnapshotCleanup.add(path);
+    scheduleObserveSnapshotCleanup();
+  }
+  return failure;
+}
+
+function clearSessionArtifacts(session: Session): void {
+  session.prevObserve = null;
+  session.observeSnapshotFile = null;
+  session.secretSlots.clear();
+  session.sealedFieldKeys.clear();
+  const error = removeObserveSnapshotDirectory(observeSnapshotDir(session.id));
+  if (error !== undefined) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(
+      `[operator] session artifact cleanup failed session=${session.id}: ${message}\n`,
+    );
+  }
+}
+
+function deregisterProvisionSession(session: Session): void {
+  clearSessionArtifacts(session);
+  if (sessions.get(session.id) === session) sessions.delete(session.id);
+}
+
 function pendingThreeDsAuditStatus(
   resolution: ThreeDsResolution,
   pending: PendingThreeDsWait,
@@ -9917,7 +10020,7 @@ async function closeFinishingProvisionSession(
     persistState,
     session.terminalTeardownOwner ?? undefined,
   );
-  if (sessions.get(sessionId) === session) sessions.delete(sessionId);
+  deregisterProvisionSession(session);
   disposeSessionWatchdog(session);
   return { session_id: sessionId, url, closed: true };
 }
@@ -9938,19 +10041,8 @@ export async function finishProvisionSessionWithPreparation<T>(
   session.terminalTeardownOwner = owner;
   session.closing = true;
   stopSessionWatchdog(session);
-  const timeoutMs = positiveTimeout(
-    "TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS",
-    DEFAULT_SESSION_TERMINAL_TRANSITION_TIMEOUT_MS,
-  );
-  let timer: NodeJS.Timeout | undefined;
   const transition = (async (): Promise<PreparedFinishResult<T>> => {
-    const drained = await waitForSessionCallsToDrain(session);
-    if (!drained) {
-      await forceTerminateProvisionSession(session, "finish_forced_terminate", {
-        reason: "call_drain_timeout",
-      });
-      throw new Error(`provision session ${sessionId} call drain timed out; browser terminated`);
-    }
+    await waitForSessionCallsToDrain(session);
     const prepared = await prepare();
     if (owner.forced || sessions.get(sessionId) !== session) {
       throw new Error(`provision session ${sessionId} terminal transition was forced`);
@@ -9970,26 +10062,7 @@ export async function finishProvisionSessionWithPreparation<T>(
     }
   })();
   try {
-    return await Promise.race([
-      transition,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          void forceTerminateProvisionSession(session, "finish_forced_terminate", {
-            reason: "terminal_transition_timeout",
-            timeout_ms: timeoutMs,
-          }).then(
-            () =>
-              reject(
-                new Error(
-                  `provision session ${sessionId} terminal transition timed out; browser terminated`,
-                ),
-              ),
-            reject,
-          );
-        }, timeoutMs);
-        timer.unref();
-      }),
-    ]);
+    return await transition;
   } catch (error) {
     if (!owner.forced && sessions.get(sessionId) === session) {
       session.closing = false;
@@ -9997,8 +10070,6 @@ export async function finishProvisionSessionWithPreparation<T>(
       startSessionWatchdog(session);
     }
     throw error;
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -10011,42 +10082,35 @@ export async function closeAllProvisionSessions(): Promise<void> {
   shutdownGeneration += 1;
   shutdownInProgress += 1;
   try {
-    const timeoutMs = positiveTimeout(
-      "TRUSTY_SQUIRE_OPERATOR_TERMINAL_TRANSITION_TIMEOUT_MS",
-      DEFAULT_SESSION_TERMINAL_TRANSITION_TIMEOUT_MS,
-    );
-    await withTerminalTimeout(
-      (async () => {
-        await Promise.all(
-          [...startingBrowsers].map(async (pending) => {
-            await cancelStartingBrowser(pending).catch(() => undefined);
-          }),
-        );
-        const closingSessions = [...sessions.values()];
-        for (const session of closingSessions) {
-          session.closing = true;
-          stopSessionWatchdog(session);
-        }
-        const closeErrors = await Promise.all(
-          closingSessions.map(async (session) => {
-            const drained = await waitForSessionCallsToDrain(session);
-            return await forceTerminateProvisionSession(session, "shutdown_terminate", {
-              reason: drained ? "transport_disconnect" : "call_drain_timeout",
-            });
-          }),
-        );
-        await Promise.all(
-          [...leasedBrowsers.values()].map(async (ephemeral) => {
-            await forceReleaseWarmBrowserPage(ephemeral.controller).catch(() => undefined);
-          }),
-        );
-        const closeError = closeErrors.find((error) => error !== undefined);
-        if (closeError !== undefined) throw closeError;
-      })(),
-      timeoutMs,
-      `operator shutdown exceeded ${timeoutMs}ms`,
-    );
+    await (async () => {
+      await Promise.all(
+        [...startingBrowsers].map(async (pending) => {
+          await cancelStartingBrowser(pending).catch(() => undefined);
+        }),
+      );
+      const closingSessions = [...sessions.values()];
+      for (const session of closingSessions) {
+        session.closing = true;
+        stopSessionWatchdog(session);
+      }
+      const closeErrors = await Promise.all(
+        closingSessions.map(async (session) => {
+          await waitForSessionCallsToDrain(session);
+          return await forceTerminateProvisionSession(session, "shutdown_terminate", {
+            reason: "transport_disconnect",
+          });
+        }),
+      );
+      await Promise.all(
+        [...leasedBrowsers.values()].map(async (ephemeral) => {
+          await forceReleaseWarmBrowserPage(ephemeral.controller).catch(() => undefined);
+        }),
+      );
+      const closeError = closeErrors.find((error) => error !== undefined);
+      if (closeError !== undefined) throw closeError;
+    })();
   } finally {
+    await drainPendingObserveSnapshotCleanup();
     shutdownInProgress -= 1;
   }
 }

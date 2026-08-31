@@ -66,9 +66,20 @@ import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
 import {
   createOperatorBrowserMarker,
   OPERATOR_BROWSER_MARKER_ENV,
+  operatorBrowserProcessMarker,
   operatorBrowserProcessMatchesMarker,
   startGlobalOperatorBrowserProcessWatchdog,
 } from "./operator-browser-watchdog.js";
+import {
+  bindOwnerBrowserLaunch,
+  markOwnerBrowserLaunchTerminal,
+  reconcileOwnerBrowserLaunchAfterLeaderExit,
+  terminateOwnerBrowserLaunch,
+  trackOwnerBrowserLaunch,
+  trackOwnerProcess,
+  untrackOwnerBrowserLaunch,
+  untrackOwnerProcess,
+} from "./owner-process-reaper.js";
 
 // Lazy registration: installing the plugin mutates the chromium singleton
 // from playwright-extra so we only do it once per process. We require()
@@ -78,6 +89,94 @@ const require = createRequire(import.meta.url);
 export type StealthProfile = "baseline" | "cdp_hardened";
 
 const OPERATOR_BROWSER_HEADLESS = true;
+
+export function registerLocalBrowserLaunch(
+  profileDir: string,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+  marker = createOperatorBrowserMarker(),
+): { marker: string; env: NodeJS.ProcessEnv } {
+  trackOwnerBrowserLaunch(marker, profileDir);
+  return {
+    marker,
+    env: { ...baseEnv, [OPERATOR_BROWSER_MARKER_ENV]: marker },
+  };
+}
+
+export async function closeBrowserContextWithin(
+  context: { close(): Promise<unknown> },
+  timeoutMs = 2_000,
+): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  const outcome = await Promise.race([
+    Promise.resolve()
+      .then(() => context.close())
+      .then(
+        () => true,
+        () => false,
+      ),
+    new Promise<false>((resolveTimeout) => {
+      timer = setTimeout(() => resolveTimeout(false), timeoutMs);
+    }),
+  ]);
+  if (timer !== undefined) clearTimeout(timer);
+  return outcome;
+}
+
+function spawnLocalBrowser(
+  binary: string,
+  args: readonly string[],
+  profileDir: string,
+  options: {
+    env: NodeJS.ProcessEnv;
+    stdio: ["ignore", "ignore", "pipe"];
+    detached: boolean;
+    marker?: string;
+  },
+): ChildProcess {
+  const ownership = registerLocalBrowserLaunch(profileDir, options.env, options.marker);
+  try {
+    const child = spawn(binary, [...args], {
+      env: ownership.env,
+      stdio: options.stdio,
+      detached: options.detached,
+    });
+    localBrowserLaunchMarkers.set(child, ownership.marker);
+    child.once("exit", () => {
+      setTimeout(() => {
+        reconcileOwnerBrowserLaunchAfterLeaderExit(ownership.marker, profileDir);
+      }, 0).unref();
+    });
+    return child;
+  } catch (error) {
+    untrackOwnerBrowserLaunch(ownership.marker);
+    throw error;
+  }
+}
+
+const localBrowserLaunchMarkers = new WeakMap<ChildProcess, string>();
+
+function markLocalBrowserLaunchTerminal(child: ChildProcess | null): void {
+  if (child === null) return;
+  const marker = localBrowserLaunchMarkers.get(child);
+  if (marker !== undefined) markOwnerBrowserLaunchTerminal(marker);
+}
+
+export async function closeLocalBrowserLaunch(
+  marker: string | undefined,
+  profileDir: string,
+  runtime: {
+    markTerminal?: typeof markOwnerBrowserLaunchTerminal;
+    terminate?: typeof terminateOwnerBrowserLaunch;
+    untrack?: typeof untrackOwnerBrowserLaunch;
+  } = {},
+): Promise<void> {
+  if (marker === undefined) return;
+  (runtime.markTerminal ?? markOwnerBrowserLaunchTerminal)(marker);
+  if (!(await (runtime.terminate ?? terminateOwnerBrowserLaunch)(marker, profileDir))) {
+    throw new Error("local login browser closure unproven");
+  }
+  (runtime.untrack ?? untrackOwnerBrowserLaunch)(marker);
+}
 
 export type ContextInitScriptId = "evaluate-name-shim" | "navigator-webdriver" | "webgl-spoof";
 
@@ -2744,6 +2843,7 @@ let selfManagedTerminationSignalExitEnabled = true;
 function cleanupSelfManagedChromes(): void {
   for (const proof of ownedChromeProcessTrees) {
     signalOwnedChromeProcessTree(proof.identity, proof.processGroup, "SIGKILL", { proof });
+    untrackOwnerProcess(proof.identity);
   }
   selfManagedChromes.clear();
 }
@@ -2806,7 +2906,14 @@ function registerSelfManagedChrome(
   const identity = child.pid === undefined ? null : profileProcessIdentity(child.pid, profileDir);
   if (identity !== null) {
     const proof = trackOwnedChromeProcessTree(identity, processGroup);
-    if (proof !== null) selfManagedChromes.set(identity.pid, { identity, processGroup, proof });
+    if (proof !== null) {
+      const marker = proof.identity.process_marker;
+      if (marker !== undefined && !bindOwnerBrowserLaunch(marker, proof.identity)) {
+        releaseOwnedChromeProcessTree(proof);
+        throw new Error("local browser launch identity could not be bound to owner custody");
+      }
+      selfManagedChromes.set(identity.pid, { identity, processGroup, proof });
+    }
   }
   child.once("exit", () => {
     if (child.pid === undefined) return;
@@ -2977,15 +3084,19 @@ function trackOwnedChromeProcessTree(
   processGroup: boolean,
 ): OwnedChromeProcessTreeProof | null {
   installSelfManagedChromeCleanup();
-  const proof = captureOwnedChromeProcessTreeProof(identity, processGroup);
+  const marker = operatorBrowserProcessMarker(identity.pid);
+  const trackedIdentity = marker === null ? identity : { ...identity, process_marker: marker };
+  const proof = captureOwnedChromeProcessTreeProof(trackedIdentity, processGroup);
   if (proof === null) return null;
   ownedChromeProcessTrees.add(proof);
+  trackOwnerProcess(proof.identity);
   return proof;
 }
 
 function releaseOwnedChromeProcessTree(proof: OwnedChromeProcessTreeProof | null): void {
   if (proof === null) return;
   ownedChromeProcessTrees.delete(proof);
+  untrackOwnerProcess(proof.identity);
 }
 
 export function ownedChromeProcessTreeState(
@@ -3123,7 +3234,6 @@ export async function terminateTrackedProfileChild(
   }
   return identity;
 }
-
 // Classify an anti-bot interstitial page from its (title + body) text.
 // `onInterstitial` matches the static Cloudflare/Turnstile challenge copy.
 // `verificationPassed` is the signal the challenge SUCCEEDED — but
@@ -3186,6 +3296,7 @@ export interface SelfLaunchedLogin {
   forceTeardown: () => void;
   isRunning: () => boolean;
   identity: ProfileProcessIdentity | null;
+  marker: string;
 }
 
 export function childProcessIsRunning(child: ChildProcess | null): boolean {
@@ -3259,15 +3370,17 @@ export async function launchSelfManagedLoginContext(params: {
   proxyServer: string | null;
   extraArgs?: readonly string[];
   onSpawned?: (
-    browser: Pick<SelfLaunchedLogin, "teardown" | "forceTeardown" | "isRunning">,
+    browser: Pick<SelfLaunchedLogin, "teardown" | "forceTeardown" | "isRunning" | "marker">,
   ) => void;
 }): Promise<SelfLaunchedLogin> {
   let child: ChildProcess | null = null;
   let childIdentity: ProfileProcessIdentity | null = null;
   let browser: Browser | null = null;
-  let torn = false;
+  let launchMarker: string | undefined;
+  let teardownPromise: Promise<void> | undefined;
   const isRunning = (): boolean => childProcessIsRunning(child);
   const forceTeardown = (): void => {
+    markLocalBrowserLaunchTerminal(child);
     if (childIdentity !== null) {
       const tracked = selfManagedChromes.get(childIdentity.pid);
       signalOwnedChromeProcessTree(childIdentity, false, "SIGKILL", {
@@ -3278,16 +3391,20 @@ export async function launchSelfManagedLoginContext(params: {
     }
     if (childProcessIsRunning(child)) child?.kill("SIGKILL");
   };
-  const teardown = async (): Promise<void> => {
-    if (torn) return;
-    torn = true;
-    await browser?.close().catch(() => undefined);
-    if (!childProcessIsRunning(child)) return;
-    if (childIdentity !== null) {
-      signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
-    } else {
-      child?.kill("SIGTERM");
-    }
+  const teardown = (): Promise<void> => {
+    teardownPromise ??= (async () => {
+      markLocalBrowserLaunchTerminal(child);
+      if (browser !== null) await closeBrowserContextWithin(browser);
+      if (childProcessIsRunning(child)) {
+        if (childIdentity !== null) {
+          signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
+        } else {
+          child?.kill("SIGTERM");
+        }
+      }
+      await closeLocalBrowserLaunch(launchMarker, params.profileDir);
+    })();
+    return teardownPromise;
   };
   const endpoint = await withChromeStartupLock(
     async () => {
@@ -3310,18 +3427,23 @@ export async function launchSelfManagedLoginContext(params: {
         // tell) is never added. That is the whole point of self-launching.
         params.appMode ? `--app=${params.initialUrl}` : params.initialUrl,
       ];
-      const spawned = spawn(params.binary, argv, {
+      const spawned = spawnLocalBrowser(params.binary, argv, params.profileDir, {
+        detached: process.platform !== "win32",
         env: params.env,
         stdio: ["ignore", "ignore", "pipe"],
       });
       child = spawned;
+      launchMarker = localBrowserLaunchMarkers.get(spawned);
+      if (launchMarker === undefined) {
+        throw new Error("self-launched login Chrome lost its ownership marker");
+      }
       childIdentity = registerSelfManagedChrome(spawned, params.profileDir);
       let chromeStderr = "";
       spawned.stderr?.on("data", (chunk: Buffer) => {
         chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
       });
       try {
-        params.onSpawned?.({ teardown, forceTeardown, isRunning });
+        params.onSpawned?.({ teardown, forceTeardown, isRunning, marker: launchMarker });
         const endpoint = await waitForDevtools(port, 30_000, spawned);
         childIdentity = await resolveAttachedProfileChildIdentity(
           spawned,
@@ -3351,6 +3473,9 @@ export async function launchSelfManagedLoginContext(params: {
   if (child === null) {
     throw new Error("self-launched login Chrome lost its process handle");
   }
+  if (launchMarker === undefined) {
+    throw new Error("self-launched login Chrome lost its ownership marker");
+  }
 
   let attached: Awaited<ReturnType<typeof attachSelfManagedLoginContext>>;
   try {
@@ -3371,6 +3496,7 @@ export async function launchSelfManagedLoginContext(params: {
     forceTeardown,
     isRunning,
     identity: childIdentity,
+    marker: launchMarker,
   };
 }
 
@@ -3382,6 +3508,7 @@ export interface PlainLoginBrowser {
   // for the polling loop to fail loudly if the visible browser disappears.
   isRunning: () => boolean;
   identity: ProfileProcessIdentity | null;
+  marker: string;
 }
 
 // Launch a TRULY PLAIN Chrome for the interactive connect claim — NO
@@ -3415,6 +3542,7 @@ export async function launchPlainLoginBrowser(params: {
 }): Promise<PlainLoginBrowser> {
   let child: ChildProcess | null = null;
   let childIdentity: ProfileProcessIdentity | null = null;
+  let launchMarker: string | undefined;
   await withChromeStartupLock(
     async () => {
       clearStaleSingletonLock(params.profileDir);
@@ -3430,11 +3558,13 @@ export async function launchPlainLoginBrowser(params: {
         ...(params.proxyServer !== null ? [`--proxy-server=${params.proxyServer}`] : []),
         `--app=${params.url}`,
       ];
-      const spawned = spawn(params.binary, argv, {
+      const spawned = spawnLocalBrowser(params.binary, argv, params.profileDir, {
+        detached: process.platform !== "win32",
         env: params.env,
         stdio: ["ignore", "ignore", "pipe"],
       });
       child = spawned;
+      launchMarker = localBrowserLaunchMarkers.get(spawned);
       childIdentity = registerSelfManagedChrome(spawned, params.profileDir);
       let chromeStderr = "";
       spawned.stderr?.on("data", (chunk: Buffer) => {
@@ -3487,8 +3617,13 @@ export async function launchPlainLoginBrowser(params: {
     { deadlineMs: 0 },
   );
 
-  let torn = false;
+  if (launchMarker === undefined) {
+    throw new Error("plain login Chrome lost its ownership marker");
+  }
+
+  let teardownPromise: Promise<void> | undefined;
   const forceTeardown = (): void => {
+    markLocalBrowserLaunchTerminal(child);
     if (childIdentity !== null) {
       const tracked = selfManagedChromes.get(childIdentity.pid);
       signalOwnedChromeProcessTree(childIdentity, false, "SIGKILL", {
@@ -3499,20 +3634,24 @@ export async function launchPlainLoginBrowser(params: {
     }
     reapProfileHolderIfOwned(params.profileDir, childIdentity);
   };
-  const teardown = async (): Promise<void> => {
-    if (torn) return;
-    torn = true;
-    if (child !== null && childIdentity !== null) {
-      signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
-    } else if (childProcessIsRunning(child)) {
-      child?.kill("SIGTERM");
-    }
+  const teardown = (): Promise<void> => {
+    teardownPromise ??= (async () => {
+      markLocalBrowserLaunchTerminal(child);
+      if (child !== null && childIdentity !== null) {
+        signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
+      } else if (childProcessIsRunning(child)) {
+        child?.kill("SIGTERM");
+      }
+      await closeLocalBrowserLaunch(launchMarker, params.profileDir);
+    })();
+    return teardownPromise;
   };
   return {
     teardown,
     forceTeardown,
     isRunning: () => childProcessIsRunning(child),
     identity: childIdentity,
+    marker: launchMarker,
   };
 }
 
@@ -3549,6 +3688,7 @@ export class BrowserController {
   private childChromeProcessGroup = false;
   private ownedChromeProcessTreeProof: OwnedChromeProcessTreeProof | null = null;
   private operatorProcessMarker: string | null = null;
+  private ownerLaunchTracked = false;
   private cdpBrowser: Browser | null = null;
   // True once a local browser context launched this session.
   private launchedContext = false;
@@ -3759,6 +3899,12 @@ export class BrowserController {
       tracked?.identity.start_time === identity.start_time
         ? tracked.proof
         : trackOwnedChromeProcessTree(identity, processGroup);
+    if (proof !== null && this.ownerLaunchTracked) {
+      if (!bindOwnerBrowserLaunch(this.operatorBrowserMarker(), proof.identity)) {
+        releaseOwnedChromeProcessTree(proof);
+        throw new Error("local browser launch identity could not be bound to owner custody");
+      }
+    }
     if (proof !== null) this.ownedChromeProcessTreeProof = proof;
     return proof;
   }
@@ -3873,12 +4019,13 @@ export class BrowserController {
         "about:blank",
       ];
       this.commitProfileLaunch();
-      const child = spawn(params.binary, argv, {
+      const child = spawnLocalBrowser(params.binary, argv, this.profileDir, {
         env: params.env,
         stdio: ["ignore", "ignore", "pipe"],
         // A dedicated process group gives the session a single, identity-
         // proven teardown target for Chrome plus every renderer/GPU helper.
         detached: process.platform !== "win32",
+        marker: this.operatorBrowserMarker(),
       });
       this.childChrome = child;
       this.childChromeProcessGroup = process.platform !== "win32";
@@ -4126,6 +4273,10 @@ export class BrowserController {
           `(real-host GPU + egress; local fingerprint spoof + display setup disabled)`,
       );
     }
+    if (!remoteMode && !this.ownerLaunchTracked) {
+      registerLocalBrowserLaunch(this.profileDir, process.env, this.operatorBrowserMarker());
+      this.ownerLaunchTracked = true;
+    }
     // T3.1: probe where this run's traffic actually exits so the
     // browser's declared timezone matches its egress IP (a US-timezone
     // browser on a foreign proxy IP is itself an anti-bot signal).
@@ -4245,7 +4396,9 @@ export class BrowserController {
         return (await this.waitForOwnedProfileExit(identity, treeProof)) ? "closed" : "unknown";
       };
       const cleanupCancelled = async (lateContext: BrowserContext): Promise<ProfileCloseState> => {
-        const proof = await this.waitForPersistentFallbackIdentity();
+        const proof = await this.waitForPersistentFallbackIdentity().catch(
+          () => ({ state: "unknown" }) as const,
+        );
         if (proof.state !== "owned") {
           await lateContext.close().catch(() => undefined);
           return proof.state === "absent" ? "closed" : "unknown";
@@ -4319,12 +4472,28 @@ export class BrowserController {
       }
       this.context = context;
       this.launchedContext = true;
-      const holderPid = currentProfileHolderPid(this.profileDir);
-      this.launchedProfileHolderIdentity =
-        holderPid === null ? null : profileProcessIdentity(holderPid, this.profileDir);
-      if (this.launchedProfileHolderIdentity !== null) {
-        this.adoptOwnedChromeProcessTree(this.launchedProfileHolderIdentity, false);
-      }
+      this.launchedProfileHolderIdentity = await this.requirePersistentFallbackOwnership(
+        async () => {
+          markOwnerBrowserLaunchTerminal(this.operatorBrowserMarker());
+          await Promise.race([
+            context.close().catch(() => undefined),
+            new Promise<void>((resolveWait) => {
+              const timer = setTimeout(resolveWait, PERSISTENT_CONTEXT_CANCELLATION_SETTLE_MS);
+              timer.unref();
+            }),
+          ]);
+          const markerClosed = await terminateOwnerBrowserLaunch(
+            this.operatorBrowserMarker(),
+            this.profileDir,
+          );
+          if (markerClosed) {
+            untrackOwnerBrowserLaunch(this.operatorBrowserMarker());
+            this.ownerLaunchTracked = false;
+          }
+          this.context = null;
+          this.launchedContext = false;
+        },
+      );
       this.commitProfileLaunch();
       this.persistentFallbackLaunchInFlight = false;
     }
@@ -16474,6 +16643,8 @@ export class BrowserController {
     this.startCancellationRequested = true;
     this.resolveStartCancellation?.();
     this.resolveStartCancellation = null;
+    const marker = this.operatorBrowserMarker();
+    if (this.ownerLaunchTracked) markOwnerBrowserLaunchTerminal(marker);
     const proof = this.ownedChromeProcessTreeProof;
     const identity = proof?.identity ?? this.currentOwnedProfileIdentity();
     if (identity !== null) {
@@ -16492,7 +16663,13 @@ export class BrowserController {
       if (tracked?.proof === proof) selfManagedChromes.delete(proof.identity.pid);
       if (this.ownedChromeProcessTreeProof === proof) this.ownedChromeProcessTreeProof = null;
     }
-    return closed ? "closed" : "unknown";
+    const markerClosed =
+      !this.ownerLaunchTracked || (await terminateOwnerBrowserLaunch(marker, this.profileDir));
+    if (closed && markerClosed && this.ownerLaunchTracked) {
+      untrackOwnerBrowserLaunch(marker);
+      this.ownerLaunchTracked = false;
+    }
+    return closed && markerClosed ? "closed" : "unknown";
   }
 
   private async closeCancelledStart(): Promise<ProfileCloseState> {
@@ -16558,6 +16735,22 @@ export class BrowserController {
     return proof;
   }
 
+  private async requirePersistentFallbackOwnership(
+    cleanupUnproven: () => Promise<void>,
+  ): Promise<ProfileProcessIdentity> {
+    try {
+      const proof = await this.waitForPersistentFallbackIdentity();
+      if (proof.state !== "owned" || this.ownedChromeProcessTreeProof === null) {
+        throw new Error("persistent browser launch identity could not be bound to owner custody");
+      }
+      return proof.identity;
+    } catch (error) {
+      await cleanupUnproven().catch(() => undefined);
+      this.persistentFallbackLaunchInFlight = false;
+      throw error;
+    }
+  }
+
   private startPersistentFallbackOwnershipMonitor(): void {
     if (this.persistentFallbackOwnershipMonitor !== null) return;
     this.persistentFallbackOwnershipMonitor = (async () => {
@@ -16571,7 +16764,9 @@ export class BrowserController {
             operatorBrowserProcessMatchesMarker(identity.pid, this.operatorBrowserMarker()));
         if (identity !== null && controllerOwnsIdentity) {
           this.launchedProfileHolderIdentity = identity;
-          this.adoptOwnedChromeProcessTree(identity, false);
+          try {
+            this.adoptOwnedChromeProcessTree(identity, false);
+          } catch {}
           return;
         }
         await new Promise<void>((resolveWait) => {
@@ -16631,6 +16826,8 @@ export class BrowserController {
       this.context = null;
       return "closed";
     }
+    const marker = this.operatorBrowserMarker();
+    if (this.ownerLaunchTracked) markOwnerBrowserLaunchTerminal(marker);
     // Each step is best-effort and independent: a throw closing the page
     // or context must NOT skip the browser reap below, or an un-closed Chrome
     // keeps the profile's
@@ -16718,7 +16915,13 @@ export class BrowserController {
         this.ownedChromeProcessTreeProof = null;
       }
     }
-    return closeState;
+    const markerClosed =
+      !this.ownerLaunchTracked || (await terminateOwnerBrowserLaunch(marker, this.profileDir));
+    if (markerClosed && this.ownerLaunchTracked) {
+      untrackOwnerBrowserLaunch(marker);
+      this.ownerLaunchTracked = false;
+    }
+    return closeState === "closed" && !markerClosed ? "force_closed_unproven" : closeState;
   }
 }
 

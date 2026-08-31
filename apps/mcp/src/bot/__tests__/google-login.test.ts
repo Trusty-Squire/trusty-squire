@@ -11,6 +11,7 @@ import {
   attachSelfManagedLoginContext,
   BrowserController,
   childProcessIsRunning,
+  closeLocalBrowserLaunch,
   launchCancellablePersistentContext,
   type launchSelfManagedLoginContext,
   resolvePersistentFallbackIdentity,
@@ -239,6 +240,7 @@ describe("operator shutdown — OAuth-bootstrap login browser cancellation", () 
     const teardown = vi.fn(async () => undefined);
     const browser: PlainLoginBrowser = {
       identity: null,
+      marker: "v1:1:deferred-display",
       teardown,
       forceTeardown: vi.fn(),
       isRunning: () => true,
@@ -336,6 +338,18 @@ describe("login browser lifecycle guards", () => {
     await expect(resolving).resolves.toEqual({ state: "unknown" });
     expect(readIdentity).toHaveBeenCalled();
     expect(clearStaleLock).toHaveBeenCalled();
+
+    const controller = new BrowserController({ profileDir });
+    const cleanupUnproven = vi.fn(async () => undefined);
+    const internals = controller as unknown as {
+      waitForPersistentFallbackIdentity: () => Promise<{ state: "unknown" }>;
+      requirePersistentFallbackOwnership: (cleanup: () => Promise<void>) => Promise<unknown>;
+    };
+    internals.waitForPersistentFallbackIdentity = async () => ({ state: "unknown" });
+    await expect(internals.requirePersistentFallbackOwnership(cleanupUnproven)).rejects.toThrow(
+      "persistent browser launch identity could not be bound to owner custody",
+    );
+    expect(cleanupUnproven).toHaveBeenCalledOnce();
   });
 
   it("returns an unproven pre-launch close for quarantine", async () => {
@@ -709,21 +723,131 @@ describe("pollUntil phase-aware heartbeat", () => {
 });
 
 describe("bot Chrome launch consistency", () => {
-  it("forces the system Chrome channel through the executable launcher", async () => {
-    const context = {};
+  it("keeps persistent launch custody through bounded terminal teardown", async () => {
+    const context = { close: vi.fn(async () => undefined) };
     const launchPersistentContext = vi.fn().mockResolvedValue(context);
     const launcher = { launchPersistentContext } as unknown as PersistentLauncher;
+    const marker = "v1:1:persistent-login";
+    const markTerminal = vi.fn();
+    const terminate = vi.fn(async () => true);
+    const untrack = vi.fn();
+    const bindLaunch = vi.fn(() => true);
 
-    await expect(
-      launchPersistentLoginContext(launcher, "/isolated-profile", {
+    const persistent = await launchPersistentLoginContext(
+      launcher,
+      "/isolated-profile",
+      {
         headless: true,
         channel: "bundled",
+      },
+      {
+        registerLocalBrowserLaunch: (_profileDir, env = {}) => ({
+          marker,
+          env: { ...env, [OPERATOR_BROWSER_MARKER_ENV]: marker },
+        }),
+        markTerminal,
+        terminate,
+        untrack,
+        bindLaunch,
+      },
+    );
+
+    expect(persistent.context).toBe(context);
+    expect(bindLaunch).toHaveBeenCalledWith(marker, "/isolated-profile");
+    expect(markTerminal).not.toHaveBeenCalled();
+    expect(launchPersistentContext).toHaveBeenCalledWith(
+      "/isolated-profile",
+      expect.objectContaining({
+        headless: true,
+        channel: "chrome",
+        env: expect.objectContaining({
+          TRUSTY_SQUIRE_OPERATOR_BROWSER_MARKER: expect.stringMatching(/^v1:/),
+        }),
       }),
-    ).resolves.toBe(context);
-    expect(launchPersistentContext).toHaveBeenCalledWith("/isolated-profile", {
-      headless: true,
-      channel: "chrome",
-    });
+    );
+
+    await persistent.close();
+
+    expect(markTerminal).toHaveBeenCalledWith(marker);
+    expect(context.close).toHaveBeenCalledOnce();
+    expect(terminate).toHaveBeenCalledWith(marker, "/isolated-profile");
+    expect(untrack).toHaveBeenCalledWith(marker);
+  });
+
+  it("retains persistent launch custody when exact-marker closure is unproven", async () => {
+    const context = { close: vi.fn(async () => undefined) };
+    const untrack = vi.fn();
+    const persistent = await launchPersistentLoginContext(
+      { launchPersistentContext: vi.fn(async () => context as never) },
+      "/isolated-profile",
+      {},
+      {
+        registerLocalBrowserLaunch: (_profileDir, env = {}) => ({
+          marker: "v1:1:unproven-login",
+          env,
+        }),
+        markTerminal: vi.fn(),
+        terminate: vi.fn(async () => false),
+        untrack,
+        bindLaunch: () => true,
+      },
+    );
+
+    await expect(persistent.close()).rejects.toThrow("persistent login browser closure unproven");
+    expect(untrack).not.toHaveBeenCalled();
+  });
+
+  it("reaches exact-marker teardown when persistent context close hangs", async () => {
+    vi.useFakeTimers();
+    const terminate = vi.fn(async () => true);
+    const untrack = vi.fn();
+    const persistent = await launchPersistentLoginContext(
+      {
+        launchPersistentContext: vi.fn(async () => ({
+          close: async () => await new Promise<never>(() => undefined),
+        })) as never,
+      },
+      "/isolated-profile",
+      {},
+      {
+        registerLocalBrowserLaunch: (_profileDir, env = {}) => ({
+          marker: "v1:1:hung-persistent-login",
+          env,
+        }),
+        markTerminal: vi.fn(),
+        terminate,
+        untrack,
+        bindLaunch: () => true,
+        closeTimeoutMs: 10,
+      },
+    );
+
+    const closing = persistent.close();
+    await vi.advanceTimersByTimeAsync(10);
+    await closing;
+
+    expect(terminate).toHaveBeenCalledWith("v1:1:hung-persistent-login", "/isolated-profile");
+    expect(untrack).toHaveBeenCalledWith("v1:1:hung-persistent-login");
+  });
+
+  it("uses exact-marker cleanup without the original login leader identity", async () => {
+    const events: string[] = [];
+
+    await expect(
+      closeLocalBrowserLaunch("v1:1:surviving-login-renderer", "/isolated-profile", {
+        markTerminal: () => {
+          events.push("terminal");
+        },
+        terminate: async () => {
+          events.push("terminate-marker");
+          return true;
+        },
+        untrack: () => {
+          events.push("untrack-marker");
+        },
+      }),
+    ).resolves.toBeUndefined();
+    expect(events).toEqual(["terminal", "terminate-marker", "untrack-marker"]);
   });
 
   it("captures every browser storage surface from the closed canonical login", async () => {
@@ -763,7 +887,12 @@ describe("bot Chrome launch consistency", () => {
       running = false;
     });
     const launch = vi.fn(async (options: Parameters<typeof launchSelfManagedLoginContext>[0]) => {
-      const browser = { teardown, forceTeardown: vi.fn(), isRunning: () => running };
+      const browser = {
+        teardown,
+        forceTeardown: vi.fn(),
+        isRunning: () => running,
+        marker: "v1:1:capture-state",
+      };
       options.onSpawned?.(browser);
       return { ...browser, context: { storageState } as never, identity: null };
     });
@@ -801,7 +930,12 @@ describe("bot Chrome launch consistency", () => {
     const capturing = captureProfileStorageState("/isolated-profile", {
       resolveChannelBinary: () => "/unused/chrome",
       launchSelfManagedLoginContext: async (options) => {
-        const browser = { teardown, forceTeardown: vi.fn(), isRunning: () => running };
+        const browser = {
+          teardown,
+          forceTeardown: vi.fn(),
+          isRunning: () => running,
+          marker: "v1:1:capture-shutdown",
+        };
         options.onSpawned?.(browser);
         return { ...browser, context: { storageState } as never, identity: null };
       },
@@ -828,7 +962,12 @@ describe("bot Chrome launch consistency", () => {
       rejectLaunch(new Error("capture launch closed"));
     });
     const launch = vi.fn(async (options: Parameters<typeof launchSelfManagedLoginContext>[0]) => {
-      const browser = { teardown, forceTeardown: vi.fn(), isRunning: () => running };
+      const browser = {
+        teardown,
+        forceTeardown: vi.fn(),
+        isRunning: () => running,
+        marker: "v1:1:capture-pending",
+      };
       options.onSpawned?.(browser);
       await new Promise<never>((_resolve, reject) => {
         rejectLaunch = reject;
@@ -878,6 +1017,7 @@ describe("bot Chrome launch consistency", () => {
             },
             forceTeardown: vi.fn(),
             isRunning: () => running,
+            marker: "v1:1:capture-metadata",
           };
           options.onSpawned?.(browser);
           return { ...browser, context: context as never, identity: null };
@@ -906,7 +1046,12 @@ describe("bot Chrome launch consistency", () => {
       captureProfileStorageState("/isolated-profile", {
         resolveChannelBinary: () => "/unused/chrome",
         launchSelfManagedLoginContext: async (options) => {
-          const browser = { teardown, forceTeardown: vi.fn(), isRunning: () => true };
+          const browser = {
+            teardown,
+            forceTeardown: vi.fn(),
+            isRunning: () => true,
+            marker: "v1:1:capture-unproven",
+          };
           options.onSpawned?.(browser);
           return {
             ...browser,
@@ -966,6 +1111,7 @@ describe("bot Chrome launch consistency", () => {
               start_time: "missing",
               user_data_dir: profileDir,
             },
+            marker: "v1:1:plain-login-capture",
             teardown: async () => {
               events.push("close");
             },

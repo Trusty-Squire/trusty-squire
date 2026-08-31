@@ -43,6 +43,14 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock("../browser.js", () => ({
+  registerLocalBrowserLaunch: (
+    _profileDir: string,
+    baseEnv: NodeJS.ProcessEnv = process.env,
+    marker = "v1:1:test-browser",
+  ) => ({
+    marker,
+    env: { ...baseEnv, TRUSTY_SQUIRE_OPERATOR_BROWSER_MARKER: marker },
+  }),
   BrowserController: class {
     constructor(_opts?: unknown) {}
     async start(): Promise<void> {}

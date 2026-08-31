@@ -481,6 +481,21 @@ Payment/card-sealing files are explicitly listed in the required tier and run
 whole, without generated test-name filters. Never move card-sealing or
 payment-safety coverage to the slow tier.
 
+### 15. Operator browser lifetime is owner-bound
+
+`apps/mcp/src/bot/owner-process-reaper.ts` is the crash/SIGKILL backstop for
+self-managed and Playwright-launched local operator browsers. Every local launch
+must receive the private operator marker at the shared launch boundary; never
+register external/remote CDP browsers. The manifest records exact PID/group,
+marker, process birth identity, and `user_data_dir`; it owns process signaling,
+not profile or snapshot deletion. The profile pool and normal session teardown
+remain the only directory-cleanup owners. Process teardown uses bounded
+SIGTERM→SIGKILL.
+
+Idle cleanup uses the provision-session call lease as its action boundary. Any new
+session-addressed operate/auth/payment surface must acquire that lease, and session
+teardown must clear its rolling observe snapshot before removing the live session.
+
 ## Final note
 
 You are reading this file because a prior agent burned four version numbers, confused users, and forced a human to intervene. The agent was not malicious. It was not lazy. It was pattern-matching on its own prose instead of on tool output.

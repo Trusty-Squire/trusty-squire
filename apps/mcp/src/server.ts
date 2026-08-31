@@ -17,6 +17,8 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { ApiClient } from "./api-client.js";
 import { setSelfManagedChromeTerminationSignalExitEnabled } from "./bot/browser.js";
 import { cancelActiveLoginBrowsers } from "./bot/google-login.js";
+import { sweepOperatorProfilePoolOrphans } from "./bot/operator-profile-pool.js";
+import { startOwnerProcessReaper } from "./bot/owner-process-reaper.js";
 import {
   activeSessionCount,
   closeAllProvisionSessions,
@@ -50,6 +52,7 @@ const DEFAULT_REGISTRY_BASE =
 const DEFAULT_IDLE_TIMEOUT_MS = 20 * 60 * 1_000; // 20m, no open session
 const DEFAULT_IDLE_TIMEOUT_WITH_SESSION_MS = 12 * 60 * 60 * 1_000; // 12h, session open
 const DEFAULT_IDLE_CHECK_INTERVAL_MS = 5 * 60 * 1_000; // 5m — must stay well under the 20m bound above
+const DEFAULT_STARTUP_PROFILE_SWEEP_TIMEOUT_MS = 2_000;
 
 function envMs(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -116,7 +119,50 @@ Routing rules for THIS server's vault tools:
   user wants the plaintext (e.g. for a .env file), they read it from the
   Trusty Squire web vault themselves.`;
 
-export async function buildServer(api: ApiClient | null): Promise<Server> {
+export interface ServerCallLifecycle {
+  started(): boolean;
+  finished(): void;
+}
+
+export interface ServerCallAdmission extends ServerCallLifecycle {
+  closeAndDrain(): Promise<void>;
+  inFlightCount(): number;
+}
+
+export function createServerCallAdmission(): ServerCallAdmission {
+  let accepting = true;
+  let inFlight = 0;
+  let drain: Promise<void> | undefined;
+  let finishDrain: (() => void) | undefined;
+  return {
+    started: () => {
+      if (!accepting) return false;
+      inFlight += 1;
+      return true;
+    },
+    finished: () => {
+      inFlight -= 1;
+      if (inFlight === 0) {
+        finishDrain?.();
+        finishDrain = undefined;
+      }
+    },
+    closeAndDrain: () => {
+      accepting = false;
+      if (inFlight === 0) return Promise.resolve();
+      drain ??= new Promise<void>((resolveDrain) => {
+        finishDrain = resolveDrain;
+      });
+      return drain;
+    },
+    inFlightCount: () => inFlight,
+  };
+}
+
+export async function buildServer(
+  api: ApiClient | null,
+  callLifecycle?: ServerCallLifecycle,
+): Promise<Server> {
   const tools = buildToolRegistry();
   const server = new Server(
     { name: SERVER_NAME, version: VERSION },
@@ -162,6 +208,9 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
           `Run \`npx @trusty-squire/mcp connect\` to reconnect.`,
       );
     }
+    if (callLifecycle !== undefined && !callLifecycle.started()) {
+      return errorContent("server_unavailable", "server is shutting down");
+    }
     try {
       api.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
       const invoke = async () =>
@@ -200,6 +249,8 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
             },
           )
         : errorContent(malformedAction ? "invalid_arguments" : "tool_execution_failed", message);
+    } finally {
+      callLifecycle?.finished();
     }
   });
 
@@ -294,6 +345,19 @@ export function installServerProcessGuards(): void {
 export async function runServer(): Promise<void> {
   installServerProcessGuards();
   setSelfManagedChromeTerminationSignalExitEnabled(false);
+  // The detached Linux watchdog survives SIGKILL/parent death. It asynchronously
+  // sweeps strict process-only manifests, then tracks exact local browser and
+  // session-helper identities for launches owned by this server.
+  startOwnerProcessReaper();
+  if (process.platform === "linux") {
+    const timeoutMs = envMs(
+      "TRUSTY_SQUIRE_STARTUP_PROFILE_SWEEP_TIMEOUT_MS",
+      DEFAULT_STARTUP_PROFILE_SWEEP_TIMEOUT_MS,
+    );
+    void sweepOperatorProfilePoolOrphans({ deadline: Date.now() + timeoutMs }).catch(
+      () => undefined,
+    );
+  }
   // Startup breadcrumb on stderr (which lands in the host agent's MCP
   // log). A silent no-op was the worst part of the entrypoint-guard
   // bug — this line makes "did the server actually start?" answerable
@@ -317,7 +381,8 @@ export async function runServer(): Promise<void> {
         })
       : null;
 
-  const server = await buildServer(api);
+  const callAdmission = createServerCallAdmission();
+  const server = await buildServer(api, callAdmission);
   const transport = new StdioServerTransport();
 
   // A stdio client can disappear without sending a signal (for example when
@@ -329,6 +394,7 @@ export async function runServer(): Promise<void> {
   let idleTimer: NodeJS.Timeout | undefined;
   const requestShutdown = (): void => {
     if (shutdown !== undefined) return;
+    const admittedCallsDrained = callAdmission.closeAndDrain();
 
     shutdown = (async () => {
       process.stdin.removeListener("end", requestShutdown);
@@ -341,7 +407,10 @@ export async function runServer(): Promise<void> {
       try {
         // The OAuth-bootstrap login Chrome (google-login) is tracked apart
         // from provision sessions — drain it too so it cannot outlive the
-        // server.
+        // server. Its own signal handlers stand down in server mode (see
+        // registerHeadlessRigCleanup), leaving this coordinator as the one
+        // exit owner.
+        await admittedCallsDrained;
         await cancelActiveLoginBrowsers();
         await closeAllProvisionSessions();
         await server.close();

@@ -29,9 +29,11 @@ import {
   withProfileOperationGuard,
 } from "./profile.js";
 import {
+  closeBrowserContextWithin,
   extractGoogleAccountEmail,
   launchPlainLoginBrowser,
   launchSelfManagedLoginContext,
+  registerLocalBrowserLaunch,
   resolveChannelBinary,
   selfLaunchEnabled,
 } from "./browser.js";
@@ -40,6 +42,12 @@ import {
   startInstallCompletionListener,
   withInstallCompletionCallback,
 } from "./install-completion.js";
+import {
+  bindOwnerBrowserLaunch,
+  markOwnerBrowserLaunchTerminal,
+  terminateOwnerBrowserLaunch,
+  untrackOwnerBrowserLaunch,
+} from "./owner-process-reaper.js";
 import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
@@ -86,15 +94,75 @@ export interface PersistentLauncher {
   ): Promise<BrowserContext>;
 }
 
+export interface PersistentLoginContext {
+  readonly context: BrowserContext;
+  readonly marker: string;
+  close(): Promise<void>;
+}
+
 export async function launchPersistentLoginContext(
   launcher: PersistentLauncher,
   userDataDir: string,
   options: Record<string, unknown>,
-): Promise<BrowserContext> {
-  return await launcher.launchPersistentContext(userDataDir, {
-    ...options,
-    channel: "chrome",
-  });
+  runtime: {
+    registerLocalBrowserLaunch?: typeof registerLocalBrowserLaunch;
+    markTerminal?: typeof markOwnerBrowserLaunchTerminal;
+    terminate?: typeof terminateOwnerBrowserLaunch;
+    untrack?: typeof untrackOwnerBrowserLaunch;
+    bindLaunch?: (marker: string, profileDir: string) => boolean;
+    closeTimeoutMs?: number;
+  } = {},
+): Promise<PersistentLoginContext> {
+  const register = runtime.registerLocalBrowserLaunch ?? registerLocalBrowserLaunch;
+  const markTerminal = runtime.markTerminal ?? markOwnerBrowserLaunchTerminal;
+  const terminate = runtime.terminate ?? terminateOwnerBrowserLaunch;
+  const untrack = runtime.untrack ?? untrackOwnerBrowserLaunch;
+  const ownership = register(
+    userDataDir,
+    (options.env as NodeJS.ProcessEnv | undefined) ?? process.env,
+  );
+  let context: BrowserContext | null = null;
+  try {
+    context = await launcher.launchPersistentContext(userDataDir, {
+      ...options,
+      env: ownership.env,
+      channel: "chrome",
+    });
+    const bindLaunch =
+      runtime.bindLaunch ??
+      ((marker: string, profileDir: string): boolean => {
+        const holderPid = currentProfileHolderPid(profileDir);
+        const identity = holderPid === null ? null : profileProcessIdentity(holderPid, profileDir);
+        return identity !== null && bindOwnerBrowserLaunch(marker, identity);
+      });
+    if (!bindLaunch(ownership.marker, userDataDir)) {
+      throw new Error("persistent login browser identity could not be bound to owner custody");
+    }
+  } catch (error) {
+    markTerminal(ownership.marker);
+    if (context !== null) await closeBrowserContextWithin(context, runtime.closeTimeoutMs);
+    if (await terminate(ownership.marker, userDataDir).catch(() => false)) {
+      untrack(ownership.marker);
+    }
+    throw error;
+  }
+  if (context === null) throw new Error("persistent login browser did not start");
+  const boundContext = context;
+  let closing: Promise<void> | undefined;
+  return {
+    context: boundContext,
+    marker: ownership.marker,
+    close: (): Promise<void> => {
+      closing ??= (async () => {
+        markTerminal(ownership.marker);
+        await closeBrowserContextWithin(boundContext, runtime.closeTimeoutMs);
+        const terminated = await terminate(ownership.marker, userDataDir).catch(() => false);
+        if (!terminated) throw new Error("persistent login browser closure unproven");
+        untrack(ownership.marker);
+      })();
+      return closing;
+    },
+  };
 }
 
 function resolveChromium(): PersistentLauncher {
@@ -135,6 +203,7 @@ export async function captureProfileStorageState(
       teardown: () => Promise<void>;
       forceTeardown: () => void;
       isRunning: () => boolean;
+      marker: string;
     }): void => {
       if (tracked) return;
       tracked = true;
@@ -416,13 +485,14 @@ export async function detectActiveProviderSessions(
     // wait is fine: reclaim a stale lock, or briefly yield to a live run.
     await waitForProfileFree(profileDir, { deadlineMs: 15_000, pollMs: 500 });
     const chromium = resolveChromium();
-    const ctx = await launchWithProfileGate(profileDir, () =>
+    const persistent = await launchWithProfileGate(profileDir, () =>
       launchPersistentLoginContext(chromium, profileDir, {
         headless: true,
         ignoreDefaultArgs: ["--enable-automation"],
         args: ["--no-sandbox", "--disable-dev-shm-usage"],
       }),
     );
+    const ctx = persistent.context;
     try {
       const present: OAuthProviderId[] = [];
       for (const id of Object.keys(LOGIN_TARGETS) as OAuthProviderId[]) {
@@ -436,7 +506,7 @@ export async function detectActiveProviderSessions(
       }
       return present;
     } finally {
-      await ctx.close();
+      await persistent.close();
     }
   });
 }
@@ -550,6 +620,7 @@ export async function teardownLoginBrowser(opts: {
   isRunning?: () => boolean;
   timeoutMs?: number;
 }): Promise<ProfileCloseState> {
+  let profileState: ProfileCloseState;
   if (opts.identity === null && opts.isRunning !== undefined) {
     const timeoutMs = opts.timeoutMs ?? 15_000;
     let timer: NodeJS.Timeout | undefined;
@@ -572,17 +643,21 @@ export async function teardownLoginBrowser(opts: {
       }
       return !opts.isRunning!();
     };
-    if (closed && (await waitForExit())) return "closed";
-    opts.forceClose();
-    return (await waitForExit()) ? "closed" : "force_closed_unproven";
+    if (closed && (await waitForExit())) profileState = "closed";
+    else {
+      opts.forceClose();
+      profileState = (await waitForExit()) ? "closed" : "force_closed_unproven";
+    }
+  } else {
+    profileState = await closeProfileWithProof({
+      profileDir: opts.profileDir,
+      identity: opts.identity,
+      close: opts.closeBrowser,
+      forceClose: opts.forceClose,
+      ...(opts.timeoutMs !== undefined ? { closeTimeoutMs: opts.timeoutMs } : {}),
+    });
   }
-  return await closeProfileWithProof({
-    profileDir: opts.profileDir,
-    identity: opts.identity,
-    close: opts.closeBrowser,
-    forceClose: opts.forceClose,
-    ...(opts.timeoutMs !== undefined ? { closeTimeoutMs: opts.timeoutMs } : {}),
-  });
+  return profileState;
 }
 
 // --- shutdown coordination with the operator server -------------------
@@ -749,9 +824,7 @@ export interface RunInBotChromeOpts {
   onProxyDisposition?: (proxy: LoginProxyDisposition) => void;
   onConfirmedLogin?: () => Promise<void>;
   seedProvider?: OAuthProviderId | (() => OAuthProviderId | null);
-  confirmedProviders?:
-    | readonly OAuthProviderId[]
-    | (() => readonly OAuthProviderId[]);
+  confirmedProviders?: readonly OAuthProviderId[] | (() => readonly OAuthProviderId[]);
   // Test/local IdP seam for asserting the just-captured live context before
   // any canonical file is written. Production provider logins use the stricter
   // seedProvider marker check below.
@@ -992,7 +1065,7 @@ export async function runDisplayedChrome(
   let googleAccountEmail: string | null = null;
   let pageLocations: string[] | undefined;
   try {
-    const context = await launchWithProfileGate(
+    const persistent = await launchWithProfileGate(
       opts.profileDir,
       () =>
         launchPersistentLoginContext(chromium, opts.profileDir, {
@@ -1012,6 +1085,7 @@ export async function runDisplayedChrome(
         }),
       { failFast: true },
     );
+    const context = persistent.context;
     const holderPid = currentProfileHolderPid(opts.profileDir);
     const identity = holderPid === null ? null : profileProcessIdentity(holderPid, opts.profileDir);
     lifecycle.browserLaunched(
@@ -1019,7 +1093,7 @@ export async function runDisplayedChrome(
         await teardownLoginBrowser({
           profileDir: opts.profileDir,
           identity,
-          closeBrowser: () => context.close(),
+          closeBrowser: persistent.close,
           forceClose: () => reapProfileHolderIfOwned(opts.profileDir, identity),
         }),
     );
@@ -1192,11 +1266,11 @@ export async function runRemoteLoginChrome(
           await teardownLoginBrowser({
             profileDir: opts.profileDir,
             identity,
-            closeBrowser: () => persistent.close(),
+            closeBrowser: persistent.close,
             forceClose: () => reapProfileHolderIfOwned(opts.profileDir, identity),
           }),
       );
-      context = persistent;
+      context = persistent.context;
     }
 
     try {

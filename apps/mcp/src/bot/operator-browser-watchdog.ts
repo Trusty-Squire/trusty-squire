@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, readlinkSync } from "node:fs";
 
-export const DEFAULT_OPERATOR_SESSION_IDLE_TIMEOUT_MS = 10 * 60 * 1_000;
+export const DEFAULT_OPERATOR_SESSION_IDLE_TIMEOUT_MS = 60 * 60 * 1_000;
 export const DEFAULT_OPERATOR_BROWSER_MAX_LIFETIME_MS = 30 * 60 * 1_000;
 export const DEFAULT_OPERATOR_BROWSER_WATCHDOG_INTERVAL_MS = 5_000;
 export const DEFAULT_OPERATOR_BROWSER_CPU_CEILING_PERCENT = 200;
@@ -48,14 +48,16 @@ export interface OperatorBrowserWatchdogOptions {
   lastActivityAt: () => number;
   hasActiveCall: () => boolean;
   processMarker: () => string | null;
-  onTerminate: (reason: OperatorBrowserWatchdogReason) => void | Promise<void>;
+  onTerminate: (reason: OperatorBrowserWatchdogReason) => boolean | void | Promise<boolean | void>;
   now?: () => number;
   idleTimeoutMs?: number;
   maxLifetimeMs?: number;
   intervalMs?: number;
   registerProcessWatchdog?: (
     marker: string,
-    onTerminate: (reason: OperatorBrowserWatchdogReason) => void | Promise<void>,
+    onTerminate: (
+      reason: OperatorBrowserWatchdogReason,
+    ) => boolean | void | Promise<boolean | void>,
   ) => () => void;
 }
 
@@ -63,7 +65,10 @@ export interface OperatorBrowserProcessWatchdogOptions {
   readProcesses?: () => OperatorBrowserProcessRecord[];
   processMatches?: (pid: number, startTime: number, marker: string) => boolean;
   kill?: (pid: number, signal: NodeJS.Signals) => unknown;
-  onTerminate?: (marker: string, reason: OperatorBrowserWatchdogReason) => void | Promise<void>;
+  onTerminate?: (
+    marker: string,
+    reason: OperatorBrowserWatchdogReason,
+  ) => boolean | void | Promise<boolean | void>;
   now?: () => number;
   intervalMs?: number;
   maxLifetimeMs?: number;
@@ -86,7 +91,7 @@ export function operatorBrowserWatchdogConfig(): {
 } {
   return {
     idleTimeoutMs: positiveEnvNumber(
-      "TRUSTY_SQUIRE_OPERATOR_SESSION_IDLE_TIMEOUT_MS",
+      "TRUSTY_SQUIRE_SESSION_IDLE_TIMEOUT_MS",
       DEFAULT_OPERATOR_SESSION_IDLE_TIMEOUT_MS,
     ),
     maxLifetimeMs: positiveEnvNumber(
@@ -197,32 +202,85 @@ function parseProcessStat(pid: number): {
   }
 }
 
-export function isOperatorChromiumCommand(command: string): boolean {
-  const executable = command.split("\0", 1)[0] ?? "";
+function isOperatorChromiumExecutable(executable: string): boolean {
   return /(?:^|\/)(?:chrome|google-chrome(?:-stable)?|chromium(?:-browser)?|chrome-headless-shell|headless_shell|chrome_crashpad_handler|chromium_crashpad_handler)$/i.test(
     executable,
   );
 }
 
-function processMarker(pid: number): string | null {
+export function isOperatorChromiumCommand(command: string): boolean {
+  const entries = command.split("\0").filter((entry) => entry.length > 0);
+  const firstEntry = entries[0] ?? "";
+  const rewrittenTitle = entries.length === 1 && /\s/.test(firstEntry);
+  const executable = rewrittenTitle
+    ? (/^(?:"([^"]+)"|'([^']+)'|(\S+))(?:\s|$)/.exec(firstEntry)?.slice(1).find(Boolean) ?? "")
+    : firstEntry;
+  return isOperatorChromiumExecutable(executable);
+}
+
+export type OperatorBrowserProcessCommandState = "matching" | "stale" | "unknown";
+
+export function operatorBrowserProcessCommandState(
+  pid: number,
+  readers: {
+    readCommand?: (pid: number) => string;
+    readExecutable?: (pid: number) => string;
+  } = {},
+): OperatorBrowserProcessCommandState {
+  const readCommand =
+    readers.readCommand ?? ((processId) => readFileSync(`/proc/${processId}/cmdline`, "utf8"));
+  const readExecutable =
+    readers.readExecutable ?? ((processId) => readlinkSync(`/proc/${processId}/exe`));
+  let commandDefinitive = false;
+  try {
+    const command = readCommand(pid);
+    if (isOperatorChromiumCommand(command)) return "matching";
+    const entries = command.split("\0").filter((entry) => entry.length > 0);
+    commandDefinitive = entries.length > 1 || (entries.length === 1 && !/\s/.test(entries[0]!));
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ESRCH") return "stale";
+  }
+  try {
+    return isOperatorChromiumExecutable(readExecutable(pid)) ? "matching" : "stale";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ESRCH") return "stale";
+    return commandDefinitive ? "stale" : "unknown";
+  }
+}
+
+export type OperatorBrowserProcessMarkerState =
+  | { state: "present"; marker: string }
+  | { state: "missing" | "unknown" };
+
+export function operatorBrowserProcessMarkerState(
+  pid: number,
+  readEnvironment: (pid: number) => string = (processId) =>
+    readFileSync(`/proc/${processId}/environ`, "utf8"),
+): OperatorBrowserProcessMarkerState {
   try {
     const prefix = `${OPERATOR_BROWSER_MARKER_ENV}=`;
-    for (const entry of readFileSync(`/proc/${pid}/environ`, "utf8").split("\0")) {
-      if (entry.startsWith(prefix)) return entry.slice(prefix.length);
+    for (const entry of readEnvironment(pid).split("\0")) {
+      if (entry.startsWith(prefix)) {
+        return { state: "present", marker: entry.slice(prefix.length) };
+      }
     }
-  } catch {
-    return null;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return { state: code === "ENOENT" || code === "ESRCH" ? "missing" : "unknown" };
   }
-  return null;
+  return { state: "missing" };
+}
+
+export function operatorBrowserProcessMarker(pid: number): string | null {
+  const result = operatorBrowserProcessMarkerState(pid);
+  return result.state === "present" ? result.marker : null;
 }
 
 function readOperatorBrowserProcess(pid: number): OperatorBrowserProcessRecord | null {
-  try {
-    if (!isOperatorChromiumCommand(readFileSync(`/proc/${pid}/cmdline`, "utf8"))) return null;
-  } catch {
-    return null;
-  }
-  const marker = processMarker(pid);
+  if (operatorBrowserProcessCommandState(pid) !== "matching") return null;
+  const marker = operatorBrowserProcessMarker(pid);
   if (marker === null || operatorBrowserMarkerStartedAt(marker) === null) return null;
   const stat = parseProcessStat(pid);
   return stat === null ? null : { pid, marker, ...stat };
@@ -230,7 +288,10 @@ function readOperatorBrowserProcess(pid: number): OperatorBrowserProcessRecord |
 
 export function operatorBrowserProcessMatchesMarker(pid: number, marker: string): boolean {
   if (process.platform !== "linux") return false;
-  return readOperatorBrowserProcess(pid)?.marker === marker;
+  return (
+    operatorBrowserProcessMarker(pid) === marker &&
+    operatorBrowserProcessCommandState(pid) === "matching"
+  );
 }
 
 export function linuxOperatorBrowserProcesses(): OperatorBrowserProcessRecord[] {
@@ -366,13 +427,19 @@ export class OperatorBrowserProcessWatchdog {
     process.stderr.write(
       `[operator] process watchdog terminate marker=${marker} reason=${JSON.stringify(reason)}\n`,
     );
+    let maySignal = true;
     if (this.options.onTerminate !== undefined) {
       try {
-        await this.options.onTerminate(marker, reason);
+        maySignal = (await this.options.onTerminate(marker, reason)) !== false;
       } catch (error) {
+        maySignal = false;
         const detail = error instanceof Error ? error.message : String(error);
         process.stderr.write(`[operator] process watchdog teardown failed: ${detail}\n`);
       }
+    }
+    if (!maySignal) {
+      this.terminating.delete(marker);
+      return;
     }
     const current = this.readProcesses().filter((record) => record.marker === marker);
     const candidates = current.length > 0 ? current : records;
@@ -391,15 +458,16 @@ export class OperatorBrowserProcessWatchdog {
 
 const processTerminationCallbacks = new Map<
   string,
-  (reason: OperatorBrowserWatchdogReason) => void | Promise<void>
+  (reason: OperatorBrowserWatchdogReason) => boolean | void | Promise<boolean | void>
 >();
 let globalProcessWatchdog: OperatorBrowserProcessWatchdog | null = null;
 
 export async function dispatchOperatorBrowserProcessTermination(
   marker: string,
   reason: OperatorBrowserWatchdogReason,
-): Promise<void> {
-  await processTerminationCallbacks.get(marker)?.(reason);
+): Promise<boolean> {
+  const callback = processTerminationCallbacks.get(marker);
+  return callback !== undefined && (await callback(reason)) !== false;
 }
 
 export function startGlobalOperatorBrowserProcessWatchdog(): void {
@@ -412,7 +480,7 @@ export function startGlobalOperatorBrowserProcessWatchdog(): void {
 
 export function registerOperatorBrowserProcessWatchdog(
   marker: string,
-  onTerminate: (reason: OperatorBrowserWatchdogReason) => void | Promise<void>,
+  onTerminate: (reason: OperatorBrowserWatchdogReason) => boolean | void | Promise<boolean | void>,
 ): () => void {
   startGlobalOperatorBrowserProcessWatchdog();
   processTerminationCallbacks.set(marker, onTerminate);
@@ -426,18 +494,16 @@ export function registerOperatorBrowserProcessWatchdog(
 export class OperatorBrowserWatchdog {
   private readonly now: () => number;
   private readonly idleTimeoutMs: number;
-  private readonly maxLifetimeMs: number;
   private readonly intervalMs: number;
   private timer: NodeJS.Timeout | null = null;
   private unregisterProcessWatchdog: (() => void) | null = null;
   private terminated = false;
-  private terminationPromise: Promise<void> | null = null;
+  private terminationPromise: Promise<boolean> | null = null;
 
   constructor(private readonly options: OperatorBrowserWatchdogOptions) {
     const config = operatorBrowserWatchdogConfig();
     this.now = options.now ?? Date.now;
     this.idleTimeoutMs = options.idleTimeoutMs ?? config.idleTimeoutMs;
-    this.maxLifetimeMs = options.maxLifetimeMs ?? config.maxLifetimeMs;
     this.intervalMs = options.intervalMs ?? config.intervalMs;
   }
 
@@ -447,7 +513,16 @@ export class OperatorBrowserWatchdog {
       if (marker !== null) {
         this.unregisterProcessWatchdog = (
           this.options.registerProcessWatchdog ?? registerOperatorBrowserProcessWatchdog
-        )(marker, async (reason) => await this.terminateAndWait(reason));
+        )(marker, async (_reason) => {
+          if (this.options.hasActiveCall()) return false;
+          const idleMs = this.now() - this.options.lastActivityAt();
+          if (idleMs < this.idleTimeoutMs) return false;
+          return await this.terminateAndWait({
+            kind: "idle_timeout",
+            idle_ms: idleMs,
+            timeout_ms: this.idleTimeoutMs,
+          });
+        });
       }
     }
     if (this.timer !== null || this.terminated) return;
@@ -468,14 +543,6 @@ export class OperatorBrowserWatchdog {
 
   check(now = this.now()): OperatorBrowserWatchdogReason | null {
     if (this.terminated) return null;
-    const lifetimeMs = now - this.options.startedAt;
-    if (lifetimeMs >= this.maxLifetimeMs) {
-      return this.terminate({
-        kind: "max_lifetime",
-        lifetime_ms: lifetimeMs,
-        timeout_ms: this.maxLifetimeMs,
-      });
-    }
     if (this.options.hasActiveCall()) return null;
     const idleMs = now - this.options.lastActivityAt();
     if (idleMs < this.idleTimeoutMs) return null;
@@ -492,20 +559,27 @@ export class OperatorBrowserWatchdog {
     return reason;
   }
 
-  private async terminateAndWait(reason: OperatorBrowserWatchdogReason): Promise<void> {
-    await this.beginTermination(reason);
+  private async terminateAndWait(reason: OperatorBrowserWatchdogReason): Promise<boolean> {
+    return await this.beginTermination(reason);
   }
 
-  private beginTermination(reason: OperatorBrowserWatchdogReason): Promise<void> {
+  private beginTermination(reason: OperatorBrowserWatchdogReason): Promise<boolean> {
     if (this.terminationPromise !== null) return this.terminationPromise;
-    this.terminated = true;
-    this.stop();
-    this.terminationPromise = (async () => await this.options.onTerminate(reason))().catch(
-      (error: unknown) => {
-        const detail = error instanceof Error ? error.message : String(error);
-        process.stderr.write(`[operator] browser watchdog teardown failed: ${detail}\n`);
-      },
-    );
+    this.terminationPromise = (async () => {
+      const accepted = (await this.options.onTerminate(reason)) !== false;
+      if (accepted) {
+        this.terminated = true;
+        this.stop();
+      } else {
+        this.terminationPromise = null;
+      }
+      return accepted;
+    })().catch((error: unknown) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`[operator] browser watchdog teardown failed: ${detail}\n`);
+      this.terminationPromise = null;
+      return false;
+    });
     return this.terminationPromise;
   }
 }

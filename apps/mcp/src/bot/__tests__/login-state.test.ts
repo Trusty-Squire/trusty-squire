@@ -4,7 +4,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearProviderCookies,
   clearProviderCookiesFromContext,
@@ -73,6 +73,105 @@ describe("provider cookie clearing", () => {
     };
 
     await expect(clearProviderCookiesFromContext(context, "github")).resolves.toBe(false);
+  });
+
+  it("tears down cookie-clear launch custody at the terminal boundary", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ts-login-state-lifecycle-"));
+    const marker = "v1:1:cookie-clear";
+    const events: string[] = [];
+    let cookies = [{ name: "user_session", domain: "github.com", path: "/" }];
+    const context = {
+      cookies: async () => cookies,
+      clearCookies: async () => {
+        cookies = [];
+      },
+      close: async () => {
+        events.push("close");
+      },
+    };
+    try {
+      await expect(
+        clearProviderCookies(dir, "github", {
+          loadChromium: async () => ({
+            launchPersistentContext: async () => context,
+          }),
+          registerLaunch: () => ({ marker, env: {} }),
+          bindLaunch: () => {
+            events.push("bind");
+            return true;
+          },
+          markTerminal: () => {
+            events.push("terminal");
+          },
+          terminate: async () => {
+            events.push("terminate");
+            return true;
+          },
+          untrack: () => {
+            events.push("untrack");
+          },
+        }),
+      ).resolves.toBe(true);
+      expect(events).toEqual(["bind", "terminal", "close", "terminate", "untrack"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reaps and releases launch custody when cookie-clear launch rejects", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ts-login-state-launch-failure-"));
+    const marker = "v1:1:cookie-clear-failure";
+    const markTerminal = vi.fn();
+    const terminate = vi.fn(async () => true);
+    const untrack = vi.fn();
+    try {
+      await expect(
+        clearProviderCookies(dir, "github", {
+          loadChromium: async () => ({
+            launchPersistentContext: async () => {
+              throw new Error("launch rejected");
+            },
+          }),
+          registerLaunch: () => ({ marker, env: {} }),
+          bindLaunch: () => true,
+          markTerminal,
+          terminate,
+          untrack,
+        }),
+      ).resolves.toBe(false);
+      expect(markTerminal).toHaveBeenCalledWith(marker);
+      expect(terminate).toHaveBeenCalledWith(marker, dir);
+      expect(untrack).toHaveBeenCalledWith(marker);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reaches exact-marker teardown when cookie-clear context close hangs", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ts-login-state-hung-close-"));
+    const terminate = vi.fn(async () => true);
+    try {
+      await expect(
+        clearProviderCookies(dir, "github", {
+          loadChromium: async () => ({
+            launchPersistentContext: async () => ({
+              cookies: async () => [],
+              clearCookies: async () => undefined,
+              close: async () => await new Promise<never>(() => undefined),
+            }),
+          }),
+          registerLaunch: () => ({ marker: "v1:1:hung-cookie-clear", env: {} }),
+          bindLaunch: () => true,
+          markTerminal: vi.fn(),
+          terminate,
+          untrack: vi.fn(),
+          closeTimeoutMs: 1,
+        }),
+      ).resolves.toBe(true);
+      expect(terminate).toHaveBeenCalledWith("v1:1:hung-cookie-clear", dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("refuses to open the canonical profile while another operation owns it", async () => {
