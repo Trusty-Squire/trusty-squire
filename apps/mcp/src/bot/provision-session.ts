@@ -1032,7 +1032,7 @@ async function withOAuthActionBoundary<T>(
     deadline,
     async () => {
       const unregisterCancellation = registerOAuthActionCancellation(deadline, () =>
-        quiesceOAuthActionBrowser(session.browser),
+        quiesceOAuthActionSession(session),
       );
       const generation = provisionStartGeneration();
       const canContinue = (): boolean =>
@@ -1289,19 +1289,34 @@ async function forceReleaseWarmBrowserPage(browser: BrowserController): Promise<
   }
 }
 
-async function quiesceOAuthActionBrowser(browser: BrowserController): Promise<void> {
-  const forceClose = (
-    browser as BrowserController & {
-      forceCloseOwnedProcessTree?: () => Promise<"closed" | "force_closed_unproven" | "unknown">;
-    }
-  ).forceCloseOwnedProcessTree;
-  const operations: Promise<unknown>[] = [
-    browser.close({ cancelStart: true }).catch(() => "unknown" as const),
-  ];
-  if (forceClose !== undefined) {
-    operations.push(forceClose.call(browser).catch(() => "unknown" as const));
+async function quiesceOAuthActionSession(session: Session): Promise<void> {
+  const browser = session.browser;
+  const ephemeral = leasedBrowsers.get(browser);
+  session.closing = true;
+  if (sessions.get(session.id) === session) sessions.delete(session.id);
+  if (ephemeral !== undefined && leasedBrowsers.get(browser) === ephemeral) {
+    leasedBrowsers.delete(browser);
   }
-  await Promise.allSettled(operations);
+  stopSessionWatchdog(session);
+  disposeSessionWatchdog(session);
+  const closeState = await closeBrowserBounded(
+    browser,
+    true,
+    "OAuth action cancellation browser cleanup timed out",
+  );
+  if (ephemeral === undefined) return;
+  if (closeState === "closed") {
+    await destroyEphemeralProfile(ephemeral.profileDir).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(
+        `[operator] retained ephemeral profile after OAuth cancellation path=${ephemeral.profileDir}: ${message}\n`,
+      );
+    });
+  } else {
+    console.error(
+      `[operator] retained ephemeral profile after unproven OAuth cancellation: ${ephemeral.profileDir}`,
+    );
+  }
 }
 
 async function closeBrowserBounded(
@@ -1489,15 +1504,17 @@ async function closeEphemeralBrowser(
 async function prepareOAuthActionBrowser(
   session: Session,
   deadline: OAuthActionDeadline,
-): Promise<void> {
+): Promise<string | undefined> {
   const browser = session.browser;
   const ephemeral = leasedBrowsers.get(browser);
-  if (ephemeral === undefined) return;
-  const latestState = await withinOAuthActionDeadline(
-    readSessionState(ephemeral.canonicalProfileDir),
+  if (ephemeral === undefined) return session.userEmail ?? undefined;
+  const canonicalIdentity = await withinOAuthActionDeadline(
+    readCanonicalIdentityState(ephemeral.canonicalProfileDir),
     deadline,
   );
-  if (latestState === undefined) return;
+  const latestState = canonicalIdentity.storageState;
+  const expectedGoogleAccountEmail = canonicalIdentity.identityMetadata?.googleAccountEmail;
+  if (latestState === undefined) return expectedGoogleAccountEmail;
 
   const generation = provisionStartGeneration();
   const ownsOriginal = (): boolean =>
@@ -1588,6 +1605,7 @@ async function prepareOAuthActionBrowser(
     if (resumeUrl.length > 0) {
       await withinOAuthActionDeadline(replacement.goto(resumeUrl), deadline);
     }
+    return expectedGoogleAccountEmail;
   } catch (error) {
     let originalCleanupState = originalCloseState;
     if (originalCleanupState !== "closed") {
@@ -1644,6 +1662,7 @@ async function runSerializedGoogleIdentityOperation<T>(
   options: {
     resumeUrl?: string;
     deadline?: OAuthActionDeadline;
+    expectedGoogleAccountEmail?: string;
   } = {},
 ): Promise<{ browser: BrowserController; result: T }> {
   const browser = session.browser;
@@ -1712,7 +1731,19 @@ async function runSerializedGoogleIdentityOperation<T>(
           ? await browser.detectGoogleAccountEmail()
           : await withinOAuthActionDeadline(browser.detectGoogleAccountEmail(), options.deadline);
       traceHandoff("identity_probe_done", { found: googleAccountEmail !== null });
-      const metadata = googleAccountEmail === null ? undefined : { googleAccountEmail };
+      if (
+        options.expectedGoogleAccountEmail !== undefined &&
+        (googleAccountEmail === null ||
+          googleAccountEmail.toLowerCase() !== options.expectedGoogleAccountEmail.toLowerCase())
+      ) {
+        throw new Error("Google OAuth completed with a different account than the sealed identity");
+      }
+      const metadata =
+        options.expectedGoogleAccountEmail !== undefined
+          ? { googleAccountEmail: options.expectedGoogleAccountEmail }
+          : googleAccountEmail === null
+            ? undefined
+            : { googleAccountEmail };
       const rotatedState =
         options.deadline === undefined
           ? await browser.captureStorageState()
@@ -1995,7 +2026,7 @@ async function runSerializedOAuthBoundary(
   if (authorizedRef === undefined) {
     throw new Error("OAuth action target was not present in the authorized action map");
   }
-  await prepareOAuthActionBrowser(session, deadline);
+  const expectedGoogleAccountEmail = await prepareOAuthActionBrowser(session, deadline);
   const completed = await runSerializedGoogleIdentityOperation(
     session,
     async (browser) => {
@@ -2016,11 +2047,16 @@ async function runSerializedOAuthBoundary(
         resolved.selector,
         oauthActionRemainingMs(deadline),
         provider,
-        provider === "google" ? session.userEmail : undefined,
+        expectedGoogleAccountEmail,
       );
       await settleAfterStateChange(browser);
     },
-    { deadline },
+    {
+      deadline,
+      ...(provider === "github" || expectedGoogleAccountEmail === undefined
+        ? {}
+        : { expectedGoogleAccountEmail }),
+    },
   );
   return completed.browser;
 }

@@ -202,9 +202,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
-  it("completes Google account choice and consent inside one OAuth operation", async () => {
+  it("selects only the sealed data-identifier account", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();
+    let selectedAccount: string | null = null;
     await context.route("https://product.test/**", async (route) => {
       const callback = route.request().url().endsWith("/callback");
       await route.fulfill({
@@ -215,20 +216,24 @@ describe("BrowserController OAuth popup lifecycle", () => {
       });
     });
     await context.route("https://accounts.google.com/**", async (route) => {
-      const consent = route.request().url().includes("/consent?");
+      const requestUrl = route.request().url();
+      const consent = requestUrl.includes("/consent?");
+      if (consent) selectedAccount = new URL(requestUrl).searchParams.get("account");
       await route.fulfill({
         contentType: "text/html",
         body: consent
           ? "<button onclick=\"location.href='https://product.test/callback'\">Continue</button>"
-          : '<button data-identifier="worker@example.com" onclick="location.href=\'https://accounts.google.com/consent?scope=openid%20email%20profile\'">worker@example.com</button>',
+          : `<button data-identifier="other@example.com" onclick="location.href='https://accounts.google.com/consent?account=other@example.com&amp;scope=openid'">other@example.com</button>
+             <button data-identifier="worker@example.com" onclick="location.href='https://accounts.google.com/consent?account=worker@example.com&amp;scope=openid'">worker@example.com</button>`,
       });
     });
     await product.goto("https://product.test/login");
     const controller = BrowserController.fromHarnessPage(product);
 
     try {
-      await controller.loginWithOAuth("#oauth", 5_000, "google");
+      await controller.loginWithOAuth("#oauth", 5_000, "google", "worker@example.com");
       await expect(product.locator("#state").textContent()).resolves.toBe("Signed in");
+      expect(selectedAccount).toBe("worker@example.com");
       expect(controller.currentUrl()).toBe("https://product.test/login");
     } finally {
       await context.close().catch(() => undefined);

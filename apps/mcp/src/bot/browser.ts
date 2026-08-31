@@ -16584,11 +16584,30 @@ export class BrowserController {
     }
     // Google. Account chooser: Google renders each account with a
     // stable data-identifier attribute (the account email).
-    const tile = this.page.locator("[data-identifier]").first();
-    if ((await tile.count().catch(() => 0)) > 0) {
+    const tiles = this.page.locator("[data-identifier]");
+    const expectedEmail = expectedGoogleAccountEmail?.trim().toLowerCase() ?? null;
+    const matchingTileIndexes = await tiles
+      .evaluateAll((elements, expected) => {
+        if (expected === null) return [];
+        return elements.flatMap((element, index) => {
+          const html = element as HTMLElement;
+          const rect = html.getBoundingClientRect();
+          const style = window.getComputedStyle(html);
+          const identifier = element.getAttribute("data-identifier")?.trim().toLowerCase();
+          return rect.width >= 2 &&
+            rect.height >= 2 &&
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            identifier === expected
+            ? [index]
+            : [];
+        });
+      }, expectedEmail)
+      .catch(() => [] as number[]);
+    if (matchingTileIndexes.length === 1) {
       if (!hasBudget()) return false;
       try {
-        await tile.click({ timeout: boundedTimeout(1_000) });
+        await tiles.nth(matchingTileIndexes[0]!).click({ timeout: boundedTimeout(1_000) });
         return true;
       } catch {
         // fall through to the approve-button path
@@ -16632,7 +16651,6 @@ export class BrowserController {
         });
       })
       .catch(() => [] as Array<{ index: number; labels: string[] } | null>);
-    const expectedEmail = expectedGoogleAccountEmail?.trim().toLowerCase() ?? null;
     const matchingAccountRows =
       expectedEmail === null
         ? []

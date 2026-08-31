@@ -3646,6 +3646,7 @@ describe("operate session — OAuth lifecycle", () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-oauth-preparation-deadline";
     h.storageStates.set(canonical, { cookies: [], origins: [] });
     h.identityMetadata.set(canonical, { googleAccountEmail: "canonical@example.com" });
+    h.liveGoogleEmail = "canonical@example.com";
     let releasePendingStart!: () => void;
     h.startGates.set(
       2,
@@ -3673,10 +3674,10 @@ describe("operate session — OAuth lifecycle", () => {
     const startedAt = Date.now();
 
     const timedOutAction = act(started.session_id, {
-        kind: "oauth_login",
-        target: "Continue with Google",
-        provider: "google",
-      }).catch((error: unknown) => error);
+      kind: "oauth_login",
+      target: "Continue with Google",
+      provider: "google",
+    }).catch((error: unknown) => error);
     await vi.waitFor(() => expect(h.startCalls).toBe(3));
     const timeoutError = await timedOutAction;
 
@@ -3870,7 +3871,7 @@ describe("operate session — OAuth lifecycle", () => {
     };
     h.storageStates.set(canonical, google);
     h.identityMetadata.set(canonical, { googleAccountEmail: "stale@example.com" });
-    h.liveGoogleEmail = null;
+    h.liveGoogleEmail = "stale@example.com";
     h.captureStorageStateSequences.set(0, [{ cookies: [], origins: [] }]);
     h.captureStorageStateSequences.set(1, [rotatedOnce]);
     h.captureStorageStateSequences.set(2, [rotatedOnce]);
@@ -3912,7 +3913,9 @@ describe("operate session — OAuth lifecycle", () => {
       { profileDir: canonical, state: rotatedOnce },
       { profileDir: canonical, state: rotatedTwice },
     ]);
-    expect(h.identityMetadata.has(canonical)).toBe(false);
+    expect(h.identityMetadata.get(canonical)).toEqual({
+      googleAccountEmail: "stale@example.com",
+    });
     await finishProvisionSession(started.session_id);
   });
 
@@ -4177,7 +4180,7 @@ describe("operate session — OAuth lifecycle", () => {
     await finishProvisionSession(started.session_id);
   });
 
-  it("routes legacy Google OAuth replay through the identity handoff", async () => {
+  it("rejects a completed OAuth identity that differs from the sealed account", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-google-replay";
     const google = {
       cookies: [
@@ -4234,36 +4237,24 @@ describe("operate session — OAuth lifecycle", () => {
       profileDir: canonical,
     });
 
-    const result = await replayOperatorRecipe(
-      started.session_id,
-      replayRecipe({
-        trace: [
-          {
-            action: {
-              kind: "oauth_click",
-              target: {
-                visible_text: "Continue with Google",
-                accessible_name: "Continue with Google",
-                css: "#google-oauth",
-              },
-            },
-          },
-          { action: { kind: "oauth_settle" } },
-        ],
+    await expect(
+      act(started.session_id, {
+        kind: "oauth_login",
+        target: "Continue with Google",
       }),
-      {},
-    );
+    ).rejects.toThrow(/different account.*sealed identity/i);
 
-    expect(result.status).toBe("complete");
     expect(h.oauthLoginCalls).toEqual(["#google-oauth"]);
     expect(h.restoredStorageStates).toEqual([]);
-    expect(h.storageStateWrites).toEqual([{ profileDir: canonical, state: rotated }]);
+    expect(h.storageStateWrites).toEqual([]);
     expect(h.identityMetadata.get(canonical)).toEqual({
-      googleAccountEmail: "account-b@example.com",
+      googleAccountEmail: "account-a@example.com",
     });
     expect(h.seededStorageStates[1]).toEqual(merged);
-    expect(h.seededStorageStates[2]).toEqual(rotated);
-    await finishProvisionSession(started.session_id);
+    expect(h.seededStorageStates).toHaveLength(2);
+    await expect(finishProvisionSession(started.session_id)).rejects.toThrow(
+      /unknown provision session/i,
+    );
   });
 
   it("waits for the cross-process canonical profile guard before Google OAuth", async () => {
@@ -4317,6 +4308,59 @@ describe("operate session — OAuth lifecycle", () => {
     } finally {
       externalOperation.release();
       await finishProvisionSession(started.session_id).catch(() => undefined);
+    }
+  });
+
+  it("terminalizes a session that times out waiting for the canonical profile guard", async () => {
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "100";
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
+    const canonical = "/tmp/trusty-squire-unit-canonical-google-busy-timeout";
+    h.storageStates.set(canonical, {
+      cookies: [
+        {
+          name: "SID",
+          value: "google-session-before-busy-timeout",
+          domain: ".google.com",
+          path: "/",
+        },
+      ],
+      origins: [],
+    });
+    h.identityMetadata.set(canonical, { googleAccountEmail: "worker@example.com" });
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+    const externalOperation = acquireProfileOperationGuard(canonical);
+    try {
+      await expect(
+        act(started.session_id, {
+          kind: "oauth_login",
+          target: "Continue with Google",
+          provider: "google",
+        }),
+      ).rejects.toThrow(/google_session.*re-login/i);
+
+      await vi.waitFor(() => expect(activeSessionCount()).toBe(0));
+      await vi.waitFor(() => expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]));
+      expect(h.connections[0]).toBe(false);
+      await expect(
+        act(started.session_id, { kind: "press", key: "Enter" }),
+      ).rejects.toThrow(/unknown provision session/i);
+      await expect(finishProvisionSession(started.session_id)).rejects.toThrow(
+        /unknown provision session/i,
+      );
+    } finally {
+      externalOperation.release();
     }
   });
 
