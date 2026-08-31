@@ -129,6 +129,12 @@ export interface ServerCallAdmission extends ServerCallLifecycle {
   inFlightCount(): number;
 }
 
+// `connect` may complete while the host's stdio server is already running.
+// Keep the post-install read behind an injected loader so the call boundary can
+// pick up the account-bound session that Finish just published without making
+// an unauthenticated startup snapshot permanent for the server lifetime.
+export type AccountSessionLoader = () => Promise<ApiClient | null>;
+
 export function createServerCallAdmission(): ServerCallAdmission {
   let accepting = true;
   let inFlight = 0;
@@ -162,7 +168,9 @@ export function createServerCallAdmission(): ServerCallAdmission {
 export async function buildServer(
   api: ApiClient | null,
   callLifecycle?: ServerCallLifecycle,
+  loadPublishedAccountSession?: AccountSessionLoader,
 ): Promise<Server> {
+  let activeApi = api;
   const tools = buildToolRegistry();
   const server = new Server(
     { name: SERVER_NAME, version: VERSION },
@@ -201,7 +209,14 @@ export async function buildServer(
           .join("; ")}`,
       );
     }
-    if (api === null) {
+    // The install ceremony publishes the agent token after the operator may
+    // already have launched this stdio server. Retry the canonical session
+    // read only while unauthenticated; once bound, keep the in-memory client
+    // for the rest of this server lifetime.
+    if (activeApi === null && loadPublishedAccountSession !== undefined) {
+      activeApi = await loadPublishedAccountSession();
+    }
+    if (activeApi === null) {
       return errorContent(
         "reconnect_required",
         `This install is from before single-tier auth and isn't bound to an account. ` +
@@ -212,9 +227,9 @@ export async function buildServer(
       return errorContent("server_unavailable", "server is shutting down");
     }
     try {
-      api.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
+      activeApi.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
       const invoke = async () =>
-        await tool.handler(parsed.data, api, {
+        await tool.handler(parsed.data, activeApi, {
           notifyUser: async (message, data) => {
             await server.sendLoggingMessage({
               level: "notice",
@@ -364,25 +379,30 @@ export async function runServer(): Promise<void> {
   // at a glance.
   process.stderr.write(`[trusty-squire] server v${VERSION} starting\n`);
 
-  const storage = await openSessionStorage();
-  const session = await storage.read();
-
-  // Single-tier: every session is account-bound. A session with just a
-  // machine_token (pre-collapse install) yields api=null, and every
-  // tool call returns the re-install instruction.
-  const api =
-    session !== null && session.agent_session_token !== undefined
-      ? new ApiClient({
-          apiBaseUrl: session.api_base_url,
-          registryBaseUrl: DEFAULT_REGISTRY_BASE,
-          agentSessionToken: session.agent_session_token,
-          agentIdentity: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "unknown",
-          ...(session.account_id !== undefined ? { accountId: session.account_id } : {}),
-        })
-      : null;
+  const loadPublishedAccountSession = async (): Promise<ApiClient | null> => {
+    try {
+      const session = await (await openSessionStorage()).read();
+      // Single-tier: every session is account-bound. A session with just a
+      // machine_token (pre-collapse install) yields api=null, and every
+      // tool call returns the re-install instruction.
+      if (session === null || session.agent_session_token === undefined) return null;
+      return new ApiClient({
+        apiBaseUrl: session.api_base_url,
+        registryBaseUrl: DEFAULT_REGISTRY_BASE,
+        agentSessionToken: session.agent_session_token,
+        agentIdentity: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "unknown",
+        ...(session.account_id !== undefined ? { accountId: session.account_id } : {}),
+      });
+    } catch {
+      // A failed session read must remain fail-closed; the next tool call can
+      // retry after a transient keychain/file backend problem clears.
+      return null;
+    }
+  };
+  const api = await loadPublishedAccountSession();
 
   const callAdmission = createServerCallAdmission();
-  const server = await buildServer(api, callAdmission);
+  const server = await buildServer(api, callAdmission, loadPublishedAccountSession);
   const transport = new StdioServerTransport();
 
   // A stdio client can disappear without sending a signal (for example when
