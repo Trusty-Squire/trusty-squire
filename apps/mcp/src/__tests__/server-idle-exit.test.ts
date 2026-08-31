@@ -16,8 +16,6 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "../api-client.js";
-import { shouldReapOwner } from "../bot/owner-process-reaper.js";
-import { shouldReapIdleProvisionSession } from "../bot/provision-session.js";
 import { buildServer, createServerCallAdmission, shouldIdleExit } from "../server.js";
 
 describe("server shutdown call admission", () => {
@@ -84,32 +82,5 @@ describe("shouldIdleExit", () => {
 
   it("re-arms after fresh activity moves lastActivityAt forward", () => {
     expect(shouldIdleExit(2_000, 1_900, 0, timeoutMs, timeoutWithSessionMs)).toBe(false);
-  });
-});
-
-describe("idle provision-session reap decision", () => {
-  it("reaps only a terminally idle action boundary", () => {
-    expect(shouldReapIdleProvisionSession(5_000, 1_000, 0, false, false, 4_000)).toBe(true);
-  });
-
-  it("never crosses an in-flight action boundary", () => {
-    expect(shouldReapIdleProvisionSession(50_000, 1_000, 1, false, false, 4_000)).toBe(false);
-  });
-
-  it("never reaps an initializing or already-closing session", () => {
-    expect(shouldReapIdleProvisionSession(50_000, 1_000, 0, true, false, 4_000)).toBe(false);
-    expect(shouldReapIdleProvisionSession(50_000, 1_000, 0, false, true, 4_000)).toBe(false);
-  });
-
-  it("re-arms from the most recent completed activity", () => {
-    expect(shouldReapIdleProvisionSession(5_000, 4_900, 0, false, false, 4_000)).toBe(false);
-  });
-});
-
-describe("owner reap decision", () => {
-  it("reaps only a birth-verified stale owner", () => {
-    expect(shouldReapOwner("stale")).toBe(true);
-    expect(shouldReapOwner("matching")).toBe(false);
-    expect(shouldReapOwner("unknown")).toBe(false);
   });
 });

@@ -5,9 +5,9 @@
 - **Operator browsers are now owner-bound.** Every local launch carries a private Trusty Squire
   marker recorded by a detached watchdog; owner death and startup sweep exact matching processes,
   including surviving process groups, with bounded SIGTERM then SIGKILL escalation.
-- **Idle operator sessions are reaped after one hour by default.** The shared timeout never crosses
-  an in-flight action boundary, and crash cleanup durably removes only signed
-  `/tmp/trusty-squire-operate-*` profiles plus their session snapshots.
+- **Idle operator sessions are reaped after one hour by default.** The per-session watchdog never
+  crosses an in-flight action boundary. Normal session teardown removes observation snapshots,
+  while the existing profile pool remains the sole owner of profile-directory cleanup.
 
 ## 1.1.13-rc.14 (2026-08-30)
 

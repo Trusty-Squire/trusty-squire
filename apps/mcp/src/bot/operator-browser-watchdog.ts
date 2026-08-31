@@ -462,11 +462,6 @@ const processTerminationCallbacks = new Map<
 >();
 let globalProcessWatchdog: OperatorBrowserProcessWatchdog | null = null;
 
-export interface OperatorBrowserLaunchWatchdogRegistration {
-  permitTerminalCleanup(): void;
-  dispose(): void;
-}
-
 export async function dispatchOperatorBrowserProcessTermination(
   marker: string,
   reason: OperatorBrowserWatchdogReason,
@@ -493,26 +488,6 @@ export function registerOperatorBrowserProcessWatchdog(
     if (processTerminationCallbacks.get(marker) === onTerminate) {
       processTerminationCallbacks.delete(marker);
     }
-  };
-}
-
-export function registerOperatorBrowserLaunchWatchdog(
-  marker: string,
-): OperatorBrowserLaunchWatchdogRegistration {
-  let terminal = false;
-  const onTerminate = (): boolean => terminal;
-  processTerminationCallbacks.set(marker, onTerminate);
-  startGlobalOperatorBrowserProcessWatchdog();
-  return {
-    permitTerminalCleanup: () => {
-      terminal = true;
-      processTerminationCallbacks.set(marker, onTerminate);
-    },
-    dispose: () => {
-      if (processTerminationCallbacks.get(marker) === onTerminate) {
-        processTerminationCallbacks.delete(marker);
-      }
-    },
   };
 }
 

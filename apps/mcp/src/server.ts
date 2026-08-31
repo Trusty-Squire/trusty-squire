@@ -17,13 +17,11 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { ApiClient } from "./api-client.js";
 import { setSelfManagedChromeTerminationSignalExitEnabled } from "./bot/browser.js";
 import { cancelActiveLoginBrowsers } from "./bot/google-login.js";
-import { operatorBrowserWatchdogConfig } from "./bot/operator-browser-watchdog.js";
 import { sweepOperatorProfilePoolOrphans } from "./bot/operator-profile-pool.js";
 import { startOwnerProcessReaper } from "./bot/owner-process-reaper.js";
 import {
   activeSessionCount,
   closeAllProvisionSessions,
-  reapIdleProvisionSessions,
   withProvisionSessionCall,
 } from "./bot/provision-session.js";
 import { buildToolRegistry, findTool } from "./tools/index.js";
@@ -451,44 +449,25 @@ export async function runServer(): Promise<void> {
     lastActivityAt = Date.now();
   };
 
-  let idleSweepInFlight = false;
   idleTimer = setInterval(() => {
     if (shutdown !== undefined) return;
-    if (idleSweepInFlight || callAdmission.inFlightCount() > 0) return;
-    idleSweepInFlight = true;
-    void (async () => {
-      try {
-        const now = Date.now();
-        const reaped = await reapIdleProvisionSessions(
-          now,
-          operatorBrowserWatchdogConfig().idleTimeoutMs,
-        );
-        if (reaped.length > 0) {
-          process.stderr.write(
-            `[trusty-squire] reaped ${reaped.length} idle operator browser session(s)\n`,
-          );
-        }
-        const sessionCount = activeSessionCount();
-        if (
-          !shouldIdleExit(
-            now,
-            lastActivityAt,
-            sessionCount,
-            idleTimeoutMs(),
-            idleTimeoutWithSessionMs(),
-          )
-        ) {
-          return;
-        }
-        process.stderr.write(
-          `[trusty-squire] server idle with ${sessionCount} open session(s) and no client ` +
-            `activity past the bound; exiting (this tears down any open session's browser)\n`,
-        );
-        requestShutdown();
-      } finally {
-        idleSweepInFlight = false;
-      }
-    })();
+    const sessionCount = activeSessionCount();
+    if (
+      !shouldIdleExit(
+        Date.now(),
+        lastActivityAt,
+        sessionCount,
+        idleTimeoutMs(),
+        idleTimeoutWithSessionMs(),
+      )
+    ) {
+      return;
+    }
+    process.stderr.write(
+      `[trusty-squire] server idle with ${sessionCount} open session(s) and no client ` +
+        `activity past the bound; exiting (this tears down any open session's browser)\n`,
+    );
+    requestShutdown();
   }, idleCheckIntervalMs());
   idleTimer.unref();
 

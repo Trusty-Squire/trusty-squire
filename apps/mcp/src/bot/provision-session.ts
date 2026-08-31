@@ -18,7 +18,7 @@
 
 import { createHash, createHmac, randomBytes, randomInt, randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
-import { renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -161,7 +161,6 @@ import {
   OperatorBrowserWatchdog,
   type OperatorBrowserWatchdogReason,
 } from "./operator-browser-watchdog.js";
-import { trackOwnerSessionArtifact, removeOwnerSessionArtifact } from "./owner-process-reaper.js";
 
 // Identity-provider + auth-handler hosts a signup legitimately bounces
 // through. Used to widen domain-scope so an OAuth `goto` (rare) isn't blocked.
@@ -4991,12 +4990,11 @@ function persistObserveSnapshot(
   elements: ObservedElement[],
 ): string | null {
   let temporaryFile: string | null = null;
-  const requestedDir = observeSnapshotDir(session.id);
-  let dir = requestedDir;
-  let file = join(dir, `observe-${session.id}.json`);
+  const dir = observeSnapshotDir(session.id);
+  const file = join(dir, `observe-${session.id}.json`);
   try {
-    dir = trackOwnerSessionArtifact(requestedDir);
-    file = join(dir, `observe-${session.id}.json`);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
     temporaryFile = join(dir, `.observe-${session.id}-${generation}.tmp`);
     writeFileSync(
       temporaryFile,
@@ -9867,7 +9865,7 @@ function clearSessionArtifacts(session: Session): void {
   session.secretSlots.clear();
   session.sealedFieldKeys.clear();
   try {
-    removeOwnerSessionArtifact(observeSnapshotDir(session.id));
+    rmSync(observeSnapshotDir(session.id), { recursive: true, force: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(
@@ -10039,51 +10037,6 @@ export async function closeAllProvisionSessions(): Promise<void> {
   } finally {
     shutdownInProgress -= 1;
   }
-}
-
-export function shouldReapIdleProvisionSession(
-  now: number,
-  lastActivityAt: number,
-  callCount: number,
-  initializing: boolean,
-  closing: boolean,
-  idleTimeoutMs: number,
-): boolean {
-  return !initializing && !closing && callCount === 0 && now - lastActivityAt >= idleTimeoutMs;
-}
-
-// Atomically closes admission before the first await, so a tool call can never
-// race an idle reap. Incomplete sessions are destroyed rather than returned to
-// the warm pool; the pool remains the authority that removes the profile dir.
-export async function reapIdleProvisionSessions(
-  now: number,
-  idleTimeoutMs: number,
-): Promise<string[]> {
-  const reaped: string[] = [];
-  for (const [id, session] of [...sessions.entries()]) {
-    if (
-      !shouldReapIdleProvisionSession(
-        now,
-        session.lastActivityAt,
-        session.callCount,
-        session.initializing,
-        session.closing,
-        idleTimeoutMs,
-      )
-    ) {
-      continue;
-    }
-    const idleMs = now - session.lastActivityAt;
-    const terminated = await terminateExpiredProvisionSession(session, {
-      kind: "idle_timeout",
-      idle_ms: idleMs,
-      timeout_ms: idleTimeoutMs,
-    });
-    if (!terminated) continue;
-    audit(id, "idle_reap", { idle_ms: idleMs });
-    reaped.push(id);
-  }
-  return reaped;
 }
 
 export function activeSessionCount(): number {

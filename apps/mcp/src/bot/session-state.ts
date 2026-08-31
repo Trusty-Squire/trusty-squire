@@ -1,13 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { renameSync } from "node:fs";
+import { chmodSync, mkdtempSync, renameSync } from "node:fs";
 import { chmod, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
-import {
-  createOwnerEphemeralProfile,
-  untrackOwnerEphemeralProfile,
-} from "./owner-process-reaper.js";
 
 export type BrowserStorageState = Awaited<ReturnType<BrowserContext["storageState"]>>;
 
@@ -214,18 +211,13 @@ export async function writeCanonicalIdentityMetadata(
 
 /** A private Chrome profile for exactly one operate session. */
 export function createEphemeralProfile(): string {
-  return createOwnerEphemeralProfile();
+  const profileDir = mkdtempSync(join(tmpdir(), "trusty-squire-operate-"));
+  chmodSync(profileDir, 0o700);
+  return profileDir;
 }
 
-export async function destroyEphemeralProfile(
-  profileDir: string,
-  operations: {
-    remove?: typeof rm;
-    untrack?: typeof untrackOwnerEphemeralProfile;
-  } = {},
-): Promise<void> {
-  await (operations.remove ?? rm)(profileDir, { recursive: true, force: true });
-  (operations.untrack ?? untrackOwnerEphemeralProfile)(profileDir);
+export async function destroyEphemeralProfile(profileDir: string): Promise<void> {
+  await rm(profileDir, { recursive: true, force: true });
 }
 
 /**

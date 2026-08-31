@@ -487,9 +487,10 @@ payment-safety coverage to the slow tier.
 self-managed and Playwright-launched local operator browsers. Every local launch
 must receive the private operator marker at the shared launch boundary; never
 register external/remote CDP browsers. The manifest records exact PID/group,
-marker, and profile signatures. Ephemeral `/tmp/trusty-squire-operate-*` profiles
-also carry a private ownership record so owner-death/startup cleanup can remove
-only Trusty Squire-created paths. Process teardown uses bounded SIGTERM→SIGKILL.
+marker, process birth identity, and `user_data_dir`; it owns process signaling,
+not profile or snapshot deletion. The profile pool and normal session teardown
+remain the only directory-cleanup owners. Process teardown uses bounded
+SIGTERM→SIGKILL.
 
 Idle cleanup uses the provision-session call lease as its action boundary. Any new
 session-addressed operate/auth/payment surface must acquire that lease, and session

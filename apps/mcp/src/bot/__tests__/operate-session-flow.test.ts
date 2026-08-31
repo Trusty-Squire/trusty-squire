@@ -9,7 +9,6 @@
 //   - credential egress seed excludes mid_session task scope
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { constants, publicEncrypt } from "node:crypto";
-import type * as NodeFs from "node:fs";
 import type * as GoogleLoginModule from "../google-login.js";
 import type * as SessionState from "../session-state.js";
 
@@ -198,35 +197,6 @@ const h = vi.hoisted(() => ({
       expected: { last4: "released_card" };
       observed: "3ds_challenge";
     };
-  },
-  artifactRemovalPath: null as string | null,
-  ownerArtifactTracks: [] as string[],
-  ownerArtifactUntracks: [] as string[],
-}));
-
-vi.mock("node:fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof NodeFs>();
-  return {
-    ...actual,
-    rmSync: (...args: Parameters<typeof actual.rmSync>) => {
-      if (h.artifactRemovalPath !== null && String(args[0]).startsWith(h.artifactRemovalPath)) {
-        throw new Error("simulated observation artifact removal failure");
-      }
-      return actual.rmSync(...args);
-    },
-  };
-});
-
-vi.mock("../owner-process-reaper.js", () => ({
-  trackOwnerSessionArtifact: (path: string) => {
-    h.ownerArtifactTracks.push(path);
-    mkdirSync(path, { recursive: true, mode: 0o700 });
-    chmodSync(path, 0o700);
-    return path;
-  },
-  removeOwnerSessionArtifact: (path: string) => {
-    h.ownerArtifactUntracks.push(path);
-    rmSync(path, { recursive: true, force: true });
   },
 }));
 
@@ -987,14 +957,13 @@ import {
   chmodSync,
   existsSync,
   mkdtempSync,
-  mkdirSync,
   writeFileSync,
   readFileSync,
   readdirSync,
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import canonicalize from "canonicalize";
 import { exportJWK, SignJWT } from "jose";
@@ -1020,7 +989,6 @@ import {
   withProvisionSessionCall,
   paymentSession,
   closeAllProvisionSessions,
-  reapIdleProvisionSessions,
   activeSessionCount,
   getSessionUserEmail,
   parseElementsTable,
@@ -1257,9 +1225,6 @@ beforeEach(() => {
   h.waitForThreeDsResult = "timeout";
   h.waitForThreeDsCalls = [];
   h.paymentInstrumentMismatch = null;
-  h.artifactRemovalPath = null;
-  h.ownerArtifactTracks = [];
-  h.ownerArtifactUntracks = [];
 });
 
 const replayRecipe = (overrides: Partial<OperatorRecipe> = {}): OperatorRecipe => ({
@@ -4057,7 +4022,6 @@ describe("operate session — OAuth lifecycle", () => {
       serviceUrl: "https://app.example.com/login",
       profileDir: canonical,
     });
-    const artifactDir = dirname(started.snapshot_file!);
     expect(existsSync(started.snapshot_file!)).toBe(true);
 
     await expect(
@@ -4066,55 +4030,10 @@ describe("operate session — OAuth lifecycle", () => {
 
     expect(activeSessionCount()).toBe(0);
     expect(existsSync(started.snapshot_file!)).toBe(false);
-    expect(h.ownerArtifactTracks).toContain(artifactDir);
-    expect(h.ownerArtifactUntracks).toContain(artifactDir);
     expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]);
     await expect(finishProvisionSession(started.session_id)).rejects.toThrow(
       "unknown provision session",
     );
-  });
-
-  it("clears artifacts when OAuth action preparation replacement startup fails", async () => {
-    const canonical = "/tmp/trusty-squire-unit-canonical-oauth-replacement-failure";
-    h.storageStates.set(canonical, {
-      cookies: [{ name: "SID", value: "google-session", domain: ".google.com", path: "/" }],
-      origins: [],
-    });
-    h.visibleText = "Continue with Google";
-    h.elements = [
-      elem({
-        visibleText: "Continue with Google",
-        labelText: "Continue with Google",
-        role: "button",
-        selector: "#google-oauth",
-      }),
-    ];
-    let rejectReplacement!: (error: Error) => void;
-    h.startGates.set(
-      1,
-      new Promise<void>((_resolve, reject) => {
-        rejectReplacement = reject;
-      }),
-    );
-    const started = await startProvisionSession({
-      serviceUrl: "https://app.example.com/login",
-      profileDir: canonical,
-    });
-    const artifactDir = dirname(started.snapshot_file!);
-    const acting = act(started.session_id, {
-      kind: "oauth_login",
-      target: "Continue with Google",
-    }).catch((error: unknown) => error);
-    await vi.waitFor(() => expect(h.startCalls).toBe(2));
-
-    rejectReplacement(new Error("replacement startup failed"));
-
-    await expect(acting).resolves.toEqual(
-      expect.objectContaining({ message: "replacement startup failed" }),
-    );
-    expect(activeSessionCount()).toBe(0);
-    expect(existsSync(started.snapshot_file!)).toBe(false);
-    expect(h.ownerArtifactUntracks).toContain(artifactDir);
   });
 
   it("rejects a replacement browser that settles after operator shutdown", async () => {
@@ -7383,68 +7302,6 @@ describe("operate session — ephemeral profile lifecycle", () => {
     ).resolves.toBe(true);
 
     expect(h.closeCalls).toBe(1);
-    expect(activeSessionCount()).toBe(0);
-    expect(existsSync(started.snapshot_file!)).toBe(false);
-  });
-
-  it.skipIf(process.platform !== "linux")(
-    "still closes the browser when observation artifact removal fails",
-    async () => {
-      vi.useFakeTimers();
-      const observeRoot = mkdtempSync(join(tmpdir(), "trusty-squire-observe-test-"));
-      const previousObserveDir = process.env.TRUSTY_SQUIRE_OBSERVE_DIR;
-      process.env.TRUSTY_SQUIRE_OBSERVE_DIR = observeRoot;
-      h.elements = [
-        elem({
-          tag: "button",
-          visibleText: "Continue",
-          screenPath: "main:checkout > button:continue",
-          container: "main:checkout",
-        }),
-      ];
-      try {
-        const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-        expect(started.snapshot_file).toBeTypeOf("string");
-        h.artifactRemovalPath = observeRoot;
-        vi.setSystemTime(Date.now() + 60 * 60 * 1_000);
-
-        await expect(
-          dispatchOperatorBrowserProcessTermination("v1:1:mock-0", {
-            kind: "max_lifetime",
-            lifetime_ms: 60 * 60 * 1_000,
-            timeout_ms: 30 * 60 * 1_000,
-          }),
-        ).resolves.toBe(true);
-
-        expect(h.closeCalls).toBe(1);
-        expect(activeSessionCount()).toBe(0);
-      } finally {
-        h.artifactRemovalPath = null;
-        rmSync(observeRoot, { recursive: true, force: true });
-        if (previousObserveDir === undefined) delete process.env.TRUSTY_SQUIRE_OBSERVE_DIR;
-        else process.env.TRUSTY_SQUIRE_OBSERVE_DIR = previousObserveDir;
-      }
-    },
-  );
-
-  it("routes server idle reaping through terminal teardown ownership", async () => {
-    h.elements = [
-      elem({
-        tag: "button",
-        visibleText: "Continue",
-        screenPath: "main:checkout > button:continue",
-        container: "main:checkout",
-      }),
-    ];
-    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-    const session = paymentSession(started.session_id);
-    expect(started.snapshot_file).toBeTypeOf("string");
-
-    await expect(
-      reapIdleProvisionSessions(session.lastActivityAt + 60 * 60 * 1_000, 60 * 60 * 1_000),
-    ).resolves.toEqual([started.session_id]);
-
-    expect(session.watchdog).toBeNull();
     expect(activeSessionCount()).toBe(0);
     expect(existsSync(started.snapshot_file!)).toBe(false);
   });
