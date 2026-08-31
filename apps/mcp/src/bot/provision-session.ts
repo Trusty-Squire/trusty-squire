@@ -1400,8 +1400,10 @@ async function quiesceStartingBrowser(
       return closeState;
     })();
     void pending.quiescencePromise.then(
-      () => startingBrowsers.delete(pending),
-      () => startingBrowsers.delete(pending),
+      (closeState) => {
+        if (closeState === "closed") startingBrowsers.delete(pending);
+      },
+      () => undefined,
     );
   }
   let closeState = await pending.quiescencePromise;
@@ -1415,6 +1417,7 @@ async function quiesceStartingBrowser(
       "operator browser startup cancellation did not quiesce",
     );
   }
+  if (closeState === "closed") startingBrowsers.delete(pending);
   return closeState;
 }
 

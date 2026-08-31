@@ -67,6 +67,7 @@ const h = vi.hoisted(() => ({
   closeCalls: 0,
   forceCloseCalls: 0,
   closeState: "closed" as "closed" | "force_closed_unproven" | "unknown",
+  closeStates: new Map<number, "closed" | "force_closed_unproven" | "unknown">(),
   closeGates: new Map<number, Promise<void>>(),
   profileProbeCalls: 0,
   controllerProviderProbeCalls: 0,
@@ -900,7 +901,7 @@ vi.mock("../browser.js", () => ({
       }
       if (h.connections[this.index] === true) h.started -= 1;
       h.connections[this.index] = false;
-      return h.closeState;
+      return h.closeStates.get(this.index) ?? h.closeState;
     }
     async waitForCancelledStartQuiescence(): Promise<void> {
       const gate = h.startGates.get(this.index);
@@ -913,7 +914,7 @@ vi.mock("../browser.js", () => ({
       if (closeGate !== undefined) await closeGate;
       if (h.connections[this.index] === true) h.started -= 1;
       h.connections[this.index] = false;
-      return h.closeState;
+      return h.closeStates.get(this.index) ?? h.closeState;
     }
   },
   // Mirrors the real export — the pending-card-fill charge guard reads it.
@@ -1184,6 +1185,7 @@ beforeEach(() => {
   h.closeCalls = 0;
   h.forceCloseCalls = 0;
   h.closeState = "closed";
+  h.closeStates = new Map();
   h.closeGates = new Map();
   h.profileProbeCalls = 0;
   h.controllerProviderProbeCalls = 0;
@@ -3105,6 +3107,7 @@ describe("verified recipe recording", () => {
 afterEach(async () => {
   vi.useRealTimers();
   await closeAllProvisionSessions();
+  delete process.env.BOT_START_TIMEOUT_MS;
   delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
   delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
   if (compactV2ModeBeforeTest === undefined) delete process.env.TRUSTY_SQUIRE_OBSERVE_V2;
@@ -3653,8 +3656,17 @@ describe("operate session — OAuth lifecycle", () => {
     );
   });
 
-  it("uses the shared payment terminal owner when OAuth fails", async () => {
-    const auditPayment = vi.fn().mockResolvedValue({ id: "audit_oauth_terminal" });
+  it("returns at the OAuth deadline while the shared payment terminal owner finishes", async () => {
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "500";
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
+    let releaseAudit!: () => void;
+    const auditGate = new Promise<void>((resolve) => {
+      releaseAudit = resolve;
+    });
+    const auditPayment = vi.fn(async () => {
+      await auditGate;
+      return { id: "audit_oauth_terminal" };
+    });
     const pendingThreeDs = {
       approval_id: "appr_oauth_terminal",
       approval_url: "https://web.test/vault/pay/appr_oauth_terminal",
@@ -3682,18 +3694,39 @@ describe("operate session — OAuth lifecycle", () => {
       serviceUrl: "https://app.example.com/login",
       api: { auditPayment } as unknown as ApiClient,
     });
+    const successor = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+    });
     const session = paymentSession(started.session_id);
     armPaymentDispatchHandoff(pendingThreeDs, session);
 
+    const startedAt = Date.now();
     const acting = act(started.session_id, {
       kind: "oauth_login",
       target: "Continue with Google",
       provider: "google",
-    });
+    }).catch((error: unknown) => error);
     await vi.waitFor(() => expect(session.paymentDispatchHandoff?.terminalizing).toBe(true));
-    setActivePendingThreeDs(pendingThreeDs, session);
+    const actionError = await acting;
+    expect(actionError).toEqual(
+      expect.objectContaining({ message: expect.stringMatching(/google_session.*re-login/i) }),
+    );
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
 
-    await expect(acting).rejects.toThrow("provider did not settle");
+    h.oauthLoginError = null;
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "3000";
+    const successorAction = act(successor.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+      provider: "google",
+    });
+    setActivePendingThreeDs(pendingThreeDs, session);
+    await vi.waitFor(() => expect(auditPayment).toHaveBeenCalledOnce());
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    expect(h.oauthLoginCalls).toHaveLength(1);
+
+    releaseAudit();
+    await successorAction;
     expect(h.waitForThreeDsCalls).toEqual([0]);
     expect(auditPayment).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -3702,7 +3735,8 @@ describe("operate session — OAuth lifecycle", () => {
       }),
     );
     expect(session.paymentDispatchHandoff?.terminalComplete).toBe(true);
-    expect(activeSessionCount()).toBe(0);
+    expect(activeSessionCount()).toBe(1);
+    await finishProvisionSession(successor.session_id);
   });
 
   it("retains OAuth custody until an unproven browser close becomes proven", async () => {
@@ -3766,9 +3800,10 @@ describe("operate session — OAuth lifecycle", () => {
     await finishProvisionSession(successor.session_id);
   });
 
-  it("retains OAuth custody while timed-out browser startup quiesces", async () => {
+  it("retains unknown startup custody across terminal-owner scans", async () => {
     process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1000";
     process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
+    process.env.BOT_START_TIMEOUT_MS = "100";
     const canonical = "/tmp/trusty-squire-unit-canonical-oauth-preparation-deadline";
     h.storageStates.set(canonical, { cookies: [], origins: [] });
     h.identityMetadata.set(canonical, { googleAccountEmail: "canonical@example.com" });
@@ -3797,6 +3832,22 @@ describe("operate session — OAuth lifecycle", () => {
       serviceUrl: "https://app.example.com/login",
       profileDir: canonical,
     });
+    const session = paymentSession(started.session_id);
+    const pendingThreeDs = {
+      approval_id: "appr_oauth_startup",
+      approval_url: "https://web.test/vault/pay/appr_oauth_startup",
+      checkout: {
+        merchant: "Example",
+        checkout_origin: "https://app.example.com",
+        amount_cents: 4_200,
+        currency: "USD",
+      },
+      last4: "4242",
+      mandate_id: "mandate_oauth_startup",
+      deadline: Date.now() + 60_000,
+    };
+    armPaymentDispatchHandoff(pendingThreeDs, session);
+    h.closeStates.set(2, "unknown");
     const startedAt = Date.now();
 
     const timedOutAction = act(started.session_id, {
@@ -3813,16 +3864,20 @@ describe("operate session — OAuth lifecycle", () => {
     expect(Date.now() - startedAt).toBeLessThan(1_500);
     expect(h.oauthLoginCalls).toEqual([]);
 
+    releasePendingStart();
+    await vi.waitFor(() => expect(h.forceCloseCalls).toBeGreaterThanOrEqual(3));
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "3000";
     const successorAction = act(successor.session_id, {
       kind: "oauth_login",
       target: "Continue with Google",
       provider: "google",
     }).catch((error: unknown) => error);
+    setActivePendingThreeDs(pendingThreeDs, session);
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
     expect(h.startCalls).toBe(3);
     expect(h.oauthLoginCalls).toEqual([]);
 
-    releasePendingStart();
+    h.closeStates.set(2, "closed");
     await successorAction;
     expect(h.startCalls).toBeGreaterThan(3);
     expect(h.oauthExpectedGoogleAccountEmails).toEqual(["canonical@example.com"]);
