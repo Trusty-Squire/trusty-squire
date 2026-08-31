@@ -214,10 +214,14 @@ export async function clearProviderCookies(
       if (err instanceof ProfileBusyError) throw err;
       cleared = false;
     } finally {
-      if (ownership === null) {
+      const registeredOwnership = ownership as {
+        marker: string;
+        env: NodeJS.ProcessEnv;
+      } | null;
+      if (registeredOwnership === null) {
         if (context !== null) await closeBrowserContextWithin(context, runtime.closeTimeoutMs);
       } else {
-        const marker = ownership.marker;
+        const marker = registeredOwnership.marker;
         (runtime.markTerminal ?? markOwnerBrowserLaunchTerminal)(marker);
         if (context !== null) await closeBrowserContextWithin(context, runtime.closeTimeoutMs);
         lifecycleClosed = await (runtime.terminate ?? terminateOwnerBrowserLaunch)(marker).catch(

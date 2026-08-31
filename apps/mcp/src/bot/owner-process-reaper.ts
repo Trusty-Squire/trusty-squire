@@ -782,6 +782,17 @@ function privateDirectoryMatches(path: string): boolean {
   }
 }
 
+function ownedArtifactParentMatches(path: string): boolean {
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o022) !== 0) return false;
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) return false;
+    return realpathSync(path) === resolve(path);
+  } catch {
+    return false;
+  }
+}
+
 function readExactArtifactSignature(signaturePath: string): {
   version?: unknown;
   token?: unknown;
@@ -1523,7 +1534,7 @@ export function startOwnerProcessReaper(
         (entry) =>
           entry.path === path && entry.token === artifactToken && entry.state === "pending",
       );
-      if (!reserved) return;
+      if (!reserved || reserved.root_path === undefined) return;
       update({
         ...manifest,
         artifacts: [
@@ -1740,7 +1751,7 @@ export function trackOwnerSessionArtifact(
   if (existsSync(requestedPath)) throw new Error("session artifact path already exists");
   const parent = dirname(requestedPath);
   mkdirSync(parent, { recursive: true, mode: 0o700 });
-  if (!privateDirectoryMatches(parent)) throw new Error("unsafe session artifact parent");
+  if (!ownedArtifactParentMatches(parent)) throw new Error("unsafe session artifact parent");
   const reaper = ensureOwnerProcessReaper();
   if (reaper === null) throw new Error("owner process reaper unavailable for session artifact");
   const token = randomUUID();
