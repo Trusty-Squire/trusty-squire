@@ -344,8 +344,10 @@ export async function writeCanonicalIdentitySnapshot(
   metadata: CanonicalIdentityMetadata | undefined,
   canPublish: () => boolean = () => true,
   confirmedProviders: readonly OAuthProviderId[] = [],
-  options: { allowGoogleIdentityDowngrade?: boolean } = {},
+  options: { allowGoogleIdentityDowngrade?: boolean; signal?: AbortSignal } = {},
 ): Promise<boolean> {
+  const canContinue = (): boolean => canPublish() && options.signal?.aborted !== true;
+  if (!canContinue()) return false;
   const disposition = canonicalIdentitySnapshotDisposition(state, metadata);
   if (disposition === "invalid_metadata") return false;
   const wouldDropUsableGoogleIdentity = async (): Promise<boolean> => {
@@ -360,12 +362,16 @@ export async function writeCanonicalIdentitySnapshot(
     );
     return false;
   }
+  if (!canContinue()) return false;
   await mkdir(profileDir, { recursive: true, mode: 0o700 });
+  if (!canContinue()) return false;
   const destination = sessionStatePath(profileDir);
   const markerDestination = join(profileDir, LOGGED_IN_PROVIDERS_FILE);
   let parsedProviders: unknown;
   try {
-    parsedProviders = JSON.parse(await readFile(markerDestination, "utf8"));
+    parsedProviders = JSON.parse(
+      await readFile(markerDestination, { encoding: "utf8", signal: options.signal }),
+    );
   } catch {
     // Missing/malformed legacy marker starts from the last atomic snapshot.
   }
@@ -396,16 +402,24 @@ export async function writeCanonicalIdentitySnapshot(
     : undefined;
   let published = false;
   try {
-    await writeFile(temporary, serialized, { mode: 0o600 });
+    if (!canContinue()) return false;
+    await writeFile(temporary, serialized, { mode: 0o600, signal: options.signal });
+    if (!canContinue()) return false;
     await chmod(temporary, 0o600);
     if (markerTemporary !== undefined) {
-      await writeFile(markerTemporary, JSON.stringify(providerMarkers), { mode: 0o600 });
+      if (!canContinue()) return false;
+      await writeFile(markerTemporary, JSON.stringify(providerMarkers), {
+        mode: 0o600,
+        signal: options.signal,
+      });
+      if (!canContinue()) return false;
       await chmod(markerTemporary, 0o600);
     }
-    if (!canPublish()) return false;
+    if (!canContinue()) return false;
     // Re-check immediately before the atomic rename. Another capture may have
     // published a good identity while this writer prepared its temporary file.
     if (await wouldDropUsableGoogleIdentity()) return false;
+    if (!canContinue()) return false;
     // The snapshot carries the authoritative provider markers. Its single
     // rename publishes cookies + markers together; the legacy marker mirror is
     // renamed second for older readers.
@@ -416,6 +430,9 @@ export async function writeCanonicalIdentitySnapshot(
     }
     published = true;
     return true;
+  } catch (error) {
+    if (options.signal?.aborted === true) return false;
+    throw error;
   } finally {
     if (!published) await rm(temporary, { force: true }).catch(() => undefined);
     if (markerTemporary !== undefined) {

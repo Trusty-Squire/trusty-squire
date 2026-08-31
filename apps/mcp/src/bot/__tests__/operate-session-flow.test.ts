@@ -3617,6 +3617,102 @@ describe("operate session — OAuth lifecycle", () => {
     expect(h.oauthLoginCalls).toEqual([]);
   });
 
+  it("prevents a timed-out identity publication from mutating later", async () => {
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1000";
+    const canonical = "/tmp/trusty-squire-unit-canonical-oauth-publication-deadline";
+    let releaseWrite!: () => void;
+    h.storageStateWriteGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+    const acting = act(started.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+      provider: "google",
+    });
+    const terminalFailure = expect(acting).rejects.toThrow(/google_session.*re-login/i);
+
+    await vi.waitFor(() => expect(h.storageStateWriteAttempts).toBe(1));
+    await terminalFailure;
+    expect(h.storageStateWrites).toEqual([]);
+
+    releaseWrite();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(h.storageStateWrites).toEqual([]);
+  });
+
+  it("keeps successors behind the owner when a queued OAuth action times out", async () => {
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1000";
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    let releaseOwner!: () => void;
+    h.oauthLoginGates.set(
+      0,
+      new Promise<void>((resolve) => {
+        releaseOwner = resolve;
+      }),
+    );
+    const owner = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+    const abandoned = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+    });
+    const successor = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+    });
+    const owningAction = act(owner.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+      provider: "google",
+    });
+    await vi.waitFor(() => expect(h.oauthLoginCalls).toEqual(["#google-oauth"]));
+
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "50";
+    await expect(
+      act(abandoned.session_id, {
+        kind: "oauth_login",
+        target: "Continue with Google",
+        provider: "google",
+      }),
+    ).rejects.toThrow(/google_session.*re-login/i);
+
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1000";
+    const successorAction = act(successor.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+      provider: "google",
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    expect(h.oauthLoginCalls).toEqual(["#google-oauth"]);
+
+    releaseOwner();
+    await owningAction;
+    await successorAction;
+    expect(h.oauthLoginCalls).toEqual(["#google-oauth", "#google-oauth"]);
+
+    await finishProvisionSession(owner.session_id);
+    await finishProvisionSession(abandoned.session_id);
+    await finishProvisionSession(successor.session_id);
+  });
+
   it("re-resolves the exact authorized OAuth handle after preparation", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-oauth-sealed-handle";
     h.storageStates.set(canonical, { cookies: [], origins: [] });
