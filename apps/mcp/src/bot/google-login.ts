@@ -178,76 +178,113 @@ function resolveChromium(): PersistentLauncher {
   }
 }
 
+const CHROME_EPOCH_MICROSECONDS = 11_644_473_600_000_000;
+const PROFILE_COOKIE_DATABASES = [
+  ["Default", "Network", "Cookies"],
+  ["Default", "Cookies"],
+  ["Cookies"],
+] as const;
+
+interface PersistedCookieRow {
+  domain: unknown;
+  name: unknown;
+  value: unknown;
+  path: unknown;
+  expiresUtc: unknown;
+  secure: unknown;
+  httpOnly: unknown;
+  sameSite: unknown;
+}
+
+function chromeCookieExpiresAt(expiresUtc: unknown): number {
+  const raw = typeof expiresUtc === "number" ? expiresUtc : Number(expiresUtc);
+  if (!Number.isFinite(raw) || raw <= 0) return -1;
+  return Math.max(-1, Math.floor((raw - CHROME_EPOCH_MICROSECONDS) / 1_000_000));
+}
+
+function chromeCookieSameSite(value: unknown): "Strict" | "Lax" | "None" {
+  // Chrome's CookieSameSite enum is UNSPECIFIED=0, NO_RESTRICTION=1,
+  // LAX_MODE=2, STRICT_MODE=3. Playwright needs one explicit value.
+  switch (Number(value)) {
+    case 3:
+      return "Strict";
+    case 2:
+      return "Lax";
+    default:
+      return "None";
+  }
+}
+
+/**
+ * Builds the portable identity state from the cookie jar the plain Google
+ * login just wrote. The plain login browser intentionally has no CDP endpoint:
+ * launching a second headless browser here can see an empty jar and turn a
+ * completed account-bound login into a reconnect loop. These Chrome instances
+ * use --password-store=basic, so the canonical cookie store holds the values
+ * needed to seed the later isolated browser. Cookie values never leave this
+ * function except inside the sealed session snapshot.
+ */
 export async function captureProfileStorageState(
   profileDir: string,
-  runtime: {
-    resolveChannelBinary: typeof resolveChannelBinary;
-    launchSelfManagedLoginContext: typeof launchSelfManagedLoginContext;
-    teardownLoginBrowser: typeof teardownLoginBrowser;
-  } = {
-    resolveChannelBinary,
-    launchSelfManagedLoginContext,
-    teardownLoginBrowser,
-  },
-): Promise<{ storageState: BrowserStorageState; googleAccountEmail?: string }> {
-  const lifecycle = createTrackedLoginBrowserLifecycle();
-  let state: BrowserStorageState | undefined;
-  let googleAccountEmail: string | null = null;
-  let closeState: ProfileCloseState = "unknown";
-  let captureContextAcquired = false;
-  try {
-    const binary = runtime.resolveChannelBinary("chrome");
-    if (binary === null) throw new Error("no Chrome binary found for identity capture");
-    let tracked = false;
-    const trackBrowser = (browser: {
-      teardown: () => Promise<void>;
-      forceTeardown: () => void;
-      isRunning: () => boolean;
-      marker: string;
-    }): void => {
-      if (tracked) return;
-      tracked = true;
-      lifecycle.browserLaunched(
-        async () =>
-          await runtime.teardownLoginBrowser({
-            profileDir,
-            identity: null,
-            closeBrowser: browser.teardown,
-            forceClose: browser.forceTeardown,
-            isRunning: browser.isRunning,
-          }),
+): Promise<{ storageState: BrowserStorageState }> {
+  const cookies: BrowserStorageState["cookies"] = [];
+  const seen = new Set<string>();
+  for (const segments of PROFILE_COOKIE_DATABASES) {
+    const path = join(profileDir, ...segments);
+    if (!existsSync(path)) continue;
+    let db: Database.Database | null = null;
+    try {
+      db = new Database(path, { readonly: true, fileMustExist: true, timeout: 250 });
+      const columns = new Set(
+        (db.pragma("table_info(cookies)") as Array<{ name: string }>).map((column) => column.name),
       );
-    };
-    const browser = await runtime.launchSelfManagedLoginContext({
-      binary,
-      profileDir,
-      initialUrl: "about:blank",
-      appMode: false,
-      window: { width: 1280, height: 800 },
-      env: process.env,
-      proxyServer: null,
-      extraArgs: ["--headless=new", "--no-sandbox", "--disable-dev-shm-usage"],
-      onSpawned: trackBrowser,
-    });
-    trackBrowser(browser);
-    const context = browser.context;
-    captureContextAcquired = true;
-    googleAccountEmail = await detectGoogleAccountEmailInContext(context);
-    state = await context.storageState({ indexedDB: true });
-  } catch (error) {
-    if (!captureContextAcquired) lifecycle.throwIfCancelled();
-    throw error;
-  } finally {
-    closeState = await lifecycle.finish();
+      if (!["host_key", "name", "value"].every((column) => columns.has(column))) continue;
+      const rows = db
+        .prepare(
+          `SELECT host_key AS domain, name, value,
+                  ${columns.has("path") ? "path" : "'/'"} AS path,
+                  ${columns.has("expires_utc") ? "expires_utc" : "0"} AS expiresUtc,
+                  ${columns.has("is_secure") ? "is_secure" : "0"} AS secure,
+                  ${columns.has("is_httponly") ? "is_httponly" : "0"} AS httpOnly,
+                  ${columns.has("samesite") ? "samesite" : "0"} AS sameSite
+             FROM cookies
+            WHERE value <> ''`,
+        )
+        .all() as PersistedCookieRow[];
+      for (const row of rows) {
+        if (
+          typeof row.domain !== "string" ||
+          typeof row.name !== "string" ||
+          typeof row.value !== "string" ||
+          row.domain.length === 0 ||
+          row.name.length === 0 ||
+          row.value.length === 0
+        ) {
+          continue;
+        }
+        const cookieKey = `${row.domain}\u0000${typeof row.path === "string" ? row.path : "/"}\u0000${row.name}`;
+        if (seen.has(cookieKey)) continue;
+        seen.add(cookieKey);
+        cookies.push({
+          domain: row.domain,
+          name: row.name,
+          value: row.value,
+          path: typeof row.path === "string" && row.path.length > 0 ? row.path : "/",
+          expires: chromeCookieExpiresAt(row.expiresUtc),
+          secure: Number(row.secure) !== 0,
+          httpOnly: Number(row.httpOnly) !== 0,
+          sameSite: chromeCookieSameSite(row.sameSite),
+        });
+      }
+    } catch {
+      // A malformed or concurrently replaced cookie store is not identity.
+      // Finalization will reject it rather than publishing a hollow snapshot.
+      continue;
+    } finally {
+      db?.close();
+    }
   }
-  lifecycle.throwIfCancelled();
-  if (closeState !== "closed") {
-    throw new Error(`login identity capture closed without proof (${closeState})`);
-  }
-  return {
-    storageState: state!,
-    ...(googleAccountEmail === null ? {} : { googleAccountEmail }),
-  };
+  return { storageState: { cookies, origins: [] } };
 }
 
 async function detectGoogleAccountEmailInContext(context: BrowserContext): Promise<string | null> {
@@ -1619,9 +1656,7 @@ export async function openInstallConfirmInBotChrome(
 }
 
 export type InstallClaimPollResult =
-  | "pending"
-  | "expired"
-  | { status: "claimed"; provider: OAuthProviderId | null };
+  "pending" | "expired" | { status: "claimed"; provider: OAuthProviderId | null };
 
 export function installClaimPollCompleted(result: InstallClaimPollResult): boolean {
   if (result === "expired") {

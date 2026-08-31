@@ -472,6 +472,15 @@ replacement is captured. Run `pnpm --filter @trusty-squire/mcp build` followed b
 `DISPLAY=<headed-display> node apps/mcp/scripts/live-login-capture-proof.mjs` for a
 credential-free local-IdP proof of this boundary.
 
+Connect's Google-safe plain-browser flow is the exception to the live-context
+mechanism: it deliberately has no CDP context. After its consent/Finish gate, read
+the authenticated cookie values from the canonical profile's `Cookies` store and
+pass that state to `writeCanonicalIdentitySnapshot`; never launch a second,
+headless recapture of the profile. The plain launcher uses `--password-store=basic`
+so these values are available for the sealed portable snapshot. A cookie-less
+profile must still fail the Google identity gate. See
+`apps/mcp/src/bot/google-login.ts` and its regression test.
+
 ### 14. MCP tests have required-fast and post-merge-slow tiers
 
 `apps/mcp/vitest.tiers.ts` is the static tier manifest. The required `test`

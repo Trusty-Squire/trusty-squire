@@ -22,7 +22,6 @@ import {
   closeLocalBrowserLaunch,
   launchCancellablePersistentContext,
   launchPlainLoginBrowser,
-  type launchSelfManagedLoginContext,
   resolvePersistentFallbackIdentity,
   resolveAttachedProfileChildIdentity,
   terminateTrackedProfileChild,
@@ -66,7 +65,6 @@ import {
   ensureOAuthSession,
   finalizeLoginRun,
   launchPersistentLoginContext,
-  teardownLoginBrowser,
   type PersistentLauncher,
   type RunInBotChromeOpts,
 } from "../google-login.js";
@@ -890,225 +888,67 @@ describe("bot Chrome launch consistency", () => {
     expect(events).toEqual(["terminal", "terminate-marker", "untrack-marker"]);
   });
 
-  it("captures every browser storage surface from the closed canonical login", async () => {
-    const state = {
-      cookies: [
-        {
-          name: "__Host-1PLSID",
-          value: "primary-google-session",
-          domain: ".google.com",
-          path: "/",
-          expires: -1,
-          httpOnly: true,
-          secure: true,
-          sameSite: "Lax" as const,
-        },
-        {
-          name: "SMSV",
-          value: "secondary-google-session",
-          domain: "accounts.google.com",
-          path: "/",
-          expires: -1,
-          httpOnly: true,
-          secure: true,
-          sameSite: "Lax" as const,
-        },
-      ],
-      origins: [
-        {
-          origin: "https://accounts.google.com",
-          localStorage: [{ name: "identity", value: "opaque" }],
-        },
-      ],
-    };
-    const storageState = vi.fn(async () => state);
-    let running = true;
-    const teardown = vi.fn(async () => {
-      running = false;
-    });
-    const launch = vi.fn(async (options: Parameters<typeof launchSelfManagedLoginContext>[0]) => {
-      const browser = {
-        teardown,
-        forceTeardown: vi.fn(),
-        isRunning: () => running,
-        marker: "v1:1:capture-state",
-      };
-      options.onSpawned?.(browser);
-      return { ...browser, context: { storageState } as never, identity: null };
-    });
-
-    await expect(
-      captureProfileStorageState("/isolated-profile", {
-        resolveChannelBinary: () => "/unused/chrome",
-        launchSelfManagedLoginContext: launch,
-        teardownLoginBrowser,
-      }),
-    ).resolves.toEqual({ storageState: state });
-    expect(storageState).toHaveBeenCalledWith({ indexedDB: true });
-    expect(teardown).toHaveBeenCalledOnce();
-    expect(launch).toHaveBeenCalledWith(
-      expect.objectContaining({
-        profileDir: "/isolated-profile",
-        extraArgs: expect.arrayContaining(["--headless=new"]),
-      }),
-    );
-  });
-
-  it("lets operator shutdown reach an in-flight identity capture", async () => {
-    let rejectStorageState: ((error: Error) => void) | undefined;
-    const storageState = vi.fn(
-      async () =>
-        await new Promise<never>((_resolve, reject) => {
-          rejectStorageState = reject;
-        }),
-    );
-    let running = true;
-    const teardown = vi.fn(async () => {
-      running = false;
-      rejectStorageState?.(new Error("capture context closed"));
-    });
-    const capturing = captureProfileStorageState("/isolated-profile", {
-      resolveChannelBinary: () => "/unused/chrome",
-      launchSelfManagedLoginContext: async (options) => {
-        const browser = {
-          teardown,
-          forceTeardown: vi.fn(),
-          isRunning: () => running,
-          marker: "v1:1:capture-shutdown",
-        };
-        options.onSpawned?.(browser);
-        return { ...browser, context: { storageState } as never, identity: null };
-      },
-      teardownLoginBrowser: async (options) => {
-        await options.closeBrowser();
-        return "closed";
-      },
-    }).catch((error: unknown) => error);
-    await vi.waitFor(() => expect(storageState).toHaveBeenCalledOnce());
-
-    await cancelActiveLoginBrowsers();
-
-    await expect(capturing).resolves.toEqual(
-      expect.objectContaining({ message: "capture context closed" }),
-    );
-    expect(teardown).toHaveBeenCalledOnce();
-  });
-
-  it("bounds shutdown cancellation while a capture launch is still pending", async () => {
-    let rejectLaunch!: (error: Error) => void;
-    let running = true;
-    const teardown = vi.fn(async () => {
-      running = false;
-      rejectLaunch(new Error("capture launch closed"));
-    });
-    const launch = vi.fn(async (options: Parameters<typeof launchSelfManagedLoginContext>[0]) => {
-      const browser = {
-        teardown,
-        forceTeardown: vi.fn(),
-        isRunning: () => running,
-        marker: "v1:1:capture-pending",
-      };
-      options.onSpawned?.(browser);
-      await new Promise<never>((_resolve, reject) => {
-        rejectLaunch = reject;
-      });
-      throw new Error("unreachable");
-    });
-    const capturing = captureProfileStorageState("/isolated-profile", {
-      resolveChannelBinary: () => "/unused/chrome",
-      launchSelfManagedLoginContext: launch,
-      teardownLoginBrowser: async (options) => {
-        await options.closeBrowser();
-        return "closed";
-      },
-    }).catch((error: unknown) => error);
-    await vi.waitFor(() => expect(launch).toHaveBeenCalledOnce());
-
-    await cancelActiveLoginBrowsers();
-    await expect(capturing).resolves.toEqual(
-      expect.objectContaining({ message: "login browser cancelled during shutdown" }),
-    );
-    expect(teardown).toHaveBeenCalledOnce();
-  });
-
-  it("returns canonical Google account email with the captured state", async () => {
-    const profileDir = mkdtempSync(join(tmpdir(), "ts-google-identity-metadata-"));
-    const page = {
-      goto: vi.fn(async () => undefined),
-      url: () => "https://myaccount.google.com/",
-      locator: () => ({
-        evaluateAll: async () => ["Google Account: Worker (worker@example.com)"],
-      }),
-      close: vi.fn(async () => undefined),
-    };
-    const context = {
-      newPage: async () => page,
-      storageState: async () => ({ cookies: [], origins: [] }),
-      close: vi.fn(async () => undefined),
-    };
+  it("publishes the authenticated canonical cookie jar and rejects a cookie-less one", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-canonical-cookie-capture-"));
+    const cookieDir = join(profileDir, "Default");
+    mkdirSync(cookieDir, { recursive: true });
+    const db = new Database(join(cookieDir, "Cookies"));
+    db.exec(`CREATE TABLE cookies (
+      host_key TEXT NOT NULL,
+      name TEXT NOT NULL,
+      value TEXT NOT NULL,
+      path TEXT NOT NULL,
+      expires_utc INTEGER NOT NULL,
+      is_secure INTEGER NOT NULL,
+      is_httponly INTEGER NOT NULL,
+      samesite INTEGER NOT NULL
+    )`);
+    db.prepare(
+      `INSERT INTO cookies
+        (host_key, name, value, path, expires_utc, is_secure, is_httponly, samesite)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(".google.com", "SID", "authenticated-google-session-cookie", "/", 0, 1, 1, 2);
+    db.close();
     try {
-      let running = true;
-      const captured = await captureProfileStorageState(profileDir, {
-        resolveChannelBinary: () => "/unused/chrome",
-        launchSelfManagedLoginContext: async (options) => {
-          const browser = {
-            teardown: async () => {
-              running = false;
-            },
-            forceTeardown: vi.fn(),
-            isRunning: () => running,
-            marker: "v1:1:capture-metadata",
-          };
-          options.onSpawned?.(browser);
-          return { ...browser, context: context as never, identity: null };
-        },
-        teardownLoginBrowser: async (options) => {
-          await options.closeBrowser();
-          return "closed";
-        },
+      const authenticated = await captureProfileStorageState(profileDir);
+      expect(authenticated.storageState).toMatchObject({
+        cookies: [
+          expect.objectContaining({
+            name: "SID",
+            value: "authenticated-google-session-cookie",
+            domain: ".google.com",
+          }),
+        ],
+      });
+      await finalizeLoginRun(
+        { profileDir, seedProvider: "google", confirmedProviders: ["google"] },
+        { status: "completed", closeState: "closed", ...authenticated },
+      );
+      await expect(readSessionState(profileDir)).resolves.toMatchObject({
+        cookies: [expect.objectContaining({ name: "SID", domain: ".google.com" })],
       });
 
-      expect(captured).toEqual({
-        storageState: { cookies: [], origins: [] },
-        googleAccountEmail: "worker@example.com",
+      const cookieLessDir = mkdtempSync(join(tmpdir(), "ts-cookie-less-profile-"));
+      try {
+        const cookieLess = await captureProfileStorageState(cookieLessDir);
+        await expect(
+          finalizeLoginRun(
+            { profileDir, seedProvider: "google", confirmedProviders: ["google"] },
+            { status: "completed", closeState: "closed", ...cookieLess },
+          ),
+        ).rejects.toThrow("without a live identity marker");
+      } finally {
+        rmSync(cookieLessDir, { recursive: true, force: true });
+      }
+      await expect(readSessionState(profileDir)).resolves.toMatchObject({
+        cookies: [expect.objectContaining({ name: "SID", domain: ".google.com" })],
       });
-      await expect(readCanonicalIdentityMetadata(profileDir)).resolves.toBeUndefined();
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }
   });
 
-  it("does not return captured identity after an unproven close", async () => {
-    const state = { cookies: [], origins: [] };
-    const teardown = vi.fn(async () => undefined);
-
-    await expect(
-      captureProfileStorageState("/isolated-profile", {
-        resolveChannelBinary: () => "/unused/chrome",
-        launchSelfManagedLoginContext: async (options) => {
-          const browser = {
-            teardown,
-            forceTeardown: vi.fn(),
-            isRunning: () => true,
-            marker: "v1:1:capture-unproven",
-          };
-          options.onSpawned?.(browser);
-          return {
-            ...browser,
-            context: { storageState: async () => state } as never,
-            identity: null,
-          };
-        },
-        teardownLoginBrowser: async (options) => {
-          await options.closeBrowser();
-          return "unknown";
-        },
-      }),
-    ).rejects.toThrow("login identity capture closed without proof (unknown)");
-    expect(teardown).toHaveBeenCalledOnce();
-  });
-
-  it("publishes plain-login identity after closing Chrome and capturing through a context", async () => {
+  it("publishes the plain-login identity after Chrome closes", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-plain-login-capture-"));
     const state = {
       cookies: [
