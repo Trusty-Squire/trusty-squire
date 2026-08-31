@@ -1014,7 +1014,10 @@ async function withCanonicalProfileOperation<T>(
       }
     }
     const retryMs = deadline === undefined ? 100 : Math.min(100, oauthActionRemainingMs(deadline));
-    if (retryMs <= 0 && deadline !== undefined) throw oauthActionDeadlineError(deadline);
+    if (retryMs <= 0 && deadline !== undefined) {
+      expireOAuthAction(deadline);
+      throw oauthActionDeadlineError(deadline);
+    }
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, retryMs);
       timer.unref();

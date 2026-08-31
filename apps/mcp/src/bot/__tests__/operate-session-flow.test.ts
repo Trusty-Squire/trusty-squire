@@ -96,6 +96,7 @@ const h = vi.hoisted(() => ({
   storageStateWriteGate: null as Promise<void> | null,
   storageStateWriteAttempts: 0,
   profileDestroyGate: null as Promise<void> | null,
+  profileOperationProbeGate: null as Promise<void> | null,
   ephemeralSerial: 0,
   createdProfiles: [] as string[],
   destroyedProfiles: [] as string[],
@@ -988,6 +989,19 @@ vi.mock("../google-login.js", async (importOriginal) => {
   };
 });
 
+vi.mock("../profile.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../profile.js")>();
+  return {
+    ...actual,
+    acquireFreeProfileOperationGuard: async (
+      ...args: Parameters<typeof actual.acquireFreeProfileOperationGuard>
+    ) => {
+      if (h.profileOperationProbeGate !== null) await h.profileOperationProbeGate;
+      return await actual.acquireFreeProfileOperationGuard(...args);
+    },
+  };
+});
+
 import {
   chmodSync,
   existsSync,
@@ -1211,6 +1225,7 @@ beforeEach(() => {
   h.storageStateWriteGate = null;
   h.storageStateWriteAttempts = 0;
   h.profileDestroyGate = null;
+  h.profileOperationProbeGate = null;
   h.ephemeralSerial = 0;
   h.createdProfiles = [];
   h.destroyedProfiles = [];
@@ -4583,7 +4598,7 @@ describe("operate session — OAuth lifecycle", () => {
   });
 
   it("terminalizes a session that times out waiting for the canonical profile guard", async () => {
-    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "100";
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "10";
     process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
     const canonical = "/tmp/trusty-squire-unit-canonical-google-busy-timeout";
     h.storageStates.set(canonical, {
@@ -4612,14 +4627,20 @@ describe("operate session — OAuth lifecycle", () => {
       profileDir: canonical,
     });
     const externalOperation = acquireProfileOperationGuard(canonical);
+    let releaseProfileProbe!: () => void;
+    h.profileOperationProbeGate = new Promise<void>((resolve) => {
+      releaseProfileProbe = resolve;
+    });
     try {
-      await expect(
-        act(started.session_id, {
-          kind: "oauth_login",
-          target: "Continue with Google",
-          provider: "google",
-        }),
-      ).rejects.toThrow(/google_session.*re-login/i);
+      const acting = act(started.session_id, {
+        kind: "oauth_login",
+        target: "Continue with Google",
+        provider: "google",
+      });
+      const terminalFailure = expect(acting).rejects.toThrow(/google_session.*re-login/i);
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      releaseProfileProbe();
+      await terminalFailure;
 
       await vi.waitFor(() => expect(activeSessionCount()).toBe(0));
       await vi.waitFor(() => expect(h.destroyedProfiles).toEqual([h.profileDirs[0]]));
@@ -4631,6 +4652,7 @@ describe("operate session — OAuth lifecycle", () => {
         /unknown provision session/i,
       );
     } finally {
+      releaseProfileProbe();
       externalOperation.release();
     }
   });
