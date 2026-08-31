@@ -1664,17 +1664,17 @@ async function runSerializedGoogleIdentityOperation<T>(
         message: error instanceof Error ? error.message : String(error),
       });
     }
-    // A provider action that never reached its own completion signal did not
-    // establish publishable identity. loginWithOAuth has already restored the
-    // retained product page and closed its recovery/provider tabs, so return
-    // the action error now instead of adding an identity probe, publication,
-    // browser replacement, and another navigation beyond the action budget.
-    if (!operationCompleted) throw operationError;
     let originalCloseState: "closed" | "force_closed_unproven" | "unknown" = "unknown";
     let replacement: BrowserController | null = null;
     let replacementPending: StartingBrowser | null = null;
     let readyReplacement: BrowserController | null = null;
     try {
+      // A provider action that never reached its own completion signal did not
+      // establish publishable identity. loginWithOAuth has already restored the
+      // retained product page and closed its recovery/provider tabs, so return
+      // the action error now instead of adding an identity probe, publication,
+      // browser replacement, and another navigation beyond the action budget.
+      if (!operationCompleted) throw operationError;
       traceHandoff("identity_probe_start");
       const googleAccountEmail =
         options.deadline === undefined

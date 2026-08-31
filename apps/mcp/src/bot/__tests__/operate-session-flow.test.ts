@@ -66,6 +66,7 @@ const h = vi.hoisted(() => ({
   closeCalls: 0,
   forceCloseCalls: 0,
   closeState: "closed" as "closed" | "force_closed_unproven" | "unknown",
+  closeGates: new Map<number, Promise<void>>(),
   profileProbeCalls: 0,
   controllerProviderProbeCalls: 0,
   workerEmail: null as string | null,
@@ -878,6 +879,8 @@ vi.mock("../browser.js", () => ({
       cancelStart?: boolean;
     }): Promise<"closed" | "force_closed_unproven" | "unknown"> {
       h.closeCalls += 1;
+      const closeGate = h.closeGates.get(this.index);
+      if (closeGate !== undefined) await closeGate;
       if (options?.cancelStart === true) {
         const gate = h.startGates.get(this.index);
         if (gate !== undefined) await gate;
@@ -889,6 +892,8 @@ vi.mock("../browser.js", () => ({
     }
     async forceCloseOwnedProcessTree(): Promise<"closed" | "force_closed_unproven" | "unknown"> {
       h.forceCloseCalls += 1;
+      const closeGate = h.closeGates.get(this.index);
+      if (closeGate !== undefined) await closeGate;
       if (h.connections[this.index] === true) h.started -= 1;
       h.connections[this.index] = false;
       return h.closeState;
@@ -1161,6 +1166,7 @@ beforeEach(() => {
   h.closeCalls = 0;
   h.forceCloseCalls = 0;
   h.closeState = "closed";
+  h.closeGates = new Map();
   h.profileProbeCalls = 0;
   h.controllerProviderProbeCalls = 0;
   h.workerEmail = null;
@@ -3493,7 +3499,7 @@ describe("operate session — OAuth lifecycle", () => {
     await finishProvisionSession(started.session_id);
   });
 
-  it("returns a failed OAuth operation without post-failure identity work", async () => {
+  it("quarantines a failed OAuth browser before a successor can use the identity", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-oauth-failure-budget";
     const google = {
       cookies: [
@@ -3536,26 +3542,66 @@ describe("operate session — OAuth lifecycle", () => {
         selector: "#google-oauth",
       }),
     ];
+    let releaseCleanup!: () => void;
+    h.closeGates.set(
+      2,
+      new Promise<void>((resolve) => {
+        releaseCleanup = resolve;
+      }),
+    );
+    let releaseSuccessor!: () => void;
+    h.oauthLoginGates.set(
+      3,
+      new Promise<void>((resolve) => {
+        releaseSuccessor = resolve;
+      }),
+    );
     const started = await startProvisionSession({
       serviceUrl: "https://app.example.com/login",
       profileDir: canonical,
     });
+    const successor = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
 
-    await expect(
-      act(started.session_id, {
-        kind: "oauth_login",
-        target: "Continue with Google",
-        provider: "google",
-      }),
-    ).rejects.toThrow("provider did not settle");
+    const failingAction = act(started.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+      provider: "google",
+    });
+    const failure = failingAction.catch((error: unknown) => error);
+    await vi.waitFor(() => expect(h.closeCalls).toBe(2));
+    h.oauthLoginError = null;
+    const successorAction = act(successor.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+      provider: "google",
+    });
 
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    expect(h.oauthLoginCalls).toEqual(["#google-oauth"]);
+    expect(h.connections[2]).toBe(true);
+
+    releaseCleanup();
+    const providerError = await failure;
+    expect(providerError).toBeInstanceOf(Error);
+    expect((providerError as Error).message).toBe("provider did not settle");
+    await vi.waitFor(() => expect(h.oauthLoginCalls).toEqual(["#google-oauth", "#google-oauth"]));
+
+    expect(h.connections[2]).toBe(false);
     expect(h.identityProbeCalls).toBe(0);
     expect(h.identityMetadata.get(canonical)).toEqual({
       googleAccountEmail: "confirmed@example.com",
     });
     expect(h.storageStateWrites).toEqual([]);
-    expect(h.profileDirs).toHaveLength(2);
-    await finishProvisionSession(started.session_id);
+    await expect(finishProvisionSession(started.session_id)).rejects.toThrow(
+      /unknown provision session/i,
+    );
+
+    releaseSuccessor();
+    await successorAction;
+    await finishProvisionSession(successor.session_id);
   });
 
   it("surfaces an OAuth completion timeout with re-login guidance", async () => {
