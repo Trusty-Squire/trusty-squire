@@ -42,10 +42,11 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `GET` | `/v1/pay/config` | agent | Return the configured Vouchflow mandate audience |
 | `POST` | `/v1/pay/approvals` | agent | Create an account-scoped approval: card-less expires in 18 minutes; has-card in 10 minutes |
 | `POST` | `/v1/pay/approvals/:id/notify-3ds` | agent | Send linked Telegram guidance and return `{ sent }`; optional body `mode` is `detected_challenge` (default) or `possible_out_of_band` |
-| `GET` | `/v1/pay/approvals/:id` | web/agent | Read an account-owned approval; agents may read, wait for, or peek at its relay candidate |
+| `GET` | `/v1/pay/approvals/:id` | web/agent | Read an account-owned approval; agents may read, peek at, or wait up to 15 seconds for its relay candidate with an optional `wait_ms` bound |
 | `GET` | `/v1/pay/approvals/:id/ceremony` | none | Return the canonical purchase display plus opaque PRF/HPKE inputs for a pending approval |
 | `POST` | `/v1/pay/approvals/:id/bind-card` | web | Bind an account-owned card to a card-less pending approval |
 | `POST` | `/v1/pay/approvals/:id/approve` | none | Stage a fingerprinted opaque final candidate; reject retired review-protocol clients |
+| `POST` | `/v1/pay/approvals/:id/deny` | none | Atomically deny an unexpired pending approval and clear every staged candidate |
 | `POST` | `/v1/pay/approvals/:id/confirm` | agent | Confirm the exact operator-verified candidate for the authenticated account |
 | `GET` | `/health` | none | Liveness |
 
@@ -98,7 +99,11 @@ payment-context passkey action signs them, derives the card key, and seals the c
 to the operator.
 
 `POST /approve` accepts a final, server-bound JWS and operator-sealed ciphertext
-only while the approval is pending. It stores the candidate, its SHA-256
+only while the approval is pending. `POST /deny` uses the same short-lived
+capability ID to atomically move an unexpired pending approval to `denied` and
+clear every staged JWS and ciphertext. Confirmation rechecks that terminal state,
+so it cannot release a card after denial has committed. `/approve` stores the
+candidate, its SHA-256
 fingerprint, phase, and an at-most-15-second expiry in the account-owned Postgres
 row so an authenticated agent polling through a different API worker can receive
 it. New review-bound submissions are rejected with
@@ -106,6 +111,9 @@ it. New review-bound submissions are rejected with
 purchase payload directly. Agent reads can consume a candidate immediately, wait
 up to the relay window, or use `peek_submission=1` (alone or with
 `wait_for_submission=1`) to inspect it without advancing the delivery phase.
+`wait_ms` optionally shortens one `wait_for_submission=1` request to 0-15000
+milliseconds; each wait re-reads the approval status and returns promptly on
+approval, denial, or expiry.
 `POST /confirm` must use the same account and exact delivered fingerprint. Its
 body requires `jws` and `sealed_card`; for compatibility with shipped operators,
 an optional string or `null` `card_ref` is accepted but ignored. The card

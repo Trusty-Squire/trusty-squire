@@ -277,6 +277,21 @@ export default function PaymentApprovalPage() {
     }
   }, [ceremony, id]);
 
+  const denyApproval = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await apiPost(`/v1/pay/approvals/${encodeURIComponent(id)}/deny`, {});
+      setCeremony((current) => (current === null ? null : { ...current, status: "denied" }));
+      setApproval((current) => (current === null ? null : { ...current, status: "denied" }));
+      setSubmitted(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to deny payment approval.");
+    } finally {
+      setBusy(false);
+    }
+  }, [id]);
+
   const setUpPasskey = useCallback(async () => {
     setBusy(true);
     setError(null);
@@ -299,9 +314,11 @@ export default function PaymentApprovalPage() {
   const terminalMessage =
     currentStatus === "approved"
       ? "Approved — you can return to your session."
-      : currentStatus === "expired"
-        ? "This payment approval has expired."
-        : "This payment is no longer pending.";
+      : currentStatus === "denied"
+        ? "Payment denied — you can return to your session."
+        : currentStatus === "expired"
+          ? "This payment approval has expired."
+          : "This payment is no longer pending.";
   const isJitOrigin = jitOrigin === true;
   const jitBindingMismatch =
     isJitOrigin &&
@@ -403,36 +420,48 @@ export default function PaymentApprovalPage() {
           <p className="pay-anchor">
             Pay with <span className="mono">{cardLine}</span> · {amountLabel} to {approval.merchant}
           </p>
-          {jitReviewBlocked ? (
-            <div className="app-banner err">
-              {jitBindingMismatch
-                ? "This payment was attached to a different card than the one you added."
-                : (cardMetadataError ?? "We couldn't load the saved card for this payment.")}
-              {!jitBindingMismatch && (
-                <button className="linkbtn" type="button" onClick={() => void refreshCeremony()}>
-                  Retry
-                </button>
-              )}
+          <div style={{ display: "grid", gap: "10px" }}>
+            {jitReviewBlocked ? (
+              <div className="app-banner err">
+                {jitBindingMismatch
+                  ? "This payment was attached to a different card than the one you added."
+                  : (cardMetadataError ?? "We couldn't load the saved card for this payment.")}
+                {!jitBindingMismatch && (
+                  <button className="linkbtn" type="button" onClick={() => void refreshCeremony()}>
+                    Retry
+                  </button>
+                )}
+              </div>
+            ) : needsPasskeySetup ? (
+              <button
+                className="btn-primary"
+                type="button"
+                onClick={() => void setUpPasskey()}
+                disabled={busy}
+              >
+                {busy ? "Setting up…" : "Sign in and set up passkey"}
+              </button>
+            ) : (
+              <button
+                className="btn-primary"
+                type="button"
+                onClick={() => void prepareApproval()}
+                disabled={busy}
+              >
+                {busy ? "Working…" : "Approve payment"}
+              </button>
+            )}
+            <div>
+              <button
+                className="btn-secondary"
+                type="button"
+                onClick={() => void denyApproval()}
+                disabled={busy}
+              >
+                Deny payment
+              </button>
             </div>
-          ) : needsPasskeySetup ? (
-            <button
-              className="btn-primary"
-              type="button"
-              onClick={() => void setUpPasskey()}
-              disabled={busy}
-            >
-              {busy ? "Setting up…" : "Sign in and set up passkey"}
-            </button>
-          ) : (
-            <button
-              className="btn-primary"
-              type="button"
-              onClick={() => void prepareApproval()}
-              disabled={busy}
-            >
-              {busy ? "Approving…" : "Approve payment"}
-            </button>
-          )}
+          </div>
         </section>
       )}
     </AppShell>

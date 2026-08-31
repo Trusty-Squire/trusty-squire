@@ -74,7 +74,9 @@ reason directly from the short-lived server record before one passkey ceremony
 authorizes those canonical payment values. You also see the requesting MCP client
 (for example, Hermes) and the bound card's label plus last four digits (or its label
 alone for a legacy card) before clicking **Approve payment** to relay the
-operator-sealed final authorization. When the pre-submission
+operator-sealed final authorization. Before submitting that authorization, you
+can instead choose **Deny payment**; a denial closes that approval attempt and
+prevents any later operator confirmation. When the pre-submission
 checkout can be machine-read, the payment is refused if its merchant, origin, amount,
 or currency has changed since approval. If that resume read cannot recover a total,
 Trusty Squire reuses the original mandate-bound checkout values. Card entry requires the PAN,
@@ -85,8 +87,10 @@ country controls remain untouched. If the checkout has a selected merchant-saved
 alongside the newly filled card, Trusty Squire selects the sole unambiguous new-card
 radio and verifies both that choice and the filled fields again immediately before
 submission; ambiguous choices, selected saved-card options, and failed verification
-are refused with `payment_card_selection_ambiguous`. A submit is reported as
-`payment_submitted` only
+are refused with `payment_card_selection_ambiguous`. A charge is treated as
+dispatched only after the browser observes a concrete charge/order request, a
+terminal merchant outcome, or genuine 3-D Secure evidence; native form validation
+alone does not claim a dispatch. A submit is reported as `payment_submitted` only
 after the checkout reaches a new merchant order-confirmation URL with a substantive
 order or receipt identity. The browser completes 3-D Secure natively, including
 out-of-band bank-app challenges — Trusty Squire never manipulates or intercepts the
@@ -97,19 +101,29 @@ returned as a structured `warning` with `kind: "payment_instrument_mismatch"` an
 expected-versus-observed evidence. The warning persists through resumable
 `operate_payment_status` calls; it neither changes the payment status nor cancels,
 approves, or modifies the challenge, so the cardholder retains the decision whether
-to continue. A bare click that produces no confirmation and no detected challenge returns
-`payment_outcome_unknown` instead of guessing that the charge succeeded, as does a click-
-completion failure after input dispatch may already have begun. A detected
-challenge that remains unresolved on timeout stays
-`payment_3ds_required` with `needs_user.wall: "3ds"`, handing control back for user
-completion. Neither status is success or permits blind resubmission: manually check
-the merchant's order state before any retry.
+to continue. A dispatched attempt with no confirmed merchant outcome and no genuine
+3-D Secure evidence remains `payment_outcome_unknown`, including across resumable
+status checks; Trusty Squire never relabels that uncertainty as 3-D Secure. A detected
+challenge that remains unresolved on timeout stays `payment_3ds_required` with
+`needs_user.wall: "3ds"`, handing control back for user completion. Neither status is
+success or permits blind resubmission: manually check the merchant's order state
+before any retry.
+
+`operate_pay` surfaces the approval link before its bounded server-side wait. It
+may wait up to one minute for approval, denial, or expiry; if it returns
+`approval_pending` first, call `operate_pay` again with the same arguments. That
+call resumes the same approval and one-passkey boundary instead of creating a new
+link. `operate_payment_status` is a non-charging alternative for inspecting the
+pre-charge approval and is the continuation tool for an already-submitted unknown
+or 3-D Secure outcome. Its `wait_seconds` accepts 0-60 (default 0) to bound-wait
+instead of taking an instant peek. Denial or expiry is terminal for that session's
+attempt: repeated calls return the same result and never mint a replacement
+approval. Close the session and start a fresh one before making a genuinely new
+payment attempt.
 
 Every payment response includes its `session_id`. Pass that same ID to every
-follow-up `operate_pay` and canonical `operate_payment_status` call. Pass
-`wait_seconds` (0-15, default 0) to bound-wait for a change instead of an instant
-peek. Omitting `session_id` remains compatible only while this MCP process has
-exactly one session; it never selects a newest or arbitrary checkout.
+follow-up payment call. Omitting `session_id` remains compatible only while this
+MCP process has exactly one session; it never selects a newest or arbitrary checkout.
 
 Some split checkouts collect the card before the final order-confirmation step. On the
 card-entry page, `operate_pay { phase: "fill_card" }` first reads the live total. A
@@ -149,8 +163,7 @@ or Shopify PCI card fields. Trusty Squire does not sign in to PayPal or use vaul
 PayPal credentials. After any submit that has not yet reached a confirmed order,
 Trusty Squire waits 180 seconds by default for native completion, including
 out-of-band bank-app approval. A linked Telegram chat receives a challenge-specific
-nudge when 3-D Secure is detected, or cautious bank-app guidance when no on-page
-challenge appeared. Standard cross-processor 3-D Secure signals and recognized
+nudge only after 3-D Secure is detected. Standard cross-processor 3-D Secure signals and recognized
 CardinalCommerce or Stripe challenge frames classify the first case only when the
 containing frame is visibly rendered. Hidden 3-D Secure Method pre-authentication and
 captcha-hosted frames never count as 3-D Secure, and an ordinary Shopify PCI card-field
@@ -276,8 +289,10 @@ The default MCP registry exposes 20 tools. The essential operator surface is
 `operate_recipe_run`, and `operate_recipe_save` — every former standalone
 workflow/lifecycle/login tool name was dropped and its behavior folded into
 `operate_act` as a `kind` (or into `operate_finish`'s `outcome`); no delegating
-aliases remain. Poll payment status via
-`operate_payment_status(wait_seconds)`. `operate_screenshot(session_id,
+aliases remain. Continue a pending pre-charge approval by re-calling
+`operate_pay` with the same arguments; use
+`operate_payment_status(wait_seconds)` as a non-charging alternative and for
+post-submit outcome checks. `operate_screenshot(session_id,
 frame_index?, frame_url_contains?, full_page?)` is a read-only debugging capture
 (page or one isolated frame, e.g. a cross-origin 3-D Secure/captcha challenge)
 returned as an actual MCP image. It refuses during an active card fill, when the
@@ -428,9 +443,10 @@ can select the legacy V1 `el_table`/snapshot contract with
   post-submit outcome wait described above before handing back unresolved
   outcomes. Split checkouts use the `fill_card` then `confirm` flow described
   above.
-  `operate_payment_status` follows the [payment guide](#one-prompt) polling
+  `operate_payment_status` follows the [payment guide](#one-prompt) bounded-wait
   contract. It returns the session ID and includes it in every follow-up tool
-  hint, so an approval is always resumed in its originating browser. Malformed calls return the same
+  hint, so an approval or submitted outcome is always observed in its originating
+  browser. Malformed calls return the same
   `error.guidance` repair fields as `operate_act`, including a safe resolution
   when `card_ref` and `card_label` conflict.
 - `list_credentials` and `use_credential` find saved credentials and make authenticated API calls without returning raw values.

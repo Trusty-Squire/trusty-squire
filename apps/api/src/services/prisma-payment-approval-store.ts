@@ -108,6 +108,22 @@ export class PrismaPendingPaymentApprovalStore implements PendingPaymentApproval
         };
   }
 
+  async deny(id: string, now: Date): Promise<"denied" | "not_pending"> {
+    const result = await this.prisma.pendingPaymentApproval.updateMany({
+      where: { id, status: "pending", expires_at: { gt: now } },
+      data: {
+        status: "denied",
+        jws: null,
+        sealed_card: null,
+        review_jws: null,
+        review_sealed_card: null,
+        submission_jws: null,
+        submission_sealed_card: null,
+      },
+    });
+    return result.count > 0 ? "denied" : "not_pending";
+  }
+
   async bindCardForAccount(
     id: string,
     accountId: string,
@@ -208,7 +224,7 @@ export class PrismaPendingPaymentApprovalStore implements PendingPaymentApproval
     accountId: string,
     fingerprint: string,
     now: Date,
-  ): Promise<"confirmed" | "candidate_changed" | "not_pending"> {
+  ): Promise<"confirmed" | "candidate_changed" | "denied" | "not_pending"> {
     const result = await this.prisma.pendingPaymentApproval.updateMany({
       where: {
         id,
@@ -242,6 +258,7 @@ export class PrismaPendingPaymentApprovalStore implements PendingPaymentApproval
       row.review_phase === "confirmed"
     )
       return "confirmed";
+    if (row?.status === "denied") return "denied";
     return row !== null && row.status === "pending" && row.expires_at > now
       ? "candidate_changed"
       : "not_pending";
@@ -376,7 +393,7 @@ export class PrismaPendingPaymentApprovalStore implements PendingPaymentApproval
     accountId: string,
     fingerprint: string,
     now: Date,
-  ): Promise<"confirmed" | "candidate_changed" | "not_pending"> {
+  ): Promise<"confirmed" | "candidate_changed" | "denied" | "not_pending"> {
     const result = await this.prisma.pendingPaymentApproval.updateMany({
       where: {
         id,
@@ -419,6 +436,7 @@ export class PrismaPendingPaymentApprovalStore implements PendingPaymentApproval
     ) {
       return "confirmed";
     }
+    if (row?.status === "denied") return "denied";
     return row !== null && row.status === "pending" && row.expires_at > now
       ? "candidate_changed"
       : "not_pending";

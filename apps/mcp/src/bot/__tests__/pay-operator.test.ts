@@ -52,7 +52,7 @@ type Mode =
   | "review_then_happy"
   | "review_wrong_issuer"
   | "confirm_response_lost"
-  | "confirm_response_lost_changed"
+  | "confirm_denied"
   | "junk_then_happy"
   | "tampered_amount"
   | "tampered_origin"
@@ -69,7 +69,7 @@ async function harness(
   expectedAudience: string | null = "customer_test",
   apiAudience?: string,
   threeDs?: {
-    resolution: "succeeded" | "failed" | "timeout";
+    resolution: "succeeded" | "failed" | "challenge_pending" | "timeout";
     waitSeconds?: number;
     notifyNeverResolves?: boolean;
     notifySent?: boolean;
@@ -134,7 +134,7 @@ async function harness(
     }
     if (
       (url.endsWith("/v1/pay/approvals/approval_test") ||
-        url.endsWith("/v1/pay/approvals/approval_test?wait_for_submission=1")) &&
+        url.includes("/v1/pay/approvals/approval_test?wait_for_submission=1")) &&
       init?.method === "GET"
     ) {
       approvalPolls += 1;
@@ -221,7 +221,7 @@ async function harness(
           mode === "happy" ||
           mode === "review_then_happy" ||
           mode === "confirm_response_lost" ||
-          mode === "confirm_response_lost_changed" ||
+          mode === "confirm_denied" ||
           mode === "junk_then_happy" ||
           mode === "expired_relay" ||
           mode === "stale_expired_relay"
@@ -242,18 +242,12 @@ async function harness(
       if (mode === "review_then_happy" && confirmationBodies.length === 1) {
         return Response.json({ status: "verified" });
       }
-      if (
-        (mode === "confirm_response_lost" || mode === "confirm_response_lost_changed") &&
-        confirmationBodies.length === 1
-      ) {
-        confirmedCandidate =
-          mode === "confirm_response_lost_changed"
-            ? { ...body, sealed_card: "different-candidate" }
-            : body;
+      if (mode === "confirm_response_lost" && confirmationBodies.length === 1) {
+        confirmedCandidate = body;
         throw new TypeError("confirm response lost");
       }
-      if (mode === "confirm_response_lost_changed") {
-        return Response.json({ error: "payment_approval_candidate_changed" }, { status: 409 });
+      if (mode === "confirm_denied") {
+        return Response.json({ error: "payment_approval_denied" }, { status: 409 });
       }
       confirmedCandidate = body;
       return Response.json({ status: "approved" });
@@ -475,7 +469,7 @@ describe("operate_pay", () => {
       }
       if (
         (url.endsWith("/v1/pay/approvals/approval_fallback") ||
-          url.endsWith("/v1/pay/approvals/approval_fallback?wait_for_submission=1")) &&
+          url.includes("/v1/pay/approvals/approval_fallback?wait_for_submission=1")) &&
         init?.method === "GET"
       ) {
         const operatorPublicKey = String(approvalBodies[0]!.operator_pubkey);
@@ -707,30 +701,30 @@ describe("operate_pay", () => {
     expect(confirmationBodies).toHaveLength(0);
   });
 
-  it("reconciles a lost confirm response before submitting payment", async () => {
-    const { result, filledCards, confirmationBodies } = await harness("confirm_response_lost");
+  it("does not retry an ambiguous final confirmation", async () => {
+    const { result, filledCards, auditBodies, pendingStates, confirmationBodies } =
+      await harness("confirm_response_lost");
 
-    expect(result).toMatchObject({ status: "payment_submitted" });
-    expect(filledCards).toEqual([SYNTHETIC_CARD]);
-    expect(confirmationBodies).toHaveLength(2);
-    expect(confirmationBodies[1]).toEqual(confirmationBodies[0]);
-  });
-
-  it("fails closed instead of resurrecting the candidate when reconciliation can't confirm it", async () => {
-    const { result, filledCards, auditBodies, pendingStates } = await harness(
-      "confirm_response_lost_changed",
-    );
-
-    // The confirm may have actually succeeded server-side (its response was
-    // merely lost); reconciliation coming back "candidate_changed" means we
-    // can't prove that either way. This must be a clean terminal failure —
-    // never a resurrected still-awaiting approval that a later call could
-    // re-confirm and re-charge.
     expect(result).toMatchObject({
       status: "payment_confirmation_failed",
       reason: "confirm_failed",
       candidate_kind: "approval",
     });
+    expect(confirmationBodies).toHaveLength(1);
+    expect(pendingStates).toHaveLength(0);
+    expect(filledCards).toHaveLength(0);
+    expect(auditBodies).toHaveLength(0);
+  });
+
+  it("returns terminal denial when denial wins final candidate confirmation", async () => {
+    const { result, filledCards, auditBodies, pendingStates, confirmationBodies } =
+      await harness("confirm_denied");
+
+    expect(result).toMatchObject({
+      status: "payment_approval_denied",
+      approval_id: "approval_test",
+    });
+    expect(confirmationBodies).toHaveLength(1);
     expect(pendingStates).toHaveLength(0);
     expect(filledCards).toHaveLength(0);
     expect(auditBodies).toHaveLength(0);
@@ -1010,7 +1004,7 @@ describe("operate_pay", () => {
     expect(pendingThreeDsStates).toMatchObject([{ payment_instrument_mismatch: mismatch }]);
   });
 
-  it("waits and hands back an app-push message without an on-page challenge", async () => {
+  it("keeps an outcome unknown without inventing an app-push challenge", async () => {
     const { result, notifyCalls, notifyBodies, browser } = await harness(
       "happy",
       "customer_test",
@@ -1026,14 +1020,11 @@ describe("operate_pay", () => {
 
     expect(result).toMatchObject({
       status: "payment_outcome_unknown",
-      needs_user: {
-        wall: "3ds",
-        resume: "checkout",
-        message: expect.stringMatching(/No order confirmation.*bank app/),
-      },
+      next: { tool: "operate_payment_status", wait_seconds: 15 },
     });
-    expect(notifyCalls).toHaveLength(1);
-    expect(notifyBodies).toEqual([{ mode: "possible_out_of_band" }]);
+    expect(result).not.toHaveProperty("needs_user");
+    expect(notifyCalls).toHaveLength(0);
+    expect(notifyBodies).toEqual([]);
     expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
   });
 
@@ -1104,8 +1095,38 @@ describe("operate_pay", () => {
     expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_outcome_unknown" })]);
     expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(0);
     expect(pendingThreeDsStates).toHaveLength(1);
-    expect(pendingThreeDsStates[0]).toMatchObject({ payment_instrument_mismatch: mismatch });
+    expect(pendingThreeDsStates[0]).toMatchObject({
+      outcome: "unknown",
+      payment_instrument_mismatch: mismatch,
+    });
   });
+
+  it.each([
+    ["succeeded", "payment_submitted"],
+    ["failed", "payment_declined"],
+  ] as const)(
+    "maps an immediate %s outcome after a dispatched submit error",
+    async (resolution, expectedStatus) => {
+      const outcome = await harness(
+        "happy",
+        "customer_test",
+        undefined,
+        { resolution },
+        {
+          fillAndSubmitCheckout: async (_card, options) => {
+            options?.onSubmitDispatched?.();
+            throw new PaymentSubmitOutcomeUnknownError();
+          },
+        },
+      );
+
+      expect(outcome.result).toMatchObject({ status: expectedStatus });
+      expect(outcome.result).not.toHaveProperty("reason");
+      expect(outcome.result).not.toHaveProperty("next");
+      expect(outcome.auditBodies).toEqual([expect.objectContaining({ status: expectedStatus })]);
+      expect(outcome.activePendingThreeDs).toBeNull();
+    },
+  );
 
   it("does not retain pending 3DS when checkout fails before charge dispatch", async () => {
     const { result, auditBodies, browser, pendingThreeDsStates } = await harness(
@@ -1261,7 +1282,7 @@ async function runJit(cfg: {
   let clock = 0;
   let summaryReads = 0;
   const serverExpiresAt = new Date(
-    (cfg.cardRefArg === undefined ? cfg.jitApprovalTimeoutMs : cfg.approvalTimeoutMs) ?? 8.64e15,
+    (cfg.cardRefArg === undefined ? cfg.jitApprovalTimeoutMs : cfg.approvalTimeoutMs) ?? 86_400_000,
   ).toISOString();
 
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -1278,7 +1299,7 @@ async function runJit(cfg: {
     }
     if (
       (url.endsWith("/v1/pay/approvals/appr_jit") ||
-        url.endsWith("/v1/pay/approvals/appr_jit?wait_for_submission=1")) &&
+        url.includes("/v1/pay/approvals/appr_jit?wait_for_submission=1")) &&
       init?.method === "GET"
     ) {
       const state = cfg.poll(clock);
@@ -1635,7 +1656,7 @@ async function runSplitFill(
     }
     if (
       (url.endsWith("/v1/pay/approvals/appr_split") ||
-        url.endsWith("/v1/pay/approvals/appr_split?wait_for_submission=1")) &&
+        url.includes("/v1/pay/approvals/appr_split?wait_for_submission=1")) &&
       init?.method === "GET"
     ) {
       // Sign the mandate over whatever checkout the operator MINTED the
@@ -1939,7 +1960,7 @@ describe("operate_pay split checkout — confirm", () => {
 // Friction-audit finding #1: operate_pay used to block the MCP call for up
 // to five (or eighteen, JIT) minutes polling for a human's phone tap. These
 // exercise the fix: a bounded per-call poll budget that returns
-// approval_pending instead of blocking, and idempotent resume — a later
+// approval_pending at an explicit zero bound, and idempotent resume — a later
 // call reuses the SAME approval/operator keypair rather than minting a
 // duplicate approval.
 
@@ -1952,6 +1973,7 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
   expiresAt: string;
   setReview: () => void;
   setApproved: () => void;
+  setDenied: () => void;
   setPendingApproved: () => void;
   setInvalidFinalJws: () => void;
   setInvalidFinalCard: () => void;
@@ -1961,6 +1983,7 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
     | "none"
     | "review"
     | "approval"
+    | "denied"
     | "approval_pending"
     | "invalid_jws"
     | "invalid_card" = "none";
@@ -1986,22 +2009,23 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
     }
     if (
       (url.endsWith("/v1/pay/approvals/appr_resume") ||
-        url.endsWith("/v1/pay/approvals/appr_resume?wait_for_submission=1") ||
+        url.includes("/v1/pay/approvals/appr_resume?wait_for_submission=1") ||
         url.endsWith("/v1/pay/approvals/appr_resume?read_submission=1")) &&
       init?.method === "GET"
     ) {
       const approval = approvalBodies[0]!;
       const operatorPublicKey = String(approval.operator_pubkey);
       const readsRelayCandidate =
-        url.endsWith("?wait_for_submission=1") || url.endsWith("?read_submission=1");
+        url.includes("?wait_for_submission=1") || url.endsWith("?read_submission=1");
       if (
         !readsRelayCandidate ||
         candidateState === "none" ||
+        candidateState === "denied" ||
         (candidateState === "review" && reviewConfirmed)
       ) {
         return Response.json({
           id: "appr_resume",
-          status: "pending",
+          status: candidateState === "denied" ? "denied" : "pending",
           ...checkout,
           nonce,
           card_ref: "card_resume",
@@ -2116,6 +2140,10 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
       candidateState = "approval";
       reviewConfirmed = false;
     },
+    setDenied: () => {
+      candidateState = "denied";
+      reviewConfirmed = false;
+    },
     setPendingApproved: () => {
       candidateState = "approval_pending";
       reviewConfirmed = false;
@@ -2129,7 +2157,7 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
   };
 }
 
-describe("operate_pay non-blocking approval [P0]", () => {
+describe("operate_pay bounded approval continuation [P0]", () => {
   const baseArgs = {
     card_ref: "card_resume",
     merchant: CHECKOUT.merchant,
@@ -2139,7 +2167,7 @@ describe("operate_pay non-blocking approval [P0]", () => {
     reason: "office restock",
   };
 
-  it("returns approval_pending immediately instead of blocking when nobody has approved yet", async () => {
+  it("returns a clean same-approval continuation when an explicit zero wait ends", async () => {
     const env = buildResumableEnv();
     const sleepCalls: number[] = [];
     const pendingStates: PendingApprovalWait[] = [];
@@ -2164,7 +2192,7 @@ describe("operate_pay non-blocking approval [P0]", () => {
       approved_amount_cents: CHECKOUT.amount_cents,
       currency: CHECKOUT.currency,
       phase: null,
-      next: { tool: "operate_payment_status", wait_seconds: 15 },
+      next: { tool: "operate_pay" },
     });
     expect(result.approval_url).toContain("appr_resume");
     expect(result.expires_at).toBe(env.expiresAt);
@@ -2280,6 +2308,7 @@ describe("operate_pay non-blocking approval [P0]", () => {
     env.setPendingApproved();
     const deadline = Date.parse(env.expiresAt);
     now = deadline - 1;
+    const onApprovalTerminal = vi.fn();
     vi.mocked(env.browser.fillAndSubmitCheckout).mockImplementation(async (_card, options) => {
       now = deadline;
       options?.beforeSubmitDispatch?.();
@@ -2294,10 +2323,15 @@ describe("operate_pay non-blocking approval [P0]", () => {
       surfaceApprovalUrl: vi.fn(),
       resumeFrom: pending,
       pollBudgetMs: 0,
+      onApprovalTerminal,
       now: () => now,
     });
 
     expect(result).toMatchObject({ status: "payment_approval_timeout" });
+    expect(onApprovalTerminal).toHaveBeenCalledWith(
+      expect.objectContaining({ approval_id: "appr_resume" }),
+      "expired",
+    );
     expect(env.browser.fillAndSubmitCheckout).toHaveBeenCalledOnce();
     expect(env.filledCards).toEqual([]);
   });
@@ -2599,5 +2633,62 @@ describe("operate_pay non-blocking approval [P0]", () => {
     expect(sleepCalls.length).toBeGreaterThan(0);
     expect(sleepCalls.every((ms) => ms === 3_000)).toBe(true);
     expect(clock).toBeLessThan(13_000);
+  });
+
+  it("returns a resumable approval when the long-poll transport times out", async () => {
+    const env = buildResumableEnv();
+    const getPaymentApproval = vi
+      .spyOn(env.api, "getPaymentApproval")
+      .mockImplementation(async (_id, candidateRead) => {
+        if (candidateRead === true) {
+          const error = new Error("approval transport timed out");
+          error.name = "TimeoutError";
+          throw error;
+        }
+        throw new Error("unexpected immediate approval read");
+      });
+    const onApprovalPending = vi.fn();
+
+    const result = await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      onApprovalPending,
+      pollBudgetMs: 1_000,
+    });
+
+    expect(result).toMatchObject({ status: "approval_pending", approval_id: "appr_resume" });
+    expect(onApprovalPending).toHaveBeenCalledOnce();
+    expect(getPaymentApproval).toHaveBeenCalledWith(
+      "appr_resume",
+      true,
+      expect.any(Number),
+      expect.any(Number),
+    );
+  });
+
+  it("aborts a stalled payment-approval transport at its request bound", async () => {
+    let observedSignal: AbortSignal | undefined;
+    const api = new ApiClient({
+      apiBaseUrl: "https://api.test",
+      registryBaseUrl: "https://registry.test",
+      agentSessionToken: "synthetic-session",
+      fetch: (async (_input, init) => {
+        observedSignal = init?.signal ?? undefined;
+        return await new Promise<Response>((_resolve, reject) => {
+          observedSignal?.addEventListener("abort", () => reject(observedSignal?.reason), {
+            once: true,
+          });
+        });
+      }) as typeof fetch,
+    });
+
+    await expect(api.getPaymentApproval("appr_stalled", true, 5_000, 25)).rejects.toMatchObject({
+      name: "TimeoutError",
+    });
+    expect(observedSignal).toBeDefined();
+    expect(observedSignal?.aborted).toBe(true);
   });
 });

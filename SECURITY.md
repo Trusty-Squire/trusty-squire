@@ -100,6 +100,12 @@ requesting-agent label while deriving the card-decryption key. The API uses the
 install's authenticated agent identity when present and otherwise signs
 `unknown-agent`; the client cannot supply the label.
 
+Before submitting that approval, the holder of the capability link may instead
+choose **Deny payment**. The API atomically changes only an unexpired `pending`
+record to `denied` and clears every staged JWS and sealed-card candidate. Operator
+confirmation rechecks the terminal state, so no card is released after denial
+has committed.
+
 Just-in-time add-card approvals may be created without a card reference, while
 still binding the operator's ephemeral public key at creation. The API permits
 one card bind only while the approval is pending and unexpired, verifies that
@@ -214,12 +220,24 @@ released card. A discrepancy is returned and retained across resumable status po
 as a structured `payment_instrument_mismatch` warning; it never mutates or cancels
 the challenge, creates a charge path, or introduces another approval. Once the trusted
 click reaches the input-dispatch boundary, a rejected click completion or missing page
-observer is conservatively retained as an unknown submitted payment with resumable 3-D
-Secure state. Only a failure known to precede that boundary is classified as a checkout
-failure and allowed to clear the pending-submit state.
+observer is conservatively retained as an unknown submitted payment with resumable
+post-submit state. That state remains `payment_outcome_unknown` until concrete
+merchant-terminal or genuine 3-D Secure evidence appears; status checks cannot
+promote uncertainty into a 3-D Secure handoff. Only a failure known to precede the
+input-dispatch boundary is classified as a checkout failure and allowed to clear the
+pending-submit state.
 
 Payment state, the approval keypair, and the verified mandate remain attached to the
-addressed operate session. `operate_pay` and `operate_payment_status`
+addressed operate session. `operate_pay` surfaces the approval link before a bounded
+server-side wait of up to one minute. If that call returns `approval_pending`, another
+`operate_pay` call with the same arguments resumes the same approval and keypair rather
+than creating another human authorization. `operate_payment_status` is an optional
+non-charging view before charge and the continuation after an unresolved submitted attempt;
+its bounded waits never verify a mandate or open a card. When either path observes
+denial or expiry, it clears the private operator key and keeps that session's attempt
+terminal. Repeated calls return the same terminal result and cannot automatically mint
+a replacement approval; a new charge attempt requires a fresh session and a fresh
+explicit human approval action. `operate_pay` and `operate_payment_status`
 resolve `session_id` once at tool entry and return that ID in
 their results and follow-up hints. Omitting the ID is accepted only when exactly one
 process-local session exists; no path selects a newest or arbitrary session. Ordinary finish

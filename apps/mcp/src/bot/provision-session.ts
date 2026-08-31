@@ -38,6 +38,7 @@ import type {
   PendingApprovalWait,
   PendingCardFill,
   PendingThreeDsWait,
+  TerminalPaymentApprovalStatus,
 } from "./pay-operator.js";
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import {
@@ -639,20 +640,24 @@ export interface Session {
   // pending -> confirming transition prevents duplicate confirmation, while
   // submitStarted forbids restoring retry state after a charge may have begun.
   // "sealed" survives unverified field cleanup and blocks later payments.
-  // [P0] "awaiting_approval" is a NEW rest state (not held during a call —
-  // operate_pay no longer blocks): the human hasn't tapped approve yet. A
-  // later operate_pay call validates the stored approval before reusing it;
-  // stale or terminal resources are replaced. operate_payment_status reads it
-  // without changing it.
+  // "awaiting_approval" is the rest state after one bounded operate_pay wait:
+  // the human has not approved or denied yet. A later operate_pay call resumes
+  // the same approval. Once denial or expiry is observed, terminal_approval
+  // keeps that attempt in custody and its private operator key is scrubbed.
   activePayment:
     | { status: "operating"; lease: ActivePaymentLease }
     | { status: "awaiting_approval"; state: PendingApprovalWait }
+    | {
+        status: "terminal_approval";
+        state: PendingApprovalWait;
+        terminalStatus: TerminalPaymentApprovalStatus;
+      }
     | { status: "pending"; pending: PendingCardFill }
     | { status: "confirming"; pending: PendingCardFill; submitStarted: boolean }
     | { status: "sealed" }
     | null;
   paymentFieldSealActive: boolean;
-  // A completed operate_pay single-page submit whose post-submit 3DS wait
+  // A completed operate_pay single-page submit whose post-submit outcome wait
   // exhausted its budget with no terminal signal. Deliberately NOT part of
   // activePayment: the card is already released and the charge already
   // submitted, so there is no lease to hold and no re-authorization risk —
@@ -4094,12 +4099,51 @@ export function getActivePendingCardFill(selectedSession?: Session): PendingCard
   return state?.status === "pending" ? state.pending : null;
 }
 
-// [P0] Read-only: the outstanding approval a prior operate_pay call left
-// waiting on the human, if any. Backs operate_payment_status, which does not
-// touch session state and just reports on it.
+// The outstanding approval a prior bounded operate_pay call left waiting on
+// the human, if any. A status read may transition this exact state to terminal
+// denial/expiry and scrub its private operator key.
 export function getActivePendingApproval(selectedSession?: Session): PendingApprovalWait | null {
   const state = (selectedSession ?? activeProvisionSession()).activePayment;
   return state?.status === "awaiting_approval" ? state.state : null;
+}
+
+export function getTerminalPaymentApproval(
+  selectedSession?: Session,
+): { state: PendingApprovalWait; terminalStatus: TerminalPaymentApprovalStatus } | null {
+  const activePayment = (selectedSession ?? activeProvisionSession()).activePayment;
+  return activePayment?.status === "terminal_approval"
+    ? { state: activePayment.state, terminalStatus: activePayment.terminalStatus }
+    : null;
+}
+
+export function completeActivePendingApprovalWithTerminalStatus(
+  state: PendingApprovalWait,
+  terminalStatus: "denied" | "expired",
+  selectedSession?: Session,
+): boolean {
+  const session = selectedSession ?? activeProvisionSession();
+  const activePayment = session.activePayment;
+  if (activePayment?.status !== "awaiting_approval" || activePayment.state !== state) return false;
+  state.keypair.privateKey = "";
+  session.activePayment = { status: "terminal_approval", state, terminalStatus };
+  return true;
+}
+
+export function completeActivePaymentLeaseWithTerminalApproval(
+  lease: ActivePaymentLease,
+  state: PendingApprovalWait,
+  terminalStatus: TerminalPaymentApprovalStatus,
+  selectedSession?: Session,
+): void {
+  const session = selectedSession ?? activeProvisionSession();
+  const activePayment = session.activePayment;
+  if (activePayment?.status !== "operating" || activePayment.lease !== lease) {
+    throw new Error(
+      "operate_pay terminal approval completed without ownership of the active payment lease",
+    );
+  }
+  state.keypair.privateKey = "";
+  session.activePayment = { status: "terminal_approval", state, terminalStatus };
 }
 
 export function getActivePendingThreeDs(selectedSession?: Session): PendingThreeDsWait | null {
@@ -4186,6 +4230,11 @@ export interface ActivePaymentLease {
 export type ActivePaymentClaim =
   | { kind: "lease"; lease: ActivePaymentLease; resumeApproval?: PendingApprovalWait }
   | { kind: "confirm"; pending: PendingCardFill }
+  | {
+      kind: "terminal";
+      state: PendingApprovalWait;
+      terminalStatus: TerminalPaymentApprovalStatus;
+    }
   | { kind: "missing_confirm" };
 
 export function claimActivePaymentForOperatePay(
@@ -4208,6 +4257,13 @@ export function claimActivePaymentForOperatePay(
   }
   if (state?.status === "sealed") {
     throw new Error("operate_pay refused: payment field cleanup remains unverified");
+  }
+  if (state?.status === "terminal_approval") {
+    return {
+      kind: "terminal",
+      state: state.state,
+      terminalStatus: state.terminalStatus,
+    };
   }
   if (state?.status === "pending") {
     if (phase !== "confirm") {
@@ -9795,10 +9851,14 @@ function profileRequiresDestroy(session: Session): boolean {
   );
 }
 
-function pendingThreeDsAuditStatus(resolution: ThreeDsResolution): string {
+function pendingThreeDsAuditStatus(
+  resolution: ThreeDsResolution,
+  pending: PendingThreeDsWait,
+): string {
   if (resolution === "succeeded") return "payment_submitted";
   if (resolution === "failed") return "payment_declined";
-  return "payment_3ds_unresolved";
+  if (resolution === "challenge_pending") pending.outcome = "three_ds";
+  return pending.outcome === "three_ds" ? "payment_3ds_unresolved" : "payment_outcome_unknown";
 }
 
 async function auditPendingThreeDsForSessionClose(session: Session): Promise<void> {
@@ -9814,7 +9874,7 @@ async function auditPendingThreeDsForSessionClose(session: Session): Promise<voi
     await session.api!.auditPayment({
       ...pending.checkout,
       last4: pending.last4,
-      status: pendingThreeDsAuditStatus(resolution),
+      status: pendingThreeDsAuditStatus(resolution, pending),
       approval_id: pending.approval_id,
       ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
     });

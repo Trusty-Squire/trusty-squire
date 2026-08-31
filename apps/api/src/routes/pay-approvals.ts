@@ -259,14 +259,34 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     id: string,
     accountId: string,
     peek: boolean,
-  ): Promise<Submission | null> => {
-    const deadline = Date.now() + submissionWaitMs;
-    while (Date.now() < deadline) {
+    waitMs: number,
+  ): Promise<{ record: ApprovalRecord | null; submission: Submission | null }> => {
+    const deadline = Date.now() + waitMs;
+    while (true) {
+      const record = await opts.deps.pendingPaymentApprovalStore.getByIdForAccount(id, accountId);
+      if (record === null) return { record: null, submission: null };
+      const now = opts.deps.now?.() ?? new Date();
+      if (record.status !== "pending" || record.expiresAt <= now) {
+        return { record, submission: null };
+      }
       const submission = await readSubmission(id, accountId, peek);
-      if (submission !== null) return submission;
-      await sleep(relayPollIntervalMs);
+      if (submission !== null) return { record, submission };
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        const finalSubmission = await readSubmission(id, accountId, peek);
+        const finalRecord = await opts.deps.pendingPaymentApprovalStore.getByIdForAccount(
+          id,
+          accountId,
+        );
+        if (finalRecord === null) return { record: null, submission: null };
+        const finalNow = opts.deps.now?.() ?? new Date();
+        if (finalRecord.status !== "pending" || finalRecord.expiresAt <= finalNow) {
+          return { record: finalRecord, submission: null };
+        }
+        return { record: finalRecord, submission: finalSubmission };
+      }
+      await sleep(Math.min(relayPollIntervalMs, remainingMs));
     }
-    return null;
   };
 
   fastify.get("/v1/pay/config", { preHandler: opts.requireAgent }, async (req, reply) => {
@@ -374,9 +394,10 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       wait_for_submission?: string;
       read_submission?: string;
       peek_submission?: string;
+      wait_ms?: string;
     };
   }>("/v1/pay/approvals/:id", { preHandler: opts.requireAny }, async (req, reply) => {
-    const record = await opts.deps.pendingPaymentApprovalStore.getByIdForAccount(
+    let record = await opts.deps.pendingPaymentApprovalStore.getByIdForAccount(
       req.params.id,
       req.auth!.account_id,
     );
@@ -384,18 +405,34 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       reply.code(404).send({ error: "payment_approval_not_found" });
       return;
     }
+    const peekSubmission = req.query.peek_submission === "1";
+    let submission: Submission | null = null;
+    if (req.auth!.kind === "agent" && req.query.wait_for_submission === "1") {
+      const requestedWaitMs = Number(req.query.wait_ms);
+      const waitMs = Number.isFinite(requestedWaitMs)
+        ? Math.min(Math.max(Math.floor(requestedWaitMs), 0), submissionWaitMs)
+        : submissionWaitMs;
+      const waited = await waitForSubmission(record.id, record.accountId, peekSubmission, waitMs);
+      if (waited.record === null) {
+        reply.code(404).send({ error: "payment_approval_not_found" });
+        return;
+      }
+      record = waited.record;
+      submission = waited.submission;
+    } else {
+      const now = opts.deps.now?.() ?? new Date();
+      if (
+        req.auth!.kind === "agent" &&
+        record.status === "pending" &&
+        record.expiresAt > now &&
+        (req.query.read_submission === "1" || peekSubmission)
+      ) {
+        submission = await readSubmission(record.id, record.accountId, peekSubmission);
+      }
+    }
     const now = opts.deps.now?.() ?? new Date();
     const status =
       record.status === "pending" && record.expiresAt <= now ? "expired" : record.status;
-    const canReadSubmission = req.auth!.kind === "agent" && status === "pending";
-    const peekSubmission = req.query.peek_submission === "1";
-    const submission = !canReadSubmission
-      ? null
-      : req.query.wait_for_submission === "1"
-        ? await waitForSubmission(record.id, record.accountId, peekSubmission)
-        : req.query.read_submission === "1" || peekSubmission
-          ? await readSubmission(record.id, record.accountId, peekSubmission)
-          : null;
     if (submission !== null && !peekSubmission)
       event("candidate_delivered", record, submissionFingerprint(submission), "ok");
     return reply.code(200).send({
@@ -603,6 +640,24 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     return reply.code(202).send({ status: "pending" });
   });
 
+  fastify.post<{ Params: { id: string } }>("/v1/pay/approvals/:id/deny", async (req, reply) => {
+    const record = await opts.deps.pendingPaymentApprovalStore.getById(req.params.id);
+    if (record === null) {
+      reply.code(404).send({ error: "payment_approval_not_found" });
+      return;
+    }
+    const now = opts.deps.now?.() ?? new Date();
+    const denied = await opts.deps.pendingPaymentApprovalStore.deny(record.id, now);
+    if (denied !== "denied") {
+      reply.code(409).send({
+        error:
+          record.expiresAt <= now ? "payment_approval_expired" : "payment_approval_not_pending",
+      });
+      return;
+    }
+    return reply.code(200).send({ status: "denied" });
+  });
+
   fastify.post<{ Params: { id: string } }>(
     "/v1/pay/approvals/:id/confirm",
     { preHandler: opts.requireAgent },
@@ -623,6 +678,10 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         return;
       }
       const now = opts.deps.now?.() ?? new Date();
+      if (record.status === "denied") {
+        reply.code(409).send({ error: "payment_approval_denied" });
+        return;
+      }
       if (record.cardRef === null) {
         reply.code(409).send({ error: "card_required" });
         return;
@@ -655,6 +714,12 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
           fingerprint,
           now,
         );
+        if (result === "denied") {
+          candidateLifecycle(record, "review", "confirmation_denied");
+          event("review_confirm_rejected", record, fingerprint, result);
+          reply.code(409).send({ error: "payment_approval_denied" });
+          return;
+        }
         if (result !== "confirmed") {
           candidateLifecycle(record, "review", "confirmation_rejected");
           event("review_confirm_rejected", record, fingerprint, result);
@@ -695,6 +760,11 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         submissionFingerprint(parsed.data),
         opts.deps.now?.() ?? new Date(),
       );
+      if (confirmed === "denied") {
+        candidateLifecycle(record, "approval", "confirmation_denied");
+        reply.code(409).send({ error: "payment_approval_denied" });
+        return;
+      }
       if (confirmed !== "confirmed") {
         candidateLifecycle(record, "approval", "confirmation_rejected");
         reply.code(409).send({ error: "payment_approval_candidate_changed" });

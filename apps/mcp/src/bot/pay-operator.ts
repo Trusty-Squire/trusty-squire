@@ -7,7 +7,12 @@ import {
 import canonicalize from "canonicalize";
 import { createLocalJWKSet, decodeJwt, jwtVerify, type JSONWebKeySet, type JWTPayload } from "jose";
 import { z } from "zod";
-import { ApiCallError, type ApiClient, type PaymentApproval } from "../api-client.js";
+import {
+  ApiCallError,
+  isPaymentApprovalTransportTimeout,
+  type ApiClient,
+  type PaymentApproval,
+} from "../api-client.js";
 import type {
   CheckoutCard,
   CheckoutSubmitResult,
@@ -46,6 +51,8 @@ export interface OperatePayArgs {
   phase?: "fill_card";
 }
 
+export type TerminalPaymentApprovalStatus = "denied" | "expired" | "payment_confirmation_failed";
+
 export interface PaymentBrowser {
   isPayPalHostedCheckout(): Promise<boolean>;
   readCheckoutSummary(fallbackCurrency?: string): Promise<CheckoutSummary>;
@@ -75,17 +82,13 @@ export interface PendingCardFill {
   mandate_id?: string;
 }
 
-// Post-submit 3-D Secure resumability: the card was already released and the
+// Post-submit outcome resumability: the card was already released and the
 // charge already submitted — this is NEVER a new authorization, just a
 // pointer to an already-in-flight one. A decoupled/out-of-band (app-push)
-// challenge's real-world completion time (the cardholder noticing, unlocking
-// their phone, opening the banking app, approving) routinely exceeds a
-// single bounded waitForThreeDsResolution call. Without this, operate_pay
-// returning still-pending after its own wait budget left NOTHING watching
-// the SAME live browser for the outcome — the mandate/approval flow has
-// operate_payment_status for exactly this shape of gap; the post-submit 3DS
-// wait did not, until now. `deadline` bounds how long Trusty Squire will
-// keep re-checking before handing back an accurate unresolved status.
+// challenge's real-world completion time routinely exceeds one bounded wait,
+// but missing challenge evidence must remain outcome="unknown" rather than
+// being relabeled as 3-D Secure. `deadline` bounds how long
+// operate_payment_status can keep checking the SAME live browser.
 export interface PendingThreeDsWait {
   approval_id: string;
   approval_url: string;
@@ -94,6 +97,7 @@ export interface PendingThreeDsWait {
   payment_instrument_mismatch?: PaymentInstrumentMismatch;
   mandate_id?: string;
   deadline: number;
+  outcome: "three_ds" | "unknown";
 }
 
 export interface CartCheckoutObservation {
@@ -102,12 +106,12 @@ export interface CartCheckoutObservation {
   observedAt: number;
 }
 
-// Non-blocking approval [P0]: everything a LATER operate_pay call needs to
-// validate and potentially resume the SAME approval. Held by the session layer
-// only (never the model) — it carries the operator keypair's PRIVATE half. A
-// live resumed approval must reuse that keypair because its sealed card was
-// HPKE-encrypted to it; a stale approval is discarded with the key before a
-// fresh approval is minted.
+// Resumable approval state: everything a later operate_pay call needs to
+// validate and continue the SAME approval after a bounded wait. Held by the
+// session layer only (never the model) — it carries the operator keypair's
+// PRIVATE half. A live resumed approval must reuse that keypair because its
+// sealed card was HPKE-encrypted to it; denial or expiry scrubs the key and
+// retains terminal custody instead of minting a replacement approval.
 export interface PendingApprovalWait {
   approval_id: string;
   approval_url: string;
@@ -161,21 +165,28 @@ interface PayDependencies {
   // the terms of an approval already presented to the human for signing.
   resumeFrom?: PendingApprovalWait;
   // [P0] How long (ms, from this call's start) THIS invocation will actively
-  // poll for approval before giving up and returning approval_pending,
+  // wait for approval before giving up and returning approval_pending,
   // bounded by the overall approval deadline. Undefined = the legacy
   // behavior of waiting for the full approval/JIT timeout (used by direct
   // executeOperatePay callers, e.g. unit tests). The MCP tool layer passes a
-  // short bound (0) so operate_pay never blocks the RPC waiting on a human.
+  // bounded human-response window so approval detection belongs to the system,
+  // while an exhausted client call can resume this same approval cleanly.
   pollBudgetMs?: number;
   // [P0] Fired when a call ends still-pending (poll budget exhausted, human
   // hasn't responded yet) so the session layer can persist resumable state.
   onApprovalPending: (state: PendingApprovalWait) => void;
+  // Terminal approval outcomes retain session custody so a later call cannot
+  // automatically mint another approval for the same attempt.
+  onApprovalTerminal: (
+    state: PendingApprovalWait,
+    terminalStatus: TerminalPaymentApprovalStatus,
+  ) => void;
   onThreeDsHandoffArmed: (state: PendingThreeDsWait) => void;
   coordinateThreeDsAudit: (state: PendingThreeDsWait, audit: () => Promise<void>) => Promise<void>;
-  // Fired when the submit-time waitForThreeDsResolution wait exhausts its
-  // budget with NO terminal signal (genuinely still pending, not declined,
-  // not confirmed) so the session layer can persist resumable state for
-  // operate_payment_status to keep checking the SAME live browser.
+  // Fired when the submit-time outcome wait exhausts its budget with no
+  // terminal signal so the session layer can persist either genuine 3-D
+  // Secure or still-unknown state for operate_payment_status to recheck in
+  // the SAME live browser.
   onThreeDsPending: (state: PendingThreeDsWait) => void;
   onThreeDsCleared: (state: PendingThreeDsWait) => void;
 }
@@ -501,6 +512,41 @@ function cardRequiredResult(
   };
 }
 
+function approvalDeniedResult(
+  approvalId: string,
+  approvalUrl: string,
+  checkout: CheckoutSummary,
+): Record<string, unknown> {
+  return {
+    status: "payment_approval_denied",
+    approval_id: approvalId,
+    approval_url: approvalUrl,
+    merchant: checkout.merchant,
+    amount_cents: checkout.amount_cents,
+    currency: checkout.currency,
+  };
+}
+
+function approvalExpiredResult(
+  approvalUrl: string,
+  checkout: CheckoutSummary,
+  jit: boolean,
+  boundCardRef: string | null,
+): Record<string, unknown> {
+  const base: Record<string, unknown> = {
+    status: "payment_approval_timeout",
+    approval_url: approvalUrl,
+    merchant: checkout.merchant,
+    amount_cents: checkout.amount_cents,
+    currency: checkout.currency,
+  };
+  return jit && hasBoundCard(boundCardRef) ? { ...base, card_persisted: true } : base;
+}
+
+function isPaymentApprovalDeniedError(error: unknown): boolean {
+  return error instanceof ApiCallError && error.code === "payment_approval_denied";
+}
+
 // Total additional time (beyond this call's own bounded wait) that a
 // resumed, still-pending decoupled/out-of-band 3DS challenge stays
 // checkable via operate_payment_status before handing back an accurate
@@ -508,6 +554,7 @@ function cardRequiredResult(
 // their phone, open the banking app, and approve — but bounded, matching
 // the rest of this file's "wait, but never forever" posture.
 const THREE_DS_RESUME_WINDOW_MS = 20 * 60 * 1000;
+const PAYMENT_APPROVAL_RESPONSE_RESERVE_MS = 500;
 
 // The cardholder approves 3-D Secure via an app-push in their bank app while
 // the browser's checkout JavaScript owns the native challenge handshake. Fires
@@ -595,6 +642,8 @@ function statusAfterThreeDsResolution(
       return "payment_submitted";
     case "failed":
       return "payment_declined";
+    case "challenge_pending":
+      return "payment_3ds_required";
     case "timeout":
       return currentStatus;
   }
@@ -672,6 +721,7 @@ function defaultDependencies(): PayDependencies {
     onCardFillCleanupFailed: () => undefined,
     onSubmitStarted: () => undefined,
     onApprovalPending: () => undefined,
+    onApprovalTerminal: () => undefined,
     onThreeDsHandoffArmed: () => undefined,
     coordinateThreeDsAudit: async (_state, audit) => await audit(),
     onThreeDsPending: () => undefined,
@@ -748,14 +798,33 @@ export async function executeOperatePay(
 
     if (resume !== undefined) {
       let reusable = false;
-      if (deps.now() < resume.deadline) {
-        try {
-          const live = await api.getPaymentApproval(resume.approval_id);
-          reusable = isLiveResumableApproval(live, resume, deps.now());
-        } catch (error) {
-          if (!(error instanceof ApiCallError && error.code === "payment_approval_not_found")) {
-            throw error;
-          }
+      try {
+        const live = await api.getPaymentApproval(resume.approval_id);
+        const liveDeadline = Date.parse(live.expires_at);
+        const terminalStatus =
+          live.status === "denied"
+            ? "denied"
+            : live.status === "expired" ||
+                (Number.isFinite(liveDeadline) ? liveDeadline : resume.deadline) <= deps.now()
+              ? "expired"
+              : null;
+        if (terminalStatus !== null) {
+          deps.onApprovalTerminal(resume, terminalStatus);
+          resumableState = undefined;
+          keypairHandedOff = false;
+          return terminalStatus === "denied"
+            ? approvalDeniedResult(resume.approval_id, resume.approval_url, resume.checkout)
+            : approvalExpiredResult(
+                resume.approval_url,
+                resume.checkout,
+                resume.jit,
+                resume.boundCardRef,
+              );
+        }
+        reusable = isLiveResumableApproval(live, resume, deps.now());
+      } catch (error) {
+        if (!(error instanceof ApiCallError && error.code === "payment_approval_not_found")) {
+          throw error;
         }
       }
       if (!reusable) {
@@ -870,15 +939,11 @@ export async function executeOperatePay(
     });
     await deps.surfaceApprovalUrl(approvalUrl);
 
-    // [P0] This call's own wait budget, bounded by the server approval expiry.
-    // Undefined pollBudgetMs (direct executeOperatePay callers) = no additional
-    // bound, i.e. the legacy full-deadline blocking behavior.
+    // This call's wait is bounded by both its client budget and server expiry.
     const callDeadline =
       deps.pollBudgetMs === undefined
         ? deadline
         : Math.min(deadline, deps.now() + deps.pollBudgetMs);
-    // True once this call's (not the overall) budget is exhausted with no
-    // resolution — distinguishes "still pending, ask again" from "expired".
     let budgetExhausted = false;
     const shouldKeepPolling = (): boolean => {
       const now = deps.now();
@@ -890,10 +955,8 @@ export async function executeOperatePay(
       return true;
     };
 
-    // In the JIT branch, the approval starts card-less; the card is bound
-    // server-side mid-ceremony. Track the latest binding so a timeout/expiry
-    // can distinguish "no card was ever added" (card_required) from "card was
-    // stored but never approved" (payment_approval_timeout, card persists).
+    // A JIT approval that expires before binding still needs a card; a bound
+    // card remains stored even though the approval itself is terminal.
     const timeoutResult = (): Record<string, unknown> => {
       if (jit && !hasBoundCard(boundCardRef)) {
         return cardRequiredResult(
@@ -902,49 +965,59 @@ export async function executeOperatePay(
           "the add-card link expired before a card was added",
         );
       }
-      const base: Record<string, unknown> = {
-        status: "payment_approval_timeout",
-        approval_url: approvalUrl,
-        merchant: checkout.merchant,
-        amount_cents: checkout.amount_cents,
-        currency: checkout.currency,
-      };
-      // JIT + a bound card = the user added a card but never approved. The card
-      // stays in the vault, so the retry is a fast has-card approval.
-      return jit ? { ...base, card_persisted: true } : base;
+      return approvalExpiredResult(approvalUrl, checkout, jit, boundCardRef);
     };
     const approvalExpired = (): boolean => deps.now() >= deadline;
-    const expiredApprovalResult = (): Record<string, unknown> => {
+    let terminalApprovalState: PendingApprovalWait | undefined;
+    const terminalApprovalResult = (
+      terminalStatus: "denied" | "expired",
+    ): Record<string, unknown> => {
+      const state = resumableState?.() ?? terminalApprovalState;
+      if (state !== undefined) deps.onApprovalTerminal(state, terminalStatus);
       resumableState = undefined;
       keypairHandedOff = false;
-      return timeoutResult();
+      return terminalStatus === "denied"
+        ? approvalDeniedResult(approvalId, approvalUrl, checkout)
+        : timeoutResult();
     };
+    const expiredApprovalResult = (): Record<string, unknown> => terminalApprovalResult("expired");
 
     let approved: { jws: string; sealed_card: string; card_ref: string | null } | undefined;
     let claims: JWTPayload | undefined;
-    // Always runs at least once — a fresh call must make one live check
-    // before ever reporting pending, and a resumed call with a zero poll
-    // budget must too. Two things gate every re-entry to the top: (1) right
-    // before each sleep, shouldKeepPolling() skips the sleep entirely when
-    // the budget is already exhausted, so a not-yet-resolved call never
-    // blocks on a real wait before returning; (2) the iteration>0 check
-    // here re-validates AFTER that sleep (real time — or a mocked clock —
-    // may have advanced past the deadline during it) so the loop never
-    // spends one more live poll call past the budget it just decided to
-    // respect.
+    // Always make one live read; later iterations recheck the budget after sleep.
     let iteration = 0;
     let immediateReviewFollowup = false;
     while (true) {
       if (iteration > 0 && !immediateReviewFollowup && !shouldKeepPolling()) break;
       immediateReviewFollowup = false;
       iteration++;
-      const approval = await api.getPaymentApproval(
-        approvalId,
-        deps.now() < callDeadline ? true : "immediate",
-      );
+      const remainingPollMs = Math.max(Math.min(callDeadline, deadline) - deps.now(), 0);
+      const candidateRead = remainingPollMs > 0 ? true : "immediate";
+      let approval: PaymentApproval;
+      try {
+        approval =
+          candidateRead === true
+            ? await api.getPaymentApproval(
+                approvalId,
+                true,
+                Math.min(
+                  Math.max(remainingPollMs - PAYMENT_APPROVAL_RESPONSE_RESERVE_MS, 0),
+                  15_000,
+                ),
+                remainingPollMs,
+              )
+            : await api.getPaymentApproval(approvalId, "immediate");
+      } catch (error) {
+        if (!isPaymentApprovalTransportTimeout(error)) throw error;
+        budgetExhausted = true;
+        break;
+      }
       const liveDeadline = Date.parse(approval.expires_at);
       if (Number.isFinite(liveDeadline)) deadline = Math.min(deadline, liveDeadline);
       boundCardRef = approval.card_ref;
+      if (approval.status === "denied") {
+        return terminalApprovalResult("denied");
+      }
       if (approval.status === "expired" || approvalExpired()) {
         return expiredApprovalResult();
       }
@@ -1111,6 +1184,9 @@ export async function executeOperatePay(
                 }
               } catch (error) {
                 candidateCardBytes.fill(0);
+                if (isPaymentApprovalDeniedError(error)) {
+                  return terminalApprovalResult("denied");
+                }
                 const failureReason =
                   error instanceof Error && /404|409/.test(error.message)
                     ? "confirm_status"
@@ -1152,35 +1228,30 @@ export async function executeOperatePay(
                 const confirmation = await api.confirmPaymentApproval(approvalId, candidate);
                 if (confirmation.status !== "approved") throw new Error("confirm_status");
               } catch (error) {
-                try {
-                  const reconciliation = await api.confirmPaymentApproval(approvalId, candidate);
-                  if (reconciliation.status !== "approved") throw error;
-                } catch {
-                  candidateCardBytes.fill(0);
-                  // The initial confirm may have actually gone through server-side (its
-                  // response was merely lost) even though reconciliation couldn't prove
-                  // it. Throwing here would leave resumableState live, and the outer
-                  // catch would resurrect this candidate as still-awaiting — letting a
-                  // later call re-confirm and re-charge a purchase that may already be
-                  // spent. Fail closed with a terminal result instead, mirroring the
-                  // review-candidate branch above.
-                  const failureReason =
-                    error instanceof Error && /404|409/.test(error.message)
-                      ? "confirm_status"
-                      : "confirm_failed";
-                  logPaymentCandidateLifecycle(
-                    approvalId,
-                    "approval",
-                    "confirmation_failed",
-                    failureReason,
-                  );
-                  return {
-                    status: "payment_confirmation_failed",
-                    reason: failureReason,
-                    candidate_kind: "approval",
-                    approval_url: approvalUrl,
-                  };
+                candidateCardBytes.fill(0);
+                if (isPaymentApprovalDeniedError(error)) {
+                  return terminalApprovalResult("denied");
                 }
+                const failureReason =
+                  error instanceof Error && /404|409/.test(error.message)
+                    ? "confirm_status"
+                    : "confirm_failed";
+                const state = resumableState();
+                deps.onApprovalTerminal(state, "payment_confirmation_failed");
+                resumableState = undefined;
+                keypairHandedOff = false;
+                logPaymentCandidateLifecycle(
+                  approvalId,
+                  "approval",
+                  "confirmation_failed",
+                  failureReason,
+                );
+                return {
+                  status: "payment_confirmation_failed",
+                  reason: failureReason,
+                  candidate_kind: "approval",
+                  approval_url: approvalUrl,
+                };
               }
             }
             if (approvalExpired()) {
@@ -1216,11 +1287,11 @@ export async function executeOperatePay(
           candidate_kind: "review",
           ready_to_charge: false,
           next: {
-            tool: "operate_payment_status",
-            wait_seconds: 15,
+            tool: "operate_pay",
             message:
               "The review signature was verified, but final payment approval is still required. " +
-              "Refresh the approval page if it does not advance to the final approval prompt.",
+              "Refresh the approval page if it does not advance to the final approval prompt, " +
+              "then call operate_pay again with the same arguments; it resumes this approval and waits.",
           },
         };
       }
@@ -1239,7 +1310,13 @@ export async function executeOperatePay(
           merchant: checkout.merchant,
           candidate_kind: "none",
           ready_to_charge: false,
-          next: { tool: "operate_payment_status", wait_seconds: 15 },
+          next: {
+            tool: "operate_pay",
+            message:
+              "The bounded server wait ended before the human responded. Call operate_pay again " +
+              "with the same arguments; it resumes this approval and continues waiting without " +
+              "creating another approval.",
+          },
         };
       }
       if (jit) {
@@ -1248,9 +1325,7 @@ export async function executeOperatePay(
           boundCardRef = final.card_ref;
         } catch {}
       }
-      resumableState = undefined;
-      keypairHandedOff = false;
-      return timeoutResult();
+      return expiredApprovalResult();
     }
 
     if (claims === undefined || card === undefined) {
@@ -1258,6 +1333,7 @@ export async function executeOperatePay(
       keypairHandedOff = false;
       return timeoutResult();
     }
+    terminalApprovalState = resumableState?.();
     resumableState = undefined;
     keypairHandedOff = false;
 
@@ -1414,6 +1490,7 @@ export async function executeOperatePay(
       last4,
       ...(mandateId !== undefined ? { mandate_id: mandateId } : {}),
       deadline: deps.now() + THREE_DS_RESUME_WINDOW_MS,
+      outcome: "unknown",
     };
     deps.onThreeDsHandoffArmed(pendingThreeDsHandoff);
     let retainedPendingThreeDs: PendingThreeDsWait | null = null;
@@ -1433,14 +1510,18 @@ export async function executeOperatePay(
       deps.onThreeDsCleared(retainedPendingThreeDs);
       retainedPendingThreeDs = null;
     };
-    const pendingThreeDsNext = {
+    const pendingOutcomeNext = (): Record<string, unknown> => ({
       tool: "operate_payment_status",
       wait_seconds: 15,
       hint:
-        "The 3-D Secure challenge has not resolved. Call operate_payment_status to keep " +
-        "checking the same submitted charge — this does not re-release the card or create a " +
-        "new approval.",
-    };
+        pendingThreeDsHandoff.outcome === "three_ds"
+          ? "The 3-D Secure challenge has not resolved. Call operate_payment_status to keep " +
+            "checking the same submitted charge — this does not re-release the card or create a " +
+            "new approval."
+          : "The submitted payment has no confirmed merchant outcome or 3-D Secure evidence. " +
+            "Call operate_payment_status to keep checking the same attempt; its outcome remains " +
+            "unknown until terminal merchant or authentication evidence appears.",
+    });
     let paymentStatus = "payment_submitted";
     let submitResult: CheckoutSubmitResult = { three_ds_required: false, order_confirmed: false };
     try {
@@ -1463,6 +1544,7 @@ export async function executeOperatePay(
       );
       if (submitResult.three_ds_required) paymentStatus = "payment_3ds_required";
       else if (!submitResult.order_confirmed) paymentStatus = "payment_outcome_unknown";
+      if (submitResult.three_ds_required) pendingThreeDsHandoff.outcome = "three_ds";
     } catch (error) {
       if (error instanceof Error && error.message === "payment_approval_expired") {
         clearPendingThreeDs();
@@ -1470,8 +1552,17 @@ export async function executeOperatePay(
       }
       const outcomeUnknown = error instanceof PaymentSubmitOutcomeUnknownError;
       paymentStatus = outcomeUnknown ? "payment_outcome_unknown" : "payment_checkout_failed";
+      let terminalSubmitOutcome = false;
       if (outcomeUnknown) {
-        await browser.waitForThreeDsResolution(0).catch(() => undefined);
+        const resolution = await browser.waitForThreeDsResolution(0).catch(() => undefined);
+        if (resolution !== undefined) {
+          paymentStatus = statusAfterThreeDsResolution(paymentStatus, resolution);
+          terminalSubmitOutcome = resolution === "succeeded" || resolution === "failed";
+          if (resolution === "challenge_pending") {
+            pendingThreeDsHandoff.outcome = "three_ds";
+            submitResult.three_ds_required = true;
+          }
+        }
         const mismatch = browser.paymentInstrumentMismatch?.();
         if (mismatch !== undefined) submitResult.payment_instrument_mismatch = mismatch;
       }
@@ -1490,21 +1581,48 @@ export async function executeOperatePay(
       } catch {
         audit_recorded = false;
       }
-      if (outcomeUnknown && retainedPendingThreeDs !== null) retainPendingThreeDs();
-      else if (!outcomeUnknown) clearPendingThreeDs();
+      if (outcomeUnknown && !terminalSubmitOutcome && retainedPendingThreeDs !== null) {
+        retainPendingThreeDs();
+      } else {
+        clearPendingThreeDs();
+      }
       return {
         status: paymentStatus,
         audit_recorded,
-        reason: outcomeUnknown
-          ? "payment_submit_outcome_unknown"
-          : error instanceof Error && /^payment_[a-z_]+(?::[a-z_]+)?$/.test(error.message)
-            ? error.message
-            : "payment_checkout_failed",
+        ...(!terminalSubmitOutcome
+          ? {
+              reason: outcomeUnknown
+                ? paymentStatus === "payment_3ds_required"
+                  ? "payment_3ds_required"
+                  : "payment_submit_outcome_unknown"
+                : error instanceof Error && /^payment_[a-z_]+(?::[a-z_]+)?$/.test(error.message)
+                  ? error.message
+                  : "payment_checkout_failed",
+            }
+          : {}),
         approval_url: approvalUrl,
         ...(submitResult.payment_instrument_mismatch !== undefined
           ? { warning: submitResult.payment_instrument_mismatch }
           : {}),
-        ...(outcomeUnknown && retainedPendingThreeDs !== null ? { next: pendingThreeDsNext } : {}),
+        ...(outcomeUnknown && !terminalSubmitOutcome && retainedPendingThreeDs !== null
+          ? { next: pendingOutcomeNext() }
+          : {}),
+        ...(paymentStatus === "payment_3ds_required"
+          ? {
+              needs_user: {
+                wall: "3ds",
+                message: threeDsHandoffMessage(submitResult, undefined),
+                resume: "checkout",
+              },
+            }
+          : {}),
+        ...(paymentStatus === "payment_submitted"
+          ? {
+              merchant: checkout.merchant,
+              amount_cents: checkout.amount_cents,
+              currency: checkout.currency,
+            }
+          : {}),
       };
     } finally {
       cardBytes?.fill(0);
@@ -1518,13 +1636,25 @@ export async function executeOperatePay(
       !submitResult.order_confirmed &&
       threeDsWaitMs > 0
     ) {
-      getThreeDsTelegramSent = trackThreeDsNotification(
-        api.notifyThreeDs(approvalId, threeDsNotificationMode(submitResult)),
-      );
+      const challengeKnownBeforeWait = pendingThreeDsHandoff.outcome === "three_ds";
+      if (challengeKnownBeforeWait) {
+        getThreeDsTelegramSent = trackThreeDsNotification(
+          api.notifyThreeDs(approvalId, threeDsNotificationMode(submitResult)),
+        );
+      }
       const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
       const mismatch = browser.paymentInstrumentMismatch?.();
       if (mismatch !== undefined) submitResult.payment_instrument_mismatch ??= mismatch;
       paymentStatus = statusAfterThreeDsResolution(paymentStatus, resolution);
+      if (resolution === "challenge_pending") {
+        pendingThreeDsHandoff.outcome = "three_ds";
+        submitResult.three_ds_required = true;
+        if (!challengeKnownBeforeWait) {
+          getThreeDsTelegramSent = trackThreeDsNotification(
+            api.notifyThreeDs(approvalId, "detected_challenge"),
+          );
+        }
+      }
     }
 
     let auditRecorded = true;
@@ -1552,13 +1682,19 @@ export async function executeOperatePay(
         ...(submitResult.payment_instrument_mismatch !== undefined
           ? { warning: submitResult.payment_instrument_mismatch }
           : {}),
-        needs_user: {
-          wall: "3ds",
-          message: threeDsHandoffMessage(submitResult, getThreeDsTelegramSent()),
-          resume: "checkout",
-          ...(submitResult.challenge_url !== undefined ? { url: submitResult.challenge_url } : {}),
-        },
-        next: pendingThreeDsNext,
+        ...(paymentStatus === "payment_3ds_required"
+          ? {
+              needs_user: {
+                wall: "3ds",
+                message: threeDsHandoffMessage(submitResult, getThreeDsTelegramSent()),
+                resume: "checkout",
+                ...(submitResult.challenge_url !== undefined
+                  ? { url: submitResult.challenge_url }
+                  : {}),
+              },
+            }
+          : {}),
+        next: pendingOutcomeNext(),
       };
     }
     if (paymentStatus === "payment_declined") {

@@ -185,7 +185,7 @@ const h = vi.hoisted(() => ({
     challenge_url?: string;
   },
   clearSealedPaymentFieldsCalls: 0,
-  waitForThreeDsResult: "timeout" as "succeeded" | "failed" | "timeout",
+  waitForThreeDsResult: "timeout" as "succeeded" | "failed" | "challenge_pending" | "timeout",
   waitForThreeDsCalls: [] as number[],
   paymentInstrumentMismatch: null as null | {
     kind: "payment_instrument_mismatch";
@@ -809,7 +809,9 @@ vi.mock("../browser.js", () => ({
     async clearSealedPaymentFields(): Promise<void> {
       h.clearSealedPaymentFieldsCalls += 1;
     }
-    async waitForThreeDsResolution(timeoutMs: number): Promise<"succeeded" | "failed" | "timeout"> {
+    async waitForThreeDsResolution(
+      timeoutMs: number,
+    ): Promise<"succeeded" | "failed" | "challenge_pending" | "timeout"> {
       h.waitForThreeDsCalls.push(timeoutMs);
       return h.waitForThreeDsResult;
     }
@@ -987,7 +989,9 @@ import {
   claimActivePaymentForOperatePay,
   completeActivePaymentLeaseWithPendingApproval,
   completeActivePaymentLeaseWithPendingFill,
+  completeActivePaymentLeaseWithTerminalApproval,
   getActivePendingApproval,
+  getTerminalPaymentApproval,
   getActivePendingCardFill,
   releaseActivePaymentLease,
   markActivePendingCardFillSubmitStarted,
@@ -6167,6 +6171,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
         last4: "9192",
         mandate_id: "mandate_timeout_3ds",
         deadline: Date.now() + 60_000,
+        outcome: "three_ds",
       });
       h.waitForThreeDsResult = "timeout";
 
@@ -6993,6 +6998,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
         last4: "9192",
         mandate_id: "mandate_outer_deadline",
         deadline: Date.now() + 60_000,
+        outcome: "unknown" as const,
       };
       const payment = withPaymentSessionCall(started.session_id, async (session) => {
         armPaymentDispatchHandoff(state, session);
@@ -7070,6 +7076,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
           last4: "9192",
           mandate_id: "mandate_watchdog_3ds",
           deadline: Date.now() + 60_000,
+          outcome: "three_ds",
         },
         paymentSession(session.session_id),
       );
@@ -7106,6 +7113,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
       last4: "9192",
       mandate_id: "mandate_dispatch_race",
       deadline: Date.now() + 60_000,
+      outcome: "unknown" as const,
     };
     armPaymentDispatchHandoff(state, session);
 
@@ -7129,7 +7137,7 @@ describe("operate session — ephemeral profile lifecycle", () => {
     expect(auditPayment).toHaveBeenCalledWith(
       expect.objectContaining({
         approval_id: "appr_dispatch_race",
-        status: "payment_3ds_unresolved",
+        status: "payment_outcome_unknown",
       }),
     );
     expect(session.paymentDispatchHandoff).toBeNull();
@@ -8643,6 +8651,7 @@ describe("pending card-fill charge guard", () => {
       checkout: pending.checkout,
       last4: pending.last4,
       deadline: Date.now() + 60_000,
+      outcome: "three_ds",
     });
 
     await expect(act(started.session_id, { kind: "click", target: "Place order" })).rejects.toThrow(
@@ -9247,18 +9256,41 @@ describe("awaiting-approval payment lease [P0]", () => {
     expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(/already in progress/);
     expect(releaseActivePaymentLease(resumed.lease, true)).toBe(true);
   });
+
+  it("keeps a denial observed by operate_pay terminal under the owned lease", async () => {
+    await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const terminalState = {
+      ...approvalState,
+      keypair: { ...approvalState.keypair, privateKey: "terminal-private" },
+    };
+    const claim = claimActivePaymentForOperatePay(undefined);
+    if (claim.kind !== "lease") throw new Error("expected a fresh lease");
+
+    completeActivePaymentLeaseWithTerminalApproval(claim.lease, terminalState, "denied");
+
+    expect(terminalState.keypair.privateKey).toBe("");
+    expect(getActivePendingApproval()).toBeNull();
+    expect(getTerminalPaymentApproval()).toEqual({
+      state: terminalState,
+      terminalStatus: "denied",
+    });
+    expect(claimActivePaymentForOperatePay(undefined)).toEqual({
+      kind: "terminal",
+      state: terminalState,
+      terminalStatus: "denied",
+    });
+  });
 });
 
-// ── operate_pay tool completion — resumes the SAME approval [P0] ───────────
+// ── operate_pay tool completion — system-owned approval wait [P0] ──────────
 //
 // The full operate_pay MCP tool (session lease + executeOperatePay), not just
 // the pure executeOperatePay unit. A single-page checkout whose card fields
-// live in a late-mounting cross-origin PCI iframe: the first call creates the
-// approval and hands back approval_pending; once the phone taps approve, a
-// SECOND operate_pay call with the SAME arguments must resume that exact
-// approval and fill+submit within it — never mint a fresh approval, never
-// re-arm approval_pending once the mandate is already signed.
-describe("operate_pay tool completion — resumes the SAME approval [P0]", () => {
+// live in a late-mounting cross-origin PCI iframe: the approval URL is surfaced
+// while the call remains open, the server detects the phone response, and the
+// same call fills/submits. A no-progress-transport fallback still resumes the
+// exact approval on one later call without minting another.
+describe("operate_pay tool completion — system-owned approval wait [P0]", () => {
   const CHECKOUT = {
     merchant: "Kobee Japan",
     checkout_origin: "https://store.kobeejapan.net",
@@ -9320,14 +9352,14 @@ describe("operate_pay tool completion — resumes the SAME approval [P0]", () =>
       }
       if (
         (url.endsWith("/v1/pay/approvals/appr_kobee") ||
-          url.endsWith("/v1/pay/approvals/appr_kobee?wait_for_submission=1") ||
+          url.includes("/v1/pay/approvals/appr_kobee?wait_for_submission=1") ||
           url.endsWith("/v1/pay/approvals/appr_kobee?read_submission=1")) &&
         init?.method === "GET"
       ) {
         const approval = approvalBodies[0]!;
         const operatorPublicKey = String(approval.operator_pubkey);
         const readsRelayCandidate =
-          url.endsWith("?wait_for_submission=1") || url.endsWith("?read_submission=1");
+          url.includes("?wait_for_submission=1") || url.endsWith("?read_submission=1");
         if (url.endsWith("?read_submission=1")) immediateApprovalReads.push(approved);
         if (!approved || !readsRelayCandidate) {
           return Response.json({
@@ -9432,7 +9464,7 @@ describe("operate_pay tool completion — resumes the SAME approval [P0]", () =>
     global.fetch = originalFetch;
   });
 
-  it("fills and submits within the SAME approval once the phone has responded — never re-arms approval_pending", async () => {
+  it("detects the phone approval and submits in the same operate_pay call", async () => {
     const env = buildPaymentEnv();
     // executeOperatePay's own JWKS fetch goes through the real global fetch
     // (the tool layer never overrides deps.fetch) — route it through the same
@@ -9441,50 +9473,24 @@ describe("operate_pay tool completion — resumes the SAME approval [P0]", () =>
 
     await startProvisionSession({ serviceUrl: "https://store.kobeejapan.net/checkout" });
 
-    const first = (await operatePayTool.handler(baseArgs, env.api)) as Record<string, unknown>;
-    expect(first.status).toBe("approval_pending");
-    expect(env.approvalBodies).toHaveLength(1);
-    expect(env.immediateApprovalReads).toEqual([false]);
-    expect(getActivePendingApproval()).not.toBeNull();
+    const notifyUser = vi.fn().mockImplementation(async () => {
+      // The notification is delivered before executeOperatePay enters its
+      // server-owned wait, so the human can respond while this call is open.
+      env.setApproved();
+    });
+    const result = (await operatePayTool.handler(baseArgs, env.api, { notifyUser })) as Record<
+      string,
+      unknown
+    >;
 
-    // The human taps approve on their phone.
-    env.setApproved();
-
-    // Completion call: same arguments, no phase — the single-page path. The
-    // card fields live in the (by now mounted) cross-origin PCI iframe; the
-    // mock's fillAndSubmitCheckout stands in for that fill.
-    const second = (await operatePayTool.handler(baseArgs, env.api)) as Record<string, unknown>;
-
-    expect(second.status).toBe("payment_submitted");
-    expect(env.immediateApprovalReads).toEqual([false, true]);
-    // Exactly ONE approval was ever minted across both calls — a re-arm would
-    // show up here as a second POST /v1/pay/approvals.
+    expect(result.status).toBe("payment_submitted");
+    expect(notifyUser).toHaveBeenCalledOnce();
+    // Exactly ONE approval was minted and spent in this call.
     expect(env.approvalBodies).toHaveLength(1);
     expect(h.filledCards).toEqual([SYNTHETIC_CARD]);
-    // The lease resolved to a terminal outcome — no dangling awaiting_approval
-    // state left behind for a THIRD call to loop on.
+    // The lease resolved to a terminal outcome — no dangling approval state
+    // for an agent-side polling loop.
     expect(getActivePendingApproval()).toBeNull();
-  });
-
-  it("never returns approval_pending a second time once the mandate is signed — terminal or a genuine handoff, not a re-arm", async () => {
-    const env = buildPaymentEnv();
-    global.fetch = env.fetch;
-
-    await startProvisionSession({ serviceUrl: "https://store.kobeejapan.net/checkout" });
-
-    const first = (await operatePayTool.handler(baseArgs, env.api)) as Record<string, unknown>;
-    expect(first.status).toBe("approval_pending");
-
-    env.setApproved();
-    const second = (await operatePayTool.handler(baseArgs, env.api)) as Record<string, unknown>;
-
-    // Never a dead-end re-arm: the mandate is either spent on a terminal
-    // outcome or the host gets an explicit, non-looping status.
-    expect(second.status).not.toBe("approval_pending");
-    expect(["payment_submitted", "payment_3ds_required", "payment_declined"]).toContain(
-      second.status,
-    );
-    expect(env.immediateApprovalReads).toEqual([false, true]);
   });
 });
 
@@ -9518,6 +9524,7 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
         observed: "3ds_challenge";
       };
     },
+    outcome: "three_ds" | "unknown" = "three_ds",
   ) {
     return {
       approval_id: "appr_3ds",
@@ -9526,6 +9533,7 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
       last4: "9192",
       mandate_id: "mandate_3ds",
       deadline,
+      outcome,
       ...(payment_instrument_mismatch !== undefined ? { payment_instrument_mismatch } : {}),
     };
   }
@@ -9553,6 +9561,7 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
     const env = buildStatusEnv();
     await startProvisionSession({
       serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: env.api,
     });
     const threeDsState = buildThreeDsState();
     setActivePendingThreeDs(threeDsState);
@@ -9594,6 +9603,40 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
         mandateId: "mandate_3ds",
       }),
     ]);
+  });
+
+  it("preserves an unknown outcome while no 3DS or merchant evidence appears", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: env.api,
+    });
+    const unknownState = buildThreeDsState(Date.now() + 60_000, undefined, "unknown");
+    setActivePendingThreeDs(unknownState);
+    h.waitForThreeDsResult = "timeout";
+
+    await expect(operatePaymentStatusTool.handler({}, env.api)).resolves.toMatchObject({
+      status: "payment_outcome_unknown",
+      next: { tool: "operate_payment_status", wait_seconds: 15 },
+    });
+    expect(getActivePendingThreeDs()).toBe(unknownState);
+    expect(env.auditBodies).toHaveLength(0);
+  });
+
+  it("reports 3DS pending only after the browser observes a challenge", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: env.api,
+    });
+    const unknownState = buildThreeDsState(Date.now() + 60_000, undefined, "unknown");
+    setActivePendingThreeDs(unknownState);
+    h.waitForThreeDsResult = "challenge_pending";
+
+    await expect(operatePaymentStatusTool.handler({}, env.api)).resolves.toMatchObject({
+      status: "payment_3ds_pending",
+    });
+    expect(unknownState.outcome).toBe("three_ds");
   });
 
   it("keeps an ACS instrument-mismatch warning visible across 3DS status waits", async () => {
@@ -9701,6 +9744,53 @@ describe("operate_payment_status — resumable post-submit 3DS wait", () => {
       expect.objectContaining({ status: "payment_3ds_unresolved" }),
     ]);
     expect(h.waitForThreeDsCalls).toEqual([0]);
+  });
+
+  it("retains an expired unknown attempt for merchant reconciliation", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: env.api,
+    });
+    const unknownState = buildThreeDsState(Date.now() - 1, undefined, "unknown");
+    setActivePendingThreeDs(unknownState);
+    h.waitForThreeDsResult = "timeout";
+
+    await expect(operatePaymentStatusTool.handler({}, env.api)).resolves.toMatchObject({
+      status: "payment_outcome_unknown",
+      audit_recorded: true,
+      needs_user: { wall: "merchant_reconciliation", resume: "checkout" },
+    });
+    expect(getActivePendingThreeDs()).toBe(unknownState);
+    expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(
+      /prior charge has unresolved 3-D Secure state/,
+    );
+    expect(env.auditBodies).toEqual([
+      expect.objectContaining({ status: "payment_outcome_unknown" }),
+    ]);
+  });
+
+  it("retains reconciliation custody when an unknown-outcome audit fails", async () => {
+    const closeAuditPayment = vi.fn().mockResolvedValue({ id: "audit_close" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: { auditPayment: closeAuditPayment } as unknown as ApiClient,
+    });
+    const unknownState = buildThreeDsState(Date.now() - 1, undefined, "unknown");
+    setActivePendingThreeDs(unknownState);
+    const auditPayment = vi.fn().mockRejectedValue(new Error("audit unavailable"));
+    h.waitForThreeDsResult = "timeout";
+
+    await expect(
+      operatePaymentStatusTool.handler({}, { auditPayment } as unknown as ApiClient),
+    ).resolves.toMatchObject({
+      status: "payment_outcome_unknown",
+      audit_recorded: false,
+      needs_user: { wall: "merchant_reconciliation", resume: "checkout" },
+    });
+    expect(auditPayment).toHaveBeenCalledTimes(1);
+    expect(getActivePendingThreeDs()).toBe(unknownState);
+    await finishProvisionSession(started.session_id);
   });
 
   it("retains expired 3DS state when its required terminal audit cannot be written", async () => {

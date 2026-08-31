@@ -25,6 +25,10 @@ export class ApiCallError extends Error {
   }
 }
 
+export function isPaymentApprovalTransportTimeout(error: unknown): boolean {
+  return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
+}
+
 export interface ApiClientConfig {
   apiBaseUrl: string;
   registryBaseUrl: string;
@@ -129,7 +133,7 @@ export interface UsageResponse {
 
 export interface PaymentApproval {
   id: string;
-  status: "pending" | "approved" | "expired";
+  status: "pending" | "approved" | "denied" | "expired";
   merchant: string;
   checkout_origin: string;
   amount_cents: number;
@@ -185,6 +189,8 @@ export class ApiClient {
   async getPaymentApproval(
     id: string,
     candidateRead: boolean | "immediate" | "peek" | "wait-peek" = false,
+    waitMs?: number,
+    transportTimeoutMs?: number,
   ): Promise<PaymentApproval> {
     const query =
       candidateRead === true
@@ -196,7 +202,15 @@ export class ApiClient {
             : candidateRead === "wait-peek"
               ? "?wait_for_submission=1&peek_submission=1"
               : "";
-    return this.get(`/v1/pay/approvals/${encodeURIComponent(id)}${query}`);
+    const boundedWait =
+      waitMs === undefined
+        ? ""
+        : `${query.length === 0 ? "?" : "&"}wait_ms=${Math.max(0, Math.floor(waitMs))}`;
+    const signal =
+      transportTimeoutMs === undefined
+        ? undefined
+        : AbortSignal.timeout(Math.max(1, Math.floor(transportTimeoutMs)));
+    return this.get(`/v1/pay/approvals/${encodeURIComponent(id)}${query}${boundedWait}`, signal);
   }
 
   async confirmPaymentApproval(
@@ -568,10 +582,11 @@ export class ApiClient {
     return h;
   }
 
-  private async get<T>(path: string): Promise<T> {
+  private async get<T>(path: string, signal?: AbortSignal): Promise<T> {
     const res = await this.fetchImpl(`${this.config.apiBaseUrl}${path}`, {
       method: "GET",
       headers: this.headers(),
+      ...(signal !== undefined ? { signal } : {}),
     });
     return (await this.handleResponse(res, "GET", path)) as T;
   }

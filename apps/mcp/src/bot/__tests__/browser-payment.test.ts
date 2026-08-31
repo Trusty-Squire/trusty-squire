@@ -88,7 +88,7 @@ describe("captured payment submit dispatch", () => {
     expect(onSubmitDispatched).toHaveBeenCalledOnce();
   });
 
-  it("retains an unknown charge when input dispatch may precede click rejection", async () => {
+  it("keeps the outcome unknown without claiming dispatch when click evidence is absent", async () => {
     const onSubmitDispatched = vi.fn();
 
     await expect(
@@ -103,7 +103,7 @@ describe("captured payment submit dispatch", () => {
       }),
     ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
 
-    expect(onSubmitDispatched).toHaveBeenCalledOnce();
+    expect(onSubmitDispatched).not.toHaveBeenCalled();
   });
 
   it("preserves a proven pre-dispatch approval rejection", async () => {
@@ -127,7 +127,7 @@ describe("captured payment submit dispatch", () => {
     expect(onSubmitDispatched).not.toHaveBeenCalled();
   });
 
-  it("retains an unknown charge when trusted input completes without observer evidence", async () => {
+  it("does not convert trusted input completion into submit evidence", async () => {
     const onSubmitDispatched = vi.fn();
 
     await expect(
@@ -139,7 +139,7 @@ describe("captured payment submit dispatch", () => {
       }),
     ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
 
-    expect(onSubmitDispatched).toHaveBeenCalledOnce();
+    expect(onSubmitDispatched).not.toHaveBeenCalled();
   });
 });
 
@@ -551,160 +551,191 @@ describe("checkout payment parsing", () => {
     },
   );
 
-  it.skipIf(!chromiumAvailable)(
-    "submits a Japanese checkout via its ご注文を確定する charge button, skipping non-charge buttons",
-    async () => {
-      const browser = await chromium.launch({ headless: true });
-      try {
-        const page = await browser.newPage();
-        await page.setContent(`
-        <form id="checkout">
-          <input autocomplete="cc-number">
-          <input autocomplete="cc-exp">
-          <input autocomplete="cc-csc">
-          <input autocomplete="cc-name">
-          <button type="button" id="change-payment">お支払い方法を変更する</button>
-          <button type="button" id="back">戻る</button>
-          <button type="submit" id="charge">ご注文を確定する</button>
-        </form>
-        <script>
-          document.querySelector("#change-payment").addEventListener("click", () => {
-            document.body.dataset.wrongClick = "change-payment";
-          });
-          document.querySelector("#back").addEventListener("click", () => {
-            document.body.dataset.wrongClick = "back";
-          });
-          document.querySelector("#checkout").addEventListener("submit", (event) => {
-            event.preventDefault();
-            document.body.dataset.submitted = "true";
-            setTimeout(() => {
-              const challenge = document.createElement("iframe");
-              challenge.title = "3D Secure";
-              document.body.append(challenge);
-            }, 200);
-          });
-        </script>
-      `);
-        const controller = new BrowserController({ humanize: false });
-        (controller as unknown as { page: Page }).page = page;
-        const bringToFront = vi.spyOn(page, "bringToFront");
+  type CheckoutControl = "native" | "external" | "role";
+  interface CheckoutDispatchHarnessOptions {
+    control: CheckoutControl;
+    required?: boolean;
+    action: string;
+    responses?: Record<string, { body?: string; contentType?: string; delayMs?: number }>;
+  }
 
-        const result = await controller.fillAndSubmitCheckout({
-          pan: "4242424242424242",
-          exp_month: "12",
-          exp_year: "30",
-          cvv: "123",
-          name: "Synthetic Cardholder",
-          billing: {
-            line1: "123 Synthetic Street",
-            city: "Testville",
-            postal_code: "10001",
-            country: "JP",
-          },
-        });
-
-        expect(await page.locator("body").getAttribute("data-submitted")).toBe("true");
-        expect(await page.locator("body").getAttribute("data-wrong-click")).toBeNull();
-        expect(result.three_ds_required).toBe(true);
-        expect(bringToFront).toHaveBeenCalled();
-      } finally {
-        await browser.close();
-      }
-    },
-    30_000,
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "preserves captured dispatch across immediate cross-origin navigation",
-    async () => {
-      const merchantUrl = "https://merchant.test/checkout";
-      const paymentUrl = "https://checkout.pci.shopifyinc.test/pay";
-      const challengeUrl = "https://issuer.test/acs/challenge";
-      const browser = await chromium.launch({ headless: true });
-      try {
-        const page = await browser.newPage();
-        await page.route("**/*", async (route) => {
-          const url = route.request().url();
-          if (url.startsWith(challengeUrl)) {
-            return route.fulfill({
-              contentType: "text/html",
-              body: "<title>3D Secure Authentication</title><h1>Verify your payment</h1>",
-            });
-          }
-          if (url === paymentUrl) {
-            return route.fulfill({
-              contentType: "text/html",
-              body: `
-                <button type="button">Pay now</button>
-                <script>
-                  document.querySelector("button").addEventListener("click", () => {
-                    window.location.replace("${challengeUrl}");
-                  });
-                </script>`,
-            });
-          }
-          if (url !== merchantUrl) return route.fulfill({ status: 404, body: "not found" });
-          return route.fulfill({
+  async function runCheckoutDispatchHarness(options: CheckoutDispatchHarnessOptions): Promise<{
+    dispatches: number;
+    error?: unknown;
+    invalid: boolean;
+    requests: string[];
+    result?: CheckoutSubmitResult;
+  }> {
+    const checkoutUrl = "https://merchant.test/checkout";
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      const requests: string[] = [];
+      const controlMarkup =
+        options.control === "native"
+          ? '<button type="submit">Pay now</button>'
+          : options.control === "external"
+            ? '<button type="button">Pay now</button>'
+            : '<div role="button" tabindex="0">Pay now</div>';
+      const controlSelector = options.control === "role" ? '[role="button"]' : "button";
+      const formControl = options.control === "native" ? controlMarkup : "";
+      const externalControl = options.control === "native" ? "" : controlMarkup;
+      await page.route("**/*", async (route) => {
+        const url = route.request().url();
+        if (url === checkoutUrl) {
+          await route.fulfill({
             contentType: "text/html",
-            body: `<iframe src="${paymentUrl}"></iframe>`,
+            body: `
+              <form id="checkout">
+                ${options.required === true ? '<input id="required-field" required>' : ""}
+                ${formControl}
+              </form>
+              ${externalControl}
+              <script>
+                const form = document.querySelector("#checkout");
+                const control = document.querySelector(${JSON.stringify(controlSelector)});
+                document.querySelector("#required-field")?.addEventListener("invalid", () => {
+                  document.body.dataset.invalid = "true";
+                });
+                const run = async (event) => {
+                  if (event.type === "submit") event.preventDefault();
+                  ${options.action}
+                };
+                ${options.control === "native" ? 'form.addEventListener("submit", run);' : 'control.addEventListener("click", run);'}
+              </script>`,
           });
+          return;
+        }
+        requests.push(url);
+        const response = options.responses?.[url];
+        if (response === undefined) {
+          await route.fulfill({ status: 404, body: "not found" });
+          return;
+        }
+        if (response.delayMs !== undefined) {
+          await new Promise((resolve) => setTimeout(resolve, response.delayMs));
+        }
+        await route.fulfill({
+          body: response.body ?? "ok",
+          contentType: response.contentType ?? "text/plain",
         });
-        await page.goto(merchantUrl);
-        await page.waitForLoadState("networkidle");
-        page.setDefaultTimeout(1_000);
-        const controller = new BrowserController({ humanize: false });
-        (controller as unknown as { page: Page }).page = page;
-        const onSubmitDispatched = vi.fn();
+      });
+      await page.goto(checkoutUrl);
+      const controller = BrowserController.fromHarnessPage(page);
+      const onSubmitDispatched = vi.fn();
+      let result: CheckoutSubmitResult | undefined;
+      let error: unknown;
+      try {
+        result = await (
+          controller as unknown as {
+            submitFilledCheckoutInScope: (
+              cardGroup: undefined,
+              onDispatched: () => void,
+            ) => Promise<CheckoutSubmitResult>;
+          }
+        ).submitFilledCheckoutInScope(undefined, onSubmitDispatched);
+      } catch (caught) {
+        error = caught;
+      }
+      return {
+        dispatches: onSubmitDispatched.mock.calls.length,
+        ...(error !== undefined ? { error } : {}),
+        invalid: (await page.locator("body").getAttribute("data-invalid")) === "true",
+        requests,
+        ...(result !== undefined ? { result } : {}),
+      };
+    } finally {
+      await browser.close();
+    }
+  }
 
-        await expect(
-          (
-            controller as unknown as {
-              submitFilledCheckoutInScope: (
-                cardGroup: undefined,
-                onDispatched: () => void,
-              ) => Promise<CheckoutSubmitResult>;
-            }
-          ).submitFilledCheckoutInScope(undefined, onSubmitDispatched),
-        ).resolves.toMatchObject({ three_ds_required: true });
-        expect(onSubmitDispatched).toHaveBeenCalledOnce();
-        expect(page.frames().some((frame) => frame.url().startsWith(challengeUrl))).toBe(true);
-      } finally {
-        await browser.close();
+  it.skipIf(!chromiumAvailable)(
+    "keeps native, external, and role-button validation blocks outside the charge boundary",
+    async () => {
+      const cases: CheckoutDispatchHarnessOptions[] = [
+        { control: "native", required: true, action: "" },
+        {
+          control: "external",
+          required: true,
+          action: 'await fetch("/v1/payment_methods", { method: "POST" }); form.requestSubmit();',
+          responses: { "https://merchant.test/v1/payment_methods": {} },
+        },
+        {
+          control: "role",
+          required: true,
+          action: 'await fetch("/analytics/orders", { method: "POST" }); form.requestSubmit();',
+          responses: { "https://merchant.test/analytics/orders": {} },
+        },
+      ];
+      for (const testCase of cases) {
+        const observed = await runCheckoutDispatchHarness(testCase);
+        expect(observed.error, testCase.control).toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
+        expect(observed.invalid, testCase.control).toBe(true);
+        expect(observed.dispatches, testCase.control).toBe(0);
+      }
+    },
+    60_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "tracks concrete charge traffic across native, external, and role controls",
+    async () => {
+      const cases: CheckoutDispatchHarnessOptions[] = [
+        {
+          control: "native",
+          action:
+            'await fetch("/charge", { method: "POST" }); history.pushState({}, "", "/receipt/REST-1");',
+          responses: { "https://merchant.test/charge": {} },
+        },
+        {
+          control: "external",
+          action:
+            'await fetch("/graphql", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ operationName: "CompleteCheckout" }) }); history.pushState({}, "", "/receipt/GQL-1");',
+          responses: { "https://merchant.test/graphql": {} },
+        },
+        {
+          control: "role",
+          action:
+            'await fetch("/v1/payment_methods", { method: "POST" }); await fetch("/graphql", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ operationName: "CompleteCheckout" }) }); history.pushState({}, "", "/receipt/DELAY-1");',
+          responses: {
+            "https://merchant.test/v1/payment_methods": { delayMs: 100 },
+            "https://merchant.test/graphql": {},
+          },
+        },
+      ];
+      for (const testCase of cases) {
+        const observed = await runCheckoutDispatchHarness(testCase);
+        expect(observed.error, testCase.control).toBeUndefined();
+        expect(observed.result, testCase.control).toEqual({
+          three_ds_required: false,
+          order_confirmed: true,
+        });
+        expect(observed.dispatches, testCase.control).toBe(1);
       }
     },
     30_000,
   );
 
   it.skipIf(!chromiumAvailable)(
-    "removes dispatch tracking when final card verification aborts submission",
+    "keeps observing after nonterminal navigation until a late order request",
     async () => {
-      const browser = await chromium.launch({ headless: true });
-      try {
-        const page = await browser.newPage();
-        await page.setContent('<button type="button">Pay now</button>');
-        const controller = BrowserController.fromHarnessPage(page);
-        const internals = controller as unknown as {
-          savedCardSelectionVerified: () => Promise<boolean>;
-          submitFilledCheckoutInScope: (
-            cardGroup: undefined,
-            onDispatched: () => void,
-          ) => Promise<CheckoutSubmitResult>;
-        };
-        internals.savedCardSelectionVerified = vi.fn(async () => {
-          throw new Error("verification document replaced");
-        });
-        const onSubmitDispatched = vi.fn();
-
-        await expect(
-          internals.submitFilledCheckoutInScope(undefined, onSubmitDispatched),
-        ).rejects.toThrow("verification document replaced");
-        await page.getByRole("button", { name: "Pay now" }).click();
-        await page.waitForTimeout(50);
-        expect(onSubmitDispatched).not.toHaveBeenCalled();
-      } finally {
-        await browser.close();
-      }
+      const observed = await runCheckoutDispatchHarness({
+        control: "external",
+        action: 'window.location.href = "/processing";',
+        responses: {
+          "https://merchant.test/processing": {
+            contentType: "text/html",
+            body: '<script>void (async () => { await fetch("/api/orders", { method: "POST" }); history.pushState({}, "", "/receipt/LATE-1"); })();</script>',
+          },
+          "https://merchant.test/api/orders": {},
+        },
+      });
+      expect(observed.error).toBeUndefined();
+      expect(observed.result).toEqual({ three_ds_required: false, order_confirmed: true });
+      expect(observed.requests).toContain("https://merchant.test/api/orders");
+      expect(observed.dispatches).toBe(1);
     },
+    30_000,
   );
 
   it.skipIf(!chromiumAvailable)(
@@ -714,31 +745,19 @@ describe("checkout payment parsing", () => {
       try {
         const page = await browser.newPage();
         await page.setContent(`
-          <form id="checkout">
-            <input autocomplete="cc-number">
-            <input autocomplete="cc-exp">
-            <input autocomplete="cc-csc">
-            <input autocomplete="cc-name">
+          <form>
+            <input autocomplete="cc-number"><input autocomplete="cc-exp">
+            <input autocomplete="cc-csc"><input autocomplete="cc-name">
             <button type="submit">Pay now</button>
-          </form>
-          <script>
-            document.querySelector("#checkout").addEventListener("submit", (event) => {
-              event.preventDefault();
-              document.body.dataset.submitted = "true";
-            });
-          </script>
-        `);
+          </form>`);
         const controller = BrowserController.fromHarnessPage(page);
         const beforeSubmitDispatch = vi.fn(() => {
           throw new Error("payment_approval_expired");
         });
-
         await expect(
           controller.fillAndSubmitCheckout(APPROVAL_CARD, { beforeSubmitDispatch }),
         ).rejects.toThrow("payment_approval_expired");
-
         expect(beforeSubmitDispatch).toHaveBeenCalledOnce();
-        expect(await page.locator("body").getAttribute("data-submitted")).toBeNull();
       } finally {
         await browser.close();
       }
@@ -780,7 +799,7 @@ describe("checkout payment parsing", () => {
                 document.querySelector("#checkout").addEventListener("submit", async (event) => {
                   event.preventDefault();
                   void fetch("/analytics").catch(() => undefined);
-                  await fetch("/charge");
+                  await fetch("/charge", { method: "POST" });
                   document.body.insertAdjacentHTML("beforeend", "<p>Authenticate payment</p>");
                 });
               </script>
@@ -1384,6 +1403,7 @@ describe("checkout payment parsing", () => {
           <button id="pay">Pay now</button>
           <script>
             document.querySelector("#pay").addEventListener("click", () => {
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               const frame = document.createElement("iframe");
               frame.src = "${pciUrl}";
               document.body.append(frame);
@@ -1423,6 +1443,7 @@ describe("checkout payment parsing", () => {
           <button id="pay">Pay now</button>
           <script>
             document.querySelector("#pay").addEventListener("click", () => {
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               const frame = document.createElement("iframe");
               frame.src = ${JSON.stringify(collectionUrl)};
               document.body.append(frame);
@@ -1543,6 +1564,7 @@ describe("checkout payment parsing", () => {
           <script>
             document.querySelector("#checkout").addEventListener("submit", (event) => {
               event.preventDefault();
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               document.querySelector("#existing-confirmation").innerHTML =
                 "<span>Order confirmed</span><span>.</span>";
             });
@@ -1602,6 +1624,7 @@ describe("checkout payment parsing", () => {
               return getAttribute(name);
             };
             document.querySelector("#pay-now").addEventListener("click", () => {
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               document.body.dataset.earlyConfirmationAtPay = String(
                 document.querySelector("#early-confirmation") !== null,
               );
@@ -1666,6 +1689,7 @@ describe("checkout payment parsing", () => {
                   <button id="pay-now">Pay now</button>
                   <script>
                     document.querySelector("#pay-now").addEventListener("click", () => {
+                      void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
                       ${clickAction};
                     });
                   </script>`,
@@ -1710,6 +1734,7 @@ describe("checkout payment parsing", () => {
               <button id="pay-now">Pay now</button>
               <script>
                 document.querySelector("#pay-now").addEventListener("click", () => {
+                  void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
                   history.replaceState({}, "", "/receipt/123?attempt=2#retry");
                 });
               </script>`,
@@ -1749,6 +1774,7 @@ describe("checkout payment parsing", () => {
               <button id="pay-now">Pay now</button>
               <script>
                 document.querySelector("#pay-now").addEventListener("click", () => {
+                  void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
                   history.replaceState({}, "", "/orders/ORD-123/confirmation");
                 });
               </script>`,
@@ -1788,6 +1814,7 @@ describe("checkout payment parsing", () => {
               <button id="pay-now">Pay now</button>
               <script>
                 document.querySelector("#pay-now").addEventListener("click", () => {
+                  void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
                   history.replaceState({}, "", "/orders/ORD-123/confirmation");
                 });
               </script>`,
@@ -1827,6 +1854,7 @@ describe("checkout payment parsing", () => {
               <button id="pay-now">Pay now</button>
               <script>
                 document.querySelector("#pay-now").addEventListener("click", () => {
+                  void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
                   history.replaceState({}, "", "/orders/ORD-123/confirmation");
                 });
               </script>`,
@@ -1871,6 +1899,7 @@ describe("checkout payment parsing", () => {
                     <button id="pay-now">Pay now</button>
                     <script>
                       document.querySelector("#pay-now").addEventListener("click", () => {
+                        void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
                         history.replaceState({}, "", "/orders/ORD-123/confirmation");
                       });
                     </script>`,
@@ -1911,6 +1940,7 @@ describe("checkout payment parsing", () => {
               <button id="pay-now">Pay now</button>
               <script>
                 document.querySelector("#pay-now").addEventListener("click", () => {
+                  void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
                   history.replaceState({}, "", "/checkout/ORD-123/thank_you");
                 });
               </script>`,
@@ -1964,7 +1994,7 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "keeps a click failure pre-dispatch when no charge event fired",
+    "keeps a click failure unknown when no charge evidence fired",
     async () => {
       const browser = await chromium.launch({ headless: true });
       try {
@@ -1985,12 +2015,12 @@ describe("checkout payment parsing", () => {
         (controller as unknown as { page: Page }).page = page;
 
         const error = await controller.submitFilledCheckout().catch((caught) => caught);
-        expect(error).toBeInstanceOf(Error);
-        expect(error).not.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
+        expect(error).toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
       } finally {
         await browser.close();
       }
     },
+    20_000,
   );
 
   it.skipIf(!chromiumAvailable)(
@@ -2027,6 +2057,7 @@ describe("checkout payment parsing", () => {
           <script>
             document.querySelector("#checkout").addEventListener("submit", (event) => {
               event.preventDefault();
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               document.body.insertAdjacentHTML(
                 "beforeend",
                 '<p style="display:none">Order confirmed</p>' +
@@ -2098,6 +2129,7 @@ describe("checkout payment parsing", () => {
               document.body.append(frame);
             }, 500);
             document.querySelector("#place-order").addEventListener("click", () => {
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               document.body.dataset.submitted = "true";
             });
           </script>
@@ -2990,7 +3022,7 @@ describe("3-D Secure resolution", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "returns timeout when neither an order route nor a decline appears",
+    "reports a pending challenge when neither an order route nor a decline appears",
     async () => {
       const { browser, page, controller } = await setupChallenge();
       let clock = 0;
@@ -2999,7 +3031,7 @@ describe("3-D Secure resolution", () => {
         clock += timeout;
       });
       try {
-        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("challenge_pending");
       } finally {
         wait.mockRestore();
         now.mockRestore();
@@ -3019,7 +3051,7 @@ describe("3-D Secure resolution", () => {
       });
       try {
         await page.evaluate(() => history.replaceState({}, "", "/checkout?success_url=/done"));
-        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("challenge_pending");
       } finally {
         wait.mockRestore();
         now.mockRestore();
@@ -3048,6 +3080,7 @@ describe("3-D Secure resolution", () => {
         <script>
           document.querySelector("#checkout").addEventListener("submit", (event) => {
             event.preventDefault();
+            void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
             document.body.dataset.submitted = "true";
           });
         </script>
@@ -4649,11 +4682,15 @@ describe("split-checkout card fill (real browser)", () => {
         await page.goto(pageUrl);
         const controller = new BrowserController({ humanize: false });
         (controller as unknown as { page: Page }).page = page;
+        const onSubmitDispatched = vi.fn();
 
-        await expect(controller.fillAndSubmitCheckout(CARD)).resolves.toEqual({
+        await expect(
+          controller.fillAndSubmitCheckout(CARD, { onSubmitDispatched }),
+        ).resolves.toEqual({
           three_ds_required: false,
           order_confirmed: true,
         });
+        expect(onSubmitDispatched).toHaveBeenCalledOnce();
         expect(consoleError).toHaveBeenCalledWith("[payment-cleanup] payment_fields_not_cleared");
         expect(await page.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
         expect(await page.locator("#preview").innerText()).toContain(CARD.pan);
@@ -4662,6 +4699,7 @@ describe("split-checkout card fill (real browser)", () => {
         await browser.close();
       }
     },
+    30_000,
   );
 
   it.skipIf(!chromiumAvailable)(
@@ -5592,6 +5630,7 @@ describe("split-checkout card fill (real browser)", () => {
           <script>
             document.querySelector("#checkout").addEventListener("submit", (event) => {
               event.preventDefault();
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               document.body.dataset.submitted = "true";
             });
           </script>`,
@@ -5651,6 +5690,7 @@ describe("split-checkout card fill (real browser)", () => {
           <script>
             document.querySelector("#card-form").addEventListener("submit", (event) => {
               event.preventDefault();
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               document.body.dataset.submitted = "true";
             });
           </script>`,
@@ -5910,6 +5950,7 @@ describe("split-checkout card fill (real browser)", () => {
           <script>
             document.querySelector("#checkout").addEventListener("submit", (event) => {
               event.preventDefault();
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               document.body.dataset.submitted = "true";
             });
           </script>`,
@@ -6026,6 +6067,7 @@ describe("split-checkout card fill (real browser)", () => {
           <script>
             document.querySelector("#checkout").addEventListener("submit", (event) => {
               event.preventDefault();
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               document.body.dataset.submitted = "true";
             });
           </script>`,

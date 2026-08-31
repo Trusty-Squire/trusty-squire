@@ -213,6 +213,7 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(screen.getByTestId("card-entry")).toBeTruthy();
     // The card is impossible to tap past — no approve action exists yet.
     expect(screen.queryByRole("button", { name: /Approve payment/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Deny payment" })).toBeTruthy();
   });
 
   it("add → bind shows the server record before one passkey approval", async () => {
@@ -231,6 +232,7 @@ describe("pay page — JIT add-card ceremony", () => {
 
     const approve = await screen.findByRole("button", { name: /Approve payment/ });
     expect(screen.getByText("CASETiFY")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Deny payment" })).toBeTruthy();
     expect(screen.getByText("https://casetify.com")).toBeTruthy();
     expect(screen.getByText("phone case")).toBeTruthy();
     expect(screen.getByText("gift")).toBeTruthy();
@@ -267,6 +269,21 @@ describe("pay page — JIT add-card ceremony", () => {
     const links = screen.getAllByRole("link");
     expect(links).toHaveLength(1);
     expect(links[0]?.getAttribute("href")).toBe("/");
+    expect(vouchflow.signPayload).not.toHaveBeenCalled();
+  });
+
+  it("lets the human deny and makes the page terminal without a passkey", async () => {
+    bound = true;
+    render(<PaymentApprovalPage />);
+    const deny = await screen.findByRole("button", { name: "Deny payment" });
+
+    await userEvent.setup().click(deny);
+
+    await waitFor(() =>
+      expect(api.apiPost).toHaveBeenCalledWith("/v1/pay/approvals/appr_1/deny", {}),
+    );
+    expect(screen.getByText("Payment denied — you can return to your session.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Approve payment/ })).toBeNull();
     expect(vouchflow.signPayload).not.toHaveBeenCalled();
   });
 
@@ -394,6 +411,7 @@ describe("pay page — JIT add-card ceremony", () => {
     ).toBeTruthy();
     expect(screen.getByText(/Pay with/).textContent).toContain("Work •••• 1111");
     expect(screen.getByText("CASETiFY")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Deny payment" })).toBeTruthy();
   });
 });
 
@@ -476,7 +494,9 @@ describe("pay page — single payment authorization", () => {
     render(<PaymentApprovalPage />);
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: /Approve payment/ }));
-    await user.click(await screen.findByRole("button", { name: /Sign in and set up passkey/ }));
+    const setup = await screen.findByRole("button", { name: /Sign in and set up passkey/ });
+    expect(screen.getByRole("button", { name: "Deny payment" })).toBeTruthy();
+    await user.click(setup);
     await waitFor(() => expect(pairing.pairDevice).toHaveBeenCalledTimes(1));
     expect(api.apiGet).toHaveBeenCalledWith("/v1/vault/e2e");
     expect(
