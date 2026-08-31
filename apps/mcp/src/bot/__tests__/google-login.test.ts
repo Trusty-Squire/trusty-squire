@@ -1,7 +1,15 @@
 // Covers deterministic Google-login helpers and lifecycle boundaries.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readFileSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
@@ -13,6 +21,7 @@ import {
   childProcessIsRunning,
   closeLocalBrowserLaunch,
   launchCancellablePersistentContext,
+  launchPlainLoginBrowser,
   type launchSelfManagedLoginContext,
   resolvePersistentFallbackIdentity,
   resolveAttachedProfileChildIdentity,
@@ -20,6 +29,7 @@ import {
   withChromeStartupLock,
   type PlainLoginBrowser,
 } from "../browser.js";
+import { stopOwnerProcessReaper } from "../owner-process-reaper.js";
 import {
   acquireProfileOperationGuard,
   launchWithProfileGate,
@@ -723,6 +733,36 @@ describe("pollUntil phase-aware heartbeat", () => {
 });
 
 describe("bot Chrome launch consistency", () => {
+  it.skipIf(process.platform !== "linux" || !existsSync("/usr/bin/google-chrome"))(
+    "anchors the plain Google login browser before exposing it to the user",
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), "ts-login-custody-"));
+      const profileDir = join(root, "profile");
+      vi.stubEnv("TRUSTY_SQUIRE_REAPER_DIR", join(root, "reapers"));
+      try {
+        const browser = await launchPlainLoginBrowser({
+          binary: "/usr/bin/google-chrome",
+          profileDir,
+          url: "about:blank",
+          window: { width: 800, height: 600 },
+          env: process.env,
+          proxyServer: null,
+          extraArgs: ["--headless=new", "--no-sandbox", "--disable-dev-shm-usage"],
+        });
+        try {
+          expect(browser.identity).not.toBeNull();
+          expect(browser.marker).toMatch(/^v1:\d+:/);
+        } finally {
+          await browser.teardown();
+        }
+      } finally {
+        stopOwnerProcessReaper();
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    15_000,
+  );
+
   it("keeps persistent launch custody through bounded terminal teardown", async () => {
     const context = { close: vi.fn(async () => undefined) };
     const launchPersistentContext = vi.fn().mockResolvedValue(context);
