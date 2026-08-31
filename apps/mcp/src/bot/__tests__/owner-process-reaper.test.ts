@@ -186,7 +186,9 @@ describe("owner process startup sweep", () => {
       expect(reaper).not.toBeNull();
       trackOwnerBrowserLaunch("v1:1:worker-restarted", join(root, "profile"));
       expect(readFileSync(join(root, "worker-count"), "utf8")).toBe("2");
-      process.kill(Number(readFileSync(join(root, "worker-1.pid"), "utf8")), "SIGTERM");
+      const firstWorkerPid = Number(readFileSync(join(root, "worker-1.pid"), "utf8"));
+      process.kill(firstWorkerPid, "SIGKILL");
+      await vi.waitFor(() => expect(processIsGone(firstWorkerPid)).toBe(true), { timeout: 2_000 });
       await vi.waitFor(() => expect(readFileSync(join(root, "worker-count"), "utf8")).toBe("3"), {
         timeout: 5_000,
       });
