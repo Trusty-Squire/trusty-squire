@@ -661,7 +661,25 @@ function profileProcessesAreStale(
   );
 }
 
-function cleanTrackedProfiles(manifest: OwnerReaperManifest): void {
+type OwnerReaperRemove = (
+  path: string,
+  options: { recursive?: boolean; force?: boolean },
+) => void;
+
+function removeTrackedPath(
+  removePath: OwnerReaperRemove,
+  path: string,
+  options: { recursive?: boolean; force?: boolean },
+): void {
+  try {
+    removePath(path, options);
+  } catch {}
+}
+
+function cleanTrackedProfiles(
+  manifest: OwnerReaperManifest,
+  removePath: OwnerReaperRemove = rmSync,
+): void {
   for (const identity of manifest.resources) {
     if (profileProcessIdentityState(identity, identity.user_data_dir) === "stale") {
       clearStaleSingletonLock(identity.user_data_dir);
@@ -671,16 +689,16 @@ function cleanTrackedProfiles(manifest: OwnerReaperManifest): void {
     if (!profileProcessesAreStale(manifest, profile)) continue;
     const reservationMatches = profileReservationMatches(profile);
     if (signedEphemeralProfile(profile)) {
-      rmSync(profile.path, { recursive: true, force: true });
+      removeTrackedPath(removePath, profile.path, { recursive: true, force: true });
     }
     if (
       profile.staging_path !== undefined &&
       (signedStagedEphemeralProfile(profile) || reservationMatches)
     ) {
-      rmSync(profile.staging_path, { recursive: true, force: true });
+      removeTrackedPath(removePath, profile.staging_path, { recursive: true, force: true });
     }
     if (profile.reservation_path !== undefined && reservationMatches) {
-      rmSync(profile.reservation_path, { force: true });
+      removeTrackedPath(removePath, profile.reservation_path, { force: true });
     }
   }
 }
@@ -696,22 +714,29 @@ function manifestCleanupComplete(manifest: OwnerReaperManifest): boolean {
   );
 }
 
-async function reapManifest(path: string, manifest: OwnerReaperManifest): Promise<number> {
+async function reapManifest(
+  path: string,
+  manifest: OwnerReaperManifest,
+  operations: { removePath?: OwnerReaperRemove } = {},
+): Promise<number> {
   const graceMs = envPositiveMs("TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS", DEFAULT_TERM_GRACE_MS);
   const signalled = signalTrackedResources(manifest, "SIGTERM");
   await new Promise<void>((resolveWait) => setTimeout(resolveWait, graceMs));
   const latestRead = readManifest(path);
   const latest = latestRead.state === "present" ? latestRead.manifest : manifest;
   signalTrackedResources(latest, "SIGKILL");
-  cleanTrackedProfiles(latest);
+  cleanTrackedProfiles(latest, operations.removePath);
   await sweepOperatorProfilePoolOrphans().catch(() => undefined);
   if (latestRead.state === "present" && manifestCleanupComplete(latest)) {
-    rmSync(path, { force: true });
+    removeTrackedPath(operations.removePath ?? rmSync, path, { force: true });
   }
   return signalled;
 }
 
-export async function sweepOrphanedOwnerProcesses(rootDir = defaultRootDir()): Promise<number> {
+export async function sweepOrphanedOwnerProcesses(
+  rootDir = defaultRootDir(),
+  operations: { removePath?: OwnerReaperRemove } = {},
+): Promise<number> {
   if (process.platform !== "linux" || !existsSync(rootDir)) return 0;
   let reaped = 0;
   for (const entry of readdirSync(rootDir)) {
@@ -719,7 +744,7 @@ export async function sweepOrphanedOwnerProcesses(rootDir = defaultRootDir()): P
     const path = join(rootDir, entry);
     const read = readManifest(path);
     if (read.state !== "present" || !shouldReapOwner(ownerState(read.manifest))) continue;
-    reaped += await reapManifest(path, read.manifest);
+    reaped += await reapManifest(path, read.manifest, operations);
   }
   return reaped;
 }
@@ -803,6 +828,7 @@ function launchOwnerReaperWorker(
   rootDir: string,
   token: string,
   spawnWorker: typeof spawn,
+  onUnexpectedExit: () => void,
 ): OwnerReaperWorkerHandle | null {
   const workerExecArgs = workerPath.endsWith(".ts")
     ? ["--import", moduleRequire.resolve("tsx")]
@@ -826,21 +852,27 @@ function launchOwnerReaperWorker(
   }
 
   let exited = false;
-  worker.once("error", () => {
+  let ready = false;
+  let stopping = false;
+  const markExited = (): void => {
+    if (exited) return;
     exited = true;
-  });
-  worker.once("exit", () => {
-    exited = true;
-  });
+    if (ready && !stopping) onUnexpectedExit();
+  };
+  worker.once("error", markExited);
+  worker.once("exit", markExited);
   const identity = waitForOwnerReaperWorker(worker, readyPath, token);
   rmSync(readyPath, { force: true });
   if (identity === null || exited) {
+    stopping = true;
     worker.kill("SIGTERM");
     return null;
   }
+  ready = true;
   return {
     isAvailable: () => !exited && ownerReaperWorkerRunning(identity),
     stop: () => {
+      stopping = true;
       exited = true;
       worker.kill("SIGTERM");
     },
@@ -885,13 +917,41 @@ export function startOwnerProcessReaper(
   }
   let stopped = false;
   const spawnWorker = runtime.spawn ?? spawn;
-  let workerHandle = launchOwnerReaperWorker(
-    workerPath,
-    manifestPath,
-    rootDir,
-    token,
-    spawnWorker,
-  );
+  let workerGeneration = 0;
+  let recovering = false;
+  let failSafePromise: Promise<void> | null = null;
+  let workerHandle: OwnerReaperWorkerHandle | null = null;
+  function failSafeExistingCustody(): void {
+    if (failSafePromise !== null) return;
+    const read = readManifest(manifestPath);
+    if (read.state !== "present") return;
+    failSafePromise = reapManifest(manifestPath, read.manifest)
+      .then(() => undefined)
+      .catch(() => undefined)
+      .finally(() => {
+        failSafePromise = null;
+      });
+  }
+  function recoverWorker(generation: number): void {
+    if (stopped || recovering || generation !== workerGeneration) return;
+    recovering = true;
+    workerHandle = null;
+    workerHandle = launchWorker();
+    recovering = false;
+    if (workerHandle === null) failSafeExistingCustody();
+  }
+  function launchWorker(): OwnerReaperWorkerHandle | null {
+    const generation = ++workerGeneration;
+    return launchOwnerReaperWorker(
+      workerPath,
+      manifestPath,
+      rootDir,
+      token,
+      spawnWorker,
+      () => recoverWorker(generation),
+    );
+  }
+  workerHandle = launchWorker();
   if (workerHandle === null) {
     rmSync(manifestPath, { force: true });
     return null;
@@ -900,14 +960,10 @@ export function startOwnerProcessReaper(
   const restart = (): boolean => {
     if (stopped) return false;
     if (isAvailable()) return true;
+    if (failSafePromise !== null) return false;
     workerHandle?.stop();
-    workerHandle = launchOwnerReaperWorker(
-      workerPath,
-      manifestPath,
-      rootDir,
-      token,
-      spawnWorker,
-    );
+    workerHandle = launchWorker();
+    if (workerHandle === null) failSafeExistingCustody();
     return workerHandle !== null;
   };
   const requireAvailable = (): void => {
@@ -1163,6 +1219,20 @@ export function untrackOwnerEphemeralProfile(profileDir: string): void {
 
 const trackedHelperProcesses = new WeakMap<ChildProcess, OwnerHelperRecord>();
 
+function terminateOwnerHelperAfterRegistrationFailure(
+  child: ChildProcess,
+  record: OwnerHelperRecord,
+): boolean {
+  const graceMs = envPositiveMs("TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS", DEFAULT_TERM_GRACE_MS);
+  signalOwnerHelper(record, "SIGTERM");
+  Atomics.wait(workerReadyWait, 0, 0, graceMs);
+  if (ownerHelperIdentityState(record) !== "stale") {
+    signalOwnerHelper(record, "SIGKILL");
+    Atomics.wait(workerReadyWait, 0, 0, graceMs);
+  }
+  return ownerTrackedHelperState(child) === "stale" || ownerHelperIdentityState(record) === "stale";
+}
+
 export function spawnOwnerTrackedHelper(
   command: string,
   args: readonly string[],
@@ -1195,12 +1265,12 @@ export function spawnOwnerTrackedHelper(
       const birth = processBirthIdentity(child.pid);
       if (birth !== null) {
         record = { ...birth, marker, process_group_id: child.pid };
-        reaper?.bindHelper(marker, record);
       }
     }
     trackedHelperProcesses.set(child, record);
     const releaseIfStale = (): void => {
       setTimeout(() => {
+        if (trackedHelperProcesses.get(child) !== record) return;
         if (ownerHelperIdentityState(record) !== "stale") return;
         activeReaper?.untrackHelper(marker);
         trackedHelperProcesses.delete(child);
@@ -1208,6 +1278,19 @@ export function spawnOwnerTrackedHelper(
     };
     child.once("error", releaseIfStale);
     child.once("exit", releaseIfStale);
+    if (!("state" in record)) {
+      try {
+        reaper?.bindHelper(marker, record);
+      } catch (error) {
+        if (terminateOwnerHelperAfterRegistrationFailure(child, record)) {
+          try {
+            reaper?.untrackHelper(marker);
+            trackedHelperProcesses.delete(child);
+          } catch {}
+        }
+        throw error;
+      }
+    }
   }
   return child;
 }

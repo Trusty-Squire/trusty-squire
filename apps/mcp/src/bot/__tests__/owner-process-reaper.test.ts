@@ -13,6 +13,7 @@ import {
   markOwnerBrowserLaunchTerminal,
   ownerBrowserLaunchState,
   ownerHelperIdentityState,
+  ownerTrackedHelperState,
   reconcileOwnerBrowserLaunchAfterLeaderExit,
   runOwnerProcessReaperWorker,
   spawnOwnerTrackedHelper,
@@ -132,7 +133,7 @@ describe("owner process startup sweep", () => {
   );
 
   it.skipIf(process.platform !== "linux")(
-    "restarts a ready worker before accepting later registrations",
+    "restarts a ready worker immediately while existing custody remains registered",
     async () => {
       const root = await mkdtemp(join(tmpdir(), "trusty-squire-reaper-test-"));
       cleanup.push(root);
@@ -144,15 +145,52 @@ describe("owner process startup sweep", () => {
 
       const reaper = startOwnerProcessReaper({ rootDir: root, workerPath });
       expect(reaper).not.toBeNull();
-      await new Promise<void>((resolveWait) => setTimeout(resolveWait, 350));
-
       trackOwnerBrowserLaunch("v1:1:worker-restarted", join(root, "profile"));
+      await new Promise<void>((resolveWait) => setTimeout(resolveWait, 450));
+
+      expect(readFileSync(join(root, "worker-count"), "utf8")).toBe("2");
+      expect(reaper!.isAvailable()).toBe(true);
       const manifest = JSON.parse(readFileSync(reaper!.manifestPath, "utf8")) as {
         launches: Array<{ marker: string }>;
       };
       expect(manifest.launches).toEqual([
         expect.objectContaining({ marker: "v1:1:worker-restarted" }),
       ]);
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "fail-safe reaps existing exact helper custody when replacement cannot start",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "trusty-squire-reaper-test-"));
+      cleanup.push(root);
+      vi.stubEnv("TRUSTY_SQUIRE_REAPER_READY_TIMEOUT_MS", "100");
+      vi.stubEnv("TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS", "5");
+      const workerPath = join(root, "failed-replacement-worker.mjs");
+      await writeFile(
+        workerPath,
+        `import { existsSync, readFileSync, writeFileSync } from "node:fs";\nconst countPath = new URL("./worker-count", import.meta.url);\nconst count = existsSync(countPath) ? Number(readFileSync(countPath, "utf8")) + 1 : 1;\nwriteFileSync(countPath, String(count));\nif (count === 1) {\n  writeFileSync(process.argv[3], JSON.stringify({ version: 1, token: process.argv[4], pid: process.pid }) + "\\n");\n  setTimeout(() => process.exit(0), 250);\n} else {\n  setInterval(() => undefined, 1000);\n}\n`,
+      );
+
+      const reaper = startOwnerProcessReaper({ rootDir: root, workerPath });
+      expect(reaper).not.toBeNull();
+      const helper = spawnOwnerTrackedHelper(process.execPath, [
+        "-e",
+        'process.on("SIGTERM", () => undefined); setInterval(() => undefined, 1000)',
+      ]);
+      try {
+        await vi.waitFor(() => expect(ownerTrackedHelperState(helper)).toBe("stale"), {
+          timeout: 2_000,
+        });
+        expect(readFileSync(join(root, "worker-count"), "utf8")).toBe("2");
+        expect(reaper!.isAvailable()).toBe(false);
+      } finally {
+        if (helper.pid !== undefined) {
+          try {
+            process.kill(-helper.pid, "SIGKILL");
+          } catch {}
+        }
+      }
     },
   );
 
@@ -268,6 +306,75 @@ describe("owner process startup sweep", () => {
     };
     expect(afterFailure.helpers).toEqual([]);
   });
+
+  it.skipIf(process.platform !== "linux")(
+    "reaps a surviving exact-marker helper group when post-spawn binding fails",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "trusty-squire-reaper-test-"));
+      cleanup.push(root);
+      vi.stubEnv("TRUSTY_SQUIRE_REAPER_DIR", root);
+      vi.stubEnv("TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS", "10");
+      const survivorPath = join(root, "survivor.pid");
+      const helperPath = join(root, "leader.mjs");
+      await writeFile(
+        helperPath,
+        `import { spawn } from "node:child_process";\nimport { writeFileSync } from "node:fs";\nconst survivor = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => undefined); setInterval(() => undefined, 1000)"], { stdio: "ignore" });\nwriteFileSync(process.argv[2], String(survivor.pid));\nsetTimeout(() => process.exit(0), 50);\n`,
+      );
+      const reaper = ensureOwnerProcessReaper();
+      expect(reaper).not.toBeNull();
+      const waitBuffer = new Int32Array(new SharedArrayBuffer(4));
+      reaper!.bindHelper = () => {
+        const deadline = Date.now() + 1_000;
+        while (!existsSync(survivorPath) && Date.now() < deadline) {
+          Atomics.wait(waitBuffer, 0, 0, 5);
+        }
+        Atomics.wait(waitBuffer, 0, 0, 100);
+        throw new Error("bind failed");
+      };
+      let leader: ChildProcess | undefined;
+      let survivorPid: number | undefined;
+      try {
+        expect(() =>
+          spawnOwnerTrackedHelper(process.execPath, [helperPath, survivorPath], {}, {
+            spawn: ((...args: Parameters<typeof spawn>) => {
+              leader = spawn(...args);
+              return leader;
+            }) as typeof spawn,
+          }),
+        ).toThrow("bind failed");
+
+        survivorPid = Number(readFileSync(survivorPath, "utf8"));
+        const processIsGone = (pid: number): boolean => {
+          try {
+            const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+            const close = stat.lastIndexOf(")");
+            const state = close < 0 ? undefined : stat.slice(close + 2).split(" ")[0];
+            return state === "Z" || state === "X";
+          } catch {
+            return true;
+          }
+        };
+        await vi.waitFor(() => expect(processIsGone(survivorPid!)).toBe(true), { timeout: 2_000 });
+        await vi.waitFor(() => {
+          const manifest = JSON.parse(readFileSync(reaper!.manifestPath, "utf8")) as {
+            helpers: unknown[];
+          };
+          expect(manifest.helpers).toEqual([]);
+        });
+      } finally {
+        if (leader?.pid !== undefined) {
+          try {
+            process.kill(-leader.pid, "SIGKILL");
+          } catch {}
+        }
+        if (survivorPid !== undefined) {
+          try {
+            process.kill(survivorPid, "SIGKILL");
+          } catch {}
+        }
+      }
+    },
+  );
 
   it("reserves profile custody before directory creation and clears failed reservations", () => {
     const root = join(tmpdir(), `trusty-squire-reaper-test-${Date.now()}`);
@@ -568,5 +675,57 @@ describe("owner process startup sweep", () => {
     expect(await readFile(join(foreign, OWNER_PROFILE_SIGNATURE_FILE), "utf8")).toContain(
       "someone-else",
     );
+  });
+
+  it("isolates profile removal failures and retries retained exact custody", async () => {
+    vi.stubEnv("TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS", "1");
+    const root = await mkdtemp(join(tmpdir(), "trusty-squire-reaper-test-"));
+    const retained = await mkdtemp(join(tmpdir(), "trusty-squire-operate-"));
+    const removed = await mkdtemp(join(tmpdir(), "trusty-squire-operate-"));
+    cleanup.push(root, retained, removed);
+    const retainedToken = "retained-cleanup-token";
+    const removedToken = "removed-cleanup-token";
+    await writeFile(
+      join(retained, OWNER_PROFILE_SIGNATURE_FILE),
+      `${JSON.stringify({ version: 1, token: retainedToken, path: retained })}\n`,
+    );
+    await writeFile(
+      join(removed, OWNER_PROFILE_SIGNATURE_FILE),
+      `${JSON.stringify({ version: 1, token: removedToken, path: removed })}\n`,
+    );
+    await writeFile(
+      join(root, "stale.json"),
+      `${JSON.stringify({
+        version: 4,
+        token: "manifest",
+        owner: { pid: 999_999_999, start_time: "1" },
+        resources: [],
+        launches: [],
+        profiles: [
+          { path: retained, token: retainedToken, state: "ready" },
+          { path: removed, token: removedToken, state: "ready" },
+        ],
+        helpers: [],
+      })}\n`,
+    );
+
+    await expect(
+      sweepOrphanedOwnerProcesses(root, {
+        removePath: (path, options) => {
+          if (path === retained) {
+            throw Object.assign(new Error("profile busy"), { code: "EBUSY" });
+          }
+          rmSync(path, options);
+        },
+      }),
+    ).resolves.toBe(0);
+
+    expect(existsSync(retained)).toBe(true);
+    expect(existsSync(removed)).toBe(false);
+    expect(existsSync(join(root, "stale.json"))).toBe(true);
+
+    await sweepOrphanedOwnerProcesses(root);
+    expect(existsSync(retained)).toBe(false);
+    expect(existsSync(join(root, "stale.json"))).toBe(false);
   });
 });
