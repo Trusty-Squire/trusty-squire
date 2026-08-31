@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +14,7 @@ import {
   ownerBrowserLaunchState,
   ownerHelperIdentityState,
   reconcileOwnerBrowserLaunchAfterLeaderExit,
+  runOwnerProcessReaperWorker,
   spawnOwnerTrackedHelper,
   startOwnerProcessReaper,
   stopOwnerProcessReaper,
@@ -131,24 +132,61 @@ describe("owner process startup sweep", () => {
   );
 
   it.skipIf(process.platform !== "linux")(
-    "rejects later registrations after the ready worker exits",
+    "restarts a ready worker before accepting later registrations",
     async () => {
       const root = await mkdtemp(join(tmpdir(), "trusty-squire-reaper-test-"));
       cleanup.push(root);
       const workerPath = join(root, "later-exit-worker.mjs");
       await writeFile(
         workerPath,
-        `import { writeFileSync } from "node:fs";\nwriteFileSync(process.argv[3], JSON.stringify({ version: 1, token: process.argv[4], pid: process.pid }) + "\\n");\nsetTimeout(() => process.exit(0), 100);\n`,
+        `import { existsSync, readFileSync, writeFileSync } from "node:fs";\nconst countPath = new URL("./worker-count", import.meta.url);\nconst count = existsSync(countPath) ? Number(readFileSync(countPath, "utf8")) + 1 : 1;\nwriteFileSync(countPath, String(count));\nwriteFileSync(process.argv[3], JSON.stringify({ version: 1, token: process.argv[4], pid: process.pid }) + "\\n");\nif (count === 1) setTimeout(() => process.exit(0), 250);\nelse setInterval(() => undefined, 1000);\n`,
       );
 
-      expect(startOwnerProcessReaper({ rootDir: root, workerPath })).not.toBeNull();
-      await new Promise<void>((resolveWait) => setTimeout(resolveWait, 200));
+      const reaper = startOwnerProcessReaper({ rootDir: root, workerPath });
+      expect(reaper).not.toBeNull();
+      await new Promise<void>((resolveWait) => setTimeout(resolveWait, 350));
 
-      expect(() =>
-        trackOwnerBrowserLaunch("v1:1:worker-exited-later", join(root, "profile")),
-      ).toThrow("owner process reaper unavailable for local browser launch");
+      trackOwnerBrowserLaunch("v1:1:worker-restarted", join(root, "profile"));
+      const manifest = JSON.parse(readFileSync(reaper!.manifestPath, "utf8")) as {
+        launches: Array<{ marker: string }>;
+      };
+      expect(manifest.launches).toEqual([
+        expect.objectContaining({ marker: "v1:1:worker-restarted" }),
+      ]);
     },
   );
+
+  it("retries an invalid manifest until confirmed deletion", async () => {
+    const root = await mkdtemp(join(tmpdir(), "trusty-squire-reaper-test-"));
+    cleanup.push(root);
+    const manifestPath = join(root, "transient.json");
+    await writeFile(manifestPath, "{\n");
+    vi.stubEnv("TRUSTY_SQUIRE_REAPER_POLL_MS", "5");
+    const stat = readFileSync(`/proc/${process.pid}/stat`, "utf8");
+    const startTime = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+    let ready = false;
+    const worker = runOwnerProcessReaperWorker(manifestPath, () => {
+      ready = true;
+      rmSync(manifestPath, { force: true });
+    });
+
+    await new Promise<void>((resolveWait) => setTimeout(resolveWait, 20));
+    await writeFile(
+      manifestPath,
+      `${JSON.stringify({
+        version: 4,
+        token: "transient-read",
+        owner: { pid: process.pid, start_time: startTime },
+        resources: [],
+        launches: [],
+        profiles: [],
+        helpers: [],
+      })}\n`,
+    );
+
+    await worker;
+    expect(ready).toBe(true);
+  });
 
   it.skipIf(process.platform !== "linux")(
     "reaps a helper from its pending exact-marker record",
@@ -235,7 +273,11 @@ describe("owner process startup sweep", () => {
     const root = join(tmpdir(), `trusty-squire-reaper-test-${Date.now()}`);
     const profile = join(tmpdir(), `trusty-squire-operate-test-${Date.now()}`);
     const staging = join(tmpdir(), `.trusty-squire-profile-staging-test-${Date.now()}`);
-    cleanup.push(root, profile, staging);
+    const reservation = join(
+      tmpdir(),
+      `.trusty-squire-profile-reservation-test-${Date.now()}.json`,
+    );
+    cleanup.push(root, profile, staging, reservation);
     vi.stubEnv("TRUSTY_SQUIRE_REAPER_DIR", root);
     const reaper = ensureOwnerProcessReaper();
     expect(reaper).not.toBeNull();
@@ -245,8 +287,10 @@ describe("owner process startup sweep", () => {
       createOwnerEphemeralProfile({
         path: () => profile,
         stagingPath: () => staging,
+        reservationPath: () => reservation,
         createDirectory: (path) => {
           expect(path).toBe(staging);
+          expect(existsSync(reservation)).toBe(true);
           atCreation = JSON.parse(readFileSync(reaper!.manifestPath, "utf8")) as typeof atCreation;
           throw new Error("directory creation failed");
         },
@@ -257,6 +301,7 @@ describe("owner process startup sweep", () => {
       {
         path: profile,
         staging_path: staging,
+        reservation_path: reservation,
         token: expect.any(String),
         state: "pending",
       },
@@ -265,6 +310,7 @@ describe("owner process startup sweep", () => {
       profiles: unknown[];
     };
     expect(afterFailure.profiles).toEqual([]);
+    expect(existsSync(reservation)).toBe(false);
   });
 
   it("publishes an ephemeral profile only after its exact signature is present", () => {
@@ -410,6 +456,15 @@ describe("owner process startup sweep", () => {
     const signed = await mkdtemp(join(tmpdir(), "trusty-squire-operate-"));
     const signedPending = await mkdtemp(join(tmpdir(), ".trusty-squire-profile-staging-"));
     const signedPendingFinal = join(tmpdir(), `trusty-squire-operate-signed-pending-${Date.now()}`);
+    const reservedPending = await mkdtemp(join(tmpdir(), ".trusty-squire-profile-staging-"));
+    const reservedPendingFinal = join(
+      tmpdir(),
+      `trusty-squire-operate-reserved-pending-${Date.now()}`,
+    );
+    const reservedPendingProof = join(
+      tmpdir(),
+      `.trusty-squire-profile-reservation-test-${Date.now()}.json`,
+    );
     const retained = await mkdtemp(join(tmpdir(), "trusty-squire-operate-"));
     const unsignedPending = await mkdtemp(join(tmpdir(), ".trusty-squire-profile-staging-"));
     const unsignedPendingFinal = join(
@@ -417,9 +472,19 @@ describe("owner process startup sweep", () => {
       `trusty-squire-operate-unsigned-pending-${Date.now()}`,
     );
     const foreign = await mkdtemp(join(tmpdir(), "trusty-squire-operate-"));
-    cleanup.push(root, signed, signedPending, retained, unsignedPending, foreign);
+    cleanup.push(
+      root,
+      signed,
+      signedPending,
+      reservedPending,
+      reservedPendingProof,
+      retained,
+      unsignedPending,
+      foreign,
+    );
     const token = "signed-profile-token";
     const pendingToken = "signed-pending-token";
+    const reservedPendingToken = "reserved-pending-token";
     const retainedToken = "live-profile-token";
     await writeFile(
       join(signed, OWNER_PROFILE_SIGNATURE_FILE),
@@ -436,6 +501,15 @@ describe("owner process startup sweep", () => {
     await writeFile(
       join(signedPending, OWNER_PROFILE_SIGNATURE_FILE),
       `${JSON.stringify({ version: 1, token: pendingToken, path: signedPendingFinal })}\n`,
+    );
+    await writeFile(
+      reservedPendingProof,
+      `${JSON.stringify({
+        version: 1,
+        token: reservedPendingToken,
+        path: reservedPendingFinal,
+        staging_path: reservedPending,
+      })}\n`,
     );
     await mkdir(root, { recursive: true });
     await writeFile(
@@ -463,6 +537,13 @@ describe("owner process startup sweep", () => {
             state: "pending",
           },
           {
+            path: reservedPendingFinal,
+            staging_path: reservedPending,
+            reservation_path: reservedPendingProof,
+            token: reservedPendingToken,
+            state: "pending",
+          },
+          {
             path: unsignedPendingFinal,
             staging_path: unsignedPending,
             token: "unsigned-pending-token",
@@ -479,6 +560,8 @@ describe("owner process startup sweep", () => {
     expect(existsSync(signed)).toBe(false);
     expect(existsSync(retained)).toBe(true);
     expect(existsSync(signedPending)).toBe(false);
+    expect(existsSync(reservedPending)).toBe(false);
+    expect(existsSync(reservedPendingProof)).toBe(false);
     expect(existsSync(unsignedPending)).toBe(true);
     expect(existsSync(foreign)).toBe(true);
     expect(existsSync(join(root, "stale.json"))).toBe(true);

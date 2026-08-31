@@ -49,7 +49,13 @@ interface OwnerProfileRecord {
   token: string;
   state: "pending" | "ready";
   staging_path?: string;
+  reservation_path?: string;
 }
+
+type OwnerReaperManifestRead =
+  | { state: "present"; manifest: OwnerReaperManifest }
+  | { state: "missing" }
+  | { state: "unknown" };
 
 export interface OwnerHelperIdentity {
   pid: number;
@@ -78,11 +84,17 @@ interface OwnerReaperManifest {
 export interface OwnerProcessReaper {
   readonly manifestPath: string;
   isAvailable(): boolean;
+  restart(): boolean;
   track(identity: ProfileProcessIdentity): void;
   untrack(identity: ProfileProcessIdentity): void;
   trackLaunch(marker: string, profileDir: string): void;
   untrackLaunch(marker: string): void;
-  reserveProfile(profileDir: string, stagingDir: string, token: string): void;
+  reserveProfile(
+    profileDir: string,
+    stagingDir: string,
+    reservationPath: string,
+    token: string,
+  ): void;
   commitProfile(profileDir: string, token: string): void;
   untrackProfile(profileDir: string): void;
   reserveHelper(marker: string): void;
@@ -97,7 +109,8 @@ const EPHEMERAL_PROFILE_PREFIX = "trusty-squire-operate-";
 const DEFAULT_POLL_MS = 1_000;
 const DEFAULT_TERM_GRACE_MS = 2_000;
 const DEFAULT_WORKER_READY_TIMEOUT_MS = 2_000;
-const DEFAULT_WORKER_STABILITY_MS = 25;
+const DEFAULT_WORKER_STABILITY_MS = 100;
+const PROFILE_RESERVATION_PREFIX = ".trusty-squire-profile-reservation-";
 const workerReadyWait = new Int32Array(new SharedArrayBuffer(4));
 const moduleRequire = createRequire(import.meta.url);
 let activeReaper: OwnerProcessReaper | null = null;
@@ -132,6 +145,7 @@ function isProfile(value: unknown): value is OwnerProfileRecord {
     typeof profile.path === "string" &&
     typeof profile.token === "string" &&
     (profile.staging_path === undefined || typeof profile.staging_path === "string") &&
+    (profile.reservation_path === undefined || typeof profile.reservation_path === "string") &&
     (profile.state === undefined || profile.state === "pending" || profile.state === "ready")
   );
 }
@@ -155,7 +169,7 @@ function isHelper(value: unknown): value is OwnerHelperRecord {
   );
 }
 
-function readManifest(path: string): OwnerReaperManifest | null {
+function readManifest(path: string): OwnerReaperManifestRead {
   try {
     const value = JSON.parse(readFileSync(path, "utf8")) as {
       version?: number;
@@ -174,7 +188,7 @@ function readManifest(path: string): OwnerReaperManifest | null {
       typeof value.owner.start_time !== "string" ||
       !Array.isArray(value.resources)
     ) {
-      return null;
+      return { state: "unknown" };
     }
     const resources = value.resources.filter(
       (resource): resource is ProfileProcessIdentity =>
@@ -196,23 +210,28 @@ function readManifest(path: string): OwnerReaperManifest | null {
       profiles.some((profile) => !isProfile(profile)) ||
       helpers.some((helper) => !isHelper(helper))
     ) {
-      return null;
+      return { state: "unknown" };
     }
     return {
-      version: 4,
-      token: value.token,
-      owner: value.owner,
-      resources,
-      launches: normalizedLaunches as OwnerLaunchRecord[],
-      profiles: (
-        profiles as Array<
-          Omit<OwnerProfileRecord, "state"> & { state?: OwnerProfileRecord["state"] }
-        >
-      ).map((profile) => ({ ...profile, state: profile.state ?? "ready" })),
-      helpers: helpers as OwnerHelperRecord[],
+      state: "present",
+      manifest: {
+        version: 4,
+        token: value.token,
+        owner: value.owner,
+        resources,
+        launches: normalizedLaunches as OwnerLaunchRecord[],
+        profiles: (
+          profiles as Array<
+            Omit<OwnerProfileRecord, "state"> & { state?: OwnerProfileRecord["state"] }
+          >
+        ).map((profile) => ({ ...profile, state: profile.state ?? "ready" })),
+        helpers: helpers as OwnerHelperRecord[],
+      },
     };
-  } catch {
-    return null;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? { state: "missing" }
+      : { state: "unknown" };
   }
 }
 
@@ -574,11 +593,52 @@ function signedStagedEphemeralProfile(record: OwnerProfileRecord): boolean {
   return profileSignatureMatches(record, stagingPath);
 }
 
+function profileReservationMatches(record: OwnerProfileRecord): boolean {
+  if (
+    record.state !== "pending" ||
+    record.staging_path === undefined ||
+    record.reservation_path === undefined
+  ) {
+    return false;
+  }
+  const reservationPath = resolve(record.reservation_path);
+  if (
+    dirname(reservationPath) !== resolve(tmpdir()) ||
+    !basename(reservationPath).startsWith(PROFILE_RESERVATION_PREFIX)
+  ) {
+    return false;
+  }
+  try {
+    const stat = lstatSync(reservationPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) return false;
+    const reservation = JSON.parse(readFileSync(reservationPath, "utf8")) as {
+      version?: unknown;
+      token?: unknown;
+      path?: unknown;
+      staging_path?: unknown;
+    };
+    return (
+      reservation.version === 1 &&
+      reservation.token === record.token &&
+      reservation.path === resolve(record.path) &&
+      reservation.staging_path === resolve(record.staging_path)
+    );
+  } catch {
+    return false;
+  }
+}
+
 function ownerProfileState(record: OwnerProfileRecord): ProcessIdentityState {
   const finalExists = existsSync(record.path);
   const stagingExists = record.staging_path !== undefined && existsSync(record.staging_path);
-  if (!finalExists && !stagingExists) return "stale";
-  if (signedEphemeralProfile(record) || signedStagedEphemeralProfile(record)) {
+  const reservationExists =
+    record.reservation_path !== undefined && existsSync(record.reservation_path);
+  if (!finalExists && !stagingExists && !reservationExists) return "stale";
+  if (
+    signedEphemeralProfile(record) ||
+    signedStagedEphemeralProfile(record) ||
+    profileReservationMatches(record)
+  ) {
     return "matching";
   }
   return "unknown";
@@ -609,11 +669,18 @@ function cleanTrackedProfiles(manifest: OwnerReaperManifest): void {
   }
   for (const profile of manifest.profiles) {
     if (!profileProcessesAreStale(manifest, profile)) continue;
+    const reservationMatches = profileReservationMatches(profile);
     if (signedEphemeralProfile(profile)) {
       rmSync(profile.path, { recursive: true, force: true });
     }
-    if (profile.staging_path !== undefined && signedStagedEphemeralProfile(profile)) {
+    if (
+      profile.staging_path !== undefined &&
+      (signedStagedEphemeralProfile(profile) || reservationMatches)
+    ) {
       rmSync(profile.staging_path, { recursive: true, force: true });
+    }
+    if (profile.reservation_path !== undefined && reservationMatches) {
+      rmSync(profile.reservation_path, { force: true });
     }
   }
 }
@@ -633,11 +700,14 @@ async function reapManifest(path: string, manifest: OwnerReaperManifest): Promis
   const graceMs = envPositiveMs("TRUSTY_SQUIRE_REAPER_TERM_GRACE_MS", DEFAULT_TERM_GRACE_MS);
   const signalled = signalTrackedResources(manifest, "SIGTERM");
   await new Promise<void>((resolveWait) => setTimeout(resolveWait, graceMs));
-  const latest = readManifest(path) ?? manifest;
+  const latestRead = readManifest(path);
+  const latest = latestRead.state === "present" ? latestRead.manifest : manifest;
   signalTrackedResources(latest, "SIGKILL");
   cleanTrackedProfiles(latest);
   await sweepOperatorProfilePoolOrphans().catch(() => undefined);
-  if (manifestCleanupComplete(latest)) rmSync(path, { force: true });
+  if (latestRead.state === "present" && manifestCleanupComplete(latest)) {
+    rmSync(path, { force: true });
+  }
   return signalled;
 }
 
@@ -647,9 +717,9 @@ export async function sweepOrphanedOwnerProcesses(rootDir = defaultRootDir()): P
   for (const entry of readdirSync(rootDir)) {
     if (!entry.endsWith(".json")) continue;
     const path = join(rootDir, entry);
-    const manifest = readManifest(path);
-    if (manifest === null || !shouldReapOwner(ownerState(manifest))) continue;
-    reaped += await reapManifest(path, manifest);
+    const read = readManifest(path);
+    if (read.state !== "present" || !shouldReapOwner(ownerState(read.manifest))) continue;
+    reaped += await reapManifest(path, read.manifest);
   }
   return reaped;
 }
@@ -661,15 +731,20 @@ export async function runOwnerProcessReaperWorker(
   const pollMs = envPositiveMs("TRUSTY_SQUIRE_REAPER_POLL_MS", DEFAULT_POLL_MS);
   let ready = false;
   for (;;) {
-    const manifest = readManifest(manifestPath);
-    if (manifest === null) return;
+    const read = readManifest(manifestPath);
+    if (read.state === "missing") return;
+    if (read.state === "unknown") {
+      await new Promise<void>((resolveWait) => setTimeout(resolveWait, pollMs));
+      continue;
+    }
+    const manifest = read.manifest;
     if (!ready) {
       onReady();
       ready = true;
     }
     if (shouldReapOwner(ownerState(manifest))) {
       await reapManifest(manifestPath, manifest);
-      if (!existsSync(manifestPath)) return;
+      if (readManifest(manifestPath).state === "missing") return;
     }
     await new Promise<void>((resolveWait) => setTimeout(resolveWait, pollMs));
   }
@@ -717,12 +792,67 @@ function waitForOwnerReaperWorker(
   return null;
 }
 
+interface OwnerReaperWorkerHandle {
+  isAvailable(): boolean;
+  stop(): void;
+}
+
+function launchOwnerReaperWorker(
+  workerPath: string,
+  manifestPath: string,
+  rootDir: string,
+  token: string,
+  spawnWorker: typeof spawn,
+): OwnerReaperWorkerHandle | null {
+  const workerExecArgs = workerPath.endsWith(".ts")
+    ? ["--import", moduleRequire.resolve("tsx")]
+    : [];
+  const readyPath = join(rootDir, `${process.pid}-${token}-${randomUUID()}.ready`);
+  let worker: ChildProcess;
+  try {
+    worker = spawnWorker(
+      process.execPath,
+      [...workerExecArgs, workerPath, manifestPath, readyPath, token],
+      {
+        detached: true,
+        stdio: "ignore",
+        env: process.env,
+      },
+    );
+    worker.unref();
+  } catch {
+    rmSync(readyPath, { force: true });
+    return null;
+  }
+
+  let exited = false;
+  worker.once("error", () => {
+    exited = true;
+  });
+  worker.once("exit", () => {
+    exited = true;
+  });
+  const identity = waitForOwnerReaperWorker(worker, readyPath, token);
+  rmSync(readyPath, { force: true });
+  if (identity === null || exited) {
+    worker.kill("SIGTERM");
+    return null;
+  }
+  return {
+    isAvailable: () => !exited && ownerReaperWorkerRunning(identity),
+    stop: () => {
+      exited = true;
+      worker.kill("SIGTERM");
+    },
+  };
+}
+
 export function startOwnerProcessReaper(
   options: { rootDir?: string; workerPath?: string } = {},
   runtime: { spawn?: typeof spawn } = {},
 ): OwnerProcessReaper | null {
   if (process.platform !== "linux") return null;
-  if (activeReaper !== null) return activeReaper.isAvailable() ? activeReaper : null;
+  if (activeReaper !== null) return activeReaper.restart() ? activeReaper : null;
   const rootDir = resolve(options.rootDir ?? defaultRootDir());
   ensurePrivateDir(rootDir);
   void sweepOrphanedOwnerProcesses(rootDir).catch(() => undefined);
@@ -753,47 +883,35 @@ export function startOwnerProcessReaper(
     rmSync(manifestPath, { force: true });
     return null;
   }
-  const workerExecArgs = workerPath.endsWith(".ts")
-    ? ["--import", moduleRequire.resolve("tsx")]
-    : [];
-  const readyPath = join(rootDir, `${owner.pid}-${token}.ready`);
-  let worker: ChildProcess;
-  try {
-    worker = (runtime.spawn ?? spawn)(
-      process.execPath,
-      [...workerExecArgs, workerPath, manifestPath, readyPath, token],
-      {
-        detached: true,
-        stdio: "ignore",
-        env: process.env,
-      },
-    );
-    worker.unref();
-  } catch {
-    rmSync(manifestPath, { force: true });
-    rmSync(readyPath, { force: true });
-    return null;
-  }
-
   let stopped = false;
-  let workerExited = false;
-  worker.once("error", () => {
-    workerExited = true;
-  });
-  worker.once("exit", () => {
-    workerExited = true;
-  });
-  const workerIdentity = waitForOwnerReaperWorker(worker, readyPath, token);
-  rmSync(readyPath, { force: true });
-  if (workerIdentity === null || workerExited) {
-    worker.kill("SIGTERM");
+  const spawnWorker = runtime.spawn ?? spawn;
+  let workerHandle = launchOwnerReaperWorker(
+    workerPath,
+    manifestPath,
+    rootDir,
+    token,
+    spawnWorker,
+  );
+  if (workerHandle === null) {
     rmSync(manifestPath, { force: true });
     return null;
   }
-  const isAvailable = (): boolean =>
-    !stopped && !workerExited && ownerReaperWorkerRunning(workerIdentity);
+  const isAvailable = (): boolean => !stopped && workerHandle?.isAvailable() === true;
+  const restart = (): boolean => {
+    if (stopped) return false;
+    if (isAvailable()) return true;
+    workerHandle?.stop();
+    workerHandle = launchOwnerReaperWorker(
+      workerPath,
+      manifestPath,
+      rootDir,
+      token,
+      spawnWorker,
+    );
+    return workerHandle !== null;
+  };
   const requireAvailable = (): void => {
-    if (!isAvailable()) throw new Error("owner process reaper worker unavailable");
+    if (!restart()) throw new Error("owner process reaper worker unavailable");
   };
   const update = (next: OwnerReaperManifest): void => {
     manifest = next;
@@ -802,6 +920,7 @@ export function startOwnerProcessReaper(
   const reaper: OwnerProcessReaper = {
     manifestPath,
     isAvailable,
+    restart,
     track: (identity) => {
       requireAvailable();
       update({
@@ -835,22 +954,31 @@ export function startOwnerProcessReaper(
         launches: manifest.launches.filter((entry) => entry.marker !== marker),
       });
     },
-    reserveProfile: (profileDir, stagingDir, profileToken) => {
+    reserveProfile: (profileDir, stagingDir, reservationPath, profileToken) => {
       requireAvailable();
       const path = resolve(profileDir);
       const stagingPath = resolve(stagingDir);
+      const durableReservationPath = resolve(reservationPath);
       if (
         dirname(path) !== resolve(tmpdir()) ||
         !basename(path).startsWith(EPHEMERAL_PROFILE_PREFIX) ||
         dirname(stagingPath) !== resolve(tmpdir()) ||
-        !basename(stagingPath).startsWith(".trusty-squire-profile-staging-")
+        !basename(stagingPath).startsWith(".trusty-squire-profile-staging-") ||
+        dirname(durableReservationPath) !== resolve(tmpdir()) ||
+        !basename(durableReservationPath).startsWith(PROFILE_RESERVATION_PREFIX)
       )
         return;
       update({
         ...manifest,
         profiles: [
           ...manifest.profiles.filter((entry) => entry.path !== path),
-          { path, staging_path: stagingPath, token: profileToken, state: "pending" },
+          {
+            path,
+            staging_path: stagingPath,
+            reservation_path: durableReservationPath,
+            token: profileToken,
+            state: "pending",
+          },
         ],
       });
     },
@@ -907,7 +1035,8 @@ export function startOwnerProcessReaper(
         trackedLaunchWatchdogs.delete(launch.marker);
       }
       rmSync(manifestPath, { force: true });
-      worker.kill("SIGTERM");
+      workerHandle?.stop();
+      workerHandle = null;
       if (activeReaper === reaper) activeReaper = null;
     },
   };
@@ -916,7 +1045,7 @@ export function startOwnerProcessReaper(
 }
 
 export function ensureOwnerProcessReaper(): OwnerProcessReaper | null {
-  if (activeReaper !== null) return activeReaper.isAvailable() ? activeReaper : null;
+  if (activeReaper !== null) return activeReaper.restart() ? activeReaper : null;
   return startOwnerProcessReaper();
 }
 
@@ -964,6 +1093,8 @@ export function createOwnerEphemeralProfile(
   operations: {
     path?: () => string;
     stagingPath?: () => string;
+    reservationPath?: () => string;
+    writeReservation?: (path: string, contents: string) => void;
     createDirectory?: (path: string) => void;
     writeSignature?: (path: string, contents: string) => void;
     publish?: (stagingPath: string, path: string) => void;
@@ -973,17 +1104,32 @@ export function createOwnerEphemeralProfile(
   if (process.platform === "linux" && reaper === null) {
     throw new Error("owner process reaper unavailable for ephemeral profile");
   }
+  const token = randomUUID();
   const profileDir = resolve(
     operations.path?.() ?? join(tmpdir(), `${EPHEMERAL_PROFILE_PREFIX}${randomUUID()}`),
   );
   const stagingDir = resolve(
-    operations.stagingPath?.() ?? join(tmpdir(), `.trusty-squire-profile-staging-${randomUUID()}`),
+    operations.stagingPath?.() ?? join(tmpdir(), `.trusty-squire-profile-staging-${token}`),
   );
-  const token = randomUUID();
-  reaper?.reserveProfile(profileDir, stagingDir, token);
+  const reservationPath = resolve(
+    operations.reservationPath?.() ?? join(tmpdir(), `${PROFILE_RESERVATION_PREFIX}${token}.json`),
+  );
+  reaper?.reserveProfile(profileDir, stagingDir, reservationPath, token);
+  let reservationCreated = false;
   let created = false;
   let published = false;
   try {
+    const reservation = `${JSON.stringify({
+      version: 1,
+      token,
+      path: profileDir,
+      staging_path: stagingDir,
+    })}\n`;
+    (
+      operations.writeReservation ??
+      ((path, contents) => writeFileSync(path, contents, { mode: 0o600, flag: "wx" }))
+    )(reservationPath, reservation);
+    reservationCreated = true;
     (operations.createDirectory ?? ((path) => mkdirSync(path, { mode: 0o700 })))(stagingDir);
     created = true;
     chmodSync(stagingDir, 0o700);
@@ -998,11 +1144,14 @@ export function createOwnerEphemeralProfile(
     )(stagingDir, signature);
     (operations.publish ?? renameSync)(stagingDir, profileDir);
     published = true;
+    rmSync(reservationPath, { force: true });
+    reservationCreated = false;
     reaper?.commitProfile(profileDir, token);
     return profileDir;
   } catch (error) {
     if (published) rmSync(profileDir, { recursive: true, force: true });
     else if (created) rmSync(stagingDir, { recursive: true, force: true });
+    if (reservationCreated) rmSync(reservationPath, { force: true });
     reaper?.untrackProfile(profileDir);
     throw error;
   }

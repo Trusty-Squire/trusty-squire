@@ -198,7 +198,24 @@ const h = vi.hoisted(() => ({
       observed: "3ds_challenge";
     };
   },
+  artifactRemovalPath: null as string | null,
 }));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    rmSync: (...args: Parameters<typeof actual.rmSync>) => {
+      if (
+        h.artifactRemovalPath !== null &&
+        String(args[0]).startsWith(h.artifactRemovalPath)
+      ) {
+        throw new Error("simulated observation artifact removal failure");
+      }
+      return actual.rmSync(...args);
+    },
+  };
+});
 
 vi.mock("../session-state.js", async (importOriginal) => {
   const actual = await importOriginal<typeof SessionState>();
@@ -1226,6 +1243,7 @@ beforeEach(() => {
   h.waitForThreeDsResult = "timeout";
   h.waitForThreeDsCalls = [];
   h.paymentInstrumentMismatch = null;
+  h.artifactRemovalPath = null;
 });
 
 const replayRecipe = (overrides: Partial<OperatorRecipe> = {}): OperatorRecipe => ({
@@ -7304,6 +7322,46 @@ describe("operate session — ephemeral profile lifecycle", () => {
     expect(activeSessionCount()).toBe(0);
     expect(existsSync(started.snapshot_file!)).toBe(false);
   });
+
+  it.skipIf(process.platform !== "linux")(
+    "still closes the browser when observation artifact removal fails",
+    async () => {
+      vi.useFakeTimers();
+      const observeRoot = mkdtempSync(join(tmpdir(), "trusty-squire-observe-test-"));
+      const previousObserveDir = process.env.TRUSTY_SQUIRE_OBSERVE_DIR;
+      process.env.TRUSTY_SQUIRE_OBSERVE_DIR = observeRoot;
+      h.elements = [
+        elem({
+          tag: "button",
+          visibleText: "Continue",
+          screenPath: "main:checkout > button:continue",
+          container: "main:checkout",
+        }),
+      ];
+      try {
+        const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+        expect(started.snapshot_file).toBeTypeOf("string");
+        h.artifactRemovalPath = observeRoot;
+        vi.setSystemTime(Date.now() + 60 * 60 * 1_000);
+
+        await expect(
+          dispatchOperatorBrowserProcessTermination("v1:1:mock-0", {
+            kind: "max_lifetime",
+            lifetime_ms: 60 * 60 * 1_000,
+            timeout_ms: 30 * 60 * 1_000,
+          }),
+        ).resolves.toBe(true);
+
+        expect(h.closeCalls).toBe(1);
+        expect(activeSessionCount()).toBe(0);
+      } finally {
+        h.artifactRemovalPath = null;
+        rmSync(observeRoot, { recursive: true, force: true });
+        if (previousObserveDir === undefined) delete process.env.TRUSTY_SQUIRE_OBSERVE_DIR;
+        else process.env.TRUSTY_SQUIRE_OBSERVE_DIR = previousObserveDir;
+      }
+    },
+  );
 
   it("routes server idle reaping through terminal teardown ownership", async () => {
     h.elements = [

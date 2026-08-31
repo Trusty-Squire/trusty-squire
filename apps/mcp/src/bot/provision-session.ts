@@ -9867,7 +9867,14 @@ function clearSessionArtifacts(session: Session): void {
   session.observeSnapshotFile = null;
   session.secretSlots.clear();
   session.sealedFieldKeys.clear();
-  rmSync(observeSnapshotDir(session.id), { recursive: true, force: true });
+  try {
+    rmSync(observeSnapshotDir(session.id), { recursive: true, force: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(
+      `[operator] session artifact cleanup failed session=${session.id}: ${message}\n`,
+    );
+  }
 }
 
 function pendingThreeDsAuditStatus(
