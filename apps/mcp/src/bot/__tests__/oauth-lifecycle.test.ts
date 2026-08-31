@@ -206,6 +206,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const context = await browser.newContext();
     const product = await context.newPage();
     let selectedAccount: string | null = null;
+    let identityAuthUser: string | null = null;
     await context.route("https://product.test/**", async (route) => {
       const callback = route.request().url().endsWith("/callback");
       await route.fulfill({
@@ -227,6 +228,13 @@ describe("BrowserController OAuth popup lifecycle", () => {
              <button data-identifier="worker@example.com" onclick="location.href='https://accounts.google.com/consent?account=worker@example.com&amp;scope=openid'">worker@example.com</button>`,
       });
     });
+    await context.route("https://myaccount.google.com/**", async (route) => {
+      identityAuthUser = new URL(route.request().url()).searchParams.get("authuser");
+      await route.fulfill({
+        contentType: "text/html",
+        body: `<button aria-label="Google Account: Selected (${identityAuthUser ?? "default@example.com"})"></button>`,
+      });
+    });
     await product.goto("https://product.test/login");
     const controller = BrowserController.fromHarnessPage(product);
 
@@ -234,6 +242,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await controller.loginWithOAuth("#oauth", 5_000, "google", "worker@example.com");
       await expect(product.locator("#state").textContent()).resolves.toBe("Signed in");
       expect(selectedAccount).toBe("worker@example.com");
+      await expect(controller.detectGoogleAccountEmail("worker@example.com")).resolves.toBe(
+        "worker@example.com",
+      );
+      expect(identityAuthUser).toBe("worker@example.com");
       expect(controller.currentUrl()).toBe("https://product.test/login");
     } finally {
       await context.close().catch(() => undefined);

@@ -16392,12 +16392,17 @@ export class BrowserController {
     }
   }
 
-  async detectGoogleAccountEmail(): Promise<string | null> {
+  async detectGoogleAccountEmail(expectedGoogleAccountEmail?: string): Promise<string | null> {
     if (this.context === null) return null;
     let identityPage: Page | null = null;
     try {
       identityPage = await this.context.newPage();
-      await identityPage.goto("https://myaccount.google.com/", {
+      const identityUrl = new URL("https://myaccount.google.com/");
+      const expectedEmail = expectedGoogleAccountEmail?.trim();
+      if (expectedEmail !== undefined && expectedEmail.length > 0) {
+        identityUrl.searchParams.set("authuser", expectedEmail);
+      }
+      await identityPage.goto(identityUrl.href, {
         waitUntil: "domcontentloaded",
         timeout: 20_000,
       });
