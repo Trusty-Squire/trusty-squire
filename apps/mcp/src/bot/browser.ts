@@ -458,15 +458,16 @@ export async function runCaptureConfirmedPaymentSubmit<T>(options: {
   } catch (error) {
     clickError = error;
   }
+  if (
+    clickError instanceof BrowserClickDispatchError &&
+    clickError.dispatchStatus === "not_dispatched"
+  ) {
+    await options.clear();
+    throw clickError;
+  }
   const evidence = await options.readEvidence();
   await options.clear();
   if (!evidence.dispatched) {
-    if (
-      clickError instanceof BrowserClickDispatchError &&
-      clickError.dispatchStatus === "not_dispatched"
-    ) {
-      throw clickError;
-    }
     if (clickError !== undefined && !inputDispatchPossible) throw clickError;
     throw new PaymentSubmitOutcomeUnknownError();
   }
@@ -11975,7 +11976,12 @@ export class BrowserController {
           }
           capturedBaseline = await runCaptureConfirmedPaymentSubmit({
             click: async (markInputDispatchPossible) => {
-              const remainingMs = beforeSubmitDispatch?.();
+              let remainingMs: void | number;
+              try {
+                remainingMs = beforeSubmitDispatch?.();
+              } catch (error) {
+                throw new BrowserClickDispatchError("not_dispatched", error);
+              }
               paymentRequestTrackingArmed = true;
               markInputDispatchPossible();
               await candidate.click({

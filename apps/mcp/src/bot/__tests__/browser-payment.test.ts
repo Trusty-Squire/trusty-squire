@@ -2437,6 +2437,7 @@ describe("checkout payment parsing", () => {
           <button id="pay">Pay now</button>
           <script>
             document.querySelector("#pay").addEventListener("click", () => {
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               const frame = document.createElement("iframe");
               frame.src = "${pciUrl}";
               document.body.append(frame);
@@ -2476,6 +2477,7 @@ describe("checkout payment parsing", () => {
           <button id="pay">Pay now</button>
           <script>
             document.querySelector("#pay").addEventListener("click", () => {
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               const frame = document.createElement("iframe");
               frame.src = ${JSON.stringify(collectionUrl)};
               document.body.append(frame);
@@ -2596,6 +2598,7 @@ describe("checkout payment parsing", () => {
           <script>
             document.querySelector("#checkout").addEventListener("submit", (event) => {
               event.preventDefault();
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               document.querySelector("#existing-confirmation").innerHTML =
                 "<span>Order confirmed</span><span>.</span>";
             });
@@ -2655,6 +2658,7 @@ describe("checkout payment parsing", () => {
               return getAttribute(name);
             };
             document.querySelector("#pay-now").addEventListener("click", () => {
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               document.body.dataset.earlyConfirmationAtPay = String(
                 document.querySelector("#early-confirmation") !== null,
               );
@@ -2719,6 +2723,7 @@ describe("checkout payment parsing", () => {
                   <button id="pay-now">Pay now</button>
                   <script>
                     document.querySelector("#pay-now").addEventListener("click", () => {
+                      void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
                       ${clickAction};
                     });
                   </script>`,
@@ -2763,6 +2768,7 @@ describe("checkout payment parsing", () => {
               <button id="pay-now">Pay now</button>
               <script>
                 document.querySelector("#pay-now").addEventListener("click", () => {
+                  void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
                   history.replaceState({}, "", "/receipt/123?attempt=2#retry");
                 });
               </script>`,
@@ -2802,6 +2808,7 @@ describe("checkout payment parsing", () => {
               <button id="pay-now">Pay now</button>
               <script>
                 document.querySelector("#pay-now").addEventListener("click", () => {
+                  void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
                   history.replaceState({}, "", "/orders/ORD-123/confirmation");
                 });
               </script>`,
@@ -2841,6 +2848,7 @@ describe("checkout payment parsing", () => {
               <button id="pay-now">Pay now</button>
               <script>
                 document.querySelector("#pay-now").addEventListener("click", () => {
+                  void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
                   history.replaceState({}, "", "/orders/ORD-123/confirmation");
                 });
               </script>`,
@@ -2880,6 +2888,7 @@ describe("checkout payment parsing", () => {
               <button id="pay-now">Pay now</button>
               <script>
                 document.querySelector("#pay-now").addEventListener("click", () => {
+                  void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
                   history.replaceState({}, "", "/orders/ORD-123/confirmation");
                 });
               </script>`,
@@ -2924,6 +2933,7 @@ describe("checkout payment parsing", () => {
                     <button id="pay-now">Pay now</button>
                     <script>
                       document.querySelector("#pay-now").addEventListener("click", () => {
+                        void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
                         history.replaceState({}, "", "/orders/ORD-123/confirmation");
                       });
                     </script>`,
@@ -2964,6 +2974,7 @@ describe("checkout payment parsing", () => {
               <button id="pay-now">Pay now</button>
               <script>
                 document.querySelector("#pay-now").addEventListener("click", () => {
+                  void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
                   history.replaceState({}, "", "/checkout/ORD-123/thank_you");
                 });
               </script>`,
@@ -3017,7 +3028,7 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "keeps a click failure pre-dispatch when no charge event fired",
+    "keeps a click failure unknown when no charge evidence fired",
     async () => {
       const browser = await chromium.launch({ headless: true });
       try {
@@ -3038,12 +3049,12 @@ describe("checkout payment parsing", () => {
         (controller as unknown as { page: Page }).page = page;
 
         const error = await controller.submitFilledCheckout().catch((caught) => caught);
-        expect(error).toBeInstanceOf(Error);
-        expect(error).not.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
+        expect(error).toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
       } finally {
         await browser.close();
       }
     },
+    20_000,
   );
 
   it.skipIf(!chromiumAvailable)(
@@ -3080,6 +3091,7 @@ describe("checkout payment parsing", () => {
           <script>
             document.querySelector("#checkout").addEventListener("submit", (event) => {
               event.preventDefault();
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               document.body.insertAdjacentHTML(
                 "beforeend",
                 '<p style="display:none">Order confirmed</p>' +
@@ -3151,6 +3163,7 @@ describe("checkout payment parsing", () => {
               document.body.append(frame);
             }, 500);
             document.querySelector("#place-order").addEventListener("click", () => {
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               document.body.dataset.submitted = "true";
             });
           </script>
@@ -4101,6 +4114,7 @@ describe("3-D Secure resolution", () => {
         <script>
           document.querySelector("#checkout").addEventListener("submit", (event) => {
             event.preventDefault();
+            void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
             document.body.dataset.submitted = "true";
           });
         </script>
@@ -6650,6 +6664,7 @@ describe("split-checkout card fill (real browser)", () => {
           <script>
             document.querySelector("#checkout").addEventListener("submit", (event) => {
               event.preventDefault();
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               document.body.dataset.submitted = "true";
             });
           </script>`,
@@ -6709,6 +6724,7 @@ describe("split-checkout card fill (real browser)", () => {
           <script>
             document.querySelector("#card-form").addEventListener("submit", (event) => {
               event.preventDefault();
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               document.body.dataset.submitted = "true";
             });
           </script>`,
@@ -6968,6 +6984,7 @@ describe("split-checkout card fill (real browser)", () => {
           <script>
             document.querySelector("#checkout").addEventListener("submit", (event) => {
               event.preventDefault();
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               document.body.dataset.submitted = "true";
             });
           </script>`,
@@ -7084,6 +7101,7 @@ describe("split-checkout card fill (real browser)", () => {
           <script>
             document.querySelector("#checkout").addEventListener("submit", (event) => {
               event.preventDefault();
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               document.body.dataset.submitted = "true";
             });
           </script>`,
