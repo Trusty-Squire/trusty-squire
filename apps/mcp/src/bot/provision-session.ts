@@ -801,6 +801,57 @@ let shutdownInProgress = 0;
 let oauthActionLeaseTail: Promise<void> = Promise.resolve();
 
 const DEFAULT_OAUTH_LOGIN_LEASE_COOLDOWN_MS = 3_000;
+const DEFAULT_OAUTH_ACTION_TIMEOUT_MS = 30_000;
+
+interface OAuthActionDeadline {
+  expiresAt: number;
+  timeoutMs: number;
+  provider: OAuthProviderId | undefined;
+}
+
+function oauthActionTimeoutMs(): number {
+  const configured = Number(process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0
+    ? Math.min(configured, DEFAULT_OAUTH_ACTION_TIMEOUT_MS)
+    : DEFAULT_OAUTH_ACTION_TIMEOUT_MS;
+}
+
+function oauthActionDeadline(provider: OAuthProviderId | undefined): OAuthActionDeadline {
+  const timeoutMs = oauthActionTimeoutMs();
+  return { expiresAt: Date.now() + timeoutMs, timeoutMs, provider };
+}
+
+function oauthActionRemainingMs(deadline: OAuthActionDeadline): number {
+  return Math.max(0, deadline.expiresAt - Date.now());
+}
+
+function oauthActionDeadlineError(deadline: OAuthActionDeadline): Error {
+  if (deadline.provider === undefined || deadline.provider === "google") {
+    return new OAuthSessionExpiredError(deadline.timeoutMs);
+  }
+  return new Error(
+    `OAuth action did not complete within ${Math.ceil(deadline.timeoutMs / 1000)} seconds`,
+  );
+}
+
+async function withinOAuthActionDeadline<T>(
+  promise: Promise<T>,
+  deadline: OAuthActionDeadline,
+): Promise<T> {
+  const remainingMs = oauthActionRemainingMs(deadline);
+  if (remainingMs <= 0) throw oauthActionDeadlineError(deadline);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(oauthActionDeadlineError(deadline)), remainingMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 function oauthLoginLeaseCooldownMs(): number {
   const configured = Number(process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS);
@@ -809,22 +860,31 @@ function oauthLoginLeaseCooldownMs(): number {
     : DEFAULT_OAUTH_LOGIN_LEASE_COOLDOWN_MS;
 }
 
-async function waitForOAuthLeaseCooldown(cooldownMs: number): Promise<void> {
-  if (cooldownMs <= 0) return;
+async function waitForOAuthLeaseCooldown(
+  cooldownMs: number,
+  deadline?: OAuthActionDeadline,
+): Promise<void> {
+  const boundedMs =
+    deadline === undefined ? cooldownMs : Math.min(cooldownMs, oauthActionRemainingMs(deadline));
+  if (boundedMs <= 0) return;
   await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, cooldownMs);
+    const timer = setTimeout(resolve, boundedMs);
     timer.unref();
   });
 }
 
-async function withOAuthActionLease<T>(run: () => Promise<T>): Promise<T> {
+async function withOAuthActionLease<T>(
+  deadline: OAuthActionDeadline | undefined,
+  run: () => Promise<T>,
+): Promise<T> {
   let release!: () => void;
   const previous = oauthActionLeaseTail;
   oauthActionLeaseTail = new Promise<void>((resolve) => {
     release = resolve;
   });
-  await previous;
   try {
+    if (deadline === undefined) await previous;
+    else await withinOAuthActionDeadline(previous, deadline);
     return await run();
   } finally {
     release();
@@ -836,8 +896,12 @@ async function withCanonicalProfileOperation<T>(
   run: () => Promise<T>,
   canContinue: () => boolean = () => true,
   releaseCooldownMs = 0,
+  deadline?: OAuthActionDeadline,
 ): Promise<T> {
   for (;;) {
+    if (deadline !== undefined && oauthActionRemainingMs(deadline) <= 0) {
+      throw oauthActionDeadlineError(deadline);
+    }
     if (!canContinue()) {
       throw new Error("canonical profile operation cancelled during operator shutdown");
     }
@@ -849,21 +913,29 @@ async function withCanonicalProfileOperation<T>(
     }
     if (lease !== undefined) {
       try {
-        return await run();
+        return deadline === undefined ? await run() : await withinOAuthActionDeadline(run(), deadline);
       } finally {
-        await waitForOAuthLeaseCooldown(releaseCooldownMs);
+        await waitForOAuthLeaseCooldown(releaseCooldownMs, deadline);
         lease.release();
       }
     }
+    const retryMs =
+      deadline === undefined ? 100 : Math.min(100, oauthActionRemainingMs(deadline));
+    if (retryMs <= 0 && deadline !== undefined) throw oauthActionDeadlineError(deadline);
     await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 100);
+      const timer = setTimeout(resolve, retryMs);
       timer.unref();
     });
   }
 }
 
-async function withOAuthActionBoundary<T>(session: Session, run: () => Promise<T>): Promise<T> {
-  return await withOAuthActionLease(async () => {
+async function withOAuthActionBoundary<T>(
+  session: Session,
+  provider: OAuthProviderId | undefined,
+  run: (deadline: OAuthActionDeadline) => Promise<T>,
+): Promise<T> {
+  const deadline = oauthActionDeadline(provider);
+  return await withOAuthActionLease(deadline, async () => {
     const generation = provisionStartGeneration();
     const canContinue = (): boolean =>
       shutdownInProgress === 0 &&
@@ -873,16 +945,17 @@ async function withOAuthActionBoundary<T>(session: Session, run: () => Promise<T
     const ephemeral = leasedBrowsers.get(session.browser);
     if (ephemeral === undefined) {
       try {
-        return await run();
+        return await withinOAuthActionDeadline(run(deadline), deadline);
       } finally {
-        await waitForOAuthLeaseCooldown(oauthLoginLeaseCooldownMs());
+        await waitForOAuthLeaseCooldown(oauthLoginLeaseCooldownMs(), deadline);
       }
     }
     return await withCanonicalProfileOperation(
       ephemeral.canonicalProfileDir,
-      run,
+      () => run(deadline),
       canContinue,
       oauthLoginLeaseCooldownMs(),
+      deadline,
     );
   });
 }
@@ -1117,6 +1190,7 @@ async function closeBrowserBounded(
   browser: BrowserController,
   cancelStart: boolean,
   timeoutMessage: string,
+  maximumTimeoutMs?: number,
 ): Promise<"closed" | "force_closed_unproven" | "unknown"> {
   const forceClose = (
     browser as BrowserController & {
@@ -1134,18 +1208,22 @@ async function closeBrowserBounded(
     ordinaryClose.then((state) => (state === "closed" ? state : forcedClose)),
     forcedClose.then((state) => (state === "closed" ? state : ordinaryClose)),
   ]);
-  return await withTerminalTimeout(
-    closed,
-    positiveTimeout(
-      "TRUSTY_SQUIRE_OPERATOR_FORCE_CLOSE_TIMEOUT_MS",
-      DEFAULT_OPERATOR_FORCE_CLOSE_TIMEOUT_MS,
-    ),
-    timeoutMessage,
-  ).catch(() => "unknown" as const);
+  const configuredTimeoutMs = positiveTimeout(
+    "TRUSTY_SQUIRE_OPERATOR_FORCE_CLOSE_TIMEOUT_MS",
+    DEFAULT_OPERATOR_FORCE_CLOSE_TIMEOUT_MS,
+  );
+  const timeoutMs =
+    maximumTimeoutMs === undefined
+      ? configuredTimeoutMs
+      : Math.max(1, Math.min(configuredTimeoutMs, maximumTimeoutMs));
+  return await withTerminalTimeout(closed, timeoutMs, timeoutMessage).catch(
+    () => "unknown" as const,
+  );
 }
 
 async function cancelStartingBrowser(
   pending: StartingBrowser,
+  maximumTimeoutMs?: number,
 ): Promise<"closed" | "force_closed_unproven" | "unknown"> {
   pending.cancelRequested = true;
   if (pending.cleanupPromise !== null) return await pending.cleanupPromise;
@@ -1158,6 +1236,7 @@ async function cancelStartingBrowser(
       pending.controller,
       true,
       "operator browser startup cancellation timed out",
+      maximumTimeoutMs,
     );
     if (closeState === "closed") destroyEphemeralProfileDetached(pending.profileDir);
     return closeState;
@@ -1261,11 +1340,17 @@ async function closeEphemeralBrowser(
 // cross-process profile-operation guard. Once the provider round-trip finishes,
 // runSerializedGoogleIdentityOperation closes it, publishes the rotated state,
 // and returns the task to its isolated browser.
-async function prepareOAuthActionBrowser(session: Session): Promise<void> {
+async function prepareOAuthActionBrowser(
+  session: Session,
+  deadline: OAuthActionDeadline,
+): Promise<void> {
   const browser = session.browser;
   const ephemeral = leasedBrowsers.get(browser);
   if (ephemeral === undefined) return;
-  const latestState = await readSessionState(ephemeral.canonicalProfileDir);
+  const latestState = await withinOAuthActionDeadline(
+    readSessionState(ephemeral.canonicalProfileDir),
+    deadline,
+  );
   if (latestState === undefined) return;
 
   const generation = provisionStartGeneration();
@@ -1288,13 +1373,14 @@ async function prepareOAuthActionBrowser(session: Session): Promise<void> {
   let pendingHandledProfile = false;
   try {
     assertOriginalOwned();
-    const currentState = await browser.captureStorageState();
+    const currentState = await withinOAuthActionDeadline(browser.captureStorageState(), deadline);
     const preparedState = mergeGoogleIdentityStorageState(currentState, latestState);
     const resumeUrl = browser.currentUrl() || session.startUrl;
     originalCloseState = await closeBrowserBounded(
       browser,
       false,
       "OAuth action preparation browser close timed out",
+      oauthActionRemainingMs(deadline),
     );
     if (originalCloseState !== "closed") {
       throw new Error(`OAuth action preparation closed without proof (${originalCloseState})`);
@@ -1315,10 +1401,15 @@ async function prepareOAuthActionBrowser(session: Session): Promise<void> {
       cleanupPromise: null,
     };
     startingBrowsers.add(pending);
-    pending.launch = startBrowserBounded(replacement, session.id, async () => {
-      if (pending !== null) await cancelStartingBrowser(pending);
-    });
-    await pending.launch;
+    pending.launch = startBrowserBounded(
+      replacement,
+      session.id,
+      async () => {
+        if (pending !== null) await cancelStartingBrowser(pending);
+      },
+      oauthActionRemainingMs(deadline),
+    );
+    await withinOAuthActionDeadline(pending.launch, deadline);
     if (pending.cancelRequested) {
       throw new Error("OAuth action preparation replacement startup cancelled");
     }
@@ -1329,9 +1420,12 @@ async function prepareOAuthActionBrowser(session: Session): Promise<void> {
     leasedBrowsers.delete(browser);
     leasedBrowsers.set(replacement, { ...ephemeral, controller: replacement });
     session.browser = replacement;
-    await replacement.setHostScopeAllowedHosts(
-      () => requestScopeHostStrings(session),
-      () => merchantSiblingSeedHosts(session),
+    await withinOAuthActionDeadline(
+      replacement.setHostScopeAllowedHosts(
+        () => requestScopeHostStrings(session),
+        () => merchantSiblingSeedHosts(session),
+      ),
+      deadline,
     );
     if (
       shutdownInProgress > 0 ||
@@ -1342,7 +1436,9 @@ async function prepareOAuthActionBrowser(session: Session): Promise<void> {
     ) {
       throw new Error("OAuth action preparation cancelled during operator shutdown");
     }
-    if (resumeUrl.length > 0) await replacement.goto(resumeUrl);
+    if (resumeUrl.length > 0) {
+      await withinOAuthActionDeadline(replacement.goto(resumeUrl), deadline);
+    }
   } catch (error) {
     let originalCleanupState = originalCloseState;
     if (originalCleanupState !== "closed") {
@@ -1350,17 +1446,22 @@ async function prepareOAuthActionBrowser(session: Session): Promise<void> {
         browser,
         true,
         "OAuth action preparation browser cleanup timed out",
+        oauthActionRemainingMs(deadline),
       ).catch(() => "unknown" as const);
     }
     if (pending !== null) {
       startingBrowsers.delete(pending);
-      replacementCloseState = await cancelStartingBrowser(pending).catch(() => "unknown" as const);
+      replacementCloseState = await withinOAuthActionDeadline(
+        cancelStartingBrowser(pending, oauthActionRemainingMs(deadline)),
+        deadline,
+      ).catch(() => "unknown" as const);
       pendingHandledProfile = true;
     } else if (replacement !== null) {
       replacementCloseState = await closeBrowserBounded(
         replacement,
         true,
         "OAuth action preparation replacement cleanup timed out",
+        oauthActionRemainingMs(deadline),
       ).catch(() => "unknown" as const);
     }
     if (leasedBrowsers.get(browser) === ephemeral) leasedBrowsers.delete(browser);
@@ -1382,6 +1483,7 @@ async function prepareOAuthActionBrowser(session: Session): Promise<void> {
         `[operator] retained ephemeral profile after failed OAuth action preparation: ${ephemeral.profileDir}`,
       );
     }
+    if (oauthActionRemainingMs(deadline) <= 0) throw oauthActionDeadlineError(deadline);
     throw error;
   } finally {
     if (pending !== null) startingBrowsers.delete(pending);
@@ -1393,12 +1495,19 @@ async function runSerializedGoogleIdentityOperation<T>(
   operation: (browser: BrowserController) => Promise<T>,
   options: {
     resumeUrl?: string;
+    deadline?: OAuthActionDeadline;
   } = {},
 ): Promise<{ browser: BrowserController; result: T }> {
   const browser = session.browser;
   const ephemeral = leasedBrowsers.get(browser);
   if (ephemeral === undefined) {
-    return { browser, result: await operation(browser) };
+    return {
+      browser,
+      result:
+        options.deadline === undefined
+          ? await operation(browser)
+          : await withinOAuthActionDeadline(operation(browser), options.deadline),
+    };
   }
   const generation = provisionStartGeneration();
   const ownsSession = (): boolean =>
@@ -1426,7 +1535,10 @@ async function runSerializedGoogleIdentityOperation<T>(
     let operationError: unknown;
     try {
       traceHandoff("boundary_operation_start");
-      operationResult = await operation(browser);
+      operationResult =
+        options.deadline === undefined
+          ? await operation(browser)
+          : await withinOAuthActionDeadline(operation(browser), options.deadline);
       operationCompleted = true;
     } catch (error) {
       operationError = error;
@@ -1446,15 +1558,24 @@ async function runSerializedGoogleIdentityOperation<T>(
     let readyReplacement: BrowserController | null = null;
     try {
       traceHandoff("identity_probe_start");
-      const googleAccountEmail = await browser.detectGoogleAccountEmail();
+      const googleAccountEmail =
+        options.deadline === undefined
+          ? await browser.detectGoogleAccountEmail()
+          : await withinOAuthActionDeadline(browser.detectGoogleAccountEmail(), options.deadline);
       traceHandoff("identity_probe_done", { found: googleAccountEmail !== null });
       const metadata = googleAccountEmail === null ? undefined : { googleAccountEmail };
-      const rotatedState = await browser.captureStorageState();
+      const rotatedState =
+        options.deadline === undefined
+          ? await browser.captureStorageState()
+          : await withinOAuthActionDeadline(browser.captureStorageState(), options.deadline);
       traceHandoff("identity_capture_done");
       originalCloseState = await closeBrowserBounded(
         browser,
         false,
         "Google OAuth browser close timed out",
+        options.deadline === undefined
+          ? undefined
+          : oauthActionRemainingMs(options.deadline),
       );
       traceHandoff("handoff_close_done", { state: originalCloseState });
       if (originalCloseState !== "closed") {
@@ -1464,12 +1585,16 @@ async function runSerializedGoogleIdentityOperation<T>(
       }
       assertOwned();
       if (canonicalIdentitySnapshotDisposition(rotatedState, metadata) !== "oversized") {
-        const published = await writeCanonicalIdentitySnapshot(
+        const publication = writeCanonicalIdentitySnapshot(
           ephemeral.canonicalProfileDir,
           rotatedState,
           metadata,
           () => ownsSession(),
         );
+        const published =
+          options.deadline === undefined
+            ? await publication
+            : await withinOAuthActionDeadline(publication, options.deadline);
         if (!published) {
           throw new Error("Google OAuth identity handoff could not publish session state");
         }
@@ -1490,10 +1615,18 @@ async function runSerializedGoogleIdentityOperation<T>(
         cleanupPromise: null,
       };
       startingBrowsers.add(replacementPending);
-      replacementPending.launch = startBrowserBounded(replacement, session.id, async () => {
-        if (replacementPending !== null) await cancelStartingBrowser(replacementPending);
-      });
-      await replacementPending.launch;
+      replacementPending.launch = startBrowserBounded(
+        replacement,
+        session.id,
+        async () => {
+          if (replacementPending !== null) await cancelStartingBrowser(replacementPending);
+        },
+        options.deadline === undefined
+          ? undefined
+          : oauthActionRemainingMs(options.deadline),
+      );
+      if (options.deadline === undefined) await replacementPending.launch;
+      else await withinOAuthActionDeadline(replacementPending.launch, options.deadline);
       traceHandoff("replacement_started");
       if (replacementPending.cancelRequested) {
         throw new Error("Google OAuth replacement browser startup cancelled");
@@ -1506,10 +1639,12 @@ async function runSerializedGoogleIdentityOperation<T>(
       leasedBrowsers.set(replacement, { ...ephemeral, controller: replacement });
       session.browser = replacement;
       if (typeof replacement.setHostScopeAllowedHosts === "function") {
-        await replacement.setHostScopeAllowedHosts(
+        const hostScope = replacement.setHostScopeAllowedHosts(
           () => requestScopeHostStrings(session),
           () => merchantSiblingSeedHosts(session),
         );
+        if (options.deadline === undefined) await hostScope;
+        else await withinOAuthActionDeadline(hostScope, options.deadline);
       }
       if (
         shutdownInProgress > 0 ||
@@ -1521,7 +1656,11 @@ async function runSerializedGoogleIdentityOperation<T>(
         throw new Error("Google OAuth identity handoff cancelled during operator shutdown");
       }
       const resumeUrl = options.resumeUrl ?? session.startUrl;
-      if (resumeUrl.length > 0) await replacement.goto(resumeUrl);
+      if (resumeUrl.length > 0) {
+        const navigation = replacement.goto(resumeUrl);
+        if (options.deadline === undefined) await navigation;
+        else await withinOAuthActionDeadline(navigation, options.deadline);
+      }
       traceHandoff("replacement_resumed");
       readyReplacement = replacement;
     } catch (error) {
@@ -1531,21 +1670,34 @@ async function runSerializedGoogleIdentityOperation<T>(
           browser,
           true,
           "Google OAuth browser cleanup timed out",
+          options.deadline === undefined
+            ? undefined
+            : oauthActionRemainingMs(options.deadline),
         ).catch(() => "unknown" as const);
       }
       let replacementCloseState: "closed" | "force_closed_unproven" | "unknown" = "closed";
       let pendingHandledProfile = false;
       if (replacementPending !== null) {
         startingBrowsers.delete(replacementPending);
-        replacementCloseState = await cancelStartingBrowser(replacementPending).catch(
-          () => "unknown" as const,
+        const cancellation = cancelStartingBrowser(
+          replacementPending,
+          options.deadline === undefined
+            ? undefined
+            : oauthActionRemainingMs(options.deadline),
         );
+        replacementCloseState = await (options.deadline === undefined
+          ? cancellation
+          : withinOAuthActionDeadline(cancellation, options.deadline)
+        ).catch(() => "unknown" as const);
         pendingHandledProfile = true;
       } else if (replacement !== null) {
         replacementCloseState = await closeBrowserBounded(
           replacement,
           true,
           "Google OAuth replacement browser cleanup timed out",
+          options.deadline === undefined
+            ? undefined
+            : oauthActionRemainingMs(options.deadline),
         ).catch(() => "unknown" as const);
       }
       if (leasedBrowsers.get(browser) === ephemeral) leasedBrowsers.delete(browser);
@@ -1569,6 +1721,9 @@ async function runSerializedGoogleIdentityOperation<T>(
           `[operator] retained ephemeral profile after failed Google OAuth handoff: ${ephemeral.profileDir}`,
         );
       }
+      if (options.deadline !== undefined && oauthActionRemainingMs(options.deadline) <= 0) {
+        throw oauthActionDeadlineError(options.deadline);
+      }
       throw error;
     } finally {
       if (replacementPending !== null) startingBrowsers.delete(replacementPending);
@@ -1588,6 +1743,7 @@ async function runDetachedGoogleIdentityOperation<T>(
   const ephemeral = leasedBrowsers.get(browser);
   if (ephemeral === undefined) {
     return await withOAuthActionLease(
+      undefined,
       async () => (await runSerializedGoogleIdentityOperation(session, operation)).result,
     );
   }
@@ -1686,10 +1842,15 @@ async function runDetachedGoogleIdentityOperation<T>(
 async function runSerializedOAuthBoundary(
   session: Session,
   authorizedElement: InteractiveElement,
+  authorizedElements: readonly InteractiveElement[],
   provider: OAuthProviderId | undefined,
+  deadline: OAuthActionDeadline,
 ): Promise<BrowserController> {
-  const authorizedRef = elementRef(authorizedElement);
-  await prepareOAuthActionBrowser(session);
+  const authorizedRef = provisionElementRefs(authorizedElements).get(authorizedElement);
+  if (authorizedRef === undefined) {
+    throw new Error("OAuth action target was not present in the authorized action map");
+  }
+  await prepareOAuthActionBrowser(session, deadline);
   const completed = await runSerializedGoogleIdentityOperation(session, async (browser) => {
     // The action was authorized against the session's isolated browser before
     // the canonical profile was opened. Re-extract inside the same serialized
@@ -1698,15 +1859,19 @@ async function runSerializedOAuthBoundary(
     // canonical browser escape the boundary on reobserve_required.
     const fresh = await browser.extractInteractiveElements();
     retainSessionElements(session, fresh);
-    const matches = fresh.filter((element) => elementRef(element) === authorizedRef);
-    if (matches.length !== 1) {
+    const resolved = resolveTarget(fresh, authorizedRef);
+    if (resolved === null) {
       throw new Error(
         "OAuth action target changed during the identity handoff; re-observe before retrying",
       );
     }
-    await browser.loginWithOAuth(matches[0]!.selector, 30_000, provider);
+    await browser.loginWithOAuth(
+      resolved.selector,
+      oauthActionRemainingMs(deadline),
+      provider,
+    );
     await settleAfterStateChange(browser);
-  });
+  }, { deadline });
   return completed.browser;
 }
 
@@ -2074,8 +2239,13 @@ async function startBrowserBounded(
   browser: BrowserController,
   sessionId: string,
   cancel: () => Promise<void>,
+  maximumTimeoutMs?: number,
 ): Promise<void> {
-  const timeoutMs = Number(process.env.BOT_START_TIMEOUT_MS) || 600_000;
+  const configuredTimeoutMs = Number(process.env.BOT_START_TIMEOUT_MS) || 600_000;
+  const timeoutMs =
+    maximumTimeoutMs === undefined
+      ? configuredTimeoutMs
+      : Math.max(1, Math.min(configuredTimeoutMs, maximumTimeoutMs));
   audit(sessionId, "browser_launch", {
     note: "first launch may download Chromium; slow but one-time",
     timeout_ms: timeoutMs,
@@ -2088,7 +2258,8 @@ async function startBrowserBounded(
     await Promise.race([browser.start(), timeout]);
   } catch (err) {
     if (err instanceof Error && err.message === "__browser_start_timeout__") {
-      await cancel().catch(() => undefined);
+      const cancellation = cancel().catch(() => undefined);
+      if (maximumTimeoutMs === undefined) await cancellation;
       throw new Error(
         `operate_start: browser did not launch within ${Math.round(timeoutMs / 1000)}s. ` +
           "On a fresh machine the first launch downloads Chromium — slow but one-time. A hang this long " +
@@ -6560,8 +6731,12 @@ async function actInternally(
   compactV2Authorization?: CompactV2TargetAuthorization,
 ): Promise<InternalActResult> {
   const session = sessionForCall(sessionId);
+  const oauthProvider =
+    action.kind === "oauth_login" || action.kind === "oauth_click"
+      ? action.provider
+      : undefined;
   try {
-    const execute = async (): Promise<InternalActResult> =>
+    const execute = async (deadline?: OAuthActionDeadline): Promise<InternalActResult> =>
       await executeAct(
         sessionId,
         action,
@@ -6570,10 +6745,11 @@ async function actInternally(
         true,
         collectCheckoutState,
         compactV2Authorization,
+        deadline,
       );
     return session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")
-      ? await withOAuthActionBoundary(session, execute)
-      : await execute();
+      ? await withOAuthActionBoundary(session, oauthProvider, execute)
+      : await execute(undefined);
   } catch (error) {
     if (
       session?.compactV2Active === true &&
@@ -6593,13 +6769,17 @@ export async function act(
   cartIdentity?: CartIdentityContext,
 ): Promise<Observation> {
   const session = sessionForCall(sessionId);
+  const oauthProvider =
+    action.kind === "oauth_login" || action.kind === "oauth_click"
+      ? action.provider
+      : undefined;
   try {
-    const execute = async (): Promise<InternalActResult> =>
-      await executeAct(sessionId, action, detail, cartIdentity, false, false);
+    const execute = async (deadline?: OAuthActionDeadline): Promise<InternalActResult> =>
+      await executeAct(sessionId, action, detail, cartIdentity, false, false, undefined, deadline);
     const result =
       session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")
-        ? await withOAuthActionBoundary(session, execute)
-        : await execute();
+        ? await withOAuthActionBoundary(session, oauthProvider, execute)
+        : await execute(undefined);
     return result.observation;
   } catch (error) {
     if (session?.compactV2Active === true) {
@@ -6617,6 +6797,7 @@ async function executeAct(
   internalAccess: boolean,
   collectCheckoutState: boolean,
   internalAuthorization?: CompactV2TargetAuthorization,
+  oauthDeadline?: OAuthActionDeadline,
 ): Promise<InternalActResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
@@ -7143,7 +7324,16 @@ async function executeAct(
           });
         } else {
           assertNoFrameTarget(el, "oauth_click");
-          browser = await runSerializedOAuthBoundary(session, el, action.provider);
+          if (oauthDeadline === undefined) {
+            throw new Error("OAuth action deadline was not established");
+          }
+          browser = await runSerializedOAuthBoundary(
+            session,
+            el,
+            fresh,
+            action.provider,
+            oauthDeadline,
+          );
         }
         if (action.kind !== "type") await settleAfterStateChange(browser);
         break;
@@ -7172,7 +7362,16 @@ async function executeAct(
         }
         resolvedEl = el;
         assertNoFrameTarget(el, "oauth_login");
-        browser = await runSerializedOAuthBoundary(session, el, action.provider);
+        if (oauthDeadline === undefined) {
+          throw new Error("OAuth action deadline was not established");
+        }
+        browser = await runSerializedOAuthBoundary(
+          session,
+          el,
+          fresh,
+          action.provider,
+          oauthDeadline,
+        );
         break;
       }
     }
@@ -7338,7 +7537,7 @@ function compactV2SelectionFailureReason(error: unknown): string {
 
 function compactV2ActionFailureReason(error: unknown, kind: ProvisionAction["kind"]): string {
   if (error instanceof CompactV2ActionFailureError) return error.message;
-  if (error instanceof OAuthSessionExpiredError) return error.code;
+  if (error instanceof OAuthSessionExpiredError) return error.message;
   if (error instanceof TargetStaleError || error instanceof CompactV2ReobserveRequiredError) {
     return "reobserve_required";
   }

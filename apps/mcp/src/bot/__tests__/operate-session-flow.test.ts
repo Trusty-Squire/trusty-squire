@@ -16,6 +16,7 @@ const h = vi.hoisted(() => ({
   providers: ["google"] as string[] | null,
   oauthStatus: "already_valid" as string,
   oauthLoginCalls: [] as string[],
+  oauthLoginTimeouts: [] as number[],
   oauthLoginError: null as Error | null,
   oauthConsentProviders: [] as Array<string | undefined>,
   oauthLoginGates: new Map<number, Promise<void>>(),
@@ -763,10 +764,11 @@ vi.mock("../browser.js", () => ({
     async startOAuth(): Promise<void> {}
     async loginWithOAuth(
       selector: string,
-      _settleTimeoutMs?: number,
+      settleTimeoutMs?: number,
       provider?: string,
     ): Promise<void> {
       h.oauthLoginCalls.push(selector);
+      h.oauthLoginTimeouts.push(settleTimeoutMs ?? 0);
       h.oauthConsentProviders.push(provider);
       const gate = h.oauthLoginGates.get(this.index);
       if (gate !== undefined) await gate;
@@ -1115,6 +1117,7 @@ beforeEach(() => {
   h.providers = ["google"];
   h.oauthStatus = "already_valid";
   h.oauthLoginCalls = [];
+  h.oauthLoginTimeouts = [];
   h.oauthLoginError = null;
   h.oauthConsentProviders = [];
   h.oauthLoginGates = new Map();
@@ -3077,6 +3080,7 @@ afterEach(async () => {
   vi.useRealTimers();
   await closeAllProvisionSessions();
   delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+  delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
   if (compactV2ModeBeforeTest === undefined) delete process.env.TRUSTY_SQUIRE_OBSERVE_V2;
   else process.env.TRUSTY_SQUIRE_OBSERVE_V2 = compactV2ModeBeforeTest;
 });
@@ -3554,7 +3558,7 @@ describe("operate session — OAuth lifecycle", () => {
     await finishProvisionSession(started.session_id);
   });
 
-  it("surfaces an OAuth completion timeout as google_session", async () => {
+  it("surfaces an OAuth completion timeout with re-login guidance", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const { OAuthSessionExpiredError } = await import("../browser.js");
     h.oauthLoginError = new OAuthSessionExpiredError(30_000);
@@ -3576,8 +3580,85 @@ describe("operate session — OAuth lifecycle", () => {
 
     await expect(
       act(started.session_id, { kind: "oauth_login", target, provider: "google" }),
-    ).rejects.toThrow("google_session");
+    ).rejects.toThrow(/google_session.*session expired.*re-login/i);
     expect(h.identityProbeCalls).toBe(0);
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("bounds browser preparation with the action deadline", async () => {
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "50";
+    const canonical = "/tmp/trusty-squire-unit-canonical-oauth-preparation-deadline";
+    h.storageStates.set(canonical, { cookies: [], origins: [] });
+    h.startGates.set(1, new Promise<void>(() => undefined));
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+    const startedAt = Date.now();
+
+    await expect(
+      act(started.session_id, {
+        kind: "oauth_login",
+        target: "Continue with Google",
+        provider: "google",
+      }),
+    ).rejects.toThrow(/google_session.*re-login/i);
+
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(h.oauthLoginCalls).toEqual([]);
+  });
+
+  it("re-resolves the exact authorized OAuth handle after preparation", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-oauth-sealed-handle";
+    h.storageStates.set(canonical, { cookies: [], origins: [] });
+    h.visibleText = "Continue";
+    h.elements = [
+      elem({
+        visibleText: "Continue",
+        labelText: "Continue",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    let releaseReplacement!: () => void;
+    h.startGates.set(
+      1,
+      new Promise<void>((resolve) => {
+        releaseReplacement = resolve;
+      }),
+    );
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir: canonical,
+    });
+    const acting = act(started.session_id, {
+      kind: "oauth_login",
+      target: "Continue",
+      provider: "google",
+    });
+    await vi.waitFor(() => expect(h.startCalls).toBe(2));
+
+    h.elements = [
+      elem({
+        visibleText: "Continue",
+        labelText: "Continue",
+        role: "button",
+        selector: "#newsletter",
+      }),
+    ];
+    releaseReplacement();
+
+    await expect(acting).rejects.toThrow(/target changed.*re-observe/i);
+    expect(h.oauthLoginCalls).toEqual([]);
     await finishProvisionSession(started.session_id);
   });
 
@@ -4730,87 +4811,90 @@ describe("Compact V2 action-map boundary", () => {
     ]);
   });
 
-  it("refreshes a cursorless provider query after async auth navigation and names its handle", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
-    h.elements = [];
-    const started = await startProvisionSession({
-      serviceUrl: "https://play.example.com/sign-up",
-    });
-    expect(started).toMatchObject({ stage: "browse", safe_table: [] });
-
-    h.mainDocumentEpoch += 1;
-    h.elements = [
-      elem({
-        tag: "button",
-        role: "button",
-        visibleText: "Continue with Google securely",
-        selector: "#google-oauth",
-      }),
-      elem({
-        index: 1,
-        tag: "input",
-        type: "password",
-        role: "textbox",
-        labelText: "Password",
-        selector: "#password",
-      }),
-    ];
-
-    const result = await observeQuery(started.session_id, "Google");
-
-    expect(result).toMatchObject({
-      stage: "auth",
-      safe_table: [
-        expect.arrayContaining([
-          expect.stringMatching(/^@e:/),
-          "b",
-          expect.stringContaining("Google"),
-        ]),
-      ],
-    });
-  });
-
-  it("waits a bounded beat for a cursorless provider query while auth controls hydrate", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
-    h.elements = [elem({ tag: "button", role: "button", selector: "#social-login-placeholder" })];
-    const started = await startProvisionSession({
-      serviceUrl: "https://play.example.com/sign-up",
-    });
-    const hydration = setTimeout(() => {
-      h.elements = [
+  it.each([
+    {
+      service: "Neon",
+      serviceUrl: "https://console.neon.tech/signup",
+      initial: [] as unknown[],
+      hydrated: [
         elem({
           tag: "button",
           role: "button",
-          visibleText: "Google",
-          selector: "#google-oauth",
+          iconLabel: "Google",
+          selector: 'button[data-provider="google"]',
         }),
+      ],
+      selector: 'button[data-provider="google"]',
+      navigate: true,
+    },
+    {
+      service: "Resend",
+      serviceUrl: "https://resend.com/signup",
+      initial: [
         elem({
-          index: 1,
-          tag: "input",
-          type: "password",
-          role: "textbox",
-          labelText: "Password",
-          selector: "#password",
+          tag: "button",
+          role: "button",
+          visibleText: "Log in with Google",
+          selector: 'form[action="google"] button',
         }),
-      ];
-    }, 50);
+      ],
+      hydrated: null,
+      selector: 'form[action="google"] button',
+      navigate: false,
+    },
+    {
+      service: "Cartesia",
+      serviceUrl: "https://play.cartesia.ai/sign-up",
+      initial: [
+        elem({
+          tag: "button",
+          role: "button",
+          selector: 'button[data-clerk-provider="google"]',
+        }),
+      ],
+      hydrated: [
+        elem({
+          tag: "button",
+          role: "button",
+          ariaLabel: "Continue with Google",
+          selector: 'button[data-clerk-provider="google"]',
+        }),
+      ],
+      selector: 'button[data-clerk-provider="google"]',
+      navigate: false,
+    },
+  ])(
+    "discovers and safely re-resolves $service's unauthenticated Google control",
+    async ({ serviceUrl, initial, hydrated, selector, navigate }) => {
+      process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+      h.elements = initial;
+      const started = await startProvisionSession({ serviceUrl });
+      let hydration: ReturnType<typeof setTimeout> | undefined;
+      if (hydrated !== null) {
+        hydration = setTimeout(() => {
+          if (navigate) h.mainDocumentEpoch += 1;
+          h.elements = hydrated;
+        }, 50);
+      }
 
-    try {
-      await expect(observeQuery(started.session_id, "Google")).resolves.toMatchObject({
-        stage: "auth",
-        safe_table: [
-          expect.arrayContaining([
-            expect.stringMatching(/^@e:/),
-            "b",
-            expect.stringContaining("Google"),
-          ]),
-        ],
-      });
-    } finally {
-      clearTimeout(hydration);
-      await finishProvisionSession(started.session_id);
-    }
-  });
+      try {
+        const query = await observeQuery(started.session_id, "Google");
+        const handle = (query.safe_table as Array<[string]>)[0]?.[0];
+        expect(handle).toMatch(/^@e:/);
+
+        await act(started.session_id, {
+          kind: "oauth_login",
+          target: handle!,
+          provider: "google",
+        });
+
+        expect(h.oauthLoginCalls).toEqual([selector]);
+      } finally {
+        if (hydration !== undefined) clearTimeout(hydration);
+        await finishProvisionSession(started.session_id).catch(() => undefined);
+      }
+    },
+  );
 
   it("matches private merchant labels while returning only sealed rows", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";

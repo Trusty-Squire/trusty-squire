@@ -15505,9 +15505,10 @@ export class BrowserController {
     this.oauthProductPage = product;
     this.oauthProviderPage = null;
     this.oauthProviderPageClosed = false;
+    const oauthBudgetMs = Math.max(1, settleTimeoutMs);
     const productUrl = product.url();
     const oauthStartedAt = Date.now();
-    const oauthDeadline = oauthStartedAt + settleTimeoutMs;
+    const oauthDeadline = oauthStartedAt + oauthBudgetMs;
     this.traceOAuthPhase("login_start", { page: productUrl });
     let recovery: Page | null = null;
     let providerPage: Page | null = null;
@@ -15605,10 +15606,10 @@ export class BrowserController {
           page: transient.isClosed() ? "closed" : transient.url(),
         });
         if (consentProvider === "google") {
-          throw new OAuthSessionExpiredError(settleTimeoutMs);
+          throw new OAuthSessionExpiredError(oauthBudgetMs);
         }
         throw new Error(
-          `OAuth login is still awaiting the provider after ${Math.ceil(settleTimeoutMs / 1000)} seconds. Retry oauth_login; do not read or close the browser session.`,
+          `OAuth login is still awaiting the provider after ${Math.ceil(oauthBudgetMs / 1000)} seconds. Retry oauth_login; do not read or close the browser session.`,
         );
       }
       this.traceOAuthPhase("login_settled", {
@@ -15616,7 +15617,10 @@ export class BrowserController {
         result: settled,
       });
       if (providerPage === null && product.isClosed()) {
-        await recovery.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
+        await recovery.reload({
+          waitUntil: "domcontentloaded",
+          timeout: Math.max(1, oauthDeadline - Date.now()),
+        });
       }
     } finally {
       product.off("framenavigated", onProductNavigation);
@@ -15634,7 +15638,9 @@ export class BrowserController {
       if (this.page !== null && !this.page.isClosed()) {
         await this.page.bringToFront().catch(() => undefined);
         await this.page
-          .waitForLoadState("domcontentloaded", { timeout: 30_000 })
+          .waitForLoadState("domcontentloaded", {
+            timeout: Math.max(1, oauthDeadline - Date.now()),
+          })
           .catch(() => undefined);
       }
     }
