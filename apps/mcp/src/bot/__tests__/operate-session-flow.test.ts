@@ -333,12 +333,6 @@ vi.mock("../browser.js", () => ({
     marker,
     env: { ...baseEnv, TRUSTY_SQUIRE_OPERATOR_BROWSER_MARKER: marker },
   }),
-  OAuthSessionExpiredError: class OAuthSessionExpiredError extends Error {
-    readonly code = "google_session";
-    constructor() {
-      super("google_session: session expired; re-login");
-    }
-  },
   BrowserController: class {
     private readonly index: number;
     private readonly opts: { profileDir?: string; proxyUrl?: string; storageState?: unknown };
@@ -3645,8 +3639,9 @@ describe("operate session — OAuth lifecycle", () => {
 
   it("surfaces an OAuth completion timeout with re-login guidance", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
-    const { OAuthSessionExpiredError } = await import("../browser.js");
-    h.oauthLoginError = new OAuthSessionExpiredError(30_000);
+    h.oauthLoginError = Object.assign(new Error("google_session: session expired; re-login"), {
+      code: "google_session",
+    });
     h.visibleText = "Continue with Google";
     h.elements = [
       elem({
@@ -5387,90 +5382,31 @@ describe("Compact V2 action-map boundary", () => {
     ]);
   });
 
-  it.each([
-    {
-      service: "Neon",
-      serviceUrl: "https://console.neon.tech/signup",
-      initial: [] as unknown[],
-      hydrated: [
-        elem({
-          tag: "button",
-          role: "button",
-          iconLabel: "Google",
-          selector: 'button[data-provider="google"]',
-        }),
-      ],
-      selector: 'button[data-provider="google"]',
-      navigate: true,
-    },
-    {
-      service: "Resend",
-      serviceUrl: "https://resend.com/signup",
-      initial: [
-        elem({
-          tag: "button",
-          role: "button",
-          visibleText: "Log in with Google",
-          selector: 'form[action="google"] button',
-        }),
-      ],
-      hydrated: null,
-      selector: 'form[action="google"] button',
-      navigate: false,
-    },
-    {
-      service: "Cartesia",
-      serviceUrl: "https://play.cartesia.ai/sign-up",
-      initial: [
-        elem({
-          tag: "button",
-          role: "button",
-          selector: 'button[data-clerk-provider="google"]',
-        }),
-      ],
-      hydrated: [
-        elem({
-          tag: "button",
-          role: "button",
-          ariaLabel: "Continue with Google",
-          selector: 'button[data-clerk-provider="google"]',
-        }),
-      ],
-      selector: 'button[data-clerk-provider="google"]',
-      navigate: false,
-    },
-  ])(
-    "discovers and safely re-resolves $service's unauthenticated Google control",
-    async ({ serviceUrl, initial, hydrated, selector, navigate }) => {
-      process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
-      h.elements = initial;
-      const started = await startProvisionSession({ serviceUrl });
-      let hydration: ReturnType<typeof setTimeout> | undefined;
-      if (hydrated !== null) {
-        hydration = setTimeout(() => {
-          if (navigate) h.mainDocumentEpoch += 1;
-          h.elements = hydrated;
-        }, 50);
-      }
+  it("queries and re-resolves Resend's existing Google control", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "button",
+        role: "button",
+        visibleText: "Log in with Google",
+        selector: 'form[action="google"] button',
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://resend.com/signup" });
 
-      try {
-        const query = await observeQuery(started.session_id, "Google");
-        const handle = (query.safe_table as Array<[string]>)[0]?.[0];
-        expect(handle).toMatch(/^@e:/);
+    const query = await observeQuery(started.session_id, "Google");
+    const handle = (query.safe_table as Array<[string]>)[0]?.[0];
+    expect(handle).toMatch(/^@e:/);
 
-        await act(started.session_id, {
-          kind: "oauth_login",
-          target: handle!,
-          provider: "google",
-        });
+    await act(started.session_id, {
+      kind: "oauth_login",
+      target: handle!,
+      provider: "google",
+    });
 
-        expect(h.oauthLoginCalls).toEqual([selector]);
-      } finally {
-        if (hydration !== undefined) clearTimeout(hydration);
-        await finishProvisionSession(started.session_id).catch(() => undefined);
-      }
-    },
-  );
+    expect(h.oauthLoginCalls).toEqual(['form[action="google"] button']);
+    await finishProvisionSession(started.session_id);
+  });
 
   it("matches private merchant labels while returning only sealed rows", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";

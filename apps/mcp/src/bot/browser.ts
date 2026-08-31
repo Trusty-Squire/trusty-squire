@@ -2344,17 +2344,6 @@ export interface BrowserControllerOptions {
   proxyUrl?: string;
 }
 
-export class OAuthSessionExpiredError extends Error {
-  readonly code = "google_session";
-
-  constructor(timeoutMs: number) {
-    super(
-      `google_session: OAuth did not complete within ${Math.ceil(timeoutMs / 1000)} seconds; ` +
-        "the saved session may have expired, so re-login before retrying",
-    );
-  }
-}
-
 // Hosts of known captcha-challenge iframes (Turnstile, reCAPTCHA, hCaptcha,
 // Arkose/FunCaptcha). Shared between the per-navigation WebGL-spoof reapply
 // (start(), below) and extractInteractiveElements' frame walk, which skips
@@ -15508,15 +15497,20 @@ export class BrowserController {
     this.oauthProviderPageClosed = false;
     const oauthBudgetMs = Math.max(1, settleTimeoutMs);
     const productUrl = product.url();
-    const oauthStartedAt = Date.now();
-    const oauthDeadline = oauthStartedAt + oauthBudgetMs;
+    const oauthDeadline = Date.now() + oauthBudgetMs;
+    const remainingBudgetMs = (): number => Math.max(1, oauthDeadline - Date.now());
     const deadlineError = (): Error =>
       consentProvider === "google"
-        ? new OAuthSessionExpiredError(oauthBudgetMs)
+        ? Object.assign(
+            new Error(
+              `google_session: OAuth did not complete within ${Math.ceil(oauthBudgetMs / 1000)} seconds; ` +
+                "the saved session may have expired, so re-login before retrying",
+            ),
+            { code: "google_session" },
+          )
         : new Error(
             `OAuth login is still awaiting the provider after ${Math.ceil(oauthBudgetMs / 1000)} seconds. Retry oauth_login; do not read or close the browser session.`,
           );
-    this.traceOAuthPhase("login_start", { page: productUrl });
     let recovery: Page | null = null;
     let providerPage: Page | null = null;
     let productDeparted = false;
@@ -15529,11 +15523,7 @@ export class BrowserController {
       recovery = await context.newPage();
       await recovery.goto(productUrl, {
         waitUntil: "domcontentloaded",
-        timeout: Math.max(1, oauthDeadline - Date.now()),
-      });
-      this.traceOAuthPhase("recovery_ready", {
-        elapsed_ms: Date.now() - oauthStartedAt,
-        page: recovery.url(),
+        timeout: remainingBudgetMs(),
       });
 
       let resolvePopup: (page: Page | null) => void = () => undefined;
@@ -15554,13 +15544,8 @@ export class BrowserController {
         }
         providerPage = await Promise.race([
           popupPromise,
-          this.sleep(Math.max(1, Math.min(oauthDeadline - Date.now(), 2_000))).then(() => null),
+          this.sleep(Math.min(remainingBudgetMs(), 2_000)).then(() => null),
         ]);
-        this.traceOAuthPhase("provider_transport", {
-          elapsed_ms: Date.now() - oauthStartedAt,
-          transport: providerPage === null ? "same_tab" : "popup",
-          page: (providerPage ?? product).url(),
-        });
       } finally {
         context.off("page", onPopup);
         resolvePopup(null);
@@ -15578,7 +15563,7 @@ export class BrowserController {
         settled = await this.waitForOAuthLifecycle(
           transient,
           productUrl,
-          Math.max(1, oauthDeadline - Date.now()),
+          remainingBudgetMs(),
           providerPage === null,
           productDeparted,
         );
@@ -15602,31 +15587,17 @@ export class BrowserController {
             consentBudgetMs,
             expectedGoogleAccountEmail,
           ).catch(() => false);
-          this.traceOAuthPhase("consent_step", {
-            elapsed_ms: Date.now() - oauthStartedAt,
-            advanced,
-            page: transient.isClosed() ? "closed" : transient.url(),
-          });
-          if (!advanced) await this.sleep(Math.min(250, Math.max(1, deadline - Date.now())));
+          if (!advanced) await this.sleep(Math.min(250, remainingBudgetMs()));
         }
       }
       if (settled === null) {
-        this.traceOAuthPhase("login_timeout", {
-          elapsed_ms: Date.now() - oauthStartedAt,
-          transport: providerPage === null ? "same_tab" : "popup",
-          page: transient.isClosed() ? "closed" : transient.url(),
-        });
         throw deadlineError();
       }
-      this.traceOAuthPhase("login_settled", {
-        elapsed_ms: Date.now() - oauthStartedAt,
-        result: settled,
-      });
       if (providerPage === null && product.isClosed()) {
         if (Date.now() >= oauthDeadline) throw deadlineError();
         await recovery.reload({
           waitUntil: "domcontentloaded",
-          timeout: Math.max(1, oauthDeadline - Date.now()),
+          timeout: remainingBudgetMs(),
         });
       }
     } finally {
@@ -15646,7 +15617,7 @@ export class BrowserController {
         await this.page.bringToFront().catch(() => undefined);
         await this.page
           .waitForLoadState("domcontentloaded", {
-            timeout: Math.max(1, oauthDeadline - Date.now()),
+            timeout: remainingBudgetMs(),
           })
           .catch(() => undefined);
       }
@@ -15665,24 +15636,6 @@ export class BrowserController {
         void product.bringToFront().catch(() => undefined);
       }
     });
-  }
-
-  private traceOAuthPhase(event: string, fields: Record<string, string | number | boolean>): void {
-    if (!/^(1|true|on)$/i.test(process.env.UNIVERSAL_BOT_OAUTH_DEBUG ?? "")) return;
-    const sanitized = Object.fromEntries(
-      Object.entries(fields).map(([key, value]) => {
-        if (key !== "page" || typeof value !== "string" || value === "closed") {
-          return [key, value];
-        }
-        try {
-          const url = new URL(value);
-          return [key, `${url.origin}${url.pathname}`];
-        } catch {
-          return [key, "unparseable"];
-        }
-      }),
-    );
-    console.error(`[oauth-debug] ${JSON.stringify({ event, ...sanitized })}`);
   }
 
   private isOAuthProductUrl(candidateUrl: string, productUrl: string): boolean {

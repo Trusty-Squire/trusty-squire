@@ -32,7 +32,6 @@ import { join } from "node:path";
 import {
   BrowserController,
   CHECKOUT_SUBMIT_LABEL_RE,
-  OAuthSessionExpiredError,
   clickDispatchStatusForError,
   parseCheckoutAmount,
   type ClickDispatchStatus,
@@ -892,7 +891,13 @@ async function waitForOAuthActionQuiescence(deadline: OAuthActionDeadline): Prom
 
 function oauthActionDeadlineError(deadline: OAuthActionDeadline): Error {
   if (deadline.provider === undefined || deadline.provider === "google") {
-    return new OAuthSessionExpiredError(deadline.timeoutMs);
+    return Object.assign(
+      new Error(
+        `google_session: OAuth did not complete within ${Math.ceil(deadline.timeoutMs / 1000)} seconds; ` +
+          "the saved session may have expired, so re-login before retrying",
+      ),
+      { code: "google_session" },
+    );
   }
   return new Error(
     `OAuth action did not complete within ${Math.ceil(deadline.timeoutMs / 1000)} seconds`,
@@ -1668,13 +1673,6 @@ async function runSerializedGoogleIdentityOperation<T>(
     sessions.get(session.id) === session &&
     session.browser === browser;
   return await (async () => {
-    const handoffStartedAt = Date.now();
-    const traceHandoff = (event: string, fields: Record<string, unknown> = {}): void => {
-      if (!/^(1|true|on)$/i.test(process.env.UNIVERSAL_BOT_OAUTH_DEBUG ?? "")) return;
-      console.error(
-        `[oauth-debug] ${JSON.stringify({ event, elapsed_ms: Date.now() - handoffStartedAt, ...fields })}`,
-      );
-    };
     const assertOwned = (): void => {
       if (!ownsSession()) {
         throw new Error("Google OAuth identity handoff cancelled during operator shutdown");
@@ -1685,7 +1683,6 @@ async function runSerializedGoogleIdentityOperation<T>(
     let operationResult: T | undefined;
     let operationError: unknown;
     try {
-      traceHandoff("boundary_operation_start");
       operationResult =
         options.deadline === undefined
           ? await operation(browser)
@@ -1693,9 +1690,6 @@ async function runSerializedGoogleIdentityOperation<T>(
       operationCompleted = true;
     } catch (error) {
       operationError = error;
-      traceHandoff("boundary_operation_error", {
-        message: error instanceof Error ? error.message : String(error),
-      });
     }
     let originalCloseState: "closed" | "force_closed_unproven" | "unknown" = "unknown";
     let replacement: BrowserController | null = null;
@@ -1716,7 +1710,6 @@ async function runSerializedGoogleIdentityOperation<T>(
             ? undefined
             : { googleAccountEmail: options.expectedGoogleAccountEmail };
       } else {
-        traceHandoff("identity_probe_start");
         const identityProbe = browser.detectGoogleAccountEmail(
           googleIdentityMode === "attest" ? options.expectedGoogleAccountEmail : undefined,
         );
@@ -1724,7 +1717,6 @@ async function runSerializedGoogleIdentityOperation<T>(
           options.deadline === undefined
             ? await identityProbe
             : await withinOAuthActionDeadline(identityProbe, options.deadline);
-        traceHandoff("identity_probe_done", { found: googleAccountEmail !== null });
         if (
           googleIdentityMode === "attest" &&
           options.expectedGoogleAccountEmail !== undefined &&
@@ -1746,14 +1738,12 @@ async function runSerializedGoogleIdentityOperation<T>(
         options.deadline === undefined
           ? await browser.captureStorageState()
           : await withinOAuthActionDeadline(browser.captureStorageState(), options.deadline);
-      traceHandoff("identity_capture_done");
       originalCloseState = await closeBrowserBounded(
         browser,
         false,
         "Google OAuth browser close timed out",
         options.deadline === undefined ? undefined : oauthActionRemainingMs(options.deadline),
       );
-      traceHandoff("handoff_close_done", { state: originalCloseState });
       if (originalCloseState !== "closed") {
         throw new Error(
           `Google OAuth identity handoff closed without proof (${originalCloseState})`,
@@ -1807,7 +1797,6 @@ async function runSerializedGoogleIdentityOperation<T>(
       );
       if (options.deadline === undefined) await replacementPending.launch;
       else await withinOAuthActionDeadline(replacementPending.launch, options.deadline);
-      traceHandoff("replacement_started");
       if (replacementPending.cancelRequested) {
         throw new Error("Google OAuth replacement browser startup cancelled");
       }
@@ -1841,7 +1830,6 @@ async function runSerializedGoogleIdentityOperation<T>(
         if (options.deadline === undefined) await navigation;
         else await withinOAuthActionDeadline(navigation, options.deadline);
       }
-      traceHandoff("replacement_resumed");
       readyReplacement = replacement;
     } catch (error) {
       await forceTerminateProvisionSession(
@@ -6346,51 +6334,14 @@ export async function observeQuery(
   role?: SafeControlV2["role"],
   cursor?: string,
 ): Promise<Record<string, unknown>> {
-  // Auth shells such as Clerk can replace their initial placeholders several
-  // seconds after navigation. Exact provider lookups may therefore spend a
-  // few additional, bounded refreshes waiting for that semantic control. All
-  // other cursorless queries retain the short stale-snapshot repair budget.
-  const cursorlessRefreshBudget = /^(google|github)$/i.test(query.trim()) ? 8 : 2;
-  return await observeQuerySnapshot(sessionId, query, role, cursor, cursorlessRefreshBudget);
-}
-
-async function observeQuerySnapshot(
-  sessionId: string,
-  query: string,
-  role: SafeControlV2["role"] | undefined,
-  cursor: string | undefined,
-  cursorlessRefreshesRemaining: number,
-): Promise<Record<string, unknown>> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const index = session.compactV2Index;
-  if (index === null || index.expiresAt < Date.now()) {
-    if (cursor === undefined && cursorlessRefreshesRemaining > 0) {
-      await observeSession(session, "compact");
-      return await observeQuerySnapshot(
-        sessionId,
-        query,
-        role,
-        undefined,
-        cursorlessRefreshesRemaining - 1,
-      );
-    }
-    throw new Error("stale_cursor");
-  }
+  if (index === null || index.expiresAt < Date.now()) throw new Error("stale_cursor");
   // Query/paging is part of the same sealed action-map protocol: never return
   // rows from a page whose private binding no longer matches the live page.
   if (index.pageKey !== compactV2PageKey(session)) {
     invalidateCompactV2Snapshot(session);
-    if (cursor === undefined && cursorlessRefreshesRemaining > 0) {
-      await observeSession(session, "compact");
-      return await observeQuerySnapshot(
-        sessionId,
-        query,
-        role,
-        undefined,
-        cursorlessRefreshesRemaining - 1,
-      );
-    }
     throw new Error("stale_cursor");
   }
   const needle = norm(query);
@@ -6430,16 +6381,6 @@ async function observeQuerySnapshot(
     [...liveSafe.byRef].some(([ref, legacy]) => session.compactV2Refs.get(ref) !== legacy)
   ) {
     invalidateCompactV2Snapshot(session);
-    if (cursor === undefined && cursorlessRefreshesRemaining > 0) {
-      await observeSession(session, "compact");
-      return await observeQuerySnapshot(
-        sessionId,
-        query,
-        role,
-        undefined,
-        cursorlessRefreshesRemaining - 1,
-      );
-    }
     throw new Error("stale_cursor");
   }
   const liveByLegacy = new Map<string, InteractiveElement>();
@@ -6453,58 +6394,26 @@ async function observeQuerySnapshot(
       }
     }
   }
-  const providerQueryName = /^google$/i.test(query.trim())
-    ? "Google"
-    : /^github$/i.test(query.trim())
-      ? "GitHub"
-      : undefined;
-  if (
-    providerQueryName !== undefined &&
-    privateMatches.size === 0 &&
-    cursor === undefined &&
-    cursorlessRefreshesRemaining > 0
-  ) {
-    // Clerk and similar auth shells mount their provider controls shortly after
-    // the route itself becomes observable. A cursorless provider lookup is a
-    // request for the current live control, so allow that narrow query one
-    // bounded hydration beat and rebuild the sealed index. Explicit cursors
-    // remain immutable/stale-on-change, and arbitrary queries never wait.
-    await new Promise<void>((resolve) => setTimeout(resolve, 750));
-    await observeSession(session, "compact");
-    return await observeQuerySnapshot(
-      sessionId,
-      query,
-      role,
-      undefined,
-      cursorlessRefreshesRemaining - 1,
+  const rows = index.rows.filter((row) => {
+    const searchable = [
+      row.name,
+      row.role,
+      row.state,
+      row.visibility,
+      row.action,
+      row.field,
+      row.choice,
+      row.frame,
+    ]
+      .filter((value): value is string => value !== undefined)
+      .map(norm);
+    return (
+      (needle.length === 0 ||
+        searchable.some((value) => value.includes(needle)) ||
+        privateMatches.has(row.ref)) &&
+      (role === undefined || row.role === role)
     );
-  }
-  const rows = index.rows
-    .filter((row) => {
-      const searchable = [
-        row.name,
-        row.role,
-        row.state,
-        row.visibility,
-        row.action,
-        row.field,
-        row.choice,
-        row.frame,
-      ]
-        .filter((value): value is string => value !== undefined)
-        .map(norm);
-      return (
-        (needle.length === 0 ||
-          searchable.some((value) => value.includes(needle)) ||
-          privateMatches.has(row.ref)) &&
-        (role === undefined || row.role === role)
-      );
-    })
-    .map((row) =>
-      row.name === undefined && providerQueryName !== undefined && privateMatches.has(row.ref)
-        ? { ...row, name: providerQueryName }
-        : row,
-    );
+  });
   const page = encodeV2Page({
     sessionId: session.id,
     stage: index.stage,
@@ -7699,7 +7608,9 @@ function compactV2SelectionFailureReason(error: unknown): string {
 
 function compactV2ActionFailureReason(error: unknown, kind: ProvisionAction["kind"]): string {
   if (error instanceof CompactV2ActionFailureError) return error.message;
-  if (error instanceof OAuthSessionExpiredError) return error.message;
+  if (error instanceof Error && (error as Error & { code?: unknown }).code === "google_session") {
+    return error.message;
+  }
   if (error instanceof TargetStaleError || error instanceof CompactV2ReobserveRequiredError) {
     return "reobserve_required";
   }
