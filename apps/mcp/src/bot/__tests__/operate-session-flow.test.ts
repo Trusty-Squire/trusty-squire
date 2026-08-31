@@ -3552,7 +3552,7 @@ describe("operate session — OAuth lifecycle", () => {
     };
     h.storageStates.set(canonical, google);
     h.identityMetadata.set(canonical, { googleAccountEmail: "confirmed@example.com" });
-    h.liveGoogleEmail = "unconfirmed@example.com";
+    h.liveGoogleEmail = "confirmed@example.com";
     h.captureStorageStateSequences.set(0, [relyingParty]);
     h.captureStorageStateSequences.set(1, [rotated]);
     h.oauthLoginError = new Error("provider did not settle");
@@ -3600,7 +3600,7 @@ describe("operate session — OAuth lifecycle", () => {
       kind: "oauth_login",
       target: "Continue with Google",
       provider: "google",
-    });
+    }).catch((error: unknown) => error);
 
     await new Promise<void>((resolve) => setTimeout(resolve, 25));
     expect(h.oauthLoginCalls).toEqual(["#google-oauth"]);
@@ -3623,7 +3623,7 @@ describe("operate session — OAuth lifecycle", () => {
     );
 
     releaseSuccessor();
-    await successorAction;
+    expect(await successorAction).not.toBeInstanceOf(Error);
     await finishProvisionSession(successor.session_id);
   });
 
@@ -3953,7 +3953,7 @@ describe("operate session — OAuth lifecycle", () => {
       kind: "oauth_login",
       target: "Continue with Google",
       provider: "google",
-    });
+    }).catch((error: unknown) => error);
     await vi.waitFor(() => expect(h.oauthLoginCalls).toEqual(["#google-oauth"]));
 
     process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "50";
@@ -3965,22 +3965,24 @@ describe("operate session — OAuth lifecycle", () => {
       }),
     ).rejects.toThrow(/google_session.*re-login/i);
 
-    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1000";
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "3000";
     const successorAction = act(successor.session_id, {
       kind: "oauth_login",
       target: "Continue with Google",
       provider: "google",
-    });
+    }).catch((error: unknown) => error);
     await new Promise<void>((resolve) => setTimeout(resolve, 25));
     expect(h.oauthLoginCalls).toEqual(["#google-oauth"]);
 
     releaseOwner();
-    await owningAction;
-    await successorAction;
+    expect(await owningAction).not.toBeInstanceOf(Error);
+    expect(await successorAction).not.toBeInstanceOf(Error);
     expect(h.oauthLoginCalls).toEqual(["#google-oauth", "#google-oauth"]);
 
     await finishProvisionSession(owner.session_id);
-    await finishProvisionSession(abandoned.session_id);
+    await expect(finishProvisionSession(abandoned.session_id)).rejects.toThrow(
+      /unknown provision session/i,
+    );
     await finishProvisionSession(successor.session_id);
   });
 

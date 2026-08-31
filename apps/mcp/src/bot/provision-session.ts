@@ -1029,21 +1029,21 @@ async function withOAuthActionBoundary<T>(
 ): Promise<T> {
   const deadline = oauthActionDeadline(provider);
   const releaseCooldownMs = oauthLoginLeaseCooldownMs();
-  return await withOAuthActionLease(
-    deadline,
-    async () => {
-      const unregisterCancellation = registerOAuthActionCancellation(deadline, () =>
-        quiesceOAuthActionSession(session),
-      );
-      const generation = provisionStartGeneration();
-      const canContinue = (): boolean =>
-        oauthActionCanMutate(deadline) &&
-        shutdownInProgress === 0 &&
-        generation === shutdownGeneration &&
-        !session.closing &&
-        sessions.get(session.id) === session;
-      const ephemeral = leasedBrowsers.get(session.browser);
-      try {
+  const unregisterCancellation = registerOAuthActionCancellation(deadline, () =>
+    quiesceOAuthActionSession(session),
+  );
+  try {
+    return await withOAuthActionLease(
+      deadline,
+      async () => {
+        const generation = provisionStartGeneration();
+        const canContinue = (): boolean =>
+          oauthActionCanMutate(deadline) &&
+          shutdownInProgress === 0 &&
+          generation === shutdownGeneration &&
+          !session.closing &&
+          sessions.get(session.id) === session;
+        const ephemeral = leasedBrowsers.get(session.browser);
         if (ephemeral === undefined) {
           return await withinOAuthActionDeadline(run(deadline), deadline);
         }
@@ -1054,12 +1054,12 @@ async function withOAuthActionBoundary<T>(
           releaseCooldownMs,
           deadline,
         );
-      } finally {
-        unregisterCancellation();
-      }
-    },
-    releaseCooldownMs,
-  );
+      },
+      releaseCooldownMs,
+    );
+  } finally {
+    unregisterCancellation();
+  }
 }
 
 async function withCanonicalSnapshotPublication<T>(
