@@ -10285,9 +10285,9 @@ export class BrowserController {
   }
 
   // The first frame that actually renders a visible card (PAN) input, or null.
-  private async panFieldFrame(): Promise<Frame | null> {
+  private async panFieldFrame(frames?: readonly Frame[]): Promise<Frame | null> {
     if (!this.page) return null;
-    for (const frame of this.page.frames()) {
+    for (const frame of frames ?? this.page.frames()) {
       const locator = frame.locator(CHECKOUT_PAN_FIELD_SELECTORS);
       const count = await locator.count().catch(() => 0);
       for (let i = 0; i < count; i += 1) {
@@ -10303,7 +10303,7 @@ export class BrowserController {
     return null;
   }
 
-  // Bounded wait for a PAN field to appear anywhere on the page. A
+  // Bounded wait for a PAN field to appear in caller-eligible frames. A
   // single-page checkout's card entry can live in a cross-origin PCI iframe
   // (e.g. Shopify's checkout.pci.shopifyinc.com) that mounts only after the
   // payment section itself renders — later than the total becomes readable,
@@ -10311,7 +10311,10 @@ export class BrowserController {
   // fillAndSubmitCheckout/fillCheckoutCardFields used to take one frames()
   // snapshot at call time; a frame that hadn't mounted YET at that exact
   // instant made a genuinely fillable checkout fail closed.
-  private async waitForPanField(timeoutMs: number): Promise<void> {
+  private async waitForPanField(
+    timeoutMs: number,
+    frameAllowed: (frame: Frame) => boolean = () => true,
+  ): Promise<void> {
     if (!this.page) return;
     const deadline = Date.now() + timeoutMs;
     while (true) {
@@ -10320,10 +10323,100 @@ export class BrowserController {
       // CHECKOUT_PAN_FIELD_SELECTORS once stamped — without this,
       // panFieldFrame() below can never match and every call here burns its
       // full timeoutMs even though the field was on the page from the start.
-      await this.stampJapaneseCardLabelFields(this.page.frames());
-      if ((await this.panFieldFrame()) !== null) return;
+      const frames = this.page.frames().filter(frameAllowed);
+      await this.stampJapaneseCardLabelFields(frames);
+      if ((await this.panFieldFrame(frames)) !== null) return;
       if (Date.now() >= deadline) return;
       await this.page.waitForTimeout(200).catch(() => undefined);
+    }
+  }
+
+  // Split checkout waits are event-driven: a trusted hosted-field frame can
+  // attach as about:blank and only later navigate to its processor URL. Watch
+  // both lifecycle events and then wait inside that exact frame for the PAN.
+  // A settled page with a PAN only in excluded frames returns immediately so
+  // the caller can produce its existing fail-closed frame-origin refusal.
+  private async waitForRecognizedPanField(
+    pageUrl: string,
+    deadline?: number,
+  ): Promise<void> {
+    if (!this.page) return;
+    const page = this.page;
+    const frameAllowed = (frame: Frame): boolean =>
+      frame === page.mainFrame() || recognizedPaymentProviderFrame(frame.url(), pageUrl);
+    const remaining = (): number =>
+      deadline === undefined ? 0 : Math.max(0, deadline - Date.now());
+    let done = false;
+    let resolveDone!: () => void;
+    const complete = (): void => {
+      if (done) return;
+      done = true;
+      resolveDone();
+    };
+    const completed = new Promise<void>((resolve) => {
+      resolveDone = resolve;
+    });
+    const observeTrustedFrame = (frame: Frame): void => {
+      if (done || !frameAllowed(frame)) return;
+      void (async () => {
+        // JP checkouts can expose their PAN only through an associated label,
+        // so normalize the trusted frame before starting its selector wait.
+        // This preserves the existing conservative label-to-control contract
+        // while never evaluating or mutating an excluded payment frame.
+        await this.stampJapaneseCardLabelFields([frame]);
+        if ((await this.panFieldFrame([frame])) !== null) {
+          complete();
+          return;
+        }
+        await frame
+          .waitForSelector(CHECKOUT_PAN_FIELD_SELECTORS, {
+            state: "visible",
+            timeout: remaining(),
+          })
+          .then(() => complete())
+          .catch(() => undefined);
+      })();
+    };
+    const settleOrRefuse = (): void => {
+      void page
+        .waitForLoadState("networkidle", { timeout: remaining() })
+        .then(async () => {
+          if (done) return;
+          const frames = page.frames();
+          const trustedFrames = frames.filter(frameAllowed);
+          await this.stampJapaneseCardLabelFields(trustedFrames);
+          if ((await this.panFieldFrame(trustedFrames)) !== null) {
+            complete();
+            return;
+          }
+          // Do not reject while a recognized provider frame is still live:
+          // its PAN may appear after the provider's own hydration work. The
+          // deadline governs that wait; there is no local timing heuristic.
+          if (frames.some((frame) => frame !== page.mainFrame() && frameAllowed(frame))) return;
+          complete();
+        })
+        .catch(() => undefined);
+    };
+    const onFrameLifecycle = (frame: Frame): void => {
+      observeTrustedFrame(frame);
+      settleOrRefuse();
+    };
+    page.on("frameattached", onFrameLifecycle);
+    page.on("framenavigated", onFrameLifecycle);
+    for (const frame of page.frames()) observeTrustedFrame(frame);
+    settleOrRefuse();
+    let deadlineTimer: NodeJS.Timeout | undefined;
+    if (deadline !== undefined) {
+      const timeout = remaining();
+      if (timeout <= 0) complete();
+      else deadlineTimer = setTimeout(complete, timeout);
+    }
+    try {
+      await completed;
+    } finally {
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      page.off("frameattached", onFrameLifecycle);
+      page.off("framenavigated", onFrameLifecycle);
     }
   }
 
@@ -11563,7 +11656,10 @@ export class BrowserController {
   // left behind. On success the filled values STAY in the page (the site
   // needs them at its confirm step) marked data-ts-sealed-payment, which
   // extractInteractiveElements reports as sealed so observations mask them.
-  async fillCheckoutCardFields(card: CheckoutCard): Promise<void> {
+  async fillCheckoutCardFields(
+    card: CheckoutCard,
+    options: { deadline?: number } = {},
+  ): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     this.checkoutCardGroupScope = undefined;
     const page = this.page;
@@ -11571,11 +11667,10 @@ export class BrowserController {
     if (!recognizedPaymentProviderFrame(pageUrl, pageUrl)) {
       throw new Error("payment_checkout_https_required");
     }
-    // Same late-mount tolerance as fillAndSubmitCheckout: wait for a PAN
-    // field to appear anywhere before taking the trusted-frame snapshot below
-    // (which still restricts the actual fill to recognized frames — this only
-    // decides WHEN to look, never WHERE it's allowed to write).
-    await this.waitForPanField(10_000);
+    await this.waitForRecognizedPanField(pageUrl, options.deadline);
+    if (options.deadline !== undefined && Date.now() >= options.deadline) {
+      throw new Error("payment_approval_expired");
+    }
     const allowed = page
       .frames()
       .filter(
