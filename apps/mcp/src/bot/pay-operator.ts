@@ -75,17 +75,13 @@ export interface PendingCardFill {
   mandate_id?: string;
 }
 
-// Post-submit 3-D Secure resumability: the card was already released and the
+// Post-submit outcome resumability: the card was already released and the
 // charge already submitted — this is NEVER a new authorization, just a
 // pointer to an already-in-flight one. A decoupled/out-of-band (app-push)
-// challenge's real-world completion time (the cardholder noticing, unlocking
-// their phone, opening the banking app, approving) routinely exceeds a
-// single bounded waitForThreeDsResolution call. Without this, operate_pay
-// returning still-pending after its own wait budget left NOTHING watching
-// the SAME live browser for the outcome — the mandate/approval flow has
-// operate_payment_status for exactly this shape of gap; the post-submit 3DS
-// wait did not, until now. `deadline` bounds how long Trusty Squire will
-// keep re-checking before handing back an accurate unresolved status.
+// challenge's real-world completion time routinely exceeds one bounded wait,
+// but missing challenge evidence must remain outcome="unknown" rather than
+// being relabeled as 3-D Secure. `deadline` bounds how long
+// operate_payment_status can keep checking the SAME live browser.
 export interface PendingThreeDsWait {
   approval_id: string;
   approval_url: string;
@@ -103,12 +99,12 @@ export interface CartCheckoutObservation {
   observedAt: number;
 }
 
-// Non-blocking approval [P0]: everything a LATER operate_pay call needs to
-// validate and potentially resume the SAME approval. Held by the session layer
-// only (never the model) — it carries the operator keypair's PRIVATE half. A
-// live resumed approval must reuse that keypair because its sealed card was
-// HPKE-encrypted to it; a stale approval is discarded with the key before a
-// fresh approval is minted.
+// Resumable approval state: everything a later operate_pay call needs to
+// validate and continue the SAME approval after a bounded wait. Held by the
+// session layer only (never the model) — it carries the operator keypair's
+// PRIVATE half. A live resumed approval must reuse that keypair because its
+// sealed card was HPKE-encrypted to it; denial or expiry scrubs the key and
+// retains terminal custody instead of minting a replacement approval.
 export interface PendingApprovalWait {
   approval_id: string;
   approval_url: string;
@@ -178,10 +174,10 @@ interface PayDependencies {
   onApprovalTerminal: (state: PendingApprovalWait, terminalStatus: "denied" | "expired") => void;
   onThreeDsHandoffArmed: (state: PendingThreeDsWait) => void;
   coordinateThreeDsAudit: (state: PendingThreeDsWait, audit: () => Promise<void>) => Promise<void>;
-  // Fired when the submit-time waitForThreeDsResolution wait exhausts its
-  // budget with NO terminal signal (genuinely still pending, not declined,
-  // not confirmed) so the session layer can persist resumable state for
-  // operate_payment_status to keep checking the SAME live browser.
+  // Fired when the submit-time outcome wait exhausts its budget with no
+  // terminal signal so the session layer can persist either genuine 3-D
+  // Secure or still-unknown state for operate_payment_status to recheck in
+  // the SAME live browser.
   onThreeDsPending: (state: PendingThreeDsWait) => void;
   onThreeDsCleared: (state: PendingThreeDsWait) => void;
 }
@@ -552,9 +548,7 @@ const THREE_DS_RESUME_WINDOW_MS = 20 * 60 * 1000;
 const PAYMENT_APPROVAL_RESPONSE_RESERVE_MS = 500;
 
 function isPaymentApprovalTransportTimeout(error: unknown): boolean {
-  return (
-    error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")
-  );
+  return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
 }
 
 // The cardholder approves 3-D Secure via an app-push in their bank app while

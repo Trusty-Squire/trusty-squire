@@ -206,10 +206,7 @@ export class ApiClient {
       transportTimeoutMs === undefined
         ? undefined
         : AbortSignal.timeout(Math.max(1, Math.floor(transportTimeoutMs)));
-    return this.get(
-      `/v1/pay/approvals/${encodeURIComponent(id)}${query}${boundedWait}`,
-      signal,
-    );
+    return this.get(`/v1/pay/approvals/${encodeURIComponent(id)}${query}${boundedWait}`, signal);
   }
 
   async confirmPaymentApproval(

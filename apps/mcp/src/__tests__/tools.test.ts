@@ -1540,13 +1540,7 @@ describe("operate_payment_status [P0]", () => {
 
       await expect(result).resolves.toMatchObject({ status: "denied", ready_to_charge: false });
       expect(getPaymentApproval).toHaveBeenCalledTimes(2);
-      expect(getPaymentApproval).toHaveBeenNthCalledWith(
-        2,
-        "appr_status",
-        "wait-peek",
-        500,
-        1_000,
-      );
+      expect(getPaymentApproval).toHaveBeenNthCalledWith(2, "appr_status", "wait-peek", 500, 1_000);
     } finally {
       vi.useRealTimers();
     }
@@ -1568,9 +1562,7 @@ describe("operate_payment_status [P0]", () => {
     });
     const api = makeMockApi({ getPaymentApproval } as unknown as ApiClient);
 
-    await expect(
-      operatePaymentStatusTool.handler({}, api),
-    ).resolves.toMatchObject({
+    await expect(operatePaymentStatusTool.handler({}, api)).resolves.toMatchObject({
       status: "pending",
       candidate_submitted: true,
       candidate_kind: "review",

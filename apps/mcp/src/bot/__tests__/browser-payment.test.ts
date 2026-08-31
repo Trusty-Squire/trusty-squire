@@ -1581,9 +1581,9 @@ describe("checkout payment parsing", () => {
           ).submitFilledCheckoutInScope(undefined, onSubmitDispatched),
         ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
 
-        await expect(page.locator("body").getAttribute("data-window-submit-observed")).resolves.toBe(
-          "true",
-        );
+        await expect(
+          page.locator("body").getAttribute("data-window-submit-observed"),
+        ).resolves.toBe("true");
         await expect(page.locator("#address-error").textContent()).resolves.toBe(
           "Address unavailable",
         );

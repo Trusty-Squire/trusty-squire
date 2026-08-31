@@ -44,8 +44,8 @@ const DEFAULT_REGISTRY_BASE =
 // terminal teardown can close Chrome and destroy its private profile. Hence two
 // bounds: a short one when idle with no session (routine), and a longer one
 // when a session is still open — wide enough that no real in-flight flow
-// (operate_pay no longer blocks a call for approval; verification polling is
-// bounded in the minutes) should ever cross it, so crossing it is a reliable
+// (operate_pay's approval wait is bounded to one minute; post-submit outcome
+// checks are bounded in the minutes) should ever cross it, so crossing it is a reliable
 // abandoned-session signal, not a false kill of live work.
 const DEFAULT_IDLE_TIMEOUT_MS = 20 * 60 * 1_000; // 20m, no open session
 const DEFAULT_IDLE_TIMEOUT_WITH_SESSION_MS = 12 * 60 * 60 * 1_000; // 12h, session open

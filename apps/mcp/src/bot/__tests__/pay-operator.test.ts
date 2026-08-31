@@ -1148,9 +1148,7 @@ describe("operate_pay", () => {
       expect(outcome.result).toMatchObject({ status: expectedStatus });
       expect(outcome.result).not.toHaveProperty("reason");
       expect(outcome.result).not.toHaveProperty("next");
-      expect(outcome.auditBodies).toEqual([
-        expect.objectContaining({ status: expectedStatus }),
-      ]);
+      expect(outcome.auditBodies).toEqual([expect.objectContaining({ status: expectedStatus })]);
       expect(outcome.activePendingThreeDs).toBeNull();
     },
   );
@@ -2725,16 +2723,16 @@ describe("operate_pay bounded approval continuation [P0]", () => {
 
   it("returns a resumable approval when the long-poll transport times out", async () => {
     const env = buildResumableEnv();
-    const getPaymentApproval = vi.spyOn(env.api, "getPaymentApproval").mockImplementation(
-      async (_id, candidateRead) => {
+    const getPaymentApproval = vi
+      .spyOn(env.api, "getPaymentApproval")
+      .mockImplementation(async (_id, candidateRead) => {
         if (candidateRead === true) {
           const error = new Error("approval transport timed out");
           error.name = "TimeoutError";
           throw error;
         }
         throw new Error("unexpected immediate approval read");
-      },
-    );
+      });
     const onApprovalPending = vi.fn();
 
     const result = await executeOperatePay(baseArgs, env.api, env.browser, {

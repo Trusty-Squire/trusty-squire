@@ -572,53 +572,14 @@ recording, and payment contracts live only in
 record remains in
 [`docs/DESIGN-replay-shape-lookup.md`](docs/DESIGN-replay-shape-lookup.md).
 
-### Non-blocking payment approval (operate_payment_status)
+### Payment implementation notes
 
 The public tool contract lives in the [README payment guide](README.md#one-prompt),
 the data flow in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#payment-flow), and
 the cross-session authorization boundary in [`SECURITY.md`](SECURITY.md#client-encrypted-card-data).
-This section records only implementation details.
+Keep approval timing, denial/expiry custody, resume guidance, status bounds, and
+post-submit outcome labels in those owners rather than copying them here.
 
-`operate_pay` (fill_card and single-page initiation — NOT `phase:"confirm"`,
-which was never a wait) no longer blocks the MCP call for up to 5 (18 for
-JIT) minutes polling for the human's phone tap. It makes ONE live
-`getPaymentApproval` check and, if not yet approved, returns
-`{session_id, status:"approval_pending", approval_id, approval_url, expires_at,
-phase, approved_amount_cents, next:{tool:"operate_payment_status", session_id,
-wait_seconds:15}}` — the friction-audit P0 fix (small models can't tell
-"pending" from "broken" on a silent multi-minute hang, so they panic-retry or
-kill the server).
-
-- **One canonical read-only tool, `operate_payment_status(session_id?, wait_seconds?)`.**
-  `wait_seconds` (0-15, default 0) is an instant peek at 0, a bound-wait
-  (client-side race in `readApprovalStatus`, `apps/mcp/src/tools/operate-pay.ts`)
-  above 0. Reports `pending`/`approved`/`expired` plus `candidate_submitted`
-  (the phone responded; call `operate_pay` again to actually verify the
-  mandate, open the card, and fill/charge — this tool never does that).
-  `paymentStatusResult()` in `operate-pay.ts` is the sole handler, called only
-  by `operate_payment_status`; no payment-status alias remains in the registry.
-- **Validated idempotent resume.** A still-pending call
-  hands its resumable state (approval id/nonce/keypair/checkout/rejected-
-  candidates — `PendingApprovalWait` in `pay-operator.ts`) to session state
-  via a NEW `activePayment` status, `"awaiting_approval"`
-  (`provision-session.ts`). A later `operate_pay` call for the same
-  checkout passes it through `claimActivePaymentForOperatePay`'s
-  `resumeApproval`. `executeOperatePay` first reads the approval resource and
-  reuses it only while its id matches, it is unexpired, and it is pending (or
-  approved with the signed candidate still present). A missing, expired,
-  rejected, consumed, or otherwise terminal resource has its old private key
-  cleared and is replaced with a fresh approval. Every initiation surfaces the
-  active approval URL, including reuse, so the host can notify the user again
-  without minting a duplicate authorization. `pollBudgetMs` bounds this call's
-  poll loop; omitted retains legacy full-deadline blocking for direct callers.
-  Reusing a live approval also reuses its operator keypair because the sealed
-  card was HPKE-encrypted to that exact keypair.
-- **Session-addressed resume.** `withPaymentSessionCall` resolves the optional
-  `session_id` exactly once at tool entry, requires it when more than one session
-  exists, and carries the selected `Session` through every await. Payment results
-  and tool hints repeat the same ID. `operate_finish*` closes admission, drains
-  entered calls, and follows the payment-state cleanup and profile-disposition
-  contract in `SECURITY.md`.
 - **Unreadable checkout totals.** Follow the README payment guide for the public
   precedence contract; `executeOperatePay` in `pay-operator.ts` is the
   authoritative implementation.

@@ -571,10 +571,7 @@ async function readApprovalStatus(
       : await Promise.race([
           fetchApproval,
           new Promise<null>((resolve) =>
-            setTimeout(
-              () => resolve(null),
-              serverWaitMs + PAYMENT_APPROVAL_RESPONSE_RESERVE_MS,
-            ),
+            setTimeout(() => resolve(null), serverWaitMs + PAYMENT_APPROVAL_RESPONSE_RESERVE_MS),
           ),
         ]);
   if (approval === null) {

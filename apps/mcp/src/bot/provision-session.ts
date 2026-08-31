@@ -639,11 +639,10 @@ export interface Session {
   // pending -> confirming transition prevents duplicate confirmation, while
   // submitStarted forbids restoring retry state after a charge may have begun.
   // "sealed" survives unverified field cleanup and blocks later payments.
-  // [P0] "awaiting_approval" is a NEW rest state (not held during a call —
-  // operate_pay no longer blocks): the human hasn't tapped approve yet. A
-  // later operate_pay call validates the stored approval before reusing it;
-  // stale or terminal resources are replaced. operate_payment_status reads it
-  // without changing it.
+  // "awaiting_approval" is the rest state after one bounded operate_pay wait:
+  // the human has not approved or denied yet. A later operate_pay call resumes
+  // the same approval. Once denial or expiry is observed, terminal_approval
+  // keeps that attempt in custody and its private operator key is scrubbed.
   activePayment:
     | { status: "operating"; lease: ActivePaymentLease }
     | { status: "awaiting_approval"; state: PendingApprovalWait }
@@ -657,7 +656,7 @@ export interface Session {
     | { status: "sealed" }
     | null;
   paymentFieldSealActive: boolean;
-  // A completed operate_pay single-page submit whose post-submit 3DS wait
+  // A completed operate_pay single-page submit whose post-submit outcome wait
   // exhausted its budget with no terminal signal. Deliberately NOT part of
   // activePayment: the card is already released and the charge already
   // submitted, so there is no lease to hold and no re-authorization risk —
@@ -4099,9 +4098,9 @@ export function getActivePendingCardFill(selectedSession?: Session): PendingCard
   return state?.status === "pending" ? state.pending : null;
 }
 
-// [P0] Read-only: the outstanding approval a prior operate_pay call left
-// waiting on the human, if any. Backs operate_payment_status, which does not
-// touch session state and just reports on it.
+// The outstanding approval a prior bounded operate_pay call left waiting on
+// the human, if any. A status read may transition this exact state to terminal
+// denial/expiry and scrub its private operator key.
 export function getActivePendingApproval(selectedSession?: Session): PendingApprovalWait | null {
   const state = (selectedSession ?? activeProvisionSession()).activePayment;
   return state?.status === "awaiting_approval" ? state.state : null;

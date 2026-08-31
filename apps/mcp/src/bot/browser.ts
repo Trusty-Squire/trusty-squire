@@ -37,7 +37,6 @@ import type {
   Request,
 } from "playwright";
 import { createRequire } from "node:module";
-import { randomUUID } from "node:crypto";
 import { Socket, createServer } from "node:net";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -561,21 +560,6 @@ function checkoutOutcomeBaselineFromDispatchSnapshot(
   };
 }
 
-function parseCheckoutOutcomeDispatchSnapshot(
-  value: unknown,
-): CheckoutOutcomeDispatchSnapshot | null {
-  if (value === null || typeof value !== "object") return null;
-  const snapshot = value as { url?: unknown; urls?: unknown };
-  if (
-    typeof snapshot.url !== "string" ||
-    !Array.isArray(snapshot.urls) ||
-    !snapshot.urls.every((url) => typeof url === "string")
-  ) {
-    return null;
-  }
-  return { url: snapshot.url, urls: snapshot.urls };
-}
-
 function checkoutUrlOrderIdentities(
   rawUrl: string,
 ): { orders: readonly string[]; terminal: string | null } | null {
@@ -963,22 +947,12 @@ function isCheckoutPaymentExecutionOperation(value: string): boolean {
   if (
     (hasChargeSubject &&
       includesAny(["authoriz", "captur", "complet", "confirm", "creat", "execut", "submit"])) ||
-    (hasOrderSubject &&
-      includesAny(["complet", "confirm", "creat", "execut", "plac", "submit"]))
+    (hasOrderSubject && includesAny(["complet", "confirm", "creat", "execut", "plac", "submit"]))
   ) {
     return true;
   }
   if (!operation.includes("payment")) return false;
-  if (
-    includesAny([
-      "initializ",
-      "paymentmethod",
-      "prepar",
-      "session",
-      "setup",
-      "tokeniz",
-    ])
-  ) {
+  if (includesAny(["initializ", "paymentmethod", "prepar", "session", "setup", "tokeniz"])) {
     return false;
   }
   return includesAny(["authoriz", "captur", "complet", "confirm", "execut", "submit"]);
@@ -1036,9 +1010,7 @@ function isCheckoutPaymentRequest(request: Request): boolean {
     const segments = new URL(request.url()).pathname.split("/").filter(Boolean);
     const normalizedSegments = segments.map(normalizedPaymentOperation);
     if (
-      normalizedSegments.some((segment) =>
-        CHECKOUT_PAYMENT_EXCLUDED_PATH_SEGMENTS.has(segment),
-      )
+      normalizedSegments.some((segment) => CHECKOUT_PAYMENT_EXCLUDED_PATH_SEGMENTS.has(segment))
     ) {
       return false;
     }
@@ -1060,9 +1032,7 @@ function isCheckoutPaymentRequest(request: Request): boolean {
       lastSegment !== undefined &&
       (normalizedPaymentOperation(lastSegment) === "confirm" ||
         normalizedPaymentOperation(lastSegment) === "capture") &&
-      segments.some(
-        (segment) => normalizedPaymentOperation(segment) === "paymentintents",
-      )
+      segments.some((segment) => normalizedPaymentOperation(segment) === "paymentintents")
     ) {
       return true;
     }
@@ -11758,82 +11728,78 @@ export class BrowserController {
           submitDispatchedReported = true;
         };
         const dispatchTrackingInstalled = await candidate
-          .evaluate(
-            (element, token) => {
-              const stateWindow = window as Window & {
-                __trustySquirePaymentSubmitDispatch?: {
-                  token: string;
-                  submitObserved: boolean;
-                  validationBlocked: boolean;
-                };
+          .evaluate((element, token) => {
+            const stateWindow = window as Window & {
+              __trustySquirePaymentSubmitDispatch?: {
+                token: string;
+                submitObserved: boolean;
+                validationBlocked: boolean;
               };
-              const tracked = element as Element & {
-                __tsPaymentSubmitDispatchListeners?: Array<{
-                  capture: boolean;
-                  event: "invalid" | "submit";
-                  listener: EventListener;
-                  target: Element;
-                }>;
-              };
-              const priorTracking = tracked.__tsPaymentSubmitDispatchListeners;
-              if (priorTracking !== undefined) {
-                for (const registration of priorTracking) {
-                  registration.target.removeEventListener(
-                    registration.event,
-                    registration.listener,
-                    registration.capture,
-                  );
-                }
-              }
-              stateWindow.__trustySquirePaymentSubmitDispatch = {
-                token,
-                submitObserved: false,
-                validationBlocked: false,
-              };
-              const listener: EventListener = () => {
-                const state = stateWindow.__trustySquirePaymentSubmitDispatch;
-                if (state?.token !== token || state.submitObserved) return;
-                state.submitObserved = true;
-              };
-              const form =
-                element instanceof HTMLButtonElement || element instanceof HTMLInputElement
-                  ? element.form
-                  : element.closest("form");
-              const submitTargets =
-                form !== null ? [form] : Array.from(document.forms);
-              const registrations: Array<{
+            };
+            const tracked = element as Element & {
+              __tsPaymentSubmitDispatchListeners?: Array<{
                 capture: boolean;
                 event: "invalid" | "submit";
                 listener: EventListener;
                 target: Element;
-              }> = submitTargets.map((target) => ({
-                capture: false,
-                event: "submit" as const,
-                listener,
-                target,
-              }));
-              const invalidListener: EventListener = () => {
-                const state = stateWindow.__trustySquirePaymentSubmitDispatch;
-                if (state?.token === token) state.validationBlocked = true;
-              };
-              registrations.push(
-                ...submitTargets.map((target) => ({
-                  capture: true,
-                  event: "invalid" as const,
-                  listener: invalidListener,
-                  target,
-                })),
-              );
-              tracked.__tsPaymentSubmitDispatchListeners = registrations;
-              for (const registration of registrations) {
-                registration.target.addEventListener(registration.event, registration.listener, {
-                  capture: registration.capture,
-                  once: true,
-                });
+              }>;
+            };
+            const priorTracking = tracked.__tsPaymentSubmitDispatchListeners;
+            if (priorTracking !== undefined) {
+              for (const registration of priorTracking) {
+                registration.target.removeEventListener(
+                  registration.event,
+                  registration.listener,
+                  registration.capture,
+                );
               }
-            },
-            dispatchToken,
-          )
+            }
+            stateWindow.__trustySquirePaymentSubmitDispatch = {
+              token,
+              submitObserved: false,
+              validationBlocked: false,
+            };
+            const listener: EventListener = () => {
+              const state = stateWindow.__trustySquirePaymentSubmitDispatch;
+              if (state?.token !== token || state.submitObserved) return;
+              state.submitObserved = true;
+            };
+            const form =
+              element instanceof HTMLButtonElement || element instanceof HTMLInputElement
+                ? element.form
+                : element.closest("form");
+            const submitTargets = form !== null ? [form] : Array.from(document.forms);
+            const registrations: Array<{
+              capture: boolean;
+              event: "invalid" | "submit";
+              listener: EventListener;
+              target: Element;
+            }> = submitTargets.map((target) => ({
+              capture: false,
+              event: "submit" as const,
+              listener,
+              target,
+            }));
+            const invalidListener: EventListener = () => {
+              const state = stateWindow.__trustySquirePaymentSubmitDispatch;
+              if (state?.token === token) state.validationBlocked = true;
+            };
+            registrations.push(
+              ...submitTargets.map((target) => ({
+                capture: true,
+                event: "invalid" as const,
+                listener: invalidListener,
+                target,
+              })),
+            );
+            tracked.__tsPaymentSubmitDispatchListeners = registrations;
+            for (const registration of registrations) {
+              registration.target.addEventListener(registration.event, registration.listener, {
+                capture: registration.capture,
+                once: true,
+              });
+            }
+          }, dispatchToken)
           .then(() => true)
           .catch(() => false);
         if (!dispatchTrackingInstalled) {
@@ -11995,8 +11961,8 @@ export class BrowserController {
               await waitForDispatchEvidence();
               const dispatchState = await readDispatchState();
               const clickOnlyOutcomeConfirmed =
-                (navigationTerminalObserved ||
-                  (await this.hasConfirmedCheckoutOutcome(clickOnlyOutcomeBaseline)));
+                navigationTerminalObserved ||
+                (await this.hasConfirmedCheckoutOutcome(clickOnlyOutcomeBaseline));
               const clickOnlyThreeDsObserved =
                 navigationObserved &&
                 (navigationThreeDsObserved ||
