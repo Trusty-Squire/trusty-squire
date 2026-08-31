@@ -179,12 +179,14 @@ describe("owner process startup sweep", () => {
       const workerPath = join(root, "later-exit-worker.mjs");
       await writeFile(
         workerPath,
-        `import { existsSync, readFileSync, writeFileSync } from "node:fs";\nconst countPath = new URL("./worker-count", import.meta.url);\nconst count = existsSync(countPath) ? Number(readFileSync(countPath, "utf8")) + 1 : 1;\nwriteFileSync(countPath, String(count));\nwriteFileSync(process.argv[3], JSON.stringify({ version: 1, token: process.argv[4], pid: process.pid }) + "\\n");\nif (count === 1) setTimeout(() => process.exit(0), 250);\nelse setInterval(() => undefined, 1000);\n`,
+        `import { existsSync, readFileSync, writeFileSync } from "node:fs";\nconst countPath = new URL("./worker-count", import.meta.url);\nconst count = existsSync(countPath) ? Number(readFileSync(countPath, "utf8")) + 1 : 1;\nwriteFileSync(countPath, String(count));\nwriteFileSync(new URL(\`./worker-\${count}.pid\`, import.meta.url), String(process.pid));\nwriteFileSync(process.argv[3], JSON.stringify({ version: 1, token: process.argv[4], pid: process.pid }) + "\\n");\nsetInterval(() => undefined, 1000);\n`,
       );
 
       const reaper = startOwnerProcessReaper({ rootDir: root, workerPath });
       expect(reaper).not.toBeNull();
       trackOwnerBrowserLaunch("v1:1:worker-restarted", join(root, "profile"));
+      expect(readFileSync(join(root, "worker-count"), "utf8")).toBe("2");
+      process.kill(Number(readFileSync(join(root, "worker-1.pid"), "utf8")), "SIGTERM");
       await vi.waitFor(() => expect(readFileSync(join(root, "worker-count"), "utf8")).toBe("3"), {
         timeout: 5_000,
       });
@@ -197,6 +199,7 @@ describe("owner process startup sweep", () => {
         expect.objectContaining({ marker: "v1:1:worker-restarted" }),
       ]);
     },
+    15_000,
   );
 
   it.skipIf(process.platform !== "linux")(
