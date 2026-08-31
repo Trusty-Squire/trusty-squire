@@ -440,6 +440,7 @@ function signalOwnerHelper(identity: OwnerHelperRecord, signal: NodeJS.Signals):
 interface BrowserIdentityReaders {
   anchor?: OwnerIdentity;
   readProcessIds?: () => number[];
+  readBirthIdentity?: (pid: number) => OwnerIdentity | null;
   readMarker?: (pid: number) => string | null;
   readMarkerState?: (pid: number) => OperatorBrowserProcessMarkerState;
   readCommandState?: (pid: number) => ProcessIdentityState;
@@ -492,12 +493,14 @@ function launchAnchorTrustState(
 function exactMarkerProcessScan(
   launch: OwnerLaunchRecord,
   readers: BrowserIdentityReaders = {},
-): { matching: number[]; unknown: boolean } {
+): { matching: OwnerIdentity[]; unknown: boolean; anchor?: OwnerIdentity } {
   if (process.platform !== "linux" && readers.readProcessIds === undefined) {
     return { matching: [], unknown: false };
   }
-  const matching: number[] = [];
+  const matching: OwnerIdentity[] = [];
+  const missingProfile: OwnerIdentity[] = [];
   const anchorTrust = launchAnchorTrustState(launch, readers);
+  let discoveredAnchor: OwnerIdentity | undefined;
   let unknown = anchorTrust === "unknown";
   try {
     for (const pid of processIds(readers.readProcessIds)) {
@@ -517,23 +520,55 @@ function exactMarkerProcessScan(
         pid,
         launch.user_data_dir,
       );
-      if (
-        profileState === "matching" ||
-        (profileState === "missing" && anchorTrust === "trusted")
-      ) {
-        matching.push(pid);
-      } else {
+      if (profileState !== "matching" && profileState !== "missing") {
         unknown = true;
+        continue;
+      }
+      const identity = (readers.readBirthIdentity ?? processBirthIdentity)(pid);
+      if (identity === null) {
+        if ((readers.readRunningState ?? linuxProcessRunningState)(pid) !== "stale") unknown = true;
+        continue;
+      }
+      const birthState = readers.readBirthState?.(identity) ?? processBirthIdentityState(identity);
+      if (birthState !== "matching") {
+        if (birthState === "unknown") unknown = true;
+        continue;
+      }
+      if (profileState === "matching") {
+        matching.push(identity);
+        discoveredAnchor ??= identity;
+      } else {
+        missingProfile.push(identity);
       }
     }
   } catch {
     unknown = true;
   }
-  return { matching, unknown };
+  const missingProfileTrusted =
+    anchorTrust === "trusted" || (anchorTrust === "pending" && discoveredAnchor !== undefined);
+  if (missingProfileTrusted) matching.push(...missingProfile);
+  else if (missingProfile.length > 0) unknown = true;
+  return {
+    matching,
+    unknown,
+    ...(launch.anchor === undefined && discoveredAnchor !== undefined
+      ? { anchor: discoveredAnchor }
+      : {}),
+  };
 }
 
-function exactMarkerProcessIds(launch: OwnerLaunchRecord): number[] {
-  return exactMarkerProcessScan(launch).matching;
+function exactMarkerIdentityMatches(
+  launch: OwnerLaunchRecord,
+  identity: OwnerIdentity,
+  readers: BrowserIdentityReaders = {},
+): boolean {
+  const scan = exactMarkerProcessScan(launch, {
+    ...readers,
+    readProcessIds: () => [identity.pid],
+  });
+  return scan.matching.some(
+    (current) => current.pid === identity.pid && current.start_time === identity.start_time,
+  );
 }
 
 export function ownerBrowserLaunchState(
@@ -557,6 +592,7 @@ export async function terminateOwnerBrowserLaunch(
   options: {
     graceMs?: number;
     readProcessIds?: () => number[];
+    readBirthIdentity?: (pid: number) => OwnerIdentity | null;
     readMarkerState?: (pid: number) => OperatorBrowserProcessMarkerState;
     readCommandState?: (pid: number) => ProcessIdentityState;
     readProfileState?: (pid: number, profileDir: string) => ProcessProfileArgumentState;
@@ -572,6 +608,9 @@ export async function terminateOwnerBrowserLaunch(
   const readers: BrowserIdentityReaders = {
     ...(anchor === undefined ? {} : { anchor }),
     ...(options.readProcessIds === undefined ? {} : { readProcessIds: options.readProcessIds }),
+    ...(options.readBirthIdentity === undefined
+      ? {}
+      : { readBirthIdentity: options.readBirthIdentity }),
     ...(options.readMarkerState === undefined ? {} : { readMarkerState: options.readMarkerState }),
     ...(options.readCommandState === undefined
       ? {}
@@ -596,28 +635,33 @@ export async function terminateOwnerBrowserLaunch(
     user_data_dir: profilePathIdentity(profileDir),
     ...(anchor === undefined ? {} : { anchor }),
   };
-  const matching = (): number[] => exactMarkerProcessScan(launch, readers).matching;
-  const signal = (pids: readonly number[], signalName: NodeJS.Signals): void => {
-    for (const pid of pids) {
-      if (!matching().includes(pid)) continue;
+  const scan = (): ReturnType<typeof exactMarkerProcessScan> => {
+    const result = exactMarkerProcessScan(launch, readers);
+    if (launch.anchor === undefined && result.anchor !== undefined) launch.anchor = result.anchor;
+    return result;
+  };
+  const matching = (): OwnerIdentity[] => scan().matching;
+  const signal = (identities: readonly OwnerIdentity[], signalName: NodeJS.Signals): void => {
+    for (const identity of identities) {
+      if (!exactMarkerIdentityMatches(launch, identity, readers)) continue;
       try {
-        kill(pid, signalName);
+        kill(identity.pid, signalName);
       } catch {}
     }
   };
   const initial = matching();
   if (initial.length === 0) {
-    return exactMarkerProcessScan(launch, readers).unknown === false;
+    return scan().unknown === false;
   }
   signal(initial, "SIGTERM");
   await wait(graceMs);
   const resistant = matching();
   if (resistant.length === 0) {
-    return exactMarkerProcessScan(launch, readers).unknown === false;
+    return scan().unknown === false;
   }
   signal(resistant, "SIGKILL");
   await wait(graceMs);
-  return matching().length === 0 && exactMarkerProcessScan(launch, readers).unknown === false;
+  return matching().length === 0 && scan().unknown === false;
 }
 
 function signalTrackedResources(manifest: OwnerReaperManifest, signal: NodeJS.Signals): number {
@@ -626,10 +670,12 @@ function signalTrackedResources(manifest: OwnerReaperManifest, signal: NodeJS.Si
     if (signalProfileProcess(identity, identity.user_data_dir, signal)) signalled += 1;
   }
   for (const launch of manifest.launches) {
-    for (const pid of exactMarkerProcessIds(launch)) {
-      if (!operatorBrowserProcessMatchesMarker(pid, launch.marker)) continue;
+    const scan = exactMarkerProcessScan(launch);
+    if (launch.anchor === undefined && scan.anchor !== undefined) launch.anchor = scan.anchor;
+    for (const identity of scan.matching) {
+      if (!exactMarkerIdentityMatches(launch, identity)) continue;
       try {
-        process.kill(pid, signal);
+        process.kill(identity.pid, signal);
         signalled += 1;
       } catch {}
     }
@@ -659,6 +705,14 @@ async function reapManifest(path: string, manifest: OwnerReaperManifest): Promis
   await new Promise<void>((resolveWait) => setTimeout(resolveWait, graceMs));
   const latestRead = readManifest(path);
   const latest = latestRead.state === "present" ? latestRead.manifest : manifest;
+  for (const launch of latest.launches) {
+    if (launch.anchor !== undefined) continue;
+    const prior = manifest.launches.find(
+      (candidate) =>
+        candidate.marker === launch.marker && candidate.user_data_dir === launch.user_data_dir,
+    );
+    if (prior?.anchor !== undefined) launch.anchor = prior.anchor;
+  }
   signalTrackedResources(latest, "SIGKILL");
   await new Promise<void>((resolveWait) => setTimeout(resolveWait, graceMs));
   await sweepOperatorProfilePoolOrphans().catch(() => undefined);

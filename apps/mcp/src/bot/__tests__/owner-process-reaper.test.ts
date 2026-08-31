@@ -104,8 +104,10 @@ describe("owner process reaper contracts", () => {
     const anchoredReaders = {
       anchor: { pid: 100, start_time: "10" },
       readProcessIds: () => [101],
-      readBirthState: () => "stale" as const,
-      readRunningState: () => "stale" as const,
+      readBirthIdentity: (pid: number) => ({ pid, start_time: "20" }),
+      readBirthState: (identity: { pid: number }) =>
+        identity.pid === 100 ? ("stale" as const) : ("matching" as const),
+      readRunningState: (pid: number) => (pid === 100 ? ("stale" as const) : ("matching" as const)),
       readCommandState: () => "matching" as const,
       readMarkerState: () => ({ state: "present" as const, marker: "v1:browser" }),
       readProfileState: () => "missing" as const,
@@ -127,6 +129,44 @@ describe("owner process reaper contracts", () => {
       }),
     ).resolves.toBe(true);
     expect(anchoredSignals).toEqual([[101, "SIGTERM"]]);
+
+    let processListReads = 0;
+    let birthReads = 0;
+    const reusedSignals: Array<[number, NodeJS.Signals]> = [];
+    await expect(
+      terminateOwnerBrowserLaunch("v1:browser", "/expected-profile", {
+        readProcessIds: () => (++processListReads === 1 ? [101] : []),
+        readBirthIdentity: (pid) => ({ pid, start_time: ++birthReads === 1 ? "old" : "new" }),
+        readBirthState: () => "matching",
+        readRunningState: () => "matching",
+        readCommandState: () => "matching",
+        readMarkerState: () => ({ state: "present", marker: "v1:browser" }),
+        readProfileState: () => "matching",
+        kill: (pid, signal) => reusedSignals.push([pid, signal]),
+        wait: async () => undefined,
+      }),
+    ).resolves.toBe(true);
+    expect(reusedSignals).toEqual([]);
+
+    let anchoredProcessListReads = 0;
+    const preBindingSignals: Array<[number, NodeJS.Signals]> = [];
+    await expect(
+      terminateOwnerBrowserLaunch("v1:browser", "/expected-profile", {
+        readProcessIds: () => (++anchoredProcessListReads === 1 ? [100, 101] : []),
+        readBirthIdentity: (pid) => ({ pid, start_time: String(pid) }),
+        readBirthState: () => "matching",
+        readRunningState: () => "matching",
+        readCommandState: () => "matching",
+        readMarkerState: () => ({ state: "present", marker: "v1:browser" }),
+        readProfileState: (pid) => (pid === 100 ? "matching" : "missing"),
+        kill: (pid, signal) => preBindingSignals.push([pid, signal]),
+        wait: async () => undefined,
+      }),
+    ).resolves.toBe(true);
+    expect(preBindingSignals).toEqual([
+      [100, "SIGTERM"],
+      [101, "SIGTERM"],
+    ]);
   });
 
   it("retains helper custody when its process group cannot be read", () => {

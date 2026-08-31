@@ -338,6 +338,18 @@ describe("login browser lifecycle guards", () => {
     await expect(resolving).resolves.toEqual({ state: "unknown" });
     expect(readIdentity).toHaveBeenCalled();
     expect(clearStaleLock).toHaveBeenCalled();
+
+    const controller = new BrowserController({ profileDir });
+    const cleanupUnproven = vi.fn(async () => undefined);
+    const internals = controller as unknown as {
+      waitForPersistentFallbackIdentity: () => Promise<{ state: "unknown" }>;
+      requirePersistentFallbackOwnership: (cleanup: () => Promise<void>) => Promise<unknown>;
+    };
+    internals.waitForPersistentFallbackIdentity = async () => ({ state: "unknown" });
+    await expect(internals.requirePersistentFallbackOwnership(cleanupUnproven)).rejects.toThrow(
+      "persistent browser launch identity could not be bound to owner custody",
+    );
+    expect(cleanupUnproven).toHaveBeenCalledOnce();
   });
 
   it("returns an unproven pre-launch close for quarantine", async () => {

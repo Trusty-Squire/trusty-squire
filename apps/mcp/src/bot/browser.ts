@@ -4396,7 +4396,9 @@ export class BrowserController {
         return (await this.waitForOwnedProfileExit(identity, treeProof)) ? "closed" : "unknown";
       };
       const cleanupCancelled = async (lateContext: BrowserContext): Promise<ProfileCloseState> => {
-        const proof = await this.waitForPersistentFallbackIdentity();
+        const proof = await this.waitForPersistentFallbackIdentity().catch(
+          () => ({ state: "unknown" }) as const,
+        );
         if (proof.state !== "owned") {
           await lateContext.close().catch(() => undefined);
           return proof.state === "absent" ? "closed" : "unknown";
@@ -4470,12 +4472,28 @@ export class BrowserController {
       }
       this.context = context;
       this.launchedContext = true;
-      const holderPid = currentProfileHolderPid(this.profileDir);
-      this.launchedProfileHolderIdentity =
-        holderPid === null ? null : profileProcessIdentity(holderPid, this.profileDir);
-      if (this.launchedProfileHolderIdentity !== null) {
-        this.adoptOwnedChromeProcessTree(this.launchedProfileHolderIdentity, false);
-      }
+      this.launchedProfileHolderIdentity = await this.requirePersistentFallbackOwnership(
+        async () => {
+          markOwnerBrowserLaunchTerminal(this.operatorBrowserMarker());
+          await Promise.race([
+            context.close().catch(() => undefined),
+            new Promise<void>((resolveWait) => {
+              const timer = setTimeout(resolveWait, PERSISTENT_CONTEXT_CANCELLATION_SETTLE_MS);
+              timer.unref();
+            }),
+          ]);
+          const markerClosed = await terminateOwnerBrowserLaunch(
+            this.operatorBrowserMarker(),
+            this.profileDir,
+          );
+          if (markerClosed) {
+            untrackOwnerBrowserLaunch(this.operatorBrowserMarker());
+            this.ownerLaunchTracked = false;
+          }
+          this.context = null;
+          this.launchedContext = false;
+        },
+      );
       this.commitProfileLaunch();
       this.persistentFallbackLaunchInFlight = false;
     }
@@ -16717,6 +16735,22 @@ export class BrowserController {
     return proof;
   }
 
+  private async requirePersistentFallbackOwnership(
+    cleanupUnproven: () => Promise<void>,
+  ): Promise<ProfileProcessIdentity> {
+    try {
+      const proof = await this.waitForPersistentFallbackIdentity();
+      if (proof.state !== "owned" || this.ownedChromeProcessTreeProof === null) {
+        throw new Error("persistent browser launch identity could not be bound to owner custody");
+      }
+      return proof.identity;
+    } catch (error) {
+      await cleanupUnproven().catch(() => undefined);
+      this.persistentFallbackLaunchInFlight = false;
+      throw error;
+    }
+  }
+
   private startPersistentFallbackOwnershipMonitor(): void {
     if (this.persistentFallbackOwnershipMonitor !== null) return;
     this.persistentFallbackOwnershipMonitor = (async () => {
@@ -16730,7 +16764,9 @@ export class BrowserController {
             operatorBrowserProcessMatchesMarker(identity.pid, this.operatorBrowserMarker()));
         if (identity !== null && controllerOwnsIdentity) {
           this.launchedProfileHolderIdentity = identity;
-          this.adoptOwnedChromeProcessTree(identity, false);
+          try {
+            this.adoptOwnedChromeProcessTree(identity, false);
+          } catch {}
           return;
         }
         await new Promise<void>((resolveWait) => {
