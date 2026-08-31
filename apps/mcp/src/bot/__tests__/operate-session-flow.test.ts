@@ -3690,6 +3690,7 @@ describe("operate session — OAuth lifecycle", () => {
       last4: "4242",
       mandate_id: "mandate_oauth_terminal",
       deadline: Date.now() + 60_000,
+      outcome: "unknown" as const,
     };
     h.oauthLoginError = new Error("provider did not settle");
     h.visibleText = "Continue with Google";
@@ -3742,7 +3743,7 @@ describe("operate session — OAuth lifecycle", () => {
     expect(auditPayment).toHaveBeenCalledWith(
       expect.objectContaining({
         approval_id: "appr_oauth_terminal",
-        status: "payment_3ds_unresolved",
+        status: "payment_outcome_unknown",
       }),
     );
     expect(session.paymentDispatchHandoff?.terminalComplete).toBe(true);
@@ -3856,6 +3857,7 @@ describe("operate session — OAuth lifecycle", () => {
       last4: "4242",
       mandate_id: "mandate_oauth_startup",
       deadline: Date.now() + 60_000,
+      outcome: "unknown" as const,
     };
     armPaymentDispatchHandoff(pendingThreeDs, session);
     h.closeStates.set(2, "unknown");
