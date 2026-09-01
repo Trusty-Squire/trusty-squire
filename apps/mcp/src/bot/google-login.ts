@@ -507,10 +507,8 @@ async function validateProviderSession(
 }
 
 // Inspect the bot Chrome profile on disk and return the set of OAuth
-// providers whose session cookies are currently present. The marker
-// file at logged-in-providers.json is a write-once memo from prior
-// runs and can lie (cookies expire, the user logs out from the
-// provider's site, etc.). This function is the source of truth.
+// providers whose session cookies are currently present. This is the
+// source of truth for provider availability.
 //
 // Cost is ~1-1.5s for the persistent-context launch + cookie read +
 // teardown. We only call it at install boundaries (after the install

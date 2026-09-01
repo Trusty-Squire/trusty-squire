@@ -57,6 +57,9 @@ vi.mock("../browser.js", () => ({
     isConnected(): boolean {
       return true;
     }
+    async detectSessionProviders(): Promise<string[]> {
+      return h.providers;
+    }
     async goto(url: string): Promise<void> {
       h.currentUrl = url;
       h.mainDocumentEpoch += 1;

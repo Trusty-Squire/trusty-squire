@@ -334,7 +334,6 @@ const startSchema = z.object({
   // Operate tasks that act AS the user (drive a gated app on an existing
   // account) set this so start fails closed to a connect hand-back if no live
   // Google session exists — rather than driving into a mid-task login wall.
-  require_live_identity: z.boolean().optional(),
 });
 
 const OBSERVE_DELTA_CONTRACT =
@@ -411,7 +410,6 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
       },
       allowed_hosts: { type: "array", items: { type: "string" } },
       extra_allowed_hosts: { type: "array", items: { type: "string" } },
-      require_live_identity: { type: "boolean" },
     },
   },
   async handler(args, api) {
@@ -423,7 +421,6 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
       consentInboxRead,
       ...(args.proxy !== undefined ? { proxyUrl: args.proxy } : {}),
       ...(extra.length > 0 ? { extraAllowedHosts: extra } : {}),
-      ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
       ...(hint !== undefined ? { hint } : {}),
       // Thread the api-client so the captcha gate can spend a vaulted 2Captcha key.
       ...(api !== null ? { api } : {}),
@@ -2137,7 +2134,6 @@ const useSchema = z
     verb: OperatorVerbSchema.optional(),
     service_url: z.string().url().optional(),
     params: z.record(z.string().max(2000)).optional(),
-    require_live_identity: z.boolean().optional(),
     // After the host repairs one missed step, resume the same live session at
     // replay.next_index instead of starting over.
     session_id: z.string().min(1).optional(),
@@ -2213,7 +2209,6 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
       verb: { type: "string", enum: OperatorVerbSchema.options },
       service_url: { type: "string" },
       params: { type: "object" },
-      require_live_identity: { type: "boolean" },
       session_id: { type: "string" },
       resume_from: { type: "integer" },
       leg: { type: "string", enum: ["checkout"] },
@@ -2241,7 +2236,6 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
       const cold = await startProvisionSession({
         serviceUrl: args.service_url,
         consentInboxRead: await readInboxConsent(),
-        ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
         ...(api !== null ? { api } : {}),
       });
       if (cold.needs_user !== undefined) return cold;
@@ -2290,7 +2284,6 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
       const cold = await startProvisionSession({
         serviceUrl: args.service_url,
         consentInboxRead: await readInboxConsent(),
-        ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
         ...(api !== null ? { api } : {}),
       });
       if (cold.needs_user !== undefined) return cold;
@@ -2314,7 +2307,6 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
         consentInboxRead,
         ...(recipe.allowed_hosts.length > 0 ? { extraAllowedHosts: recipe.allowed_hosts } : {}),
         hint: renderOperatorRecipeHint(recipe),
-        ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
         ...(api !== null ? { api } : {}),
       });
       if (started.needs_user !== undefined) return started;

@@ -1,5 +1,4 @@
-// Tests for the OAuth login-state marker — the signup bot reads this
-// to decide which providers it can auto-prefer for OAuth-first signup.
+// Tests for the profile cookie clearing and provider-email metadata helpers.
 
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,8 +8,6 @@ import {
   clearProviderCookies,
   clearProviderCookiesFromContext,
   clearBrowserProfile,
-  loggedInProviders,
-  markProviderLoggedIn,
   loggedInEmail,
   recordProviderEmail,
 } from "../login-state.js";
@@ -186,39 +183,6 @@ describe("provider cookie clearing", () => {
   });
 });
 
-describe("login-state marker", () => {
-  let dir: string;
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "ts-login-state-"));
-  });
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  it("reports no providers when the marker is absent", () => {
-    expect(loggedInProviders(dir)).toEqual([]);
-  });
-
-  it("round-trips a marked provider", () => {
-    markProviderLoggedIn("google", dir);
-    expect(loggedInProviders(dir)).toEqual(["google"]);
-  });
-
-  it("accumulates providers and de-duplicates", () => {
-    markProviderLoggedIn("google", dir);
-    markProviderLoggedIn("github", dir);
-    markProviderLoggedIn("google", dir);
-    expect([...loggedInProviders(dir)].sort()).toEqual(["github", "google"]);
-  });
-
-  it("drops unknown provider ids and tolerates a non-array payload", () => {
-    writeFileSync(join(dir, "logged-in-providers.json"), '["google","bogus"]');
-    expect(loggedInProviders(dir)).toEqual(["google"]);
-    writeFileSync(join(dir, "logged-in-providers.json"), '{"x":1}');
-    expect(loggedInProviders(dir)).toEqual([]);
-  });
-});
-
 describe("provider-email marker (PR3 capture-at-login)", () => {
   let dir: string;
   beforeEach(() => {
@@ -251,10 +215,8 @@ describe("provider-email marker (PR3 capture-at-login)", () => {
     expect(loggedInEmail("google", dir)).toBeNull();
   });
 
-  it("keeps the provider-array marker independent of the email marker", () => {
-    markProviderLoggedIn("google", dir);
+  it("keeps provider email metadata independent per provider", () => {
     recordProviderEmail("google", "ada@example.com", dir);
-    expect(loggedInProviders(dir)).toEqual(["google"]);
     expect(loggedInEmail("google", dir)).toBe("ada@example.com");
   });
 });

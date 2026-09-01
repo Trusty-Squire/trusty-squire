@@ -181,10 +181,9 @@ describe("operator session storage state", () => {
     });
   });
 
-  it("refuses to replace marker-bearing Google identity with a cookie-less capture", async () => {
+  it("refuses to replace a live Google identity with a cookie-less capture", async () => {
     const canonical = mkdtempSync(join(tmpdir(), "ts-session-state-marker-clear-"));
     roots.push(canonical);
-    const marker = join(canonical, "logged-in-providers.json");
     await writeCanonicalIdentitySnapshot(
       canonical,
       {
@@ -204,8 +203,6 @@ describe("operator session storage state", () => {
       },
       undefined,
     );
-    writeFileSync(marker, JSON.stringify(["google", "github"]), { mode: 0o600 });
-
     const capturedWithoutGoogle = {
       cookies: [
         {
@@ -228,8 +225,6 @@ describe("operator session storage state", () => {
     await expect(readSessionState(canonical)).resolves.toMatchObject({
       cookies: [expect.objectContaining({ name: "SID", domain: ".google.com" })],
     });
-    expect(JSON.parse(readFileSync(marker, "utf8"))).toEqual(["google", "github"]);
-    expect(statSync(marker).mode & 0o777).toBe(0o600);
   });
 
   it("leaves one complete snapshot after concurrent last-writer-wins publishes", async () => {

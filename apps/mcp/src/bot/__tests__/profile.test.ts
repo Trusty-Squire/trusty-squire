@@ -308,6 +308,38 @@ describe("profile operation guard", () => {
     second.release();
   });
 
+  it("evicts and claims a holder proven dead by its recorded identity", () => {
+    const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
+    const lockDir = join(lockRoot, `trusty-squire-profile-${digest}.lock`);
+    mkdirSync(lockDir);
+    writeFileSync(
+      join(lockDir, "owner.json"),
+      JSON.stringify({ host: hostname(), pid: deadPid(), start_time: "gone", token: "dead" }),
+    );
+
+    const lease = acquireProfileOperationGuard(dir, lockRoot);
+    lease.release();
+  });
+
+  it("refuses a holder proven alive by its recorded identity", () => {
+    const first = acquireProfileOperationGuard(dir, lockRoot);
+    expect(() => acquireProfileOperationGuard(dir, lockRoot)).toThrow(ProfileBusyError);
+    first.release();
+  });
+
+  it("refuses an indeterminate holder instead of evicting it", () => {
+    const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
+    const lockDir = join(lockRoot, `trusty-squire-profile-${digest}.lock`);
+    mkdirSync(lockDir);
+    writeFileSync(
+      join(lockDir, "owner.json"),
+      JSON.stringify({ host: "another-host", pid: process.pid, start_time: "unknown", token: "remote" }),
+    );
+
+    expect(() => acquireProfileOperationGuard(dir, lockRoot)).toThrow(ProfileBusyError);
+    expect(existsSync(lockDir)).toBe(true);
+  });
+
   it.skipIf(process.platform !== "linux")(
     "quarantines only the exact stale process birth before reclaiming",
     () => {

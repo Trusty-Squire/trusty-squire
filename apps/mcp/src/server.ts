@@ -17,7 +17,6 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { ApiClient } from "./api-client.js";
 import { setSelfManagedChromeTerminationSignalExitEnabled } from "./bot/browser.js";
 import { cancelActiveLoginBrowsers } from "./bot/google-login.js";
-import { sweepOperatorProfilePoolOrphans } from "./bot/operator-profile-pool.js";
 import { startOwnerProcessReaper } from "./bot/owner-process-reaper.js";
 import {
   activeSessionCount,
@@ -52,7 +51,6 @@ const DEFAULT_REGISTRY_BASE =
 const DEFAULT_IDLE_TIMEOUT_MS = 20 * 60 * 1_000; // 20m, no open session
 const DEFAULT_IDLE_TIMEOUT_WITH_SESSION_MS = 12 * 60 * 60 * 1_000; // 12h, session open
 const DEFAULT_IDLE_CHECK_INTERVAL_MS = 5 * 60 * 1_000; // 5m — must stay well under the 20m bound above
-const DEFAULT_STARTUP_PROFILE_SWEEP_TIMEOUT_MS = 2_000;
 
 function envMs(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -364,15 +362,6 @@ export async function runServer(): Promise<void> {
   // sweeps strict process-only manifests, then tracks exact local browser and
   // session-helper identities for launches owned by this server.
   startOwnerProcessReaper();
-  if (process.platform === "linux") {
-    const timeoutMs = envMs(
-      "TRUSTY_SQUIRE_STARTUP_PROFILE_SWEEP_TIMEOUT_MS",
-      DEFAULT_STARTUP_PROFILE_SWEEP_TIMEOUT_MS,
-    );
-    void sweepOperatorProfilePoolOrphans({ deadline: Date.now() + timeoutMs }).catch(
-      () => undefined,
-    );
-  }
   // Startup breadcrumb on stderr (which lands in the host agent's MCP
   // log). A silent no-op was the worst part of the entrypoint-guard
   // bug — this line makes "did the server actually start?" answerable

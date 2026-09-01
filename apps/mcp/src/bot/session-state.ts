@@ -12,7 +12,6 @@ export const SESSION_STATE_FILE = "trusty-squire-session-state.json";
 export const CANONICAL_IDENTITY_METADATA_FILE = "trusty-squire-identity.json";
 export const PENDING_SESSION_STATE_PREFIX = `${SESSION_STATE_FILE}.pending.`;
 const LEGACY_PROVIDER_EMAILS_FILE = "provider-emails.json";
-const LOGGED_IN_PROVIDERS_FILE = "logged-in-providers.json";
 export const MAX_SESSION_STATE_BYTES = 4 * 1024 * 1024;
 const MAX_IDENTITY_METADATA_BYTES = 4 * 1024;
 export const GOOGLE_LOGIN_COOKIE_MARKERS = [
@@ -366,22 +365,11 @@ export async function writeCanonicalIdentitySnapshot(
   await mkdir(profileDir, { recursive: true, mode: 0o700 });
   if (!canContinue()) return false;
   const destination = sessionStatePath(profileDir);
-  const markerDestination = join(profileDir, LOGGED_IN_PROVIDERS_FILE);
-  let parsedProviders: unknown;
-  try {
-    parsedProviders = JSON.parse(
-      await readFile(markerDestination, { encoding: "utf8", signal: options.signal }),
-    );
-  } catch {
-    // Missing/malformed legacy marker starts from the last atomic snapshot.
-  }
-  const providers = new Set<OAuthProviderId>(
-    Array.isArray(parsedProviders) ? parsedProviders.filter(isCanonicalProviderMarker) : [],
-  );
+  const providers = new Set<OAuthProviderId>();
   for (const provider of confirmedProviders) providers.add(provider);
   if (!hasUsableGoogleIdentity(state)) providers.delete("google");
   const providerMarkers = [...providers].sort();
-  const includeProviderMarkers = confirmedProviders.length > 0 || Array.isArray(parsedProviders);
+  const includeProviderMarkers = confirmedProviders.length > 0;
   const snapshot: CanonicalIdentitySnapshot = {
     version: 1,
     storageState: state,
@@ -397,37 +385,18 @@ export async function writeCanonicalIdentitySnapshot(
     return false;
   }
   const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
-  let markerTemporary: string | undefined = includeProviderMarkers
-    ? `${markerDestination}.${process.pid}.${randomUUID()}.tmp`
-    : undefined;
   let published = false;
   try {
     if (!canContinue()) return false;
     await writeFile(temporary, serialized, { mode: 0o600, signal: options.signal });
     if (!canContinue()) return false;
     await chmod(temporary, 0o600);
-    if (markerTemporary !== undefined) {
-      if (!canContinue()) return false;
-      await writeFile(markerTemporary, JSON.stringify(providerMarkers), {
-        mode: 0o600,
-        signal: options.signal,
-      });
-      if (!canContinue()) return false;
-      await chmod(markerTemporary, 0o600);
-    }
     if (!canContinue()) return false;
     // Re-check immediately before the atomic rename. Another capture may have
     // published a good identity while this writer prepared its temporary file.
     if (await wouldDropUsableGoogleIdentity()) return false;
     if (!canContinue()) return false;
-    // The snapshot carries the authoritative provider markers. Its single
-    // rename publishes cookies + markers together; the legacy marker mirror is
-    // renamed second for older readers.
     renameSync(temporary, destination);
-    if (markerTemporary !== undefined) {
-      renameSync(markerTemporary, markerDestination);
-      markerTemporary = undefined;
-    }
     published = true;
     return true;
   } catch (error) {
@@ -435,9 +404,6 @@ export async function writeCanonicalIdentitySnapshot(
     throw error;
   } finally {
     if (!published) await rm(temporary, { force: true }).catch(() => undefined);
-    if (markerTemporary !== undefined) {
-      await rm(markerTemporary, { force: true }).catch(() => undefined);
-    }
   }
 }
 

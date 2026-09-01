@@ -19,7 +19,6 @@ import {
   operatorBrowserProcessMarkerState,
   type OperatorBrowserProcessMarkerState,
 } from "./operator-browser-watchdog.js";
-import { sweepOperatorProfilePoolOrphans } from "./operator-profile-pool.js";
 import {
   processBirthIdentity,
   processBirthIdentityState,
@@ -734,7 +733,6 @@ async function reapManifest(path: string, manifest: OwnerReaperManifest): Promis
   }
   signalTrackedResources(latest, "SIGKILL");
   await new Promise<void>((resolveWait) => setTimeout(resolveWait, graceMs));
-  await sweepOperatorProfilePoolOrphans().catch(() => undefined);
   if (latestRead.state === "present" && manifestCleanupComplete(latest)) {
     rmSync(path, { force: true });
   }

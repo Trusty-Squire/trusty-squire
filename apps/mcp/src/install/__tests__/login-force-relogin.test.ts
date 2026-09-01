@@ -1,6 +1,4 @@
-// Explicit login must open a fresh provider ceremony without destroying the
-// last portable identity first. The live context clears its provider cookies;
-// the canonical snapshot is replaced only after a completed capture.
+// Explicit login must open a fresh provider ceremony in the real profile.
 
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -8,19 +6,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type * as GoogleLogin from "../../bot/google-login.js";
 import { acquireProfileOperationGuard } from "../../bot/profile.js";
-import {
-  readSessionState,
-  writeCanonicalIdentitySnapshot,
-} from "../../bot/session-state.js";
 
 // vi.hoisted so these are initialized before the hoisted vi.mock factories
 // reference them (and so tsc sees plain Mocks, not spread wrappers).
 const m = vi.hoisted(() => ({
   ensureOAuthSession: vi.fn(),
-  clearProviderLoggedIn: vi.fn(),
-  markProviderLoggedIn: vi.fn(),
-  loggedInProviders: vi.fn(() => [] as string[]),
-  clearAllProviderMarkers: vi.fn(),
   clearProviderCookies: vi.fn(async () => true),
 }));
 
@@ -33,16 +23,12 @@ vi.mock("../../bot/google-login.js", async (importActual) => {
 });
 
 vi.mock("../../bot/login-state.js", () => ({
-  clearProviderLoggedIn: m.clearProviderLoggedIn,
-  markProviderLoggedIn: m.markProviderLoggedIn,
-  loggedInProviders: m.loggedInProviders,
-  clearAllProviderMarkers: m.clearAllProviderMarkers,
   clearProviderCookies: m.clearProviderCookies,
 }));
 
 const { runCli } = await import("../cli.js");
 
-describe("login --force-relogin marker honesty", () => {
+describe("login --force-relogin", () => {
   let exitSpy: MockInstance<typeof process.exit>;
   let profileDir: string;
   beforeEach(() => {
@@ -60,44 +46,26 @@ describe("login --force-relogin marker honesty", () => {
     rmSync(profileDir, { recursive: true, force: true });
   });
 
-  it("clears the provider marker up front on force-relogin (timed-out login can't leave it lying)", async () => {
+  it("opens a fresh provider ceremony on force-relogin", async () => {
     m.ensureOAuthSession.mockResolvedValue({ status: "timeout" });
     await expect(
       runCli(["login", "--provider=github", "--force-relogin", `--profile-dir=${profileDir}`]),
     ).rejects.toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(m.clearProviderLoggedIn).toHaveBeenCalledWith("github", profileDir);
-    // a timed-out login never confirms a cookie, so it must NOT re-mark
-    expect(m.markProviderLoggedIn).not.toHaveBeenCalled();
+    expect(m.ensureOAuthSession).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "github", profileDir, forceOpen: true }),
+    );
   });
 
-  it("treats every explicit login as fresh without deleting the last Google snapshot", async () => {
-    const prior = {
-      cookies: [
-        {
-          name: "SID",
-          value: "prior-portable-google-session",
-          domain: ".google.com",
-          path: "/",
-          expires: -1,
-          httpOnly: true,
-          secure: true,
-          sameSite: "Lax" as const,
-        },
-      ],
-      origins: [],
-    };
-    await writeCanonicalIdentitySnapshot(profileDir, prior, undefined, () => true, ["google"]);
+  it("treats every explicit login as fresh", async () => {
     m.ensureOAuthSession.mockResolvedValue({ status: "timeout" });
     await expect(
       runCli(["login", "--provider=google", `--profile-dir=${profileDir}`]),
     ).rejects.toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(m.clearProviderLoggedIn).not.toHaveBeenCalled();
     expect(m.ensureOAuthSession).toHaveBeenCalledWith(
       expect.objectContaining({ provider: "google", profileDir, forceOpen: true }),
     );
-    await expect(readSessionState(profileDir)).resolves.toEqual(prior);
   });
 
   it("prints the package version for an explicit login", async () => {
@@ -130,14 +98,13 @@ describe("login --force-relogin marker honesty", () => {
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
 
-  it("does not mutate markers while another canonical operation owns the profile", async () => {
+  it("does not start while another operation owns the profile", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-login-guard-"));
     const lease = acquireProfileOperationGuard(profileDir);
     try {
       await expect(
         runCli(["login", `--profile-dir=${profileDir}`, "--force-relogin"]),
       ).rejects.toThrow("process.exit");
-      expect(m.clearProviderLoggedIn).not.toHaveBeenCalled();
       expect(m.ensureOAuthSession).not.toHaveBeenCalled();
     } finally {
       lease.release();

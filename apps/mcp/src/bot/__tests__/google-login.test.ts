@@ -35,7 +35,6 @@ import {
   ProfileBusyError,
 } from "../profile.js";
 import { OPERATOR_BROWSER_MARKER_ENV } from "../operator-browser-watchdog.js";
-import { loggedInProviders, markProviderLoggedIn } from "../login-state.js";
 import {
   MAX_SESSION_STATE_BYTES,
   readCanonicalIdentityMetadata,
@@ -1034,13 +1033,11 @@ describe("confirmed login finalization", () => {
         finalizeLoginRun(
           {
             profileDir,
-            onConfirmedLogin: async () => markProviderLoggedIn("google", profileDir),
           },
           { status: "completed", closeState: "unknown" },
         ),
       ).rejects.toThrow("closed without publishable state");
 
-      expect(loggedInProviders(profileDir)).toEqual([]);
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }
@@ -1135,7 +1132,6 @@ describe("confirmed login finalization", () => {
         { status: "completed", closeState: "closed", storageState: liveGoogleState },
       );
       await expect(readSessionState(profileDir)).resolves.toEqual(liveGoogleState);
-      expect(loggedInProviders(profileDir)).toEqual(["google"]);
       expect(
         JSON.parse(readFileSync(join(profileDir, "trusty-squire-session-state.json"), "utf8")),
       ).toMatchObject({ providerMarkers: ["google"] });
@@ -1181,7 +1177,6 @@ describe("confirmed login finalization", () => {
         },
       );
 
-      expect(loggedInProviders(profileDir)).toEqual([]);
       await expect(readSessionState(profileDir)).resolves.toEqual(prior);
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
@@ -1244,7 +1239,6 @@ describe("confirmed login finalization", () => {
         },
       );
       await expect(readSessionState(profileDir)).resolves.toEqual(liveGoogleState);
-      expect(loggedInProviders(profileDir)).toEqual(["google"]);
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }

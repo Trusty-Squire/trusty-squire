@@ -54,12 +54,8 @@ import {
 } from "../bot/google-login.js";
 import { isOAuthProviderId, type OAuthProviderId } from "../bot/oauth-providers.js";
 import {
-  clearAllProviderMarkers,
   clearBrowserProfile,
   clearProviderCookies,
-  clearProviderLoggedIn,
-  loggedInProviders,
-  markProviderLoggedIn,
 } from "../bot/login-state.js";
 import {
   CHROME_PROFILE_DIR,
@@ -569,9 +565,7 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
   // account-switch escape hatch.
   if (args.forceRelogin) {
     if (args.forceReloginProvider !== undefined) {
-      clearProviderLoggedIn(args.forceReloginProvider, profileDir);
     } else {
-      clearAllProviderMarkers(profileDir);
     }
     let cookiesCleared: boolean;
     if (args.forceReloginProvider !== undefined) {
@@ -666,13 +660,9 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
   args.noRegistry = session.consent_skillify_telemetry !== true;
   args.consentOperatorInboxOtp = session.consent_operator_inbox_otp === true;
 
-  // 0.8.1 — the bot's persistent profile may have a stale provider
-  // marker from a previous install (the marker is sticky on disk).
-  // The install confirm above only seeded one provider (whichever
-  // OAuth button the user clicked on trustysquire.com), so trusting
-  // the marker would make the step-2 secondary-provider prompt
-  // short-circuit incorrectly. Probe live cookies + rewrite the
-  // marker so loggedInProviders() returns ground truth.
+  // Probe the real profile. Cookie/session state is the source of truth; no
+  // persisted provider marker is allowed to outlive the session it describes.
+  let providers: OAuthProviderId[] = [];
   try {
     const actual = await ui.withSpinner({
       start: "Checking provider sessions",
@@ -682,29 +672,15 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
       // so a dead-but-present GitHub session isn't shown as connected.
       task: () => detectActiveProviderSessions(),
     });
-    if (actual !== null) {
-      clearAllProviderMarkers();
-      for (const p of actual) markProviderLoggedIn(p);
-    }
+    if (actual !== null) providers = actual;
   } catch (err) {
-    // Best-effort: a probe failure (rare — playwright launch should
-    // succeed if the install confirm just opened Chrome there) just
-    // leaves the marker as-is. The downstream secondary prompt's
-    // logic still has the maybeOfferSecondaryProvider escape hatch
-    // (yes/no prompt with the default-yes), so the user can still
-    // reach GitHub even if we mis-identified the live state.
-    //
-    // Surface the reason on stderr so this never recurs invisibly: the
-    // empty catch once hid a launch error (probe missing channel:"chrome",
-    // reaching for an absent bundled Chromium) behind the bare "(continuing)"
-    // ✗ for months, while the stale marker still printed "connected".
+    // The live probe is best-effort at this display boundary.
     console.error(
       `[connect] provider-session probe failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 
-  // Backfill connected_providers from the (now-fresh) bot-side marker.
-  const providers = loggedInProviders();
+  // Persist the current live probe only as connect UX data.
   for (const p of providers) await recordConnectedProvider(p);
   printProviderState(providers);
 
@@ -902,7 +878,6 @@ async function reloginGithubOnly(
   opts: { writeConfig: boolean },
 ): Promise<boolean> {
   ui.heading("Sign in to GitHub");
-  clearProviderLoggedIn("github");
   const result = await ensureOAuthSession({
     provider: "github",
     forceOpen: true,
@@ -949,8 +924,6 @@ async function offerGithubReloginIfDead(
 }
 
 async function syncConnectedProviders(providers: OAuthProviderId[]): Promise<void> {
-  clearAllProviderMarkers();
-  for (const p of providers) markProviderLoggedIn(p);
   try {
     const storage = await openSessionStorage();
     const session = await storage.read();
@@ -1335,9 +1308,6 @@ async function loginWithProfileGuard(args: Argv, profileDir: string): Promise<vo
   // has produced and closed a replacement context. forceOpen clears the live
   // browser's provider cookies, so deleting the portable fallback here was
   // redundant and burned a good login whenever the new attempt timed out.
-  if (provider !== "google") {
-    clearProviderLoggedIn(provider, profileDir);
-  }
   const result = await ensureOAuthSession({
     provider,
     // --profile-dir pins login to an isolated profile (a secondary

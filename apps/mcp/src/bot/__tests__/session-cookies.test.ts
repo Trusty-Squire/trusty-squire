@@ -1,6 +1,6 @@
 // sessionProvidersFromCookies — cookie-jar-backed session detection, the
 // ground truth that keeps a warm provider session from going invisible when
-// the logged-in-providers.json marker drifts out of sync.
+// stale cached provider state drifts out of sync.
 
 import { describe, expect, it } from "vitest";
 import { sessionProvidersFromCookies } from "../browser.js";

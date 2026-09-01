@@ -88,7 +88,9 @@ import {
 const require = createRequire(import.meta.url);
 export type StealthProfile = "baseline" | "cdp_hardened";
 
-const OPERATOR_BROWSER_HEADLESS = true;
+// Operator signup runs are deliberately headed. Google, Stytch, and Cloudflare
+// routinely reject a headless Chrome even when it is otherwise self-launched.
+const OPERATOR_BROWSER_HEADLESS = false;
 
 export function registerLocalBrowserLaunch(
   profileDir: string,
@@ -3846,11 +3848,11 @@ export class BrowserController {
   private oauthProviderPage: Page | null = null;
   private oauthProviderPageClosed = false;
 
-  // Surfaced in the run trail so operators can distinguish local, remote,
-  // and headless launches without retaining a virtual-display mode.
-  private launchedMode: "headless" | "remote" | "unknown" = "unknown";
+  // Surfaced in the run trail so operators can distinguish local headed,
+  // remote, and headless launches.
+  private launchedMode: "headed" | "headless" | "remote" | "unknown" = "unknown";
 
-  get launchMode(): "headless" | "remote" | "unknown" {
+  get launchMode(): "headed" | "headless" | "remote" | "unknown" {
     return this.launchedMode;
   }
 
@@ -4032,7 +4034,6 @@ export class BrowserController {
         "--lang=en-US",
         ...params.args,
         ...(params.proxy !== null ? [`--proxy-server=${params.proxy.server}`] : []),
-        "--headless=new",
         "about:blank",
       ];
       this.commitProfileLaunch();
@@ -4310,10 +4311,9 @@ export class BrowserController {
             : ""),
       );
     }
-    // Browser automation is always Chrome's new headless mode. The virtual
-    // display path was removed after its strict-Cloudflare gain proved too
-    // narrow for its startup and CPU cost.
-    this.launchedMode = "headless";
+    // Keep the operator browser headed: the browser runs on the operator's
+    // Xvfb display, preserving the normal Chrome surface OAuth providers see.
+    this.launchedMode = "headed";
 
     // T3: a PERSISTENT context backed by this operator session's unique
     // profile. launchPersistentContext takes launch + context options in one
@@ -16308,14 +16308,8 @@ export class BrowserController {
     }
   }
 
-  // Which OAuth providers have a LIVE session in this profile's cookie jar.
-  // The logged-in-providers.json marker is a memo that drifts out of sync
-  // (a --force-relogin clears it, a misclassified run clears it, a parallel
-  // run overwrites it) — so a session that is genuinely live in the cookies
-  // can go invisible to provider selection, which is exactly how a restored
-  // GitHub session got skipped in favour of a broken Google path. The cookie
-  // jar is the ground truth: read it directly. Cookie NAMES + presence only;
-  // values are never read into logs. Best-effort — a read failure returns [].
+  // Which OAuth providers have a live session in this profile's cookie jar.
+  // Cookie names and presence are sufficient; values are never logged.
   async detectSessionProviders(): Promise<OAuthProviderId[]> {
     if (this.context === null) return [];
     try {
