@@ -1210,6 +1210,46 @@ describe("confirmed login finalization", () => {
     }
   });
 
+  it("publishes a live-context capture even when browser closure is unproven", async () => {
+    // Regression: under the noVNC rig, Chrome routinely fails the 2s stale-PID
+    // proof and teardown returns force_closed_unproven on a normal exit. The
+    // session was snapshotted live from the open, healthy context the moment
+    // sign-in was confirmed, so it must still publish — refusing it stranded
+    // every operator login with "closed without publishable state".
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
+    const liveGoogleState = {
+      cookies: [
+        {
+          name: "SID",
+          value: "live-google-session",
+          domain: ".google.com",
+          path: "/",
+          expires: -1,
+          httpOnly: true,
+          secure: true,
+          sameSite: "Lax" as const,
+        },
+      ],
+      origins: [],
+    };
+    try {
+      await finalizeLoginRun(
+        { profileDir, seedProvider: "google", confirmedProviders: ["google"] },
+        {
+          status: "completed",
+          closeState: "force_closed_unproven",
+          storageState: liveGoogleState,
+          captureSource: "remote-live-context",
+          capturedPageLocations: [],
+        },
+      );
+      await expect(readSessionState(profileDir)).resolves.toEqual(liveGoogleState);
+      expect(loggedInProviders(profileDir)).toEqual(["google"]);
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
   it("threads completed Google provenance without opening a validation browser", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-connect-seed-"));
     mkdirSync(join(profileDir, "Default"));

@@ -3609,6 +3609,15 @@ export async function launchPlainLoginBrowser(params: {
               proof,
             });
           }
+          // Bind the owner-launch anchor to the profile-proven child identity.
+          // registerSelfManagedChrome only binds when it can read the marker back
+          // from the process, but Chrome erases the marker from its own environ
+          // when it rewrites process titles, so that bind is skipped here. Use
+          // the marker we generated for THIS launch, keyed to the tracked launch
+          // record, so teardown can trust this anchor and reap the marker-only
+          // wrapper processes (the google-chrome launcher's stdout/stderr `cat`
+          // relays and crashpad) instead of reporting closure unproven.
+          bindOwnerBrowserLaunch(launchMarker, childIdentity);
         }
         if (!childProcessIsRunning(launched)) {
           reapProfileHolderIfOwned(params.profileDir, childIdentity);

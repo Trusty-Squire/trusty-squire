@@ -914,7 +914,22 @@ export async function finalizeLoginRun(
   result: LoginRunResult,
 ): Promise<void> {
   if (result.status !== "completed" && result.status !== "preflight_satisfied") return;
-  if (result.closeState !== "closed" || result.storageState === undefined) {
+  // A live-context capture (displayed/remote) snapshots the authenticated
+  // session from the open, healthy context at the moment sign-in was confirmed,
+  // so it is publishable regardless of whether the browser's SUBSEQUENT teardown
+  // could be proven clean. Under the noVNC rig, Chrome (app-mode / --no-sandbox)
+  // routinely fails closeProfileWithProof's 2s stale-PID check and returns
+  // force_closed_unproven even on a normal exit — that says nothing about the
+  // snapshot we already hold. The plain path, which reads the profile dir AFTER
+  // close, still needs a proven-closed browser, and it yields no storageState
+  // unless closure was proven, so the storageState presence check covers it.
+  const liveContextCapture =
+    result.captureSource === "displayed-live-context" ||
+    result.captureSource === "remote-live-context";
+  if (
+    result.storageState === undefined ||
+    (!liveContextCapture && result.closeState !== "closed")
+  ) {
     throw new Error("login identity snapshot closed without publishable state");
   }
   const seedProvider =

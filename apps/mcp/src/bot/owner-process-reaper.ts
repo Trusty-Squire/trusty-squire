@@ -17,7 +17,6 @@ import { fileURLToPath } from "node:url";
 import {
   operatorBrowserProcessCommandState,
   operatorBrowserProcessMarkerState,
-  operatorBrowserProcessMatchesMarker,
   type OperatorBrowserProcessMarkerState,
 } from "./operator-browser-watchdog.js";
 import { sweepOperatorProfilePoolOrphans } from "./operator-profile-pool.js";
@@ -482,10 +481,17 @@ function launchAnchorTrustState(
     launch.anchor.pid,
     launch.user_data_dir,
   );
-  return commandState === "matching" &&
-    markerState.state === "present" &&
-    markerState.marker === launch.marker &&
-    profileState === "matching"
+  // The anchor is a birth identity (pid + start_time) recorded at this launch,
+  // so we are already looking at THIS launch's process. Chrome overwrites its
+  // own /proc/<pid>/environ memory when it rewrites process titles, which erases
+  // the owner marker there — so a live chromium anchor is NEVER re-readable by
+  // marker even though it is genuinely ours. Its per-launch --user-data-dir is a
+  // unique ownership token that survives, so a matching chromium command plus a
+  // matching profile is definitive. A marker that IS still readable must not
+  // positively name a different launch; a missing/erased marker does not.
+  const markerContradicts =
+    markerState.state === "present" && markerState.marker !== launch.marker;
+  return commandState === "matching" && profileState === "matching" && !markerContradicts
     ? "trusted"
     : "unknown";
 }
@@ -508,7 +514,20 @@ function exactMarkerProcessScan(
       if (commandState === "stale") continue;
       const markerState = browserMarkerState(pid, readers);
       if (markerState.state === "unknown") {
-        if ((readers.readUidState ?? linuxProcessUidState)(pid) !== "stale") unknown = true;
+        // Only a CONFIRMED chromium process (commandState "matching") whose
+        // marker we transiently cannot read is conservatively treated as
+        // maybe-ours. A process we cannot even confirm is chromium — e.g. a
+        // hardened own-uid process such as sshd, whose /proc/<pid>/exe and
+        // environ are both EACCES, so commandState reads "unknown" — cannot be
+        // our marked browser: our own login browser launches unhardened under
+        // our uid with a readable environ. Poisoning the scan on such a process
+        // made every login-browser teardown report closure unproven.
+        if (
+          commandState === "matching" &&
+          (readers.readUidState ?? linuxProcessUidState)(pid) !== "stale"
+        ) {
+          unknown = true;
+        }
         continue;
       }
       if (markerState.state !== "present" || markerState.marker !== launch.marker) continue;
@@ -1038,11 +1057,21 @@ export function startOwnerProcessReaper(
     bindLaunch: (marker, identity) => {
       requireAvailable();
       const launch = manifest.launches.find((entry) => entry.marker === marker);
+      // Ownership is proven by the birth-identity + unique per-launch profile
+      // (profileProcessIdentityState "matching"), a random per-launch
+      // --user-data-dir no other process shares. The environ marker is only a
+      // non-contradiction check here: Chrome erases its own marker from
+      // /proc/<pid>/environ when it rewrites process titles, so requiring the
+      // marker to still be readable back from the browser process left the
+      // anchor permanently unbound and every login-browser teardown reporting
+      // closure unproven. A marker that IS readable must not name a different
+      // launch; an erased marker does not disqualify.
+      const processMarker = operatorBrowserProcessMarkerState(identity.pid);
       if (
         launch === undefined ||
         profilePathIdentity(identity.user_data_dir) !== launch.user_data_dir ||
         profileProcessIdentityState(identity, launch.user_data_dir) !== "matching" ||
-        !operatorBrowserProcessMatchesMarker(identity.pid, marker)
+        (processMarker.state === "present" && processMarker.marker !== marker)
       ) {
         return false;
       }
