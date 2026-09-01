@@ -754,6 +754,10 @@ function merchantSiblingSeedHosts(session: Session): string[] {
 }
 
 const sessions = new Map<string, Session>();
+// A Google-gated start returns an ID so the caller can correlate its handoff,
+// but it never creates a browser session. Its terminal acknowledgement is a
+// no-op rather than an "unknown session" error.
+const refusedStartSessionIds = new Set<string>();
 
 interface LeasedBrowser {
   controller: BrowserController;
@@ -3339,6 +3343,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     if (!gate.ok) {
       audit(id, "connect_gate", { ok: false, wall: "google_session" });
       await releaseWarmBrowserPage(browser, false);
+      refusedStartSessionIds.add(id);
       return compactV2Mode === "on"
         ? {
             session_id: id,
@@ -9722,6 +9727,9 @@ export async function finishProvisionSessionWithPreparation<T>(
 }
 
 export async function finishProvisionSession(sessionId: string): Promise<FinishResult> {
+  if (refusedStartSessionIds.delete(sessionId)) {
+    return { session_id: sessionId, url: "", closed: true };
+  }
   return (await finishProvisionSessionWithPreparation(sessionId, async () => undefined)).finish;
 }
 
@@ -9758,6 +9766,7 @@ export async function closeAllProvisionSessions(): Promise<void> {
       if (closeError !== undefined) throw closeError;
     })();
   } finally {
+    refusedStartSessionIds.clear();
     await drainPendingObserveSnapshotCleanup();
     shutdownInProgress -= 1;
   }

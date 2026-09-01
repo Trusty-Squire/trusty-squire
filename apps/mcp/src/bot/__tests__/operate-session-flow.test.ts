@@ -5347,6 +5347,11 @@ describe("operate session — live-profile precondition gate", () => {
     expect(h.profileDirs).toEqual([canonical]);
     expect(h.destroyedProfiles).toEqual([]);
     expect(h.storageStateWrites).toEqual([]);
+    await expect(finishProvisionSession(obs.session_id)).resolves.toEqual({
+      session_id: obs.session_id,
+      url: "",
+      closed: true,
+    });
   });
 
   it("uses the supplied real profile without a storage-state handoff", async () => {

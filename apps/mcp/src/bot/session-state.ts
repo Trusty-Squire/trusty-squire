@@ -22,6 +22,63 @@ export const GOOGLE_LOGIN_COOKIE_MARKERS = [
   "APISID",
   "SAPISID",
 ] as const;
+// Current Google sign-ins can persist this account-scoped pair after the
+// legacy apex *SID family is rotated away. Neither member is sufficient by
+// itself: the pair is the live-session signal, not account-chooser residue.
+export const GOOGLE_ACCOUNT_SESSION_COOKIE_MARKERS = ["LSID", "__Host-1PLSID"] as const;
+export const GOOGLE_LOGIN_COOKIE_NAMES = [
+  ...GOOGLE_LOGIN_COOKIE_MARKERS,
+  ...GOOGLE_ACCOUNT_SESSION_COOKIE_MARKERS,
+] as const;
+
+type GoogleSessionCookie = {
+  name: string;
+  value: string;
+  domain: string;
+  expires?: number;
+};
+
+export function googleSessionMarkerCount(
+  cookies: ReadonlyArray<GoogleSessionCookie>,
+  nowSeconds = Date.now() / 1_000,
+): number {
+  let legacyMarkerCount = 0;
+  const accountMarkers = new Set<string>();
+  for (const cookie of cookies) {
+    const host = cookie.domain.replace(/^\./, "");
+    if (
+      !/(^|\.)google\.com$/i.test(host) ||
+      cookie.value.length <= 10 ||
+      (cookie.expires !== undefined && cookie.expires > 0 && cookie.expires <= nowSeconds)
+    ) {
+      continue;
+    }
+    if (GOOGLE_LOGIN_COOKIE_MARKERS.includes(cookie.name as (typeof GOOGLE_LOGIN_COOKIE_MARKERS)[number])) {
+      legacyMarkerCount += 1;
+    }
+    if (
+      host === "accounts.google.com" &&
+      GOOGLE_ACCOUNT_SESSION_COOKIE_MARKERS.includes(
+        cookie.name as (typeof GOOGLE_ACCOUNT_SESSION_COOKIE_MARKERS)[number],
+      )
+    ) {
+      accountMarkers.add(cookie.name);
+    }
+  }
+  return (
+    legacyMarkerCount +
+    (GOOGLE_ACCOUNT_SESSION_COOKIE_MARKERS.every((marker) => accountMarkers.has(marker))
+      ? GOOGLE_ACCOUNT_SESSION_COOKIE_MARKERS.length
+      : 0)
+  );
+}
+
+export function hasLiveGoogleSession(
+  cookies: ReadonlyArray<GoogleSessionCookie>,
+  nowSeconds = Date.now() / 1_000,
+): boolean {
+  return googleSessionMarkerCount(cookies, nowSeconds) > 0;
+}
 
 function isCanonicalProviderMarker(value: unknown): value is OAuthProviderId {
   return value === "google" || value === "github";
@@ -31,19 +88,7 @@ export function hasUsableGoogleIdentity(
   state: BrowserStorageState | undefined,
   nowSeconds = Date.now() / 1_000,
 ): boolean {
-  if (state === undefined) return false;
-  return state.cookies.some((cookie) => {
-    if (typeof cookie.domain !== "string") return false;
-    const host = cookie.domain.replace(/^\./, "");
-    return (
-      /(^|\.)google\.com$/i.test(host) &&
-      GOOGLE_LOGIN_COOKIE_MARKERS.includes(
-        cookie.name as (typeof GOOGLE_LOGIN_COOKIE_MARKERS)[number],
-      ) &&
-      cookie.value.length > 10 &&
-      (cookie.expires === undefined || cookie.expires <= 0 || cookie.expires > nowSeconds)
-    );
-  });
+  return state !== undefined && hasLiveGoogleSession(state.cookies, nowSeconds);
 }
 
 export function isSessionStateArtifact(entry: string): boolean {

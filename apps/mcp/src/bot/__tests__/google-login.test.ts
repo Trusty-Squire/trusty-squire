@@ -568,6 +568,29 @@ describe("profileHasProviderCookies (plain-login SQLite seed check)", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("detects the persisted accounts.google.com login pair but not chooser residue", () => {
+    const live = withProfile([
+      { host: "accounts.google.com", name: "LSID" },
+      { host: "accounts.google.com", name: "__Host-1PLSID" },
+      { host: "accounts.google.com", name: "__Host-3PLSID" },
+      { host: "accounts.google.com", name: "ACCOUNT_CHOOSER" },
+      { host: "accounts.google.com", name: "SMSV" },
+    ]);
+    const chooserOnly = withProfile([
+      { host: "accounts.google.com", name: "LSID" },
+      { host: "accounts.google.com", name: "ACCOUNT_CHOOSER" },
+      { host: "accounts.google.com", name: "SMSV" },
+      { host: "accounts.google.com", name: "__Host-GAPS" },
+    ]);
+    try {
+      expect(profileHasProviderCookies(live, "google")).toBe(true);
+      expect(profileHasProviderCookies(chooserOnly, "google")).toBe(false);
+    } finally {
+      rmSync(live, { recursive: true, force: true });
+      rmSync(chooserOnly, { recursive: true, force: true });
+    }
+  });
+
   it("detects a GitHub session by user_session", () => {
     const dir = withProfile([{ host: ".github.com", name: "user_session" }]);
     expect(profileHasProviderCookies(dir, "github")).toBe(true);

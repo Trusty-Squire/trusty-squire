@@ -52,7 +52,9 @@ import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
   canonicalIdentitySnapshotDisposition,
-  GOOGLE_LOGIN_COOKIE_MARKERS,
+  googleSessionMarkerCount,
+  GOOGLE_LOGIN_COOKIE_NAMES,
+  hasLiveGoogleSession,
   hasUsableGoogleIdentity,
   readCanonicalIdentityMetadata,
   readSessionState,
@@ -330,7 +332,7 @@ const LOGIN_TARGETS: Record<OAuthProviderId, LoginTarget> = {
     provider: "google",
     label: "Google",
     cookieOrigin: "https://www.google.com",
-    cookies: GOOGLE_LOGIN_COOKIE_MARKERS,
+    cookies: GOOGLE_LOGIN_COOKIE_NAMES,
   },
   github: {
     provider: "github",
@@ -351,7 +353,7 @@ export function explicitLoginStartUrl(
 }
 
 interface ExplicitLoginContext {
-  cookies(url: string): Promise<Array<{ name: string }>>;
+  cookies(url?: string): Promise<Array<{ name: string; value?: string; domain?: string }>>;
   pages(): Array<{ url(): string }>;
 }
 
@@ -361,8 +363,18 @@ export async function explicitLoginCompleted(
   webBase = process.env.TRUSTY_SQUIRE_WEB_BASE ?? DEFAULT_LOGIN_WEB_BASE,
 ): Promise<boolean> {
   const target = LOGIN_TARGETS[provider];
-  const cookies = await context.cookies(target.cookieOrigin);
-  if (!cookies.some((cookie) => target.cookies.includes(cookie.name))) return false;
+  const cookies = await context.cookies(provider === "google" ? undefined : target.cookieOrigin);
+  const hasProviderCookie =
+    provider === "google"
+      ? hasLiveGoogleSession(
+          cookies.map((cookie) => ({
+            name: cookie.name,
+            value: cookie.value ?? "",
+            domain: cookie.domain ?? "",
+          })),
+        )
+      : cookies.some((cookie) => target.cookies.includes(cookie.name));
+  if (!hasProviderCookie) return false;
   const expected = new URL(webBase);
   const page = context.pages()[0];
   if (page === undefined) return false;
@@ -383,8 +395,10 @@ export interface LoginResult {
 
 // --- session detection -------------------------------------------------
 async function hasProviderSession(context: BrowserContext, target: LoginTarget): Promise<boolean> {
-  const cookies = await context.cookies(target.cookieOrigin);
-  return cookies.some((c) => target.cookies.includes(c.name));
+  const cookies = await context.cookies(target.provider === "google" ? undefined : target.cookieOrigin);
+  return target.provider === "google"
+    ? hasLiveGoogleSession(cookies)
+    : cookies.some((cookie) => target.cookies.includes(cookie.name));
 }
 
 // Exported for the connect claim loop: does this LIVE context already hold the
@@ -404,17 +418,7 @@ function providerIdentityMarkerCount(
   nowSeconds = Date.now() / 1_000,
 ): number {
   if (provider === "google") {
-    return state.cookies.filter((cookie) => {
-      const host = cookie.domain.replace(/^\./, "");
-      return (
-        /(^|\.)google\.com$/i.test(host) &&
-        GOOGLE_LOGIN_COOKIE_MARKERS.includes(
-          cookie.name as (typeof GOOGLE_LOGIN_COOKIE_MARKERS)[number],
-        ) &&
-        cookie.value.length > 10 &&
-        (cookie.expires === undefined || cookie.expires <= 0 || cookie.expires > nowSeconds)
-      );
-    }).length;
+    return googleSessionMarkerCount(state.cookies, nowSeconds);
   }
   return state.cookies.filter((cookie) => {
     const host = cookie.domain.replace(/^\./, "");
@@ -439,7 +443,7 @@ function capturedPageLocations(context: BrowserContext): string[] {
 }
 
 const PROVIDER_COOKIE_MARKERS: Record<OAuthProviderId, readonly string[]> = {
-  google: GOOGLE_LOGIN_COOKIE_MARKERS,
+  google: GOOGLE_LOGIN_COOKIE_NAMES,
   github: ["user_session"],
 };
 
@@ -457,16 +461,28 @@ export function profileHasProviderCookies(profileDir: string, provider: OAuthPro
         timeout: 250,
       });
       const placeholders = markers.map(() => "?").join(", ");
-      const row = db
+      const rows = db
         .prepare(
-          `SELECT 1
+          `SELECT host_key, name
              FROM cookies
             WHERE (host_key = ? OR host_key = ? OR host_key LIKE ?)
-              AND name IN (${placeholders})
-            LIMIT 1`,
+              AND name IN (${placeholders})`,
         )
-        .get(root, `.${root}`, `%.${root}`, ...markers);
-      if (row !== undefined) return true;
+        .all(root, `.${root}`, `%.${root}`, ...markers) as Array<{
+        host_key: string;
+        name: string;
+      }>;
+      if (provider === "google") {
+        if (
+          hasLiveGoogleSession(
+            rows.map((row) => ({ name: row.name, value: "stored-cookie", domain: row.host_key })),
+          )
+        ) {
+          return true;
+        }
+      } else if (rows.length > 0) {
+        return true;
+      }
     } catch {
       continue;
     } finally {

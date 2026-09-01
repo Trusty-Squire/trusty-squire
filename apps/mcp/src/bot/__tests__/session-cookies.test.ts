@@ -27,6 +27,21 @@ describe("sessionProvidersFromCookies", () => {
     expect(sessionProvidersFromCookies([c("SID", "accounts.google.com")])).toEqual(["google"]);
   });
 
+  it("detects the current persisted Google account-session pair", () => {
+    expect(
+      sessionProvidersFromCookies([
+        c("LSID", "accounts.google.com"),
+        c("__Host-1PLSID", "accounts.google.com"),
+        c("__Host-3PLSID", "accounts.google.com"),
+        c("__Host-GAPS", "accounts.google.com"),
+        c("__Secure-1PAPISID", ".google.com"),
+        c("__Secure-3PAPISID", ".google.com"),
+        c("__Secure-3PSID", ".google.com"),
+        c("__Secure-3PSIDCC", ".google.com"),
+      ]),
+    ).toEqual(["google"]);
+  });
+
   it("reports BOTH when both sessions are live", () => {
     expect(
       sessionProvidersFromCookies([
@@ -36,12 +51,25 @@ describe("sessionProvidersFromCookies", () => {
     ).toEqual(["github", "google"]);
   });
 
-  it("does NOT count logged-out Google cookies (NID / CONSENT / 1P_JAR)", () => {
+  it("does NOT count logged-out or standalone Google cookies", () => {
     expect(
       sessionProvidersFromCookies([
         c("NID", ".google.com"),
         c("CONSENT", ".google.com"),
         c("1P_JAR", ".google.com"),
+        c("__Secure-1PAPISID", ".google.com"),
+        c("__Secure-3PSID", ".google.com"),
+      ]),
+    ).toEqual([]);
+  });
+
+  it("does NOT count Google chooser residue without the complete account-session pair", () => {
+    expect(
+      sessionProvidersFromCookies([
+        c("ACCOUNT_CHOOSER", "accounts.google.com"),
+        c("SMSV", "accounts.google.com"),
+        c("__Host-GAPS", "accounts.google.com"),
+        c("LSID", "accounts.google.com"),
       ]),
     ).toEqual([]);
   });
