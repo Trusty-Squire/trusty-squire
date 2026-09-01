@@ -4298,13 +4298,14 @@ describe("Compact V2 action-map boundary", () => {
     expect(h.clickCalls).toBe(0);
   });
 
-  it("verifies text and URL postconditions from private live evidence in V2", async () => {
+  it("exposes a screened origin while keeping V2 text and URL paths private", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.visibleText = "Review order";
     const started = await startProvisionSession({
-      serviceUrl: "https://shop.example.com/checkout/review",
+      serviceUrl: "https://shop.example.com/checkout/review?token=private-url-token-123456789",
     });
-    expect(started).toMatchObject({ format: "compact-v2", url: "", text: "" });
+    expect(started).toMatchObject({ format: "compact-v2", url: "https://shop.example.com", text: "" });
+    expect(JSON.stringify(started)).not.toContain("private-url-token-123456789");
     await expect(
       verifyPostcondition(started.session_id, {
         kind: "execute_capability",
@@ -4424,7 +4425,12 @@ describe("Compact V2 action-map boundary", () => {
       .safe_table[0]![0];
 
     const ack = await act(started.session_id, { kind: "scroll", direction: "down" }, "none");
-    expect(ack).toMatchObject({ format: "compact-v2", url: "", text: "", observed: "none" });
+    expect(ack).toMatchObject({
+      format: "compact-v2",
+      url: "https://app.example.com",
+      text: "",
+      observed: "none",
+    });
     expect(ack.elements).toBeUndefined();
     await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
       "reobserve_required",
@@ -4442,7 +4448,7 @@ describe("Compact V2 action-map boundary", () => {
     const transition = await observe(started.session_id);
     expect(transition).toMatchObject({
       format: "compact-v2",
-      url: "",
+      url: "https://app.example.com",
       text: "",
       stage: "auth",
       oauth: {

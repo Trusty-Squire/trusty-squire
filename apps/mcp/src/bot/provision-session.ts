@@ -270,8 +270,8 @@ export interface ScreenOutline {
 
 export interface Observation {
   session_id: string;
-  // V1 page location. Compact V2 deliberately emits an empty string and keeps
-  // the live URL on the private side of its sealed page identity.
+  // V1 emits the full page location. Compact V2 emits only a screened origin;
+  // its path/query remain inside the sealed page identity.
   url: string;
   // Registry route guidance, present ONLY on the first (start) observation when
   // a skill exists for the service. The host agent reads it before driving.
@@ -5409,7 +5409,9 @@ function compactV2PublicObservation(
   const payload: Observation = {
     format: "compact-v2",
     session_id: session.id,
-    url: "",
+    // Keep the path/query private, but expose the screened origin so a
+    // successful navigation is distinguishable from an empty/about:blank view.
+    url: safeOriginV2(session.browser.currentUrl()) ?? "",
     text: "",
     stage: fields.stage,
     ...(fields.guidance === undefined ? {} : { guidance: fields.guidance }),
@@ -5503,6 +5505,7 @@ function compactV2Observation(
     const encodedDelta = encodeV2Delta({
       sessionId: session.id,
       stage,
+      pageUrl: session.browser.currentUrl(),
       // The first V2 page establishes semantic essentials. On a delta they
       // are sticky, so resend only a sealed semantic change rather than the
       // same title/heading on every harmless re-observe.
@@ -5516,6 +5519,7 @@ function compactV2Observation(
   const page = encodeV2Page({
     sessionId: session.id,
     stage: index.stage,
+    pageUrl: session.browser.currentUrl(),
     semantics,
     rows: index.rows,
     cursorFor: (offset) =>
@@ -5668,6 +5672,7 @@ export async function observeQuery(
   const page = encodeV2Page({
     sessionId: session.id,
     stage: index.stage,
+    pageUrl: session.browser.currentUrl(),
     semantics: index.semantics,
     rows,
     offset,

@@ -363,7 +363,7 @@ const OBSERVE_DELTA_CONTRACT =
   "handle; do not retry the old handle or use V1 replacement candidates or locator fallback. ";
 
 const COMPACT_V2_CONTRACT =
-  "When format is `compact-v2`, use its sealed map: session_id is the continuation handle; `stage` is a finite enum; " +
+  "When format is `compact-v2`, use its sealed map: session_id is the continuation handle; `url` is the screened page origin (never its path/query); `stage` is a finite enum; " +
   "semantic carries the screened title and primary visible heading; safe_table rows use [ref,role,facts?], where role is " +
   "b=button,l=link,t=textbox,s=select,c=checkbox,r=radio,tb=tab,m=menuitem,f=file. facts is a pipe-delimited string: " +
   "an optional first unkeyed segment is the screened short label; labels containing `|` or beginning like a keyed fact " +

@@ -133,6 +133,36 @@ describe("compact observation v2", () => {
     expect(sealed?.frameOrigin).toBeNull();
   });
 
+  it("emits only a screened origin instead of an empty or secret-bearing page URL", () => {
+    const page = encodeV2Page({
+      sessionId: "session",
+      stage: "browse",
+      pageUrl: "https://ipinfo.io/signup?token=private-url-token-123456789",
+      rows: [],
+      cursorFor: (offset) => `cursor-${offset}`,
+    });
+    expect(page.payload).toMatchObject({ url: "https://ipinfo.io", text: "" });
+    expect(JSON.stringify(page.payload)).not.toContain("private-url-token-123456789");
+  });
+
+  it("prioritizes signup actions over unlabeled landing-page navigation", () => {
+    const nav = ["Products", "Enterprise", "Resources", "Pricing"].map((visibleText, index) =>
+      element({ index, visibleText }),
+    );
+    const signup = element({
+      index: nav.length,
+      tag: "a",
+      visibleText: "Sign Up",
+    });
+    const safe = buildSafeControlsV2({
+      elements: [...nav, signup],
+      legacyRefs: new Map([...nav, signup].map((el, index) => [el, `@e:legacy-${index}`])),
+      generation: 1,
+      pageOrigin: "https://ipinfo.io",
+    });
+    expect(safe.rows[0]).toMatchObject({ role: "link", action: "signup" });
+  });
+
   it("returns an intact first page and signed cursor below the final wire cap", () => {
     const rows = Array.from({ length: 200 }, (_, index) => ({
       ref: `@e:${index.toString(36).padStart(18, "a")}`,

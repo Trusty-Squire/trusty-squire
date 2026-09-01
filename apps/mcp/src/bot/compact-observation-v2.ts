@@ -627,12 +627,14 @@ export function diffSafeControlsV2(
 export function encodeV2Delta(args: {
   sessionId: string;
   stage: SafeStageV2;
+  /** Only the screened origin reaches the wire; paths and query strings stay private. */
+  pageUrl?: string;
   semantics?: SafePageSemanticsV2 | undefined;
   delta: SafeObservationDeltaV2;
 }): Record<string, unknown> | null {
   const payload: Record<string, unknown> = {
     format: "compact-v2",
-    url: "",
+    url: safeOriginV2(args.pageUrl) ?? "",
     text: "",
     session_id: args.sessionId,
     delta: true,
@@ -1019,7 +1021,15 @@ export function buildSafeControlsV2(args: {
         ? {}
         : { choice: `${cardChoice.position}/${cardChoice.total}` }),
     };
-    rows.push({ legacy, row, priority: (el.inViewport ? 0 : 10) + (role === "button" ? 0 : 1) });
+    // A signup/login action is the useful first move on a landing page. Put it
+    // ahead of unlabeled navigation chrome while preserving the existing
+    // viewport and role ordering within each group.
+    const actionPriority = action === "signup" ? -20 : action === "login" ? -10 : 0;
+    rows.push({
+      legacy,
+      row,
+      priority: actionPriority + (el.inViewport ? 0 : 10) + (role === "button" ? 0 : 1),
+    });
   }
   rows.sort((a, b) => a.priority - b.priority || a.legacy.localeCompare(b.legacy));
   const byRef = new Map<string, string>();
@@ -1036,6 +1046,8 @@ export function buildSafeControlsV2(args: {
 export function encodeV2Page(args: {
   sessionId: string;
   stage: SafeStageV2;
+  /** Only the screened origin reaches the wire; paths and query strings stay private. */
+  pageUrl?: string;
   semantics?: SafePageSemanticsV2;
   rows: readonly SafeControlV2[];
   cursorFor: (offset: number) => string;
@@ -1051,7 +1063,7 @@ export function encodeV2Page(args: {
   if (args.unchanged === true && offset === 0) {
     const payload: Record<string, unknown> = {
       format: "compact-v2",
-      url: "",
+      url: safeOriginV2(args.pageUrl) ?? "",
       text: "",
       session_id: args.sessionId,
       stage: args.stage,
@@ -1085,7 +1097,7 @@ export function encodeV2Page(args: {
     const remainder = args.rows.length - (index + 1);
     const payload: Record<string, unknown> = {
       format: "compact-v2",
-      url: "",
+      url: safeOriginV2(args.pageUrl) ?? "",
       text: "",
       session_id: args.sessionId,
       stage: args.stage,
@@ -1111,7 +1123,7 @@ export function encodeV2Page(args: {
   const remaining = args.rows.length - nextOffset;
   const payload: Record<string, unknown> = {
     format: "compact-v2",
-    url: "",
+    url: safeOriginV2(args.pageUrl) ?? "",
     text: "",
     session_id: args.sessionId,
     stage: args.stage,
