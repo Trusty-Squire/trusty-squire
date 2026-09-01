@@ -53,7 +53,9 @@ import type { OAuthProviderId } from "./oauth-providers.js";
 import {
   canonicalIdentitySnapshotDisposition,
   GOOGLE_LOGIN_COOKIE_MARKERS,
+  hasUsableGoogleIdentity,
   readCanonicalIdentityMetadata,
+  readSessionState,
   writeCanonicalIdentitySnapshot,
   type BrowserStorageState,
 } from "./session-state.js";
@@ -981,7 +983,22 @@ export async function finalizeLoginRun(
     () => true,
     confirmedProviders,
   );
-  if (!published) throw new Error("login identity snapshot could not be published");
+  if (!published) {
+    // writeCanonicalIdentitySnapshot returns false both on genuine failure AND
+    // when it deliberately RETAINS a usable prior identity rather than overwrite
+    // it with a cookie-less capture. The latter is the common connect case: the
+    // install page re-signs into a fresh ephemeral profile, so this capture has
+    // no Google cookies while the prior login's snapshot is intact and usable.
+    // Retaining a usable identity is success — only fail when nothing usable
+    // survives on disk. This mirrors writeCanonicalIdentitySnapshot's own
+    // would-drop-usable-Google-identity guard.
+    const retainedUsableGoogleIdentity =
+      !hasUsableGoogleIdentity(result.storageState) &&
+      hasUsableGoogleIdentity(await readSessionState(opts.profileDir));
+    if (!retainedUsableGoogleIdentity) {
+      throw new Error("login identity snapshot could not be published");
+    }
+  }
   if (result.captureSource !== undefined) {
     console.error(
       `[login:capture] ${JSON.stringify({
