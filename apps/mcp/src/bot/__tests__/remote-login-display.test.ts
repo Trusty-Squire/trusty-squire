@@ -225,7 +225,7 @@ describe("remote interactive login display", () => {
     ]);
   });
 
-  it("launches the resolved Xvfb and uses its atomic display allocation", async () => {
+  it("gives a headed Chrome child a display when the parent has none", async () => {
     const executable = fakeExecutable(`
 const fs = require("node:fs");
 if (!/^v1:/.test(process.env.TRUSTY_SQUIRE_OWNER_HELPER_MARKER || "")) process.exit(24);
@@ -250,7 +250,9 @@ setInterval(() => undefined, 1000);
       expect(statSync(rig.authFile!).mode & 0o777).toBe(0o600);
       expect(statSync(rig.passFile!).mode & 0o777).toBe(0o600);
       expect(readFileSync(rig.passFile!, "utf8")).toBe(rig.vncPassword);
-      expect(remoteLoginEnvironment(rig, { PATH: "/bin" })).toMatchObject({
+      const parentEnv: NodeJS.ProcessEnv = { PATH: "/bin" };
+      expect(parentEnv.DISPLAY).toBeUndefined();
+      expect(remoteLoginEnvironment(rig, parentEnv)).toMatchObject({
         DISPLAY: ":117",
         XAUTHORITY: rig.authFile,
       });

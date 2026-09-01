@@ -80,6 +80,7 @@ import {
   untrackOwnerBrowserLaunch,
   untrackOwnerProcess,
 } from "./owner-process-reaper.js";
+import type { RemoteLoginRig } from "./remote-login-display.js";
 
 // Lazy registration: installing the plugin mutates the chromium singleton
 // from playwright-extra so we only do it once per process. We require()
@@ -3711,6 +3712,7 @@ export class BrowserController {
   private childChrome: ChildProcess | null = null;
   private childChromeIdentity: ProfileProcessIdentity | null = null;
   private childChromeProcessGroup = false;
+  private ownedDisplayRig: RemoteLoginRig | null = null;
   private ownedChromeProcessTreeProof: OwnedChromeProcessTreeProof | null = null;
   private operatorProcessMarker: string | null = null;
   private ownerLaunchTracked = false;
@@ -3901,6 +3903,29 @@ export class BrowserController {
   operatorBrowserMarker(): string {
     this.operatorProcessMarker ??= createOperatorBrowserMarker();
     return this.operatorProcessMarker;
+  }
+
+  private async ownedHeadedBrowserEnvironment(): Promise<NodeJS.ProcessEnv> {
+    if (this.ownedDisplayRig === null) {
+      const { createXvfbDisplayRig, startRemoteLoginDisplay } = await import(
+        "./remote-login-display.js"
+      );
+      const rig = createXvfbDisplayRig();
+      this.ownedDisplayRig = rig;
+      await startRemoteLoginDisplay(rig);
+    }
+    const { remoteLoginEnvironment } = await import("./remote-login-display.js");
+    const rig = this.ownedDisplayRig;
+    if (rig === null) throw new Error("headed operator display did not start");
+    return remoteLoginEnvironment(rig, process.env);
+  }
+
+  private async teardownOwnedDisplay(): Promise<void> {
+    const rig = this.ownedDisplayRig;
+    this.ownedDisplayRig = null;
+    if (rig === null) return;
+    const { teardownRemoteLoginRig } = await import("./remote-login-display.js");
+    await teardownRemoteLoginRig(rig);
   }
 
   private adoptOwnedChromeProcessTree(
@@ -4243,6 +4268,7 @@ export class BrowserController {
         throw new Error("BrowserController start cancelled");
       }
     } catch (err) {
+      await this.teardownOwnedDisplay().catch(() => undefined);
       if (this.startCancellationRequested && this.persistentFallbackCancellationState === null) {
         await this.closeBrowser().catch(() => undefined);
       }
@@ -4295,13 +4321,14 @@ export class BrowserController {
       registerLocalBrowserLaunch(this.profileDir, process.env, this.operatorBrowserMarker());
       this.ownerLaunchTracked = true;
     }
+    const browserEnv = remoteMode ? process.env : await this.ownedHeadedBrowserEnvironment();
     // T3.1: probe where this run's traffic actually exits so the
     // browser's declared timezone matches its egress IP (a US-timezone
     // browser on a foreign proxy IP is itself an anti-bot signal).
     // Done before the real launch: launchPersistentContext bakes the
     // timezone in at creation, with no way to set it afterward. Skipped in
     // remote mode — the remote host's own clock/IP are the authentic truth.
-    const geo = remoteMode ? null : await this.probeEgressGeo(channel, proxy);
+    const geo = remoteMode ? null : await this.probeEgressGeo(channel, proxy, browserEnv);
     this.throwIfStartCancelled();
     if (geo !== null) {
       console.error(
@@ -4371,7 +4398,7 @@ export class BrowserController {
       );
       const window = { width: 1280, height: 1024 };
       const selfEnv: NodeJS.ProcessEnv = {
-        ...process.env,
+        ...browserEnv,
         TZ: geo?.timezoneId ?? "America/New_York",
         [OPERATOR_BROWSER_MARKER_ENV]: this.operatorBrowserMarker(),
       };
@@ -4446,7 +4473,7 @@ export class BrowserController {
             options: {
               headless: OPERATOR_BROWSER_HEADLESS,
               env: {
-                ...process.env,
+                ...browserEnv,
                 [OPERATOR_BROWSER_MARKER_ENV]: this.operatorBrowserMarker(),
               },
               ...(channel !== null ? { channel } : {}),
@@ -4806,6 +4833,7 @@ export class BrowserController {
   private async probeEgressGeo(
     channel: string | null,
     proxy: ProxySettings | null,
+    browserEnv: NodeJS.ProcessEnv,
   ): Promise<EgressGeo | null> {
     if (proxy === null) {
       try {
@@ -4825,6 +4853,7 @@ export class BrowserController {
     try {
       probe = await getChromium().launch({
         headless: OPERATOR_BROWSER_HEADLESS,
+        env: browserEnv,
         ...(channel !== null ? { channel } : {}),
         ...(proxy !== null ? { proxy } : {}),
         args: ["--no-sandbox", "--disable-dev-shm-usage"],
@@ -16786,6 +16815,7 @@ export class BrowserController {
       untrackOwnerBrowserLaunch(marker);
       this.ownerLaunchTracked = false;
     }
+    await this.teardownOwnedDisplay().catch(() => undefined);
     return closed && markerClosed ? "closed" : "unknown";
   }
 
@@ -17036,6 +17066,7 @@ export class BrowserController {
       untrackOwnerBrowserLaunch(marker);
       this.ownerLaunchTracked = false;
     }
+    await this.teardownOwnedDisplay().catch(() => undefined);
     return closeState === "closed" && !markerClosed ? "force_closed_unproven" : closeState;
   }
 }

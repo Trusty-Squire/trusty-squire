@@ -1,8 +1,8 @@
 // Login-only virtual display + noVNC bridge.
 //
-// This module is deliberately not used by BrowserController. Automated operator
-// sessions stay on Chrome's new-headless path; only interactive login/connect
-// calls start this stack, and every process is torn down with that login.
+// Interactive login and headed operator sessions share this Xvfb lifecycle.
+// Only login exposes the display over VNC/noVNC; operator Chrome uses the
+// private display directly and tears it down with its browser session.
 
 import { randomBytes } from "node:crypto";
 import type { ChildProcess } from "node:child_process";
@@ -430,13 +430,30 @@ function buildVncWebDir(): string {
   return webDir;
 }
 
-export function createRemoteLoginRig(): RemoteLoginRig {
-  const namedTunnel = namedTunnelConfig();
-  const binaries = requireRemoteLoginBinaries(namedTunnel !== null);
+export function createXvfbDisplayRig(): RemoteLoginRig {
+  const xvfb = resolveLoginBinary("Xvfb");
+  if (xvfb === null) {
+    throw new Error(
+      "headed Chrome needs Xvfb installed.\n" + remoteLoginInstallHint(["Xvfb"]),
+    );
+  }
   return {
     width: LOGIN_WIDTH,
     height: LOGIN_HEIGHT,
     procs: [],
+    binaries: {
+      xvfb,
+      x11vnc: "",
+      websockify: "",
+    },
+  };
+}
+
+export function createRemoteLoginRig(): RemoteLoginRig {
+  const namedTunnel = namedTunnelConfig();
+  const binaries = requireRemoteLoginBinaries(namedTunnel !== null);
+  return {
+    ...createXvfbDisplayRig(),
     binaries,
   };
 }
