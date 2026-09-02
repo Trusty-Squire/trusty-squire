@@ -60,6 +60,9 @@ vi.mock("../browser.js", () => ({
     async detectSessionProviders(): Promise<string[]> {
       return h.providers;
     }
+    async detectGoogleAccountEmail(): Promise<string | null> {
+      return h.providers.includes("google") ? "operator@example.com" : null;
+    }
     async goto(url: string): Promise<void> {
       h.currentUrl = url;
       h.mainDocumentEpoch += 1;

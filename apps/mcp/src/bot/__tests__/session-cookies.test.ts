@@ -27,7 +27,7 @@ describe("sessionProvidersFromCookies", () => {
     expect(sessionProvidersFromCookies([c("SID", "accounts.google.com")])).toEqual(["google"]);
   });
 
-  it("detects the current persisted Google account-session pair", () => {
+  it("does not treat the persisted Google account-chooser cookie family as a session", () => {
     expect(
       sessionProvidersFromCookies([
         c("LSID", "accounts.google.com"),
@@ -39,7 +39,7 @@ describe("sessionProvidersFromCookies", () => {
         c("__Secure-3PSID", ".google.com"),
         c("__Secure-3PSIDCC", ".google.com"),
       ]),
-    ).toEqual(["google"]);
+    ).toEqual([]);
   });
 
   it("reports BOTH when both sessions are live", () => {
@@ -63,7 +63,7 @@ describe("sessionProvidersFromCookies", () => {
     ).toEqual([]);
   });
 
-  it("does NOT count Google chooser residue without the complete account-session pair", () => {
+  it("does NOT count Google chooser residue", () => {
     expect(
       sessionProvidersFromCookies([
         c("ACCOUNT_CHOOSER", "accounts.google.com"),

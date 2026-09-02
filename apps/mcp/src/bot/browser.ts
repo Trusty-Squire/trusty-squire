@@ -2383,9 +2383,9 @@ export function extractGoogleAccountEmail(pageText: string): string | null {
 
 // Map a cookie jar to the OAuth providers that have a LIVE logged-in session.
 // The auth cookies that mean "signed in": GitHub → `user_session`; Google →
-// a legacy *SID cookie or the current LSID + __Host-1PLSID account pair
-// (NID / CONSENT / 1P_JAR and chooser residue are set even when logged out,
-// so they are deliberately NOT signals). Host-scoped so a
+// a legacy *SID cookie. NID / CONSENT / 1P_JAR and the current account-chooser
+// family are set even when logged out, so they are deliberately NOT signals.
+// Host-scoped so a
 // google.com cookie can't pass for github. Cookie NAMES + presence only;
 // values are checked for non-triviality, never logged. Exported for tests.
 export function sessionProvidersFromCookies(

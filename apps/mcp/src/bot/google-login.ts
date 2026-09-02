@@ -355,6 +355,7 @@ export function explicitLoginStartUrl(
 interface ExplicitLoginContext {
   cookies(url?: string): Promise<Array<{ name: string; value?: string; domain?: string }>>;
   pages(): Array<{ url(): string }>;
+  newPage?: BrowserContext["newPage"];
 }
 
 export async function explicitLoginCompleted(
@@ -363,18 +364,13 @@ export async function explicitLoginCompleted(
   webBase = process.env.TRUSTY_SQUIRE_WEB_BASE ?? DEFAULT_LOGIN_WEB_BASE,
 ): Promise<boolean> {
   const target = LOGIN_TARGETS[provider];
-  const cookies = await context.cookies(provider === "google" ? undefined : target.cookieOrigin);
-  const hasProviderCookie =
-    provider === "google"
-      ? hasLiveGoogleSession(
-          cookies.map((cookie) => ({
-            name: cookie.name,
-            value: cookie.value ?? "",
-            domain: cookie.domain ?? "",
-          })),
-        )
-      : cookies.some((cookie) => target.cookies.includes(cookie.name));
-  if (!hasProviderCookie) return false;
+  if (provider === "google") {
+    if (context.newPage === undefined) return false;
+    if ((await detectGoogleAccountEmailInContext(context as BrowserContext)) === null) return false;
+  } else {
+    const cookies = await context.cookies(target.cookieOrigin);
+    if (!cookies.some((cookie) => target.cookies.includes(cookie.name))) return false;
+  }
   const expected = new URL(webBase);
   const page = context.pages()[0];
   if (page === undefined) return false;
@@ -395,10 +391,11 @@ export interface LoginResult {
 
 // --- session detection -------------------------------------------------
 async function hasProviderSession(context: BrowserContext, target: LoginTarget): Promise<boolean> {
-  const cookies = await context.cookies(target.provider === "google" ? undefined : target.cookieOrigin);
-  return target.provider === "google"
-    ? hasLiveGoogleSession(cookies)
-    : cookies.some((cookie) => target.cookies.includes(cookie.name));
+  if (target.provider === "google") {
+    return (await detectGoogleAccountEmailInContext(context)) !== null;
+  }
+  const cookies = await context.cookies(target.cookieOrigin);
+  return cookies.some((cookie) => target.cookies.includes(cookie.name));
 }
 
 // Exported for the connect claim loop: does this LIVE context already hold the
@@ -502,9 +499,11 @@ async function validateProviderSession(
   context: BrowserContext,
   target: LoginTarget,
 ): Promise<boolean> {
+  if (target.provider === "google") {
+    return (await detectGoogleAccountEmailInContext(context)) !== null;
+  }
   // Cheap negative: no session cookie at all → definitely not logged in.
   if (!(await hasProviderSession(context, target))) return false;
-  if (target.provider !== "github") return true; // only GitHub's marker is known to lie
   const page = await context.newPage();
   try {
     await page
@@ -554,7 +553,8 @@ export async function detectActiveProviderSessions(
         // just the install display. validateProviderSession is cheap: it returns
         // a fast false when no cookie is present (no navigation), and only pays
         // the github.com round-trip when a github cookie EXISTS and must be proven
-        // live. Google stays presence-based (it doesn't lie this way).
+        // live. Google is verified by a My Account identity probe, since its
+        // chooser cookies can survive after the account is signed out.
         if (await validateProviderSession(ctx, LOGIN_TARGETS[id])) present.push(id);
       }
       return present;
@@ -958,10 +958,18 @@ export async function finalizeLoginRun(
     seedProvider === undefined || seedProvider === null
       ? 0
       : providerIdentityMarkerCount(result.storageState, seedProvider);
+  // A live Google context is authoritative only when its My Account probe
+  // produced an email. Cookie names alone cannot distinguish a signed-in
+  // session from the signed-out account chooser. Plain-browser capture has no
+  // CDP context to probe, so retain its existing cookie-store check.
+  const providerIdentityVerified =
+    seedProvider === "google" && result.captureSource !== undefined
+      ? result.googleAccountEmail !== undefined
+      : providerMarkerCount > 0;
   await opts.validateCapturedState?.(result.storageState);
   const priorMetadata = await readCanonicalIdentityMetadata(opts.profileDir);
   if (seedProvider !== undefined && seedProvider !== null && result.status === "completed") {
-    if (providerMarkerCount === 0) {
+    if (!providerIdentityVerified) {
       if (result.captureSource !== undefined) {
         console.error(
           `[login:capture] ${JSON.stringify({
@@ -972,11 +980,12 @@ export async function finalizeLoginRun(
             cookieCount: result.storageState.cookies.length,
             provider: seedProvider,
             providerMarkerCount,
+            googleAccountEmail: result.googleAccountEmail,
           })}`,
         );
       }
       const label = seedProvider === "google" ? "Google" : "GitHub";
-      throw new Error(`${label} login completed without a live identity marker`);
+      throw new Error(`${label} login completed without a live identity`);
     }
   }
   const metadata =
@@ -1245,6 +1254,7 @@ export async function runRemoteLoginChrome(
   );
   activeTeardown = lifecycle.cancel;
   let storageState: BrowserStorageState | undefined;
+  let googleAccountEmail: string | null = null;
   let pageLocations: string[] | undefined;
 
   try {
@@ -1364,11 +1374,18 @@ export async function runRemoteLoginChrome(
         if (preflightSatisfied) {
           storageState = await context.storageState({ indexedDB: true });
           pageLocations = capturedPageLocations(context);
+          const seedProvider =
+            typeof opts.seedProvider === "function" ? opts.seedProvider() : opts.seedProvider;
+          const googleAccountEmail =
+            seedProvider === "google"
+              ? await detectGoogleAccountEmailInContext(context)
+              : null;
           const closeState = await lifecycle.finish();
           return {
             status: "preflight_satisfied",
             closeState,
             storageState,
+            ...(googleAccountEmail === null ? {} : { googleAccountEmail }),
             captureSource: "remote-live-context",
             capturedPageLocations: pageLocations,
           };
@@ -1405,6 +1422,11 @@ export async function runRemoteLoginChrome(
           }
           storageState = await context.storageState({ indexedDB: true });
           pageLocations = capturedPageLocations(context);
+          const seedProvider =
+            typeof opts.seedProvider === "function" ? opts.seedProvider() : opts.seedProvider;
+          if (seedProvider === "google") {
+            googleAccountEmail = await detectGoogleAccountEmailInContext(context);
+          }
         } else if (opts.plainOnSuccess !== undefined) {
           try {
             await opts.plainOnSuccess(opts.profileDir);
@@ -1433,6 +1455,7 @@ export async function runRemoteLoginChrome(
               captureSource: "remote-live-context" as const,
               capturedPageLocations: pageLocations ?? [],
             }),
+        ...(googleAccountEmail === null ? {} : { googleAccountEmail }),
         ...captured,
       };
     } finally {

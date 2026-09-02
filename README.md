@@ -347,11 +347,9 @@ seal. Maintainers can select the legacy V1 `el_table`/snapshot contract with
   providers, and 3-D Secure ACS/directory-server hosts) is exempt from that
   session-start-trust requirement — otherwise a checkout's own out-of-band 3DS
   challenge could never complete its own status poll.
-  For a task gated by the user's connected Google account, pass
-  `require_live_identity: true` to `operate_start`. The start checks the saved
-  snapshot for an unexpired Google identity marker without loading Google state
-  into the ordinary private profile. If no usable marker exists, it fails closed
-  with a login handoff. It never opens Chrome on the canonical profile.
+  Every operator task uses the user's Chrome profile directly. Before it starts,
+  the operator checks the live Google My Account identity; if the profile is
+  signed out, it returns a clear login handoff before navigating to the service.
   To route only that browser session through a proxy, pass `proxy` to
   `operate_start` as an HTTP or HTTPS URL (credentials are optional), or as an
   unauthenticated SOCKS5 URL. The value is launch-only and sensitive: it is not

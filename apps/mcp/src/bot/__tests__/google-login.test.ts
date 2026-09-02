@@ -14,6 +14,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { spawn, type ChildProcess } from "node:child_process";
+import type { BrowserContext } from "playwright";
 import Database from "better-sqlite3";
 import {
   attachSelfManagedLoginContext,
@@ -186,6 +187,14 @@ describe("explicit provider login completion", () => {
         { url: () => "https://myaccount.google.com/" },
         { url: () => "https://trustysquire.ai/vault" },
       ],
+      newPage: vi.fn(async () => ({
+        goto: vi.fn(async () => undefined),
+        url: () => "https://myaccount.google.com/",
+        locator: () => ({
+          evaluateAll: vi.fn(async () => ["Google Account: Test (operator@example.com)"]),
+        }),
+        close: vi.fn(async () => undefined),
+      })) as unknown as BrowserContext["newPage"],
     };
 
     await expect(
@@ -568,26 +577,18 @@ describe("profileHasProviderCookies (plain-login SQLite seed check)", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("detects the persisted accounts.google.com login pair but not chooser residue", () => {
-    const live = withProfile([
+  it("does not mistake the persisted accounts.google.com account-chooser cookies for a login", () => {
+    const signedOut = withProfile([
       { host: "accounts.google.com", name: "LSID" },
       { host: "accounts.google.com", name: "__Host-1PLSID" },
       { host: "accounts.google.com", name: "__Host-3PLSID" },
       { host: "accounts.google.com", name: "ACCOUNT_CHOOSER" },
       { host: "accounts.google.com", name: "SMSV" },
     ]);
-    const chooserOnly = withProfile([
-      { host: "accounts.google.com", name: "LSID" },
-      { host: "accounts.google.com", name: "ACCOUNT_CHOOSER" },
-      { host: "accounts.google.com", name: "SMSV" },
-      { host: "accounts.google.com", name: "__Host-GAPS" },
-    ]);
     try {
-      expect(profileHasProviderCookies(live, "google")).toBe(true);
-      expect(profileHasProviderCookies(chooserOnly, "google")).toBe(false);
+      expect(profileHasProviderCookies(signedOut, "google")).toBe(false);
     } finally {
-      rmSync(live, { recursive: true, force: true });
-      rmSync(chooserOnly, { recursive: true, force: true });
+      rmSync(signedOut, { recursive: true, force: true });
     }
   });
 
@@ -958,7 +959,7 @@ describe("bot Chrome launch consistency", () => {
             { profileDir, seedProvider: "google", confirmedProviders: ["google"] },
             { status: "completed", closeState: "closed", ...cookieLess },
           ),
-        ).rejects.toThrow("without a live identity marker");
+        ).rejects.toThrow("without a live identity");
       } finally {
         rmSync(cookieLessDir, { recursive: true, force: true });
       }
@@ -1168,8 +1169,65 @@ describe("confirmed login finalization", () => {
             googleAccountEmail: "worker@example.com",
           },
         ),
-      ).rejects.toThrow("without a live identity marker");
+        ).rejects.toThrow("without a live identity");
       await expect(readSessionState(profileDir)).resolves.toEqual(liveGoogleState);
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the live My Account identity for a CDP-captured Google login", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-live-google-"));
+    const currentGoogleCookies = {
+      cookies: [
+        {
+          name: "__Host-1PLSID",
+          value: "current-google-session",
+          domain: "myaccount.google.com",
+          path: "/",
+          expires: -1,
+          httpOnly: true,
+          secure: true,
+          sameSite: "Lax" as const,
+        },
+        {
+          name: "__Secure-3PSID",
+          value: "current-google-session",
+          domain: ".google.com",
+          path: "/",
+          expires: -1,
+          httpOnly: true,
+          secure: true,
+          sameSite: "Lax" as const,
+        },
+      ],
+      origins: [],
+    };
+    try {
+      await expect(
+        finalizeLoginRun(
+          { profileDir, seedProvider: "google", confirmedProviders: ["google"] },
+          {
+            status: "completed",
+            closeState: "closed",
+            storageState: currentGoogleCookies,
+            googleAccountEmail: "operator@example.com",
+            captureSource: "displayed-live-context",
+          },
+        ),
+      ).resolves.toBeUndefined();
+
+      await expect(
+        finalizeLoginRun(
+          { profileDir, seedProvider: "google", confirmedProviders: ["google"] },
+          {
+            status: "completed",
+            closeState: "closed",
+            storageState: currentGoogleCookies,
+            captureSource: "displayed-live-context",
+          },
+        ),
+      ).rejects.toThrow("Google login completed without a live identity");
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }
@@ -1257,6 +1315,7 @@ describe("confirmed login finalization", () => {
           status: "completed",
           closeState: "force_closed_unproven",
           storageState: liveGoogleState,
+          googleAccountEmail: "operator@example.com",
           captureSource: "remote-live-context",
           capturedPageLocations: [],
         },

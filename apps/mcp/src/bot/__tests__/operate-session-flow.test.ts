@@ -3495,6 +3495,35 @@ describe("operate session — OAuth lifecycle", () => {
     expect(result.text).toBe("Signed in");
     await finishProvisionSession(started.session_id);
   });
+
+  it("acknowledges operate_finish after an OAuth deadline terminalizes the session", async () => {
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "10";
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    let releaseOAuth!: () => void;
+    h.oauthLoginGates.set(
+      0,
+      new Promise<void>((resolve) => {
+        releaseOAuth = resolve;
+      }),
+    );
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+    await expect(
+      act(started.session_id, { kind: "oauth_login", target: "Continue with Google" }),
+    ).rejects.toMatchObject({ code: "google_session" });
+    releaseOAuth();
+    await expect(finishProvisionSession(started.session_id)).resolves.toMatchObject({
+      session_id: started.session_id,
+      closed: true,
+    });
+  });
 });
 describe("operate_start — consent-overlay auto-dismiss", () => {
   // Regression: dismissConsentBanner() shipped as DEAD CODE (zero call sites), so
@@ -5332,6 +5361,7 @@ describe("operate session — live-profile precondition gate", () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-empty";
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.providers = []; // no live session
+    h.liveGoogleEmail = null;
     const obs = await startProvisionSession({
       serviceUrl: "https://app.example.com/",
       profileDir: canonical,
@@ -5367,6 +5397,23 @@ describe("operate session — live-profile precondition gate", () => {
     expect(h.profileDirs).toEqual([canonical]);
     await finishProvisionSession(obs.session_id);
     expect(h.destroyedProfiles).toEqual([]);
+  });
+
+  it("admits a real Google identity even when cookie candidates do not include Google", async () => {
+    h.providers = [];
+    h.liveGoogleEmail = "live-google@example.com";
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    expect(obs.needs_user).toBeUndefined();
+    expect(h.identityProbeCalls).toBe(1);
+    await finishProvisionSession(obs.session_id);
+  });
+
+  it("refuses a signed-out Google chooser even when cookie candidates say Google", async () => {
+    h.providers = ["google"];
+    h.liveGoogleEmail = null;
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    expect(obs.needs_user).toMatchObject({ wall: "google_session", resume: "login" });
+    await expect(finishProvisionSession(obs.session_id)).resolves.toMatchObject({ closed: true });
   });
 
   it("accepts the live provider probe without consulting a snapshot", async () => {
@@ -6068,8 +6115,10 @@ describe("operate session — PR3c username/password login (capture-at-login sou
   });
 
   it("prepare_login hands back when no user email was captured", async () => {
-    h.liveGoogleEmail = null;
-    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/", profileDir });
+    const obs = await startHarnessProvisionSession({
+      browser: new BrowserController(),
+      serviceUrl: "https://app.example.com/",
+    });
     const res = (await provisionPrepareLoginTool.handler(
       { session_id: obs.session_id },
       null as unknown as ApiClient,

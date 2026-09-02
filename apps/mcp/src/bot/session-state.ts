@@ -22,14 +22,7 @@ export const GOOGLE_LOGIN_COOKIE_MARKERS = [
   "APISID",
   "SAPISID",
 ] as const;
-// Current Google sign-ins can persist this account-scoped pair after the
-// legacy apex *SID family is rotated away. Neither member is sufficient by
-// itself: the pair is the live-session signal, not account-chooser residue.
-export const GOOGLE_ACCOUNT_SESSION_COOKIE_MARKERS = ["LSID", "__Host-1PLSID"] as const;
-export const GOOGLE_LOGIN_COOKIE_NAMES = [
-  ...GOOGLE_LOGIN_COOKIE_MARKERS,
-  ...GOOGLE_ACCOUNT_SESSION_COOKIE_MARKERS,
-] as const;
+export const GOOGLE_LOGIN_COOKIE_NAMES = GOOGLE_LOGIN_COOKIE_MARKERS;
 
 type GoogleSessionCookie = {
   name: string;
@@ -42,8 +35,7 @@ export function googleSessionMarkerCount(
   cookies: ReadonlyArray<GoogleSessionCookie>,
   nowSeconds = Date.now() / 1_000,
 ): number {
-  let legacyMarkerCount = 0;
-  const accountMarkers = new Set<string>();
+  let markerCount = 0;
   for (const cookie of cookies) {
     const host = cookie.domain.replace(/^\./, "");
     if (
@@ -54,23 +46,10 @@ export function googleSessionMarkerCount(
       continue;
     }
     if (GOOGLE_LOGIN_COOKIE_MARKERS.includes(cookie.name as (typeof GOOGLE_LOGIN_COOKIE_MARKERS)[number])) {
-      legacyMarkerCount += 1;
-    }
-    if (
-      host === "accounts.google.com" &&
-      GOOGLE_ACCOUNT_SESSION_COOKIE_MARKERS.includes(
-        cookie.name as (typeof GOOGLE_ACCOUNT_SESSION_COOKIE_MARKERS)[number],
-      )
-    ) {
-      accountMarkers.add(cookie.name);
+      markerCount += 1;
     }
   }
-  return (
-    legacyMarkerCount +
-    (GOOGLE_ACCOUNT_SESSION_COOKIE_MARKERS.every((marker) => accountMarkers.has(marker))
-      ? GOOGLE_ACCOUNT_SESSION_COOKIE_MARKERS.length
-      : 0)
-  );
+  return markerCount;
 }
 
 export function hasLiveGoogleSession(
