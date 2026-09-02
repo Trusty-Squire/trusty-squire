@@ -5262,7 +5262,7 @@ describe("operate session — live-profile precondition gate", () => {
     expect(h.startCalls).toBe(1);
     expect(h.started).toBe(0); // the rejected profile is closed before handoff
     expect(h.gotos).toHaveLength(0);
-    expect(h.identityProbeCalls).toBe(0); // provider admission never waits on email lookup
+    expect(h.identityProbeCalls).toBe(1); // warm the real context before provider admission
     expect(h.storageStateReads).toEqual([]);
     expect(h.profileDirs).toEqual([canonical]);
     expect(h.destroyedProfiles).toEqual([]);
@@ -5283,7 +5283,7 @@ describe("operate session — live-profile precondition gate", () => {
     });
     expect(obs.needs_user).toBeUndefined();
     expect(h.started).toBe(1);
-    expect(h.identityProbeCalls).toBe(1); // email is metadata only after live admission
+    expect(h.identityProbeCalls).toBe(2); // warm admission, then optional session metadata
     expect(h.seededStorageStates).toEqual([undefined]);
     expect(h.profileDirs).toEqual([canonical]);
     await finishProvisionSession(obs.session_id);

@@ -3324,6 +3324,13 @@ export function googleSessionGate(
 async function ensureProvisionPrimaryProviderSession(
   browser: BrowserController,
 ): Promise<OAuthProviderId[]> {
+  // Chrome materializes the real profile's provider jar after the account
+  // surface is opened in this same context. Match the proven live-identity
+  // path before reading the markers. The account lookup warms the context; it
+  // is not itself the admission signal.
+  if (typeof browser.detectGoogleAccountEmail === "function") {
+    await browser.detectGoogleAccountEmail().catch(() => null);
+  }
   if (typeof browser.detectSessionProviders !== "function") return [];
   return await browser.detectSessionProviders().catch(() => [] as OAuthProviderId[]);
 }
