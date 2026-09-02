@@ -2412,17 +2412,6 @@ export function sessionProvidersFromCookies(
   return live;
 }
 
-// A logged-out visitor is redirected from Cloud Console to accounts.google.com.
-// The console itself is an Angular SPA, so its URL is the live-session signal;
-// do not infer identity from its loading-shell text or cookie names.
-export function isAuthenticatedGoogleConsoleUrl(url: string): boolean {
-  try {
-    return new URL(url).hostname.toLowerCase() === "console.cloud.google.com";
-  } catch {
-    return false;
-  }
-}
-
 // Finer-grained captcha classification for spike telemetry (T3.2).
 // `recaptcha_v3` covers any score-mode reCAPTCHA with no clickable
 // checkbox (true v3 and v2-invisible behave the same to the bot:
@@ -16345,28 +16334,14 @@ export class BrowserController {
     }
   }
 
-  // Which OAuth providers have a live session in this profile. Google is
-  // proven by its authenticated-console redirect boundary; its cookie names
-  // are not an identity signal. Other providers retain their cookie probe.
+  // Which OAuth providers have a live session in this profile's cookie jar.
   async detectSessionProviders(): Promise<OAuthProviderId[]> {
     if (this.context === null) return [];
-    const providers: OAuthProviderId[] = sessionProvidersFromCookies(
-      await this.context.cookies().catch(() => []),
-    ).filter((provider) => provider !== "google");
-    let consolePage: Page | null = null;
     try {
-      consolePage = await this.context.newPage();
-      await consolePage.goto("https://console.cloud.google.com/", {
-        waitUntil: "domcontentloaded",
-        timeout: 20_000,
-      });
-      if (isAuthenticatedGoogleConsoleUrl(consolePage.url())) providers.push("google");
+      return sessionProvidersFromCookies(await this.context.cookies());
     } catch {
-      // A failed probe is not identity.
-    } finally {
-      await consolePage?.close().catch(() => undefined);
+      return [];
     }
-    return providers;
   }
 
   async detectGoogleAccountEmail(expectedGoogleAccountEmail?: string): Promise<string | null> {
@@ -16570,7 +16545,6 @@ export class BrowserController {
     const expectedEmail = expectedGoogleAccountEmail?.trim().toLowerCase() ?? null;
     const matchingTileIndexes = await tiles
       .evaluateAll((elements, expected) => {
-        if (expected === null) return [];
         return elements.flatMap((element, index) => {
           const html = element as HTMLElement;
           const rect = html.getBoundingClientRect();
@@ -16580,12 +16554,15 @@ export class BrowserController {
             rect.height >= 2 &&
             style.display !== "none" &&
             style.visibility !== "hidden" &&
-            identifier === expected
+            identifier !== undefined &&
+            (expected === null || identifier === expected)
             ? [index]
             : [];
         });
       }, expectedEmail)
       .catch(() => [] as number[]);
+    // Without account metadata, a sole visible chooser tile is still
+    // unambiguous. Multiple accounts remain intentionally untouched.
     if (matchingTileIndexes.length === 1) {
       if (!hasBudget()) return false;
       try {

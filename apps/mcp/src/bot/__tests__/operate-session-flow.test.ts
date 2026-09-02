@@ -5399,7 +5399,7 @@ describe("operate session — live-profile precondition gate", () => {
     expect(h.destroyedProfiles).toEqual([]);
   });
 
-  it("admits a modern Google provider probe without requiring account-email metadata", async () => {
+  it("admits a live Google provider probe without requiring account-email metadata", async () => {
     h.providers = ["google"];
     h.liveGoogleEmail = null;
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });

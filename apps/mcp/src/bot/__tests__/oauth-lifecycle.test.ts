@@ -41,40 +41,6 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await browser?.close();
   });
 
-  it("admits Google when its live context remains on Cloud Console", async () => {
-    const { controller, product } = await controllerForProduct();
-    const context = product.context();
-    await context.route("https://console.cloud.google.com/**", async (route) => {
-      await route.fulfill({ contentType: "text/html", body: "<main>console shell</main>" });
-    });
-
-    try {
-      await expect(controller.detectSessionProviders()).resolves.toEqual(["google"]);
-    } finally {
-      await context.close().catch(() => undefined);
-    }
-  });
-
-  it("refuses Google when Cloud Console redirects to accounts.google.com", async () => {
-    const { controller, product } = await controllerForProduct();
-    const context = product.context();
-    await context.addCookies([
-      { name: "SID", value: "x".repeat(40), domain: ".google.com", path: "/" },
-    ]);
-    await context.route("https://console.cloud.google.com/**", async (route) => {
-      await route.continue({ url: "https://accounts.google.com/signin/v2/identifier" });
-    });
-    await context.route("https://accounts.google.com/**", async (route) => {
-      await route.fulfill({ contentType: "text/html", body: "<main>sign in</main>" });
-    });
-
-    try {
-      await expect(controller.detectSessionProviders()).resolves.toEqual([]);
-    } finally {
-      await context.close().catch(() => undefined);
-    }
-  });
-
   it("reattaches the active controller page when a provider closes its OAuth-return popup", async () => {
     const { controller, product } = await controllerForProduct();
     const context = product.context();
@@ -280,6 +246,43 @@ describe("BrowserController OAuth popup lifecycle", () => {
         "worker@example.com",
       );
       expect(identityAuthUser).toBe("worker@example.com");
+      expect(controller.currentUrl()).toBe("https://product.test/login");
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("selects a sole Google account tile when session email metadata is unavailable", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    let selectedAccount: string | null = null;
+    await context.route("https://product.test/**", async (route) => {
+      const callback = route.request().url().endsWith("/callback");
+      await route.fulfill({
+        contentType: "text/html",
+        body: callback
+          ? '<script>window.opener.document.querySelector("#state").textContent="Signed in"; window.close()</script>'
+          : '<main id="state">Signed out</main><button id="oauth" onclick="window.open(\'https://accounts.google.com/v3/signin/accountchooser\')">Continue</button>',
+      });
+    });
+    await context.route("https://accounts.google.com/**", async (route) => {
+      const requestUrl = route.request().url();
+      const consent = requestUrl.includes("/consent?");
+      if (consent) selectedAccount = new URL(requestUrl).searchParams.get("account");
+      await route.fulfill({
+        contentType: "text/html",
+        body: consent
+          ? "<button onclick=\"location.href='https://product.test/callback'\">Continue</button>"
+          : '<button data-identifier="only@example.com" onclick="location.href=\'https://accounts.google.com/consent?account=only@example.com&amp;scope=openid\'">only@example.com</button>',
+      });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+
+    try {
+      await controller.loginWithOAuth("#oauth", 5_000, "google");
+      await expect(product.locator("#state").textContent()).resolves.toBe("Signed in");
+      expect(selectedAccount).toBe("only@example.com");
       expect(controller.currentUrl()).toBe("https://product.test/login");
     } finally {
       await context.close().catch(() => undefined);
