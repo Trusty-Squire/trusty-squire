@@ -5,9 +5,23 @@ export const MCP_TEST_INCLUDE_GLOBS = ["src/**/*.test.ts", "scripts/**/*.test.mj
 
 // These long browser/corpus/integration files run after every relevant merge
 // and in the complete nightly suite. Unit and logic tests not listed here stay
-// in the required fast-core glob.
+// in the required fast-core glob. Genuinely slow NON-behavioral files only:
+// operator fail-closed/OAuth/payment/observation behavior files live in
+// REQUIRED_BEHAVIOR_FILES below and gate every pull request instead.
 export const SLOW_POST_MERGE_FILES = [
   "src/__tests__/bin-smoke.test.ts",
+  "src/bot/__tests__/widget-corpus-eval.test.ts",
+  "src/eval/replay-harness/__tests__/replay-harness.test.ts",
+];
+
+// Operator behavior suites that MUST gate every pull request (via test:fast,
+// alongside REQUIRED_PAYMENT_SAFETY_FILES). These exercise the operator's
+// fail-closed session/OAuth/payment/observation surfaces; deferring them to a
+// post-merge workflow let PRs merge green without their behavior tests ever
+// running. They run whole files — never select or shard individual test
+// names — same contract as REQUIRED_PAYMENT_SAFETY_FILES. The nightly full
+// suite still covers them as a drift backstop.
+export const REQUIRED_BEHAVIOR_FILES = [
   "src/bot/__tests__/autocomplete-commit-confirm.test.ts",
   "src/bot/__tests__/browser-frame-support.test.ts",
   "src/bot/__tests__/google-login.test.ts",
@@ -18,8 +32,6 @@ export const SLOW_POST_MERGE_FILES = [
   "src/bot/__tests__/observe-jp-mojibake.test.ts",
   "src/bot/__tests__/operate-session-flow.test.ts",
   "src/bot/__tests__/phone-country-widget.test.ts",
-  "src/bot/__tests__/widget-corpus-eval.test.ts",
-  "src/eval/replay-harness/__tests__/replay-harness.test.ts",
 ];
 
 // Every file here gates every release. Run whole files: never select or shard
