@@ -455,31 +455,22 @@ Preserve that contract when changing browser startup or shutdown: never replace 
 identity-proven scope with root-PID-only signaling or broad `pkill`. The strict
 containment follow-up is `ts-operator-browser-cgroup-containment` in `TODOS.md`.
 
-### 13. OAuth identity uses portable state and a narrow lease
+### 13. OAuth identity uses the real profile and a narrow lease
 
-Every `oauth_login` and legacy `oauth_click` is serialized by the narrow action
-lease from action start through completion and cooldown; all other operator work
-stays parallel. Operators never open the canonical profile or copy Chrome cookie
-databases. The portable-state capture and handoff contract is owned by
+Every `oauth_login` and legacy `oauth_click` stays in the single real
+`CHROME_PROFILE_DIR` browser context. The serialized boundary preserves the
+authorized target and delegates to `loginWithOAuth`; never copy cookies, restore
+storage state, swap browsers, or add a parallel OAuth driver.
+
+`operate_start` admits Google only through `detectSessionProviders()` on that
+live context and feeds it to `googleSessionGate`. Do not read Chrome's on-disk
+cookie database for identity or completion.
+
+Connect's Google-safe plain browser deliberately has no CDP context. Its
+completion is the install claim plus explicit Finish callback, not a disk-cookie
+probe. See `apps/mcp/src/bot/google-login.ts` and
 `docs/DESIGN-warm-browser-reuse.md`.
 
-Explicit provider login has the same live-context rule: after the provider cookie
-and Trusty Squire vault return are both observed, call `context.storageState()` on
-that exact context before any metadata navigation or teardown. Do not invalidate
-the last portable identity before opening a fresh login; the live preflight clears
-provider cookies and the prior snapshot remains the fallback until an authenticated
-replacement is captured. Run `pnpm --filter @trusty-squire/mcp build` followed by
-`DISPLAY=<headed-display> node apps/mcp/scripts/live-login-capture-proof.mjs` for a
-credential-free local-IdP proof of this boundary.
-
-Connect's Google-safe plain-browser flow is the exception to the live-context
-mechanism: it deliberately has no CDP context. After its consent/Finish gate, read
-the authenticated cookie values from the canonical profile's `Cookies` store and
-pass that state to `writeCanonicalIdentitySnapshot`; never launch a second,
-headless recapture of the profile. The plain launcher uses `--password-store=basic`
-so these values are available for the sealed portable snapshot. A cookie-less
-profile must still fail the Google identity gate. See
-`apps/mcp/src/bot/google-login.ts` and its regression test.
 
 ### 14. MCP tests have required-fast and post-merge-slow tiers
 

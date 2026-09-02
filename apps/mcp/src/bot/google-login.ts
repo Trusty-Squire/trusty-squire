@@ -10,9 +10,6 @@
 // this module's display stack and remain on Chrome's new-headless path.
 
 import { createRequire } from "node:module";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-import Database from "better-sqlite3";
 import chalk from "chalk";
 import {
   CHROME_PROFILE_DIR,
@@ -48,19 +45,9 @@ import {
   terminateOwnerBrowserLaunch,
   untrackOwnerBrowserLaunch,
 } from "./owner-process-reaper.js";
+import { clearProviderCookies } from "./login-state.js";
 import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
-import {
-  canonicalIdentitySnapshotDisposition,
-  googleSessionMarkerCount,
-  GOOGLE_LOGIN_COOKIE_NAMES,
-  hasLiveGoogleSession,
-  hasUsableGoogleIdentity,
-  readCanonicalIdentityMetadata,
-  readSessionState,
-  writeCanonicalIdentitySnapshot,
-  type BrowserStorageState,
-} from "./session-state.js";
 import {
   assertRemoteLoginRigLive,
   createRemoteLoginRig,
@@ -182,115 +169,6 @@ function resolveChromium(): PersistentLauncher {
   }
 }
 
-const CHROME_EPOCH_MICROSECONDS = 11_644_473_600_000_000;
-const PROFILE_COOKIE_DATABASES = [
-  ["Default", "Network", "Cookies"],
-  ["Default", "Cookies"],
-  ["Cookies"],
-] as const;
-
-interface PersistedCookieRow {
-  domain: unknown;
-  name: unknown;
-  value: unknown;
-  path: unknown;
-  expiresUtc: unknown;
-  secure: unknown;
-  httpOnly: unknown;
-  sameSite: unknown;
-}
-
-function chromeCookieExpiresAt(expiresUtc: unknown): number {
-  const raw = typeof expiresUtc === "number" ? expiresUtc : Number(expiresUtc);
-  if (!Number.isFinite(raw) || raw <= 0) return -1;
-  return Math.max(-1, Math.floor((raw - CHROME_EPOCH_MICROSECONDS) / 1_000_000));
-}
-
-function chromeCookieSameSite(value: unknown): "Strict" | "Lax" | "None" {
-  // Chrome's CookieSameSite enum is UNSPECIFIED=0, NO_RESTRICTION=1,
-  // LAX_MODE=2, STRICT_MODE=3. Playwright needs one explicit value.
-  switch (Number(value)) {
-    case 3:
-      return "Strict";
-    case 2:
-      return "Lax";
-    default:
-      return "None";
-  }
-}
-
-/**
- * Builds the portable identity state from the cookie jar the plain Google
- * login just wrote. The plain login browser intentionally has no CDP endpoint:
- * launching a second headless browser here can see an empty jar and turn a
- * completed account-bound login into a reconnect loop. These Chrome instances
- * use --password-store=basic, so the canonical cookie store holds the values
- * needed to seed the later isolated browser. Cookie values never leave this
- * function except inside the sealed session snapshot.
- */
-export async function captureProfileStorageState(
-  profileDir: string,
-): Promise<{ storageState: BrowserStorageState }> {
-  const cookies: BrowserStorageState["cookies"] = [];
-  const seen = new Set<string>();
-  for (const segments of PROFILE_COOKIE_DATABASES) {
-    const path = join(profileDir, ...segments);
-    if (!existsSync(path)) continue;
-    let db: Database.Database | null = null;
-    try {
-      db = new Database(path, { readonly: true, fileMustExist: true, timeout: 250 });
-      const columns = new Set(
-        (db.pragma("table_info(cookies)") as Array<{ name: string }>).map((column) => column.name),
-      );
-      if (!["host_key", "name", "value"].every((column) => columns.has(column))) continue;
-      const rows = db
-        .prepare(
-          `SELECT host_key AS domain, name, value,
-                  ${columns.has("path") ? "path" : "'/'"} AS path,
-                  ${columns.has("expires_utc") ? "expires_utc" : "0"} AS expiresUtc,
-                  ${columns.has("is_secure") ? "is_secure" : "0"} AS secure,
-                  ${columns.has("is_httponly") ? "is_httponly" : "0"} AS httpOnly,
-                  ${columns.has("samesite") ? "samesite" : "0"} AS sameSite
-             FROM cookies
-            WHERE value <> ''`,
-        )
-        .all() as PersistedCookieRow[];
-      for (const row of rows) {
-        if (
-          typeof row.domain !== "string" ||
-          typeof row.name !== "string" ||
-          typeof row.value !== "string" ||
-          row.domain.length === 0 ||
-          row.name.length === 0 ||
-          row.value.length === 0
-        ) {
-          continue;
-        }
-        const cookieKey = `${row.domain}\u0000${typeof row.path === "string" ? row.path : "/"}\u0000${row.name}`;
-        if (seen.has(cookieKey)) continue;
-        seen.add(cookieKey);
-        cookies.push({
-          domain: row.domain,
-          name: row.name,
-          value: row.value,
-          path: typeof row.path === "string" && row.path.length > 0 ? row.path : "/",
-          expires: chromeCookieExpiresAt(row.expiresUtc),
-          secure: Number(row.secure) !== 0,
-          httpOnly: Number(row.httpOnly) !== 0,
-          sameSite: chromeCookieSameSite(row.sameSite),
-        });
-      }
-    } catch {
-      // A malformed or concurrently replaced cookie store is not identity.
-      // Finalization will reject it rather than publishing a hollow snapshot.
-      continue;
-    } finally {
-      db?.close();
-    }
-  }
-  return { storageState: { cookies, origins: [] } };
-}
-
 async function detectGoogleAccountEmailInContext(context: BrowserContext): Promise<string | null> {
   let page: Awaited<ReturnType<BrowserContext["newPage"]>> | null = null;
   try {
@@ -320,7 +198,7 @@ async function detectGoogleAccountEmailInContext(context: BrowserContext): Promi
 // --- config ------------------------------------------------------------
 // Provider cookie markers for `mcp login` (T13). A cookie proves the provider
 // login succeeded; the Trusty Squire vault return proves its OAuth handoff also
-// finished before the portable session is published.
+// finished in that same real profile.
 interface LoginTarget {
   provider: OAuthProviderId;
   label: string;
@@ -332,7 +210,7 @@ const LOGIN_TARGETS: Record<OAuthProviderId, LoginTarget> = {
     provider: "google",
     label: "Google",
     cookieOrigin: "https://www.google.com",
-    cookies: GOOGLE_LOGIN_COOKIE_NAMES,
+    cookies: ["__Secure-1PSID", "SID", "HSID", "SSID", "APISID", "SAPISID"],
   },
   github: {
     provider: "github",
@@ -385,7 +263,7 @@ export async function explicitLoginCompleted(
   }
 }
 export interface LoginResult {
-  status: "logged_in" | "already_valid" | "timeout" | "error";
+  status: "satisfied" | "timeout" | "error";
   detail?: string;
 }
 
@@ -396,97 +274,6 @@ async function hasProviderSession(context: BrowserContext, target: LoginTarget):
   }
   const cookies = await context.cookies(target.cookieOrigin);
   return cookies.some((cookie) => target.cookies.includes(cookie.name));
-}
-
-// Exported for the connect claim loop: does this LIVE context already hold the
-// given provider's session cookies? The force-relogin teardown gates on this so
-// it never closes the visible browser on the bare API claim while the
-// interactive sign-in (e.g. Google's cold-profile second challenge) is in flight.
-export async function contextHasProviderSession(
-  context: BrowserContext,
-  provider: OAuthProviderId,
-): Promise<boolean> {
-  return hasProviderSession(context, LOGIN_TARGETS[provider]);
-}
-
-function providerIdentityMarkerCount(
-  state: BrowserStorageState,
-  provider: OAuthProviderId,
-  nowSeconds = Date.now() / 1_000,
-): number {
-  if (provider === "google") {
-    return googleSessionMarkerCount(state.cookies, nowSeconds);
-  }
-  return state.cookies.filter((cookie) => {
-    const host = cookie.domain.replace(/^\./, "");
-    return (
-      /(^|\.)github\.com$/i.test(host) &&
-      LOGIN_TARGETS.github.cookies.includes(cookie.name) &&
-      cookie.value.length > 0 &&
-      (cookie.expires === undefined || cookie.expires <= 0 || cookie.expires > nowSeconds)
-    );
-  }).length;
-}
-
-function capturedPageLocations(context: BrowserContext): string[] {
-  return context.pages().flatMap((page) => {
-    try {
-      const url = new URL(page.url());
-      return [`${url.origin}${url.pathname}`];
-    } catch {
-      return [];
-    }
-  });
-}
-
-const PROVIDER_COOKIE_MARKERS: Record<OAuthProviderId, readonly string[]> = {
-  google: GOOGLE_LOGIN_COOKIE_NAMES,
-  github: ["user_session"],
-};
-
-export function profileHasProviderCookies(profileDir: string, provider: OAuthProviderId): boolean {
-  const markers = PROVIDER_COOKIE_MARKERS[provider];
-  const bases = [join(profileDir, "Default", "Cookies"), join(profileDir, "Cookies")];
-  const root = provider === "google" ? "google.com" : "github.com";
-  for (const path of bases) {
-    if (!existsSync(path)) continue;
-    let db: Database.Database | null = null;
-    try {
-      db = new Database(path, {
-        readonly: true,
-        fileMustExist: true,
-        timeout: 250,
-      });
-      const placeholders = markers.map(() => "?").join(", ");
-      const rows = db
-        .prepare(
-          `SELECT host_key, name
-             FROM cookies
-            WHERE (host_key = ? OR host_key = ? OR host_key LIKE ?)
-              AND name IN (${placeholders})`,
-        )
-        .all(root, `.${root}`, `%.${root}`, ...markers) as Array<{
-        host_key: string;
-        name: string;
-      }>;
-      if (provider === "google") {
-        if (
-          hasLiveGoogleSession(
-            rows.map((row) => ({ name: row.name, value: "stored-cookie", domain: row.host_key })),
-          )
-        ) {
-          return true;
-        }
-      } else if (rows.length > 0) {
-        return true;
-      }
-    } catch {
-      continue;
-    } finally {
-      db?.close();
-    }
-  }
-  return false;
 }
 
 // VALIDATE a session instead of just spotting a cookie. A provider session that
@@ -521,13 +308,12 @@ async function validateProviderSession(
   }
 }
 
-// Inspect the bot Chrome profile on disk and return the set of OAuth
-// providers whose session cookies are currently present. This is the
-// source of truth for provider availability.
+// Inspect a live bot Chrome context and return the providers whose sessions are
+// currently present. This is the source of truth for provider availability.
 //
 // Cost is ~1-1.5s for the persistent-context launch + cookie read +
 // teardown. We only call it at install boundaries (after the install
-// confirm seeds whatever provider the user clicked, before the
+// confirm establishes whichever provider the user clicked, before the
 // secondary-provider prompt fires) so the latency is acceptable.
 export async function detectActiveProviderSessions(
   profileDir: string = CHROME_PROFILE_DIR,
@@ -845,17 +631,6 @@ export interface RunInBotChromeOpts {
   pollUntilDone: (context: BrowserContext) => Promise<boolean>;
   // Short label shown after the local Chrome window opens.
   bannerLabel: string;
-  // Optional pre-flight check that decides we don't need a browser at
-  // all (e.g. an existing session covers it). Returns true to short-
-  // circuit before launching Chrome.
-  preflight?: (context: BrowserContext) => Promise<boolean>;
-  // Optional hook called AFTER pollUntilDone returns true, while the
-  // Chrome context is still open. Use this to inspect the freshly-
-  // mutated profile (e.g. read which provider cookies got set) before
-  // tear-down — opening a second persistent context to the same
-  // profile right after close is racy (profile lock contention) and
-  // can silently fail.
-  onSuccess?: (context: BrowserContext) => Promise<void>;
   // The install flow has a sign-in phase followed by an explicit Finish
   // step. Resolve this lazily so its heartbeat describes the current phase.
   heartbeatMessage?: string | (() => string);
@@ -863,25 +638,15 @@ export interface RunInBotChromeOpts {
   // as plain Chrome with NO CDP attach — required because Google's OAuth
   // "secure browser" check rejects a CDP-attached Chrome (see
   // launchPlainLoginBrowser). In this mode the browser is never driven: the
-  // user signs in in the visible browser, and completion is detected via `plainPollUntilDone`
-  // (which reads the API + the SQLite cookie store, not a live context). The
-  // context-taking `pollUntilDone`/`onSuccess`/`preflight` above are IGNORED in
+  // user signs in in the visible browser, and completion is detected by the
+  // install claim plus its explicit Finish callback. The context-taking
+  // `pollUntilDone` above is IGNORED in
   // this mode. `mcp login` does NOT set this (it stays on the CDP path).
   plainProfileLogin?: boolean;
-  // Plain-mode completion predicate. Receives the profileDir instead of a live
-  // context; re-polled every ~3s. Required when plainProfileLogin is set.
-  plainPollUntilDone?: (profileDir: string) => Promise<boolean>;
-  // Plain-mode success hook, run after plainPollUntilDone returns true while the
-  // browser is still open (read which provider cookies seeded, etc.).
-  plainOnSuccess?: (profileDir: string) => Promise<void>;
+  // Plain-mode completion predicate, re-polled every ~3s. Required when
+  // plainProfileLogin is set.
+  plainPollUntilDone?: () => Promise<boolean>;
   onProxyDisposition?: (proxy: LoginProxyDisposition) => void;
-  onConfirmedLogin?: () => Promise<void>;
-  seedProvider?: OAuthProviderId | (() => OAuthProviderId | null);
-  confirmedProviders?: readonly OAuthProviderId[] | (() => readonly OAuthProviderId[]);
-  // Test/local IdP seam for asserting the just-captured live context before
-  // any canonical file is written. Production provider logins use the stricter
-  // seedProvider marker check below.
-  validateCapturedState?: (state: BrowserStorageState) => void | Promise<void>;
 }
 
 const LOGIN_BROWSER_CLOSED_ERROR =
@@ -891,151 +656,15 @@ const LOGIN_STATUS_CHECK_STALLED_ERROR =
 
 export async function runInBotChrome(
   opts: RunInBotChromeOpts,
-): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
-  return await withProfileOperationGuard(opts.profileDir, async () => {
-    const result = await runInBotChromeWithProfileGuard(opts);
-    await finalizeLoginRun(opts, result);
-    return { status: result.status };
-  });
+): Promise<{ status: "satisfied" | "timeout" }> {
+  return await withProfileOperationGuard(opts.profileDir, async () =>
+    await runInBotChromeWithProfileGuard(opts),
+  );
 }
 
 export interface LoginRunResult {
-  status: "completed" | "preflight_satisfied" | "timeout";
+  status: "satisfied" | "timeout";
   closeState: ProfileCloseState;
-  storageState?: BrowserStorageState;
-  googleAccountEmail?: string;
-  captureSource?: "displayed-live-context" | "remote-live-context";
-  capturedPageLocations?: string[];
-}
-
-async function captureClosedPlainLoginState(
-  profileDir: string,
-  status: LoginRunResult["status"],
-  closeState: ProfileCloseState,
-  capture: typeof captureProfileStorageState,
-): Promise<Pick<LoginRunResult, "storageState" | "googleAccountEmail">> {
-  if (status !== "completed" || closeState !== "closed") return {};
-  return await capture(profileDir);
-}
-
-export async function finalizeLoginRun(
-  opts: Pick<
-    RunInBotChromeOpts,
-    | "profileDir"
-    | "onConfirmedLogin"
-    | "seedProvider"
-    | "confirmedProviders"
-    | "validateCapturedState"
-  >,
-  result: LoginRunResult,
-): Promise<void> {
-  if (result.status !== "completed" && result.status !== "preflight_satisfied") return;
-  // A live-context capture (displayed/remote) snapshots the authenticated
-  // session from the open, healthy context at the moment sign-in was confirmed,
-  // so it is publishable regardless of whether the browser's SUBSEQUENT teardown
-  // could be proven clean. Under the noVNC rig, Chrome (app-mode / --no-sandbox)
-  // routinely fails closeProfileWithProof's 2s stale-PID check and returns
-  // force_closed_unproven even on a normal exit — that says nothing about the
-  // snapshot we already hold. The plain path, which reads the profile dir AFTER
-  // close, still needs a proven-closed browser, and it yields no storageState
-  // unless closure was proven, so the storageState presence check covers it.
-  const liveContextCapture =
-    result.captureSource === "displayed-live-context" ||
-    result.captureSource === "remote-live-context";
-  if (
-    result.storageState === undefined ||
-    (!liveContextCapture && result.closeState !== "closed")
-  ) {
-    throw new Error("login identity snapshot closed without publishable state");
-  }
-  const seedProvider =
-    typeof opts.seedProvider === "function" ? opts.seedProvider() : opts.seedProvider;
-  const confirmedProviders =
-    typeof opts.confirmedProviders === "function"
-      ? opts.confirmedProviders()
-      : (opts.confirmedProviders ?? []);
-  const providerMarkerCount =
-    seedProvider === undefined || seedProvider === null
-      ? 0
-      : providerIdentityMarkerCount(result.storageState, seedProvider);
-  // A live Google context is authoritative only when its My Account probe
-  // produced an email. Cookie names alone cannot distinguish a signed-in
-  // session from the signed-out account chooser. Plain-browser capture has no
-  // CDP context to probe, so retain its existing cookie-store check.
-  const providerIdentityVerified =
-    seedProvider === "google" && result.captureSource !== undefined
-      ? result.googleAccountEmail !== undefined
-      : providerMarkerCount > 0;
-  await opts.validateCapturedState?.(result.storageState);
-  const priorMetadata = await readCanonicalIdentityMetadata(opts.profileDir);
-  if (seedProvider !== undefined && seedProvider !== null && result.status === "completed") {
-    if (!providerIdentityVerified) {
-      if (result.captureSource !== undefined) {
-        console.error(
-          `[login:capture] ${JSON.stringify({
-            status: "rejected_missing_provider_cookie",
-            source: result.captureSource,
-            profileDir: opts.profileDir,
-            pages: result.capturedPageLocations ?? [],
-            cookieCount: result.storageState.cookies.length,
-            provider: seedProvider,
-            providerMarkerCount,
-            googleAccountEmail: result.googleAccountEmail,
-          })}`,
-        );
-      }
-      const label = seedProvider === "google" ? "Google" : "GitHub";
-      throw new Error(`${label} login completed without a live identity`);
-    }
-  }
-  const metadata =
-    result.googleAccountEmail !== undefined
-      ? { googleAccountEmail: result.googleAccountEmail }
-      : seedProvider === "google" && result.status === "completed"
-        ? undefined
-        : priorMetadata;
-  const disposition = canonicalIdentitySnapshotDisposition(result.storageState, metadata);
-  if (disposition === "oversized") {
-    await opts.onConfirmedLogin?.();
-    return;
-  }
-  const published = await writeCanonicalIdentitySnapshot(
-    opts.profileDir,
-    result.storageState,
-    metadata,
-    () => true,
-    confirmedProviders,
-  );
-  if (!published) {
-    // writeCanonicalIdentitySnapshot returns false both on genuine failure AND
-    // when it deliberately RETAINS a usable prior identity rather than overwrite
-    // it with a cookie-less capture. The latter is the common connect case: the
-    // install page re-signs into a fresh ephemeral profile, so this capture has
-    // no Google cookies while the prior login's snapshot is intact and usable.
-    // Retaining a usable identity is success — only fail when nothing usable
-    // survives on disk. This mirrors writeCanonicalIdentitySnapshot's own
-    // would-drop-usable-Google-identity guard.
-    const retainedUsableGoogleIdentity =
-      !hasUsableGoogleIdentity(result.storageState) &&
-      hasUsableGoogleIdentity(await readSessionState(opts.profileDir));
-    if (!retainedUsableGoogleIdentity) {
-      throw new Error("login identity snapshot could not be published");
-    }
-  }
-  if (result.captureSource !== undefined) {
-    console.error(
-      `[login:capture] ${JSON.stringify({
-        status: "published",
-        source: result.captureSource,
-        profileDir: opts.profileDir,
-        pages: result.capturedPageLocations ?? [],
-        cookieCount: result.storageState.cookies.length,
-        provider: seedProvider ?? null,
-        providerMarkerCount,
-      })}`,
-    );
-  }
-  await opts.onConfirmedLogin?.();
 }
 
 async function runInBotChromeWithProfileGuard(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
@@ -1070,11 +699,10 @@ export async function runDisplayedChrome(
   runtime: {
     resolveChannelBinary: typeof resolveChannelBinary;
     launchPlainLoginBrowser: typeof launchPlainLoginBrowser;
-    captureProfileStorageState?: typeof captureProfileStorageState;
   } = { resolveChannelBinary, launchPlainLoginBrowser },
 ): Promise<LoginRunResult> {
   // PLAIN-BROWSER path (connect claim): launch plain Chrome, never attach CDP,
-  // detect completion off the API + SQLite cookie store. See
+  // detect completion from the explicit install callback. See
   // launchPlainLoginBrowser / RunInBotChromeOpts.plainProfileLogin.
   if (opts.plainProfileLogin === true) {
     if (opts.plainPollUntilDone === undefined) {
@@ -1118,34 +746,17 @@ export async function runDisplayedChrome(
       console.error(`\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`);
       const ok = await pollUntil(
         opts.deadline,
-        () => opts.plainPollUntilDone!(opts.profileDir),
+        () => opts.plainPollUntilDone!(),
         opts.heartbeatMessage,
         () => {
           if (!browser.isRunning()) throw new Error(LOGIN_BROWSER_CLOSED_ERROR);
         },
       );
-      if (ok && opts.plainOnSuccess !== undefined) {
-        try {
-          await opts.plainOnSuccess(opts.profileDir);
-        } catch {
-          /* swallow */
-        }
-      }
-      status = ok ? "completed" : "timeout";
+      status = ok ? "satisfied" : "timeout";
     } finally {
       closeState = await lifecycle.finish();
     }
-    const captured = await captureClosedPlainLoginState(
-      opts.profileDir,
-      status,
-      closeState,
-      runtime.captureProfileStorageState ?? captureProfileStorageState,
-    );
-    return {
-      status,
-      closeState,
-      ...captured,
-    };
+    return { status: status === "timeout" ? "timeout" : "satisfied", closeState };
   }
   const chromium = resolveChromium();
   const proxyOpt = loginProxyOption();
@@ -1153,9 +764,6 @@ export async function runDisplayedChrome(
   const lifecycle = createTrackedLoginBrowserLifecycle();
   let status: LoginRunResult["status"] = "timeout";
   let closeState: ProfileCloseState = "unknown";
-  let storageState: BrowserStorageState | undefined;
-  let googleAccountEmail: string | null = null;
-  let pageLocations: string[] | undefined;
   try {
     const persistent = await launchWithProfileGate(
       opts.profileDir,
@@ -1189,62 +797,22 @@ export async function runDisplayedChrome(
           forceClose: () => reapProfileHolderIfOwned(opts.profileDir, identity),
         }),
     );
-    const preflightSatisfied =
-      opts.preflight !== undefined &&
-      (await checkLoginStatusWithin(opts.deadline, () => opts.preflight!(context)));
-    if (preflightSatisfied) {
-      status = "preflight_satisfied";
-    } else {
-      const page = context.pages()[0] ?? (await context.newPage());
-      await page.goto(opts.url, { waitUntil: "domcontentloaded" });
-      console.error(`\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`);
-      const ok = await pollUntil(
-        opts.deadline,
-        () => opts.pollUntilDone(context),
-        opts.heartbeatMessage,
-      );
-      if (ok && opts.onSuccess !== undefined) {
-        try {
-          await opts.onSuccess(context);
-        } catch {
-          /* swallow */
-        }
-      }
-      status = ok ? "completed" : "timeout";
-    }
-    if (status === "completed" || status === "preflight_satisfied") {
-      // Snapshot the exact context whose completion predicate just passed.
-      // Metadata probing opens another Google page and must never get between
-      // the authoritative vault return and the cookie-jar capture.
-      storageState = await context.storageState({ indexedDB: true });
-      pageLocations = capturedPageLocations(context);
-      const seedProvider =
-        typeof opts.seedProvider === "function" ? opts.seedProvider() : opts.seedProvider;
-      if (seedProvider === "google") {
-        googleAccountEmail = await detectGoogleAccountEmailInContext(context);
-      }
-    }
+    const page = context.pages()[0] ?? (await context.newPage());
+    await page.goto(opts.url, { waitUntil: "domcontentloaded" });
+    console.error(`\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`);
+    const ok = await pollUntil(
+      opts.deadline,
+      () => opts.pollUntilDone(context),
+      opts.heartbeatMessage,
+    );
+    status = ok ? "satisfied" : "timeout";
   } finally {
     closeState = await lifecycle.finish();
   }
-  return {
-    status,
-    closeState,
-    ...(storageState === undefined ? {} : { storageState }),
-    ...(googleAccountEmail === null ? {} : { googleAccountEmail }),
-    ...(storageState === undefined
-      ? {}
-      : {
-          captureSource: "displayed-live-context" as const,
-          capturedPageLocations: pageLocations ?? [],
-        }),
-  };
+  return { status, closeState };
 }
 
-export async function runRemoteLoginChrome(
-  opts: RunInBotChromeOpts,
-  runtime: { captureProfileStorageState?: typeof captureProfileStorageState } = {},
-): Promise<LoginRunResult> {
+export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
   const rig = createRemoteLoginRig();
   let activeTeardown: (() => Promise<void>) | undefined;
   let plainBrowserIsRunning: (() => boolean) | undefined;
@@ -1253,9 +821,6 @@ export async function runRemoteLoginChrome(
     async () => await teardownRemoteLoginRig(rig),
   );
   activeTeardown = lifecycle.cancel;
-  let storageState: BrowserStorageState | undefined;
-  let googleAccountEmail: string | null = null;
-  let pageLocations: string[] | undefined;
 
   try {
     await startRemoteLoginDisplay(rig);
@@ -1368,28 +933,6 @@ export async function runRemoteLoginChrome(
 
     try {
       if (context !== undefined) {
-        const preflightSatisfied =
-          opts.preflight !== undefined &&
-          (await checkLoginStatusWithin(opts.deadline, () => opts.preflight!(context)));
-        if (preflightSatisfied) {
-          storageState = await context.storageState({ indexedDB: true });
-          pageLocations = capturedPageLocations(context);
-          const seedProvider =
-            typeof opts.seedProvider === "function" ? opts.seedProvider() : opts.seedProvider;
-          const googleAccountEmail =
-            seedProvider === "google"
-              ? await detectGoogleAccountEmailInContext(context)
-              : null;
-          const closeState = await lifecycle.finish();
-          return {
-            status: "preflight_satisfied",
-            closeState,
-            storageState,
-            ...(googleAccountEmail === null ? {} : { googleAccountEmail }),
-            captureSource: "remote-live-context",
-            capturedPageLocations: pageLocations,
-          };
-        }
         const page = context.pages()[0] ?? (await context.newPage());
         await page.goto(opts.url, { waitUntil: "domcontentloaded" });
       }
@@ -1402,7 +945,7 @@ export async function runRemoteLoginChrome(
         () =>
           context !== undefined
             ? opts.pollUntilDone(context)
-            : opts.plainPollUntilDone!(opts.profileDir),
+            : opts.plainPollUntilDone!(),
         opts.heartbeatMessage,
         () => {
           assertRemoteLoginRigLive(rig);
@@ -1411,52 +954,10 @@ export async function runRemoteLoginChrome(
           }
         },
       );
-      if (completed) {
-        if (context !== undefined) {
-          if (opts.onSuccess !== undefined) {
-            try {
-              await opts.onSuccess(context);
-            } catch {
-              // best-effort success metadata
-            }
-          }
-          storageState = await context.storageState({ indexedDB: true });
-          pageLocations = capturedPageLocations(context);
-          const seedProvider =
-            typeof opts.seedProvider === "function" ? opts.seedProvider() : opts.seedProvider;
-          if (seedProvider === "google") {
-            googleAccountEmail = await detectGoogleAccountEmailInContext(context);
-          }
-        } else if (opts.plainOnSuccess !== undefined) {
-          try {
-            await opts.plainOnSuccess(opts.profileDir);
-          } catch {
-            // best-effort success metadata
-          }
-        }
-      }
       const closeState = await lifecycle.finish();
-      const captured =
-        context === undefined
-          ? await captureClosedPlainLoginState(
-              opts.profileDir,
-              completed ? "completed" : "timeout",
-              closeState,
-              runtime.captureProfileStorageState ?? captureProfileStorageState,
-            )
-          : {};
       return {
-        status: completed ? "completed" : "timeout",
+        status: completed ? "satisfied" : "timeout",
         closeState,
-        ...(storageState === undefined ? {} : { storageState }),
-        ...(storageState === undefined || context === undefined
-          ? {}
-          : {
-              captureSource: "remote-live-context" as const,
-              capturedPageLocations: pageLocations ?? [],
-            }),
-        ...(googleAccountEmail === null ? {} : { googleAccountEmail }),
-        ...captured,
       };
     } finally {
       await lifecycle.finish();
@@ -1555,13 +1056,8 @@ export async function ensureOAuthSession(opts?: {
   provider?: OAuthProviderId;
   profileDir?: string;
   timeoutMinutes?: number;
-  // 0.8.3-rc.1 — skip the preflight session-cookie check so the
-  // browser opens even when a valid session is already cached. Used
-  // by `login --force-relogin` to surface the browser and let the
-  // operator interactively clear a provider
-  // security challenge (GitHub's "verify it's you" anti-abuse,
-  // Google's number-match drift) the cached cookie alone doesn't
-  // resolve.
+  // Opens a fresh provider flow after clearing the selected provider when
+  // requested by `login --force-relogin`.
   forceOpen?: boolean;
   webBase?: string;
 }): Promise<LoginResult> {
@@ -1572,54 +1068,20 @@ export async function ensureOAuthSession(opts?: {
   const deadline = Date.now() + timeoutMinutes * 60 * 1000;
 
   try {
+    if (opts?.forceOpen === true && !(await clearProviderCookies(profileDir, provider))) {
+      return { status: "error", detail: `could not clear the existing ${target.label} session` };
+    }
     const webBase = opts?.webBase ?? process.env.TRUSTY_SQUIRE_WEB_BASE ?? DEFAULT_LOGIN_WEB_BASE;
     const result = await runInBotChrome({
       profileDir,
       url: explicitLoginStartUrl(provider, webBase),
       deadline,
       bannerLabel: `You'll see a Chrome window — log into your ${target.label} account.`,
-      // When forceOpen is true, the preflight ALSO clears the
-      // provider's session cookies before returning false. Without
-      // this the browser opens but pollUntilDone immediately sees the
-      // still-valid cached session and exits — the operator never
-      // gets a chance to interactively log in or clear a server-side
-      // challenge (GitHub "verify it's you"). Clearing the cookies
-      // forces the next page load to land on the provider's login
-      // page in a real, interactive session.
-      preflight: async (ctx) => {
-        if (opts?.forceOpen === true) {
-          try {
-            // Clear ONLY this provider's session cookies — never a bare
-            // ctx.clearCookies(), which wiped EVERY provider (a
-            // force-relogin=github would nuke the live Google session and the
-            // operate precondition gate would then fail "no Google session").
-            // The named session cookies are what define the login; dropping
-            // them forces the next load to the provider's login page.
-            for (const name of target.cookies) {
-              await ctx.clearCookies({ name });
-            }
-          } catch {
-            // best-effort — if clear fails we still proceed and let
-            // the operator signed out manually in the browser.
-          }
-          return false;
-        }
-        return hasProviderSession(ctx, target);
-      },
       pollUntilDone: (ctx) => explicitLoginCompleted(ctx, provider, webBase),
-      seedProvider: provider,
-      confirmedProviders: [provider],
     });
-    // Map runInBotChrome's status set to ensureOAuthSession's contract.
-    let mapped: LoginResult;
-    if (result.status === "preflight_satisfied") {
-      mapped = { status: "already_valid" };
-    } else if (result.status === "completed") {
-      mapped = { status: "logged_in" };
-    } else {
-      mapped = { status: "timeout", detail: "no login completed before the deadline" };
-    }
-    return mapped;
+    return result.status === "satisfied"
+      ? { status: "satisfied" }
+      : { status: "timeout", detail: "no login completed before the deadline" };
   } catch (err) {
     return { status: "error", detail: err instanceof Error ? err.message : String(err) };
   }
@@ -1635,15 +1097,10 @@ export async function ensureOAuthSession(opts?: {
 export async function openInstallConfirmInBotChrome(
   opts: {
     confirmUrl: string;
-    // Returns claimed only after the install ceremony succeeds. The login browser
-    // runs PLAIN (no CDP — Google's OAuth "secure browser" check rejects a CDP
-    // attach), so the predicate gets the profileDir, NOT a live context: it
-    // composes the API claim with either the normal wizard's per-run loopback
-    // Finish callback or forced re-login's on-disk provider-session seed.
-    pollUntilClaimed: (
-      profileDir: string,
-      wizardCompleted: boolean,
-    ) => Promise<InstallClaimPollResult>;
+    // Returns claimed only after the install ceremony succeeds. The plain login
+    // browser intentionally has no CDP endpoint, so the per-run Finish callback
+    // is the completion signal for every install path.
+    pollUntilClaimed: (wizardCompleted: boolean) => Promise<InstallClaimPollResult>;
     profileDir?: string;
     timeoutMinutes?: number;
     // Phase-aware terminal copy supplied by connect.
@@ -1658,9 +1115,6 @@ export async function openInstallConfirmInBotChrome(
   const timeoutMinutes = Math.max(1, opts.timeoutMinutes ?? 15);
   const deadline = Date.now() + timeoutMinutes * 60 * 1000;
   let completion: Awaited<ReturnType<typeof startInstallCompletionListener>> | undefined;
-  let observedGoogleIdentity = false;
-  const completedProviders = new Set<OAuthProviderId>();
-  const observedProviders = new Set<OAuthProviderId>();
 
   try {
     const doneUrl = new URL("/install/done", opts.confirmUrl).toString();
@@ -1679,41 +1133,11 @@ export async function openInstallConfirmInBotChrome(
       // stub to satisfy the (CDP-path) type.
       plainProfileLogin: true,
       pollUntilDone: () => Promise.resolve(false),
-      plainPollUntilDone: async (dir) => {
-        const claim = await opts.pollUntilClaimed(dir, completion?.isCompleted() === true);
-        if (typeof claim === "object" && claim.provider !== null) {
-          completedProviders.add(claim.provider);
-        }
-        for (const provider of completion?.completedProviders() ?? []) {
-          completedProviders.add(provider);
-        }
-        return installClaimPollCompleted(claim);
-      },
+      plainPollUntilDone: async () =>
+        installClaimPollCompleted(await opts.pollUntilClaimed(completion?.isCompleted() === true)),
       ...(opts.heartbeatMessage !== undefined ? { heartbeatMessage: opts.heartbeatMessage } : {}),
-      // The user's sign-in inside this Chrome leaves a provider session in the
-      // persistent profile. We don't know WHICH provider they used, so probe
-      // both cookie sets (from the on-disk store — no live context in plain
-      // mode) and mark whichever seeded.
-      plainOnSuccess: async (dir) => {
-        for (const provider of ["google", "github"] as const) {
-          if (completedProviders.has(provider) && profileHasProviderCookies(dir, provider)) {
-            observedProviders.add(provider);
-            if (provider === "google" && completedProviders.has("google")) {
-              observedGoogleIdentity = true;
-            }
-          }
-        }
-        // NB: eager Google-email capture (captureGoogleEmail) needed a live
-        // context to scrape myaccount.google.com; the plain login path has
-        // none. It was only an optimization ("provision proceeds without a
-        // pre-known email" otherwise) — provision scrapes the email per-run
-        // when unset, so dropping eager capture is safe and keeping CDP off
-        // the OAuth login is the whole point of the plain path.
-      },
-      seedProvider: () => (observedGoogleIdentity ? "google" : null),
-      confirmedProviders: () => [...observedProviders],
     });
-    if (result.status === "completed") {
+    if (result.status === "satisfied") {
       return { status: "claimed" };
     }
     return { status: "timeout", detail: "no install completed before the deadline" };

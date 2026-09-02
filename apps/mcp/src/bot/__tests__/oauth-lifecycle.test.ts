@@ -41,6 +41,35 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await browser?.close();
   });
 
+  it("admits Google only from the active browser context", async () => {
+    const { controller, product } = await controllerForProduct();
+    const context = product.context();
+    try {
+      await context.addCookies([
+        {
+          name: "SID",
+          value: "live-google-session-cookie",
+          domain: ".google.com",
+          path: "/",
+        },
+      ]);
+
+      await expect(controller.detectSessionProviders()).resolves.toEqual(["google"]);
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("refuses an active context without a provider session", async () => {
+    const { controller, product } = await controllerForProduct();
+    const context = product.context();
+    try {
+      await expect(controller.detectSessionProviders()).resolves.toEqual([]);
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
   it("reattaches the active controller page when a provider closes its OAuth-return popup", async () => {
     const { controller, product } = await controllerForProduct();
     const context = product.context();

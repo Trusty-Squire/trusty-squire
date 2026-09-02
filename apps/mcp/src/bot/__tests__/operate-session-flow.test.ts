@@ -11,7 +11,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { constants, publicEncrypt } from "node:crypto";
 import type * as GoogleLoginModule from "../google-login.js";
 import type * as ProfileModule from "../profile.js";
-import type * as SessionState from "../session-state.js";
 
 const h = vi.hoisted(() => ({
   providers: ["google"] as string[] | null,
@@ -209,115 +208,6 @@ const h = vi.hoisted(() => ({
     };
   },
 }));
-
-vi.mock("../session-state.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof SessionState>();
-  return {
-    ...actual,
-    createEphemeralProfile: () => {
-      const profileDir = `/tmp/trusty-squire-unit-ephemeral-${++h.ephemeralSerial}`;
-      h.createdProfiles.push(profileDir);
-      return profileDir;
-    },
-    destroyEphemeralProfile: async (profileDir: string) => {
-      h.destroyedProfiles.push(profileDir);
-      if (h.profileDestroyGate !== null) await h.profileDestroyGate;
-    },
-    readSessionState: async (profileDir: string) => {
-      h.storageStateReads.push(profileDir);
-      if (h.storageStateReadGate !== null) await h.storageStateReadGate;
-      if (h.storageStates.has(profileDir)) return h.storageStates.get(profileDir);
-      return h.providers?.includes("google")
-        ? {
-            cookies: [
-              {
-                name: "SID",
-                value: "default-google-session-state",
-                domain: ".google.com",
-                path: "/",
-              },
-            ],
-            origins: [],
-          }
-        : undefined;
-    },
-    readCanonicalIdentityMetadata: async (profileDir: string) =>
-      h.identityMetadata.get(profileDir) ??
-      (h.workerEmail === null ? undefined : { googleAccountEmail: h.workerEmail }),
-    readCanonicalIdentityState: async (profileDir: string) => {
-      h.storageStateReads.push(profileDir);
-      if (h.storageStateReadGate !== null) await h.storageStateReadGate;
-      const storageState = h.storageStates.has(profileDir)
-        ? h.storageStates.get(profileDir)
-        : h.providers?.includes("google")
-          ? {
-              cookies: [
-                {
-                  name: "SID",
-                  value: "default-google-session-state",
-                  domain: ".google.com",
-                  path: "/",
-                },
-              ],
-              origins: [],
-            }
-          : undefined;
-      return {
-        storageState,
-        identityMetadata:
-          h.identityMetadata.get(profileDir) ??
-          (h.workerEmail === null ? undefined : { googleAccountEmail: h.workerEmail }),
-      };
-    },
-    writeSessionState: async (
-      profileDir: string,
-      state: unknown,
-      canPublish: () => boolean = () => true,
-    ) => {
-      h.storageStateWriteAttempts += 1;
-      if (h.storageStateWriteGate !== null) await h.storageStateWriteGate;
-      if (!canPublish()) return false;
-      if (h.storageStateWriteError !== null) throw h.storageStateWriteError;
-      h.storageStateWrites.push({ profileDir, state });
-      h.storageStates.set(profileDir, state);
-      return true;
-    },
-    writePendingSessionState: async (
-      profileDir: string,
-      state: unknown,
-      canPublish: () => boolean = () => true,
-    ) => {
-      if (!canPublish()) return undefined;
-      if (h.pendingStorageStateOversized) return undefined;
-      const path = `${profileDir}/pending-${h.pendingStorageStates.length}.json`;
-      h.pendingStorageStates.push({ path, profileDir, state });
-      return path;
-    },
-    readPendingSessionStates: async (profileDir: string) =>
-      h.pendingStorageStates
-        .filter((entry) => entry.profileDir === profileDir)
-        .map((entry) => ({ path: entry.path, state: entry.state })),
-    removePendingSessionState: async (path: string) => {
-      h.pendingStorageStates = h.pendingStorageStates.filter((entry) => entry.path !== path);
-    },
-    writeCanonicalIdentitySnapshot: async (
-      profileDir: string,
-      state: unknown,
-      metadata: { googleAccountEmail: string } | undefined,
-      canPublish: () => boolean = () => true,
-    ) => {
-      h.storageStateWriteAttempts += 1;
-      if (h.storageStateWriteGate !== null) await h.storageStateWriteGate;
-      if (!canPublish()) return false;
-      if (h.storageStateWriteError !== null) throw h.storageStateWriteError;
-      h.storageStateWrites.push({ profileDir, state });
-      h.storageStates.set(profileDir, state);
-      if (metadata === undefined) h.identityMetadata.delete(profileDir);
-      else h.identityMetadata.set(profileDir, metadata);
-      return true;
-    },
-  };
-});
 
 // This suite is the V1 contract suite. Individual Compact V2 tests opt in
 // explicitly below, which keeps the feature-flagged V1 and V2 action
@@ -1017,7 +907,6 @@ import { ApiClient } from "../../api-client.js";
 import { dispatchOperatorBrowserProcessTermination } from "../operator-browser-watchdog.js";
 import { BrowserController } from "../browser.js";
 import { acquireProfileOperationGuard } from "../profile.js";
-import { MAX_SESSION_STATE_BYTES } from "../session-state.js";
 import {
   startProvisionSession,
   startHarnessProvisionSession,
@@ -5373,6 +5262,7 @@ describe("operate session — live-profile precondition gate", () => {
     expect(h.startCalls).toBe(1);
     expect(h.started).toBe(0); // the rejected profile is closed before handoff
     expect(h.gotos).toHaveLength(0);
+    expect(h.identityProbeCalls).toBe(0); // provider admission never waits on email lookup
     expect(h.storageStateReads).toEqual([]);
     expect(h.profileDirs).toEqual([canonical]);
     expect(h.destroyedProfiles).toEqual([]);
@@ -5393,6 +5283,7 @@ describe("operate session — live-profile precondition gate", () => {
     });
     expect(obs.needs_user).toBeUndefined();
     expect(h.started).toBe(1);
+    expect(h.identityProbeCalls).toBe(1); // email is metadata only after live admission
     expect(h.seededStorageStates).toEqual([undefined]);
     expect(h.profileDirs).toEqual([canonical]);
     await finishProvisionSession(obs.session_id);
@@ -5507,7 +5398,7 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
       origins: [
         {
           origin: "https://mail.google.com",
-          localStorage: [{ name: "state", value: "x".repeat(MAX_SESSION_STATE_BYTES) }],
+          localStorage: [{ name: "state", value: "x".repeat(4 * 1024 * 1024) }],
         },
       ],
     });

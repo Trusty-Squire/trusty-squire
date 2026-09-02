@@ -162,22 +162,18 @@ refinement — the firebase path already yields a valid GCP credential.
 
 ## Google-OAuth real-profile signup: session admission (2026-09-01)
 
-- **✓ CONFIRMED:** `require_live_identity:true` worked because it bypassed the
-  seed/clones and opened the real Chrome profile. Its admission signal is
-  `detectSessionProviders()` on that **live browser context** — Google provider
-  cookies (`__Secure-1PSID` / `SAPISID` / `SID`) feed `googleSessionGate`.
-  `detectGoogleAccountEmail()` supplies identity metadata; 1.1.12 does not gate
-  admission on it.
-- **H: the on-disk cookie DB, a Cloud Console URL, or an account email probe is
-  a more reliable admission authority.** **✗ FALSIFIED.** The on-disk `Cookies`
-  file can omit the live browser session. A signed-in Google profile can land at
-  `accounts.google.com`'s **ACCOUNT CHOOSER** (authenticated selection), while a
-  password/identifier prompt is the signed-out state. An email-only gate is also
-  wrong for this flow.
-- **✓ ROOT CAUSE:** the clone seed could report `["google"]` with no `Cookies`
-  DB behind it, producing hollow clones. Repair a degraded/empty seed with:
-  `npx -y @trusty-squire/mcp@1.1.12 connect --force-relogin` — it completes login
-  and republishes the seed with cookies.
+- **CONFIRMED:** Operate opens the real `CHROME_PROFILE_DIR` directly.
+  Admission is `detectSessionProviders()` on that **live browser context**;
+  Google legacy provider cookies (`__Secure-1PSID` / `SAPISID` / `SID`)
+  feed `googleSessionGate`. It returns a clear log-in-first hand-back when
+  absent.
+- **FALSIFIED:** the on-disk `Cookies` DB, a Cloud Console URL, an account
+  chooser, or an account-email probe is a more reliable admission authority.
+  The cookie file can omit the live context; account chooser is authenticated
+  selection rather than proof of a missing session; email is not the gate.
+- **CONFIRMED:** snapshots, seed/clone reconstruction, cached provider markers,
+  and OAuth browser replacement are retired. Forced relogin completion uses the
+  install claim plus explicit Finish callback, not a disk-cookie read.
 
 ---
 

@@ -3333,15 +3333,11 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
   const compactV2Mode = configuredCompactV2Mode();
   let browser: BrowserController;
   let liveProviders: OAuthProviderId[];
-  let workerEmail: string | null;
+  let workerEmail: string | null = null;
   const acquired = await acquireWarmBrowser(opts, id);
   browser = acquired.controller;
   try {
     liveProviders = await ensureProvisionPrimaryProviderSession(browser);
-    workerEmail =
-      typeof browser.detectGoogleAccountEmail === "function"
-        ? await browser.detectGoogleAccountEmail().catch(() => null)
-        : null;
     assertProvisionStartAdmitted(acquired.shutdownGeneration);
     const gate = googleSessionGate(liveProviders);
     if (!gate.ok) {
@@ -3359,6 +3355,10 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
           }
         : { session_id: id, url: "", text: "", elements: [], needs_user: gate.needs_user };
     }
+    workerEmail =
+      typeof browser.detectGoogleAccountEmail === "function"
+        ? await browser.detectGoogleAccountEmail().catch(() => null)
+        : null;
   } catch (error) {
     await releaseWarmBrowserPage(browser, false);
     throw error;

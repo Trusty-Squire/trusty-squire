@@ -1,32 +1,29 @@
-// Tests for the profile cookie clearing and provider-email metadata helpers.
+// Tests for profile clearing and live-context provider cookie cleanup.
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   clearProviderCookies,
   clearProviderCookiesFromContext,
   clearBrowserProfile,
-  loggedInEmail,
-  recordProviderEmail,
 } from "../login-state.js";
 import { acquireProfileOperationGuard, ProfileBusyError } from "../profile.js";
-import { SESSION_STATE_FILE } from "../session-state.js";
 
 describe("full profile clearing", () => {
-  it("preserves the canonical snapshot and an in-flight snapshot temporary", () => {
+  it("removes every profile artifact", () => {
     const dir = mkdtempSync(join(tmpdir(), "ts-login-profile-clear-"));
-    const snapshot = join(dir, SESSION_STATE_FILE);
-    const temporary = join(dir, `${SESSION_STATE_FILE}.123.writer.tmp`);
+    const snapshot = join(dir, "trusty-squire-session-state.json");
+    const temporary = join(dir, "trusty-squire-session-state.json.123.writer.tmp");
     const stale = join(dir, "Default");
     writeFileSync(snapshot, "prior");
     writeFileSync(temporary, "replacement");
     writeFileSync(stale, "chrome-state");
     try {
       clearBrowserProfile(dir);
-      expect(readFileSync(snapshot, "utf8")).toBe("prior");
-      expect(readFileSync(temporary, "utf8")).toBe("replacement");
+      expect(existsSync(snapshot)).toBe(false);
+      expect(existsSync(temporary)).toBe(false);
       expect(existsSync(stale)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -180,43 +177,5 @@ describe("provider cookie clearing", () => {
       lease.release();
       rmSync(dir, { recursive: true, force: true });
     }
-  });
-});
-
-describe("provider-email marker (PR3 capture-at-login)", () => {
-  let dir: string;
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "ts-provider-email-"));
-  });
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  it("returns null when no email marker exists", () => {
-    expect(loggedInEmail("google", dir)).toBeNull();
-  });
-
-  it("round-trips a recorded email per provider", () => {
-    recordProviderEmail("google", "ada@example.com", dir);
-    expect(loggedInEmail("google", dir)).toBe("ada@example.com");
-    expect(loggedInEmail("github", dir)).toBeNull();
-  });
-
-  it("overwrites the email on re-record (account switch)", () => {
-    recordProviderEmail("google", "old@example.com", dir);
-    recordProviderEmail("google", "new@example.com", dir);
-    expect(loggedInEmail("google", dir)).toBe("new@example.com");
-  });
-
-  it("ignores an empty email and tolerates a malformed marker", () => {
-    recordProviderEmail("google", "", dir);
-    expect(loggedInEmail("google", dir)).toBeNull();
-    writeFileSync(join(dir, "provider-emails.json"), "not json");
-    expect(loggedInEmail("google", dir)).toBeNull();
-  });
-
-  it("keeps provider email metadata independent per provider", () => {
-    recordProviderEmail("google", "ada@example.com", dir);
-    expect(loggedInEmail("google", dir)).toBe("ada@example.com");
   });
 });

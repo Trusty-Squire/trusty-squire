@@ -4,7 +4,7 @@
 // expensive provider round-trip — which providers it can auto-prefer
 // for OAuth-first signup.
 
-import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
   CHROME_PROFILE_DIR,
@@ -15,7 +15,6 @@ import {
   withProfileOperationGuard,
 } from "./profile.js";
 import { type OAuthProviderId } from "./oauth-providers.js";
-import { invalidateCanonicalGoogleIdentity, isSessionStateArtifact } from "./session-state.js";
 import { closeBrowserContextWithin, registerLocalBrowserLaunch } from "./browser.js";
 import {
   bindOwnerBrowserLaunch,
@@ -53,55 +52,6 @@ export async function clearProviderCookiesFromContext(
     });
   }
   return !(await context.cookies()).some((cookie) => belongs(cookie.domain));
-}
-
-// PR3 signin-vault: the email of the account logged into the profile, per
-// provider, captured AT LOGIN (the one moment it's certain). The operator fills
-// this as the signup email so accounts are user-owned, and it is the SAME
-// account whose inbox awaitVerification reads (browser-sourced → fill-email and
-// read-inbox are consistent by construction). Separate file so the provider
-// array format above is unchanged.
-function emailMarkerPath(profileDir: string): string {
-  return join(profileDir, "provider-emails.json");
-}
-
-// The captured email for `provider`, or null. Best-effort; never throws.
-export function loggedInEmail(
-  provider: OAuthProviderId,
-  profileDir: string = CHROME_PROFILE_DIR,
-): string | null {
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(emailMarkerPath(profileDir), "utf8"));
-    if (parsed === null || typeof parsed !== "object") return null;
-    const v = (parsed as Record<string, unknown>)[provider];
-    return typeof v === "string" && v.length > 0 ? v : null;
-  } catch {
-    return null;
-  }
-}
-
-// Record the logged-in email for `provider`. Idempotent overwrite. Best-effort.
-export function recordProviderEmail(
-  provider: OAuthProviderId,
-  email: string,
-  profileDir: string = CHROME_PROFILE_DIR,
-): void {
-  if (email.length === 0) return;
-  try {
-    let current: Record<string, unknown> = {};
-    try {
-      const parsed: unknown = JSON.parse(readFileSync(emailMarkerPath(profileDir), "utf8"));
-      if (parsed !== null && typeof parsed === "object")
-        current = parsed as Record<string, unknown>;
-    } catch {
-      /* no marker yet */
-    }
-    current[provider] = email;
-    mkdirSync(profileDir, { recursive: true });
-    writeFileSync(emailMarkerPath(profileDir), JSON.stringify(current), "utf8");
-  } catch {
-    /* best-effort — provision can still proceed, just without a pre-known email */
-  }
 }
 
 // Wipe Google + GitHub cookies through a short-lived Chrome context. This uses
@@ -163,9 +113,6 @@ export async function clearProviderCookies(
       }
       cleared = await clearProviderCookiesFromContext(context, provider);
       if (!cleared) return false;
-      if (provider === undefined || provider === "google") {
-        cleared = await invalidateCanonicalGoogleIdentity(profileDir);
-      }
     } catch (err) {
       if (err instanceof ProfileBusyError) throw err;
       cleared = false;
@@ -199,7 +146,6 @@ export function clearBrowserProfile(profileDir: string = CHROME_PROFILE_DIR): vo
   try {
     mkdirSync(profileDir, { recursive: true });
     for (const entry of readdirSync(profileDir)) {
-      if (isSessionStateArtifact(entry)) continue;
       rmSync(join(profileDir, entry), { recursive: true, force: true });
     }
   } catch {

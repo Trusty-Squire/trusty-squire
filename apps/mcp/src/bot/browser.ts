@@ -61,7 +61,6 @@ import {
   type ProfileCloseState,
 } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
-import { hasLiveGoogleSession, type BrowserStorageState } from "./session-state.js";
 import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
 import {
   createOperatorBrowserMarker,
@@ -2338,8 +2337,6 @@ export interface BrowserControllerOptions {
   humanize?: boolean;
   // Per-session persistent Chrome profile directory. Required by start().
   profileDir?: string;
-  /** Portable login state restored before the first navigation. */
-  storageState?: BrowserStorageState;
   // Per-launch egress override. A session may supply its own proxy without
   // affecting any other browser session. It is honored regardless of the host
   // ASN; malformed or unreachable values fail startup rather than using direct
@@ -2408,7 +2405,13 @@ export function sessionProvidersFromCookies(
     );
     if (present) live.push(sig.provider);
   }
-  if (hasLiveGoogleSession(cookies)) live.push("google");
+  const googleSession = cookies.some(
+    (cookie) =>
+      /(^|\.)google\.com$/i.test(cookie.domain.replace(/^\./, "")) &&
+      ["__Secure-1PSID", "SID", "HSID", "SSID", "APISID", "SAPISID"].includes(cookie.name) &&
+      cookie.value.length > 10,
+  );
+  if (googleSession) live.push("google");
   return live;
 }
 
@@ -3528,10 +3531,9 @@ export interface PlainLoginBrowser {
 // though the same CDP browser passes a DIRECT accounts.google.com sign-in. The
 // tell is the CDP attachment itself (NOT the launcher, NOT the flags, NOT
 // `navigator.webdriver` — all separately ruled out). The connect claim doesn't
-// need to drive the browser: the USER signs in interactively, completion is read
-// from the API (`installPoll`), and provider seeding is read from the profile's
-// SQLite cookie store (`profileHasProviderCookies`). So we spawn Chrome and
-// only ever kill it — never attach.
+// need to drive the browser: the USER signs in interactively, completion comes
+// from the API (`installPoll`) plus its explicit Finish callback. So we spawn
+// Chrome and only ever kill it — never attach.
 //
 // Persistent profile is preserved (--user-data-dir=profileDir) so the Google/
 // GitHub session still lands in the bot's profile for later signups.
@@ -3679,9 +3681,7 @@ export async function launchPlainLoginBrowser(params: {
 }
 
 export class BrowserController {
-  // A persistent browser context backed by this session's private user-data
-  // directory. Portable login state is restored before first navigation; the
-  // directory itself is never reused by another operate session.
+  // A persistent browser context backed by the user's real Chrome profile.
   private context: BrowserContext | null = null;
   private page: Page | null = null;
   private checkoutCardGroupScope: CheckoutCardGroupScope | undefined;
@@ -3832,7 +3832,6 @@ export class BrowserController {
   }
 
   private readonly profileDir: string;
-  private readonly storageState: BrowserStorageState | undefined;
 
   // The replay harness owns this context so it can route the storefront from a
   // HAR, then remove that route before checkout becomes live.
@@ -3858,7 +3857,6 @@ export class BrowserController {
   constructor(opts: BrowserControllerOptions = {}) {
     this.humanize = opts.humanize ?? true;
     this.profileDir = opts.profileDir ?? "";
-    this.storageState = opts.storageState;
     this.proxyOverride =
       opts.proxyUrl !== undefined && opts.proxyUrl.trim().length > 0 ? opts.proxyUrl.trim() : null;
   }
@@ -4539,9 +4537,6 @@ export class BrowserController {
       this.persistentFallbackLaunchInFlight = false;
     }
     this.context = context;
-    if (this.storageState !== undefined) {
-      await context.setStorageState(this.storageState);
-    }
     // We own the profile now — close() may reap a leaked Chrome.
     this.launchedContext = true;
     if (!remoteMode) {
@@ -16070,17 +16065,6 @@ export class BrowserController {
   // page otherwise). Cheap — no screenshot, unlike getState().
   currentUrl(): string {
     return this.page !== null ? this.page.url() : "";
-  }
-
-  /** Capture every portable login surface for the next fresh operator profile. */
-  async captureStorageState(): Promise<BrowserStorageState> {
-    if (this.context === null) throw new Error("Browser not started");
-    return await this.context.storageState({ indexedDB: true });
-  }
-
-  async restoreStorageState(state: BrowserStorageState): Promise<void> {
-    if (this.context === null) throw new Error("Browser not started");
-    await this.context.setStorageState(state);
   }
 
   recoverActivePage(): boolean {

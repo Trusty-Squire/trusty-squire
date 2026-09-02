@@ -49,7 +49,6 @@ import {
   detectActiveProviderSessions,
   ensureOAuthSession,
   openInstallConfirmInBotChrome,
-  profileHasProviderCookies,
   type InstallClaimPollResult,
 } from "../bot/google-login.js";
 import { isOAuthProviderId, type OAuthProviderId } from "../bot/oauth-providers.js";
@@ -564,9 +563,6 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
   // form clears only one provider; bare --force-relogin is the full-profile
   // account-switch escape hatch.
   if (args.forceRelogin) {
-    if (args.forceReloginProvider !== undefined) {
-    } else {
-    }
     let cookiesCleared: boolean;
     if (args.forceReloginProvider !== undefined) {
       cookiesCleared = await clearProviderCookies(profileDir, args.forceReloginProvider);
@@ -628,7 +624,7 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
     printAsnWarning(asn);
   }
 
-  // Browser confirm: bind this machine + seed the bot's Chrome.
+  // Browser confirm: bind this machine in the bot's real Chrome profile.
   // The user signs into trustysquire from inside the bot's persistent
   // Chrome profile on a visible display. That
   // single sign-in does TWO things at once: trustysquire claims the
@@ -644,7 +640,6 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
   };
   const session = await runInstallClaim(args.apiBase, target, baseSession, args.skipBrowser, {
     applyServerPrefs: !wantInteractive,
-    ...connectCompletionOptions(args),
   });
   if (session === null) {
     ui.fail(
@@ -734,7 +729,7 @@ function printProviderState(providers: OAuthProviderId[]): void {
 //
 // Default path (`skipBrowser=false`): opens the trustysquire confirm
 // URL in the bot's OWN persistent Chrome profile. The user signs in
-// once — that single sign-in claims the install AND seeds the bot's
+// once — that single sign-in claims the install and establishes the bot's
 // profile with a provider session for future OAuth signups. The
 // pollUntilClaimed callback closes the Chrome window as soon as the
 // API flips the install to claimed.
@@ -882,7 +877,7 @@ async function reloginGithubOnly(
     provider: "github",
     forceOpen: true,
   });
-  if (result.status === "logged_in" || result.status === "already_valid") {
+  if (result.status === "satisfied") {
     await recordConnectedProvider("github");
     if (opts.writeConfig) await writeAgentConfig(target, agent, args);
     ui.success("Signed in to GitHub. The bot is ready.");
@@ -1041,38 +1036,15 @@ async function writeAgentConfig(
   }
 }
 
-// First-time setup stays open after the account claim so the user can finish
-// optional setup. A forced re-login has no remaining onboarding contract — but
-// the account claim (agent token) is NOT the end of the interactive sign-in.
-// The API flips to `claimed` the moment the OAuth identity lands, which on a
-// cold profile is BEFORE the provider's browser session is fully seeded (Google
-// can still be mid-flow with a second cold-profile challenge). Tearing down on
-// the bare claim killed the browser before that challenge — the "two number
-// picks with a red-close between them" bug. So force-relogin now waits
-// for the requested provider's post-clear cookie presence before it closes;
-// neither an explicit terminal page nor another provider can substitute. The
-// deadline still bounds the wait.
+// The browser remains open until both the account claim and its explicit Finish
+// callback arrive. The callback is emitted after the visible browser flow
+// completes, so it works for onboarding and forced re-login without inspecting
+// Chrome's on-disk cookie database.
 export function shouldCompleteInstallClaim(
   claimed: boolean,
-  completeOnClaim: boolean,
-  sessionSeeded: boolean,
   wizardCompleted = false,
 ): boolean {
-  if (!claimed) return false;
-  // A forced provider relogin is successful only when its provider-specific
-  // completion evidence arrives. Finish alone is not an override: the user may
-  // skip optional GitHub and still send the normal completion callback.
-  if (completeOnClaim) return sessionSeeded;
-  return wizardCompleted;
-}
-
-export function connectCompletionOptions(
-  args: Pick<Argv, "forceRelogin" | "forceReloginProvider">,
-): { completeOnClaim: boolean; completionProvider: OAuthProviderId } {
-  return {
-    completeOnClaim: args.forceRelogin,
-    completionProvider: args.forceReloginProvider ?? "google",
-  };
+  return claimed && wizardCompleted;
 }
 
 // During normal onboarding, claim happens before the browser's Finish step.
@@ -1096,12 +1068,6 @@ async function runInstallClaim(
     // discarded a fresh "yes" to inbox-OTP consent (readInboxConsent → false →
     // await_verification refused despite the user consenting).
     applyServerPrefs: boolean;
-    // Forced re-login is complete when the fresh account claim and requested
-    // provider seed succeed. Normal onboarding stays open for Finish.
-    completeOnClaim: boolean;
-    // A scoped re-login must wait for the requested provider, not any
-    // pre-existing provider cookie left in the shared browser profile.
-    completionProvider: OAuthProviderId;
   },
 ): Promise<SessionData | null> {
   console.warn(`Connecting this machine to your account…`);
@@ -1113,18 +1079,9 @@ async function runInstallClaim(
   // check at the call site — bare closure-captured `let` doesn't.
   const state: { value: ClaimResult | null } = { value: null };
   // The normal wizard's Finish button invokes the nonce-scoped loopback
-  // callback. First-time onboarding waits for that signal so the user gets a
-  // chance to complete optional setup. Forced re-login instead ends after the
-  // API claim and requested provider seed because no setup remains to wait for.
-  // Plain-login predicate: the connect claim browser runs plain (no CDP — a CDP
-  // attach fails Google's OAuth "secure browser" check). The API delivers the
-  // account claim, the SQLite cookie store proves a forced re-login landed,
-  // and a per-run loopback callback carries the normal wizard's explicit
-  // Finish signal.
-  const pollOnce = async (
-    profileDir: string,
-    wizardCompleted: boolean,
-  ): Promise<InstallClaimPollResult> => {
+  // callback. Every install path waits for it. Plain login deliberately has no
+  // CDP attach, so this callback is the sole browser-completion authority.
+  const pollOnce = async (wizardCompleted: boolean): Promise<InstallClaimPollResult> => {
     let claimedThisPoll = false;
     // Keep state.value warm — the install moves to "claimed" the instant the
     // user finishes signing in.
@@ -1143,28 +1100,10 @@ async function runInstallClaim(
         return "expired";
       }
     }
-    // Tear down once the account is claimed AND the provider session has
-    // actually seeded — not on the bare claim, which can land while Google is
-    // still writing cookies on a cold profile.
     const claimed = state.value !== null;
-    const sessionSeeded =
-      claimed &&
-      options.completeOnClaim &&
-      profileHasProviderCookies(profileDir, options.completionProvider);
-    // No browser URL to watch in plain mode. Normal onboarding keys off the
-    // explicit loopback Finish callback; forced re-login finishes once its
-    // requested provider session is safely seeded.
-    const tearDown = shouldCompleteInstallClaim(
-      claimed,
-      options.completeOnClaim,
-      sessionSeeded,
-      wizardCompleted,
-    );
+    const tearDown = shouldCompleteInstallClaim(claimed, wizardCompleted);
     if (tearDown) {
-      return {
-        status: "claimed",
-        provider: options.completeOnClaim ? options.completionProvider : null,
-      };
+      return { status: "claimed", provider: null };
     }
     if (claimedThisPoll) {
       console.error(chalk.dim(`   ✓ ${claimHeartbeatMessage(true)}`));
@@ -1304,10 +1243,8 @@ async function loginWithProfileGuard(args: Argv, profileDir: string): Promise<vo
   // An explicit login always means "open a fresh provider login". Requiring a
   // second --force-relogin flag made the command silently short-circuit on any
   // cached cookie, even when the user was deliberately repairing this flow.
-  // Keep the last portable Google identity until this fresh OAuth round trip
-  // has produced and closed a replacement context. forceOpen clears the live
-  // browser's provider cookies, so deleting the portable fallback here was
-  // redundant and burned a good login whenever the new attempt timed out.
+  // forceOpen clears only this provider's live-context cookies before opening
+  // the fresh OAuth flow; other provider sessions remain intact.
   const result = await ensureOAuthSession({
     provider,
     // --profile-dir pins login to an isolated profile (a secondary
@@ -1316,11 +1253,7 @@ async function loginWithProfileGuard(args: Argv, profileDir: string): Promise<vo
     forceOpen: true,
   });
   switch (result.status) {
-    case "already_valid":
-      await recordConnectedProvider(provider);
-      ui.success(`Already signed in to ${label}.`);
-      return;
-    case "logged_in":
+    case "satisfied":
       await recordConnectedProvider(provider);
       ui.success(`Signed in to ${label}. The bot is ready.`);
       return;

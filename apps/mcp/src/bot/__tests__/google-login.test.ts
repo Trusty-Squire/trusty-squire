@@ -1,21 +1,12 @@
 // Covers deterministic Google-login helpers and lifecycle boundaries.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  existsSync,
-  readFileSync,
-  mkdtempSync,
-  mkdirSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { spawn, type ChildProcess } from "node:child_process";
 import type { BrowserContext } from "playwright";
-import Database from "better-sqlite3";
 import {
   attachSelfManagedLoginContext,
   BrowserController,
@@ -37,14 +28,7 @@ import {
 } from "../profile.js";
 import { OPERATOR_BROWSER_MARKER_ENV } from "../operator-browser-watchdog.js";
 import {
-  MAX_SESSION_STATE_BYTES,
-  readCanonicalIdentityMetadata,
-  readSessionState,
-} from "../session-state.js";
-import {
   cancelActiveLoginBrowsers,
-  captureProfileStorageState,
-  installClaimPollCompleted,
   openInstallConfirmInBotChrome,
   classifyGoogleAuthState,
   checkLoginStatusWithin,
@@ -56,14 +40,12 @@ import {
   extractOAuthScopes,
   hasDisplay,
   pollUntil,
-  profileHasProviderCookies,
   runLoginBrowserForEnvironment,
   runDisplayedChrome,
   scopesAreBasic,
   scrapeGoogleScopePhrases,
   trackActiveLoginBrowser,
   ensureOAuthSession,
-  finalizeLoginRun,
   launchPersistentLoginContext,
   type PersistentLauncher,
   type RunInBotChromeOpts,
@@ -140,7 +122,7 @@ describe("interactive login display routing", () => {
 
   it("routes a headless login to the remote noVNC path", async () => {
     const displayed = vi.fn(async () => ({ status: "timeout", closeState: "closed" }) as const);
-    const remote = vi.fn(async () => ({ status: "completed", closeState: "closed" }) as const);
+    const remote = vi.fn(async () => ({ status: "satisfied", closeState: "closed" }) as const);
 
     await expect(
       runLoginBrowserForEnvironment(opts, {
@@ -148,13 +130,13 @@ describe("interactive login display routing", () => {
         runDisplayedChrome: displayed,
         runRemoteLoginChrome: remote,
       }),
-    ).resolves.toMatchObject({ status: "completed" });
+    ).resolves.toMatchObject({ status: "satisfied" });
     expect(remote).toHaveBeenCalledOnce();
     expect(displayed).not.toHaveBeenCalled();
   });
 
   it("keeps a user-visible desktop on the local headed path", async () => {
-    const displayed = vi.fn(async () => ({ status: "completed", closeState: "closed" }) as const);
+    const displayed = vi.fn(async () => ({ status: "satisfied", closeState: "closed" }) as const);
     const remote = vi.fn(async () => ({ status: "timeout", closeState: "closed" }) as const);
 
     await runLoginBrowserForEnvironment(opts, {
@@ -164,6 +146,33 @@ describe("interactive login display routing", () => {
     });
     expect(displayed).toHaveBeenCalledOnce();
     expect(remote).not.toHaveBeenCalled();
+  });
+});
+
+describe("install completion callback", () => {
+  it("waits for the explicit Finish callback rather than profile files", async () => {
+    const pollUntilClaimed = vi.fn(async () => ({ status: "claimed", provider: "google" }) as const);
+    const runChrome = vi.fn(async (opts: RunInBotChromeOpts) => {
+      const callback = new URLSearchParams(new URL(opts.url).hash.slice(1)).get(
+        "ts_install_complete",
+      );
+      expect(callback).not.toBeNull();
+      await fetch(`${callback!}?provider=google`, { redirect: "manual" });
+      await expect(opts.plainPollUntilDone!()).resolves.toBe(true);
+      return { status: "satisfied" as const, closeState: "closed" as const };
+    });
+
+    await expect(
+      openInstallConfirmInBotChrome(
+        {
+          confirmUrl: "https://example.test/install",
+          pollUntilClaimed,
+          profileDir: "/unused/profile",
+        },
+        runChrome,
+      ),
+    ).resolves.toEqual({ status: "claimed" });
+    expect(pollUntilClaimed).toHaveBeenCalledWith(true);
   });
 });
 
@@ -550,102 +559,6 @@ describe("headless login profile contention", () => {
   });
 });
 
-describe("profileHasProviderCookies (plain-login SQLite seed check)", () => {
-  const withProfile = (
-    cookies: Array<{ host: string; name: string }> | null,
-    sub = "Default",
-  ): string => {
-    const dir = mkdtempSync(join(tmpdir(), "phpc-"));
-    if (cookies !== null) {
-      mkdirSync(join(dir, sub), { recursive: true });
-      const db = new Database(join(dir, sub, "Cookies"));
-      db.exec("CREATE TABLE cookies (host_key TEXT NOT NULL, name TEXT NOT NULL)");
-      const insert = db.prepare("INSERT INTO cookies (host_key, name) VALUES (?, ?)");
-      for (const cookie of cookies) insert.run(cookie.host, cookie.name);
-      db.close();
-    }
-    return dir;
-  };
-
-  it("detects a Google session from a matching cookie row", () => {
-    const dir = withProfile([
-      { host: ".google.com", name: "SAPISID" },
-      { host: "accounts.google.com", name: "__Secure-1PSID" },
-    ]);
-    expect(profileHasProviderCookies(dir, "google")).toBe(true);
-    expect(profileHasProviderCookies(dir, "github")).toBe(false);
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  it("does not mistake the persisted accounts.google.com account-chooser cookies for a login", () => {
-    const signedOut = withProfile([
-      { host: "accounts.google.com", name: "LSID" },
-      { host: "accounts.google.com", name: "__Host-1PLSID" },
-      { host: "accounts.google.com", name: "__Host-3PLSID" },
-      { host: "accounts.google.com", name: "ACCOUNT_CHOOSER" },
-      { host: "accounts.google.com", name: "SMSV" },
-    ]);
-    try {
-      expect(profileHasProviderCookies(signedOut, "google")).toBe(false);
-    } finally {
-      rmSync(signedOut, { recursive: true, force: true });
-    }
-  });
-
-  it("detects a GitHub session by user_session", () => {
-    const dir = withProfile([{ host: ".github.com", name: "user_session" }]);
-    expect(profileHasProviderCookies(dir, "github")).toBe(true);
-    expect(profileHasProviderCookies(dir, "google")).toBe(false);
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  it("returns false for a cookieless profile and never throws on a missing file", () => {
-    const dir = withProfile([]);
-    expect(profileHasProviderCookies(dir, "google")).toBe(false);
-    rmSync(dir, { recursive: true, force: true });
-    const missing = withProfile(null);
-    expect(profileHasProviderCookies(missing, "google")).toBe(false);
-    rmSync(missing, { recursive: true, force: true });
-  });
-
-  it("also finds cookies in the bare <profile>/Cookies layout", () => {
-    const dir = withProfile([{ host: ".google.com", name: "SAPISID" }], ".");
-    expect(profileHasProviderCookies(dir, "google")).toBe(true);
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  it("does not accept a deleted cookie whose name remains in SQLite bytes", () => {
-    const dir = withProfile([{ host: ".google.com", name: "__Secure-1PSID" }]);
-    const path = join(dir, "Default", "Cookies");
-    const db = new Database(path);
-    db.pragma("secure_delete = OFF");
-    db.prepare("DELETE FROM cookies").run();
-    db.close();
-
-    expect(readFileSync(path).includes(Buffer.from("__Secure-1PSID"))).toBe(true);
-    expect(profileHasProviderCookies(dir, "google")).toBe(false);
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  it("reads a committed cookie from the live WAL", () => {
-    const dir = withProfile([]);
-    const path = join(dir, "Default", "Cookies");
-    const db = new Database(path);
-    db.pragma("journal_mode = WAL");
-    db.pragma("wal_autocheckpoint = 0");
-    db.prepare("INSERT INTO cookies (host_key, name) VALUES (?, ?)").run(
-      ".github.com",
-      "user_session",
-    );
-    try {
-      expect(profileHasProviderCookies(dir, "github")).toBe(true);
-    } finally {
-      db.close();
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-});
-
 describe("pollUntil phase-aware heartbeat", () => {
   it("resolves a heartbeat callback lazily after the wait phase changes", async () => {
     vi.useFakeTimers();
@@ -911,501 +824,6 @@ describe("bot Chrome launch consistency", () => {
     expect(events).toEqual(["terminal", "terminate-marker", "untrack-marker"]);
   });
 
-  it("publishes the authenticated canonical cookie jar and rejects a cookie-less one", async () => {
-    const profileDir = mkdtempSync(join(tmpdir(), "ts-canonical-cookie-capture-"));
-    const cookieDir = join(profileDir, "Default");
-    mkdirSync(cookieDir, { recursive: true });
-    const db = new Database(join(cookieDir, "Cookies"));
-    db.exec(`CREATE TABLE cookies (
-      host_key TEXT NOT NULL,
-      name TEXT NOT NULL,
-      value TEXT NOT NULL,
-      path TEXT NOT NULL,
-      expires_utc INTEGER NOT NULL,
-      is_secure INTEGER NOT NULL,
-      is_httponly INTEGER NOT NULL,
-      samesite INTEGER NOT NULL
-    )`);
-    db.prepare(
-      `INSERT INTO cookies
-        (host_key, name, value, path, expires_utc, is_secure, is_httponly, samesite)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(".google.com", "SID", "authenticated-google-session-cookie", "/", 0, 1, 1, 2);
-    db.close();
-    try {
-      const authenticated = await captureProfileStorageState(profileDir);
-      expect(authenticated.storageState).toMatchObject({
-        cookies: [
-          expect.objectContaining({
-            name: "SID",
-            value: "authenticated-google-session-cookie",
-            domain: ".google.com",
-          }),
-        ],
-      });
-      await finalizeLoginRun(
-        { profileDir, seedProvider: "google", confirmedProviders: ["google"] },
-        { status: "completed", closeState: "closed", ...authenticated },
-      );
-      await expect(readSessionState(profileDir)).resolves.toMatchObject({
-        cookies: [expect.objectContaining({ name: "SID", domain: ".google.com" })],
-      });
-
-      const cookieLessDir = mkdtempSync(join(tmpdir(), "ts-cookie-less-profile-"));
-      try {
-        const cookieLess = await captureProfileStorageState(cookieLessDir);
-        await expect(
-          finalizeLoginRun(
-            { profileDir, seedProvider: "google", confirmedProviders: ["google"] },
-            { status: "completed", closeState: "closed", ...cookieLess },
-          ),
-        ).rejects.toThrow("without a live identity");
-      } finally {
-        rmSync(cookieLessDir, { recursive: true, force: true });
-      }
-      await expect(readSessionState(profileDir)).resolves.toMatchObject({
-        cookies: [expect.objectContaining({ name: "SID", domain: ".google.com" })],
-      });
-    } finally {
-      rmSync(profileDir, { recursive: true, force: true });
-    }
-  });
-
-  it("publishes the plain-login identity after Chrome closes", async () => {
-    const profileDir = mkdtempSync(join(tmpdir(), "ts-plain-login-capture-"));
-    const state = {
-      cookies: [
-        {
-          name: "SID",
-          value: "portable-google-session",
-          domain: ".google.com",
-          path: "/",
-          expires: -1,
-          httpOnly: true,
-          secure: true,
-          sameSite: "Lax" as const,
-        },
-      ],
-      origins: [],
-    };
-    const events: string[] = [];
-    const capture = vi.fn(async (capturedProfileDir: string) => {
-      expect(capturedProfileDir).toBe(profileDir);
-      events.push("capture");
-      return { storageState: state, googleAccountEmail: "worker@example.com" };
-    });
-    try {
-      const result = await runDisplayedChrome(
-        {
-          profileDir,
-          url: "https://example.test/install",
-          deadline: Date.now() + 60_000,
-          pollUntilDone: async () => false,
-          bannerLabel: "Complete sign-in.",
-          plainProfileLogin: true,
-          plainPollUntilDone: async () => true,
-        },
-        {
-          resolveChannelBinary: () => "/unused/chrome",
-          launchPlainLoginBrowser: async () => ({
-            identity: {
-              host: hostname(),
-              pid: 2_147_483_000,
-              start_time: "missing",
-              user_data_dir: profileDir,
-            },
-            marker: "v1:1:plain-login-capture",
-            teardown: async () => {
-              events.push("close");
-            },
-            forceTeardown: vi.fn(),
-            isRunning: () => true,
-          }),
-          captureProfileStorageState: capture,
-        },
-      );
-
-      expect(result).toEqual({
-        status: "completed",
-        closeState: "closed",
-        storageState: state,
-        googleAccountEmail: "worker@example.com",
-      });
-      expect(events).toEqual(["close", "capture"]);
-      await finalizeLoginRun({ profileDir }, result);
-      await expect(readSessionState(profileDir)).resolves.toEqual(state);
-      await expect(readCanonicalIdentityMetadata(profileDir)).resolves.toEqual({
-        googleAccountEmail: "worker@example.com",
-      });
-    } finally {
-      rmSync(profileDir, { recursive: true, force: true });
-    }
-  });
-});
-
-describe("confirmed login finalization", () => {
-  it("distinguishes a claimed install from pending and expired polls", () => {
-    expect(installClaimPollCompleted("pending")).toBe(false);
-    expect(installClaimPollCompleted({ status: "claimed", provider: "google" })).toBe(true);
-    expect(() => installClaimPollCompleted("expired")).toThrow(/expired/);
-  });
-
-  it("refuses to confirm a login without a publishable identity snapshot", async () => {
-    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
-    try {
-      await expect(
-        finalizeLoginRun(
-          {
-            profileDir,
-          },
-          { status: "completed", closeState: "unknown" },
-        ),
-      ).rejects.toThrow("closed without publishable state");
-
-    } finally {
-      rmSync(profileDir, { recursive: true, force: true });
-    }
-  });
-
-  it("does not record a timed-out login", async () => {
-    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
-    const onConfirmedLogin = vi.fn();
-    try {
-      await finalizeLoginRun(
-        { profileDir, onConfirmedLogin },
-        { status: "timeout", closeState: "closed" },
-      );
-
-      expect(onConfirmedLogin).not.toHaveBeenCalled();
-    } finally {
-      rmSync(profileDir, { recursive: true, force: true });
-    }
-  });
-
-  it("writes a full captured storage state for every completed login", async () => {
-    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
-    try {
-      await finalizeLoginRun(
-        { profileDir },
-        {
-          status: "completed",
-          closeState: "closed",
-          storageState: { cookies: [], origins: [] },
-        },
-      );
-      expect(readFileSync(join(profileDir, "trusty-squire-session-state.json"), "utf8")).toContain(
-        '"origins":[]',
-      );
-    } finally {
-      rmSync(profileDir, { recursive: true, force: true });
-    }
-  });
-
-  it("preserves prior account metadata when a later probe is inconclusive", async () => {
-    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
-    try {
-      await finalizeLoginRun(
-        { profileDir },
-        {
-          status: "completed",
-          closeState: "closed",
-          storageState: { cookies: [], origins: [] },
-          googleAccountEmail: "worker@example.com",
-        },
-      );
-      await finalizeLoginRun(
-        { profileDir },
-        {
-          status: "preflight_satisfied",
-          closeState: "closed",
-          storageState: {
-            cookies: [],
-            origins: [{ origin: "https://app.example.com", localStorage: [] }],
-          },
-        },
-      );
-
-      await expect(readCanonicalIdentityMetadata(profileDir)).resolves.toEqual({
-        googleAccountEmail: "worker@example.com",
-      });
-    } finally {
-      rmSync(profileDir, { recursive: true, force: true });
-    }
-  });
-
-  it("requires live Google identity while keeping account metadata best-effort", async () => {
-    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
-    const liveGoogleState = {
-      cookies: [
-        {
-          name: "SID",
-          value: "live-google-session",
-          domain: ".google.com",
-          path: "/",
-          expires: -1,
-          httpOnly: true,
-          secure: true,
-          sameSite: "Lax" as const,
-        },
-      ],
-      origins: [],
-    };
-    try {
-      await finalizeLoginRun(
-        { profileDir, seedProvider: "google", confirmedProviders: ["google"] },
-        { status: "completed", closeState: "closed", storageState: liveGoogleState },
-      );
-      await expect(readSessionState(profileDir)).resolves.toEqual(liveGoogleState);
-      expect(
-        JSON.parse(readFileSync(join(profileDir, "trusty-squire-session-state.json"), "utf8")),
-      ).toMatchObject({ providerMarkers: ["google"] });
-      await expect(
-        finalizeLoginRun(
-          { profileDir, seedProvider: "google", confirmedProviders: ["google"] },
-          {
-            status: "completed",
-            closeState: "closed",
-            storageState: { cookies: [], origins: [] },
-            googleAccountEmail: "worker@example.com",
-          },
-        ),
-        ).rejects.toThrow("without a live identity");
-      await expect(readSessionState(profileDir)).resolves.toEqual(liveGoogleState);
-    } finally {
-      rmSync(profileDir, { recursive: true, force: true });
-    }
-  });
-
-  it("uses the live My Account identity for a CDP-captured Google login", async () => {
-    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-live-google-"));
-    const currentGoogleCookies = {
-      cookies: [
-        {
-          name: "__Host-1PLSID",
-          value: "current-google-session",
-          domain: "myaccount.google.com",
-          path: "/",
-          expires: -1,
-          httpOnly: true,
-          secure: true,
-          sameSite: "Lax" as const,
-        },
-        {
-          name: "__Secure-3PSID",
-          value: "current-google-session",
-          domain: ".google.com",
-          path: "/",
-          expires: -1,
-          httpOnly: true,
-          secure: true,
-          sameSite: "Lax" as const,
-        },
-      ],
-      origins: [],
-    };
-    try {
-      await expect(
-        finalizeLoginRun(
-          { profileDir, seedProvider: "google", confirmedProviders: ["google"] },
-          {
-            status: "completed",
-            closeState: "closed",
-            storageState: currentGoogleCookies,
-            googleAccountEmail: "operator@example.com",
-            captureSource: "displayed-live-context",
-          },
-        ),
-      ).resolves.toBeUndefined();
-
-      await expect(
-        finalizeLoginRun(
-          { profileDir, seedProvider: "google", confirmedProviders: ["google"] },
-          {
-            status: "completed",
-            closeState: "closed",
-            storageState: currentGoogleCookies,
-            captureSource: "displayed-live-context",
-          },
-        ),
-      ).rejects.toThrow("Google login completed without a live identity");
-    } finally {
-      rmSync(profileDir, { recursive: true, force: true });
-    }
-  });
-
-  it("treats an oversized completed login snapshot as a clean skip", async () => {
-    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
-    const prior = { cookies: [], origins: [] };
-    try {
-      await finalizeLoginRun(
-        { profileDir },
-        { status: "completed", closeState: "closed", storageState: prior },
-      );
-      await finalizeLoginRun(
-        { profileDir, confirmedProviders: ["google"] },
-        {
-          status: "completed",
-          closeState: "closed",
-          storageState: {
-            cookies: [],
-            origins: [
-              {
-                origin: "https://oversized.example",
-                localStorage: [{ name: "state", value: "x".repeat(MAX_SESSION_STATE_BYTES) }],
-              },
-            ],
-          },
-        },
-      );
-
-      await expect(readSessionState(profileDir)).resolves.toEqual(prior);
-    } finally {
-      rmSync(profileDir, { recursive: true, force: true });
-    }
-  });
-
-  it("does not replace the prior snapshot when browser closure is unproven", async () => {
-    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
-    const path = join(profileDir, "trusty-squire-session-state.json");
-    const prior = '{"cookies":[{"name":"SID"}],"origins":[]}';
-    writeFileSync(path, prior, { mode: 0o600 });
-    try {
-      await expect(
-        finalizeLoginRun(
-          { profileDir },
-          {
-            status: "completed",
-            closeState: "unknown",
-            storageState: { cookies: [], origins: [] },
-          },
-        ),
-      ).rejects.toThrow("closed without publishable state");
-      expect(readFileSync(path, "utf8")).toBe(prior);
-    } finally {
-      rmSync(profileDir, { recursive: true, force: true });
-    }
-  });
-
-  it("publishes a live-context capture even when browser closure is unproven", async () => {
-    // Regression: under the noVNC rig, Chrome routinely fails the 2s stale-PID
-    // proof and teardown returns force_closed_unproven on a normal exit. The
-    // session was snapshotted live from the open, healthy context the moment
-    // sign-in was confirmed, so it must still publish — refusing it stranded
-    // every operator login with "closed without publishable state".
-    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
-    const liveGoogleState = {
-      cookies: [
-        {
-          name: "SID",
-          value: "live-google-session",
-          domain: ".google.com",
-          path: "/",
-          expires: -1,
-          httpOnly: true,
-          secure: true,
-          sameSite: "Lax" as const,
-        },
-      ],
-      origins: [],
-    };
-    try {
-      await finalizeLoginRun(
-        { profileDir, seedProvider: "google", confirmedProviders: ["google"] },
-        {
-          status: "completed",
-          closeState: "force_closed_unproven",
-          storageState: liveGoogleState,
-          googleAccountEmail: "operator@example.com",
-          captureSource: "remote-live-context",
-          capturedPageLocations: [],
-        },
-      );
-      await expect(readSessionState(profileDir)).resolves.toEqual(liveGoogleState);
-    } finally {
-      rmSync(profileDir, { recursive: true, force: true });
-    }
-  });
-
-  it("threads completed Google provenance without opening a validation browser", async () => {
-    const profileDir = mkdtempSync(join(tmpdir(), "ts-connect-seed-"));
-    mkdirSync(join(profileDir, "Default"));
-    const db = new Database(join(profileDir, "Default", "Cookies"));
-    db.exec("CREATE TABLE cookies (host_key TEXT NOT NULL, name TEXT NOT NULL)");
-    db.prepare("INSERT INTO cookies (host_key, name) VALUES (?, ?)").run(".google.com", "SID");
-    db.close();
-    const pollUntilClaimed = vi.fn(async () => ({ status: "claimed", provider: null }) as const);
-    const runChrome = vi.fn(async (runOpts: RunInBotChromeOpts) => {
-      const callback = new URLSearchParams(new URL(runOpts.url).hash.slice(1)).get(
-        "ts_install_complete",
-      );
-      expect(callback).not.toBeNull();
-      await fetch(`${callback!}?provider=google`, { redirect: "manual" });
-      await expect(runOpts.plainPollUntilDone!(profileDir)).resolves.toBe(true);
-      await runOpts.plainOnSuccess!(profileDir);
-      runOpts.onProxyDisposition?.(null);
-      const provider =
-        typeof runOpts.seedProvider === "function"
-          ? runOpts.seedProvider()
-          : (runOpts.seedProvider ?? null);
-      expect(provider).toBe("google");
-      return { status: "completed" as const };
-    });
-
-    try {
-      await expect(
-        openInstallConfirmInBotChrome(
-          {
-            confirmUrl: "https://example.com/install",
-            profileDir,
-            pollUntilClaimed,
-          },
-          runChrome,
-        ),
-      ).resolves.toEqual({ status: "claimed" });
-      expect(pollUntilClaimed).toHaveBeenCalledWith(profileDir, true);
-      expect(runChrome).toHaveBeenCalledOnce();
-    } finally {
-      rmSync(profileDir, { recursive: true, force: true });
-    }
-  });
-
-  it("does not derive Google provenance from ambient cookies after GitHub completion", async () => {
-    const profileDir = mkdtempSync(join(tmpdir(), "ts-connect-seed-"));
-    mkdirSync(join(profileDir, "Default"));
-    const db = new Database(join(profileDir, "Default", "Cookies"));
-    db.exec("CREATE TABLE cookies (host_key TEXT NOT NULL, name TEXT NOT NULL)");
-    db.prepare("INSERT INTO cookies (host_key, name) VALUES (?, ?)").run(".google.com", "SID");
-    db.close();
-    const runChrome = vi.fn(async (runOpts: RunInBotChromeOpts) => {
-      const callback = new URLSearchParams(new URL(runOpts.url).hash.slice(1)).get(
-        "ts_install_complete",
-      );
-      await fetch(`${callback!}?provider=github`, { redirect: "manual" });
-      await expect(runOpts.plainPollUntilDone!(profileDir)).resolves.toBe(true);
-      await runOpts.plainOnSuccess!(profileDir);
-      const provider =
-        typeof runOpts.seedProvider === "function"
-          ? runOpts.seedProvider()
-          : (runOpts.seedProvider ?? null);
-      expect(provider).toBeNull();
-      return { status: "completed" as const };
-    });
-
-    try {
-      await expect(
-        openInstallConfirmInBotChrome(
-          {
-            confirmUrl: "https://example.com/install",
-            profileDir,
-            pollUntilClaimed: async () => ({ status: "claimed", provider: null }),
-          },
-          runChrome,
-        ),
-      ).resolves.toEqual({ status: "claimed" });
-    } finally {
-      rmSync(profileDir, { recursive: true, force: true });
-    }
-  });
 });
 
 describe("cancelled self-managed Chrome launch", () => {
