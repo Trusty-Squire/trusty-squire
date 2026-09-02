@@ -13,6 +13,14 @@ function toBase64(bytes: Uint8Array): string {
   return btoa(String.fromCharCode(...bytes));
 }
 
+// Mobile numeric keypads have no `/` key (inputMode="numeric"), so the
+// Expiration field must build MM/YY from digits alone. Desktop users who
+// type their own `/` are handled too: it is stripped and re-inserted.
+function formatExpiry(raw: string): string {
+  const digits = raw.replace(/\D/g, "").slice(0, 4);
+  return digits.length > 2 ? `${digits.slice(0, 2)}/${digits.slice(2)}` : digits;
+}
+
 interface CardEntryProps {
   // Receives the id of the just-stored card so a caller (the pay page) can
   // bind it to a pending approval. Callers that only need to refresh a list
@@ -227,7 +235,7 @@ export function CardEntry({ onSaved }: CardEntryProps) {
           id="card-expiry"
           className="mono"
           value={expiry}
-          onChange={(event) => setExpiry(event.target.value)}
+          onChange={(event) => setExpiry(formatExpiry(event.target.value))}
           inputMode="numeric"
           placeholder="MM / YY"
           required
