@@ -54,6 +54,9 @@ import {
   checkoutStageFromUrlV2,
   compactV2LegacyRefForHandle,
   compactV2PayloadWithinBudget,
+  COMPACT_V2_HANDLE_LENGTH,
+  isCompactV2Handle,
+  isCompactV2Label,
   controlMatchesPrivateQueryV2,
   diffSafeControlsV2,
   equalSafePageSemanticsV2,
@@ -65,12 +68,14 @@ import {
   sealRetainedInteractiveElementsV2,
   safeStageV2,
   type SafeControlV2,
+  type ObservationEpochV2,
   type ObservationSemanticSourceV2,
   type SafePageSemanticsV2,
   type SafeObservationBaselineV2,
   type SafeObservationIndexV2,
   type SafeStageV2,
 } from "./compact-observation-v2.js";
+import { elementFingerprints } from "./element-fingerprint.js";
 import type { ApiClient } from "../api-client.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
 import { pickVerificationLink } from "./email-verification.js";
@@ -2029,10 +2034,16 @@ export class TargetStaleError extends Error {
   }
 }
 
-class CompactV2ReobserveRequiredError extends Error {}
+class CompactV2StaleRefError extends Error {}
 class ProvisionTargetNotAllowedError extends Error {}
 class ProvisionTargetMissingError extends Error {}
 class CompactV2ActionFailureError extends Error {}
+/**
+ * A `@label` that names more than one observed control. Extends the
+ * already-sealed failure channel so its message survives V2's opaque error
+ * mapping: it carries ONLY refs the agent already holds, never page text.
+ */
+class CompactV2AmbiguousLabelError extends CompactV2ActionFailureError {}
 
 function replacementCandidates(elements: readonly InteractiveElement[]): Record<string, string[]> {
   const refs = provisionElementRefs(elements);
@@ -2358,10 +2369,10 @@ function invalidateCompactV2Snapshot(
   session.compactV2Previous = null;
 }
 
-function throwCompactV2ReobserveRequired(): never {
+function throwCompactV2StaleRef(): never {
   // Deliberately opaque: stale V2 errors must not construct V1 replacement
   // candidates or reveal raw labels/legacy identities outside the safe view.
-  throw new CompactV2ReobserveRequiredError("reobserve_required");
+  throw new CompactV2StaleRefError("stale_ref");
 }
 
 interface CompactV2TargetAuthorization {
@@ -2369,6 +2380,25 @@ interface CompactV2TargetAuthorization {
   row: SafeControlV2;
 }
 
+/**
+ * The parts of an observed row that carry what the agent CHOSE the control for.
+ * `state`, `visibility` and `choice` legitimately churn on a live form and are
+ * excluded, so a ref stays actionable across a re-render; role, intent, field
+ * class, frame and label are not — a control whose label went from "Continue"
+ * to "Delete account" is no longer the control the agent reasoned about, even
+ * though its fingerprint (its DOM id) never moved.
+ */
+function sameCompactV2Intent(left: SafeControlV2, right: SafeControlV2): boolean {
+  return (
+    left.role === right.role &&
+    left.action === right.action &&
+    left.field === right.field &&
+    left.frame === right.frame &&
+    left.label === right.label
+  );
+}
+
+/** Row equality over the sealed representation only — never raw page data. */
 function sameCompactV2Control(left: SafeControlV2, right: SafeControlV2): boolean {
   return (
     left.role === right.role &&
@@ -2376,72 +2406,80 @@ function sameCompactV2Control(left: SafeControlV2, right: SafeControlV2): boolea
     left.visibility === right.visibility &&
     left.action === right.action &&
     left.field === right.field &&
-    left.name === right.name &&
+    left.label === right.label &&
     left.choice === right.choice &&
     left.frame === right.frame
   );
 }
 
-function compactV2AuthorizationForHandle(
+/**
+ * Authorize an agent-supplied target against the observed skeleton. Two forms:
+ * a `@e:` handle (the durable fingerprint) or a `@label` alias, which resolves
+ * to exactly one observed handle or fails — never a guess. Only the epoch's
+ * `doc` gates here; a benign re-render since the observation is expected and is
+ * settled at act time against live elements.
+ */
+function compactV2AuthorizationForTarget(
   session: Session,
   target: string,
 ): CompactV2TargetAuthorization {
   const index = session.compactV2Index;
-  if (index === null) throwCompactV2ReobserveRequired();
-  if (index.expiresAt < Date.now() || index.pageKey !== compactV2PageKey(session)) {
+  if (index === null) throwCompactV2StaleRef();
+  if (index.expiresAt < Date.now() || index.epoch.doc !== compactV2EpochDoc(session)) {
     invalidateCompactV2Snapshot(session);
-    throwCompactV2ReobserveRequired();
+    throwCompactV2StaleRef();
   }
-  const legacy = compactV2LegacyRefForHandle(session.compactV2Refs, index.generation, target);
-  if (legacy === null) throwCompactV2ReobserveRequired();
-  const row = index.rows.find((candidate) => candidate.ref === target);
-  if (row === undefined) throwCompactV2ReobserveRequired();
+  const row = isCompactV2Label(target)
+    ? resolveCompactV2Label(index.rows, target)
+    : index.rows.find((candidate) => candidate.ref === target);
+  if (row === undefined) throwCompactV2StaleRef();
+  const legacy = compactV2LegacyRefForHandle(session.compactV2Refs, row.ref);
+  if (legacy === null) throwCompactV2StaleRef();
   return { legacyRef: legacy, row };
 }
 
+/** A label acts only when it names exactly one observed control. */
+function resolveCompactV2Label(
+  rows: readonly SafeControlV2[],
+  label: string,
+): SafeControlV2 | undefined {
+  const matches = rows.filter((row) => row.label === label);
+  if (matches.length > 1) {
+    throw new CompactV2AmbiguousLabelError(
+      `ambiguous_target: "${label}" names ${matches.length} controls. ` +
+        `Retry with one exact ref: ${matches.map((row) => row.ref).join(", ")}`,
+    );
+  }
+  return matches[0];
+}
+
+/**
+ * Re-resolve an authorized ref against LIVE elements. The handle is minted from
+ * the element's durable fingerprint under the current document epoch, so this
+ * survives a re-render between two acts (the whole point of the identity model)
+ * while a replaced document, a removed control, or a control that changed role
+ * under the same fingerprint all fail closed.
+ */
 function resolveAuthorizedCompactV2Target(
   session: Session,
   elements: readonly InteractiveElement[],
   authorization: CompactV2TargetAuthorization,
 ): InteractiveElement {
-  let pageOrigin = "";
-  try {
-    pageOrigin = new URL(session.browser.currentUrl()).origin;
-  } catch {}
-  const safe = buildSafeControlsV2({
-    elements,
-    legacyRefs: provisionElementRefs(elements),
-    generation: session.compactV2Index?.generation ?? 0,
-    pageOrigin,
-    pageUrl: session.browser.currentUrl(),
-  });
   const index = session.compactV2Index;
-  if (
-    index === null ||
-    safe.rows.length !== index.rows.length ||
-    safe.byRef.size !== session.compactV2Refs.size ||
-    safe.rows.some((row, rowIndex) => !sameCompactV2Control(row, index.rows[rowIndex]!)) ||
-    [...safe.byRef].some(([ref, legacy]) => session.compactV2Refs.get(ref) !== legacy)
-  ) {
+  if (index === null || index.epoch.doc !== compactV2EpochDoc(session)) {
     invalidateCompactV2Snapshot(session);
-    throwCompactV2ReobserveRequired();
+    throwCompactV2StaleRef();
   }
-  let liveRow: SafeControlV2 | undefined;
-  for (const [ref, legacyRef] of safe.byRef) {
-    if (legacyRef === authorization.legacyRef) {
-      liveRow = safe.rows.find((candidate) => candidate.ref === ref);
-      break;
-    }
-  }
-  const resolved = resolveTarget(elements, authorization.legacyRef);
-  if (
-    liveRow === undefined ||
-    !sameCompactV2Control(authorization.row, liveRow) ||
-    resolved === null
-  ) {
-    invalidateCompactV2Snapshot(session);
-    throwCompactV2ReobserveRequired();
-  }
+  const live = compactV2LiveControls(session, elements);
+  const matches = live.rows.filter((row) => row.ref === authorization.row.ref);
+  // Fingerprints are unique within an inventory by construction, so >1 means a
+  // broken invariant rather than an addressable ambiguity: refuse either way.
+  if (matches.length !== 1) throwCompactV2StaleRef();
+  const liveRow = matches[0]!;
+  if (!sameCompactV2Intent(liveRow, authorization.row)) throwCompactV2StaleRef();
+  const legacy = live.byRef.get(liveRow.ref);
+  const resolved = legacy === undefined ? null : resolveTarget(elements, legacy);
+  if (resolved === null) throwCompactV2StaleRef();
   return resolved;
 }
 
@@ -5311,16 +5349,12 @@ function compactV2HintCursorScope(session: Session): string {
     .slice(0, 10);
 }
 
-function compactV2Cursor(
-  session: Session,
-  generation: number,
-  offset: number,
-  scope: string,
-): string {
+function compactV2Cursor(session: Session, rev: number, offset: number, scope: string): string {
   // The session-held index owns the five-minute expiry, so the cursor need not
   // repeat a UUID/timestamp on every dense-page observation. A session-secret
-  // HMAC makes this compact in-MCP token unforgeable across sessions.
-  const body = `${generation.toString(36)}:${offset.toString(36)}:${scope}`;
+  // HMAC makes this compact in-MCP token unforgeable across sessions. Binding
+  // the epoch revision is what kills a page offset across a re-serialization.
+  const body = `${rev.toString(36)}:${offset.toString(36)}:${scope}`;
   const signature = createHmac("sha256", session.compactV2Secret)
     .update(body)
     .digest("base64url")
@@ -5328,14 +5362,14 @@ function compactV2Cursor(
   return `${body}.${signature}`;
 }
 
-// Deltas are valid only for the same document location. The full URL stays
-// on the private side of V2 and is too volatile to page by: live checkouts
-// (e.g. Shopify) append a rotating query token on every step re-render, which
-// would invalidate the snapshot between overflow pages. The identity therefore
-// hashes only the main document plus origin+pathname. A real navigation to a
-// different path or a replaced main document still produces a different key;
-// query-string and fragment churn on the same logical page must not.
-function compactV2PageKey(session: Session): string {
+// The `doc` half of the observation epoch (docs/observation-model.md §4.1):
+// the browser's stable main-document identity, not the URL. The full URL is too
+// volatile to key on — live checkouts (e.g. Shopify) append a rotating query
+// token on every step re-render, which would invalidate every ref between two
+// acts. Origin+pathname is folded in as a fail-closed backstop for a host whose
+// document identity does not move on a logical page change; query-string and
+// fragment churn on the same logical page must not invalidate.
+function compactV2EpochDoc(session: Session): string {
   let location = session.browser.currentUrl();
   try {
     const parsed = new URL(location);
@@ -5347,11 +5381,52 @@ function compactV2PageKey(session: Session): string {
     .digest("base64url");
 }
 
+/**
+ * Mint the durable, document-scoped handle for every element in one inventory.
+ * The session HMAC makes a handle unforgeable and unlinkable across sessions;
+ * folding the epoch's `doc` into it is what makes a ref die on a real
+ * navigation without any snapshot bookkeeping — a handle simply stops being
+ * producible by any live element once the document is replaced.
+ */
+function compactV2Handles(
+  session: Session,
+  elements: readonly InteractiveElement[],
+): Map<InteractiveElement, string> {
+  const doc = compactV2EpochDoc(session);
+  const handles = new Map<InteractiveElement, string>();
+  for (const [element, fingerprint] of elementFingerprints(elements)) {
+    const digest = createHmac("sha256", session.compactV2Secret)
+      .update(`${doc}\u001f${fingerprint}`)
+      .digest("base64url")
+      .slice(0, COMPACT_V2_HANDLE_LENGTH);
+    handles.set(element, `@e:${digest}`);
+  }
+  return handles;
+}
+
+/** The live skeleton for an element inventory, under the session's epoch. */
+function compactV2LiveControls(
+  session: Session,
+  elements: readonly InteractiveElement[],
+): { rows: SafeControlV2[]; byRef: Map<string, string> } {
+  let pageOrigin = "";
+  try {
+    pageOrigin = new URL(session.browser.currentUrl()).origin;
+  } catch {}
+  return buildSafeControlsV2({
+    elements,
+    legacyRefs: provisionElementRefs(elements),
+    handles: compactV2Handles(session, elements),
+    pageOrigin,
+    pageUrl: session.browser.currentUrl(),
+  });
+}
+
 function parseCompactV2Cursor(
   session: Session,
   cursor: string,
   expectedScope: string,
-): { generation: number; offset: number } {
+): { rev: number; offset: number } {
   const [body, signature, extra] = cursor.split(".");
   if (body === undefined || signature === undefined || extra !== undefined)
     throw new Error("invalid_cursor");
@@ -5360,9 +5435,9 @@ function parseCompactV2Cursor(
     .digest("base64url")
     .slice(0, 12);
   if (signature !== expected) throw new Error("invalid_cursor");
-  const [generationRaw, offsetRaw, scope, extraPart] = body.split(":");
+  const [revRaw, offsetRaw, scope, extraPart] = body.split(":");
   if (
-    generationRaw === undefined ||
+    revRaw === undefined ||
     offsetRaw === undefined ||
     scope === undefined ||
     extraPart !== undefined ||
@@ -5370,18 +5445,18 @@ function parseCompactV2Cursor(
   ) {
     throw new Error("invalid_cursor");
   }
-  const generation = Number.parseInt(generationRaw, 36);
+  const rev = Number.parseInt(revRaw, 36);
   const offset = Number.parseInt(offsetRaw, 36);
   if (
-    !Number.isSafeInteger(generation) ||
+    !Number.isSafeInteger(rev) ||
     !Number.isSafeInteger(offset) ||
     offset < 0 ||
-    generation.toString(36) !== generationRaw ||
+    rev.toString(36) !== revRaw ||
     offset.toString(36) !== offsetRaw
   ) {
     throw new Error("stale_cursor");
   }
-  return { generation, offset };
+  return { rev, offset };
 }
 
 function compactV2HintPage(
@@ -5406,7 +5481,7 @@ function compactV2HintPage(
             remaining,
             next_cursor: compactV2Cursor(
               session,
-              index.generation,
+              index.epoch.rev,
               nextOffset,
               compactV2HintCursorScope(session),
             ),
@@ -5460,54 +5535,35 @@ function compactV2Observation(
   if (startMetadata?.hintPages !== undefined) {
     session.compactV2HintPages = [...startMetadata.hintPages];
   }
-  const legacyRefs = provisionElementRefs(elements);
-  let pageOrigin = "";
-  try {
-    pageOrigin = new URL(session.browser.currentUrl()).origin;
-  } catch {}
   const stage = safeStageV2(session.browser.currentUrl(), elements);
   const semantics = safePageSemanticsV2(semanticSource);
-  const pageKey = compactV2PageKey(session);
+  const epochDoc = compactV2EpochDoc(session);
   const previous = session.compactV2Previous;
-  const samePage = previous !== null && previous.pageKey === pageKey;
-  let snapshotGeneration = samePage ? previous.snapshotGeneration : generation;
-  let safe = buildSafeControlsV2({
-    elements,
-    legacyRefs,
-    generation: snapshotGeneration,
-    pageOrigin,
-    pageUrl: session.browser.currentUrl(),
-  });
-  let delta = samePage ? diffSafeControlsV2(previous, stage, safe.rows) : null;
+  const sameDocument = previous !== null && previous.epoch.doc === epochDoc;
+  const safe = compactV2LiveControls(session, elements);
+  let delta = sameDocument ? diffSafeControlsV2(previous, stage, safe.rows) : null;
   const privateBindingsChanged =
-    samePage &&
+    sameDocument &&
     (session.compactV2Refs.size !== safe.byRef.size ||
       [...safe.byRef].some(([ref, legacy]) => session.compactV2Refs.get(ref) !== legacy));
-  // An index belongs to exactly one action-map snapshot. If structural state
-  // changed, publish a complete fresh map with a new generation rather than
-  // letting a prior short index drift onto a new control.
   const requiresResync =
-    !samePage ||
+    !sameDocument ||
     delta === null ||
     delta.stageChanged ||
     privateBindingsChanged ||
     delta.added.length > 0 ||
     delta.changed.length > 0 ||
     delta.removed.length > 0;
-  if (requiresResync && snapshotGeneration !== generation) {
-    snapshotGeneration = generation;
-    safe = buildSafeControlsV2({
-      elements,
-      legacyRefs,
-      generation: snapshotGeneration,
-      pageOrigin,
-      pageUrl: session.browser.currentUrl(),
-    });
-    delta = null;
-  }
+  if (requiresResync) delta = null;
+  // The epoch's DOM-mutation counter advances only when the skeleton actually
+  // changed. Refs are fingerprint-derived and survive it; paging cursors are
+  // positional and bound to it, so a cursor minted before a re-render dies.
+  const epoch: ObservationEpochV2 = {
+    doc: epochDoc,
+    rev: sameDocument && !requiresResync ? previous.epoch.rev : generation,
+  };
   const index: SafeObservationIndexV2 = {
-    generation: snapshotGeneration,
-    pageKey,
+    epoch,
     stage,
     semantics,
     rows: safe.rows,
@@ -5520,8 +5576,7 @@ function compactV2Observation(
   session.compactV2Index = index;
   session.compactV2Refs = safe.byRef;
   session.compactV2Previous = {
-    pageKey,
-    snapshotGeneration,
+    epoch,
     stage,
     semantics,
     byRef: new Map(safe.rows.map((row) => [row.ref, row])),
@@ -5551,7 +5606,7 @@ function compactV2Observation(
     cursorFor: (offset) =>
       compactV2Cursor(
         session,
-        snapshotGeneration,
+        epoch.rev,
         offset,
         compactV2QueryCursorScope(session, "", undefined),
       ),
@@ -5572,7 +5627,7 @@ function compactV2Observation(
                     remaining: session.compactV2HintPages.length - 1,
                     next_cursor: compactV2Cursor(
                       session,
-                      snapshotGeneration,
+                      epoch.rev,
                       1,
                       compactV2HintCursorScope(session),
                     ),
@@ -5621,7 +5676,7 @@ export async function observeQuery(
   if (index === null || index.expiresAt < Date.now()) throw new Error("stale_cursor");
   // Query/paging is part of the same sealed action-map protocol: never return
   // rows from a page whose private binding no longer matches the live page.
-  if (index.pageKey !== compactV2PageKey(session)) {
+  if (index.epoch.doc !== compactV2EpochDoc(session)) {
     invalidateCompactV2Snapshot(session);
     throw new Error("stale_cursor");
   }
@@ -5632,29 +5687,18 @@ export async function observeQuery(
     if (needle.length === 0 && role === undefined && session.compactV2HintPages.length > 0) {
       try {
         const parsed = parseCompactV2Cursor(session, cursor, compactV2HintCursorScope(session));
-        if (parsed.generation !== index.generation) throw new Error("stale_cursor");
+        if (parsed.rev !== index.epoch.rev) throw new Error("stale_cursor");
         return compactV2HintPage(session, index, parsed.offset);
       } catch (error) {
         if (!(error instanceof Error) || error.message !== "invalid_cursor") throw error;
       }
     }
     const parsed = parseCompactV2Cursor(session, cursor, cursorScope);
-    if (parsed.generation !== index.generation) throw new Error("stale_cursor");
+    if (parsed.rev !== index.epoch.rev) throw new Error("stale_cursor");
     offset = parsed.offset;
   }
   const liveElements = await session.browser.extractInteractiveElements();
-  let pageOrigin = "";
-  try {
-    pageOrigin = new URL(session.browser.currentUrl()).origin;
-  } catch {}
-  const liveRefs = provisionElementRefs(liveElements);
-  const liveSafe = buildSafeControlsV2({
-    elements: liveElements,
-    legacyRefs: liveRefs,
-    generation: index.generation,
-    pageOrigin,
-    pageUrl: session.browser.currentUrl(),
-  });
+  const liveSafe = compactV2LiveControls(session, liveElements);
   const liveUnchanged =
     liveSafe.rows.length === index.rows.length &&
     liveSafe.byRef.size === session.compactV2Refs.size &&
@@ -5662,45 +5706,38 @@ export async function observeQuery(
     [...liveSafe.byRef].every(([ref, legacy]) => session.compactV2Refs.get(ref) === legacy);
   let snapshotRows = index.rows;
   let pagingStage = index.stage;
-  let pagingGeneration = index.generation;
+  let pagingRev = index.epoch.rev;
   if (!liveUnchanged) {
     // Benign live re-render (validation states appearing, dynamic fields
     // toggling, rotating checkout query tokens): re-serialize the same
-    // document instead of failing the page. A fresh generation keeps a prior
-    // short index from drifting onto a new control — the same invariant as
-    // the observe resync path — while cursors minted here bind to the fresh
-    // map, so the caller can keep paging deterministically.
+    // document instead of failing the page. Refs are unaffected — they are
+    // fingerprint-derived — but the positional page offsets are not, so the
+    // epoch's revision advances and cursors minted here bind to the fresh map.
     session.generation += 1;
-    pagingGeneration = session.generation;
-    const fresh = buildSafeControlsV2({
-      elements: liveElements,
-      legacyRefs: liveRefs,
-      generation: pagingGeneration,
-      pageOrigin,
-      pageUrl: session.browser.currentUrl(),
-    });
+    pagingRev = session.generation;
     pagingStage = safeStageV2(session.browser.currentUrl(), liveElements);
-    snapshotRows = fresh.rows;
+    snapshotRows = liveSafe.rows;
+    const epoch: ObservationEpochV2 = { doc: index.epoch.doc, rev: pagingRev };
     session.compactV2Index = {
-      generation: pagingGeneration,
-      pageKey: index.pageKey,
+      epoch,
       stage: pagingStage,
       semantics: index.semantics,
-      rows: fresh.rows,
-      byRef: fresh.byRef,
+      rows: liveSafe.rows,
+      byRef: liveSafe.byRef,
       expiresAt: Date.now() + 5 * 60_000,
     };
-    session.compactV2Refs = fresh.byRef;
+    session.compactV2Refs = liveSafe.byRef;
     session.compactV2Previous = {
-      pageKey: index.pageKey,
-      snapshotGeneration: pagingGeneration,
+      epoch,
       stage: pagingStage,
       semantics: index.semantics,
-      byRef: new Map(fresh.rows.map((row) => [row.ref, row])),
+      byRef: new Map(liveSafe.rows.map((row) => [row.ref, row])),
     };
   }
   const liveByLegacy = new Map<string, InteractiveElement>();
-  for (const [element, legacy] of liveRefs) liveByLegacy.set(legacy, element);
+  for (const [element, legacy] of provisionElementRefs(liveElements)) {
+    liveByLegacy.set(legacy, element);
+  }
   const privateMatches = new Set<string>();
   if (needle.length > 0) {
     for (const [ref, legacy] of session.compactV2Refs) {
@@ -5712,7 +5749,7 @@ export async function observeQuery(
   }
   const rows = snapshotRows.filter((row) => {
     const searchable = [
-      row.name,
+      row.label,
       row.role,
       row.state,
       row.visibility,
@@ -5737,7 +5774,7 @@ export async function observeQuery(
     semantics: index.semantics,
     rows,
     offset,
-    cursorFor: (next) => compactV2Cursor(session, pagingGeneration, next, cursorScope),
+    cursorFor: (next) => compactV2Cursor(session, pagingRev, next, cursorScope),
   });
   return page.payload;
 }
@@ -6222,7 +6259,7 @@ async function executeAct(
   if ("target" in action) {
     if (session.compactV2Active && !internalAccess) {
       try {
-        compactV2Authorization = compactV2AuthorizationForHandle(session, action.target);
+        compactV2Authorization = compactV2AuthorizationForTarget(session, action.target);
         resolutionTarget = compactV2Authorization.legacyRef;
         auditTarget = action.target;
       } catch (error) {
@@ -6371,7 +6408,7 @@ async function executeAct(
             : resolveAuthorizedCompactV2Target(session, fresh, compactV2Authorization);
         if (el === null) {
           if (session.compactV2Active) {
-            if (!internalAccess) throwCompactV2ReobserveRequired();
+            if (!internalAccess) throwCompactV2StaleRef();
             throw new Error("type_secret: internal live target changed");
           }
           const stale = staleTargetError(session, action.target, fresh);
@@ -6414,7 +6451,7 @@ async function executeAct(
             : resolveAuthorizedCompactV2Target(session, fresh, compactV2Authorization);
         if (el === null) {
           if (session.compactV2Active) {
-            if (!internalAccess) throwCompactV2ReobserveRequired();
+            if (!internalAccess) throwCompactV2StaleRef();
             throw new Error("select: internal live target changed");
           }
           const stale = staleTargetError(session, action.target, fresh);
@@ -6556,7 +6593,7 @@ async function executeAct(
             : resolveAuthorizedCompactV2Target(session, fresh, compactV2Authorization);
         if (el === null) {
           if (session.compactV2Active) {
-            if (!internalAccess) throwCompactV2ReobserveRequired();
+            if (!internalAccess) throwCompactV2StaleRef();
             throw new Error(`${action.kind}: internal live target changed`);
           }
           const stale = staleTargetError(session, action.target, fresh);
@@ -6741,7 +6778,7 @@ async function executeAct(
             : resolveAuthorizedCompactV2Target(session, fresh, compactV2Authorization);
         if (el === null) {
           if (session.compactV2Active) {
-            if (!internalAccess) throwCompactV2ReobserveRequired();
+            if (!internalAccess) throwCompactV2StaleRef();
             throw new Error("oauth_login: internal live target changed");
           }
           throw new Error(
@@ -6764,7 +6801,18 @@ async function executeAct(
       }
     }
   } finally {
-    if (action.kind !== "allow_host") invalidateCompactV2Snapshot(session);
+    // An act no longer retires the action map. Refs are fingerprint-derived and
+    // re-resolved live against the observed epoch on every act, so the agent can
+    // fill a whole form from one observation. Only LEAVING the observed document
+    // retires them — the same condition the authorization check enforces — so
+    // drop the snapshot exactly then, and fail closed if the epoch is unreadable.
+    if (action.kind !== "allow_host" && session.compactV2Index !== null) {
+      let stillObservedDocument = false;
+      try {
+        stillObservedDocument = session.compactV2Index.epoch.doc === compactV2EpochDoc(session);
+      } catch {}
+      if (!stillObservedDocument) invalidateCompactV2Snapshot(session);
+    }
   }
   await verifyRecordedFieldsAfterTransition(session, action, recordingTransitionFields);
   // Don't fold inbox-provider steps into the replayable recipe (see
@@ -6838,7 +6886,7 @@ export async function formSelectMany(
   for (let index = 0; index < selectionEntries.length; index += 1) {
     const [label, option] = selectionEntries[index]!;
     const publicLabel =
-      session.compactV2Active && !/^@e:[0-9a-z]+\.[0-9a-z]+$/.test(label)
+      session.compactV2Active && !isCompactV2Handle(label) && !isCompactV2Label(label)
         ? "<rejected-v2-target>"
         : label;
     const publicSelection = session.compactV2Active
@@ -6847,7 +6895,7 @@ export async function formSelectMany(
     let authorization: CompactV2TargetAuthorization | undefined;
     if (session.compactV2Active) {
       try {
-        authorization = compactV2AuthorizationForHandle(session, label);
+        authorization = compactV2AuthorizationForTarget(session, label);
       } catch (error) {
         audit(sessionId, "act", { kind: "select_many", target: "<rejected-v2-target>" });
         if (index === 0) throw error;
@@ -6928,9 +6976,8 @@ function compactV2ActionFailureReason(error: unknown, kind: ProvisionAction["kin
   if (error instanceof Error && (error as Error & { code?: unknown }).code === "google_session") {
     return error.message;
   }
-  if (error instanceof TargetStaleError || error instanceof CompactV2ReobserveRequiredError) {
-    return "reobserve_required";
-  }
+  if (error instanceof CompactV2StaleRefError) return "stale_ref";
+  if (error instanceof TargetStaleError) return "reobserve_required";
   if (error instanceof ProvisionTargetNotAllowedError) {
     return "target_not_allowed";
   }
