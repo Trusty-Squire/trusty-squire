@@ -5328,12 +5328,22 @@ function compactV2Cursor(
   return `${body}.${signature}`;
 }
 
-// Deltas are valid only for the same document location. The URL itself stays
-// on the private side of V2; the session keeps this HMAC solely to decide
-// whether a subsequent observe may reuse the preceding safe action map.
+// Deltas are valid only for the same document location. The full URL stays
+// on the private side of V2 and is too volatile to page by: live checkouts
+// (e.g. Shopify) append a rotating query token on every step re-render, which
+// would invalidate the snapshot between overflow pages. The identity therefore
+// hashes only the main document plus origin+pathname. A real navigation to a
+// different path or a replaced main document still produces a different key;
+// query-string and fragment churn on the same logical page must not.
 function compactV2PageKey(session: Session): string {
+  let location = session.browser.currentUrl();
+  try {
+    const parsed = new URL(location);
+    if (parsed.origin !== "null" && parsed.origin !== "")
+      location = `${parsed.origin}${parsed.pathname}`;
+  } catch {}
   return createHmac("sha256", session.compactV2Secret)
-    .update(`${session.browser.mainDocumentIdentity()}\u0000${session.browser.currentUrl()}`)
+    .update(`${session.browser.mainDocumentIdentity()}\u0000${location}`)
     .digest("base64url");
 }
 
@@ -5645,14 +5655,49 @@ export async function observeQuery(
     pageOrigin,
     pageUrl: session.browser.currentUrl(),
   });
-  if (
-    liveSafe.rows.length !== index.rows.length ||
-    liveSafe.byRef.size !== session.compactV2Refs.size ||
-    liveSafe.rows.some((row, rowIndex) => !sameCompactV2Control(row, index.rows[rowIndex]!)) ||
-    [...liveSafe.byRef].some(([ref, legacy]) => session.compactV2Refs.get(ref) !== legacy)
-  ) {
-    invalidateCompactV2Snapshot(session);
-    throw new Error("stale_cursor");
+  const liveUnchanged =
+    liveSafe.rows.length === index.rows.length &&
+    liveSafe.byRef.size === session.compactV2Refs.size &&
+    liveSafe.rows.every((row, rowIndex) => sameCompactV2Control(row, index.rows[rowIndex]!)) &&
+    [...liveSafe.byRef].every(([ref, legacy]) => session.compactV2Refs.get(ref) === legacy);
+  let snapshotRows = index.rows;
+  let pagingStage = index.stage;
+  let pagingGeneration = index.generation;
+  if (!liveUnchanged) {
+    // Benign live re-render (validation states appearing, dynamic fields
+    // toggling, rotating checkout query tokens): re-serialize the same
+    // document instead of failing the page. A fresh generation keeps a prior
+    // short index from drifting onto a new control — the same invariant as
+    // the observe resync path — while cursors minted here bind to the fresh
+    // map, so the caller can keep paging deterministically.
+    session.generation += 1;
+    pagingGeneration = session.generation;
+    const fresh = buildSafeControlsV2({
+      elements: liveElements,
+      legacyRefs: liveRefs,
+      generation: pagingGeneration,
+      pageOrigin,
+      pageUrl: session.browser.currentUrl(),
+    });
+    pagingStage = safeStageV2(session.browser.currentUrl(), liveElements);
+    snapshotRows = fresh.rows;
+    session.compactV2Index = {
+      generation: pagingGeneration,
+      pageKey: index.pageKey,
+      stage: pagingStage,
+      semantics: index.semantics,
+      rows: fresh.rows,
+      byRef: fresh.byRef,
+      expiresAt: Date.now() + 5 * 60_000,
+    };
+    session.compactV2Refs = fresh.byRef;
+    session.compactV2Previous = {
+      pageKey: index.pageKey,
+      snapshotGeneration: pagingGeneration,
+      stage: pagingStage,
+      semantics: index.semantics,
+      byRef: new Map(fresh.rows.map((row) => [row.ref, row])),
+    };
   }
   const liveByLegacy = new Map<string, InteractiveElement>();
   for (const [element, legacy] of liveRefs) liveByLegacy.set(legacy, element);
@@ -5665,7 +5710,7 @@ export async function observeQuery(
       }
     }
   }
-  const rows = index.rows.filter((row) => {
+  const rows = snapshotRows.filter((row) => {
     const searchable = [
       row.name,
       row.role,
@@ -5687,12 +5732,12 @@ export async function observeQuery(
   });
   const page = encodeV2Page({
     sessionId: session.id,
-    stage: index.stage,
+    stage: pagingStage,
     pageUrl: session.browser.currentUrl(),
     semantics: index.semantics,
     rows,
     offset,
-    cursorFor: (next) => compactV2Cursor(session, index.generation, next, cursorScope),
+    cursorFor: (next) => compactV2Cursor(session, pagingGeneration, next, cursorScope),
   });
   return page.payload;
 }
