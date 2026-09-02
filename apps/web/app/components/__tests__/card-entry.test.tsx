@@ -58,6 +58,37 @@ describe("CardEntry — the shared sensitive add-card flow", () => {
     );
   });
 
+  it(
+    "auto-formats Expiration from digits alone (mobile numeric keypads have no /)",
+    async () => {
+      render(<CardEntry />);
+      await waitFor(() => expect(screen.getByLabelText("Expiration")).toBeTruthy());
+      const user = userEvent.setup();
+      const expiry = screen.getByLabelText("Expiration") as HTMLInputElement;
+
+      await user.type(expiry, "1230");
+      expect(expiry.value).toBe("12/30");
+
+      // Partial input grows naturally, without a stuck slash on backspace.
+      await user.clear(expiry);
+      await user.type(expiry, "1");
+      expect(expiry.value).toBe("1");
+      await user.clear(expiry);
+      await user.type(expiry, "12");
+      expect(expiry.value).toBe("12");
+      await user.clear(expiry);
+      await user.type(expiry, "123");
+      expect(expiry.value).toBe("12/3");
+      await user.keyboard("{Backspace}");
+      expect(expiry.value).toBe("12");
+
+      // A desktop user typing their own `/` still lands on valid MM/YY.
+      await user.clear(expiry);
+      await user.type(expiry, "12/30");
+      expect(expiry.value).toBe("12/30");
+    },
+  );
+
   // userEvent typing across 9 fields exceeds the 5s default when the whole
   // workspace's suites run in parallel and starve the CPU.
   it(
