@@ -7594,13 +7594,11 @@ export function emitProvisionMeasurement(
 }
 
 async function settleAfterStateChange(browser: BrowserController): Promise<void> {
-  await settle(450);
+  // A fixed dwell here used to consume the OAuth action's completion window
+  // after the provider had already returned. Wait for the page's actual
+  // interactive state instead; it resolves immediately when the redirect has
+  // rendered and remains bounded for slow SPAs.
   await browser.waitForInteractiveDom(1, 2_000).catch(() => undefined);
-  for (let i = 0; i < 4; i += 1) {
-    const text = await browser.extractVisibleText().catch(() => "");
-    if (text.replace(/\s+/g, " ").trim().length > 0) return;
-    await settle(300);
-  }
 }
 
 // ── operator-recipe: remember a successful run, verify a postcondition ──

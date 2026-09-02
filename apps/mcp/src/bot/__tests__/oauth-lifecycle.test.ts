@@ -453,4 +453,40 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await context.close().catch(() => undefined);
     }
   });
+
+  it("recognizes a settled same-tab return while the authenticated dashboard keeps polling", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const productUrl = "https://product.test/login";
+    await context.route("https://product.test/**", async (route) => {
+      const requestUrl = route.request().url();
+      if (requestUrl.endsWith("/pulse")) {
+        await route.fulfill({ status: 204 });
+        return;
+      }
+      const callback = requestUrl.endsWith("/callback");
+      await route.fulfill({
+        contentType: "text/html",
+        body: callback
+          ? '<main>Signed in</main><script>setInterval(() => fetch("/pulse"), 25)</script>'
+          : '<button id="oauth" onclick="location.href=\'https://provider.test/oauth\'">Login with Provider</button>',
+      });
+    });
+    await context.route("https://provider.test/oauth", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<script>setTimeout(() => location.href="https://product.test/callback", 100)</script>',
+      });
+    });
+    await product.goto(productUrl);
+    const controller = BrowserController.fromHarnessPage(product);
+
+    try {
+      await controller.loginWithOAuth("#oauth", 1_500);
+      expect(controller.currentUrl()).toBe("https://product.test/callback");
+      expect(await controller.extractVisibleText()).toContain("Signed in");
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
 });

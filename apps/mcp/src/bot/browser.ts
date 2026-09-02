@@ -15607,7 +15607,7 @@ export class BrowserController {
   // are read or bypassed here.
   async loginWithOAuth(
     selector: string,
-    settleTimeoutMs = 12_000,
+    settleTimeoutMs = 30_000,
     consentProvider?: OAuthProviderId,
     expectedGoogleAccountEmail?: string | null,
   ): Promise<void> {
@@ -15639,9 +15639,16 @@ export class BrowserController {
     let recovery: Page | null = null;
     let providerPage: Page | null = null;
     let productDeparted = false;
+    let resolveProductDeparture: () => void = () => undefined;
+    const productDeparturePromise = new Promise<void>((resolve) => {
+      resolveProductDeparture = resolve;
+    });
     const onProductNavigation = (frame: Frame): void => {
       if (frame !== product.mainFrame()) return;
-      if (!this.isOAuthProductUrl(frame.url(), productUrl)) productDeparted = true;
+      if (!this.isOAuthProductUrl(frame.url(), productUrl)) {
+        productDeparted = true;
+        resolveProductDeparture();
+      }
     };
     product.on("framenavigated", onProductNavigation);
     try {
@@ -15669,11 +15676,16 @@ export class BrowserController {
         }
         providerPage = await Promise.race([
           popupPromise,
+          // A same-tab provider redirect is just as conclusive as a popup.
+          // Do not burn two seconds of the OAuth budget waiting for a window
+          // that this service will never open.
+          productDeparturePromise.then(() => null),
           this.sleep(Math.min(remainingBudgetMs(), 2_000)).then(() => null),
         ]);
       } finally {
         context.off("page", onPopup);
         resolvePopup(null);
+        resolveProductDeparture();
       }
       const transient = providerPage ?? product;
       productDeparted = productDeparted || !this.isOAuthProductUrl(transient.url(), productUrl);
@@ -15789,12 +15801,23 @@ export class BrowserController {
       const url = page.url();
       const isProduct = this.isOAuthProductUrl(url, productUrl);
       if (startsOnProduct && departed && isProduct) {
-        const remaining = Math.max(1, deadline - Date.now());
-        const idle = await page
-          .waitForLoadState("networkidle", { timeout: remaining })
+        // A return to the relying party is the OAuth completion signal. A
+        // dashboard can keep polling or streaming forever, so networkidle is
+        // not a valid requirement for a completed OAuth redirect.
+        const returnedUrl = url;
+        const ready = await page
+          .waitForLoadState("domcontentloaded", { timeout: Math.max(1, deadline - Date.now()) })
           .then(() => true)
           .catch(() => false);
-        return idle && !page.isClosed() && this.isOAuthProductUrl(page.url(), productUrl)
+        if (!ready || page.isClosed() || !this.isOAuthProductUrl(page.url(), productUrl)) {
+          return null;
+        }
+        // Require the return URL to survive one event-loop turn so a transient
+        // callback hop is never reported as the final product page.
+        await this.sleep(Math.min(50, Math.max(1, deadline - Date.now())));
+        return !page.isClosed() &&
+          page.url() === returnedUrl &&
+          this.isOAuthProductUrl(page.url(), productUrl)
           ? "returned"
           : null;
       }

@@ -21,6 +21,7 @@ const h = vi.hoisted(() => ({
   oauthConsentProviders: [] as Array<string | undefined>,
   oauthExpectedGoogleAccountEmails: [] as Array<string | null | undefined>,
   oauthLoginGates: new Map<number, Promise<void>>(),
+  waitForInteractiveDomCalls: [] as Array<{ minElements: number; timeoutMs: number }>,
   oauthResultUrl: "https://app.example.com/dashboard",
   restoredStorageStates: [] as Array<{ browserIndex: number; state: unknown }>,
   restoreStorageStateGate: null as Promise<void> | null,
@@ -336,7 +337,9 @@ vi.mock("../browser.js", () => ({
     async openFirstMailResult(): Promise<boolean> {
       return h.openFirstMailResult;
     }
-    async waitForInteractiveDom(): Promise<void> {}
+    async waitForInteractiveDom(minElements = 5, timeoutMs = 20_000): Promise<void> {
+      h.waitForInteractiveDomCalls.push({ minElements, timeoutMs });
+    }
     async waitForCaptchaChallengeToSettle(): Promise<boolean> {
       return h.captchaSettled;
     }
@@ -1043,6 +1046,7 @@ beforeEach(() => {
   h.oauthConsentProviders = [];
   h.oauthExpectedGoogleAccountEmails = [];
   h.oauthLoginGates = new Map();
+  h.waitForInteractiveDomCalls = [];
   h.oauthResultUrl = "https://app.example.com/dashboard";
   h.restoredStorageStates = [];
   h.restoreStorageStateGate = null;
@@ -3382,6 +3386,32 @@ describe("operate session — OAuth lifecycle", () => {
     expect(h.startCalls).toBe(1);
     expect(h.profileDirs).toHaveLength(1);
     expect(result.text).toBe("Signed in");
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("waits for DOM readiness instead of spending the OAuth completion budget on a fixed dwell", async () => {
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "30";
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    h.oauthLoginGates.set(
+      0,
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, 10);
+      }),
+    );
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+
+    await expect(
+      act(started.session_id, { kind: "oauth_login", target: "Continue with Google" }),
+    ).resolves.toMatchObject({ text: "Signed in" });
+    expect(h.waitForInteractiveDomCalls).toContainEqual({ minElements: 1, timeoutMs: 2_000 });
     await finishProvisionSession(started.session_id);
   });
 
