@@ -41,6 +41,40 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await browser?.close();
   });
 
+  it("admits Google when its live context remains on Cloud Console", async () => {
+    const { controller, product } = await controllerForProduct();
+    const context = product.context();
+    await context.route("https://console.cloud.google.com/**", async (route) => {
+      await route.fulfill({ contentType: "text/html", body: "<main>console shell</main>" });
+    });
+
+    try {
+      await expect(controller.detectSessionProviders()).resolves.toEqual(["google"]);
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("refuses Google when Cloud Console redirects to accounts.google.com", async () => {
+    const { controller, product } = await controllerForProduct();
+    const context = product.context();
+    await context.addCookies([
+      { name: "SID", value: "x".repeat(40), domain: ".google.com", path: "/" },
+    ]);
+    await context.route("https://console.cloud.google.com/**", async (route) => {
+      await route.continue({ url: "https://accounts.google.com/signin/v2/identifier" });
+    });
+    await context.route("https://accounts.google.com/**", async (route) => {
+      await route.fulfill({ contentType: "text/html", body: "<main>sign in</main>" });
+    });
+
+    try {
+      await expect(controller.detectSessionProviders()).resolves.toEqual([]);
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
   it("reattaches the active controller page when a provider closes its OAuth-return popup", async () => {
     const { controller, product } = await controllerForProduct();
     const context = product.context();
