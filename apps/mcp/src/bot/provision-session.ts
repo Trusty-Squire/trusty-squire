@@ -3342,13 +3342,6 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
       typeof browser.detectGoogleAccountEmail === "function"
         ? await browser.detectGoogleAccountEmail().catch(() => null)
         : null;
-    // Cookie presence can leave Google looking authenticated after the provider
-    // has already put that account back on its signed-out chooser. My Account
-    // is the live authority: it yields an account email only for a genuinely
-    // signed-in profile. Keep the other provider probe results for guidance,
-    // but admit Google only when this probe succeeds.
-    liveProviders = liveProviders.filter((provider) => provider !== "google");
-    if (workerEmail !== null) liveProviders.push("google");
     assertProvisionStartAdmitted(acquired.shutdownGeneration);
     const gate = googleSessionGate(liveProviders);
     if (!gate.ok) {
