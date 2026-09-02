@@ -3866,6 +3866,104 @@ describe("Compact V2 action-map boundary", () => {
     );
   });
 
+  it("pages across a volatile query-token change on the same origin+path", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = Array.from({ length: 8 }, (_, index) =>
+      elem({
+        index,
+        tag: "button",
+        role: "button",
+        visibleText: `Item ${index}`,
+        selector: `#item-${index}`,
+      }),
+    );
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkouts/c/token",
+    });
+    const pageCursor = (started.overflow as { next_cursor: string }).next_cursor;
+    // Live checkouts (e.g. Shopify) rotate a query token on every step
+    // re-render without a real navigation; paging must survive it.
+    h.currentUrl = "https://shop.example.com/checkouts/c/token?_r=revalidated";
+    const nextPage = await observeQuery(started.session_id, "", undefined, pageCursor);
+    expect((nextPage.safe_table as unknown[]).length).toBeGreaterThan(0);
+    expect(nextPage.overflow).toBeUndefined();
+  });
+
+  it("pages across a benign form re-render and rebinds to a fresh generation", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = Array.from({ length: 8 }, (_, index) =>
+      elem({
+        index,
+        tag: "button",
+        role: "button",
+        visibleText: `Item ${index}`,
+        selector: `#item-${index}`,
+      }),
+    );
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkouts/c/token",
+    });
+    const pageCursor = (started.overflow as { next_cursor: string }).next_cursor;
+    // A validation state appears on a live field between pages: the element
+    // set no longer byte-matches the frozen snapshot, but paging must
+    // re-serialize the same document instead of failing with stale_cursor.
+    (h.elements[3] as { required?: boolean }).required = true;
+    const nextPage = (await observeQuery(started.session_id, "", undefined, pageCursor)) as {
+      safe_table: Array<[string]>;
+      overflow?: { next_cursor: string };
+    };
+    expect(nextPage.safe_table.length).toBe(4);
+    // The fresh map rebinds every short index to a new generation.
+    const firstPageRef = (started as unknown as { safe_table: Array<[string]> }).safe_table[0]![0];
+    const firstGen = /^@e:([0-9a-z]+)\./.exec(firstPageRef)![1]!;
+    const nextGen = /^@e:([0-9a-z]+)\./.exec(nextPage.safe_table[0]![0]!)![1]!;
+    expect(nextGen).not.toBe(firstGen);
+    // The pre-resync cursor must be dead, never silently re-paged.
+    await expect(observeQuery(started.session_id, "", undefined, pageCursor)).rejects.toThrow(
+      "stale_cursor",
+    );
+    // A ref issued before the resync must not resolve onto the fresh map.
+    await expect(act(started.session_id, { kind: "click", target: firstPageRef })).rejects.toThrow(
+      "reobserve_required",
+    );
+    expect(h.clickCalls).toBe(0);
+  });
+
+  it("still invalidates overflow cursors on a cross-document or cross-path navigation", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = Array.from({ length: 8 }, (_, index) =>
+      elem({
+        index,
+        tag: "button",
+        role: "button",
+        visibleText: `Item ${index}`,
+        selector: `#item-${index}`,
+      }),
+    );
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkouts/c/token",
+    });
+    const pageCursor = (started.overflow as { next_cursor: string }).next_cursor;
+
+    // A replaced main document on the same URL still invalidates.
+    h.mainDocumentEpoch += 1;
+    await expect(observeQuery(started.session_id, "", undefined, pageCursor)).rejects.toThrow(
+      "stale_cursor",
+    );
+
+    // Re-establish the snapshot, then navigate to a different path (a real
+    // navigation also replaces the document): the normalized origin+pathname
+    // page key must change and the cursor must die — refs never leak across
+    // documents.
+    const reObserved = await observe(started.session_id);
+    const freshCursor = (reObserved.overflow as { next_cursor: string }).next_cursor;
+    h.currentUrl = "https://shop.example.com/checkouts/c/other?_r=x";
+    h.mainDocumentEpoch += 1;
+    await expect(observeQuery(started.session_id, "", undefined, freshCursor)).rejects.toThrow(
+      "stale_cursor",
+    );
+  });
+
   it("searches only the sealed action map", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
