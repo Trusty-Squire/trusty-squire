@@ -358,16 +358,17 @@ const OBSERVE_DELTA_CONTRACT =
   'div — e.g. some SPA "Add To Cart" buttons), it has no ref: click it with operate_act click/js_click ' +
   'target=`text="…"` or `css=…` (see operate_act). `click` respects actionability and throws if an overlay ' +
   "intercepts; dismiss the overlay or deliberately use `js_click`, which directly dispatches through a " +
-  "transparent overlay. Under default compact-v2, only handles from the current sealed action map are accepted; " +
-  "browser-driving actions invalidate them. On opaque `reobserve_required`, call operate_observe and choose a new " +
-  "handle; do not retry the old handle or use V1 replacement candidates or locator fallback. ";
+  "transparent overlay. Under default compact-v2, only refs and @labels from the current sealed action map are " +
+  "accepted. A ref is a durable element fingerprint: it stays valid across acts and benign re-renders on the same " +
+  "document, so one observation can drive several acts. On opaque `stale_ref`, call operate_observe and choose a " +
+  "new ref; do not retry the old one or use V1 replacement candidates or locator fallback. ";
 
 const COMPACT_V2_CONTRACT =
   "When format is `compact-v2`, use its sealed map: session_id is the continuation handle; `url` is the screened page origin (never its path/query); `stage` is a finite enum; " +
   "semantic carries the screened title and primary visible heading; safe_table rows use [ref,role,facts?], where role is " +
-  "b=button,l=link,t=textbox,s=select,c=checkbox,r=radio,tb=tab,m=menuitem,f=file. facts is a pipe-delimited string: " +
-  "an optional first unkeyed segment is the screened short label; labels containing `|` or beginning like a keyed fact " +
-  "are instead encoded as n=<label>, with `%` encoded as `%25` and `|` as `%7C` (decode `%7C` before `%25`). " +
+  "b=button,l=link,t=textbox,s=select,c=checkbox,r=radio,tb=tab,m=menuitem,f=file. ref is an opaque durable " +
+  "element handle. facts is a pipe-delimited string: an optional first unkeyed segment is the row's @label alias, " +
+  "a slug of its screened short label that operate_act also accepts as a target. " +
   "The label is followed by any present s=<state bitset>, a=<action>, " +
   "f=<field>, q=<choice position>/<choice total>, and x=<frame> segments. Fact-only rows begin with a keyed segment. " +
   "State bitset codes are c=checked,u=unchecked,d=disabled,r=required; frame codes are x=s for a same-origin child " +
@@ -595,7 +596,7 @@ const formSelectionsSchema = z
   .refine((value) => Object.keys(value).length > 0, "Provide at least one selection")
   .refine((value) => Object.keys(value).length <= 12, "At most 12 selections per call")
   .describe(
-    "Map each current Compact V2 @e: handle, or V1 observed label/ref, to its visible option text.",
+    "Map each current Compact V2 @e: ref or @label, or V1 observed label/ref, to its visible option text.",
   );
 
 interface CartAddArgs {
@@ -1363,7 +1364,7 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "cart_add (product_identity + options_hash + idempotency_key — reserve an " +
     "idempotent cart mutation, exact-line post-verify it, and return its postcondition), " +
     "select_many (ordered selections map — select sequentially, re-observe after " +
-    "each success, and retain partial results; Compact V2 keys are current safe_table @e: handles, " +
+    "each success, and retain partial results; Compact V2 keys are current safe_table @e: refs or @labels, " +
     "while V1 keys may be observed labels or refs), extract (into_slot/secret_label/store — " +
     "reveal masked keys and extract credentials from the current page, sealed slot or vaulted), " +
     "solve_captcha (detect and drive the in-session captcha gate; settled=false carries a " +
@@ -1384,9 +1385,11 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "Squire-known address, contact, product_query, or quantity input; type_secret and " +
     "operate_pay record credential and card provenance from their sealed sources. " +
     "When repairing a replay fallback field, pass its replay_step_index and replay_hole. " +
-    "Under default compact-v2, each target handle belongs only to the current sealed action map and browser-driving " +
-    "actions invalidate that map. On opaque `reobserve_required`, call operate_observe and choose a new handle; do " +
-    "not retry the old handle. In V1, stable target refs remain reusable while their element exists; a stale @e: " +
+    "Under default compact-v2, target is either an @e: ref from the current sealed action map or the @label alias " +
+    "of exactly one of its rows; a @label matching several rows returns ambiguous_target listing their refs, never " +
+    "a guess. Refs survive acts and benign re-renders on the same document; a real navigation retires them. On " +
+    "opaque `stale_ref`, call operate_observe and choose a new ref; do not retry the old one. " +
+    "In V1, stable target refs remain reusable while their element exists; a stale @e: " +
     "ref returns {status:target_stale, replacement_candidates, retry_policy:do_not_retry_old_ref}. " +
     'detail (default "compact") controls the returned payload: "none" skips it ' +
     "entirely for chained fills (then operate_observe before the next ref action), " +
@@ -1449,7 +1452,7 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
         maxProperties: 12,
         additionalProperties: { type: "string" },
         description:
-          "Map each current Compact V2 @e: handle, or V1 observed label/ref, to its visible option text.",
+          "Map each current Compact V2 @e: ref or @label, or V1 observed label/ref, to its visible option text.",
       },
       into_slot: { type: "string" },
       secret_label: { type: "string" },
@@ -1605,7 +1608,7 @@ export const operateFormSelectManyTool: Tool<z.infer<typeof formSelectManySchema
         maxProperties: 12,
         additionalProperties: { type: "string" },
         description:
-          "Map each current Compact V2 @e: handle, or V1 observed label/ref, to its visible option text.",
+          "Map each current Compact V2 @e: ref or @label, or V1 observed label/ref, to its visible option text.",
       },
     },
   },

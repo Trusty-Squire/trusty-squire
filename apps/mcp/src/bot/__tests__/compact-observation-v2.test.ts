@@ -5,6 +5,9 @@ import {
   OBSERVE_V2_MAX_TOKENS,
   buildSafeControlsV2,
   compactV2LegacyRefForHandle,
+  controlLabelV2,
+  isCompactV2Handle,
+  isCompactV2Label,
   controlMatchesPrivateQueryV2,
   diffSafeControlsV2,
   equalSafePageSemanticsV2,
@@ -17,6 +20,25 @@ import {
   safeStageV2,
 } from "../compact-observation-v2.js";
 import type { InteractiveElement } from "../browser.js";
+
+/**
+ * The serializer under test consumes handles; minting them is the session's job
+ * (docs/observation-model.md §4.1). Give each element a stable synthetic handle
+ * so these cases stay about the wire representation.
+ */
+function safeControls(args: {
+  elements: readonly InteractiveElement[];
+  legacyRefs: ReadonlyMap<InteractiveElement, string>;
+  pageOrigin: string;
+  pageUrl?: string;
+}): ReturnType<typeof buildSafeControlsV2> {
+  return buildSafeControlsV2({
+    ...args,
+    handles: new Map(
+      args.elements.map((el, index) => [el, `@e:${String(index + 1).padStart(10, "h")}`]),
+    ),
+  });
+}
 
 function element(overrides: Partial<InteractiveElement> = {}): InteractiveElement {
   return {
@@ -54,10 +76,9 @@ describe("compact observation v2", () => {
       href: `https://merchant.invalid/pay?card=${planted}`,
     });
     const refs = new Map<InteractiveElement, string>([[input, "@e:private_identity_1"]]);
-    const safe = buildSafeControlsV2({
+    const safe = safeControls({
       elements: [input],
       legacyRefs: refs,
-      generation: 1,
       pageOrigin: "https://merchant.invalid",
     });
     const wire = JSON.stringify(safe.rows);
@@ -75,13 +96,12 @@ describe("compact observation v2", () => {
 
   it("removes credential-shaped labels before building the safe table", () => {
     const button = element({ visibleText: "Copy api_1234567890123" });
-    const safe = buildSafeControlsV2({
+    const safe = safeControls({
       elements: [button],
       legacyRefs: new Map([[button, "@e:copy-secret"]]),
-      generation: 1,
       pageOrigin: "https://merchant.invalid",
     });
-    expect(safe.rows).toEqual([expect.objectContaining({ ref: "@e:1.1", role: "button" })]);
+    expect(safe.rows).toEqual([expect.objectContaining({ ref: "@e:hhhhhhhhh1", role: "button" })]);
     expect(JSON.stringify(safe.rows)).not.toContain("api_1234567890123");
   });
 
@@ -95,13 +115,12 @@ describe("compact observation v2", () => {
       }),
     ).toEqual({ headings: ["Create your account"] });
     const button = element({ visibleText: "correcthorsebattery" });
-    const safe = buildSafeControlsV2({
+    const safe = safeControls({
       elements: [button],
       legacyRefs: new Map([[button, "@e:standalone-secret"]]),
-      generation: 1,
       pageOrigin: "https://merchant.invalid",
     });
-    expect(safe.rows[0]?.name).toBeUndefined();
+    expect(safe.rows[0]?.label).toBeUndefined();
   });
 
   it("retains only finite DOM semantic tokens", () => {
@@ -154,10 +173,9 @@ describe("compact observation v2", () => {
       tag: "a",
       visibleText: "Sign Up",
     });
-    const safe = buildSafeControlsV2({
+    const safe = safeControls({
       elements: [...nav, signup],
       legacyRefs: new Map([...nav, signup].map((el, index) => [el, `@e:legacy-${index}`])),
-      generation: 1,
       pageOrigin: "https://ipinfo.io",
     });
     expect(safe.rows[0]).toMatchObject({ role: "link", action: "signup" });
@@ -215,10 +233,9 @@ describe("compact observation v2", () => {
         selector: `#control-${index}`,
       }),
     );
-    const safe = buildSafeControlsV2({
+    const safe = safeControls({
       elements: dense,
       legacyRefs: new Map(dense.map((control, index) => [control, `@e:legacy_${index}`])),
-      generation: 1,
       pageOrigin: "https://merchant.invalid",
     });
     const page = encodeV2Page({
@@ -245,10 +262,9 @@ describe("compact observation v2", () => {
       ariaLabel: "Private customer contact address: private@example.test",
       autocomplete: "email",
     });
-    const safe = buildSafeControlsV2({
+    const safe = safeControls({
       elements: [input],
       legacyRefs: new Map([[input, "@e:email_1"]]),
-      generation: 1,
       pageOrigin: "https://merchant.invalid",
     });
     expect(safe.rows).toEqual([expect.objectContaining({ role: "textbox", field: "email" })]);
@@ -263,14 +279,13 @@ describe("compact observation v2", () => {
       value: "Create account",
       selector: "#create-account",
     });
-    const safe = buildSafeControlsV2({
+    const safe = safeControls({
       elements: [submit],
       legacyRefs: new Map([[submit, "@e:submit"]]),
-      generation: 1,
       pageOrigin: "https://merchant.invalid",
     });
     expect(safe.rows).toEqual([
-      expect.objectContaining({ role: "button", name: "Create account", action: "signup" }),
+      expect.objectContaining({ role: "button", label: "@create-account", action: "signup" }),
     ]);
   });
 
@@ -289,63 +304,69 @@ describe("compact observation v2", () => {
       ariaLabel: "Quantity",
       selector: "#quantity",
     });
-    const safe = buildSafeControlsV2({
+    const safe = safeControls({
       elements: [otp, quantity],
       legacyRefs: new Map([
         [otp, "@e:otp"],
         [quantity, "@e:quantity"],
       ]),
-      generation: 1,
       pageOrigin: "https://merchant.invalid",
     });
-    const otpRow = safe.rows.find((row) => row.name === "Verification code");
-    const quantityRow = safe.rows.find((row) => row.name === "Quantity");
+    const otpRow = safe.rows.find((row) => row.label === "@verification-code");
+    const quantityRow = safe.rows.find((row) => row.label === "@quantity");
     expect(otpRow?.field).toBeUndefined();
     expect(quantityRow?.field).toBe("quantity");
   });
 
-  it("issues short generation-bound indices in table order", () => {
+  it("carries the minted handle and a slugified addressable label", () => {
     const button = element({ visibleText: "private merchant copy" });
     const refs = new Map<InteractiveElement, string>([[button, "@e:stable_button"]]);
-    const initial = buildSafeControlsV2({
+    const initial = safeControls({
       elements: [button],
       legacyRefs: refs,
-      generation: 1,
       pageOrigin: "https://merchant.invalid",
     });
-    const repeated = buildSafeControlsV2({
+    const repeated = safeControls({
       elements: [button],
       legacyRefs: refs,
-      generation: 2,
       pageOrigin: "https://merchant.invalid",
     });
     expect(initial.rows[0]).toEqual(
-      expect.objectContaining({ ref: "@e:1.1", name: "private merchant copy" }),
+      expect.objectContaining({ ref: "@e:hhhhhhhhh1", label: "@private-merchant-copy" }),
     );
-    expect(repeated.rows[0]).toEqual(expect.objectContaining({ ref: "@e:2.1" }));
+    // A re-serialization of the same element keeps the same ref: no churn.
+    expect(repeated.rows[0]?.ref).toBe(initial.rows[0]?.ref);
   });
 
-  it("accepts only current snapshot index members", () => {
-    const current = new Map([["@e:2.1", "@e:legacy_current"]]);
-    expect(compactV2LegacyRefForHandle(current, 2, "@e:2.1")).toBe("@e:legacy_current");
-    expect(compactV2LegacyRefForHandle(current, 2, "@e:1.1")).toBeNull(); // stale generation
-    expect(compactV2LegacyRefForHandle(current, 2, "@e:2.2")).toBeNull(); // out of range
-    expect(compactV2LegacyRefForHandle(current, 2, "@e:2.01")).toBeNull(); // non-canonical forgery
-    expect(compactV2LegacyRefForHandle(current, 3, "@e:2.1")).toBeNull(); // page-change snapshot
+  it("accepts only well-formed handles that are current snapshot members", () => {
+    const current = new Map([["@e:hhhhhhhhh1", "@e:legacy_current"]]);
+    expect(compactV2LegacyRefForHandle(current, "@e:hhhhhhhhh1")).toBe("@e:legacy_current");
+    expect(compactV2LegacyRefForHandle(current, "@e:hhhhhhhhh2")).toBeNull(); // not a member
+    expect(compactV2LegacyRefForHandle(current, "@e:short")).toBeNull(); // malformed
+    expect(compactV2LegacyRefForHandle(current, "@e:1.1")).toBeNull(); // legacy index form
+    expect(compactV2LegacyRefForHandle(current, "@private-merchant-copy")).toBeNull(); // a label
+  });
+
+  it("slugs a label only from a screened description", () => {
+    expect(controlLabelV2("Continue with Google")).toBe("@continue-with-google");
+    expect(controlLabelV2(undefined)).toBeUndefined();
+    expect(controlLabelV2("!!!")).toBeUndefined();
+    expect(isCompactV2Label("@continue-with-google")).toBe(true);
+    expect(isCompactV2Label("@e:hhhhhhhhh1")).toBe(false);
+    expect(isCompactV2Handle("@e:hhhhhhhhh1")).toBe(true);
   });
 
   it("uses the native DOM label while retaining TS's local action ref", () => {
     const button = element({ visibleText: "Native serialized control" });
-    const safe = buildSafeControlsV2({
+    const safe = safeControls({
       elements: [button],
       legacyRefs: new Map([[button, "@e:continue"]]),
-      generation: 1,
       pageOrigin: "https://merchant.invalid",
     });
     expect(safe.rows).toEqual([
       expect.objectContaining({
         ref: expect.stringMatching(/^@e:/),
-        name: "Native serialized control",
+        label: "@native-serialized-control",
       }),
     ]);
   });
@@ -363,16 +384,17 @@ describe("compact observation v2", () => {
     ).toEqual({ title: "Example storefront", headings: ["Create your account"] });
     const button = element({ visibleText: "Continue to registration" });
     const cardLike = element({ selector: "#secret", visibleText: "4111111111111111" });
-    const safe = buildSafeControlsV2({
+    const safe = safeControls({
       elements: [button, cardLike],
       legacyRefs: new Map([
         [button, "@e:continue"],
         [cardLike, "@e:card"],
       ]),
-      generation: 1,
       pageOrigin: "https://merchant.invalid",
     });
-    expect(safe.rows).toContainEqual(expect.objectContaining({ name: "Continue to registration" }));
+    expect(safe.rows).toContainEqual(
+      expect.objectContaining({ label: "@continue-to-registration" }),
+    );
     expect(JSON.stringify(safe.rows)).not.toContain("4111111111111111");
   });
 
@@ -381,13 +403,12 @@ describe("compact observation v2", () => {
       visibleText: "abcdefghijklmnopqrstuvwxyz123456",
       ariaLabel: "Copy API key",
     });
-    const safe = buildSafeControlsV2({
+    const safe = safeControls({
       elements: [button],
       legacyRefs: new Map([[button, "@e:copy"]]),
-      generation: 1,
       pageOrigin: "https://merchant.invalid",
     });
-    expect(safe.rows).toEqual([expect.objectContaining({ name: "Copy API key" })]);
+    expect(safe.rows).toEqual([expect.objectContaining({ label: "@copy-api-key" })]);
   });
 
   it("matches every private query term against one control naming source", () => {
@@ -415,10 +436,9 @@ describe("compact observation v2", () => {
       role: "textbox",
       autocomplete: "cc-csc",
     });
-    const safe = buildSafeControlsV2({
+    const safe = safeControls({
       elements: [cvc],
       legacyRefs: new Map([[cvc, "@e:cvc"]]),
-      generation: 1,
       pageOrigin: "https://merchant.invalid",
     });
     expect(safe.rows).toEqual([expect.objectContaining({ field: "payment" })]);
@@ -432,10 +452,9 @@ describe("compact observation v2", () => {
       role: "textbox",
       ariaLabel: "CVC",
     });
-    const safe = buildSafeControlsV2({
+    const safe = safeControls({
       elements: [cvc],
       legacyRefs: new Map([[cvc, "@e:cvc"]]),
-      generation: 1,
       pageOrigin: "https://merchant.invalid",
     });
     expect(safe.rows).toEqual([expect.objectContaining({ field: "payment" })]);
@@ -449,10 +468,9 @@ describe("compact observation v2", () => {
       role: "textbox",
       ariaLabel: "Security code",
     });
-    const safe = buildSafeControlsV2({
+    const safe = safeControls({
       elements: [securityCode],
       legacyRefs: new Map([[securityCode, "@e:security-code"]]),
-      generation: 1,
       pageOrigin: "https://merchant.invalid",
       pageUrl: "https://merchant.invalid/checkout",
     });
@@ -478,10 +496,9 @@ describe("compact observation v2", () => {
         role: "textbox",
         ariaLabel: label,
       });
-      const contextual = buildSafeControlsV2({
+      const contextual = safeControls({
         elements: [verificationCode],
         legacyRefs: new Map([[verificationCode, `@e:${label.toLowerCase()}`]]),
-        generation: 1,
         pageOrigin: "https://merchant.invalid",
         pageUrl: "https://merchant.invalid/checkout",
       });
@@ -572,13 +589,12 @@ describe("compact observation v2", () => {
       selector: "#postal",
       autocomplete: "shipping postal-code",
     });
-    const safe = buildSafeControlsV2({
+    const safe = safeControls({
       elements: [city, postal],
       legacyRefs: new Map([
         [city, "@e:city"],
         [postal, "@e:postal"],
       ]),
-      generation: 1,
       pageOrigin: "https://merchant.invalid",
     });
     expect(safe.rows).toEqual([
@@ -597,7 +613,7 @@ describe("compact observation v2", () => {
           role: "checkbox",
           visibility: "viewport",
           frame: "same_origin",
-          name: "Terms",
+          label: "@terms",
           state: "u",
           action: "continue",
           field: "email",
@@ -607,7 +623,7 @@ describe("compact observation v2", () => {
       cursorFor: (offset) => `cursor-${offset}`,
     });
     expect(page.payload.safe_table).toEqual([
-      ["@e:1.1", "c", "Terms|s=u|a=continue|f=email|q=1/2|x=s"],
+      ["@e:1.1", "c", "@terms|s=u|a=continue|f=email|q=1/2|x=s"],
     ]);
   });
 
@@ -638,12 +654,12 @@ describe("compact observation v2", () => {
           role: "button",
           visibility: "viewport",
           frame: "main",
-          name: "Continue",
+          label: "@continue",
         },
       ],
       cursorFor: (offset) => `cursor-${offset}`,
     });
-    expect(first.payload.safe_table).toEqual([["@e:first-control", "b", "Continue"]]);
+    expect(first.payload.safe_table).toEqual([["@e:first-control", "b", "@continue"]]);
     const repeat = encodeV2Delta({
       sessionId: "session",
       stage: "browse",
@@ -716,8 +732,7 @@ describe("compact observation v2", () => {
     const added = { ...before, ref: "@e:added", field: "email" as const };
     const delta = diffSafeControlsV2(
       {
-        pageKey: "same-page",
-        snapshotGeneration: 1,
+        epoch: { doc: "same-document", rev: 1 },
         stage: "form",
         semantics: {},
         byRef: new Map([

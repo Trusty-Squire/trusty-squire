@@ -552,6 +552,17 @@ package would defeat the whole 0.7.0 thesis).
   path is honored without any env work. Set to `off` / `0` / `false`
   to suppress capture entirely.
 
+### Operator observation model (compact-v2 ref identity)
+
+A compact-v2 `@e:` ref is a DURABLE element fingerprint, not a positional
+index: it survives acts and benign re-renders on the same document, so one
+observation can drive a whole multi-field fill. Do not reintroduce
+per-act/per-observe ref churn.
+[`docs/observation-model.md`](docs/observation-model.md) owns the identity
+model (fingerprint, `@label` alias, document epoch), the fail-closed rules
+(`stale_ref` / `ambiguous_target`), the compactness invariant, and the phased
+roadmap. Implementation map is in its §9.
+
 ### Operator Recipe registry (replay-serve-live-domainlock)
 
 Operator Recipes use an action-path-aware local lookup plus a shared

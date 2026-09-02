@@ -68,8 +68,11 @@ export interface SafeControlV2 {
   visibility: "viewport" | "near";
   action?: SafeIntentV2;
   field?: SafeFieldV2;
-  /** Short, screened descriptive control label; never a field value. */
-  name?: string;
+  /**
+   * The legible alias the agent may target instead of `ref` (`@email-address`).
+   * Screened and slugified from the control's accessible name; never a value.
+   */
+  label?: string;
   choice?: string;
   frame: "main" | "same_origin" | "cross_origin";
 }
@@ -85,10 +88,21 @@ export interface SafePageSemanticsV2 {
   headings?: string[];
 }
 
+/**
+ * The observed document version an act is authorized against
+ * (docs/observation-model.md §4.1). `doc` is an internal HMAC of the browser's
+ * stable main-document identity; `rev` is a monotonic counter that advances
+ * whenever the skeleton is re-serialized after a DOM mutation. A `doc` change
+ * (a real navigation) invalidates every ref minted under it; a `rev` change is
+ * benign and only re-binds paging cursors.
+ */
+export interface ObservationEpochV2 {
+  doc: string;
+  rev: number;
+}
+
 export interface SafeObservationIndexV2 {
-  generation: number;
-  /** Internal HMAC page identity for the snapshot this index was minted from. */
-  pageKey: string;
+  epoch: ObservationEpochV2;
   stage: SafeStageV2;
   semantics: SafePageSemanticsV2;
   rows: SafeControlV2[];
@@ -102,10 +116,7 @@ export interface SafeObservationIndexV2 {
  * code-owned enums, never DOM values or arbitrary page copy.
  */
 export interface SafeObservationBaselineV2 {
-  /** Internal HMAC page identity; never emitted or persisted outside the session. */
-  pageKey: string;
-  /** The generation encoded into every current short action index. */
-  snapshotGeneration: number;
+  epoch: ObservationEpochV2;
   stage: SafeStageV2;
   semantics: SafePageSemanticsV2;
   byRef: Map<string, SafeControlV2>;
@@ -123,47 +134,63 @@ export function equalSafePageSemanticsV2(
   return left.title === right.title && (left.headings?.[0] ?? "") === (right.headings?.[0] ?? "");
 }
 
-const COMPACT_V2_HANDLE_RE = /^@e:([0-9a-z]+)\.([0-9a-z]+)$/i;
+/** `@e:` + a truncated session-secret HMAC of (document epoch, fingerprint). */
+export const COMPACT_V2_HANDLE_LENGTH = 10;
+const COMPACT_V2_HANDLE_RE = new RegExp(`^@e:[A-Za-z0-9_-]{${COMPACT_V2_HANDLE_LENGTH}}$`);
+const COMPACT_V2_LABEL_RE = /^@[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+export function isCompactV2Handle(target: string): boolean {
+  return COMPACT_V2_HANDLE_RE.test(target);
+}
+
+/** The `@label` alias form, distinguishable from a handle by its `@e:` prefix. */
+export function isCompactV2Label(target: string): boolean {
+  return COMPACT_V2_LABEL_RE.test(target);
+}
 
 /**
- * Resolve a compact index only when it is a canonical handle for the current
- * snapshot generation AND a member of that snapshot's sealed map. This is the
- * complete authorization boundary for short indices: callers must never turn
- * an unknown @e: value into a label or legacy-ref lookup.
+ * Resolve a handle only when it is well-formed AND a member of the current
+ * snapshot's sealed map. Callers must never turn an unknown @e: value into a
+ * label or legacy-ref lookup. The handle is document-scoped by construction
+ * (the epoch is hashed into it), so a ref from a replaced document finds no
+ * live match rather than resolving onto whatever now occupies its position.
  */
 export function compactV2LegacyRefForHandle(
   handles: ReadonlyMap<string, string>,
-  generation: number,
   target: string,
 ): string | null {
-  const match = COMPACT_V2_HANDLE_RE.exec(target);
-  if (match === null) return null;
-  const generationRaw = match[1]!.toLowerCase();
-  const indexRaw = match[2]!.toLowerCase();
-  const parsedGeneration = Number.parseInt(generationRaw, 36);
-  const parsedIndex = Number.parseInt(indexRaw, 36);
-  if (
-    !Number.isSafeInteger(parsedGeneration) ||
-    !Number.isSafeInteger(parsedIndex) ||
-    parsedIndex < 1 ||
-    parsedGeneration !== generation ||
-    parsedGeneration.toString(36) !== generationRaw ||
-    parsedIndex.toString(36) !== indexRaw
-  ) {
-    return null;
-  }
+  if (!isCompactV2Handle(target)) return null;
   return handles.get(target) ?? null;
+}
+
+const LABEL_MAX_CHARS = 32;
+
+/**
+ * The addressable alias for a screened control description. Slugified so the
+ * agent can type it back verbatim; `undefined` when the description screened
+ * out or carries no alphanumeric content.
+ */
+export function controlLabelV2(description: string | undefined): string | undefined {
+  if (description === undefined) return undefined;
+  const slug = description
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, LABEL_MAX_CHARS)
+    .replace(/-+$/g, "");
+  return slug.length === 0 ? undefined : `@${slug}`;
 }
 
 type WireControlV2 = [string, string, string?];
 
 // The protocol is intentionally positional to keep repeated observes small.
 // Tuple schema: [ref, role(b/l/t/s/c/r/tb/m/f), optional compact description].
-// The description starts with the short safe label and appends only present
-// code-owned facts (`s=`, `a=`, `f=`, `q=`, `x=`). It is deliberately one
-// sparse string rather than nullable columns: checked/unchecked, disabled,
-// action, field, card choice, and frame context remain distinguishable without
-// paying for empty slots on every row.
+// The description starts with the `@label` alias (itself a valid act target)
+// and appends only present code-owned facts (`s=`, `a=`, `f=`, `q=`, `x=`). It
+// is deliberately one sparse string rather than nullable columns:
+// checked/unchecked, disabled, action, field, card choice, and frame context
+// remain distinguishable without paying for empty slots on every row. The
+// label's slug charset excludes `|` and `=`, so no escaping is needed.
 function wireControl(row: SafeControlV2): WireControlV2 {
   const role: Record<SafeRoleV2, string> = {
     button: "b",
@@ -176,14 +203,8 @@ function wireControl(row: SafeControlV2): WireControlV2 {
     menuitem: "m",
     file: "f",
   };
-  const wireName =
-    row.name === undefined
-      ? undefined
-      : row.name.includes("|") || /^[nsafqx]=/.test(row.name)
-        ? `n=${row.name.replace(/%/g, "%25").replace(/\|/g, "%7C")}`
-        : row.name;
   const facts = [
-    wireName,
+    row.label,
     ...(row.state === undefined ? [] : [`s=${row.state}`]),
     ...(row.action === undefined ? [] : [`a=${row.action}`]),
     ...(row.field === undefined ? [] : [`f=${row.field}`]),
@@ -987,11 +1008,17 @@ function frameOf(el: InteractiveElement, pageOrigin: string): SafeControlV2["fra
 export function buildSafeControlsV2(args: {
   elements: readonly InteractiveElement[];
   legacyRefs: ReadonlyMap<InteractiveElement, string>;
-  generation: number;
+  /** Durable per-element handles, minted by the session (document-scoped). */
+  handles: ReadonlyMap<InteractiveElement, string>;
   pageOrigin: string;
   pageUrl?: string;
 }): { rows: SafeControlV2[]; byRef: Map<string, string> } {
-  const rows: Array<{ legacy: string; row: Omit<SafeControlV2, "ref">; priority: number }> = [];
+  const rows: Array<{
+    ref: string;
+    legacy: string;
+    row: Omit<SafeControlV2, "ref">;
+    priority: number;
+  }> = [];
   const paymentContext =
     checkoutStageFromUrlV2(args.pageUrl ?? "") !== null ||
     args.elements.some((element) => hasExplicitPaymentFieldSignal(element));
@@ -999,7 +1026,8 @@ export function buildSafeControlsV2(args: {
     if (el.visible !== true || el.topmost === false) continue;
     const role = roleOf(el);
     const legacy = args.legacyRefs.get(el);
-    if (role === null || legacy === undefined) continue;
+    const ref = args.handles.get(el);
+    if (role === null || legacy === undefined || ref === undefined) continue;
     const state = stateOf(el);
     const action = intentOf(el);
     const field = fieldOf(el, paymentContext);
@@ -1008,7 +1036,7 @@ export function buildSafeControlsV2(args: {
     // already CDP-derived interactive inventory supplies each visible control's
     // descendant/accessibility name. This pass binds that name to its own live
     // element, so no cross-serializer tag/role fallback can swap labels.
-    const name = controlDescription(el);
+    const label = controlLabelV2(controlDescription(el));
     const row: Omit<SafeControlV2, "ref"> = {
       role,
       visibility: el.inViewport ? "viewport" : "near",
@@ -1016,7 +1044,7 @@ export function buildSafeControlsV2(args: {
       ...(state === undefined ? {} : { state }),
       ...(action === undefined ? {} : { action }),
       ...(field === undefined ? {} : { field }),
-      ...(name === undefined ? {} : { name }),
+      ...(label === undefined ? {} : { label }),
       ...(cardChoice === null || cardChoice === undefined
         ? {}
         : { choice: `${cardChoice.position}/${cardChoice.total}` }),
@@ -1026,6 +1054,7 @@ export function buildSafeControlsV2(args: {
     // viewport and role ordering within each group.
     const actionPriority = action === "signup" ? -20 : action === "login" ? -10 : 0;
     rows.push({
+      ref,
       legacy,
       row,
       priority: actionPriority + (el.inViewport ? 0 : 10) + (role === "button" ? 0 : 1),
@@ -1033,10 +1062,7 @@ export function buildSafeControlsV2(args: {
   }
   rows.sort((a, b) => a.priority - b.priority || a.legacy.localeCompare(b.legacy));
   const byRef = new Map<string, string>();
-  const safeRows = rows.map(({ legacy, row }, index) => {
-    // Per-snapshot compact index. Generation binding is checked before the
-    // legacy live-ref is ever resolved (see resolveSessionTarget).
-    const ref = `@e:${args.generation.toString(36)}.${(index + 1).toString(36)}`;
+  const safeRows = rows.map(({ ref, legacy, row }) => {
     byRef.set(ref, legacy);
     return { ref, ...row };
   });

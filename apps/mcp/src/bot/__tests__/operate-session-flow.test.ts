@@ -960,7 +960,7 @@ import {
   observeQuery,
   verifyPostcondition,
 } from "../provision-session.js";
-import { OBSERVE_V2_MAX_WIRE_BYTES } from "../compact-observation-v2.js";
+import { OBSERVE_V2_MAX_TOKENS, OBSERVE_V2_MAX_WIRE_BYTES } from "../compact-observation-v2.js";
 import {
   isRecipeDomainLocked,
   isRecipeShareEligible,
@@ -2225,7 +2225,8 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
       'operate_act { kind: "extract", into_slot: "<slot>" }',
     );
     expect(provisionActTool.description).toContain("Under default compact-v2");
-    expect(provisionActTool.description).toContain("opaque `reobserve_required`");
+    expect(provisionActTool.description).toContain("opaque `stale_ref`");
+    expect(provisionActTool.description).toContain("@label alias of exactly one of its rows");
     expect(provisionActTool.description).toContain("In V1, stable target refs remain reusable");
     expect(provisionObserveTool.description).toContain("default compact-v2 mode");
     expect(provisionObserveTool.description).toContain("[ref,role,facts?]");
@@ -3468,13 +3469,13 @@ describe("Compact V2 action-map boundary", () => {
     const selectionDescription = (properties.selections as { description: string }).description;
 
     expect(selectionDescription).toBe(
-      "Map each current Compact V2 @e: handle, or V1 observed label/ref, to its visible option text.",
+      "Map each current Compact V2 @e: ref or @label, or V1 observed label/ref, to its visible option text.",
     );
     expect(provisionActTool.description).toContain(
-      "Compact V2 keys are current safe_table @e: handles, while V1 keys may be observed labels or refs",
+      "Compact V2 keys are current safe_table @e: refs or @labels, while V1 keys may be observed labels or refs",
     );
     expect(provisionObserveTool.description).toContain(
-      "encoded as n=<label>, with `%` encoded as `%25` and `|` as `%7C`",
+      "the row's @label alias, a slug of its screened short label",
     );
     expect(provisionObserveTool.description).toContain(
       "matching actionable refs with screened labels and code-owned facts",
@@ -3766,7 +3767,7 @@ describe("Compact V2 action-map boundary", () => {
     // fallback cannot escape the action map.
     await expect(
       act(started.session_id, { kind: "click", target: "css=#continue" }),
-    ).rejects.toThrow("reobserve_required");
+    ).rejects.toThrow("stale_ref");
     expect(h.locatorClickCalls).toBe(0);
 
     // A page transition invalidates all handles issued from the old map.
@@ -3775,7 +3776,7 @@ describe("Compact V2 action-map boundary", () => {
       url: "https://shop.example.com/next",
     });
     await expect(act(started.session_id, { kind: "click", target: firstRef! })).rejects.toThrow(
-      "reobserve_required",
+      "stale_ref",
     );
     expect(h.clickCalls).toBe(0);
 
@@ -3802,7 +3803,7 @@ describe("Compact V2 action-map boundary", () => {
       });
       const forged = "4111111111111111";
       await expect(act(started.session_id, { kind: "click", target: forged })).rejects.toThrow(
-        "reobserve_required",
+        "stale_ref",
       );
       const auditText = writes.join("");
       expect(auditText).toContain('"target":"<sealed>"');
@@ -3827,7 +3828,7 @@ describe("Compact V2 action-map boundary", () => {
         .safe_table[0]![0];
       now += 5 * 60_000 + 1;
       await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
-        "reobserve_required",
+        "stale_ref",
       );
       expect(h.clickCalls).toBe(0);
     } finally {
@@ -3889,7 +3890,7 @@ describe("Compact V2 action-map boundary", () => {
     expect(nextPage.overflow).toBeUndefined();
   });
 
-  it("pages across a benign form re-render and rebinds to a fresh generation", async () => {
+  it("pages across a benign form re-render, retiring cursors but not refs", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = Array.from({ length: 8 }, (_, index) =>
       elem({
@@ -3913,20 +3914,16 @@ describe("Compact V2 action-map boundary", () => {
       overflow?: { next_cursor: string };
     };
     expect(nextPage.safe_table.length).toBe(4);
-    // The fresh map rebinds every short index to a new generation.
-    const firstPageRef = (started as unknown as { safe_table: Array<[string]> }).safe_table[0]![0];
-    const firstGen = /^@e:([0-9a-z]+)\./.exec(firstPageRef)![1]!;
-    const nextGen = /^@e:([0-9a-z]+)\./.exec(nextPage.safe_table[0]![0]!)![1]!;
-    expect(nextGen).not.toBe(firstGen);
-    // The pre-resync cursor must be dead, never silently re-paged.
+    // The pre-resync cursor is a positional offset into the OLD serialization
+    // and must be dead, never silently re-paged.
     await expect(observeQuery(started.session_id, "", undefined, pageCursor)).rejects.toThrow(
       "stale_cursor",
     );
-    // A ref issued before the resync must not resolve onto the fresh map.
-    await expect(act(started.session_id, { kind: "click", target: firstPageRef })).rejects.toThrow(
-      "reobserve_required",
-    );
-    expect(h.clickCalls).toBe(0);
+    // A ref issued before the re-render is NOT positional and stays valid:
+    // the element it names is still there and unchanged.
+    const firstPageRef = (started as unknown as { safe_table: Array<[string]> }).safe_table[0]![0];
+    await act(started.session_id, { kind: "click", target: firstPageRef });
+    expect(h.clickCalls).toBe(1);
   });
 
   it("still invalidates overflow cursors on a cross-document or cross-path navigation", async () => {
@@ -3986,7 +3983,7 @@ describe("Compact V2 action-map boundary", () => {
       expect.arrayContaining([
         expect.stringMatching(/^@e:/),
         "b",
-        expect.stringContaining("Continue"),
+        expect.stringContaining("@continue"),
       ]),
     ]);
   });
@@ -4097,7 +4094,7 @@ describe("Compact V2 action-map boundary", () => {
     expect(JSON.stringify(result)).not.toContain("Model");
   });
 
-  it("rejects a handle when the complete live action map remints its index", async () => {
+  it("keeps a ref valid when other controls appear in the live action map", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const email = elem({
       tag: "input",
@@ -4110,15 +4107,15 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
     const handle = (started as unknown as { safe_table: Array<[string]> }).safe_table[0]![0];
 
+    // A live re-render adds a control. The observed field is untouched, so its
+    // ref must still act — that is the whole point of fingerprint identity.
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
       email,
     ];
 
-    await expect(
-      act(started.session_id, { kind: "type", target: handle, text: "buyer@example.com" }),
-    ).rejects.toThrow("reobserve_required");
-    expect(h.typed).toEqual([]);
+    await act(started.session_id, { kind: "type", target: handle, text: "buyer@example.com" });
+    expect(h.typed).toEqual([{ selector: "#email", text: "buyer@example.com" }]);
   });
 
   it("rejects a handle after a same-URL main-document replacement", async () => {
@@ -4132,7 +4129,7 @@ describe("Compact V2 action-map boundary", () => {
     h.mainDocumentEpoch += 1;
 
     await expect(act(started.session_id, { kind: "click", target: handle })).rejects.toThrow(
-      "reobserve_required",
+      "stale_ref",
     );
     expect(h.clickCalls).toBe(0);
   });
@@ -4159,7 +4156,7 @@ describe("Compact V2 action-map boundary", () => {
     expect(serialized).not.toContain("Keep account");
   });
 
-  it("reissues handles when a private live binding changes", async () => {
+  it("keeps a ref through a selector-only re-render of the same control", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#step-one" }),
@@ -4168,17 +4165,17 @@ describe("Compact V2 action-map boundary", () => {
     const oldHandle = (started as unknown as { safe_table: Array<[string, string, string?]> })
       .safe_table[0]![0];
 
+    // A framework re-render swaps the CSS-in-JS selector. The control's
+    // identity — frame, path, role, accessible name — is unchanged, so the
+    // fingerprint (and therefore the ref) is too.
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#step-two" }),
     ];
     const refreshed = await observe(started.session_id);
     const newHandle = (refreshed as unknown as { safe_table: Array<[string, string, string?]> })
       .safe_table[0]![0];
-    expect(newHandle).not.toBe(oldHandle);
-    await expect(act(started.session_id, { kind: "click", target: oldHandle })).rejects.toThrow(
-      "reobserve_required",
-    );
-    await act(started.session_id, { kind: "click", target: newHandle });
+    expect(newHandle).toBe(oldHandle);
+    await act(started.session_id, { kind: "click", target: oldHandle });
     expect(h.clickCalls).toBe(1);
   });
 
@@ -4207,7 +4204,7 @@ describe("Compact V2 action-map boundary", () => {
       }),
     ];
     await expect(act(started.session_id, { kind: "click", target: handle })).rejects.toThrow(
-      "reobserve_required",
+      "stale_ref",
     );
     expect(h.clickCalls).toBe(0);
   });
@@ -4339,7 +4336,7 @@ describe("Compact V2 action-map boundary", () => {
       success_signal: { text_present: "Checkout" },
     });
     await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
-      "reobserve_required",
+      "stale_ref",
     );
     expect(h.clickCalls).toBe(0);
   });
@@ -4478,12 +4475,13 @@ describe("Compact V2 action-map boundary", () => {
       observed: "none",
     });
     expect(ack.elements).toBeUndefined();
-    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
-      "reobserve_required",
-    );
-    const refreshed = await observe(started.session_id);
-    const refreshedRef = (refreshed as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table[0]![0];
+    // A detail:"none" scroll returns no map, but it does not retire the one the
+    // agent already holds — the control it names has not moved.
+    await act(started.session_id, { kind: "click", target: ref }, "none");
+    // Nothing structural changed, so this is an unchanged delta and the ref the
+    // agent already holds is still the current one.
+    expect(await observe(started.session_id)).toMatchObject({ delta: true });
+    const refreshedRef = ref;
 
     h.oauthTransition = {
       productUrl: secretUrl,
@@ -4507,7 +4505,7 @@ describe("Compact V2 action-map boundary", () => {
     expect(JSON.stringify(transition)).not.toContain("private-query-token");
     expect(h.oauthRecoveryCalls).toBe(1);
     await expect(act(started.session_id, { kind: "click", target: refreshedRef })).rejects.toThrow(
-      "reobserve_required",
+      "stale_ref",
     );
   });
 
@@ -4524,7 +4522,7 @@ describe("Compact V2 action-map boundary", () => {
     expect(h.clickCalls).toBe(1);
   });
 
-  it("invalidates a handle when a dispatched action throws", async () => {
+  it("keeps a ref usable after a dispatched action throws", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
@@ -4538,11 +4536,11 @@ describe("Compact V2 action-map boundary", () => {
     await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
       "action_failed",
     );
+    // The action failed; the control did not move. Retrying the same ref is
+    // legitimate — only leaving the document retires it.
     h.clickError = null;
-    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
-      "reobserve_required",
-    );
-    expect(h.clickCalls).toBe(1);
+    await act(started.session_id, { kind: "click", target: ref });
+    expect(h.clickCalls).toBe(2);
   });
 
   it("invalidates a handle before the captcha driver receives the browser", async () => {
@@ -4557,7 +4555,7 @@ describe("Compact V2 action-map boundary", () => {
       .safe_table[0]![0];
     await expect(captchaGate(started.session_id)).resolves.toMatchObject({ found: false });
     await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
-      "reobserve_required",
+      "stale_ref",
     );
   });
 
@@ -4573,7 +4571,7 @@ describe("Compact V2 action-map boundary", () => {
       .safe_table[0]![0];
     await activeProvisionBrowserForPayment(paymentSession(started.session_id));
     await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
-      "reobserve_required",
+      "stale_ref",
     );
   });
 
@@ -4594,12 +4592,12 @@ describe("Compact V2 action-map boundary", () => {
     const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
       .safe_table[0]![0];
     await expect(formSelectMany(started.session_id, { Country: "Korea" })).rejects.toThrow(
-      "reobserve_required",
+      "stale_ref",
     );
     expect(h.selected).toEqual([]);
     await expect(
       formSelectMany(started.session_id, { "@e:legacy_country_1": "Korea" }),
-    ).rejects.toThrow("reobserve_required");
+    ).rejects.toThrow("stale_ref");
     expect(h.selected).toEqual([]);
     const result = await formSelectMany(started.session_id, { [handle]: "Korea" });
     expect(result.fields).toEqual([expect.objectContaining({ status: "selected" })]);
@@ -4610,7 +4608,7 @@ describe("Compact V2 action-map boundary", () => {
     expect(result.observation.format).toBe("compact-v2");
   });
 
-  it("rejects old-generation bulk targets after the preceding mutation", async () => {
+  it("keeps a later bulk target actionable when the preceding mutation spares it", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
@@ -4643,8 +4641,10 @@ describe("Compact V2 action-map boundary", () => {
     });
     const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
       .safe_table;
-    const variantHandle = rows.find(([, , description]) => description?.startsWith("Variant"))?.[0];
-    const sizeHandle = rows.find(([, , description]) => description?.startsWith("Size"))?.[0];
+    const variantHandle = rows.find(([, , description]) =>
+      description?.startsWith("@variant"),
+    )?.[0];
+    const sizeHandle = rows.find(([, , description]) => description?.startsWith("@size"))?.[0];
     expect(variantHandle).toMatch(/^@e:/);
     expect(sizeHandle).toMatch(/^@e:/);
 
@@ -4653,15 +4653,18 @@ describe("Compact V2 action-map boundary", () => {
       [sizeHandle!]: "Large",
     });
 
-    expect(h.selected).toEqual([{ selector: "#variant", matcher: "Blue" }]);
+    expect(h.selected).toEqual([
+      { selector: "#variant", matcher: "Blue" },
+      { selector: "#size", matcher: "Large" },
+    ]);
     expect(result.fields).toEqual([
       expect.objectContaining({ status: "selected" }),
-      expect.objectContaining({ status: "failed", reason: "reobserve_required" }),
+      expect.objectContaining({ status: "selected" }),
     ]);
     expect(JSON.stringify(result.fields)).not.toContain("Ocean Blue");
   });
 
-  it("rejects a changed bulk target after the preceding mutation", async () => {
+  it("rejects a bulk target the preceding mutation replaced", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
@@ -4680,12 +4683,15 @@ describe("Compact V2 action-map boundary", () => {
         selectOptions: [{ value: "large", text: "Large" }],
       }),
     ];
+    // The mutation swaps the second control for a DIFFERENT one. The observed
+    // Size ref names an element that no longer exists, so it must fail closed
+    // rather than slide onto the replacement.
     h.selectMutation = [
       elem({
         tag: "select",
         role: "combobox",
-        labelText: "Size",
-        selector: "#replacement-size",
+        labelText: "Shipping",
+        selector: "#shipping",
         selectOptions: [{ value: "large", text: "Large" }],
       }),
     ];
@@ -4694,8 +4700,10 @@ describe("Compact V2 action-map boundary", () => {
     });
     const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
       .safe_table;
-    const variantHandle = rows.find(([, , description]) => description?.startsWith("Variant"))?.[0];
-    const sizeHandle = rows.find(([, , description]) => description?.startsWith("Size"))?.[0];
+    const variantHandle = rows.find(([, , description]) =>
+      description?.startsWith("@variant"),
+    )?.[0];
+    const sizeHandle = rows.find(([, , description]) => description?.startsWith("@size"))?.[0];
 
     const result = await formSelectMany(started.session_id, {
       [variantHandle!]: "Blue",
@@ -4705,7 +4713,7 @@ describe("Compact V2 action-map boundary", () => {
     expect(h.selected).toEqual([{ selector: "#variant", matcher: "Blue" }]);
     expect(result.fields).toEqual([
       expect.objectContaining({ status: "selected" }),
-      expect.objectContaining({ status: "failed", reason: "reobserve_required" }),
+      expect.objectContaining({ status: "failed", reason: "stale_ref" }),
     ]);
   });
 
@@ -4770,7 +4778,7 @@ describe("Compact V2 action-map boundary", () => {
     expect((error as Error).message).not.toContain("Private option");
   });
 
-  it("does not authorize later old-generation handles after a failed selection", async () => {
+  it("refuses a cross-origin frame target without retiring the later ref", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
@@ -4796,22 +4804,183 @@ describe("Compact V2 action-map boundary", () => {
     });
     const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
       .safe_table;
-    const externalHandle = rows.find(([, , facts]) => facts?.startsWith("External variant"))?.[0];
-    const sizeHandle = rows.find(([, , facts]) => facts?.startsWith("Size"))?.[0];
+    const externalHandle = rows.find(([, , facts]) => facts?.startsWith("@external-variant"))?.[0];
+    const sizeHandle = rows.find(([, , facts]) => facts?.startsWith("@size"))?.[0];
 
     const result = await formSelectMany(started.session_id, {
       [externalHandle!]: "Blue",
       [sizeHandle!]: "Large",
     });
 
-    expect(h.selected).toEqual([]);
+    expect(h.selected).toEqual([{ selector: "#size", matcher: "Large" }]);
     expect(result.fields).toEqual([
       expect.objectContaining({
         status: "failed",
         reason: "target_not_allowed",
       }),
-      expect.objectContaining({ status: "failed", reason: "reobserve_required" }),
+      expect.objectContaining({ status: "selected" }),
     ]);
+  });
+});
+
+// docs/observation-model.md §4.1/§4.2 — the identity model's own contract.
+describe("Compact V2 durable ref identity", () => {
+  function field(index: number, overrides: Record<string, unknown>): unknown {
+    return elem({
+      index,
+      tag: "input",
+      type: "text",
+      role: "textbox",
+      inViewport: true,
+      screenPath: "form:checkout > input",
+      ...overrides,
+    });
+  }
+
+  it("fills a multi-field form from ONE observation while the page re-renders", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const fields = [
+      field(0, { id: "first-name", labelText: "First name", selector: "#first-name" }),
+      field(1, { id: "email", labelText: "Email", selector: "#email" }),
+      // No authored id: this one rides the structural fallback.
+      field(2, { labelText: "City", selector: "form > div:nth-child(3) > input" }),
+      field(3, { id: "postal", labelText: "Postal code", selector: "#postal" }),
+    ];
+    h.elements = fields;
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const refs = (
+      started as unknown as { safe_table: Array<[string, string, string?]> }
+    ).safe_table.map(([ref]) => ref);
+    expect(refs).toHaveLength(4);
+
+    const values = ["Ada", "ada@example.com", "Cambridge", "CB2 1TN"];
+    for (const [index, ref] of refs.entries()) {
+      // detail:"none" — no observation between acts at all, so every ref comes
+      // from the single observation the session started with.
+      await act(started.session_id, { kind: "type", target: ref, text: values[index]! }, "none");
+      // The form re-renders between every act: a validation flag flips and the
+      // framework hands out fresh selectors. Neither is an identity change.
+      h.elements = fields.map((entry, position) => ({
+        ...(entry as Record<string, unknown>),
+        required: position <= index,
+        selector: `${(entry as { selector: string }).selector}.render-${index}`,
+      }));
+    }
+
+    expect(h.typed.map((entry) => (entry as { text: string }).text)).toEqual(values);
+    expect(h.extractInteractiveElementsCalls).toBeGreaterThan(0);
+  });
+
+  it("survives a useId re-render, and dies on a real navigation", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", id: ":r3:", visibleText: "Continue", selector: "#a" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    const ref = (started as unknown as { safe_table: Array<[string]> }).safe_table[0]![0];
+
+    // React re-runs useId: the id is different every render, so it must not be
+    // part of the fingerprint.
+    h.elements = [
+      elem({ tag: "button", role: "button", id: ":r9:", visibleText: "Continue", selector: "#b" }),
+    ];
+    await act(started.session_id, { kind: "click", target: ref });
+    expect(h.clickCalls).toBe(1);
+
+    // A real navigation replaces the document and retires the ref.
+    h.mainDocumentEpoch += 1;
+    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+      "stale_ref",
+    );
+    expect(h.clickCalls).toBe(1);
+  });
+
+  it("refuses a label shared by two grid controls, and acts on either ref", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [0, 1].map((index) =>
+      elem({
+        index,
+        tag: "button",
+        role: "button",
+        visibleText: "Add to cart",
+        screenPath: "main > button:add",
+        selector: `.product:nth-child(${index + 1}) button`,
+      }),
+    );
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/products",
+    });
+    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table;
+    expect(rows.map(([, , facts]) => facts)).toEqual([
+      "@add-to-cart|a=add_to_cart",
+      "@add-to-cart|a=add_to_cart",
+    ]);
+    // Same label, different fingerprints.
+    expect(rows[0]![0]).not.toBe(rows[1]![0]);
+
+    const error = await act(started.session_id, {
+      kind: "click",
+      target: "@add-to-cart",
+    }).catch((cause: unknown) => cause);
+    expect((error as Error).message).toContain('ambiguous_target: "@add-to-cart" names 2 controls');
+    expect((error as Error).message).toContain(rows[0]![0]);
+    expect((error as Error).message).toContain(rows[1]![0]);
+    expect(h.clickCalls).toBe(0);
+
+    await act(started.session_id, { kind: "click", target: rows[1]![0] });
+    expect(h.clickCalls).toBe(1);
+  });
+
+  it("acts on a label that names exactly one control", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+      elem({ index: 1, tag: "button", role: "button", visibleText: "Cancel", selector: "#cancel" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    await act(started.session_id, { kind: "click", target: "@continue" });
+    expect(h.clickCalls).toBe(1);
+  });
+
+  it("keeps the default observation bounded on a large product grid", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    // 240 controls: a long storefront grid plus a full checkout form.
+    h.elements = Array.from({ length: 240 }, (_, index) =>
+      elem({
+        index,
+        tag: index % 3 === 0 ? "button" : "input",
+        type: index % 3 === 0 ? "button" : "text",
+        role: index % 3 === 0 ? "button" : "textbox",
+        id: `product-control-${index}-with-a-long-authored-identifier`,
+        labelText: `Add to cart ${index}`,
+        ariaLabel: `Add the ${index}th product to your shopping cart right now`,
+        selector: `.grid .product-${index} .control-${index}`,
+      }),
+    );
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/products",
+    });
+    const bytes = Buffer.byteLength(JSON.stringify(started), "utf8");
+    expect(bytes).toBeLessThanOrEqual(OBSERVE_V2_MAX_TOKENS);
+    // Bounded, not proportional to the page: the rest is behind overflow.
+    expect((started as unknown as { safe_table: unknown[] }).safe_table.length).toBeLessThanOrEqual(
+      4,
+    );
+    expect((started.overflow as { remaining: number }).remaining).toBeGreaterThan(200);
+
+    // Paging stays bounded too.
+    const page = await observeQuery(
+      started.session_id,
+      "",
+      undefined,
+      (started.overflow as { next_cursor: string }).next_cursor,
+    );
+    expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThanOrEqual(
+      OBSERVE_V2_MAX_TOKENS,
+    );
   });
 });
 
