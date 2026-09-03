@@ -3101,6 +3101,34 @@ async function performCartAdd(session: Session, record: CartAddRecord): Promise<
   };
 }
 
+export interface CartClearResult {
+  status: "cleared";
+  cart_url: string | null;
+  checkout_state?: CheckoutState;
+}
+
+// Deterministic cart-normalize affordance: empty the cart before a cart_add so
+// a run reaches a KNOWN quantity regardless of what accumulated in the shared
+// persistent-profile cart across earlier operate_start sessions. Drops the
+// local idempotency reservations too — a stale "already_in_cart" for a line
+// that no longer exists must not suppress a real add after the clear.
+export async function cartClear(sessionId: string): Promise<CartClearResult> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const cleared = await session.browser.clearCart();
+  if (!cleared) throw new Error("cart_clear failed to reach the cart-clear endpoint");
+  session.cartAdds.clear();
+  session.cartAddsByIdempotencyKey.clear();
+  session.lastCartMutation = null;
+  session.lastCartCheckout = null;
+  const observed = await observeSession(session);
+  return {
+    status: "cleared",
+    cart_url: observed.checkout_state?.cart_url ?? null,
+    ...(observed.checkout_state !== undefined ? { checkout_state: observed.checkout_state } : {}),
+  };
+}
+
 export async function cartAdd(
   sessionId: string,
   productIdentity: string,

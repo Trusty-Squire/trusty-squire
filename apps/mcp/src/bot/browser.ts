@@ -10481,6 +10481,27 @@ export class BrowserController {
     return includeDetails ? items : items.map(({ title, quantity }) => ({ title, quantity }));
   }
 
+  // Deterministic cart-normalize primitive: Shopify's standard Ajax Cart API
+  // exposes POST /cart/clear.js on every storefront's own origin — no DOM
+  // markup dependency, so it works regardless of theme. This is how an
+  // operator reaches a KNOWN (empty) cart quantity before a fresh cart_add,
+  // rather than accumulating quantity across separate operate_start sessions
+  // on the shared persistent profile.
+  async clearCart(): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    return await this.page.evaluate(async () => {
+      try {
+        const response = await fetch("/cart/clear.js", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        });
+        return response.ok;
+      } catch {
+        return false;
+      }
+    });
+  }
+
   async readSettledCheckoutReviewSummary(
     fallbackCurrency?: string,
     timeoutMs = 12_000,
