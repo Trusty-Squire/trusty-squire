@@ -428,7 +428,17 @@ export function recordableTokenV2(value: string | null | undefined): string | un
  * description before it can enter a wire row or delta. The truncation is the
  * compactness budget, not redaction.
  */
-export function safeDescriptionV2(value: string | null | undefined): string | undefined {
+export function safeDescriptionV2(
+  value: string | null | undefined,
+  /**
+   * Values the operator injected from the vault this session. A page can
+   * reflect one back outside the field it was typed into (helper text, an aria
+   * label, an autocomplete preview), so descriptions are screened against them
+   * by EXACT match. This is the vault guarantee, not a shape guess — before the
+   * payment-only narrowing it was an accident of the entropy heuristic.
+   */
+  knownSecrets: readonly string[] = [],
+): string | undefined {
   if (typeof value !== "string") return undefined;
   // Control characters would break the positional wire encoding; they are not
   // page copy, so dropping them is formatting rather than masking.
@@ -437,6 +447,9 @@ export function safeDescriptionV2(value: string | null | undefined): string | un
     .replace(/\s+/g, " ")
     .trim();
   if (normalized.length === 0 || carriesPaymentMaterial(normalized)) return undefined;
+  if (knownSecrets.some((secret) => secret.length > 0 && normalized.includes(secret))) {
+    return undefined;
+  }
   return normalized.length <= SAFE_DESCRIPTION_MAX_CHARS
     ? normalized
     : `${normalized.slice(0, SAFE_DESCRIPTION_MAX_CHARS - 1)}…`;
@@ -703,10 +716,13 @@ export function sealRetainedInteractiveElementsV2(
   }));
 }
 
-export function safePageSemanticsV2(source: ObservationSemanticSourceV2): SafePageSemanticsV2 {
-  const title = safeDescriptionV2(source.title);
+export function safePageSemanticsV2(
+  source: ObservationSemanticSourceV2,
+  knownSecrets: readonly string[] = [],
+): SafePageSemanticsV2 {
+  const title = safeDescriptionV2(source.title, knownSecrets);
   const headings = source.headings
-    .map(safeDescriptionV2)
+    .map((heading) => safeDescriptionV2(heading, knownSecrets))
     .filter((value): value is string => value !== undefined)
     .filter((value, index, all) => all.indexOf(value) === index)
     .slice(0, 1);
@@ -832,11 +848,14 @@ function candidateText(el: InteractiveElement): string {
   return candidateTexts(el).join(" ");
 }
 
-function controlDescription(el: InteractiveElement): string | undefined {
+function controlDescription(
+  el: InteractiveElement,
+  knownSecrets: readonly string[] = [],
+): string | undefined {
   // Labels are chosen from visible/accessibility naming sources only. Native
   // button values are names; field values, `name`, and `id` stay excluded.
   return controlNamingTexts(el)
-    .map((candidate) => safeDescriptionV2(candidate))
+    .map((candidate) => safeDescriptionV2(candidate, knownSecrets))
     .find((candidate) => candidate !== undefined);
 }
 
@@ -866,7 +885,11 @@ function privateQueryTermsV2(value: string): string[] | null {
   return terms.every((term): term is string => term !== null) ? [...new Set(terms)] : null;
 }
 
-export function controlMatchesPrivateQueryV2(el: InteractiveElement, query: string): boolean {
+export function controlMatchesPrivateQueryV2(
+  el: InteractiveElement,
+  query: string,
+  knownSecrets: readonly string[] = [],
+): boolean {
   const needles = privateQueryTermsV2(query);
   if (needles === null) return false;
   // The private match also consults the element's name/id slugs so
@@ -879,6 +902,9 @@ export function controlMatchesPrivateQueryV2(el: InteractiveElement, query: stri
     if (typeof candidate !== "string") return false;
     const normalized = candidate.normalize("NFKC").trim().toLowerCase();
     if (carriesPaymentMaterial(normalized)) return false;
+    if (knownSecrets.some((secret) => secret.length > 0 && candidate.includes(secret))) {
+      return false;
+    }
     const tokens = candidate.normalize("NFKC").match(/[\p{L}\p{M}\p{N}]{1,48}/gu);
     if (tokens === null) return false;
     const safeTokens = new Set(
@@ -1111,6 +1137,8 @@ export function buildSafeControlsV2(args: {
   handles: ReadonlyMap<InteractiveElement, string>;
   pageOrigin: string;
   pageUrl?: string;
+  /** Operator-injected vault values, screened out of every description. */
+  knownSecrets?: readonly string[];
 }): { rows: SafeControlV2[]; byRef: Map<string, string> } {
   const rows: Array<{
     ref: string;
@@ -1135,7 +1163,7 @@ export function buildSafeControlsV2(args: {
     // already CDP-derived interactive inventory supplies each visible control's
     // descendant/accessibility name. This pass binds that name to its own live
     // element, so no cross-serializer tag/role fallback can swap labels.
-    const label = controlLabelV2(controlDescription(el));
+    const label = controlLabelV2(controlDescription(el, args.knownSecrets ?? []));
     const row: Omit<SafeControlV2, "ref"> = {
       role,
       visibility: el.inViewport ? "viewport" : "near",

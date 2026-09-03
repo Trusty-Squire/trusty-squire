@@ -4289,6 +4289,7 @@ function compactV2LiveControls(
     handles: compactV2Handles(session, elements),
     pageOrigin,
     pageUrl: session.browser.currentUrl(),
+    knownSecrets: [...session.secretSlots.values()],
   });
 }
 
@@ -4406,7 +4407,7 @@ function compactV2Observation(
     session.compactV2HintPages = [...startMetadata.hintPages];
   }
   const stage = safeStageV2(session.browser.currentUrl(), elements);
-  const semantics = safePageSemanticsV2(semanticSource);
+  const semantics = safePageSemanticsV2(semanticSource, [...session.secretSlots.values()]);
   const epochDoc = compactV2EpochDoc(session);
   const previous = session.compactV2Previous;
   const sameDocument = previous !== null && previous.epoch.doc === epochDoc;
@@ -4612,7 +4613,10 @@ export async function observeQuery(
   if (needle.length > 0) {
     for (const [ref, legacy] of session.compactV2Refs) {
       const element = liveByLegacy.get(legacy);
-      if (element !== undefined && controlMatchesPrivateQueryV2(element, query)) {
+      if (
+        element !== undefined &&
+        controlMatchesPrivateQueryV2(element, query, [...session.secretSlots.values()])
+      ) {
         privateMatches.add(ref);
       }
     }
