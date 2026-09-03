@@ -51,8 +51,8 @@ export interface SessionData {
   // Values are OAuthProviderId strings ("google" | "github"); kept as
   // string[] here to avoid a circular import.
   connected_providers?: string[];
-  // Explicit install-time consent. Missing means "not approved" so older
-  // sessions do not silently opt into privacy-sensitive flows.
+  // Install-time preferences. Inbox reads default on when this older optional
+  // field is missing; explicit false remains the opt-out.
   consent_skillify_telemetry?: boolean;
   consent_operator_inbox_otp?: boolean;
 }

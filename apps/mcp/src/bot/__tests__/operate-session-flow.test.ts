@@ -6209,24 +6209,23 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     expect(JSON.stringify(compactResult)).not.toContain("private-link-token");
   });
 
-  it("PR2: refuses the inbox read without consent and hands the code request back", async () => {
-    // No consentInboxRead → default OFF → must NOT read the (mocked) inbox.
+  it("reads the inbox by default when no consent option is supplied", async () => {
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
     h.visibleText = "Your verification code is 481920.";
     const res = await awaitVerification(obs.session_id, {});
-    expect(res.found).toBe(false);
-    expect(res.code).toBeNull();
-    expect(res.needs_user?.resume).toBe("code");
-    expect(res.needs_user?.message).toContain("not consented");
+    expect(res.found).toBe(true);
+    expect(res.code).toBe("481920");
   });
 
-  it("PR3b: grant_inbox_consent reads the inbox after an in-context yes, and is remembered", async () => {
+  it("allows an explicit opt-out and a later session-only opt-in", async () => {
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
     const sid = obs.session_id;
     h.visibleText = "Your verification code is 481920.";
-    // First call refuses (consent OFF).
-    expect((await awaitVerification(sid, {})).found).toBe(false);
-    // Host relays the user's yes → grant + read.
+    // Explicit false wins over the default-on preference.
+    const optedOut = await awaitVerification(sid, { grantConsent: false });
+    expect(optedOut.found).toBe(false);
+    expect(optedOut.needs_user?.message).toContain("disabled");
+    // A later explicit true restores access for this session.
     const granted = await awaitVerification(sid, { grantConsent: true });
     expect(granted.found).toBe(true);
     expect(granted.code).toBe("481920");

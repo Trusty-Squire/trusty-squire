@@ -415,7 +415,7 @@ async function settings(args: Argv): Promise<void> {
     const picker = await runSettingsSetup({
       ...(args.target !== undefined ? { initialTarget: args.target } : {}),
       initialRegistryEnabled: session.consent_skillify_telemetry === true,
-      initialConsentOperatorInboxOtp: session.consent_operator_inbox_otp === true,
+      initialConsentOperatorInboxOtp: session.consent_operator_inbox_otp !== false,
     });
     args.target = picker.target;
     args.noRegistry = !picker.registryEnabled;
@@ -432,6 +432,9 @@ async function settings(args: Argv): Promise<void> {
     if (args.registryConfigured !== true) {
       args.noRegistry = session.consent_skillify_telemetry !== true;
     }
+    if (args.consentOperatorInboxOtp === undefined) {
+      args.consentOperatorInboxOtp = session.consent_operator_inbox_otp !== false;
+    }
   }
 
   const target = await resolveTarget(args.target);
@@ -440,7 +443,7 @@ async function settings(args: Argv): Promise<void> {
     ...session,
     saved_at: new Date().toISOString(),
     consent_skillify_telemetry: !args.noRegistry,
-    consent_operator_inbox_otp: args.consentOperatorInboxOtp === true,
+    consent_operator_inbox_otp: args.consentOperatorInboxOtp !== false,
   };
   await storage.write(updated);
   await writeAgentConfig(target, agent, args);
@@ -653,7 +656,7 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
   await storage.write(session);
   ui.success(`Session saved (${storage.backendName()})`);
   args.noRegistry = session.consent_skillify_telemetry !== true;
-  args.consentOperatorInboxOtp = session.consent_operator_inbox_otp === true;
+  args.consentOperatorInboxOtp = session.consent_operator_inbox_otp !== false;
 
   // Probe the real profile. Cookie/session state is the source of truth; no
   // persisted provider marker is allowed to outlive the session it describes.
@@ -711,9 +714,9 @@ async function hydrateArgsFromStoredPreferences(args: Argv): Promise<void> {
     const session = await (await openSessionStorage()).read();
     if (session === null) return;
     args.noRegistry = session.consent_skillify_telemetry !== true;
-    args.consentOperatorInboxOtp = session.consent_operator_inbox_otp === true;
+    args.consentOperatorInboxOtp = session.consent_operator_inbox_otp !== false;
   } catch {
-    // Best-effort. Missing preferences fall back to the privacy-safe defaults.
+    // Best-effort. Missing inbox preference uses the default-on setting.
   }
 }
 
@@ -963,7 +966,7 @@ async function recordConnectedProvider(provider: OAuthProviderId): Promise<void>
 function consentFromArgs(args: Argv): InstallConsent {
   return {
     skillifyTelemetry: !args.noRegistry,
-    operatorInboxOtp: args.consentOperatorInboxOtp === true,
+    operatorInboxOtp: args.consentOperatorInboxOtp !== false,
   };
 }
 
@@ -986,8 +989,7 @@ async function ensureConsentRecorded(consent: InstallConsent, overwrite: boolean
       consent_operator_inbox_otp: consent.operatorInboxOtp,
     });
   } catch {
-    // Best-effort. If we can't persist consent, runtime treats missing
-    // fields as not approved.
+    // Best-effort. Missing preferences use the runtime default (inbox reads on).
   }
 }
 
@@ -1065,8 +1067,7 @@ async function runInstallClaim(
     // session's consent choices. Only for the non-interactive path (CI / re-install
     // inheritance). In the interactive flow the user JUST answered these questions,
     // so baseSession is authoritative — applying stale server prefs there silently
-    // discarded a fresh "yes" to inbox-OTP consent (readInboxConsent → false →
-    // await_verification refused despite the user consenting).
+    // discarded a fresh inbox-read preference.
     applyServerPrefs: boolean;
   },
 ): Promise<SessionData | null> {
@@ -1186,7 +1187,7 @@ export function applyInstallPreferences(
   return {
     ...baseSession,
     consent_skillify_telemetry: preferences.registry_enabled === true,
-    consent_operator_inbox_otp: preferences.consent_operator_inbox_otp === true,
+    consent_operator_inbox_otp: preferences.consent_operator_inbox_otp !== false,
   };
 }
 

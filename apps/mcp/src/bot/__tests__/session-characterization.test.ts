@@ -379,8 +379,7 @@ describe("characterization: Session construction", () => {
       compactV2Previous: null,
       compactV2Refs: { kind: "Map", size: 0 },
       compactV2Secret: { kind: "Buffer", length: 32 },
-      // harness start never consents to an inbox read and has no user identity.
-      consentInboxRead: false,
+      consentInboxRead: true,
       generation: 0,
       hintServed: true,
       id: expect.any(String),

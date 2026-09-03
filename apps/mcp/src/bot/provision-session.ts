@@ -8316,11 +8316,8 @@ export interface AwaitVerificationOptions {
   // code is typed via type_secret and never crosses the MCP boundary to the
   // host (also dodges host-side payload truncation — see T3).
   intoSlot?: string;
-  // PR3b — JIT consent at the verification wall. The host sets this true ONLY
-  // after the user agrees, in-context, to let the operator read their inbox.
-  // Grants inbox-read for the rest of THIS session (the remembered cache, so we
-  // don't re-prompt on every await); it does NOT change the standing install
-  // flag. Headless/no-user → the host never sets it, so the gate still refuses.
+  // Overrides inbox reading for this session only. true grants (or restores)
+  // access and false opts out without changing the saved advanced preference.
   grantConsent?: boolean;
 }
 
@@ -8380,22 +8377,20 @@ export function buildVerificationResult(
   return { session_id: sessionId, found, code, link, needs_user, ...src };
 }
 
-// PR2 — consent refusal. The user has not consented to the operator reading
-// their inbox, so we do NOT read it. The session stays live (resumable): the
-// host asks the user for the code and types it, or the user grants inbox consent
-// and retries. Distinct message from buildVerificationResult so the host can tell
-// "consent withheld" apart from "code not found in an inbox we DID read".
+// Inbox-read opt-out refusal. The session stays live (resumable): the host asks
+// the user for the code and types it, or restores inbox access and retries.
+// Distinct from buildVerificationResult so the host can tell "access disabled"
+// apart from "code not found in an inbox we DID read".
 // Exported for unit tests.
 export function buildConsentRefusal(sessionId: string): VerificationResult {
   const needs_user: NeedsUserCode = {
     wall: "verification_code",
     message:
-      "Inbox reading is not consented, so the operator did not read any mail. Ask " +
-      "the user, in context: may the operator read your inbox to fetch the code for " +
-      'this signup? If YES, retry operate_act { kind: "await_verification" } with ' +
-      "grant_inbox_consent:true (grants it for the rest of this session). If NO, " +
-      "ask them for the code and type it with operate_act — the session is still " +
-      "live either way. (To grant it permanently, re-run `connect` and allow inbox access.)",
+      "Inbox reading is disabled, so the operator did not read any mail. Ask " +
+      "the user for the code and type it with operate_act, or retry " +
+      'operate_act { kind: "await_verification" } with grant_inbox_consent:true ' +
+      "to restore inbox reading for this session. The session stays live either way. " +
+      "To change the default permanently, re-run `connect` and update advanced settings.",
     resume: "code",
   };
   return { session_id: sessionId, found: false, code: null, link: null, needs_user };
@@ -8425,17 +8420,16 @@ export async function awaitVerification(
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
 
-  // PR3b — JIT consent grant: the host passes grantConsent ONLY after the user
-  // agreed in-context. Grant inbox-read for the rest of this session (remembered
-  // so we don't re-prompt each await); does not touch the standing install flag.
-  if (opts.grantConsent === true && !session.consentInboxRead) {
-    session.consentInboxRead = true;
-    audit(sessionId, "inbox_consent_granted", { scope: "session" });
+  // A caller can override the default for this session without changing the
+  // saved advanced preference. In particular, false must win over default-on.
+  if (opts.grantConsent !== undefined && opts.grantConsent !== session.consentInboxRead) {
+    session.consentInboxRead = opts.grantConsent;
+    audit(sessionId, opts.grantConsent ? "inbox_consent_granted" : "inbox_consent_revoked", {
+      scope: "session",
+    });
   }
-  // PR2 fail-closed gate: without inbox-read consent, do NOT read the user's
-  // mail. Hand the code request back to the user instead (resumable). The old
-  // behavior read mail.google.com unconditionally, silently breaking the
-  // default-off consent promise.
+  // Explicit opt-out gate: do NOT read mail while disabled. Hand the code
+  // request back to the user instead (resumable).
   if (!session.consentInboxRead) {
     audit(sessionId, "await_verification", { refused: "no_inbox_consent" });
     return buildConsentRefusal(sessionId);
