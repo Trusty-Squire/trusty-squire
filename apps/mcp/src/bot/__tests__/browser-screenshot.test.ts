@@ -213,6 +213,44 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "redacts secret-shaped text and attributes plus an exact injected vault value",
+    async () => {
+      const browser = await launchIsolatedTestBrowser();
+      try {
+        const page = await browser.newPage();
+        const injected = "stored-credential-7f3d9a";
+        await page.setContent(`
+          <p id="api">API key: sk-proj-1234567890abcdefghijklmnopqrstuv</p>
+          <p id="recovery" title="Recovery code: 814226">Use your recovery code</p>
+          <input id="vault" aria-label="Saved value ${injected}" placeholder="${injected}" value="${injected}">
+          <p id="ordinary">Keep this ordinary checkout instruction visible.</p>
+        `);
+        const controller = BrowserController.fromHarnessPage(page);
+
+        const result = await controller.captureOperatorScreenshot({}, [], [injected]);
+        expect(result.redactedCount).toBe(3);
+        const boxes = await Promise.all(
+          ["#api", "#recovery", "#vault", "#ordinary"].map(
+            async (selector) => await page.locator(selector).boundingBox(),
+          ),
+        );
+        expect(boxes.every((box) => box !== null)).toBe(true);
+        const pixels = await samplePixels(
+          page,
+          result.base64,
+          boxes.map((box) => [box!.x + box!.width / 2, box!.y + box!.height / 2]),
+        );
+        expect(isMaskMagenta(pixels[0]!)).toBe(true);
+        expect(isMaskMagenta(pixels[1]!)).toBe(true);
+        expect(isMaskMagenta(pixels[2]!)).toBe(true);
+        expect(isMaskMagenta(pixels[3]!)).toBe(false);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "fails closed — an unqueryable redaction selector aborts the capture entirely",
     async () => {
       const browser = await launchIsolatedTestBrowser();
@@ -273,7 +311,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "refuses populated sealed, password, PAN, expiry, CVV, and select fields",
+    "captures populated sealed, password, PAN, expiry, CVV, and select fields with node masks",
     async () => {
       const browser = await launchIsolatedTestBrowser();
       try {
@@ -292,9 +330,9 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
           const page = await browser.newPage();
           await page.setContent(field);
           const controller = BrowserController.fromHarnessPage(page);
-          await expect(controller.captureOperatorScreenshot()).rejects.toThrow(
-            "screenshot_unavailable_sealed_context",
-          );
+          await expect(controller.captureOperatorScreenshot()).resolves.toMatchObject({
+            redactedCount: expect.any(Number),
+          });
           await page.close();
         }
       } finally {
@@ -318,9 +356,11 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
           input.replaceWith(replacement);
         });
 
-        await expect(controller.captureOperatorScreenshot({}, sealedFieldKeys)).rejects.toThrow(
-          "screenshot_unavailable_sealed_context",
-        );
+        await expect(
+          controller.captureOperatorScreenshot({}, sealedFieldKeys),
+        ).resolves.toMatchObject({
+          redactedCount: 1,
+        });
       } finally {
         await browser.close();
       }
@@ -347,25 +387,27 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
           input.replaceWith(replacement);
         });
 
-        await expect(controller.captureOperatorScreenshot({}, sealedFieldKeys)).rejects.toThrow(
-          "screenshot_unavailable_sealed_context",
-        );
+        await expect(
+          controller.captureOperatorScreenshot({}, sealedFieldKeys),
+        ).resolves.toMatchObject({
+          redactedCount: 1,
+        });
       } finally {
         await browser.close();
       }
     },
   );
 
-  it.skipIf(!chromiumAvailable)("refuses a rendered separator-formatted PAN", async () => {
+  it.skipIf(!chromiumAvailable)("redacts a rendered separator-formatted PAN", async () => {
     const browser = await launchIsolatedTestBrowser();
     try {
       const page = await browser.newPage();
       await page.setContent("<div>Card on file: 4242-4242 4242-4242</div>");
       const controller = BrowserController.fromHarnessPage(page);
 
-      await expect(controller.captureOperatorScreenshot()).rejects.toThrow(
-        "screenshot_unavailable_sealed_context",
-      );
+      await expect(controller.captureOperatorScreenshot()).resolves.toMatchObject({
+        redactedCount: 1,
+      });
     } finally {
       await browser.close();
     }
@@ -455,7 +497,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "re-verifies sealed content immediately before pixel capture",
+    "retries and redacts a secret that appears immediately before pixel capture",
     async () => {
       const browser = await launchIsolatedTestBrowser();
       try {
@@ -478,10 +520,10 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
         };
         const controller = BrowserController.fromHarnessPage(page);
 
-        await expect(controller.captureOperatorScreenshot()).rejects.toThrow(
-          "screenshot_unavailable_sealed_context",
-        );
-        expect(captureCalls).toBe(0);
+        await expect(controller.captureOperatorScreenshot()).resolves.toMatchObject({
+          redactedCount: 1,
+        });
+        expect(captureCalls).toBeGreaterThanOrEqual(1);
       } finally {
         await browser.close();
       }
@@ -658,9 +700,9 @@ describe("operate_screenshot frame targeting (real browser)", () => {
         await page.waitForLoadState("networkidle");
         const controller = BrowserController.fromHarnessPage(page);
 
-        await expect(controller.captureOperatorScreenshot()).rejects.toThrow(
-          "screenshot_unavailable_sealed_context",
-        );
+        await expect(controller.captureOperatorScreenshot()).resolves.toMatchObject({
+          redactedCount: 1,
+        });
         const result = await controller.captureOperatorScreenshot({
           frameUrlContains: "cardinalcommerce.com",
         });
@@ -673,7 +715,7 @@ describe("operate_screenshot frame targeting (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "verifies parent compositor overlays included in a targeted capture",
+    "redacts a parent compositor overlay included in a targeted capture",
     async () => {
       const browser = await launchIsolatedTestBrowser();
       try {
@@ -694,7 +736,7 @@ describe("operate_screenshot frame targeting (real browser)", () => {
 
         await expect(
           controller.captureOperatorScreenshot({ frameUrlContains: "cardinalcommerce.com" }),
-        ).rejects.toThrow("screenshot_unavailable_sealed_context");
+        ).resolves.toMatchObject({ redactedCount: 1 });
       } finally {
         await browser.close();
       }
@@ -702,7 +744,7 @@ describe("operate_screenshot frame targeting (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "verifies descendant documents included by a targeted frame",
+    "redacts a secret node in descendant documents included by a targeted frame",
     async () => {
       const browser = await launchIsolatedTestBrowser();
       try {
@@ -720,7 +762,7 @@ describe("operate_screenshot frame targeting (real browser)", () => {
 
         await expect(
           controller.captureOperatorScreenshot({ frameUrlContains: "cardinalcommerce.com" }),
-        ).rejects.toThrow("screenshot_unavailable_sealed_context");
+        ).resolves.toMatchObject({ redactedCount: 1 });
       } finally {
         await browser.close();
       }

@@ -83,7 +83,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       expect(textBlock?.text ?? "").not.toContain(TINY_JPEG_BASE64);
 
       expect((browser.captureOperatorScreenshot as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual(
-        [{}, []],
+        [{}, [], []],
       );
     } finally {
       await client.close();
@@ -134,6 +134,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
             fullPage: true,
           },
           ["historical-card-form"],
+          [],
         ],
       );
     } finally {
@@ -178,7 +179,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
         arguments: { session_id: started.session_id },
       });
       expect(result.isError).not.toBe(true);
-      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({}, []);
+      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({}, [], []);
       expect(
         (browser.extractInteractiveElements as ReturnType<typeof vi.fn>).mock.calls.length,
       ).toBe(extractionCalls);
@@ -219,14 +220,14 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       });
 
       expect(result.isError).not.toBe(true);
-      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({}, ["some-target-key"]);
+      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({}, ["some-target-key"], []);
     } finally {
       await client.close();
       await closeAllProvisionSessions();
     }
   });
 
-  it("refuses (screenshot_unavailable_sealed_context) while a payment card fill is currently active", async () => {
+  it("captures during an active payment seal so the browser can redact its secret nodes", async () => {
     const url = "https://operator-screenshot.test/checkout";
     const browser = {
       goto: vi.fn().mockResolvedValue(undefined),
@@ -254,11 +255,8 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
         arguments: { session_id: started.session_id },
       });
 
-      expect(result.isError).toBe(true);
-      const content = result.content as Array<{ type: string; text?: string }>;
-      const text = content.find((c) => c.type === "text")?.text ?? "";
-      expect(text).toContain("screenshot_unavailable_sealed_context");
-      expect(browser.captureOperatorScreenshot).not.toHaveBeenCalled();
+      expect(result.isError).not.toBe(true);
+      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({}, [], []);
     } finally {
       await client.close();
       await closeAllProvisionSessions();
