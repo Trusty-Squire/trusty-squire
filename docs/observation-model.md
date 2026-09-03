@@ -76,7 +76,7 @@ Captain's call, made against codex's push for a frame-level seal: **never seal a
 - Redact secret-shaped / secret-marked content in `read`/`screenshot`, and extend redaction **beyond text nodes to attributes and control state** (input `value`, `placeholder`, `aria-*`, `title`, autocomplete previews, secret-bearing URLs) — codex correctly noted secrets are not only in text nodes.
 - Do **not** seal ordinary or payment pages.
 
-**Accepted residual risk (recorded, not hand-waved).** Node redaction cannot cover a secret rendered in a `<canvas>`, an image, an SVG, a QR code, OCR-readable pixels, or a cross-origin third-party iframe, and "payment iframes mask their own fields" is an assumption some processors violate. Under option B these can leak a secret into the agent's context. The captain accepts this exposure in exchange for agent visibility; revisit if a real leak occurs or a processor is found rendering PAN/CVV outside its iframe. Shape-heuristic false positives are handled by keeping the shapes TIGHT (vendor API-key/token/JWT/recovery/TOTP signatures only — see "Tightened node-shape heuristics and the debug switch" at the end of this document) and by `SQUIRE_OBSERVE_REDACTION_DEBUG=1`, an operator debugging switch that lifts the shape heuristics and the mid-capture instability refusal while never disabling exact injected-value and rendered-PAN masking.
+**Accepted residual risk (recorded, not hand-waved).** Node redaction cannot cover a secret rendered in a `<canvas>`, an image, an SVG, a QR code, OCR-readable pixels, or an uninspectable cross-origin third-party iframe, and "payment iframes mask their own fields" is an assumption some processors violate. Under option B these can leak a secret into the agent's context. The captain accepts this exposure in exchange for agent visibility; revisit if a real leak occurs or a processor is found rendering PAN/CVV outside its iframe. Shape-heuristic false positives are handled by keeping the shapes TIGHT (vendor API-key/token/JWT/recovery/TOTP signatures only — see "Tightened node-shape heuristics" at the end of this document).
 
 ### 4.6 The descriptive ref is the join key
 
@@ -249,19 +249,21 @@ now hold.
 `operate_screenshot` no longer rejects an ordinary or checkout document solely
 because it contains a filled secret field. `browser.ts` discovers sensitive
 nodes immediately before a capture and paints masks over their rendered
-rectangles; it rechecks after capture and discards an unstable image. The mask
-set covers secret-marked nodes, payment fields, Luhn PANs, secret-shaped text,
-control values, and attribute/state surfaces including `placeholder`,
-`aria-*`, `title`, autocomplete previews, and session-known injected vault
-values. `provision-session.ts` applies corresponding shape/exact-value
-redaction to host-facing observation text.
+rectangles; it rechecks after capture and paints the union of both masks if
+only the node set changed. The mask set covers secret-marked nodes, payment
+fields, Luhn PANs, secret-shaped text, control values, and attribute/state
+surfaces including `placeholder`, `aria-*`, `title`, autocomplete previews,
+and session-known injected vault values. `provision-session.ts` applies
+corresponding shape/exact-value redaction to host-facing observation text. An
+uninspectable unrelated child frame does not seal the surrounding screenshot;
+if it may contain a session-injected value, only that frame is covered.
 
 The accepted §4.5 residual remains unchanged: this cannot redact a secret
 rendered in canvas, an image, SVG, QR/OCR-readable pixels, or a cross-origin
 third-party iframe. That exposure is accepted for the visibility gained by
 node-level redaction; no additional concealment mechanism is implied here.
 
-#### Tightened node-shape heuristics and the debug switch
+#### Tightened node-shape heuristics
 
 The original shape heuristics (PR #627) were BROAD: any `code`-word within 40
 characters of 4–8 digits, any secret-ish label before any 4+ character value,
@@ -271,7 +273,9 @@ redacting hundreds of nodes (`redacted_count=569` on a Shopify checkout), and
 the per-node evaluate round trips made dynamic pages slow enough to trip the
 post-capture stability guard, which converts ANY pipeline failure into
 `screenshot_unavailable_sealed_context` — blinding the agent at the payment
-step.
+step. The collector now uses the union of pre/post capture masks when only the
+node set changes, so a normal checkout re-render does not discard the image;
+a changed document or frame set still refuses.
 
 The heuristics are now TIGHT, shared between the in-page screenshot node scan
 and the observation-text scrub (`OBSERVATION_SECRET_SHAPE_SOURCES` in
@@ -285,12 +289,10 @@ heuristic guesses. The node scan is a single in-page pass per frame (one
 round trip, shadow-root piercing preserved) instead of one evaluate per
 candidate node.
 
-`SQUIRE_OBSERVE_REDACTION_DEBUG=1` lifts the remaining heuristic layer for
-operator debugging: the shape heuristics are disabled and a mask-set mutation
-during capture no longer discards the image (the union of the before/after
-mask samplings is painted instead; a changed frame set or a document
-replacement still refuses). Default OFF. In BOTH modes the guarantees that
-matter hold: an operator-injected vault value (a `secretSlots` value or a
-sealed field) never reaches an observation, screenshot text, or unmasked
-screenshot pixels, and a rendered Luhn-valid PAN is always masked. Only the
-shape guesses disappear.
+There is one default path: the tight shape heuristics always run, and a
+mask-set mutation during capture is covered by the union of the before/after
+samplings. A changed frame set or document replacement still refuses. The
+guarantees that matter hold: an operator-injected vault value (a
+`secretSlots` value or a sealed field) never reaches an observation,
+screenshot text, or unmasked screenshot pixels, and a rendered Luhn-valid PAN
+is always masked.

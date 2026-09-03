@@ -794,8 +794,7 @@ function isShopifyCheckoutThankYouRoute(rawUrl: string): boolean {
       .filter(Boolean)
       .map((segment) => decodeURIComponent(segment).toLowerCase().replace(/-/g, "_"));
     return (
-      (segments[0] === "checkout" || segments[0] === "checkouts") &&
-      segments.at(-1) === "thank_you"
+      (segments[0] === "checkout" || segments[0] === "checkouts") && segments.at(-1) === "thank_you"
     );
   } catch {
     return false;
@@ -960,19 +959,6 @@ const SCREENSHOT_SECRET_FIELD_SELECTORS = [
   'input[id*="pin" i]:not([id*="shipping" i])',
 ].join(",");
 const SCREENSHOT_REDACTION_SELECTORS = `${CHECKOUT_CARD_VALUE_FIELD_SELECTORS},${SCREENSHOT_SECRET_FIELD_SELECTORS}`;
-
-// Knobs for the operator-screenshot redaction pipeline. Defaults preserve the
-// fail-closed posture: tight secret-shape heuristics on, an unstable mask set
-// refuses the image. SQUIRE_OBSERVE_REDACTION_DEBUG=1 (via captureScreenshot)
-// flips both: shape heuristics off and a mutating mask set keeps the image,
-// painting the union of both samplings. Neither knob ever disables the
-// per-field masks themselves (card-field selectors, sealed-field locators,
-// Luhn-valid PAN values, operator-injected vault values) — the injected-value
-// guarantee holds in both modes.
-export interface OperatorScreenshotRedactionOptions {
-  shapeRedaction?: boolean;
-  unstablePolicy?: "refuse" | "union";
-}
 
 interface SealedElementDescriptor {
   tag: string;
@@ -5189,10 +5175,13 @@ export class BrowserController {
    */
   async commitRequiredShippingAddressLine1(selector: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
-    await this.page.locator(selector).first().evaluate((field) => {
-      field.dispatchEvent(new Event("change", { bubbles: true }));
-      if (field instanceof HTMLElement) field.blur();
-    });
+    await this.page
+      .locator(selector)
+      .first()
+      .evaluate((field) => {
+        field.dispatchEvent(new Event("change", { bubbles: true }));
+        if (field instanceof HTMLElement) field.blur();
+      });
     // Allow Shopify's bounded Places/geocoding request to begin before the
     // caller observes the delivery-method section.
     await this.sleep(500);
@@ -9289,7 +9278,6 @@ export class BrowserController {
     knownSecrets: readonly string[] = [],
     captureClip: { x: number; y: number; width: number; height: number } | null = null,
     strictFrames: ReadonlySet<Frame> = new Set(frames),
-    shapeRedaction = true,
   ): Promise<{
     rectangles: Array<{ x: number; y: number; width: number; height: number }>;
     redactedCount: number;
@@ -9304,193 +9292,231 @@ export class BrowserController {
     try {
       for (const [frameIndex, frame] of frames.entries()) {
         let frameCount = 0;
-        const frameHandles = await frame.locator(selector).elementHandles();
-        for (const locator of sealedLocators.get(frame) ?? []) {
-          const handle = await locator.elementHandle({ timeout: 5_000 });
-          if (handle === null) throw new Error("screenshot_redaction_unresolved");
-          if (
-            !(await handle.evaluate((el, matchSelector) => el.matches(matchSelector), selector))
-          ) {
-            frameHandles.push(handle);
-          } else {
-            await handle.dispose();
+        const handlesStart = handles.length;
+        const rectanglesStart = rectangles.length;
+        const signatureStart = signatureParts.length;
+        try {
+          const frameHandles = await frame.locator(selector).elementHandles();
+          for (const locator of sealedLocators.get(frame) ?? []) {
+            const handle = await locator.elementHandle({ timeout: 5_000 });
+            if (handle === null) throw new Error("screenshot_redaction_unresolved");
+            if (
+              !(await handle.evaluate((el, matchSelector) => el.matches(matchSelector), selector))
+            ) {
+              frameHandles.push(handle);
+            } else {
+              await handle.dispose();
+            }
           }
-        }
-        const valueCandidates = await frame
-          .locator('input:not([type="hidden" i]),textarea')
-          .elementHandles();
-        for (const candidate of valueCandidates) {
-          const value = await candidate.inputValue({ timeout: 5_000 });
-          if (!containsLuhnPanSpan(value)) {
-            await candidate.dispose();
-            continue;
+          const valueCandidates = await frame
+            .locator('input:not([type="hidden" i]),textarea')
+            .elementHandles();
+          for (const candidate of valueCandidates) {
+            const value = await candidate.inputValue({ timeout: 5_000 });
+            if (!containsLuhnPanSpan(value)) {
+              await candidate.dispose();
+              continue;
+            }
+            const duplicate = await Promise.all(
+              frameHandles.map(
+                async (existing) => await candidate.evaluate((el, other) => el === other, existing),
+              ),
+            );
+            if (duplicate.includes(true)) {
+              await candidate.dispose();
+              continue;
+            }
+            frameHandles.push(candidate);
           }
-          const duplicate = await Promise.all(
-            frameHandles.map(
-              async (existing) => await candidate.evaluate((el, other) => el === other, existing),
-            ),
-          );
-          if (duplicate.includes(true)) {
-            await candidate.dispose();
-            continue;
-          }
-          frameHandles.push(candidate);
-        }
-        // A secret is not necessarily a form value. It can be reflected by a
-        // page into visible text, title/aria/placeholder attributes, or a
-        // browser-autofill preview. Find the smallest renderable owner node
-        // (direct text only, never a parent merely because a child is secret)
-        // and mask that node's rectangle. This intentionally does not attempt
-        // to cover pixels in canvas/image/SVG/QR/cross-origin rendering; that
-        // residual is the accepted D2 observation-model posture.
-        //
-        // One in-page pass returns every matching node in a single round trip;
-        // PR #627's per-node evaluate loop (one round trip per candidate over
-        // every element) made dynamic checkout pages slow enough to trip the
-        // stability guard below at the payment step and blind the agent.
-        // Shape sources travel as data because page.evaluate code cannot
-        // import; the sources stay byte-identical to the host-side text
-        // scrub (OBSERVATION_SECRET_SHAPE_SOURCES).
-        // evaluateHandle (not evaluate): nested DOM nodes serialize as strings
-        // through a plain evaluate return; a handle to the array plus property
-        // enumeration preserves per-node handles.
-        const matchesHandle = await frame.evaluateHandle(
-          (args) => {
-            const { secrets, shapeSources } = args;
-            const shapes = shapeSources.map((source) => new RegExp(source, "giu"));
-            const hasLuhnPan = (text: string): boolean => {
-              const positions = Array.from(text.matchAll(/\d/g), (match) => match.index);
-              const luhn = (digits: string): boolean => {
-                let sum = 0;
-                let double = false;
-                for (let index = digits.length - 1; index >= 0; index -= 1) {
-                  let digit = Number(digits[index]);
-                  if (double) {
-                    digit *= 2;
-                    if (digit > 9) digit -= 9;
+          // A secret is not necessarily a form value. It can be reflected by a
+          // page into visible text, title/aria/placeholder attributes, or a
+          // browser-autofill preview. Find the smallest renderable owner node
+          // (direct text only, never a parent merely because a child is secret)
+          // and mask that node's rectangle. This intentionally does not attempt
+          // to cover pixels in canvas/image/SVG/QR/cross-origin rendering; that
+          // residual is the accepted D2 observation-model posture.
+          //
+          // One in-page pass returns every matching node in a single round trip;
+          // PR #627's per-node evaluate loop (one round trip per candidate over
+          // every element) made dynamic checkout pages slow enough to trip the
+          // stability guard below at the payment step and blind the agent.
+          // Shape sources travel as data because page.evaluate code cannot
+          // import; the sources stay byte-identical to the host-side text
+          // scrub (OBSERVATION_SECRET_SHAPE_SOURCES).
+          // evaluateHandle (not evaluate): nested DOM nodes serialize as strings
+          // through a plain evaluate return; a handle to the array plus property
+          // enumeration preserves per-node handles.
+          const matchesHandle = await frame.evaluateHandle(
+            (args) => {
+              const { secrets, shapeSources } = args;
+              const shapes = shapeSources.map((source) => new RegExp(source, "giu"));
+              const hasLuhnPan = (text: string): boolean => {
+                const positions = Array.from(text.matchAll(/\d/g), (match) => match.index);
+                const luhn = (digits: string): boolean => {
+                  let sum = 0;
+                  let double = false;
+                  for (let index = digits.length - 1; index >= 0; index -= 1) {
+                    let digit = Number(digits[index]);
+                    if (double) {
+                      digit *= 2;
+                      if (digit > 9) digit -= 9;
+                    }
+                    sum += digit;
+                    double = !double;
                   }
-                  sum += digit;
-                  double = !double;
+                  return sum % 10 === 0;
+                };
+                for (let start = 0; start + 13 <= positions.length; start += 1) {
+                  const maxLength = Math.min(19, positions.length - start);
+                  for (let length = 13; length <= maxLength; length += 1) {
+                    const span = positions.slice(start, start + length);
+                    if (span[span.length - 1]! - span[0]! + 1 > 96) break;
+                    if (luhn(span.map((position) => text[position]).join(""))) return true;
+                  }
                 }
-                return sum % 10 === 0;
+                return false;
               };
-              for (let start = 0; start + 13 <= positions.length; start += 1) {
-                const maxLength = Math.min(19, positions.length - start);
-                for (let length = 13; length <= maxLength; length += 1) {
-                  const span = positions.slice(start, start + length);
-                  if (span[span.length - 1]! - span[0]! + 1 > 96) break;
-                  if (luhn(span.map((position) => text[position]).join(""))) return true;
+              // No broad vendor-token catch-all here. DOM identifiers are not
+              // secrets: Shopify-style ids/names like
+              // "checkout_shipping_address_address1" matched the previous
+              // in-page port of findCredentialTokens and masked the entire
+              // shipping block — radios, prices, addresses — out of the
+              // screenshot. Node redaction is now exactly: operator-injected
+              // vault values, Luhn-valid PANs, and the tight secret-shape
+              // signatures (API keys, recovery codes, TOTP, JWTs…).
+              const containsInjected = (text: string): boolean =>
+                secrets.some((secret) => secret.length > 0 && text.includes(secret));
+              // Values/text also admit a Luhn-valid PAN (a card number rendered
+              // or typed into a field); attributes admit injected values and the
+              // tight secret shapes.
+              const secretValue = (text: string, kind: "value" | "attr" | "text"): boolean => {
+                if (text.length === 0) return false;
+                if (containsInjected(text)) return true;
+                if (kind !== "attr" && hasLuhnPan(text)) return true;
+                for (const shape of shapes) {
+                  if (shape.test(text)) return true;
                 }
-              }
-              return false;
-            };
-            // No broad vendor-token catch-all here. DOM identifiers are not
-            // secrets: Shopify-style ids/names like
-            // "checkout_shipping_address_address1" matched the previous
-            // in-page port of findCredentialTokens and masked the entire
-            // shipping block — radios, prices, addresses — out of the
-            // screenshot. Node redaction is now exactly: operator-injected
-            // vault values, Luhn-valid PANs, and the tight secret-shape
-            // signatures (API keys, recovery codes, TOTP, JWTs…).
-            const containsInjected = (text: string): boolean =>
-              secrets.some((secret) => secret.length > 0 && text.includes(secret));
-            // kind "value"/"text" also admit a Luhn-valid PAN (a card number
-            // rendered or typed into a field) in EVERY mode; attributes only
-            // admit injected values and the tight shapes. With shapes off
-            // (SQUIRE_OBSERVE_REDACTION_DEBUG=1) only the injected-value and
-            // PAN guarantees remain.
-            const secretValue = (text: string, kind: "value" | "attr" | "text"): boolean => {
-              if (text.length === 0) return false;
-              if (containsInjected(text)) return true;
-              if (kind !== "attr" && hasLuhnPan(text)) return true;
-              if (shapes.length === 0) return false;
-              for (const shape of shapes) {
-                if (shape.test(text)) return true;
-              }
-              return false;
-            };
-            const matches = new Set<Element>();
-            const check = (el: Element): void => {
-              const state =
-                el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
-                  ? el.value
-                  : el instanceof HTMLSelectElement
-                    ? `${el.value} ${el.options[el.selectedIndex]?.textContent ?? ""}`
-                    : "";
-              if (state.length > 0 && secretValue(state, "value")) {
-                matches.add(el);
-                return;
-              }
-              for (const attribute of Array.from(el.attributes)) {
-                if (secretValue(attribute.value, "attr")) {
+                return false;
+              };
+              const matches = new Set<Element>();
+              const check = (el: Element): void => {
+                const state =
+                  el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+                    ? el.value
+                    : el instanceof HTMLSelectElement
+                      ? `${el.value} ${el.options[el.selectedIndex]?.textContent ?? ""}`
+                      : "";
+                if (state.length > 0 && secretValue(state, "value")) {
                   matches.add(el);
                   return;
                 }
-              }
-              const directText = Array.from(el.childNodes)
-                .filter((node) => node.nodeType === Node.TEXT_NODE)
-                .map((node) => node.textContent ?? "")
-                .join(" ")
-                .trim();
-              if (directText.length > 0 && secretValue(directText, "text")) matches.add(el);
-            };
-            // Walk the light DOM and every open shadow root — parity with the
-            // piercing the old frame.locator("*") candidates provided.
-            const walk = (root: Document | ShadowRoot | Element): void => {
-              for (const el of Array.from(root.querySelectorAll("*"))) {
-                check(el);
-                if (el.shadowRoot !== null) walk(el.shadowRoot);
-              }
-            };
-            walk(document);
-            return Array.from(matches);
-          },
-          { secrets, shapeSources: shapeRedaction ? OBSERVATION_SECRET_SHAPE_SOURCES : [] },
-        );
-        const sensitiveProperties = await matchesHandle.getProperties();
-        await matchesHandle.dispose().catch(() => undefined);
-        for (const property of sensitiveProperties.values()) {
-          const candidate = property.asElement();
-          if (candidate === null) {
-            await property.dispose().catch(() => undefined);
-            throw new Error("screenshot_redaction_unresolved");
-          }
-          const duplicate = await Promise.all(
-            frameHandles.map(
-              async (existing) => await candidate.evaluate((el, other) => el === other, existing),
-            ),
+                for (const attribute of Array.from(el.attributes)) {
+                  if (secretValue(attribute.value, "attr")) {
+                    matches.add(el);
+                    return;
+                  }
+                }
+                const directText = Array.from(el.childNodes)
+                  .filter((node) => node.nodeType === Node.TEXT_NODE)
+                  .map((node) => node.textContent ?? "")
+                  .join(" ")
+                  .trim();
+                if (directText.length > 0 && secretValue(directText, "text")) matches.add(el);
+              };
+              // Walk the light DOM and every open shadow root — parity with the
+              // piercing the old frame.locator("*") candidates provided.
+              const walk = (root: Document | ShadowRoot | Element): void => {
+                for (const el of Array.from(root.querySelectorAll("*"))) {
+                  check(el);
+                  if (el.shadowRoot !== null) walk(el.shadowRoot);
+                }
+              };
+              walk(document);
+              return Array.from(matches);
+            },
+            { secrets, shapeSources: OBSERVATION_SECRET_SHAPE_SOURCES },
           );
-          if (duplicate.includes(true)) {
-            await candidate.dispose();
-            continue;
+          const sensitiveProperties = await matchesHandle.getProperties();
+          await matchesHandle.dispose().catch(() => undefined);
+          for (const property of sensitiveProperties.values()) {
+            const candidate = property.asElement();
+            if (candidate === null) {
+              await property.dispose().catch(() => undefined);
+              throw new Error("screenshot_redaction_unresolved");
+            }
+            const duplicate = await Promise.all(
+              frameHandles.map(
+                async (existing) => await candidate.evaluate((el, other) => el === other, existing),
+              ),
+            );
+            if (duplicate.includes(true)) {
+              await candidate.dispose();
+              continue;
+            }
+            frameHandles.push(candidate);
           }
-          frameHandles.push(candidate);
-        }
-        for (const handle of frameHandles) {
-          if (!(await handle.evaluate((el) => el.isConnected))) {
-            throw new Error("screenshot_redaction_unresolved");
+          for (const handle of frameHandles) {
+            if (!(await handle.evaluate((el) => el.isConnected))) {
+              throw new Error("screenshot_redaction_unresolved");
+            }
+            const box = await handle.boundingBox();
+            if (
+              captureClip !== null &&
+              !strictFrames.has(frame) &&
+              (box === null ||
+                box.x >= captureClip.x + captureClip.width ||
+                box.x + box.width <= captureClip.x ||
+                box.y >= captureClip.y + captureClip.height ||
+                box.y + box.height <= captureClip.y)
+            ) {
+              await handle.dispose();
+              continue;
+            }
+            handles.push(handle);
+            if (box !== null) rectangles.push(box);
+            signatureParts.push(
+              `${frameIndex}:${box === null ? "hidden" : [box.x, box.y, box.width, box.height].join(":")}`,
+            );
+            frameCount += 1;
           }
-          const box = await handle.boundingBox();
+          signatureParts.push(`count:${frameIndex}:${frameCount}`);
+        } catch {
+          const discarded = handles.splice(handlesStart);
+          rectangles.splice(rectanglesStart);
+          signatureParts.splice(signatureStart);
+          await Promise.all(
+            discarded.map(async (handle) => await handle.dispose().catch(() => undefined)),
+          );
+          // An unreadable embedded third-party frame is part of the accepted
+          // cross-origin residual risk. Do not blind an otherwise ordinary
+          // checkout page because analytics/chat cannot be inspected. The main
+          // document and an explicitly targeted frame still fail closed.
           if (
-            captureClip !== null &&
-            !strictFrames.has(frame) &&
-            (box === null ||
-              box.x >= captureClip.x + captureClip.width ||
-              box.x + box.width <= captureClip.x ||
-              box.y >= captureClip.y + captureClip.height ||
-              box.y + box.height <= captureClip.y)
+            frame === this.page?.mainFrame() ||
+            (captureClip !== null && strictFrames.has(frame))
           ) {
-            await handle.dispose();
-            continue;
+            throw new Error("screenshot_redaction_unresolved");
           }
-          handles.push(handle);
-          if (box !== null) rectangles.push(box);
-          signatureParts.push(
-            `${frameIndex}:${box === null ? "hidden" : [box.x, box.y, box.width, box.height].join(":")}`,
-          );
-          frameCount += 1;
+          // If this frame may contain a session-injected value, preserving the
+          // vault guarantee wins over the normal cross-origin residual: hide
+          // only this uninspectable iframe, never the surrounding page.
+          if (secrets.length > 0 || (sealedLocators.get(frame)?.length ?? 0) > 0) {
+            const owner = await frame.frameElement();
+            try {
+              const box = await owner.boundingBox();
+              if (box === null) throw new Error("screenshot_redaction_unresolved");
+              rectangles.push(box);
+              signatureParts.push(
+                `${frameIndex}:opaque:${[box.x, box.y, box.width, box.height].join(":")}`,
+              );
+              frameCount = 1;
+            } finally {
+              await owner.dispose().catch(() => undefined);
+            }
+          }
+          signatureParts.push(`uninspectable:${frameIndex}`);
+          signatureParts.push(`count:${frameIndex}:${frameCount}`);
         }
-        signatureParts.push(`count:${frameIndex}:${frameCount}`);
       }
     } catch {
       await Promise.all(
@@ -9681,7 +9707,6 @@ export class BrowserController {
     } = {},
     sealedFieldKeys: readonly string[] = [],
     knownSecrets: readonly string[] = [],
-    redaction: OperatorScreenshotRedactionOptions = {},
   ): Promise<{
     base64: string;
     frameUrl: string | null;
@@ -9714,13 +9739,9 @@ export class BrowserController {
         return true;
       };
       if (!(await documentsStillCurrent())) {
-        // SQUIRE_OBSERVE_REDACTION_DEBUG=1: a navigation caught between scope
-        // resolution and this check gets one settle-and-recheck before the
-        // capture is sealed; the frame-set re-check in the retry loop below
-        // still refuses a genuinely changed context.
-        if (redaction.unstablePolicy === "union") {
-          await this.wait(0.5);
-        }
+        // Give a navigation caught between scope resolution and this check one
+        // short settle before rejecting a genuinely changed document.
+        await this.wait(0.5);
         if (!(await documentsStillCurrent())) {
           throw new Error("screenshot_unavailable_sealed_context");
         }
@@ -9756,18 +9777,11 @@ export class BrowserController {
                 // The redaction set is collected immediately before capture and
                 // re-collected after it. A new/moved/replaced secret node makes
                 // the image unstable and is discarded; it never seals the
-                // surrounding document. In debug mode the navigation falls
-                // through to the retry loop instead of sealing the image —
-                // the attempt-scope check there refuses a changed frame set.
-                throw new Error(
-                  redaction.unstablePolicy === "union"
-                    ? "screenshot_redaction_unstable"
-                    : "screenshot_unavailable_sealed_context",
-                );
+                // surrounding document.
+                throw new Error("screenshot_unavailable_sealed_context");
               }
             },
             knownSecrets,
-            redaction,
           );
           break;
         } catch (error) {
@@ -9812,7 +9826,6 @@ export class BrowserController {
       frameUrlContains?: string;
       fullPage?: boolean;
       extraRedactionSelectors?: readonly string[];
-      redaction?: OperatorScreenshotRedactionOptions;
     } = {},
     knownSecrets: readonly string[] = [],
   ): Promise<{
@@ -9832,7 +9845,6 @@ export class BrowserController {
       scope,
       undefined,
       knownSecrets,
-      opts.redaction,
     );
   }
 
@@ -9851,7 +9863,6 @@ export class BrowserController {
     } = { frames: [...framesBefore], strictFrames: new Set(framesBefore), clip: null },
     beforeCapture?: () => Promise<void>,
     knownSecrets: readonly string[] = [],
-    redaction: OperatorScreenshotRedactionOptions = {},
   ): Promise<{
     base64: string;
     frameUrl: string | null;
@@ -9868,7 +9879,6 @@ export class BrowserController {
       knownSecrets,
       scope.clip,
       scope.strictFrames,
-      redaction.shapeRedaction ?? true,
     );
     const { rectangles, redactedCount, signature } = before;
     let recheck: typeof before | undefined;
@@ -9977,7 +9987,6 @@ export class BrowserController {
             knownSecrets,
             scope.clip,
             scope.strictFrames,
-            redaction.shapeRedaction ?? true,
           );
           maskStable =
             recheck.signature === signature && recheck.handles.length === before.handles.length;
@@ -9999,15 +10008,12 @@ export class BrowserController {
         }
       }
       if (!maskStable) {
-        if (!(redaction.unstablePolicy === "union" && framesStable)) {
+        if (!framesStable) {
           throw new Error("screenshot_redaction_unstable");
         }
-        // SQUIRE_OBSERVE_REDACTION_DEBUG=1: the frame set is unchanged but the
-        // mask set drifted while the capture was in flight. Keep the image and
-        // paint the union of both samplings — every node that matched at
-        // either end is covered, so nothing secret survives; the image is no
-        // longer discarded on pages that mutate at the payment step. A frame
-        // set change (framesStable === false) still refuses.
+        // The node set drifted while capture was in flight. Paint the union of
+        // both samplings, so every secret found at either end is covered. A
+        // frame-set change still refuses because it can add unseen pixels.
         const unionRectangles = [...rectangles, ...(recheck?.rectangles ?? [])];
         const unionBase64 = await this.redactOperatorScreenshot(
           buffer,
@@ -13003,9 +13009,7 @@ export class BrowserController {
     }
     return await this.page.mainFrame().evaluate(() => {
       const visibleText = document.body?.innerText ?? "";
-      const confirmationNumber = /\bconfirmation\s*#\s*[a-z0-9][a-z0-9-]{3,}\b/i.test(
-        visibleText,
-      );
+      const confirmationNumber = /\bconfirmation\s*#\s*[a-z0-9][a-z0-9-]{3,}\b/i.test(visibleText);
       const confirmedOrder = /\byour order is confirmed\b/i.test(visibleText);
       const thankYouHeading = Array.from(document.querySelectorAll("h1, h2, [role=heading]")).some(
         (element) => /\bthank you\b/i.test(element.textContent ?? ""),

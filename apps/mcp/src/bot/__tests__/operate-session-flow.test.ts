@@ -187,7 +187,6 @@ const h = vi.hoisted(() => ({
   locatorClickCalls: 0,
   locatorTypeCalls: [] as Array<{ text: string; sealed: boolean }>,
   capturedSealedFieldKeys: [] as string[][],
-  capturedRedactionOptions: [] as unknown[],
   locatorResolveIntents: [] as string[],
   locatorDisposeCalls: 0,
   isPayPalHostedCheckout: false,
@@ -665,10 +664,8 @@ vi.mock("../browser.js", () => ({
       _opts: unknown,
       sealedFieldKeys: readonly string[],
       _knownSecrets: readonly string[] = [],
-      redactionOptions?: unknown,
     ): Promise<{ base64: string; frameUrl: null; frameCount: number; redactedCount: number }> {
       h.capturedSealedFieldKeys.push([...sealedFieldKeys]);
-      h.capturedRedactionOptions.push(redactionOptions);
       return { base64: "jpeg", frameUrl: null, frameCount: 1, redactedCount: 0 };
     }
     async uploadFile(selector: string, filePath: string): Promise<void> {
@@ -1176,7 +1173,6 @@ beforeEach(() => {
   h.locatorClickCalls = 0;
   h.locatorTypeCalls = [];
   h.capturedSealedFieldKeys = [];
-  h.capturedRedactionOptions = [];
   h.locatorResolveIntents = [];
   h.locatorDisposeCalls = 0;
   h.isPayPalHostedCheckout = false;
@@ -3072,7 +3068,8 @@ describe("3.1 — autocomplete-aware type fill", () => {
     h.shippingMethodsLoadOnAutocompleteCommit = true;
 
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> }).safe_table;
+    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table;
     const addressRef = rows.find((row) => row[1] === "s" && row[2]?.includes("f=address"))?.[0];
 
     // The old observation exposed both controls as f=address, allowing the
@@ -3090,7 +3087,10 @@ describe("3.1 — autocomplete-aware type fill", () => {
     ]);
     expect(h.elements).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ selector: "#shipping-address", value: "350 5th Ave, New York, NY 10118, USA" }),
+        expect.objectContaining({
+          selector: "#shipping-address",
+          value: "350 5th Ave, New York, NY 10118, USA",
+        }),
         expect.objectContaining({ selector: "#shipping-apartment", value: "" }),
       ]),
     );
@@ -5558,38 +5558,19 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     expect(JSON.stringify(full)).not.toContain(secret);
   });
 
-  it("keeps the screenshot redaction posture on the default path and widens it only under the debug switch", async () => {
+  it("uses one screenshot redaction path while retaining shape and vault-value redaction", async () => {
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
     await captureScreenshot(started.session_id);
-    // Default path: no redaction options — byte-identical to the pre-flag call.
-    expect(h.capturedRedactionOptions).toEqual([undefined]);
+    expect(h.capturedSealedFieldKeys).toEqual([[]]);
 
-    const previous = process.env.SQUIRE_OBSERVE_REDACTION_DEBUG;
-    process.env.SQUIRE_OBSERVE_REDACTION_DEBUG = "1";
-    try {
-      h.capturedRedactionOptions = [];
-      await captureScreenshot(started.session_id);
-      expect(h.capturedRedactionOptions).toEqual([
-        { shapeRedaction: false, unstablePolicy: "union" },
-      ]);
-
-      // Vault guarantee holds under the flag: a reflected slot value is still
-      // scrubbed from observation text (only the SHAPE heuristics lift).
-      const secret = "stored-credential-7f3d9a";
-      stashSecretSlot(started.session_id, "login", secret);
-      h.visibleText = `API key: sk-proj-1234567890abcdefghijklmnopqrstuv ${secret}`;
-      h.elements = [];
-      const full = await observe(started.session_id, "full");
-      expect(full.text).toContain("[sealed]");
-      expect(full.text).toContain("sk-proj-1234567890abcdefghijklmnopqrstuv");
-      expect(full.text).not.toContain(secret);
-    } finally {
-      if (previous === undefined) delete process.env.SQUIRE_OBSERVE_REDACTION_DEBUG;
-      else process.env.SQUIRE_OBSERVE_REDACTION_DEBUG = previous;
-    }
-    h.capturedRedactionOptions = [];
-    await captureScreenshot(started.session_id);
-    expect(h.capturedRedactionOptions).toEqual([undefined]);
+    const secret = "stored-credential-7f3d9a";
+    stashSecretSlot(started.session_id, "login", secret);
+    h.visibleText = `API key: sk-proj-1234567890abcdefghijklmnopqrstuv ${secret}`;
+    h.elements = [];
+    const full = await observe(started.session_id, "full");
+    expect(full.text).toContain("[sealed]");
+    expect(full.text).not.toContain("sk-proj-1234567890abcdefghijklmnopqrstuv");
+    expect(full.text).not.toContain(secret);
   });
 
   it("refuses to remember a session that used a locator fallback", async () => {
