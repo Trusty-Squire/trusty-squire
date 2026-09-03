@@ -23,6 +23,14 @@ import {
   closeAllProvisionSessions,
   withProvisionSessionCall,
 } from "./bot/provision-session.js";
+import {
+  heartbeatIntervalMs,
+  idleCheckIntervalMs,
+  idleTimeoutMs,
+  idleTimeoutWithSessionMs,
+  reapStaleServerInstances,
+  registerServerInstance,
+} from "./server-instance-registry.js";
 import { buildToolRegistry, findTool } from "./tools/index.js";
 import { openSessionStorage } from "./session.js";
 import { VERSION } from "./version.js";
@@ -48,31 +56,10 @@ const DEFAULT_REGISTRY_BASE =
 // (operate_pay's approval wait is bounded to one minute; post-submit outcome
 // checks are bounded in the minutes) should ever cross it, so crossing it is a reliable
 // abandoned-session signal, not a false kill of live work.
-const DEFAULT_IDLE_TIMEOUT_MS = 20 * 60 * 1_000; // 20m, no open session
-const DEFAULT_IDLE_TIMEOUT_WITH_SESSION_MS = 12 * 60 * 60 * 1_000; // 12h, session open
-const DEFAULT_IDLE_CHECK_INTERVAL_MS = 5 * 60 * 1_000; // 5m — must stay well under the 20m bound above
-
-function envMs(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (raw === undefined) return fallback;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function idleTimeoutMs(): number {
-  return envMs("TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_MS", DEFAULT_IDLE_TIMEOUT_MS);
-}
-
-function idleTimeoutWithSessionMs(): number {
-  return envMs(
-    "TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_WITH_SESSION_MS",
-    DEFAULT_IDLE_TIMEOUT_WITH_SESSION_MS,
-  );
-}
-
-function idleCheckIntervalMs(): number {
-  return envMs("TRUSTY_SQUIRE_SERVER_IDLE_CHECK_INTERVAL_MS", DEFAULT_IDLE_CHECK_INTERVAL_MS);
-}
+//
+// The bounds themselves live in server-instance-registry.ts, because the
+// startup reaper there applies the same policy from the outside to a prior
+// instance that failed to apply it to itself.
 
 // Exported for unit testing; kept pure so the branches (recent activity,
 // no-session idle, session-open idle) don't need a live process/interval.
@@ -362,6 +349,21 @@ export async function runServer(): Promise<void> {
   // sweeps strict process-only manifests, then tracks exact local browser and
   // session-helper identities for launches owned by this server.
   startOwnerProcessReaper();
+  // Reconnects leave the superseded instance behind: a live box carried a
+  // superseded server beside its replacement plus two orphaned to init for
+  // ~31 hours, each keeping a browser tree resident. Reap prior instances of
+  // OUR agent identity that are orphaned or past their own idle bound, before
+  // serving — never by process name, never one still serving a client. Purely
+  // housekeeping, so a failure here must not stop the server from starting.
+  try {
+    await reapStaleServerInstances();
+  } catch (err) {
+    process.stderr.write(
+      `[trusty-squire] stale server reap failed: ${
+        err instanceof Error ? err.message : String(err)
+      }\n`,
+    );
+  }
   // Startup breadcrumb on stderr (which lands in the host agent's MCP
   // log). A silent no-op was the worst part of the entrypoint-guard
   // bug — this line makes "did the server actually start?" answerable
@@ -393,6 +395,10 @@ export async function runServer(): Promise<void> {
   const callAdmission = createServerCallAdmission();
   const server = await buildServer(api, callAdmission, loadPublishedAccountSession);
   const transport = new StdioServerTransport();
+  // Publishes what a later launch of this identity needs to tell "still
+  // serving a client" from "wedged": last inbound message, open sessions,
+  // in-flight calls. Without it every prior instance looks equally idle.
+  const instance = registerServerInstance();
 
   // A stdio client can disappear without sending a signal (for example when
   // its parent agent exits). Chrome keeps Node's event loop alive in that
@@ -401,6 +407,7 @@ export async function runServer(): Promise<void> {
   // idle backstop below racing together cannot run teardown twice.
   let shutdown: Promise<void> | undefined;
   let idleTimer: NodeJS.Timeout | undefined;
+  let heartbeatTimer: NodeJS.Timeout | undefined;
   const requestShutdown = (): void => {
     if (shutdown !== undefined) return;
     const admittedCallsDrained = callAdmission.closeAndDrain();
@@ -412,6 +419,8 @@ export async function runServer(): Promise<void> {
       process.removeListener("SIGTERM", requestShutdown);
       process.removeListener("SIGINT", requestShutdown);
       if (idleTimer !== undefined) clearInterval(idleTimer);
+      if (heartbeatTimer !== undefined) clearInterval(heartbeatTimer);
+      instance?.release();
 
       try {
         // The OAuth-bootstrap login Chrome (google-login) is tracked apart
@@ -479,6 +488,18 @@ export async function runServer(): Promise<void> {
     requestShutdown();
   }, idleCheckIntervalMs());
   idleTimer.unref();
+
+  if (instance !== null) {
+    heartbeatTimer = setInterval(() => {
+      if (shutdown !== undefined) return;
+      instance.heartbeat({
+        lastActivityAt,
+        activeSessions: activeSessionCount(),
+        inFlightCalls: callAdmission.inFlightCount(),
+      });
+    }, heartbeatIntervalMs());
+    heartbeatTimer.unref();
+  }
 
   await server.connect(transport);
 }
