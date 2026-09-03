@@ -72,12 +72,18 @@ already extracted through `BrowserController`'s CDP path. It ports only the
 compact tuple formatting; it does not launch Python or depend on browser-use at
 runtime.
 
-The serializer constructs an allowlisted view before any V2 audit, delta,
+The serializer constructs a screened view before any V2 audit, delta,
 retention, recipe-capture, or public-result sink. Page URLs and visible text are
 empty on the wire. Page-derived hostnames, origins, titles, headings, labels,
-options, errors, and nested action results cross the shared credential/card
-seal before they can leave the session. This is output screening only: V2 does
-not add a payment validation or approval gate.
+options, errors, and nested action results cross the card seal before they can
+leave the session. That seal is **payment-only** (captain, 2026-09-03): only a
+Luhn-valid PAN, a labeled CVV, and the exact value the operator injected from
+the vault are screened out — see
+[observation-model.md §4.5](observation-model.md). Ordinary page copy, including
+a rendered API key or one-time code, reaches the wire. The audit trail and the
+registry-bound recipe trace keep the older closed-vocabulary screen
+(`recordableTokenV2`). This is output screening only: V2 does not add a payment
+validation or approval gate.
 
 The public observation contains:
 
@@ -96,8 +102,9 @@ The public observation contains:
 browser. The query, optional role filter, and HMAC-bound cursor stay inside the
 session; results remain screened `safe_table` tuples. An empty query consumes an
 `overflow.next_cursor`, and also consumes `hint_overflow.next_cursor` when the
-trusted start hint spans more than one page. Secret-, OTP-, email-, and
-card-shaped query material is rejected from matching rather than echoed.
+trusted start hint spans more than one page. Card-shaped query material (a Luhn PAN or a
+labeled CVV) is rejected from matching rather than echoed; other query material
+is matched normally under the payment-only policy.
 
 An exact, cursorless `Google` or `GitHub` lookup has a narrow bounded hydration
 repair for auth shells that mount or label their provider controls after the

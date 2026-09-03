@@ -55,6 +55,7 @@ import {
   compactV2AuditHost,
   compactV2AuditUrl,
   compactV2AuditValue,
+  recordableTokenV2,
   safeDescriptionV2,
   safeOriginV2,
   safePageSemanticsV2,
@@ -130,7 +131,6 @@ import {
   findOtpCredential,
   keyFamilyPrefix,
   pickRelaxedNearCopyCredential,
-  observationSecretShapeRes,
 } from "./credential-shape.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
@@ -1270,24 +1270,13 @@ function redactPaymentObservationText(
   );
 }
 
-// D2 observation redaction: an injected vault value can be reflected outside
-// its original input (a page may put it in helper text, an aria label, or a
-// preview URL). Keep the raw slot value inside the session, then scrub every
-// host-facing text surface by exact value as well as the credential/OTP/PAN
-// shapes that can be rendered independently of a slot.
+// D2 observation redaction, PAYMENT-ONLY: an injected vault value can be
+// reflected outside its original input (a page may put it in helper text, an
+// aria label, or a preview URL), so every host-facing text surface is scrubbed
+// by EXACT injected value. There is no secret-SHAPE pass — a rendered API key,
+// recovery code, TOTP, or JWT is ordinary page content the agent must be able
+// to read.
 const OBSERVATION_SECRET_PLACEHOLDER = "[sealed]";
-const OBSERVATION_SECRET_SHAPES = observationSecretShapeRes();
-
-function redactObservationShapeTokens(text: string): string {
-  let redacted = text;
-  for (const shape of OBSERVATION_SECRET_SHAPES) {
-    redacted = redacted.replace(shape, OBSERVATION_SECRET_PLACEHOLDER);
-  }
-  for (const token of findCredentialTokens(redacted)) {
-    redacted = redacted.split(token).join(OBSERVATION_SECRET_PLACEHOLDER);
-  }
-  return redacted;
-}
 
 function redactObservationText(
   text: string,
@@ -1304,8 +1293,7 @@ function redactObservationText(
     redacted = redacted.split(secret).join(OBSERVATION_SECRET_PLACEHOLDER);
   }
   // A rendered Luhn-valid PAN is a card value, not a heuristic guess.
-  redacted = redactLuhnPanSpans(redacted);
-  return redactObservationShapeTokens(redacted);
+  return redactLuhnPanSpans(redacted);
 }
 
 function presentPaymentSafeString(
@@ -6104,7 +6092,9 @@ function compactV2RecordedAction(
     return null;
   }
   if (action.kind === "select") {
-    const text = safeDescriptionV2(action.text);
+    // Registry-bound recipe value, not an observation: it must be recognizable
+    // code-owned vocabulary before it is published to the shared registry.
+    const text = recordableTokenV2(action.text);
     if (text !== undefined) return { ...action, text };
     rejectRecipeRecording(session, "compact_v2_unrepresentable_value_action");
     return null;
