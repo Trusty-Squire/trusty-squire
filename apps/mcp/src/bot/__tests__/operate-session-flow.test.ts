@@ -3488,7 +3488,13 @@ describe("operate session — OAuth lifecycle", () => {
     await finishProvisionSession(started.session_id);
   });
 
-  it("acknowledges operate_finish after an OAuth deadline terminalizes the session", async () => {
+  it("keeps the session alive and inspectable after an OAuth completion-wait timeout", async () => {
+    // Regression: an OAuth boundary timeout used to force-terminate the whole
+    // provision session ("oauth_action_terminalize"), so a pending
+    // chooser/consent screen became unreachable — observe/screenshot/oauth_settle
+    // all returned "unknown provision session" and the only recovery was a
+    // fresh session that lost all progress. A timeout must surface as a
+    // recoverable error while the session stays usable.
     process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "10";
     h.visibleText = "Continue with Google";
     h.elements = [
@@ -3510,7 +3516,15 @@ describe("operate session — OAuth lifecycle", () => {
     await expect(
       act(started.session_id, { kind: "oauth_login", target: "Continue with Google" }),
     ).rejects.toMatchObject({ code: "google_session" });
+
+    // The timeout must NOT have deregistered the session: observe succeeds…
+    await expect(observe(started.session_id)).resolves.toMatchObject({
+      session_id: started.session_id,
+    });
+    // …oauth_settle is still callable on the same session…
+    await expect(act(started.session_id, { kind: "oauth_settle" })).resolves.toBeDefined();
     releaseOAuth();
+    // …and operate_finish closes the still-registered session normally.
     await expect(finishProvisionSession(started.session_id)).resolves.toMatchObject({
       session_id: started.session_id,
       closed: true,
