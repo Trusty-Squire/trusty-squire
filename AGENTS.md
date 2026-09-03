@@ -520,6 +520,30 @@ registry-bound recipe action trace. The policy and its file-by-file map live in
 [`docs/observation-model.md`](docs/observation-model.md) §4.5 — read it before
 touching redaction.
 
+### 17. `await_verification` must score link-picking on anchor TEXT too, and must retry through Gmail's own transient backend error
+
+Two failure modes measured live during a Xata Keycloak account-link signup
+(rc.25), both in `pickVerificationLink`/`awaitVerification`
+(`apps/mcp/src/bot/email-verification.ts`, `apps/mcp/src/bot/provision-session.ts`):
+
+- A verification email's action link is often rewritten by the sender's ESP
+  into an opaque, per-recipient click-tracking URL (SendGrid/Mailgun/
+  Customer.io/Postmark-style) — no verify/login/token vocabulary survives in
+  the href at all. `pickVerificationLink` takes an optional
+  `VerificationLinkCandidate {url, text}` and scores the anchor's visible
+  text/label the same way it scores the href, so the button's own words
+  ("Link your Google account") still resolve it. Any caller reading real
+  DOM links must pass the anchor text, not just the href — a bare
+  `string[]` of hrefs silently loses this signal.
+- Gmail's own search backend intermittently throws "...encountered a
+  problem (#2014) - Retrying in Ns" and can render "No messages matched
+  your search" during that window even though the message exists.
+  `awaitVerification`'s inbox read detects that banner (`isGmailTransientErrorText`)
+  and an accompanying empty-looking render (`isEmptyGmailResultText`) and
+  retries with bounded backoff (`gmailTransientBackoffMs`, capped at 4s)
+  before accepting a result as final. Do not treat a single empty/erroring
+  Gmail search read as proof the message hasn't arrived.
+
 ## Final note
 
 You are reading this file because a prior agent burned four version numbers, confused users, and forced a human to intervene. The agent was not malicious. It was not lazy. It was pattern-matching on its own prose instead of on tool output.

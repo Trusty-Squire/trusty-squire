@@ -71,7 +71,7 @@ import {
 import { elementFingerprints } from "./element-fingerprint.js";
 import type { ApiClient } from "../api-client.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
-import { pickVerificationLink } from "./email-verification.js";
+import { pickVerificationLink, type VerificationLinkCandidate } from "./email-verification.js";
 import {
   type OperatorRecipe,
   type TraceEntry,
@@ -8399,7 +8399,7 @@ const OTP_ANY_RE = /(?:^|[^0-9])(\d{4,8})(?:[^0-9]|$)/g;
 
 export function parseVerification(
   text: string,
-  links: readonly string[],
+  links: readonly (string | VerificationLinkCandidate)[],
   expectedDomains?: readonly string[],
 ): { code: string | null; link: string | null } {
   const link = pickVerificationLink([...links], expectedDomains);
@@ -8498,6 +8498,69 @@ export function buildVerificationSearchQuery(sender?: string): string {
     .join(" ");
 }
 
+// Gmail's own search backend intermittently throws a transient error —
+// "Oops... the system encountered a problem (#2014) - Retrying in Ns" —
+// and while that banner is up a search like `from:xata.io` can spuriously
+// render "No messages matched your search" even though the message is
+// really there. Exported for unit tests.
+export function isGmailTransientErrorText(text: string): boolean {
+  return /#2014|encountered a problem|retrying in\s*\d+/i.test(text);
+}
+
+// Exported for unit tests.
+export function isEmptyGmailResultText(text: string): boolean {
+  return /no messages matched your search/i.test(text);
+}
+
+// Backoff schedule for the transient-error retry, in ms: 800, 1600, 3200,
+// capped at 4000. Exported for unit tests.
+export function gmailTransientBackoffMs(retryIndex: number): number {
+  return Math.min(800 * 2 ** retryIndex, 4000);
+}
+
+// Bounded — a genuinely empty inbox must still resolve to not-found in
+// finite time, not hang retrying forever.
+const GMAIL_TRANSIENT_MAX_RETRIES = 3;
+
+// Reads the Gmail search results list, retrying through Gmail's own transient
+// backend error with backoff before accepting a result as final. Detects
+// EITHER the error banner itself, or an empty-looking "No messages matched"
+// render with no result links (the shape the banner's spurious empty state
+// takes) — and only gives up on the bounded retries running out, never on
+// the first read. Exported for unit tests via the pure detectors above; this
+// wrapper needs a live browser so it isn't itself unit tested directly.
+async function readGmailSearchResultsResilient(
+  browser: BrowserController,
+  searchUrl: string,
+  linkCandidatesOf: (
+    els: readonly {
+      href?: string | null;
+      visibleText?: string | null;
+      labelText?: string | null;
+      ariaLabel?: string | null;
+    }[],
+  ) => VerificationLinkCandidate[],
+): Promise<{ text: string; links: VerificationLinkCandidate[] }> {
+  let text = "";
+  let links: VerificationLinkCandidate[] = [];
+  for (let retry = 0; retry <= GMAIL_TRANSIENT_MAX_RETRIES; retry++) {
+    if (retry > 0) {
+      await browser.waitForCaptchaChallengeToSettle(gmailTransientBackoffMs(retry - 1), 0).catch(() => false);
+      await browser.goto(searchUrl);
+    }
+    for (let i = 0; i < 6; i++) {
+      text = await browser.extractVisibleText();
+      if (text.length > 200) break;
+      await browser.waitForCaptchaChallengeToSettle(1200, 0).catch(() => false);
+    }
+    links = linkCandidatesOf(await browser.extractInteractiveElements());
+    const transientOrEmpty =
+      isGmailTransientErrorText(text) || (isEmptyGmailResultText(text) && links.length === 0);
+    if (!transientOrEmpty || retry === GMAIL_TRANSIENT_MAX_RETRIES) break;
+  }
+  return { text, links };
+}
+
 export async function awaitVerification(
   sessionId: string,
   opts: AwaitVerificationOptions = {},
@@ -8526,8 +8589,17 @@ export async function awaitVerification(
     return await browser.withTemporaryHostScopeAllowedHosts(["mail.google.com"], async () => {
       const query = buildVerificationSearchQuery(opts.sender);
       const searchUrl = `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
-      const hrefsOf = (els: readonly { href?: string | null }[]): string[] =>
-        els.map((e) => e.href).filter((h): h is string => typeof h === "string" && h.length > 0);
+      const linkCandidatesOf = (
+        els: readonly {
+          href?: string | null;
+          visibleText?: string | null;
+          labelText?: string | null;
+          ariaLabel?: string | null;
+        }[],
+      ): VerificationLinkCandidate[] =>
+        els
+          .filter((e): e is typeof e & { href: string } => typeof e.href === "string" && e.href.length > 0)
+          .map((e) => ({ url: e.href, text: e.visibleText ?? e.labelText ?? e.ariaLabel ?? null }));
       let code: string | null = null;
       let link: string | null = null;
       let sourceFrom: string | null = null;
@@ -8535,17 +8607,15 @@ export async function awaitVerification(
         sourceFrom = null;
         if (attempt > 0) await browser.waitForCaptchaChallengeToSettle(4000, 0).catch(() => false);
         await browser.goto(searchUrl);
-        let listText = "";
-        for (let i = 0; i < 6; i++) {
-          listText = await browser.extractVisibleText();
-          if (listText.length > 200) break;
-          await browser.waitForCaptchaChallengeToSettle(1200, 0).catch(() => false);
-        }
-        const listLinks = hrefsOf(await browser.extractInteractiveElements());
+        const { text: listText, links: listLinks } = await readGmailSearchResultsResilient(
+          browser,
+          searchUrl,
+          linkCandidatesOf,
+        );
         const opened = await browser.openFirstMailResult().catch(() => false);
         if (opened) {
           const openedText = await browser.extractVisibleText();
-          const openedLinks = hrefsOf(await browser.extractInteractiveElements());
+          const openedLinks = linkCandidatesOf(await browser.extractInteractiveElements());
           sourceFrom = extractSenderEmail(openedText);
           const expectedDomains = expectedVerificationDomains(opts.sender, sourceFrom);
           ({ code, link } = parseVerification(openedText, [...openedLinks, ...listLinks], expectedDomains));
