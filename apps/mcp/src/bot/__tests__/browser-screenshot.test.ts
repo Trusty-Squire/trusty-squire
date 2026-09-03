@@ -456,7 +456,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "rejects redaction geometry and element identity changes during capture",
+    "covers redaction geometry and element identity changes with the union mask",
     async () => {
       const browser = await launchIsolatedTestBrowser();
       try {
@@ -485,9 +485,9 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
           };
           const controller = BrowserController.fromHarnessPage(page);
 
-          await expect(controller.screenshotForOperator()).rejects.toThrow(
-            "screenshot_redaction_unstable",
-          );
+          await expect(controller.screenshotForOperator()).resolves.toMatchObject({
+            redactedCount: 2,
+          });
           await page.close();
         }
       } finally {
@@ -531,7 +531,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "retries one observed capture mutation against fresh geometry",
+    "returns one union-masked capture for an observed geometry mutation",
     async () => {
       const browser = await launchIsolatedTestBrowser();
       try {
@@ -562,7 +562,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
         const result = await controller.captureOperatorScreenshot();
 
         expect(isValidJpegBase64(result.base64)).toBe(true);
-        expect(captureCalls).toBe(2);
+        expect(captureCalls).toBe(1);
       } finally {
         await browser.close();
       }
@@ -879,7 +879,7 @@ describe("operate_screenshot frame targeting (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "fails closed on an unreadable included frame but allows a separate verified target",
+    "keeps viewport and full-page captures available around an unreadable unrelated frame",
     async () => {
       const browser = await launchIsolatedTestBrowser();
       try {
@@ -895,9 +895,16 @@ describe("operate_screenshot frame targeting (real browser)", () => {
         await page.waitForLoadState("networkidle");
         const controller = BrowserController.fromHarnessPage(page);
 
-        await expect(controller.captureOperatorScreenshot()).rejects.toThrow(
-          "screenshot_unavailable_sealed_context",
-        );
+        await expect(controller.captureOperatorScreenshot()).resolves.toMatchObject({
+          frameUrl: null,
+          frameCount: 3,
+        });
+        await expect(
+          controller.captureOperatorScreenshot({ fullPage: true }),
+        ).resolves.toMatchObject({
+          frameUrl: null,
+          frameCount: 3,
+        });
         await expect(
           controller.captureOperatorScreenshot({ frameUrlContains: "cardinalcommerce.com" }),
         ).resolves.toMatchObject({ frameUrl: acsFrameUrl });
@@ -992,10 +999,7 @@ describe("operate_screenshot frame targeting (real browser)", () => {
   );
 });
 
-// SQUIRE_OBSERVE_REDACTION_DEBUG=1 posture: the TIGHT secret-shape heuristics
-// are lifted for debugging, but the injected-vault-value and rendered-PAN
-// guarantees hold in both modes.
-describe("operate_screenshot debug redaction switch (real browser)", () => {
+describe("operate_screenshot default redaction (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
     "default mode keeps ordinary checkout text visible while tight shapes are redacted",
     async () => {
@@ -1040,30 +1044,26 @@ describe("operate_screenshot debug redaction switch (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "debug mode drops the shape heuristics but still masks an injected vault value",
+    "masks rendered secret shapes and operator-injected card/CVV values",
     async () => {
       const browser = await launchIsolatedTestBrowser();
       try {
         const page = await browser.newPage();
-        const injected = "stored-credential-7f3d9a";
+        const injectedCard = "4242424242424242";
+        const injectedCvv = "123";
         await page.setContent(`
           <p id="key">API key: sk-proj-1234567890abcdefghijklmnopqrstuv</p>
-          <p id="reflect">${injected}</p>
-          <input id="vault" value="${injected}">
+          <input id="injected-card" value="${injectedCard}">
+          <input id="injected-cvv" value="${injectedCvv}">
           <p id="ordinary">Discount code: SAVE20, ZIP code 10001</p>
         `);
         const controller = BrowserController.fromHarnessPage(page);
 
-        const result = await controller.screenshotForOperator(
-          { redaction: { shapeRedaction: false } },
-          [injected],
-        );
+        const result = await controller.screenshotForOperator({}, [injectedCard, injectedCvv]);
 
-        // Only the injected value's nodes are masked; the sk- key is visible
-        // under the debug switch.
-        expect(result.redactedCount).toBe(2);
+        expect(result.redactedCount).toBe(3);
         const boxes = await Promise.all(
-          ["#key", "#reflect", "#vault", "#ordinary"].map(
+          ["#key", "#injected-card", "#injected-cvv", "#ordinary"].map(
             async (selector) => await page.locator(selector).boundingBox(),
           ),
         );
@@ -1072,7 +1072,7 @@ describe("operate_screenshot debug redaction switch (real browser)", () => {
           result.base64,
           boxes.map((box) => [box!.x + box!.width / 2, box!.y + box!.height / 2]),
         );
-        expect(isMaskMagenta(pixels[0]!)).toBe(false);
+        expect(isMaskMagenta(pixels[0]!)).toBe(true);
         expect(isMaskMagenta(pixels[1]!)).toBe(true);
         expect(isMaskMagenta(pixels[2]!)).toBe(true);
         expect(isMaskMagenta(pixels[3]!)).toBe(false);
@@ -1083,42 +1083,7 @@ describe("operate_screenshot debug redaction switch (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "debug mode still masks a Luhn-valid PAN typed into a freeform field",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        const page = await browser.newPage();
-        await page.setContent(`
-          <input id="notes" value="card on file 4242424242424242">
-          <input id="zip" value="10001">
-        `);
-        const controller = BrowserController.fromHarnessPage(page);
-
-        const result = await controller.screenshotForOperator({
-          redaction: { shapeRedaction: false },
-        });
-
-        expect(result.redactedCount).toBe(1);
-        const boxes = await Promise.all(
-          ["#notes", "#zip"].map(
-            async (selector) => await page.locator(selector).boundingBox(),
-          ),
-        );
-        const pixels = await samplePixels(
-          page,
-          result.base64,
-          boxes.map((box) => [box!.x + box!.width / 2, box!.y + box!.height / 2]),
-        );
-        expect(isMaskMagenta(pixels[0]!)).toBe(true);
-        expect(isMaskMagenta(pixels[1]!)).toBe(false);
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "debug mode keeps the image when the mask set mutates mid-capture, masking the union",
+    "keeps the image when the mask set mutates mid-capture, masking the union",
     async () => {
       const browser = await launchIsolatedTestBrowser();
       try {
@@ -1142,9 +1107,7 @@ describe("operate_screenshot debug redaction switch (real browser)", () => {
         };
         const controller = BrowserController.fromHarnessPage(page);
 
-        const result = await controller.screenshotForOperator({
-          redaction: { unstablePolicy: "union" },
-        });
+        const result = await controller.screenshotForOperator();
 
         expect(isValidJpegBase64(result.base64)).toBe(true);
         // The moved node is covered by the union of both samplings.
@@ -1156,7 +1119,7 @@ describe("operate_screenshot debug redaction switch (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "debug mode still refuses when the frame set changes during capture",
+    "still refuses when the frame set changes during capture",
     async () => {
       const browser = await launchIsolatedTestBrowser();
       try {
@@ -1182,9 +1145,9 @@ describe("operate_screenshot debug redaction switch (real browser)", () => {
         };
         const controller = BrowserController.fromHarnessPage(page);
 
-        await expect(
-          controller.screenshotForOperator({ redaction: { unstablePolicy: "union" } }),
-        ).rejects.toThrow("screenshot_redaction_unstable");
+        await expect(controller.screenshotForOperator()).rejects.toThrow(
+          "screenshot_redaction_unstable",
+        );
       } finally {
         await browser.close();
       }
