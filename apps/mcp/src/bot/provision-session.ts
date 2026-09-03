@@ -1230,6 +1230,19 @@ function isPendingCardFilledField(el: InteractiveElement): boolean {
   );
 }
 
+// Shopify defers address geocoding (and therefore delivery-rate loading) until
+// its required shipping street field is committed. Keep this deliberately
+// narrow: ordinary text fields and even other autocomplete controls retain
+// their existing type-only behavior.
+function isRequiredShippingAddressLine1(el: InteractiveElement): boolean {
+  if (!el.required) return false;
+  const autocomplete = (el.autocomplete ?? "")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((token) => token.length > 0);
+  return autocomplete.includes("shipping") && autocomplete.includes("address-line1");
+}
+
 function pendingCardSecretKind(el: InteractiveElement): "pan" | "cvv" | null {
   const autocomplete = (el.autocomplete ?? "").toLowerCase().split(/\s+/);
   const signal = `${el.name ?? ""} ${el.id ?? ""}`.toLowerCase();
@@ -5655,6 +5668,9 @@ async function executeAct(
               }
             } finally {
               await browser.discardTypeSuggestionPopup(dismissPopupWithEscape);
+            }
+            if (isRequiredShippingAddressLine1(el)) {
+              await browser.commitRequiredShippingAddressLine1(el.selector);
             }
           }
         } else if (action.kind === "upload") {

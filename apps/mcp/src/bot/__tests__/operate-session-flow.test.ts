@@ -51,6 +51,7 @@ const h = vi.hoisted(() => ({
   autocompleteCommitMutation: null as { selector: string; value: string } | null,
   shippingMethodsLoadOnAutocompleteCommit: false,
   shippingMethodsLoaded: false,
+  requiredShippingAddressCommits: [] as string[],
   autocompleteCommitCalls: [] as number[],
   autocompleteConfirmOverride: null as boolean | null,
   autocompleteConfirmCalls: [] as Array<{ selector: string; pickedText: string }>,
@@ -414,6 +415,10 @@ vi.mock("../browser.js", () => ({
             (key): key is string => typeof key === "string" && key.length > 0,
           )
         : [];
+    }
+    async commitRequiredShippingAddressLine1(selector: string): Promise<void> {
+      h.requiredShippingAddressCommits.push(selector);
+      if (h.shippingMethodsLoadOnAutocompleteCommit) h.shippingMethodsLoaded = true;
     }
     async markPreexistingTypeSuggestionPopups(): Promise<void> {}
     async detectTypeSuggestionPopup(_selector: string): Promise<string[]> {
@@ -1075,6 +1080,7 @@ beforeEach(() => {
   h.autocompleteCommitMutation = null;
   h.shippingMethodsLoadOnAutocompleteCommit = false;
   h.shippingMethodsLoaded = false;
+  h.requiredShippingAddressCommits = [];
   h.autocompleteCommitCalls = [];
   h.autocompleteConfirmOverride = null;
   h.autocompleteConfirmCalls = [];
@@ -3061,8 +3067,8 @@ describe("3.1 — autocomplete-aware type fill", () => {
       selector: "#shipping-address",
       value: "350 5th Ave, New York, NY 10118, USA",
     };
-    // Shopify only enables delivery-rate selection after the Places choice is
-    // committed. The harness models that checkout state transition here.
+    // Shopify only enables delivery-rate selection after the required address
+    // line is committed by blur/change, not merely after a Places selection.
     h.shippingMethodsLoadOnAutocompleteCommit = true;
 
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
@@ -3077,6 +3083,7 @@ describe("3.1 — autocomplete-aware type fill", () => {
 
     expect(h.typed).toEqual([{ selector: "#shipping-address", text: "350 5th Ave" }]);
     expect(h.autocompleteCommitCalls).toEqual([0]);
+    expect(h.requiredShippingAddressCommits).toEqual(["#shipping-address"]);
     expect(h.shippingMethodsLoaded).toBe(true);
     expect(h.autocompleteConfirmCalls).toEqual([
       { selector: "#shipping-address", pickedText: "350 5th Ave, New York, NY 10118, USA" },
