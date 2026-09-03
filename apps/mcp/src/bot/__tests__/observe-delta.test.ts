@@ -74,6 +74,10 @@ vi.mock("../browser.js", () => ({
       return String(h.mainDocumentEpoch);
     }
     recoverActivePage(): void {}
+    armOpenedTabAdoption(): void {}
+    async adoptOpenedTab(): Promise<string | null> {
+      return null;
+    }
     async extractInteractiveElements(): Promise<unknown[]> {
       return h.elements;
     }

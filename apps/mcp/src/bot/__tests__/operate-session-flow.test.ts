@@ -286,6 +286,10 @@ vi.mock("../browser.js", () => ({
       return String(h.mainDocumentEpoch);
     }
     recoverActivePage(): void {}
+    armOpenedTabAdoption(): void {}
+    async adoptOpenedTab(): Promise<string | null> {
+      return null;
+    }
     async extractInteractiveElements(): Promise<unknown[]> {
       h.extractInteractiveElementsCalls += 1;
       if (h.oauthReadError !== null) throw new Error(h.oauthReadError);
