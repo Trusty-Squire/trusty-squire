@@ -2392,9 +2392,7 @@ export function sessionProvidersFromCookies(
     provider: OAuthProviderId;
     host: RegExp;
     names: readonly string[];
-  }> = [
-    { provider: "github", host: /(^|\.)github\.com$/i, names: ["user_session"] },
-  ];
+  }> = [{ provider: "github", host: /(^|\.)github\.com$/i, names: ["user_session"] }];
   const live: OAuthProviderId[] = [];
   for (const sig of SIGNATURES) {
     const present = cookies.some(
@@ -3902,9 +3900,8 @@ export class BrowserController {
 
   private async ownedHeadedBrowserEnvironment(): Promise<NodeJS.ProcessEnv> {
     if (this.ownedDisplayRig === null) {
-      const { createXvfbDisplayRig, startRemoteLoginDisplay } = await import(
-        "./remote-login-display.js"
-      );
+      const { createXvfbDisplayRig, startRemoteLoginDisplay } =
+        await import("./remote-login-display.js");
       const rig = createXvfbDisplayRig();
       this.ownedDisplayRig = rig;
       await startRemoteLoginDisplay(rig);
@@ -9226,6 +9223,7 @@ export class BrowserController {
     frames: readonly Frame[],
     extraRedactionSelectors: readonly string[],
     sealedLocators: ReadonlyMap<Frame, readonly Locator[]> = new Map(),
+    knownSecrets: readonly string[] = [],
     captureClip: { x: number; y: number; width: number; height: number } | null = null,
     strictFrames: ReadonlySet<Frame> = new Set(frames),
   ): Promise<{
@@ -9235,6 +9233,7 @@ export class BrowserController {
     handles: ElementHandle<Node>[];
   }> {
     const selector = [SCREENSHOT_REDACTION_SELECTORS, ...extraRedactionSelectors].join(",");
+    const secrets = knownSecrets.filter((value) => value.length > 0);
     const rectangles: Array<{ x: number; y: number; width: number; height: number }> = [];
     const handles: ElementHandle<Node>[] = [];
     const signatureParts: string[] = [];
@@ -9259,6 +9258,88 @@ export class BrowserController {
         for (const candidate of valueCandidates) {
           const value = await candidate.inputValue({ timeout: 5_000 });
           if (!containsLuhnPanSpan(value)) {
+            await candidate.dispose();
+            continue;
+          }
+          const duplicate = await Promise.all(
+            frameHandles.map(
+              async (existing) => await candidate.evaluate((el, other) => el === other, existing),
+            ),
+          );
+          if (duplicate.includes(true)) {
+            await candidate.dispose();
+            continue;
+          }
+          frameHandles.push(candidate);
+        }
+        // A secret is not necessarily a form value. It can be reflected by a
+        // page into visible text, title/aria/placeholder attributes, or a
+        // browser-autofill preview. Find the smallest renderable owner node
+        // (direct text only, never a parent merely because a child is secret)
+        // and mask that node's rectangle. This intentionally does not attempt
+        // to cover pixels in canvas/image/SVG/QR/cross-origin rendering; that
+        // residual is the accepted D2 observation-model posture.
+        const nodeCandidates = await frame.locator("*").elementHandles();
+        for (const candidate of nodeCandidates) {
+          const sensitive = await candidate.evaluate((el, injectedSecrets) => {
+            if (!(el instanceof Element)) return false;
+            const hasLuhnPan = (text: string): boolean => {
+              const positions = Array.from(text.matchAll(/\d/g), (match) => match.index);
+              const luhn = (digits: string): boolean => {
+                let sum = 0;
+                let double = false;
+                for (let index = digits.length - 1; index >= 0; index -= 1) {
+                  let digit = Number(digits[index]);
+                  if (double) {
+                    digit *= 2;
+                    if (digit > 9) digit -= 9;
+                  }
+                  sum += digit;
+                  double = !double;
+                }
+                return sum % 10 === 0;
+              };
+              for (let start = 0; start + 13 <= positions.length; start += 1) {
+                const maxLength = Math.min(19, positions.length - start);
+                for (let length = 13; length <= maxLength; length += 1) {
+                  const span = positions.slice(start, start + length);
+                  if (span[span.length - 1]! - span[0]! + 1 > 96) break;
+                  if (luhn(span.map((position) => text[position]).join(""))) return true;
+                }
+              }
+              return false;
+            };
+            const secretLabel =
+              /\b(?:password|passcode|secret|api[_ -]?(?:key|token)|access[_ -]?token|recovery[_ -]?code|totp|otp|cvv|cvc|security[_ -]?code)\b\s*[:=#-]?\s*[^\s]{4,}/iu;
+            const credential =
+              /\b(?:[A-Za-z][A-Za-z0-9]{1,9}[_-][A-Za-z0-9][A-Za-z0-9_-]{12,}|eyJ[A-Za-z0-9_-]{20,}\.eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}|sk-(?:proj-|ant-|or-v1-)?[A-Za-z0-9_-]{24,}|(?:re|rnd|napi|tfp|r8|pscale_tkn|sbp|phx)_[A-Za-z0-9_-]{20,})\b/u;
+            const otp =
+              /(?:code|verification|verify|otp|passcode|one[- ]time|recovery)\D{0,40}?\d{4,8}|\d{4,8}\D{0,8}?(?:code|verification|verify|otp|passcode|recovery)/iu;
+            const containsInjected = (text: string): boolean =>
+              injectedSecrets.some((secret) => secret.length > 0 && text.includes(secret));
+            const secretValue = (text: string): boolean =>
+              containsInjected(text) ||
+              hasLuhnPan(text) ||
+              secretLabel.test(text) ||
+              credential.test(text) ||
+              otp.test(text);
+            const state =
+              el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+                ? el.value
+                : el instanceof HTMLSelectElement
+                  ? `${el.value} ${el.options[el.selectedIndex]?.textContent ?? ""}`
+                  : "";
+            if (secretValue(state)) return true;
+            for (const attribute of Array.from(el.attributes)) {
+              if (secretValue(attribute.value)) return true;
+            }
+            const directText = Array.from(el.childNodes)
+              .filter((node) => node.nodeType === Node.TEXT_NODE)
+              .map((node) => node.textContent ?? "")
+              .join(" ");
+            return secretValue(directText);
+          }, secrets);
+          if (!sensitive) {
             await candidate.dispose();
             continue;
           }
@@ -9487,6 +9568,7 @@ export class BrowserController {
       fullPage?: boolean;
     } = {},
     sealedFieldKeys: readonly string[] = [],
+    knownSecrets: readonly string[] = [],
   ): Promise<{
     base64: string;
     frameUrl: string | null;
@@ -9506,13 +9588,6 @@ export class BrowserController {
       const sealedLocators = await this.resolveOperatorScreenshotSealedLocators(
         frames,
         new Set(sealedFieldKeys),
-      );
-      await this.assertOperatorScreenshotFramesNoSealedValues(
-        frames,
-        [],
-        sealedLocators,
-        scope.clip,
-        scope.strictFrames,
       );
       const documentsStillCurrent = async (): Promise<boolean> => {
         if (documents.length !== frames.length) return false;
@@ -9558,17 +9633,12 @@ export class BrowserController {
               if (!(await documentsStillCurrent())) {
                 throw new Error("screenshot_unavailable_sealed_context");
               }
-              await this.assertOperatorScreenshotFramesNoSealedValues(
-                frames,
-                [],
-                sealedLocators,
-                attemptScope.clip,
-                attemptScope.strictFrames,
-              );
-              if (!(await documentsStillCurrent())) {
-                throw new Error("screenshot_unavailable_sealed_context");
-              }
+              // The redaction set is collected immediately before capture and
+              // re-collected after it. A new/moved/replaced secret node makes
+              // the image unstable and is discarded; it never seals the
+              // surrounding document.
             },
+            knownSecrets,
           );
           break;
         } catch (error) {
@@ -9586,13 +9656,6 @@ export class BrowserController {
       if (!(await documentsStillCurrent())) {
         throw new Error("screenshot_unavailable_sealed_context");
       }
-      await this.assertOperatorScreenshotFramesNoSealedValues(
-        frames,
-        [],
-        sealedLocators,
-        attemptScope.clip,
-        attemptScope.strictFrames,
-      );
       return captured;
     } catch (error) {
       if (error instanceof Error && error.message === "screenshot_frame_not_found") throw error;
@@ -9608,7 +9671,7 @@ export class BrowserController {
   }
 
   // Low-level read-only capture used by captureOperatorScreenshot after its
-  // capture-scoped sealed-value checks, and directly by redaction tests. It
+  // capture-scoped node-redaction discovery, and directly by redaction tests. It
   // never navigates, clicks, types, focuses, or mutates the DOM. Redaction
   // covers every frame included in the image: the whole page composites its
   // visible frames, while an isolated frame includes only that frame.
@@ -9653,6 +9716,7 @@ export class BrowserController {
       clip: { x: number; y: number; width: number; height: number } | null;
     } = { frames: [...framesBefore], strictFrames: new Set(framesBefore), clip: null },
     beforeCapture?: () => Promise<void>,
+    knownSecrets: readonly string[] = [],
   ): Promise<{
     base64: string;
     frameUrl: string | null;
@@ -9666,6 +9730,7 @@ export class BrowserController {
       framesBefore,
       extraRedactionSelectors,
       sealedLocators,
+      knownSecrets,
       scope.clip,
       scope.strictFrames,
     );
@@ -9772,6 +9837,7 @@ export class BrowserController {
             framesAfter,
             extraRedactionSelectors,
             sealedLocators,
+            knownSecrets,
             scope.clip,
             scope.strictFrames,
           );
@@ -10366,10 +10432,7 @@ export class BrowserController {
   // both lifecycle events and then wait inside that exact frame for the PAN.
   // A settled page with a PAN only in excluded frames returns immediately so
   // the caller can produce its existing fail-closed frame-origin refusal.
-  private async waitForRecognizedPanField(
-    pageUrl: string,
-    deadline?: number,
-  ): Promise<void> {
+  private async waitForRecognizedPanField(pageUrl: string, deadline?: number): Promise<void> {
     if (!this.page) return;
     const page = this.page;
     const frameAllowed = (frame: Frame): boolean =>

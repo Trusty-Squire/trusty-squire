@@ -1,6 +1,6 @@
 # Design: Trusty Squire operator observation model — skeleton + resident DOM + descriptive refs
 
-**Status:** Phase 1 (identity model) shipped — see §9; phases 2-4 not started
+**Status:** Phases 1 (identity model) and 2 (node-level redaction) shipped — see §9; phases 3-4 not started
 **Scope:** `@trusty-squire/mcp` operator observation/serialization layer (`operate_observe`, `operate_observe_query`, `operate_act`, `operate_screenshot`, and the compact-v2 serializer)
 **Author:** firstmate, from hands-on operator driving (ipinfo signup + whitejade.xyz checkout, rc.19)
 **Related:** PR #624 (interim gap-2 patch: tolerate live re-renders in compact-v2 overflow paging). This doc is the model that makes that patch unnecessary long-term.
@@ -219,3 +219,20 @@ per-row controls carry a distinguishing signal — an authored `id`, differing
 row text, a `data-testid` — which puts them on the id branch or in distinct
 structural groups. This is the same information-theoretic residual documented
 at `volatilePositionalGroups` in `provision-session.ts`.
+
+### Phase 2 — redaction, not sealing
+
+`operate_screenshot` no longer rejects an ordinary or checkout document solely
+because it contains a filled secret field. `browser.ts` discovers sensitive
+nodes immediately before a capture and paints masks over their rendered
+rectangles; it rechecks after capture and discards an unstable image. The mask
+set covers secret-marked nodes, payment fields, Luhn PANs, secret-shaped text,
+control values, and attribute/state surfaces including `placeholder`,
+`aria-*`, `title`, autocomplete previews, and session-known injected vault
+values. `provision-session.ts` applies corresponding shape/exact-value
+redaction to host-facing observation text.
+
+The accepted §4.5 residual remains unchanged: this cannot redact a secret
+rendered in canvas, an image, SVG, QR/OCR-readable pixels, or a cross-origin
+third-party iframe. That exposure is accepted for the visibility gained by
+node-level redaction; no additional concealment mechanism is implied here.
