@@ -80,6 +80,7 @@ import {
   untrackOwnerProcess,
 } from "./owner-process-reaper.js";
 import type { RemoteLoginRig } from "./remote-login-display.js";
+import { OBSERVATION_SECRET_SHAPE_SOURCES } from "./credential-shape.js";
 
 // Lazy registration: installing the plugin mutates the chromium singleton
 // from playwright-extra so we only do it once per process. We require()
@@ -935,6 +936,19 @@ const SCREENSHOT_SECRET_FIELD_SELECTORS = [
   'input[id*="pin" i]',
 ].join(",");
 const SCREENSHOT_REDACTION_SELECTORS = `${CHECKOUT_CARD_VALUE_FIELD_SELECTORS},${SCREENSHOT_SECRET_FIELD_SELECTORS}`;
+
+// Knobs for the operator-screenshot redaction pipeline. Defaults preserve the
+// fail-closed posture: tight secret-shape heuristics on, an unstable mask set
+// refuses the image. SQUIRE_OBSERVE_REDACTION_DEBUG=1 (via captureScreenshot)
+// flips both: shape heuristics off and a mutating mask set keeps the image,
+// painting the union of both samplings. Neither knob ever disables the
+// per-field masks themselves (card-field selectors, sealed-field locators,
+// Luhn-valid PAN values, operator-injected vault values) — the injected-value
+// guarantee holds in both modes.
+export interface OperatorScreenshotRedactionOptions {
+  shapeRedaction?: boolean;
+  unstablePolicy?: "refuse" | "union";
+}
 
 interface SealedElementDescriptor {
   tag: string;
@@ -9234,6 +9248,7 @@ export class BrowserController {
     knownSecrets: readonly string[] = [],
     captureClip: { x: number; y: number; width: number; height: number } | null = null,
     strictFrames: ReadonlySet<Frame> = new Set(frames),
+    shapeRedaction = true,
   ): Promise<{
     rectangles: Array<{ x: number; y: number; width: number; height: number }>;
     redactedCount: number;
@@ -9287,10 +9302,21 @@ export class BrowserController {
         // and mask that node's rectangle. This intentionally does not attempt
         // to cover pixels in canvas/image/SVG/QR/cross-origin rendering; that
         // residual is the accepted D2 observation-model posture.
-        const nodeCandidates = await frame.locator("*").elementHandles();
-        for (const candidate of nodeCandidates) {
-          const sensitive = await candidate.evaluate((el, injectedSecrets) => {
-            if (!(el instanceof Element)) return false;
+        //
+        // One in-page pass returns every matching node in a single round trip;
+        // PR #627's per-node evaluate loop (one round trip per candidate over
+        // every element) made dynamic checkout pages slow enough to trip the
+        // stability guard below at the payment step and blind the agent.
+        // Shape sources travel as data because page.evaluate code cannot
+        // import; the sources stay byte-identical to the host-side text
+        // scrub (OBSERVATION_SECRET_SHAPE_SOURCES).
+        // evaluateHandle (not evaluate): nested DOM nodes serialize as strings
+        // through a plain evaluate return; a handle to the array plus property
+        // enumeration preserves per-node handles.
+        const matchesHandle = await frame.evaluateHandle(
+          (args) => {
+            const { secrets, shapeSources } = args;
+            const shapes = shapeSources.map((source) => new RegExp(source, "giu"));
             const hasLuhnPan = (text: string): boolean => {
               const positions = Array.from(text.matchAll(/\d/g), (match) => match.index);
               const luhn = (digits: string): boolean => {
@@ -9317,39 +9343,104 @@ export class BrowserController {
               }
               return false;
             };
-            const secretLabel =
-              /\b(?:password|passcode|secret|api[_ -]?(?:key|token)|access[_ -]?token|recovery[_ -]?code|totp|otp|cvv|cvc|security[_ -]?code)\b\s*[:=#-]?\s*[^\s]{4,}/iu;
-            const credential =
-              /\b(?:[A-Za-z][A-Za-z0-9]{1,9}[_-][A-Za-z0-9][A-Za-z0-9_-]{12,}|eyJ[A-Za-z0-9_-]{20,}\.eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}|sk-(?:proj-|ant-|or-v1-)?[A-Za-z0-9_-]{24,}|(?:re|rnd|napi|tfp|r8|pscale_tkn|sbp|phx)_[A-Za-z0-9_-]{20,})\b/u;
-            const otp =
-              /(?:code|verification|verify|otp|passcode|one[- ]time|recovery)\D{0,40}?\d{4,8}|\d{4,8}\D{0,8}?(?:code|verification|verify|otp|passcode|recovery)/iu;
+            // In-page port of findCredentialTokens: a vendor-style token is a
+            // 16+ char lowercase-ish identifier with a digit that either uses
+            // snake_case, a known vendor prefix, or an entropy segment of 10+
+            // alphanumeric chars. Product SKUs, CSS class names, and env-var
+            // NAMES do not qualify.
+            const credToken = (text: string): string[] => {
+              const out: string[] = [];
+              for (const match of text.matchAll(
+                /\b[A-Za-z][A-Za-z0-9]{1,9}[_-][A-Za-z0-9][A-Za-z0-9_-]{12,}\b/g,
+              )) {
+                const token = match[0];
+                if (
+                  token.length < 16 ||
+                  !/[0-9]/.test(token) ||
+                  /^[A-Z][A-Z0-9_]*$/.test(token)
+                ) {
+                  continue;
+                }
+                if (
+                  token.includes("_") ||
+                  /^(?:api|key|pk|re|rk|sk|xai|ghp|pat|vsk|tly)-/i.test(token) ||
+                  /^[A-Za-z][A-Za-z0-9]{0,7}-[A-Za-z0-9]{12,}$/.test(token) ||
+                  token
+                    .split("-")
+                    .some(
+                      (segment) =>
+                        segment.length >= 10 &&
+                        /[A-Za-z]/.test(segment) &&
+                        /[0-9]/.test(segment),
+                    )
+                ) {
+                  out.push(token);
+                }
+              }
+              return out;
+            };
             const containsInjected = (text: string): boolean =>
-              injectedSecrets.some((secret) => secret.length > 0 && text.includes(secret));
-            const secretValue = (text: string): boolean =>
-              containsInjected(text) ||
-              hasLuhnPan(text) ||
-              secretLabel.test(text) ||
-              credential.test(text) ||
-              otp.test(text);
-            const state =
-              el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
-                ? el.value
-                : el instanceof HTMLSelectElement
-                  ? `${el.value} ${el.options[el.selectedIndex]?.textContent ?? ""}`
-                  : "";
-            if (secretValue(state)) return true;
-            for (const attribute of Array.from(el.attributes)) {
-              if (secretValue(attribute.value)) return true;
-            }
-            const directText = Array.from(el.childNodes)
-              .filter((node) => node.nodeType === Node.TEXT_NODE)
-              .map((node) => node.textContent ?? "")
-              .join(" ");
-            return secretValue(directText);
-          }, secrets);
-          if (!sensitive) {
-            await candidate.dispose();
-            continue;
+              secrets.some((secret) => secret.length > 0 && text.includes(secret));
+            // kind "value"/"text" also admit a Luhn-valid PAN (a card number
+            // rendered or typed into a field) in EVERY mode; attributes only
+            // admit injected values and the tight shapes. With shapes off
+            // (SQUIRE_OBSERVE_REDACTION_DEBUG=1) only the injected-value and
+            // PAN guarantees remain.
+            const secretValue = (text: string, kind: "value" | "attr" | "text"): boolean => {
+              if (text.length === 0) return false;
+              if (containsInjected(text)) return true;
+              if (kind !== "attr" && hasLuhnPan(text)) return true;
+              if (shapes.length === 0) return false;
+              for (const shape of shapes) {
+                if (shape.test(text)) return true;
+              }
+              return credToken(text).length > 0;
+            };
+            const matches = new Set<Element>();
+            const check = (el: Element): void => {
+              const state =
+                el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+                  ? el.value
+                  : el instanceof HTMLSelectElement
+                    ? `${el.value} ${el.options[el.selectedIndex]?.textContent ?? ""}`
+                    : "";
+              if (state.length > 0 && secretValue(state, "value")) {
+                matches.add(el);
+                return;
+              }
+              for (const attribute of Array.from(el.attributes)) {
+                if (secretValue(attribute.value, "attr")) {
+                  matches.add(el);
+                  return;
+                }
+              }
+              const directText = Array.from(el.childNodes)
+                .filter((node) => node.nodeType === Node.TEXT_NODE)
+                .map((node) => node.textContent ?? "")
+                .join(" ")
+                .trim();
+              if (directText.length > 0 && secretValue(directText, "text")) matches.add(el);
+            };
+            // Walk the light DOM and every open shadow root — parity with the
+            // piercing the old frame.locator("*") candidates provided.
+            const walk = (root: Document | ShadowRoot | Element): void => {
+              for (const el of Array.from(root.querySelectorAll("*"))) {
+                check(el);
+                if (el.shadowRoot !== null) walk(el.shadowRoot);
+              }
+            };
+            walk(document);
+            return Array.from(matches);
+          },
+          { secrets, shapeSources: shapeRedaction ? OBSERVATION_SECRET_SHAPE_SOURCES : [] },
+        );
+        const sensitiveProperties = await matchesHandle.getProperties();
+        await matchesHandle.dispose().catch(() => undefined);
+        for (const property of sensitiveProperties.values()) {
+          const candidate = property.asElement();
+          if (candidate === null) {
+            await property.dispose().catch(() => undefined);
+            throw new Error("screenshot_redaction_unresolved");
           }
           const duplicate = await Promise.all(
             frameHandles.map(
@@ -9577,6 +9668,7 @@ export class BrowserController {
     } = {},
     sealedFieldKeys: readonly string[] = [],
     knownSecrets: readonly string[] = [],
+    redaction: OperatorScreenshotRedactionOptions = {},
   ): Promise<{
     base64: string;
     frameUrl: string | null;
@@ -9609,7 +9701,16 @@ export class BrowserController {
         return true;
       };
       if (!(await documentsStillCurrent())) {
-        throw new Error("screenshot_unavailable_sealed_context");
+        // SQUIRE_OBSERVE_REDACTION_DEBUG=1: a navigation caught between scope
+        // resolution and this check gets one settle-and-recheck before the
+        // capture is sealed; the frame-set re-check in the retry loop below
+        // still refuses a genuinely changed context.
+        if (redaction.unstablePolicy === "union") {
+          await this.wait(0.5);
+        }
+        if (!(await documentsStillCurrent())) {
+          throw new Error("screenshot_unavailable_sealed_context");
+        }
       }
       let captured:
         | {
@@ -9639,14 +9740,21 @@ export class BrowserController {
             attemptScope,
             async () => {
               if (!(await documentsStillCurrent())) {
-                throw new Error("screenshot_unavailable_sealed_context");
+                // The redaction set is collected immediately before capture and
+                // re-collected after it. A new/moved/replaced secret node makes
+                // the image unstable and is discarded; it never seals the
+                // surrounding document. In debug mode the navigation falls
+                // through to the retry loop instead of sealing the image —
+                // the attempt-scope check there refuses a changed frame set.
+                throw new Error(
+                  redaction.unstablePolicy === "union"
+                    ? "screenshot_redaction_unstable"
+                    : "screenshot_unavailable_sealed_context",
+                );
               }
-              // The redaction set is collected immediately before capture and
-              // re-collected after it. A new/moved/replaced secret node makes
-              // the image unstable and is discarded; it never seals the
-              // surrounding document.
             },
             knownSecrets,
+            redaction,
           );
           break;
         } catch (error) {
@@ -9691,7 +9799,9 @@ export class BrowserController {
       frameUrlContains?: string;
       fullPage?: boolean;
       extraRedactionSelectors?: readonly string[];
+      redaction?: OperatorScreenshotRedactionOptions;
     } = {},
+    knownSecrets: readonly string[] = [],
   ): Promise<{
     base64: string;
     frameUrl: string | null;
@@ -9707,6 +9817,9 @@ export class BrowserController {
       scope.frames,
       new Map(),
       scope,
+      undefined,
+      knownSecrets,
+      opts.redaction,
     );
   }
 
@@ -9725,6 +9838,7 @@ export class BrowserController {
     } = { frames: [...framesBefore], strictFrames: new Set(framesBefore), clip: null },
     beforeCapture?: () => Promise<void>,
     knownSecrets: readonly string[] = [],
+    redaction: OperatorScreenshotRedactionOptions = {},
   ): Promise<{
     base64: string;
     frameUrl: string | null;
@@ -9741,6 +9855,7 @@ export class BrowserController {
       knownSecrets,
       scope.clip,
       scope.strictFrames,
+      redaction.shapeRedaction ?? true,
     );
     const { rectangles, redactedCount, signature } = before;
     let recheck: typeof before | undefined;
@@ -9835,11 +9950,12 @@ export class BrowserController {
       // signature are unchanged.
       const scopeAfter = await this.operatorScreenshotCaptureScope(targetFrame);
       const framesAfter = scopeAfter.frames;
-      let stable =
+      let framesStable =
         JSON.stringify(scopeAfter.clip) === JSON.stringify(scope.clip) &&
         framesAfter.length === framesBefore.length &&
         framesBefore.every((frame, index) => framesAfter[index] === frame);
-      if (stable) {
+      let maskStable = framesStable;
+      if (framesStable) {
         try {
           recheck = await this.collectOperatorScreenshotMask(
             framesAfter,
@@ -9848,10 +9964,11 @@ export class BrowserController {
             knownSecrets,
             scope.clip,
             scope.strictFrames,
+            redaction.shapeRedaction ?? true,
           );
-          stable =
+          maskStable =
             recheck.signature === signature && recheck.handles.length === before.handles.length;
-          if (stable) {
+          if (maskStable) {
             for (let index = 0; index < before.handles.length; index += 1) {
               if (
                 !(await recheck.handles[index]!.evaluate(
@@ -9859,16 +9976,39 @@ export class BrowserController {
                   before.handles[index]!,
                 ))
               ) {
-                stable = false;
+                maskStable = false;
                 break;
               }
             }
           }
         } catch {
-          stable = false;
+          maskStable = false;
         }
       }
-      if (!stable) throw new Error("screenshot_redaction_unstable");
+      if (!maskStable) {
+        if (!(redaction.unstablePolicy === "union" && framesStable)) {
+          throw new Error("screenshot_redaction_unstable");
+        }
+        // SQUIRE_OBSERVE_REDACTION_DEBUG=1: the frame set is unchanged but the
+        // mask set drifted while the capture was in flight. Keep the image and
+        // paint the union of both samplings — every node that matched at
+        // either end is covered, so nothing secret survives; the image is no
+        // longer discarded on pages that mutate at the payment step. A frame
+        // set change (framesStable === false) still refuses.
+        const unionRectangles = [...rectangles, ...(recheck?.rectangles ?? [])];
+        const unionBase64 = await this.redactOperatorScreenshot(
+          buffer,
+          unionRectangles,
+          origin,
+          captureSize,
+        );
+        return {
+          base64: unionBase64,
+          frameUrl: targetFrame?.url() ?? null,
+          frameCount: page.frames().length,
+          redactedCount: unionRectangles.length,
+        };
+      }
       const base64 = await this.redactOperatorScreenshot(buffer, rectangles, origin, captureSize);
       return {
         base64,

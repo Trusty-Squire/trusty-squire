@@ -152,6 +152,53 @@ export function pickRelaxedNearCopyCredential(nearCopyTokens: readonly string[])
   return null;
 }
 
+// ---- Observation redaction secret-shapes (TIGHT) ---------------------------
+// The PR #627 node/text redaction shipped BROAD secret-shaped heuristics (any
+// "code"-word within 40 chars of 4-8 digits, any secret label before any 4+
+// chars, Luhn scans over every attribute). On real checkout pages those matched
+// ordinary content — product titles, prices, ZIP codes, the shipping address,
+// generic labels — redacting hundreds of nodes and blinding the agent. These
+// shapes are the TIGHT replacement: only API-key / token / JWT / recovery-code /
+// TOTP signatures. Consumed two ways: provision-session compiles them for the
+// observation-text scrub, and browser.ts passes the SOURCES into its in-page
+// screenshot node scan (page.evaluate code cannot import, so it compiles its
+// own RegExp objects from these sources — same pattern as MASKED_DISPLAY_RE).
+export const OBSERVATION_SECRET_SHAPE_SOURCES: readonly string[] = [
+  // OpenAI/Anthropic-style keys (sk-…, sk-proj-…, sk-ant-…). The body must carry
+  // a digit — class/data names like "sk-header-navigation-menu" are not keys.
+  "\\bsk-(?:proj-|ant-|svcacct-)?(?=[A-Za-z0-9_-]{20,}\\b)(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9_-]{20,}",
+  // GitHub tokens (ghp_/gho_/ghu_/ghs_/ghr_ 36+, fine-grained PATs)
+  "\\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,})",
+  // AWS access key id
+  "\\bAKIA[0-9A-Z]{16}\\b",
+  // Slack tokens
+  "\\bxox[baprs]-[A-Za-z0-9-]{10,}",
+  // Google API key
+  "\\bAIza[0-9A-Za-z_-]{35}",
+  // Stripe live secret/limited keys
+  "\\b[sr]k_live_[A-Za-z0-9]{16,}",
+  // JWT (three base64url segments)
+  "\\beyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}",
+  // Labeled recovery code: an explicit "recovery code/key" directly followed by
+  // a 6+ char code token carrying a digit. The adjacency + digit keep this
+  // tight — prose like "Recovery code setup" or "keep your recovery code safe"
+  // does not match.
+  "\\brecovery\\s*(?:code|key)\\s*[:=\\-]?\\s*(?=[A-Za-z0-9-]{6,}\\b)(?=[A-Za-z0-9-]*[0-9])[A-Za-z0-9-]{6,}",
+  // Labeled TOTP/OTP: an auth keyword directly adjacent to (optionally via
+  // "is"/":") a 6-8 digit code. The old heuristic allowed a 40-char gap in both
+  // directions, which matched "ZIP code 10001" and prices near "discount code".
+  "\\b(?:totp|2fa|authenticator|one[- ]?time|verification|verify|otp|passcode)\\s*(?:code)?\\s*(?:is)?\\s*[:=\\-]?\\s*\\d{6,8}\\b",
+  "\\b\\d{6,8}\\s*(?:is\\s+your)?\\s*(?:verification|otp|one[- ]?time|totp|passcode|recovery)\\s+code\\b",
+  // Prefixless high-entropy uppercase key (the ScrapingBee shape
+  // looksLikeCredentialValue already accepts): 40+ A-Z0-9 with BOTH letters and
+  // digits — distinct from lowercase hex hashes and env-var NAMES.
+  "\\b(?=[A-Z0-9]{40,}\\b)(?=[A-Z0-9]*[0-9])(?=[A-Z0-9]*[A-Z])[A-Z0-9]{40,}",
+];
+
+export function observationSecretShapeRes(): RegExp[] {
+  return OBSERVATION_SECRET_SHAPE_SOURCES.map((source) => new RegExp(source, "giu"));
+}
+
 // The TIGHT host-side gate: is this string a credential VALUE we'd surface/store?
 // (Distinct from browser.ts's loose in-page collector — see the TIERS note above.)
 export function looksLikeCredentialValue(value: string): boolean {

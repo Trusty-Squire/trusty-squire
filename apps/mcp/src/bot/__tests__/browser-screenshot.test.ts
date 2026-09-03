@@ -882,3 +882,203 @@ describe("operate_screenshot frame targeting (real browser)", () => {
     },
   );
 });
+
+// SQUIRE_OBSERVE_REDACTION_DEBUG=1 posture: the TIGHT secret-shape heuristics
+// are lifted for debugging, but the injected-vault-value and rendered-PAN
+// guarantees hold in both modes.
+describe("operate_screenshot debug redaction switch (real browser)", () => {
+  it.skipIf(!chromiumAvailable)(
+    "default mode keeps ordinary checkout text visible while tight shapes are redacted",
+    async () => {
+      const browser = await launchIsolatedTestBrowser();
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <p id="product">Fleece Jacket — FJ-2026-004</p>
+          <p id="price">$189.00 (was $249.00)</p>
+          <p id="address">450 Lexington Ave, New York, NY 10001, ZIP code 10001</p>
+          <p id="coupon">Discount code: SAVE20 applied at checkout</p>
+          <input id="zip" aria-label="ZIP code" value="10001">
+          <input id="phone" aria-label="Phone number" value="212-555-0199">
+          <p id="key">API key: sk-proj-1234567890abcdefghijklmnopqrstuv</p>
+          <p id="token">Token: ghp_AbcdefghijklmnopqrstuvwxyzAbcdefghij</p>
+          <p id="aws">Access key: AKIAIOSFODNN7EXAMPLE</p>
+          <p id="jwt">Session: eyJ0ZXN0aW5nX3BsYWNlaG9sZGVyX2FiY2Q.eyJ0ZXN0aW5nX3BsYWNlaG9sZGVyX2VmZ2g.c2lnbmF0dXJlX3BsYWNlaG9sZGVyX2lqa2w (synthetic example)</p>
+        `);
+        const controller = BrowserController.fromHarnessPage(page);
+
+        const result = await controller.screenshotForOperator();
+
+        // Exactly the tight shapes redacted; the ordinary checkout content is
+        // untouched (the PR #627 broad heuristics redacted hundreds of nodes
+        // on pages like this).
+        expect(result.redactedCount).toBe(4);
+        const boxes = await Promise.all(
+          ["#product", "#price", "#address", "#coupon", "#zip", "#phone"].map(
+            async (selector) => await page.locator(selector).boundingBox(),
+          ),
+        );
+        const pixels = await samplePixels(
+          page,
+          result.base64,
+          boxes.map((box) => [box!.x + box!.width / 2, box!.y + box!.height / 2]),
+        );
+        for (const pixel of pixels) expect(isMaskMagenta(pixel)).toBe(false);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "debug mode drops the shape heuristics but still masks an injected vault value",
+    async () => {
+      const browser = await launchIsolatedTestBrowser();
+      try {
+        const page = await browser.newPage();
+        const injected = "stored-credential-7f3d9a";
+        await page.setContent(`
+          <p id="key">API key: sk-proj-1234567890abcdefghijklmnopqrstuv</p>
+          <p id="reflect">${injected}</p>
+          <input id="vault" value="${injected}">
+          <p id="ordinary">Discount code: SAVE20, ZIP code 10001</p>
+        `);
+        const controller = BrowserController.fromHarnessPage(page);
+
+        const result = await controller.screenshotForOperator(
+          { redaction: { shapeRedaction: false } },
+          [injected],
+        );
+
+        // Only the injected value's nodes are masked; the sk- key is visible
+        // under the debug switch.
+        expect(result.redactedCount).toBe(2);
+        const boxes = await Promise.all(
+          ["#key", "#reflect", "#vault", "#ordinary"].map(
+            async (selector) => await page.locator(selector).boundingBox(),
+          ),
+        );
+        const pixels = await samplePixels(
+          page,
+          result.base64,
+          boxes.map((box) => [box!.x + box!.width / 2, box!.y + box!.height / 2]),
+        );
+        expect(isMaskMagenta(pixels[0]!)).toBe(false);
+        expect(isMaskMagenta(pixels[1]!)).toBe(true);
+        expect(isMaskMagenta(pixels[2]!)).toBe(true);
+        expect(isMaskMagenta(pixels[3]!)).toBe(false);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "debug mode still masks a Luhn-valid PAN typed into a freeform field",
+    async () => {
+      const browser = await launchIsolatedTestBrowser();
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <input id="notes" value="card on file 4242424242424242">
+          <input id="zip" value="10001">
+        `);
+        const controller = BrowserController.fromHarnessPage(page);
+
+        const result = await controller.screenshotForOperator({
+          redaction: { shapeRedaction: false },
+        });
+
+        expect(result.redactedCount).toBe(1);
+        const boxes = await Promise.all(
+          ["#notes", "#zip"].map(
+            async (selector) => await page.locator(selector).boundingBox(),
+          ),
+        );
+        const pixels = await samplePixels(
+          page,
+          result.base64,
+          boxes.map((box) => [box!.x + box!.width / 2, box!.y + box!.height / 2]),
+        );
+        expect(isMaskMagenta(pixels[0]!)).toBe(true);
+        expect(isMaskMagenta(pixels[1]!)).toBe(false);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "debug mode keeps the image when the mask set mutates mid-capture, masking the union",
+    async () => {
+      const browser = await launchIsolatedTestBrowser();
+      try {
+        const page = await browser.newPage();
+        await page.setContent('<input id="secret" autocomplete="cc-number" value="">');
+        const context = page.context();
+        const newCDPSession = context.newCDPSession.bind(context);
+        context.newCDPSession = async (target) => {
+          const session = await newCDPSession(target);
+          const send = session.send.bind(session);
+          session.send = async (method, params) => {
+            const result = await send(method, params);
+            if (method === "Page.captureScreenshot") {
+              await page.locator("#secret").evaluate((element) => {
+                (element as HTMLElement).style.marginLeft = "80px";
+              });
+            }
+            return result;
+          };
+          return session;
+        };
+        const controller = BrowserController.fromHarnessPage(page);
+
+        const result = await controller.screenshotForOperator({
+          redaction: { unstablePolicy: "union" },
+        });
+
+        expect(isValidJpegBase64(result.base64)).toBe(true);
+        // The moved node is covered by the union of both samplings.
+        expect(result.redactedCount).toBeGreaterThanOrEqual(1);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "debug mode still refuses when the frame set changes during capture",
+    async () => {
+      const browser = await launchIsolatedTestBrowser();
+      try {
+        const page = await browser.newPage();
+        await page.setContent('<input id="secret" autocomplete="cc-number" value="">');
+        const context = page.context();
+        const newCDPSession = context.newCDPSession.bind(context);
+        context.newCDPSession = async (target) => {
+          const session = await newCDPSession(target);
+          const send = session.send.bind(session);
+          session.send = async (method, params) => {
+            const result = await send(method, params);
+            if (method === "Page.captureScreenshot") {
+              await page.evaluate(() => {
+                const iframe = document.createElement("iframe");
+                iframe.id = "late-frame";
+                document.body.appendChild(iframe);
+              });
+            }
+            return result;
+          };
+          return session;
+        };
+        const controller = BrowserController.fromHarnessPage(page);
+
+        await expect(
+          controller.screenshotForOperator({ redaction: { unstablePolicy: "union" } }),
+        ).rejects.toThrow("screenshot_redaction_unstable");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+});

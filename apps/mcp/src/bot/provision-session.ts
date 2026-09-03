@@ -130,6 +130,7 @@ import {
   findOtpCredential,
   keyFamilyPrefix,
   pickRelaxedNearCopyCredential,
+  observationSecretShapeRes,
 } from "./credential-shape.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
@@ -1283,6 +1284,30 @@ function redactPaymentObservationText(
 // host-facing text surface by exact value as well as the credential/OTP/PAN
 // shapes that can be rendered independently of a slot.
 const OBSERVATION_SECRET_PLACEHOLDER = "[sealed]";
+const OBSERVATION_SECRET_SHAPES = observationSecretShapeRes();
+
+// SQUIRE_OBSERVE_REDACTION_DEBUG=1 — operator-side debugging switch for the
+// observation redaction. When set, the TIGHT secret-SHAPE heuristics above are
+// disabled so the driving agent can see a suspect page (e.g. to diagnose a
+// payment-confirmation bug) without shape false-positives mangling it. This
+// NEVER disables the exact-value redaction of operator-injected vault values
+// (secretSlots) or rendered-PAN masking — the vault guarantee holds in both
+// modes; only the shape heuristics are lifted.
+export function observationShapeRedactionEnabled(): boolean {
+  return process.env.SQUIRE_OBSERVE_REDACTION_DEBUG !== "1";
+}
+
+function redactObservationShapeTokens(text: string): string {
+  let redacted = text;
+  for (const shape of OBSERVATION_SECRET_SHAPES) {
+    redacted = redacted.replace(shape, OBSERVATION_SECRET_PLACEHOLDER);
+  }
+  for (const token of findCredentialTokens(redacted)) {
+    redacted = redacted.split(token).join(OBSERVATION_SECRET_PLACEHOLDER);
+  }
+  return redacted;
+}
+
 function redactObservationText(
   text: string,
   elements: readonly InteractiveElement[],
@@ -1290,25 +1315,18 @@ function redactObservationText(
   knownSecrets: readonly string[],
 ): string {
   let redacted = redactPaymentObservationText(text, elements, paymentSealActive);
+  // Exact injected vault values are redacted in EVERY mode — this is the vault
+  // guarantee, not a heuristic.
   for (const secret of [...knownSecrets]
     .filter((value) => value.length > 0)
     .sort((a, b) => b.length - a.length)) {
     redacted = redacted.split(secret).join(OBSERVATION_SECRET_PLACEHOLDER);
   }
+  // A rendered Luhn-valid PAN is a card value, not a heuristic guess — also
+  // kept in debug mode.
   redacted = redactLuhnPanSpans(redacted);
-  redacted = redacted.replace(
-    /\b(?:password|passcode|secret|api[_\s-]?(?:key|token)|access[_\s-]?token|recovery[_\s-]?code|totp|otp|cvv|cvc|security\s*code)\b\s*[:=#-]?\s*([A-Za-z0-9][^\s]{3,})/giu,
-    (match, value: string) => match.replace(value, OBSERVATION_SECRET_PLACEHOLDER),
-  );
-  for (const token of findCredentialTokens(redacted)) {
-    redacted = redacted.split(token).join(OBSERVATION_SECRET_PLACEHOLDER);
-  }
-  const otp = findOtpCredential(redacted);
-  if (otp !== null) {
-    redacted = redacted.replace(
-      new RegExp(`\\b${otp.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "g"),
-      OBSERVATION_SECRET_PLACEHOLDER,
-    );
+  if (observationShapeRedactionEnabled()) {
+    redacted = redactObservationShapeTokens(redacted);
   }
   return redacted;
 }
@@ -2463,17 +2481,32 @@ export interface ScreenshotCapture {
 // operate_screenshot's session-level entry point. Session-known secret values
 // remain inside the operator process and are used only to locate node-level
 // pixel masks; they are never included in a tool response.
+//
+// SQUIRE_OBSERVE_REDACTION_DEBUG=1 lifts the BROAD observation seals for
+// debugging: the secret-shape node heuristics are skipped and a mask-set
+// mutation mid-capture no longer refuses the whole image (the union of both
+// mask samplings is painted instead). The per-field seal on operator-injected
+// vault values stays in every mode.
 export async function captureScreenshot(
   sessionId: string,
   opts: { frameIndex?: number; frameUrlContains?: string; fullPage?: boolean } = {},
 ): Promise<ScreenshotCapture> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const captured = await session.browser.captureOperatorScreenshot(
-    opts,
-    [...session.sealedFieldKeys],
-    [...session.secretSlots.values()],
-  );
+  // Default path stays byte-identical to the pre-flag call; only the debug
+  // switch widens the redaction posture.
+  const captured = observationShapeRedactionEnabled()
+    ? await session.browser.captureOperatorScreenshot(
+        opts,
+        [...session.sealedFieldKeys],
+        [...session.secretSlots.values()],
+      )
+    : await session.browser.captureOperatorScreenshot(
+        opts,
+        [...session.sealedFieldKeys],
+        [...session.secretSlots.values()],
+        { shapeRedaction: false, unstablePolicy: "union" },
+      );
   return {
     session_id: sessionId,
     url: session.browser.currentUrl(),
