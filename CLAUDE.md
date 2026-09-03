@@ -552,6 +552,22 @@ package would defeat the whole 0.7.0 thesis).
   path is honored without any env work. Set to `off` / `0` / `false`
   to suppress capture entirely.
 
+### Operator session model (`provision-session.ts` is a facade)
+
+`apps/mcp/src/bot/provision-session.ts` is being restructured in behavior-
+preserving phases behind a **compatibility facade**: it keeps every export it
+has today, so no caller (tools, `server.ts`, the replay harness) changes. The
+Session data model and its **single** construction contract now live in
+`apps/mcp/src/bot/session/model.ts` — build a Session ONLY via `createSession`
+(operate_start and the harness start previously duplicated a ~60-field literal
+side by side). `Session` is still re-exported from `provision-session.ts`.
+
+`apps/mcp/src/bot/__tests__/session-characterization.test.ts` is the before/after
+oracle for that work: it pins the registered `operate_*` tool surface, both
+starts' session construction field-for-field, start/observe/finish ordering, and
+the COMPLETE key set of every observation payload. Treat a failure there as a
+behavior change, not a test to update.
+
 ### Operator observation model (compact-v2 ref identity)
 
 A compact-v2 `@e:` ref is a DURABLE element fingerprint, not a positional
