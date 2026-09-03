@@ -498,6 +498,9 @@ SIGTERM→SIGKILL.
 Idle cleanup uses the provision-session call lease as its action boundary. Any new
 session-addressed operate/auth/payment surface must acquire that lease, and session
 teardown must clear its rolling observe snapshot before removing the live session.
+That lease, the watchdog, and the whole terminal-teardown ordering now live in
+`apps/mcp/src/bot/session/lifecycle.ts` (`provision-session.ts` re-exports them);
+see CLAUDE.md's "Operator session model" for what may not be reordered.
 
 ## Final note
 

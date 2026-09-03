@@ -34,6 +34,8 @@ const h = vi.hoisted(() => ({
   // Runs inside the first goto — i.e. after the initializer has inserted the
   // Session and started its watchdog, but before the initial observation.
   onFirstGoto: null as null | (() => void),
+  // Ordered record of the terminal-teardown steps the browser side observes.
+  terminalOrder: [] as string[],
 }));
 
 vi.mock("../browser.js", async (importOriginal) => {
@@ -55,6 +57,10 @@ vi.mock("../browser.js", async (importOriginal) => {
       }
       async close(): Promise<void> {
         h.closeCalls += 1;
+        h.terminalOrder.push("browser_close");
+      }
+      async waitForThreeDsResolution(): Promise<string> {
+        return "challenge_pending";
       }
       async detectSessionProviders(): Promise<string[]> {
         return h.providers ?? [];
@@ -135,8 +141,12 @@ import {
   finishProvisionSession,
   closeAllProvisionSessions,
   activeSessionCount,
+  setActivePendingThreeDs,
   type Session,
 } from "../provision-session.js";
+import * as provisionSession from "../provision-session.js";
+import * as sessionLifecycle from "../session/lifecycle.js";
+import type { ApiClient } from "../../api-client.js";
 
 // A Session snapshot reduced to comparable primitives. Collections render as
 // kind + size so "empty Map" is asserted as exactly that, rather than as an
@@ -169,6 +179,7 @@ beforeEach(() => {
   h.closeCalls = 0;
   h.documentEpoch = 0;
   h.onFirstGoto = null;
+  h.terminalOrder = [];
   profileDir = mkdtempSync(join(tmpdir(), "ts-session-characterization-"));
 });
 
@@ -530,6 +541,87 @@ const SAMPLE_ELEMENTS: InteractiveElement[] = [
   }),
   el({ index: 1, tag: "button", type: "submit", visibleText: "Sign up", selector: "#submit" }),
 ];
+
+// ── 3b. lifecycle facade + terminal-transaction ordering ──────────────────
+//
+// Phase 2 moved the registry transaction to session/lifecycle.ts behind the
+// facade. These two pin the properties that move could silently break: the
+// facade must FORWARD (not re-implement) each lifecycle export, and the
+// terminal transition must still audit a pending 3-D Secure outcome BEFORE the
+// browser closes, then clear artifacts and drop the exact session.
+
+describe("characterization: session lifecycle facade", () => {
+  it("re-exports the lifecycle transaction as forwards, not copies", () => {
+    for (const name of [
+      "startProvisionSession",
+      "startHarnessProvisionSession",
+      "finishProvisionSession",
+      "finishProvisionSessionWithPreparation",
+      "closeAllProvisionSessions",
+      "activeSessionCount",
+      "paymentSession",
+      "withProvisionSessionCall",
+      "withPaymentSessionCall",
+      "googleSessionGate",
+    ] as const) {
+      const facade = (provisionSession as unknown as Record<string, unknown>)[name];
+      const owner = (sessionLifecycle as unknown as Record<string, unknown>)[name];
+      expect(typeof facade).toBe("function");
+      expect(typeof owner).toBe("function");
+      // The two start paths bind perception ports, so they are thin wrappers;
+      // everything else must be the identical function object.
+      if (name === "startProvisionSession" || name === "startHarnessProvisionSession") continue;
+      expect(facade).toBe(owner);
+    }
+  });
+
+  it("audits a pending 3-D Secure outcome before closing the browser, then clears the session", async () => {
+    const auditPayment = vi.fn().mockImplementation(async () => {
+      h.terminalOrder.push("3ds_audit");
+      return { id: "evt_characterization" };
+    });
+    let session: Session | null = null;
+    h.onFirstGoto = () => {
+      session = paymentSession();
+    };
+    const started = await startHarnessProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+      browser: new BrowserController({}),
+      api: { auditPayment } as unknown as ApiClient,
+    });
+    const live = session as Session | null;
+    expect(live).not.toBeNull();
+    live!.secretSlots.set("slot_1", "value");
+    live!.sealedFieldKeys.add("#card");
+    setActivePendingThreeDs({
+      approval_id: "appr_characterization",
+      approval_url: "https://web.test/vault/pay/appr_characterization",
+      checkout: {
+        merchant: "Shop",
+        checkout_origin: "https://shop.example.com",
+        amount_cents: 100,
+        currency: "USD",
+      },
+      last4: "4242",
+      deadline: Date.now() + 60_000,
+      outcome: "three_ds",
+    });
+
+    await finishProvisionSession(started.session_id);
+
+    expect(h.terminalOrder).toEqual(["3ds_audit", "browser_close"]);
+    expect(auditPayment).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "payment_3ds_unresolved" }),
+    );
+    // Artifacts cleared and the exact session dropped from the registry.
+    expect(live!.secretSlots.size).toBe(0);
+    expect(live!.sealedFieldKeys.size).toBe(0);
+    expect(live!.prevObserve).toBeNull();
+    expect(live!.observeSnapshotFile).toBeNull();
+    expect(live!.pendingThreeDs).toBeNull();
+    expect(activeSessionCount()).toBe(0);
+  });
+});
 
 describe("characterization: agent-facing observation payload shapes", () => {
   beforeEach(() => {
