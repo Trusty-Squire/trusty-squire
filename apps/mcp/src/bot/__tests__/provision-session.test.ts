@@ -607,7 +607,7 @@ describe("buildConsentRefusal (PR2 — inbox-read consent withheld)", () => {
     expect(r).toMatchObject({ session_id: "sk_2", found: false, code: null, link: null });
     expect(r.needs_user).toEqual({
       wall: "verification_code",
-      message: expect.stringContaining("not consented"),
+      message: expect.stringContaining("Inbox reading is disabled"),
       resume: "code",
     });
   });
