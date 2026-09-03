@@ -461,7 +461,12 @@ seal. Maintainers can select the legacy V1 `el_table`/snapshot contract with
   `approval_id`. Neither tool can read or alter the secret value; use
   `store_credential` to rotate a secret.
 - `grant_app_access` and `revoke_app_access` create and remove scoped backend access.
-- `audit_log` reports credential activity without exposing credential values.
+- `audit_log` reports credential activity without exposing credential values. It
+  defaults to a shaped security ledger: lifecycle events and anomalies (non-2xx,
+  429, rejected calls) as rows, routine proxied egress collapsed into per
+  credential/host/burst rollups with per-grant running totals. Pass a rollup's
+  `id` as `expand` for its individual calls, or `view: "raw"` for the flat
+  per-request stream.
 
 ## One README for GitHub and npm
 

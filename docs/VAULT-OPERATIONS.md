@@ -96,6 +96,38 @@ approval pending and the credential unchanged.
 retrieve, AND web `reveal` — counts against one per-account ceiling
 (100/hr). There is no human-only bypass.
 
+## Reading the audit trail (`audit_log`)
+
+`GET /v1/vault/audit` is, and stays, the flat per-request stream: one row per
+vault action, newest first, keyset-paginated. That stream is unreadable at
+egress volume — a few hundred proxied LLM calls are a few hundred
+`vault.proxy_executed` rows carrying the same reference, host, and requester.
+
+The MCP `audit_log` tool therefore shapes it on READ (nothing about how events
+are recorded changes; `apps/mcp/src/tools/audit-rollup.ts` owns the shaping):
+
+- **`view: "ledger"` (default)** — `events` carries the security-relevant
+  lifecycle rows (stored / rotated / deleted / edited, grant minted / revoked,
+  payments) plus every anomaly, marked `anomaly: true` with an
+  `anomaly_reason`. Routine successful egress is not listed here.
+- **`egress.rollups`** — routine proxied calls collapsed per
+  (credential reference × target host × burst): count, status breakdown, total
+  bytes, first/last timestamp, and the grants live over that window. A burst
+  ends when the gap between adjacent calls exceeds `window_minutes` (60).
+- **`expand: "<rollup id>"`** — the individual calls behind one rollup. The id
+  carries (reference, host, window), so the drill-down is stateless.
+- **`grant_totals`** — cumulative calls / bytes / last-used per egress grant.
+  Attribution is by credential reference within the grant's lifetime: the write
+  side records no grant id on a proxied call, so direct `use_credential` traffic
+  on the same credential is counted here too. The response says so in
+  `attribution`. Per-event provenance is a planned write-side follow-up.
+- **`view: "raw"`** — the unaggregated escape hatch, exactly the server's page.
+
+Only verifiably-2xx egress is allowed to disappear into an aggregate: a non-2xx
+status, a 429, a proxy error, a missing status, a `proxy_rejected`, or any
+non-`success` outcome is surfaced as its own marked ledger row *and* still
+counted in its rollup's totals.
+
 ## Notifications
 
 A **new** credential stored via the agent path (bot signup) fires a
