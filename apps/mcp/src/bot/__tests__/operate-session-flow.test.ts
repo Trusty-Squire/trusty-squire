@@ -5587,6 +5587,42 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     expect(JSON.stringify(full)).not.toContain(secret);
   });
 
+  it("keeps a reflected sealed slot out of the compact-v2 wire, label, and query", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const secret = "stored-credential-7f3d9a";
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
+    stashSecretSlot(started.session_id, "login", secret);
+    h.elements = [
+      elem({
+        tag: "button",
+        role: "button",
+        selector: "#reflected",
+        // The page reflects the injected value back OUTSIDE the field it was
+        // typed into. Under the payment-only policy nothing screens this by
+        // shape any more, so the exact-value screen has to carry it.
+        visibleText: `Saved value ${secret}`,
+        ariaLabel: `Saved value ${secret}`,
+      }),
+      elem({ index: 1, tag: "button", role: "button", selector: "#ok", visibleText: "Continue" }),
+    ];
+
+    const observation = await observe(started.session_id);
+    expect(observation.format).toBe("compact-v2");
+    expect(JSON.stringify(observation)).not.toContain(secret);
+    // The control is still THERE and actionable — only its reflected
+    // description is withheld.
+    const table = (observation as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table;
+    expect(table).toHaveLength(2);
+    // Only code-owned facts survive on that row — no `@label` alias derived
+    // from the reflected description.
+    expect(table[0]![2] ?? "").not.toContain("@");
+
+    const query = await observeQuery(started.session_id, "saved value");
+    expect(JSON.stringify(query)).not.toContain(secret);
+    expect(query.safe_table).toEqual([]);
+  });
+
   it("uses one screenshot redaction path and redacts only the exact vault value", async () => {
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
     await captureScreenshot(started.session_id);
