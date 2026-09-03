@@ -31,6 +31,7 @@ const groups =
     ? [runVitest("slow post-merge tier", "vitest.slow.config.ts")]
     : [
         runVitest("fast core", "vitest.fast-core.config.ts"),
+        runVitest("required behavior", "vitest.behavior-required.config.ts"),
         runVitest("required payment safety", "vitest.payment-required.config.ts"),
       ];
 

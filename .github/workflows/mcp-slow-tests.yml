@@ -1,8 +1,11 @@
 name: MCP slow tests
 
-# Long integration/corpus suites stay live without blocking release PRs. Every
-# merge that can affect MCP runs the slow partition; the nightly run executes
-# the complete suite as a partition-drift backstop.
+# Genuinely slow non-behavioral suites (corpus evals, packaging smoke, replay
+# harness) stay live without blocking release PRs. Operator behavior suites are
+# NOT here: they are in vitest.tiers.ts REQUIRED_BEHAVIOR_FILES and gate every
+# pull request via ci.yml's test:fast. Every merge that can affect MCP runs the
+# slow partition; the nightly run executes the complete suite as a
+# partition-drift backstop.
 on:
   push:
     branches: [main, staging]

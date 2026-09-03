@@ -477,9 +477,12 @@ probe. See `apps/mcp/src/bot/google-login.ts` and
 `apps/mcp/vitest.tiers.ts` is the static tier manifest. The required `test`
 check and `release.yml` run `test:fast`; `.github/workflows/mcp-slow-tests.yml`
 runs the named integration files after merges and the complete suite nightly.
-Payment/card-sealing files are explicitly listed in the required tier and run
-whole, without generated test-name filters. Never move card-sealing or
-payment-safety coverage to the slow tier.
+Payment/card-sealing files and operator behavior files (session fail-closed,
+OAuth lifecycle, observation — `REQUIRED_BEHAVIOR_FILES`) are explicitly listed
+in the required tier and run whole, without generated test-name filters. Never
+move card-sealing, payment-safety, or operator behavior coverage to the slow
+tier; slow is reserved for genuinely slow non-behavioral files (corpus evals,
+packaging smoke, replay harness).
 
 ### 15. Operator browser lifetime is owner-bound
 

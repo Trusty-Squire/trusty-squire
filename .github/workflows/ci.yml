@@ -342,9 +342,12 @@ jobs:
         if: needs.secret-scan.outputs.replay_eval == 'true'
         run: pnpm -F @trusty-squire/mcp test replay-harness
       # Per-package test over every package whose suite passes locally. MCP's
-      # required tier keeps all payment/card-sealing coverage, but partitions
-      # the large payment file and defers three long integration suites to the
-      # post-merge/nightly workflow in mcp-slow-tests.yml.
+      # required tier keeps all payment/card-sealing coverage AND the operator
+      # behavior suites (operate-session-flow, oauth-lifecycle, etc. via
+      # vitest.tiers.ts REQUIRED_BEHAVIOR_FILES), so behavior breakage fails
+      # the PR before merge. Only genuinely slow non-behavioral files (corpus
+      # evals, packaging smoke, replay harness) defer to the post-merge/nightly
+      # workflow in mcp-slow-tests.yml.
       # (registry + vault were historically excluded; the registry "prisma
       # drift" failures are resolved — both are green and now run here.)
       - name: Test (green packages)
