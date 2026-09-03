@@ -116,6 +116,10 @@ const h = vi.hoisted(() => ({
   extractInteractiveElementsCalls: 0,
   checkoutFieldNames: [] as string[],
   visibleText: "",
+  // When non-empty, extractVisibleText() shifts values off this queue in call
+  // order (falling back to `visibleText` once exhausted) — lets a test script
+  // a sequence of reads, e.g. a transient Gmail error banner then real content.
+  visibleTextQueue: [] as string[],
   visibleTextGate: null as Promise<void> | null,
   extractVisibleTextCalls: 0,
   openFirstMailResult: false,
@@ -310,6 +314,7 @@ vi.mock("../browser.js", () => ({
       h.extractVisibleTextCalls += 1;
       if (h.visibleTextGate !== null) await h.visibleTextGate;
       if (h.oauthReadError !== null) throw new Error(h.oauthReadError);
+      if (h.visibleTextQueue.length > 0) return h.visibleTextQueue.shift()!;
       return h.visibleText;
     }
     async revealMaskedCredentials(): Promise<void> {}
@@ -947,6 +952,9 @@ import {
   observedHostsForSession,
   stashSecretSlot,
   awaitVerification,
+  isGmailTransientErrorText,
+  isEmptyGmailResultText,
+  gmailTransientBackoffMs,
   captchaGate,
   finishProvisionSession,
   finishProvisionSessionWithPreparation,
@@ -1162,6 +1170,7 @@ beforeEach(() => {
   h.extractInteractiveElementsCalls = 0;
   h.checkoutFieldNames = [];
   h.visibleText = "";
+  h.visibleTextQueue = [];
   h.visibleTextGate = null;
   h.extractVisibleTextCalls = 0;
   h.openFirstMailResult = false;
@@ -6304,6 +6313,117 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     } finally {
       stderrWrite.mockRestore();
     }
+  });
+
+  it("populates link for a link-only verification email whose action button is text, not href, keyed (Xata Keycloak account-link)", async () => {
+    // The real Xata email: a Keycloak "Link Google account" email whose CTA
+    // href is an opaque per-recipient click-tracking URL (no verify/login/
+    // token vocabulary survives in it at all) — only the button's visible
+    // text carries the signal. #644 handled a bare href carrying that
+    // vocabulary; this covers the href carrying NONE of it.
+    const obs = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      consentInboxRead: true,
+    });
+    const trackingHref = "https://click.mailtrack.example.net/wf/click?upn=abc123opaque";
+    h.visibleText = "Xata wants to link your Google account. No code needed.";
+    h.elements = [
+      elem({ tag: "a", role: "link", href: "https://xata.io/unsubscribe?u=1", visibleText: "Unsubscribe" }),
+      elem({ tag: "a", role: "link", href: trackingHref, visibleText: "Link your Google account" }),
+    ];
+    h.openFirstMailResult = true;
+
+    const res = await awaitVerification(obs.session_id, {});
+
+    expect(res.found).toBe(true);
+    expect(res.code).toBeNull();
+    expect(res.link).toBe(trackingHref);
+  });
+
+  it("never returns an unsubscribe/footer link even when it is the only href present", async () => {
+    const obs = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      consentInboxRead: true,
+    });
+    h.visibleText = "Manage your email preferences below.";
+    h.elements = [
+      elem({
+        tag: "a",
+        role: "link",
+        href: "https://click.mailtrack.example.net/wf/click?upn=xyz",
+        visibleText: "Unsubscribe from marketing emails",
+      }),
+    ];
+    h.openFirstMailResult = true;
+
+    const res = await awaitVerification(obs.session_id, {});
+
+    expect(res.link).toBeNull();
+    expect(res.found).toBe(false);
+  });
+});
+
+describe("await_verification — Gmail transient #2014 backend error resilience", () => {
+  it("detects the #2014 banner and Gmail's 'encountered a problem' / 'Retrying' text", () => {
+    expect(
+      isGmailTransientErrorText(
+        "Oops... the system encountered a problem (#2014) - Retrying in 5s.",
+      ),
+    ).toBe(true);
+    expect(isGmailTransientErrorText("Retrying in 12 seconds")).toBe(true);
+    expect(isGmailTransientErrorText("Your inbox — 3 unread messages")).toBe(false);
+  });
+
+  it("detects Gmail's empty-search-result banner", () => {
+    expect(isEmptyGmailResultText("No messages matched your search.")).toBe(true);
+    expect(isEmptyGmailResultText("1 of 1 message shown")).toBe(false);
+  });
+
+  it("backs off with a bounded, increasing schedule", () => {
+    expect(gmailTransientBackoffMs(0)).toBe(800);
+    expect(gmailTransientBackoffMs(1)).toBe(1600);
+    expect(gmailTransientBackoffMs(2)).toBe(3200);
+    // Capped, not unbounded exponential growth.
+    expect(gmailTransientBackoffMs(5)).toBeLessThanOrEqual(4000);
+  });
+
+  it("retries past a transient #2014 banner instead of giving up, and still finds the code", async () => {
+    const obs = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      consentInboxRead: true,
+    });
+    const banner =
+      "Oops... the system encountered a problem (#2014) - Retrying in 5s. " + "pad".repeat(80);
+    const real = "Your verification code is 481920. " + "pad".repeat(80);
+    // First search read hits the transient banner; the retry-with-backoff
+    // re-issues the search and the second read is the real content.
+    h.visibleTextQueue = [banner, real];
+    h.visibleText = real; // fallback once the queue is drained (the opened-mail read)
+    h.openFirstMailResult = true;
+
+    const res = await awaitVerification(obs.session_id, {});
+
+    expect(res.found).toBe(true);
+    expect(res.code).toBe("481920");
+    // The search page was re-navigated to recover from the transient error.
+    expect(h.gotos.filter((u) => u.includes("mail.google.com")).length).toBeGreaterThan(1);
+  });
+
+  it("still concludes not-found after bounded retries on a genuinely empty, non-errored inbox", async () => {
+    const obs = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      consentInboxRead: true,
+    });
+    const empty = "No messages matched your search. " + "pad".repeat(80);
+    h.visibleText = empty;
+    h.openFirstMailResult = false;
+
+    const res = await awaitVerification(obs.session_id, {});
+
+    expect(res.found).toBe(false);
+    expect(res.code).toBeNull();
+    expect(res.link).toBeNull();
+    expect(res.needs_user).toBeDefined();
   });
 });
 
