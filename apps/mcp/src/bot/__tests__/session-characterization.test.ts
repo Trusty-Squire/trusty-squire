@@ -19,6 +19,7 @@
 // decision, not in a refactor.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type * as GoogleLoginModule from "../google-login.js";
+import type * as BrowserModule from "../browser.js";
 import type { InteractiveElement } from "../browser.js";
 
 const h = vi.hoisted(() => ({
@@ -36,7 +37,7 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock("../browser.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../browser.js")>();
+  const actual = await importOriginal<typeof BrowserModule>();
   return {
     ...actual,
     registerLocalBrowserLaunch: (
@@ -149,7 +150,8 @@ function describeSessionShape(session: Session): Record<string, unknown> {
     else if (Buffer.isBuffer(value)) entries[key] = { kind: "Buffer", length: value.length };
     else if (Array.isArray(value)) entries[key] = { kind: "Array", length: value.length };
     else if (value === null) entries[key] = null;
-    else if (typeof value === "object") entries[key] = { kind: "object", ctor: value.constructor.name };
+    else if (typeof value === "object")
+      entries[key] = { kind: "object", ctor: value.constructor.name };
     else entries[key] = value;
   }
   return entries;
