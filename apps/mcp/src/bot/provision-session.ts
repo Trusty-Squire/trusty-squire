@@ -490,7 +490,6 @@ import {
   googleSessionGate,
   observeSnapshotDir,
   paymentSession,
-  quiesceOAuthActionSession,
   sessionForCall,
   startProvisionSession as startProvisionSessionInternal,
   startHarnessProvisionSession as startHarnessProvisionSessionInternal,
@@ -524,10 +523,8 @@ interface OAuthActionDeadline {
   expiresAt: number;
   timeoutMs: number;
   provider: OAuthProviderId | undefined;
-  controller: AbortController;
   timedOut: boolean;
   inFlight: Set<Promise<unknown>>;
-  cancellations: Set<() => Promise<unknown> | void>;
 }
 
 function oauthActionTimeoutMs(): number {
@@ -543,21 +540,13 @@ function oauthActionDeadline(provider: OAuthProviderId | undefined): OAuthAction
     expiresAt: Date.now() + timeoutMs,
     timeoutMs,
     provider,
-    controller: new AbortController(),
     timedOut: false,
     inFlight: new Set(),
-    cancellations: new Set(),
   };
 }
 
 function oauthActionRemainingMs(deadline: OAuthActionDeadline): number {
   return Math.max(0, deadline.expiresAt - Date.now());
-}
-
-function oauthActionCanMutate(deadline: OAuthActionDeadline): boolean {
-  return (
-    !deadline.timedOut && !deadline.controller.signal.aborted && Date.now() < deadline.expiresAt
-  );
 }
 
 function trackOAuthActionPromise<T>(
@@ -575,21 +564,6 @@ function trackOAuthActionPromise<T>(
 function expireOAuthAction(deadline: OAuthActionDeadline): void {
   if (deadline.timedOut) return;
   deadline.timedOut = true;
-  deadline.controller.abort();
-  for (const cancel of deadline.cancellations) {
-    try {
-      const result = cancel();
-      if (result instanceof Promise) void trackOAuthActionPromise(deadline, result);
-    } catch {}
-  }
-}
-
-function registerOAuthActionCancellation(
-  deadline: OAuthActionDeadline,
-  cancel: () => Promise<unknown> | void,
-): () => void {
-  deadline.cancellations.add(cancel);
-  return () => deadline.cancellations.delete(cancel);
 }
 
 async function waitForOAuthActionQuiescence(deadline: OAuthActionDeadline): Promise<void> {
@@ -697,20 +671,25 @@ async function withOAuthActionBoundary<T>(
 ): Promise<T> {
   const deadline = oauthActionDeadline(provider);
   const releaseCooldownMs = oauthLoginLeaseCooldownMs();
-  const unregisterCancellation = registerOAuthActionCancellation(deadline, () =>
-    quiesceOAuthActionSession(session),
+  // A deadline expiry must NOT terminalize the session: the in-flight OAuth
+  // operation is budget-bounded (loginWithOAuth races its own completion
+  // window), so unwinding needs no teardown. Force-closing here used to
+  // deregister a healthy session mid-handoff, leaving the pending
+  // chooser/consent screen unreachable — observe/screenshot/oauth_settle all
+  // returned "unknown provision session" and the only recovery was a fresh
+  // session that lost all progress. The timeout surfaces as a recoverable
+  // error while the session, browser, and page stay valid for inspection and
+  // a settle/retry. Serialization custody is unchanged: the lease below still
+  // drains the in-flight work (plus the cooldown) before the next OAuth
+  // action acquires it, and a genuinely dead browser still surfaces as
+  // unavailable through its own close paths.
+  return await withOAuthActionLease(
+    deadline,
+    async () => {
+      return await withinOAuthActionDeadline(run(deadline), deadline);
+    },
+    releaseCooldownMs,
   );
-  try {
-    return await withOAuthActionLease(
-      deadline,
-      async () => {
-        return await withinOAuthActionDeadline(run(deadline), deadline);
-      },
-      releaseCooldownMs,
-    );
-  } finally {
-    unregisterCancellation();
-  }
 }
 
 async function runSerializedGoogleIdentityOperation<T>(

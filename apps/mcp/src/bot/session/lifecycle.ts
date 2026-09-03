@@ -290,20 +290,6 @@ async function forceReleaseWarmBrowserPage(
   leasedBrowsers.delete(browser);
 }
 
-export async function quiesceOAuthActionSession(session: Session): Promise<void> {
-  // The deadline makes this session terminal before the host can issue its
-  // usual operate_finish. Record its one no-op acknowledgement before awaiting
-  // browser teardown, which can itself be waiting on the cancelled OAuth call.
-  refusedStartSessionIds.add(session.id);
-  await forceTerminateProvisionSession(
-    session,
-    "oauth_action_terminalize",
-    { reason: "action_deadline" },
-    true,
-    true,
-  );
-}
-
 async function closeBrowserBounded(
   browser: BrowserController,
   cancelStart: boolean,
