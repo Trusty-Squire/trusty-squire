@@ -221,7 +221,7 @@ const EMAIL_VALUE_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
 const SECRET_ASSIGNMENT_RE = /\b(?:password|passcode|token|api[_ -]?key|secret)\b\s*[:=]\s*\S{4,}/i;
 const HIGH_ENTROPY_TOKEN_RE = /\b[A-Za-z0-9_-]{24,}\b/;
 const CARD_SECURITY_VALUE_RE = /\b(?:cvv|cvc|security\s*code)\s*[:#-]?\s*\d{3,4}\b/i;
-const SAFE_DESCRIPTION_GRAMMAR_RE = /^[\p{L}\p{N}][\p{L}\p{N}\s&'’+,.!?():=/@_|-]*$/u;
+const SAFE_DESCRIPTION_GRAMMAR_RE = /^[\p{L}\p{N}][\p{L}\p{N}\s&'’+,.!?():=/@_$|-]*$/u;
 const SAFE_DESCRIPTION_WORDS = new Set([
   "a",
   "access",
@@ -261,14 +261,18 @@ const SAFE_DESCRIPTION_WORDS = new Set([
   "discount",
   "dismiss",
   "done",
+  "economy",
   "email",
   "example",
+  "express",
   "external",
   "first",
   "finish",
   "form",
+  "free",
   "gift",
   "google",
+  "ground",
   "in",
   "item",
   "key",
@@ -276,6 +280,7 @@ const SAFE_DESCRIPTION_WORDS = new Set([
   "log",
   "login",
   "merchant",
+  "method",
   "name",
   "native",
   "next",
@@ -283,18 +288,22 @@ const SAFE_DESCRIPTION_WORDS = new Set([
   "now",
   "option",
   "order",
+  "overnight",
   "page",
   "password",
   "pay",
   "payment",
   "phone",
+  "pickup",
   "postal",
   "previous",
+  "priority",
   "private",
   "proceed",
   "product",
   "promo",
   "quantity",
+  "rate",
   "region",
   "register",
   "registration",
@@ -309,6 +318,7 @@ const SAFE_DESCRIPTION_WORDS = new Set([
   "sign",
   "signup",
   "size",
+  "standard",
   "storefront",
   "style",
   "submit",
@@ -331,7 +341,13 @@ function hasSafeDescriptionGrammar(value: string): boolean {
   const words = value.match(/[\p{L}\p{N}]+/gu) ?? [];
   return (
     words.length > 0 &&
-    words.every((word) => SAFE_DESCRIPTION_WORDS.has(word.toLowerCase()) || /^[0-9]$/.test(word))
+    // Multi-digit amounts are part of ordinary checkout copy — shipping-method
+    // prices ("Standard $8.00", "Express $15"), totals, ZIP codes — none of
+    // which is secret. PAN-shaped digit runs are still rejected upstream by
+    // hasPanLikeDigits (≥13 digits), and standalone OTP codes by
+    // findOtpCredential/isStandaloneOtpCredential, so 1-6 digit words are
+    // safe label vocabulary.
+    words.every((word) => SAFE_DESCRIPTION_WORDS.has(word.toLowerCase()) || /^\d{1,6}$/.test(word))
   );
 }
 
@@ -817,7 +833,13 @@ function privateQueryTermsV2(value: string): string[] | null {
 export function controlMatchesPrivateQueryV2(el: InteractiveElement, query: string): boolean {
   const needles = privateQueryTermsV2(query);
   if (needles === null) return false;
-  return controlNamingTexts(el).some((candidate) => {
+  // The private match also consults the element's name/id slugs so
+  // choice-group members without their own copy — Shopify shipping-rate
+  // radios (name "checkout[shipping_rate][id]", id "checkout_shipping_rate_…")
+  // — stay queryable. These are DOM identifiers, never field values, and each
+  // candidate still passes the full secret-shape gate below before any token
+  // comparison.
+  return [...controlNamingTexts(el), el.name, el.id].some((candidate) => {
     if (typeof candidate !== "string") return false;
     const normalized = candidate.normalize("NFKC").trim().toLowerCase();
     if (

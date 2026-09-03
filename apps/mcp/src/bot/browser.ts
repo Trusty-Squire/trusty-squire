@@ -932,8 +932,13 @@ const SCREENSHOT_SECRET_FIELD_SELECTORS = [
   'input[autocomplete~="one-time-code" i]',
   'input[name*="otp" i]',
   'input[id*="otp" i]',
-  'input[name*="pin" i]',
-  'input[id*="pin" i]',
+  // "pin" as a bare substring also matches inside "shipping" (s-h-i-p-pin-g),
+  // which masked every Shopify shipping-address input and shipping-rate radio
+  // (name/id "checkout[shipping_address][…]" / "checkout_shipping_…"). Pin
+  // fields are excluded there; a genuine shipping-pin name would still be
+  // caught by the other secret selectors, and "pin" token names remain covered.
+  'input[name*="pin" i]:not([name*="shipping" i])',
+  'input[id*="pin" i]:not([id*="shipping" i])',
 ].join(",");
 const SCREENSHOT_REDACTION_SELECTORS = `${CHECKOUT_CARD_VALUE_FIELD_SELECTORS},${SCREENSHOT_SECRET_FIELD_SELECTORS}`;
 
@@ -9343,42 +9348,14 @@ export class BrowserController {
               }
               return false;
             };
-            // In-page port of findCredentialTokens: a vendor-style token is a
-            // 16+ char lowercase-ish identifier with a digit that either uses
-            // snake_case, a known vendor prefix, or an entropy segment of 10+
-            // alphanumeric chars. Product SKUs, CSS class names, and env-var
-            // NAMES do not qualify.
-            const credToken = (text: string): string[] => {
-              const out: string[] = [];
-              for (const match of text.matchAll(
-                /\b[A-Za-z][A-Za-z0-9]{1,9}[_-][A-Za-z0-9][A-Za-z0-9_-]{12,}\b/g,
-              )) {
-                const token = match[0];
-                if (
-                  token.length < 16 ||
-                  !/[0-9]/.test(token) ||
-                  /^[A-Z][A-Z0-9_]*$/.test(token)
-                ) {
-                  continue;
-                }
-                if (
-                  token.includes("_") ||
-                  /^(?:api|key|pk|re|rk|sk|xai|ghp|pat|vsk|tly)-/i.test(token) ||
-                  /^[A-Za-z][A-Za-z0-9]{0,7}-[A-Za-z0-9]{12,}$/.test(token) ||
-                  token
-                    .split("-")
-                    .some(
-                      (segment) =>
-                        segment.length >= 10 &&
-                        /[A-Za-z]/.test(segment) &&
-                        /[0-9]/.test(segment),
-                    )
-                ) {
-                  out.push(token);
-                }
-              }
-              return out;
-            };
+            // No broad vendor-token catch-all here. DOM identifiers are not
+            // secrets: Shopify-style ids/names like
+            // "checkout_shipping_address_address1" matched the previous
+            // in-page port of findCredentialTokens and masked the entire
+            // shipping block — radios, prices, addresses — out of the
+            // screenshot. Node redaction is now exactly: operator-injected
+            // vault values, Luhn-valid PANs, and the tight secret-shape
+            // signatures (API keys, recovery codes, TOTP, JWTs…).
             const containsInjected = (text: string): boolean =>
               secrets.some((secret) => secret.length > 0 && text.includes(secret));
             // kind "value"/"text" also admit a Luhn-valid PAN (a card number
@@ -9394,7 +9371,7 @@ export class BrowserController {
               for (const shape of shapes) {
                 if (shape.test(text)) return true;
               }
-              return credToken(text).length > 0;
+              return false;
             };
             const matches = new Set<Element>();
             const check = (el: Element): void => {

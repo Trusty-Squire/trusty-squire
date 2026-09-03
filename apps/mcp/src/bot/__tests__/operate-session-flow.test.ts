@@ -5025,6 +5025,169 @@ describe("Compact V2 action-map boundary", () => {
   });
 });
 
+// Over-broad node redaction on live Shopify checkouts masked the shipping
+// block ("pin" substring-matched inside "shipping", and a broad vendor-token
+// heuristic matched checkout DOM slugs like checkout_shipping_address_address1),
+// which emptied operate_observe_query results for shipping-method radios and
+// magenta-masked addresses, prices, and radio labels. Node redaction must stay
+// exactly: injected vault values + tight secret-shape signatures.
+describe("Compact V2 checkout copy stays unredacted", () => {
+  const checkoutUrl = "https://shop.example.com/checkouts/c/token?_r=revalidated";
+
+  function shopifyCheckoutFixture(): unknown[] {
+    return [
+      elem({
+        tag: "input",
+        role: "textbox",
+        labelText: "Address",
+        name: "checkout[shipping_address][address1]",
+        id: "checkout_shipping_address_address1",
+        selector: "#checkout_shipping_address_address1",
+        autocomplete: "shipping address-line1",
+        required: true,
+        value: "",
+      }),
+      elem({
+        index: 1,
+        tag: "input",
+        role: "textbox",
+        labelText: "City",
+        name: "checkout[shipping_address][city]",
+        id: "checkout_shipping_address_city",
+        selector: "#checkout_shipping_address_city",
+        autocomplete: "shipping address-level2",
+        value: "",
+      }),
+      elem({
+        index: 2,
+        tag: "input",
+        type: "radio",
+        role: "radio",
+        labelText: "Standard $8.00",
+        name: "checkout[shipping_rate][id]",
+        id: "checkout_shipping_rate_standard",
+        selector: "#checkout_shipping_rate_standard",
+        checked: true,
+      }),
+      elem({
+        index: 3,
+        tag: "input",
+        type: "radio",
+        role: "radio",
+        labelText: "Express $15.00",
+        name: "checkout[shipping_rate][id]",
+        id: "checkout_shipping_rate_express",
+        selector: "#checkout_shipping_rate_express",
+        checked: false,
+      }),
+    ];
+  }
+
+  it("exposes shipping-method radios in the V2 map and their query results", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = shopifyCheckoutFixture();
+
+    const started = await startProvisionSession({ serviceUrl: checkoutUrl });
+    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table;
+
+    // Both shipping-rate options are in the map with role radio and their
+    // price-bearing labels; the standard option carries its checked state.
+    const radioRows = rows.filter(([, role]) => role === "r");
+    expect(radioRows).toHaveLength(2);
+    const facts = radioRows.map(([, , rowFacts]) => rowFacts ?? "");
+    expect(facts.some((value) => value.startsWith("@standard-8-00"))).toBe(true);
+    expect(facts.some((value) => value.startsWith("@express-15-00"))).toBe(true);
+    expect(facts.find((value) => value.startsWith("@standard-8-00"))).toContain("s=c");
+
+    // operate_observe_query resolves the shipping methods — previously EMPTY
+    // when the radios were redacted out of the map.
+    retainActivePaymentFieldSeal();
+    const queried = (await observeQuery(started.session_id, "shipping", "radio")) as {
+      safe_table: Array<[string, string, string?]>;
+    };
+    expect(queried.safe_table).toHaveLength(2);
+    const queriedLabels = queried.safe_table.map(([, , rowFacts]) => rowFacts ?? "");
+    expect(queriedLabels.some((value) => value.startsWith("@standard-8-00"))).toBe(true);
+    expect(queriedLabels.some((value) => value.startsWith("@express-15-00"))).toBe(true);
+
+    // The queried ref is selectable through the normal act path.
+    const expressRef = queried.safe_table.find(([, , rowFacts]) =>
+      rowFacts?.startsWith("@express-15-00"),
+    )![0]!;
+    await act(started.session_id, { kind: "click", target: expressRef });
+    expect(h.clickCalls).toBe(1);
+  });
+
+  it("keeps address and shipping copy visible in the legacy observation text", async () => {
+    // V2 off (forced by beforeEach): the legacy observation renders page text.
+    h.visibleText =
+      "Shipping address\n350 5th Ave, New York, NY 10118\nShipping method: Standard $8.00";
+    h.elements = [
+      elem({
+        tag: "input",
+        role: "textbox",
+        labelText: "Address",
+        name: "checkout[shipping_address][address1]",
+        id: "checkout_shipping_address_address1",
+        selector: "#checkout_shipping_address_address1",
+        autocomplete: "shipping address-line1",
+        value: "350 5th Ave",
+      }),
+      elem({
+        index: 1,
+        tag: "input",
+        type: "radio",
+        role: "radio",
+        labelText: "Standard $8.00",
+        name: "checkout[shipping_rate][id]",
+        id: "checkout_shipping_rate_standard",
+        selector: "#checkout_shipping_rate_standard",
+        checked: true,
+      }),
+    ];
+
+    const started = await startProvisionSession({ serviceUrl: checkoutUrl });
+    const observation = (await observe(started.session_id, "full")) as unknown as {
+      text: string;
+      elements: Array<{ role?: string; label?: string }>;
+    };
+    expect(observation.text).toContain("350 5th Ave, New York, NY 10118");
+    expect(observation.text).toContain("Standard $8.00");
+    // The radio row itself is present with its price label, not sealed out.
+    const radioElement = observation.elements.find((entry) => entry.role === "radio");
+    expect(radioElement?.label).toContain("Standard $8.00");
+  });
+
+  it("still redacts injected vault values and tight secret shapes from observation text", async () => {
+    const secret = "injected-1234567890abcdef";
+    h.visibleText =
+      "API key: sk-proj-1234567890abcdefghijklmnopqrstuv Recovery code: 814226 Your 2FA code is 553218";
+    h.elements = [
+      elem({
+        tag: "input",
+        role: "textbox",
+        labelText: "Address",
+        name: "checkout[shipping_address][address1]",
+        id: "checkout_shipping_address_address1",
+        selector: "#checkout_shipping_address_address1",
+        autocomplete: "shipping address-line1",
+        value: "",
+      }),
+    ];
+
+    const started = await startProvisionSession({ serviceUrl: checkoutUrl });
+    // An operator-injected vault value reflected onto the page copy.
+    stashSecretSlot(started.session_id, "login", secret);
+    h.visibleText = `${h.visibleText} ${secret}`;
+    const observed = await observe(started.session_id, "full");
+    expect(observed.text).not.toContain("sk-proj-1234567890abcdefghijklmnopqrstuv");
+    expect(observed.text).not.toContain("814226");
+    expect(observed.text).not.toContain("553218");
+    expect(observed.text).not.toContain(secret);
+  });
+});
+
 // docs/observation-model.md §4.1/§4.2 — the identity model's own contract.
 describe("Compact V2 durable ref identity", () => {
   function field(index: number, overrides: Record<string, unknown>): unknown {
