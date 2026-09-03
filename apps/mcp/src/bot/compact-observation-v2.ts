@@ -467,6 +467,48 @@ export function safeOriginV2(value: string | null | undefined): string | null {
   }
 }
 
+// Audit-trail sealing: the operator's structured stderr trail must never carry
+// a raw URL or host while compact-v2 is sealing an observation. These two are
+// the audit-side counterpart of safeOriginV2, and live here with it so both the
+// lifecycle transaction and the observe/act surface can reach them.
+export function compactV2AuditUrl(rawUrl: string): string {
+  return safeOriginV2(rawUrl) ?? "<sealed-origin>";
+}
+
+export function compactV2AuditHost(rawHost: string): string {
+  const origin = safeOriginV2(rawHost.includes("://") ? rawHost : `https://${rawHost}`);
+  if (origin === null) return "<sealed-host>";
+  return new URL(origin).host;
+}
+
+export function compactV2AuditValue(key: string, value: unknown): unknown {
+  if ((key === "url" || key === "service_url") && typeof value === "string") {
+    return compactV2AuditUrl(value);
+  }
+  if (
+    (key === "host" || key === "url_host" || key === "frame_origin" || key === "recipe_domain") &&
+    typeof value === "string"
+  ) {
+    return compactV2AuditHost(value);
+  }
+  if (key === "allowed_hosts" && Array.isArray(value)) {
+    return value.map((host) =>
+      typeof host === "string" ? compactV2AuditHost(host) : "<sealed-host>",
+    );
+  }
+  if (typeof value === "string") return safeDescriptionV2(value) ?? "<sealed>";
+  if (Array.isArray(value)) return value.map((item) => compactV2AuditValue("", item));
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([nestedKey, nestedValue]) => [
+        nestedKey,
+        compactV2AuditValue(nestedKey, nestedValue),
+      ]),
+    );
+  }
+  return value;
+}
+
 export function sealRetainedInteractiveElementsV2(
   elements: readonly InteractiveElement[],
   selectorFor: (element: InteractiveElement) => string = () => "",

@@ -562,11 +562,26 @@ Session data model and its **single** construction contract now live in
 (operate_start and the harness start previously duplicated a ~60-field literal
 side by side). `Session` is still re-exported from `provision-session.ts`.
 
+The **lifecycle registry transaction** now lives in
+`apps/mcp/src/bot/session/lifecycle.ts`: the session map + refused-start set,
+the real-profile lease and browser acquisition, the ordinary/payment call leases
+and their drains, the watchdog, the bounded close, the single terminal-teardown
+owner, artifact cleanup, and start/finish/shutdown. Its ORDER is the contract —
+drain leases → run finish prep → audit a pending 3DS outcome → close the browser
+→ clear artifacts → delete the EXACT session object from the map — so change it
+as one unit, never step by step. The host-scope views over `Session.allowedHosts`
+sit below it in `session/hosts.ts`. Perception has NOT moved: the two start paths
+reach `observeSession` through the `SessionStartPorts` the facade binds, which is
+what keeps the facade → lifecycle dependency one-way with no runtime import
+cycle. Payment state transitions are still in the facade.
+
 `apps/mcp/src/bot/__tests__/session-characterization.test.ts` is the before/after
 oracle for that work: it pins the registered `operate_*` tool surface, both
-starts' session construction field-for-field, start/observe/finish ordering, and
-the COMPLETE key set of every observation payload. Treat a failure there as a
-behavior change, not a test to update.
+starts' session construction field-for-field, start/observe/finish ordering, that
+the facade FORWARDS each lifecycle export rather than re-implementing it, the
+3DS-audit-before-browser-close terminal ordering, and the COMPLETE key set of
+every observation payload. Treat a failure there as a behavior change, not a test
+to update.
 
 ### Operator observation model (compact-v2 ref identity)
 
