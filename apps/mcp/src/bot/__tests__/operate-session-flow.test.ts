@@ -49,6 +49,8 @@ const h = vi.hoisted(() => ({
   },
   autocompleteSuggestions: [] as string[],
   autocompleteCommitMutation: null as { selector: string; value: string } | null,
+  shippingMethodsLoadOnAutocompleteCommit: false,
+  shippingMethodsLoaded: false,
   autocompleteCommitCalls: [] as number[],
   autocompleteConfirmOverride: null as boolean | null,
   autocompleteConfirmCalls: [] as Array<{ selector: string; pickedText: string }>,
@@ -426,6 +428,7 @@ vi.mock("../browser.js", () => ({
           }
         }
       }
+      if (h.shippingMethodsLoadOnAutocompleteCommit) h.shippingMethodsLoaded = true;
     }
     async discardTypeSuggestionPopup(dismissWithEscape: boolean): Promise<void> {
       h.autocompleteDiscardCalls += 1;
@@ -1070,6 +1073,8 @@ beforeEach(() => {
   h.trackedClickFailure = null;
   h.autocompleteSuggestions = [];
   h.autocompleteCommitMutation = null;
+  h.shippingMethodsLoadOnAutocompleteCommit = false;
+  h.shippingMethodsLoaded = false;
   h.autocompleteCommitCalls = [];
   h.autocompleteConfirmOverride = null;
   h.autocompleteConfirmCalls = [];
@@ -3029,6 +3034,61 @@ afterEach(async () => {
 });
 
 describe("3.1 — autocomplete-aware type fill", () => {
+  it("fills Shopify's required address combobox, commits its suggestion, and leaves apartment empty", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        role: "combobox",
+        labelText: "Address",
+        autocomplete: "shipping address-line1",
+        required: true,
+        selector: "#shipping-address",
+        value: "",
+      }),
+      elem({
+        index: 1,
+        tag: "input",
+        role: "textbox",
+        labelText: "Apartment, suite, etc. (optional)",
+        autocomplete: "shipping address-line2",
+        selector: "#shipping-apartment",
+        value: "",
+      }),
+    ];
+    h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
+    h.autocompleteCommitMutation = {
+      selector: "#shipping-address",
+      value: "350 5th Ave, New York, NY 10118, USA",
+    };
+    // Shopify only enables delivery-rate selection after the Places choice is
+    // committed. The harness models that checkout state transition here.
+    h.shippingMethodsLoadOnAutocompleteCommit = true;
+
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> }).safe_table;
+    const addressRef = rows.find((row) => row[1] === "s" && row[2]?.includes("f=address"))?.[0];
+
+    // The old observation exposed both controls as f=address, allowing the
+    // textbox below the required line to receive this value and leaving
+    // shipping blocked. The only f=address ref now identifies line 1.
+    expect(addressRef).toBeDefined();
+    await act(started.session_id, { kind: "type", target: addressRef!, text: "350 5th Ave" });
+
+    expect(h.typed).toEqual([{ selector: "#shipping-address", text: "350 5th Ave" }]);
+    expect(h.autocompleteCommitCalls).toEqual([0]);
+    expect(h.shippingMethodsLoaded).toBe(true);
+    expect(h.autocompleteConfirmCalls).toEqual([
+      { selector: "#shipping-address", pickedText: "350 5th Ave, New York, NY 10118, USA" },
+    ]);
+    expect(h.elements).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ selector: "#shipping-address", value: "350 5th Ave, New York, NY 10118, USA" }),
+        expect.objectContaining({ selector: "#shipping-apartment", value: "" }),
+      ]),
+    );
+  });
+
   it("commits the single matching suggestion and verifies the underlying value actually committed", async () => {
     h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
     h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
