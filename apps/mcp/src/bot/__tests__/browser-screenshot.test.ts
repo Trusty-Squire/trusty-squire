@@ -604,6 +604,115 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "keeps Shopify-style shipping radios and addresses unmasked on a plain checkout",
+    async () => {
+      const browser = await launchIsolatedTestBrowser();
+      try {
+        const page = await browser.newPage();
+        // A minimal Shopify-checkout-shaped page: shipping-address inputs and
+        // shipping-method radio options whose name/id slugs are long
+        // underscore/bracket identifiers with digits. Before the fix these
+        // matched the "pin"-in-"shipping" selector collision and the broad
+        // vendor-token heuristic, masking nearly every node on the page.
+        await page.setContent(`
+          <main>
+            <h1>Information</h1>
+            <input id="checkout_email" name="checkout[email]" value="buyer@example.com" autocomplete="email">
+            <h2>Shipping address</h2>
+            <input id="checkout_shipping_address_first_name" name="checkout[shipping_address][first_name]" value="Jamie" autocomplete="given-name">
+            <input id="checkout_shipping_address_address1" name="checkout[shipping_address][address1]" value="350 5th Ave" autocomplete="shipping address-line1">
+            <input id="checkout_shipping_address_city" name="checkout[shipping_address][city]" value="New York" autocomplete="shipping address-level2">
+            <input id="checkout_shipping_address_zip" name="checkout[shipping_address][zip]" value="10118" autocomplete="shipping postal-code">
+            <h2>Shipping method</h2>
+            <div role="radiogroup" aria-label="Shipping method">
+              <input type="radio" id="checkout_shipping_rate_standard" name="checkout[shipping_rate][id]" value="standard-8.00" checked>
+              <label for="checkout_shipping_rate_standard">Standard $8.00</label>
+              <input type="radio" id="checkout_shipping_rate_express" name="checkout[shipping_rate][id]" value="express-15.00">
+              <label for="checkout_shipping_rate_express">Express $15.00</label>
+            </div>
+          </main>
+        `);
+        const controller = BrowserController.fromHarnessPage(page);
+
+        const result = await controller.captureOperatorScreenshot();
+
+        // Nothing on this page is secret: zero masks, no redacted_count noise.
+        expect(result.redactedCount).toBe(0);
+        expect(isValidJpegBase64(result.base64)).toBe(true);
+
+        // Pixel-level proof: shipping-rate radio labels and the address
+        // line-1 input keep ordinary (non-magenta) pixels.
+        const boxes = await Promise.all(
+          [
+            'label[for="checkout_shipping_rate_standard"]',
+            'label[for="checkout_shipping_rate_express"]',
+            "#checkout_shipping_address_address1",
+            "#checkout_shipping_address_city",
+          ].map(async (selector) => await page.locator(selector).boundingBox()),
+        );
+        expect(boxes.every((box) => box !== null)).toBe(true);
+        const pixels = await samplePixels(
+          page,
+          result.base64,
+          boxes.map((box) => [box!.x + box!.width / 2, box!.y + box!.height / 2]),
+        );
+        for (const pixel of pixels) expect(isMaskMagenta(pixel)).toBe(false);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "still redacts rendered API keys, recovery codes, and TOTPs on a checkout",
+    async () => {
+      const browser = await launchIsolatedTestBrowser();
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <main>
+            <h2>Shipping address</h2>
+            <input id="checkout_shipping_address_address1" name="checkout[shipping_address][address1]" value="350 5th Ave" autocomplete="shipping address-line1">
+            <input type="radio" id="checkout_shipping_rate_standard" name="checkout[shipping_rate][id]" value="standard-8.00" checked>
+            <label for="checkout_shipping_rate_standard">Standard $8.00</label>
+            <p id="api">API key: sk-proj-1234567890abcdefghijklmnopqrstuv</p>
+            <p id="recovery" title="Recovery code: 814226">Use your recovery code</p>
+            <p id="totp">Your 2FA code is 553218</p>
+          </main>
+        `);
+        const controller = BrowserController.fromHarnessPage(page);
+
+        const result = await controller.captureOperatorScreenshot();
+
+        // Tight secret shapes stay masked; the address/radio nodes do not.
+        expect(result.redactedCount).toBe(3);
+        const boxes = await Promise.all(
+          [
+            "#api",
+            "#recovery",
+            "#totp",
+            "#checkout_shipping_address_address1",
+            'label[for="checkout_shipping_rate_standard"]',
+          ].map(async (selector) => await page.locator(selector).boundingBox()),
+        );
+        expect(boxes.every((box) => box !== null)).toBe(true);
+        const pixels = await samplePixels(
+          page,
+          result.base64,
+          boxes.map((box) => [box!.x + box!.width / 2, box!.y + box!.height / 2]),
+        );
+        expect(isMaskMagenta(pixels[0]!)).toBe(true);
+        expect(isMaskMagenta(pixels[1]!)).toBe(true);
+        expect(isMaskMagenta(pixels[2]!)).toBe(true);
+        expect(isMaskMagenta(pixels[3]!)).toBe(false);
+        expect(isMaskMagenta(pixels[4]!)).toBe(false);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "captures with no redaction when no card/sealed fields exist",
     async () => {
       const browser = await launchIsolatedTestBrowser();
