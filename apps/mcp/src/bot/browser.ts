@@ -5157,6 +5157,23 @@ export class BrowserController {
     );
   }
 
+  /**
+   * Commit Shopify's required shipping street field after type/autocomplete.
+   * Shopify Places only begins geocoding on this field's change/blur boundary;
+   * dispatching change and moving focus away mirrors the user's Tab action.
+   * This is intentionally not a generic post-type event mechanism.
+   */
+  async commitRequiredShippingAddressLine1(selector: string): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    await this.page.locator(selector).first().evaluate((field) => {
+      field.dispatchEvent(new Event("change", { bubbles: true }));
+      if (field instanceof HTMLElement) field.blur();
+    });
+    // Allow Shopify's bounded Places/geocoding request to begin before the
+    // caller observes the delivery-method section.
+    await this.sleep(500);
+  }
+
   private async typeInner(selector: string, text: string, sealed = false): Promise<string[]> {
     if (!this.page) throw new Error("Browser not started");
     // Wait for element to be visible and enabled before typing.
