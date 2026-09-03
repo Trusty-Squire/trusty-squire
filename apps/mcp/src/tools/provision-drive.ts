@@ -16,6 +16,7 @@ import {
   observeQuery,
   act,
   cartAdd,
+  cartClear,
   formSelectMany,
   TargetStaleError,
   extractCredentials,
@@ -606,6 +607,10 @@ interface CartAddArgs {
   idempotency_key: string;
 }
 
+interface CartClearArgs {
+  session_id: string;
+}
+
 interface FormSelectManyArgs {
   session_id: string;
   selections: Record<string, string>;
@@ -673,6 +678,7 @@ const actSchema = z
       "scroll",
       "upload",
       "cart_add",
+      "cart_clear",
       "select_many",
       "extract",
       "solve_captcha",
@@ -862,6 +868,7 @@ const ACTION_KINDS = [
   "scroll",
   "upload",
   "cart_add",
+  "cart_clear",
   "select_many",
   "extract",
   "solve_captcha",
@@ -891,6 +898,15 @@ const ACTION_REPAIR_BY_KIND: Partial<Record<ActionKind, ActionRepair>> = {
     },
     safe_alternative:
       "Retry cart_add with the same stable idempotency_key for the same product_identity and options_hash. Do not replace it with click: cart_add reserves the mutation and exact-line post-verifies the cart." +
+      manualCardRecovery,
+  },
+  cart_clear: {
+    example: {
+      session_id: "<session_id>",
+      kind: "cart_clear",
+    },
+    safe_alternative:
+      "Retry cart_clear with only session_id — it empties the cart so a following cart_add reaches a known quantity, regardless of what accumulated in the persistent browser profile's cart across earlier sessions." +
       manualCardRecovery,
   },
   select_many: {
@@ -1101,6 +1117,7 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
     case "upload":
       return { kind: "upload", target: need(args.target, "target"), path: need(args.path, "path") };
     case "cart_add":
+    case "cart_clear":
     case "select_many":
     case "extract":
     case "solve_captcha":
@@ -1119,6 +1136,10 @@ async function handleCartAdd(args: CartAddArgs) {
     args.options_hash,
     args.idempotency_key,
   );
+}
+
+async function handleCartClear(args: CartClearArgs) {
+  return await cartClear(args.session_id);
 }
 
 async function handleFormSelectMany(args: FormSelectManyArgs) {
@@ -1363,6 +1384,10 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "already signed into). " +
     "cart_add (product_identity + options_hash + idempotency_key — reserve an " +
     "idempotent cart mutation, exact-line post-verify it, and return its postcondition), " +
+    "cart_clear (no arguments beyond session_id — empty the cart so a following cart_add " +
+    "reaches a KNOWN quantity; the browser profile persists across sessions, so a cart " +
+    "can carry quantity over from an earlier run. Call cart_clear before the first cart_add " +
+    "whenever the cart's starting quantity is not already known to be zero), " +
     "select_many (ordered selections map — select sequentially, re-observe after " +
     "each success, and retain partial results; Compact V2 keys are current safe_table @e: refs or @labels, " +
     "while V1 keys may be observed labels or refs), extract (into_slot/secret_label/store — " +
@@ -1420,6 +1445,7 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
           "scroll",
           "upload",
           "cart_add",
+          "cart_clear",
           "select_many",
           "extract",
           "solve_captcha",
@@ -1494,6 +1520,8 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
       switch (args.kind) {
         case "cart_add":
           return await handleCartAdd(args as CartAddArgs);
+        case "cart_clear":
+          return await handleCartClear(args as CartClearArgs);
         case "select_many":
           return await handleFormSelectMany(args as FormSelectManyArgs);
         case "extract":
@@ -1516,6 +1544,9 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
             api,
           );
       }
+      // Keep the defense-in-depth guard in act() for internal/replay callers,
+      // while this public tool surface makes the safe recovery explicit at the
+      // exact point a small model tried a forbidden manual PAN entry.
       if (args.kind === "type") {
         const reason = manualCardEntryBlockReason(args.text ?? "");
         if (reason !== null) {

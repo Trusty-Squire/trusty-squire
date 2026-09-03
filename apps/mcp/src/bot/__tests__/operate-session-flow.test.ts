@@ -143,6 +143,15 @@ const h = vi.hoisted(() => ({
   }> | null,
   cartLineReadFailuresRemaining: 0,
   failNextCartLineReadAfterClick: false,
+  clearCartResult: true,
+  clearCartCalls: 0,
+  clearCartItems: null as Array<{
+    title: string;
+    quantity: number;
+    details?: string;
+    product_identities: string[];
+    option_signatures: string[];
+  }> | null,
   readCheckoutSummaryCalls: 0,
   focusedLabels: [] as string[],
   pressedKeys: [] as string[],
@@ -337,6 +346,13 @@ vi.mock("../browser.js", () => ({
         throw new Error("cart line observation failed");
       }
       return h.cartLineItems.map((line) => ({ ...line, details: line.details ?? line.title }));
+    }
+    async clearCart(): Promise<boolean> {
+      h.clearCartCalls += 1;
+      if (h.clearCartResult) {
+        h.cartLineItems = h.clearCartItems ?? [];
+      }
+      return h.clearCartResult;
     }
     async openFirstMailResult(): Promise<boolean> {
       return h.openFirstMailResult;
@@ -945,6 +961,7 @@ import {
   activeCartCheckoutForOrigin,
   armPaymentDispatchHandoff,
   cartAdd,
+  cartClear,
   coordinatePaymentDispatchAudit,
   finishPaymentDispatchHandoff,
   formSelectMany,
@@ -1152,6 +1169,9 @@ beforeEach(() => {
   h.cartLineItemsAfterClick = null;
   h.cartLineReadFailuresRemaining = 0;
   h.failNextCartLineReadAfterClick = false;
+  h.clearCartResult = true;
+  h.clearCartCalls = 0;
+  h.clearCartItems = null;
   h.readCheckoutSummaryCalls = 0;
   h.focusedLabels = [];
   h.pressedKeys = [];
@@ -8853,6 +8873,116 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
       cartAdd(started.session_id, "sku:tiara", "size=M", "cart-add-reconcile"),
     ).resolves.toMatchObject({ status: "already_in_cart", cart_delta: "0" });
     expect(h.locatorClickCalls).toBe(1);
+  });
+
+  it("cart_clear reaches a known (empty) quantity regardless of prior accumulated cart state", async () => {
+    h.currentUrl = "https://shop.example.com/cart";
+    h.visibleText = "Cart Quantity: 3 Subtotal 2904円 Total 2904円";
+    h.checkoutSummary = {
+      merchant: "Synthetic Shop",
+      checkout_origin: "https://shop.example.com",
+      amount_cents: 2904,
+      currency: "JPY",
+    };
+    // Simulates a persistent-profile cart that accumulated quantity 3 across
+    // earlier operate_start sessions (the whitejade.xyz $57-instead-of-$19 case).
+    h.cartLineItems = [
+      {
+        title: "Tiara",
+        quantity: 3,
+        product_identities: ["sku:tiara"],
+        option_signatures: ["size=M"],
+      },
+    ];
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    const cleared = await cartClear(started.session_id);
+
+    expect(h.clearCartCalls).toBe(1);
+    expect(cleared.status).toBe("cleared");
+    expect(h.cartLineItems).toEqual([]);
+
+    h.clickValueMutation = { selector: "#qty", value: "1" };
+    h.cartLineItemsAfterClick = [
+      {
+        title: "Tiara",
+        quantity: 1,
+        product_identities: ["sku:tiara"],
+        option_signatures: ["size=M"],
+      },
+    ];
+
+    const added = (await provisionActTool.handler(
+      provisionActTool.inputSchema.parse({
+        session_id: started.session_id,
+        kind: "cart_add",
+        product_identity: "sku:tiara",
+        options_hash: "size=M",
+        idempotency_key: "cart-add-after-clear",
+      }),
+      null,
+    )) as Awaited<ReturnType<typeof cartAdd>>;
+
+    expect(added).toMatchObject({ status: "added", cart_delta: "+1", checkout_state: { quantity: 1 } });
+  });
+
+  it("cart_clear drops a stale reservation so a same-key retry after clearing still adds", async () => {
+    h.currentUrl = "https://shop.example.com/cart";
+    h.visibleText = "Cart Quantity: 1 Total 968円";
+    h.checkoutSummary = {
+      merchant: "Synthetic Shop",
+      checkout_origin: "https://shop.example.com",
+      amount_cents: 968,
+      currency: "JPY",
+    };
+    h.cartLineItems = [
+      {
+        title: "Tiara",
+        quantity: 1,
+        product_identities: ["sku:tiara"],
+        option_signatures: ["size=M"],
+      },
+    ];
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    await cartAdd(started.session_id, "sku:tiara", "size=M", "reused-key");
+    expect(h.locatorClickCalls).toBe(0); // already in cart before any click
+
+    await cartClear(started.session_id);
+    expect(h.cartLineItems).toEqual([]);
+
+    h.clickValueMutation = { selector: "#qty", value: "1" };
+    h.cartLineItemsAfterClick = [
+      {
+        title: "Tiara",
+        quantity: 1,
+        product_identities: ["sku:tiara"],
+        option_signatures: ["size=M"],
+      },
+    ];
+    const readded = await cartAdd(started.session_id, "sku:tiara", "size=M", "reused-key");
+    expect(readded.status).toBe("added");
+    expect(h.locatorClickCalls).toBe(1);
+  });
+
+  it("cart_clear throws when the clear endpoint fails, leaving cart state untouched", async () => {
+    h.currentUrl = "https://shop.example.com/cart";
+    h.visibleText = "Cart Quantity: 2 Total 1936円";
+    h.cartLineItems = [
+      {
+        title: "Tiara",
+        quantity: 2,
+        product_identities: ["sku:tiara"],
+        option_signatures: ["size=M"],
+      },
+    ];
+    h.clearCartResult = false;
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    await expect(cartClear(started.session_id)).rejects.toThrow(
+      "cart_clear failed to reach the cart-clear endpoint",
+    );
+    expect(h.cartLineItems).toHaveLength(1);
   });
 
   it("does not infer checkout stage from ordinary body copy", async () => {
