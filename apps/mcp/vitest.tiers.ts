@@ -28,6 +28,7 @@ export const REQUIRED_BEHAVIOR_FILES = [
   "src/bot/__tests__/google-login.test.ts",
   "src/bot/__tests__/locator-fallback.test.ts",
   "src/bot/__tests__/modal-overlay-inert.test.ts",
+  "src/bot/__tests__/new-tab-adoption.test.ts",
   "src/bot/__tests__/oauth-lifecycle.test.ts",
   "src/bot/__tests__/observe-delta.test.ts",
   "src/bot/__tests__/observe-jp-mojibake.test.ts",

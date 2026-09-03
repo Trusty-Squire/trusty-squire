@@ -338,6 +338,14 @@ seal. Maintainers can select the legacy V1 `el_table`/snapshot contract with
   locator-capable actions (`click`, `js_click`, `type`, and `type_secret`) use a
   live `text=…`/`css=…` locator; that one-off fallback is not replayable.
   Compact V2 accepts only a handle from its current sealed action map.
+  When a `click` or `js_click` opens a new tab or popup (`target=_blank`, a
+  `window.open` control), the operator follows it the way a person would: the
+  newly opened page becomes the active page, so the next `operate_observe` or
+  `operate_act` reads it. This is how an emailed verification or magic link is
+  followed. Do not try to `extract` the link's href instead — a single-use login
+  token is sealed and is never returned as text; following the tab navigates the
+  browser without exposing it. Payment is excluded: during a sealed card fill or
+  a live place-order/3-D Secure approval the active page never changes.
   In a live operator session, in-page XHR/fetch calls to merchant API sibling
   subdomains are automatically in scope only when they share the registrable
   domain of a host trusted at session start. Calls outside the session scope fail

@@ -5477,9 +5477,13 @@ async function executeAct(
                   shouldTrack,
                 ),
               );
-            } else if (action.kind === "click") await browser.clickHandle(resolved.handle);
-            else if (action.kind === "js_click") await browser.jsClickHandle(resolved.handle);
-            else await browser.typeHandle(resolved.handle, action.text);
+            } else if (action.kind === "click" || action.kind === "js_click") {
+              const method = action.kind;
+              await adoptTabOpenedByClick(session, browser, async () => {
+                if (method === "click") await browser.clickHandle(resolved.handle);
+                else await browser.jsClickHandle(resolved.handle);
+              });
+            } else await browser.typeHandle(resolved.handle, action.text);
           } finally {
             await resolved.handle.dispose().catch(() => undefined);
           }
@@ -5487,7 +5491,13 @@ async function executeAct(
             locator_mode: locator.mode,
             host: registrableHost(browser.currentUrl()),
           });
-          if (action.kind !== "type") await settleAfterStateChange(browser);
+          if (action.kind !== "type") {
+            await settleAfterStateChange(browser);
+            // A tab opened by JS a tick after the click lands during the
+            // settle above, not inside the click's own grace window. Drain it
+            // here — the queue is already populated, so this costs nothing.
+            await adoptOpenedTab(session, browser, 0);
+          }
           break;
         }
         // Re-resolve against FRESH elements every act — never trust a stale index.
@@ -5535,11 +5545,15 @@ async function executeAct(
               ),
             );
           } else if (action.kind === "click") {
-            if (target !== null) await browser.clickInFrame(target, el.selector);
-            else await browser.click(el.selector);
+            await adoptTabOpenedByClick(session, browser, async () => {
+              if (target !== null) await browser.clickInFrame(target, el.selector);
+              else await browser.click(el.selector);
+            });
           } else {
-            if (target !== null) await browser.clickViaJsInFrame(target, el.selector);
-            else await browser.clickViaJs(el.selector);
+            await adoptTabOpenedByClick(session, browser, async () => {
+              if (target !== null) await browser.clickViaJsInFrame(target, el.selector);
+              else await browser.clickViaJs(el.selector);
+            });
           }
         } else if (action.kind === "type" && frameTargetFor(el) !== null) {
           // Frame targets skip the autocomplete-popup-commit machinery below —
@@ -5673,6 +5687,11 @@ async function executeAct(
           );
         }
         if (action.kind !== "type") await settleAfterStateChange(browser);
+        // Only a plain click follows a tab it opened. oauth_click owns its own
+        // provider-page lifecycle and upload never opens one.
+        if (action.kind === "click" || action.kind === "js_click") {
+          await adoptOpenedTab(session, browser, 0);
+        }
         break;
       }
       case "oauth_login": {
@@ -6585,6 +6604,62 @@ export function emitProvisionMeasurement(
       : m;
   process.stderr.write(`${JSON.stringify({ marker: "provision-measurement", ...emitted })}\n`);
   return m;
+}
+
+// ── new-tab adoption ──
+//
+// A click on a `target=_blank` link or a `window.open` control opens a NEW TAB,
+// and a real user lands on it. The operator has to do the same: an email
+// magic-link button in Gmail opens its login tab that way, and following the
+// tab is the ONLY safe way to reach it — the link carries a single-use login
+// token, so `extract` seals the href and must never hand it to the host as
+// text. Navigating the browser exposes nothing.
+//
+// Grace between the click returning and Playwright delivering the context
+// "page" event for the tab it opened. It cannot be zero: MEASURED 2026-09-03
+// (new-tab-adoption.test.ts, 3 runs) — at 0 the event has not landed yet and
+// every follow case fails, including the post-settle drain below. It is kept
+// short because a click that opens NO tab pays it in full, and a tab that
+// arrives later than this is still caught by that drain.
+const OPENED_TAB_GRACE_MS = 300;
+
+// Payment is deliberately out of scope. A sealed card fill and a live
+// place-order/3DS approval both own their page identity, so leave the operator
+// anchored where those flows put it rather than following a tab into them.
+function newTabAdoptionAllowed(session: Session): boolean {
+  return (
+    !session.paymentFieldSealActive &&
+    session.placeOrderApproval === null &&
+    getActivePendingThreeDs(session) === null
+  );
+}
+
+async function adoptOpenedTab(
+  session: Session,
+  browser: BrowserController,
+  graceMs: number,
+): Promise<void> {
+  if (!newTabAdoptionAllowed(session)) return;
+  const url = await browser.adoptOpenedTab(graceMs).catch(() => null);
+  if (url === null) return;
+  audit(session.id, "new_tab_adopted", { host: registrableHost(url) });
+}
+
+async function adoptTabOpenedByClick(
+  session: Session,
+  browser: BrowserController,
+  click: () => Promise<void>,
+): Promise<void> {
+  if (!newTabAdoptionAllowed(session)) {
+    await click();
+    return;
+  }
+  browser.armOpenedTabAdoption();
+  try {
+    await click();
+  } finally {
+    await adoptOpenedTab(session, browser, OPENED_TAB_GRACE_MS);
+  }
 }
 
 async function settleAfterStateChange(browser: BrowserController): Promise<void> {

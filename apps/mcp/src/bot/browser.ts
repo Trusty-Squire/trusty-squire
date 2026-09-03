@@ -3725,6 +3725,13 @@ export class BrowserController {
   // reuse must always restore this original page rather than adopting a popup
   // whose lifecycle handlers were never installed.
   private primaryPage: Page | null = null;
+  // Tabs the PAGE opened (target=_blank / window.open) since the operator armed
+  // adoption for an action, oldest first. A real user lands on the tab their
+  // click opened — an email magic-link button in Gmail is the case this exists
+  // for — so the operator has to follow it too. Reading the link's href instead
+  // is not an option: a single-use login token is sealed and must never be
+  // handed to the model as text.
+  private openedTabs: Page[] = [];
   // Self-launch path (Turnstile-safe; see selfLaunchEnabled). When we spawn
   // Chrome ourselves and attach over CDP, these hold the child process and
   // the connected Browser so close() can tear both down.
@@ -3916,9 +3923,24 @@ export class BrowserController {
     controller.page = page;
     controller.primaryPage = page;
     controller.trackMainDocument(page);
+    controller.trackOpenedTabs(page.context());
     controller.harnessAttachedPage = true;
     controller.launchedMode = "headless";
     return controller;
+  }
+
+  // Record every page the CONTEXT opens. Covers window.open popups and
+  // target=_blank tabs alike; Playwright emits the same context-level "page"
+  // event for both.
+  private trackOpenedTabs(context: BrowserContext): void {
+    context.on("page", (page) => {
+      this.trackMainDocument(page);
+      this.openedTabs.push(page);
+      // Bounded: adoption only ever reads the newest followable entry, and a
+      // controller driven by something other than the operator's click path
+      // never arms (and so never drains) this queue.
+      if (this.openedTabs.length > 8) this.openedTabs.splice(0, this.openedTabs.length - 8);
+    });
   }
 
   // Per-launch egress override. null means direct egress. Explicit overrides
@@ -4718,7 +4740,7 @@ export class BrowserController {
       await context.addInitScript({ content: installWebglSpoofScript });
     }
     for (const page of context.pages()) this.trackMainDocument(page);
-    context.on("page", (page) => this.trackMainDocument(page));
+    this.trackOpenedTabs(context);
     this.page = context.pages()[0] ?? (await context.newPage());
     this.trackMainDocument(this.page);
     this.primaryPage = this.page;
@@ -16359,6 +16381,70 @@ export class BrowserController {
 
   recoverActivePage(): boolean {
     return this.adoptLivePage();
+  }
+
+  // ───────────── new-tab adoption ─────────────
+  //
+  // Arm adoption immediately BEFORE an action that may open a tab. Anything
+  // already queued belonged to an earlier action and is not this action's to
+  // follow.
+  armOpenedTabAdoption(): void {
+    this.openedTabs.length = 0;
+  }
+
+  // Adopt the newest live tab opened since armOpenedTabAdoption() as the active
+  // page, so the next observe/act reads the tab the click actually opened.
+  // Returns the adopted URL, or null when the action opened no followable tab.
+  //
+  // `graceMs` covers the window between the click returning and Playwright
+  // delivering the context "page" event; a caller that has already waited for
+  // the page to settle passes 0 and just drains what arrived.
+  async adoptOpenedTab(graceMs = 0): Promise<string | null> {
+    const deadline = Date.now() + Math.max(0, graceMs);
+    let candidate = this.takeFollowableTab();
+    while (candidate === null && Date.now() < deadline) {
+      await this.sleep(50);
+      candidate = this.takeFollowableTab();
+    }
+    if (candidate === null) return null;
+    this.openedTabs.length = 0;
+    // A window.open target starts at about:blank and is navigated a tick later.
+    // Adopting it while blank would report an empty page to the host, so wait
+    // (bounded) for the document it was opened for.
+    const blank = (url: string): boolean =>
+      url === "" || url === "about:blank" || url === "about:srcdoc";
+    for (let i = 0; i < 40 && !candidate.isClosed() && blank(candidate.url()); i++) {
+      await this.sleep(50);
+    }
+    if (candidate.isClosed()) return null;
+    this.page = candidate;
+    this.trackMainDocument(candidate);
+    await candidate.bringToFront().catch(() => undefined);
+    await candidate
+      .waitForLoadState("domcontentloaded", { timeout: 15_000 })
+      .catch(() => undefined);
+    return candidate.isClosed() ? null : candidate.url();
+  }
+
+  // Newest queued tab the operator may follow. Pages the controller itself owns
+  // (the active page, the primary page, either side of an OAuth handshake, a
+  // recovery tab) are never adoption candidates — those lifecycles are managed
+  // by the code that created them.
+  private takeFollowableTab(): Page | null {
+    for (let i = this.openedTabs.length - 1; i >= 0; i--) {
+      const tab = this.openedTabs[i]!;
+      if (tab.isClosed()) continue;
+      if (
+        tab === this.page ||
+        tab === this.primaryPage ||
+        tab === this.oauthProductPage ||
+        tab === this.oauthProviderPage
+      ) {
+        continue;
+      }
+      return tab;
+    }
+    return null;
   }
 
   private adoptLivePage(): boolean {

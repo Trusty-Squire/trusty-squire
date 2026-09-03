@@ -35,6 +35,8 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
     const browser = {
       goto: vi.fn().mockResolvedValue(undefined),
       recoverActivePage: vi.fn(),
+      armOpenedTabAdoption: vi.fn(),
+      adoptOpenedTab: vi.fn(async () => null),
       extractInteractiveElements: vi.fn().mockResolvedValue([]),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
       currentUrl: vi.fn().mockReturnValue(url),
@@ -96,6 +98,8 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
     const browser = {
       goto: vi.fn().mockResolvedValue(undefined),
       recoverActivePage: vi.fn(),
+      armOpenedTabAdoption: vi.fn(),
+      adoptOpenedTab: vi.fn(async () => null),
       // One field sealed via the ref-based type_secret path (session-tracked,
       // no DOM marker) and one ordinary field: only the sealed one's selector
       // may reach the capture's redaction set.
@@ -149,6 +153,8 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
     const browser = {
       goto: vi.fn().mockResolvedValue(undefined),
       recoverActivePage: vi.fn(),
+      armOpenedTabAdoption: vi.fn(),
+      adoptOpenedTab: vi.fn(async () => null),
       extractInteractiveElements: vi
         .fn()
         .mockImplementation(() =>
@@ -194,6 +200,8 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
     const browser = {
       goto: vi.fn().mockResolvedValue(undefined),
       recoverActivePage: vi.fn(),
+      armOpenedTabAdoption: vi.fn(),
+      adoptOpenedTab: vi.fn(async () => null),
       extractInteractiveElements: vi.fn().mockResolvedValue([]),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
       currentUrl: vi.fn().mockReturnValue(url),
@@ -232,6 +240,8 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
     const browser = {
       goto: vi.fn().mockResolvedValue(undefined),
       recoverActivePage: vi.fn(),
+      armOpenedTabAdoption: vi.fn(),
+      adoptOpenedTab: vi.fn(async () => null),
       extractInteractiveElements: vi.fn().mockResolvedValue([]),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
       currentUrl: vi.fn().mockReturnValue(url),

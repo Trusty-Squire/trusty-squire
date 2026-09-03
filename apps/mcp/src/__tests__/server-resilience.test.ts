@@ -38,6 +38,8 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
     const browser = {
       goto: vi.fn().mockResolvedValue(undefined),
       recoverActivePage: vi.fn(),
+      armOpenedTabAdoption: vi.fn(),
+      adoptOpenedTab: vi.fn(async () => null),
       extractInteractiveElements: vi.fn().mockResolvedValue([]),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout session still active"),
       currentUrl: vi.fn().mockReturnValue(url),
