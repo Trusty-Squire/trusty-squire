@@ -4134,6 +4134,139 @@ describe("Compact V2 action-map boundary", () => {
     expect(h.clickCalls).toBe(0);
   });
 
+  // A live Shopify checkout re-renders the delivery block while the agent is
+  // still filling it: Places autocomplete reorders the address inputs (which
+  // shifts the positional slug baked into screenPath) and the checkout rewrites
+  // the volatile `/checkouts/cn/<token>/<step>` path segment. Neither replaces
+  // the document, so every ref from the opening observation must still act.
+  function deliveryBlock(order: readonly string[], suffix = ""): unknown[] {
+    const byName: Record<string, Record<string, unknown>> = {
+      firstName: { labelText: "First name", selector: "#first-name" },
+      lastName: { labelText: "Last name", selector: "#last-name" },
+      address1: { labelText: "Address", selector: "#address1" },
+      city: { labelText: "City", selector: "#city" },
+      zip: { labelText: "Postal code", selector: "#zip" },
+    };
+    return order.map((name, position) =>
+      elem({
+        ...byName[name],
+        index: position,
+        tag: "input",
+        type: "text",
+        role: "textbox",
+        name,
+        // Shopify's inputs carry framework-random ids, so identity falls to the
+        // structural branch — the branch the reorder used to break.
+        id: `:r${position + 4}:`,
+        container: `form:delivery-${suffix}`,
+        screenPath: `form:delivery-${suffix} > input:input-${position}`,
+      }),
+    );
+  }
+
+  it("fills a whole delivery block across an autocomplete re-render and a checkout token rewrite", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const fields = ["firstName", "lastName", "address1", "city", "zip"] as const;
+    h.elements = deliveryBlock(fields);
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkouts/cn/2iRZ0Tt8lYFMqW9sc9uCyR/information",
+    });
+    const page = started as unknown as {
+      safe_table: Array<[string, string, string?]>;
+      overflow: { next_cursor: string };
+    };
+    const rest = (await observeQuery(
+      started.session_id,
+      "",
+      undefined,
+      page.overflow.next_cursor,
+    )) as { safe_table: Array<[string, string, string?]> };
+    const refs = [...page.safe_table, ...rest.safe_table].map((row) => row[0]);
+    expect(refs).toHaveLength(fields.length);
+
+    // The re-render: siblings reordered, every screenPath ordinal shifted, and
+    // the container's text-derived slug changed. Same document throughout.
+    h.elements = deliveryBlock([...fields].reverse(), "suggestions-open");
+    h.currentUrl = "https://shop.example.com/checkouts/cn/8kQm4Xd1pWvB6nHy3LrTzE/shipping?_r=2";
+
+    for (const ref of refs) {
+      await act(started.session_id, { kind: "type", target: ref, text: "filled" });
+    }
+    expect(h.typed.map((entry: { selector: string }) => entry.selector).sort()).toEqual([
+      "#address1",
+      "#city",
+      "#first-name",
+      "#last-name",
+      "#zip",
+    ]);
+  });
+
+  it("still retires refs on a same-document route change to a different logical page", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkouts/cn/2iRZ0Tt8lYFMqW9sc9uCyR/information",
+    });
+    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+
+    // An SPA pushState off the checkout, with NO document replacement: the
+    // normalized origin+pathname backstop is the only thing standing between
+    // the ref and another logical page, and it must refuse.
+    h.currentUrl = "https://shop.example.com/account/addresses";
+
+    await expect(act(started.session_id, { kind: "click", target: handle })).rejects.toThrow(
+      "stale_ref",
+    );
+    expect(h.clickCalls).toBe(0);
+  });
+
+  it("does not collapse an authored path slug that merely sits under /checkouts/", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkouts/c/spring-sale-guide",
+    });
+    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+
+    // Only a MINTED-looking token is treated as volatile. A readable slug is a
+    // real page name, so a same-document route change between two of them must
+    // still retire the ref.
+    h.currentUrl = "https://shop.example.com/checkouts/c/summer-sale-guide";
+
+    await expect(act(started.session_id, { kind: "click", target: handle })).rejects.toThrow(
+      "stale_ref",
+    );
+    expect(h.clickCalls).toBe(0);
+  });
+
+  it("still retires refs when a different checkout replaces the document", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkouts/cn/2iRZ0Tt8lYFMqW9sc9uCyR/information",
+    });
+    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+
+    // Two different checkouts normalize onto the same page key on purpose, so
+    // the document-identity half of the epoch is what keeps them isolated.
+    h.currentUrl = "https://shop.example.com/checkouts/cn/5vNc9Jt2hQwR7bKx4MpZfD/information";
+    h.mainDocumentEpoch += 1;
+
+    await expect(act(started.session_id, { kind: "click", target: handle })).rejects.toThrow(
+      "stale_ref",
+    );
+    expect(h.clickCalls).toBe(0);
+  });
+
   it("distinguishes destructive and affirmative controls with code-owned semantics", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [

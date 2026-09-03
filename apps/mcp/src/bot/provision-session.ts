@@ -5427,19 +5427,62 @@ function compactV2Cursor(session: Session, rev: number, offset: number, scope: s
   return `${body}.${signature}`;
 }
 
+// A live checkout mints a per-checkout token INTO ITS PATH and re-writes it as
+// the checkout SPA re-renders a step. The token names the checkout, never the
+// document, so folding it into `doc` retires every ref between two fills of one
+// address block. This is the path-side twin of the query/fragment exclusion
+// PR #624 landed; it is deliberately a CLOSED list of known checkout shapes —
+// every other path keeps its full identity, so an SPA route change to a
+// different logical page still retires refs.
+const VOLATILE_CHECKOUT_PATH_RULES: readonly RegExp[] = [
+  // Shopify hosted checkout, current (`…/checkouts/cn/<token>[/<step>]`) and
+  // legacy (`…/checkouts/c|co/<token>[/<step>]`), under any locale/shop prefix.
+  // The marker must be a whole segment, so a token that merely starts with "c"
+  // cannot be split across the capture.
+  /^(.*\/checkouts\/c[no]?)\/([^/]+)(?:\/.*)?$/i,
+  // Older Shopify: `/<shop-id>/checkouts/<token>[/<step>]`.
+  /^(.*\/checkouts)\/([^/]+)(?:\/.*)?$/i,
+];
+
+/**
+ * Generated, not authored. An authored path slug under `/checkouts/` (a docs
+ * page, a marketing route) must keep its own identity, so the token has to look
+ * minted: long, in the URL-safe token alphabet, and carrying a digit.
+ */
+function looksLikeVolatileCheckoutToken(segment: string): boolean {
+  return segment.length >= 16 && /^[A-Za-z0-9_-]+$/.test(segment) && /\d/.test(segment);
+}
+
+/**
+ * Collapse a known-volatile checkout path onto one logical-page key. The step
+ * suffix collapses with the token: inside a single checkout the steps are
+ * same-document SPA routing, and a move to a DIFFERENT checkout replaces the
+ * document, which the primary document-identity signal catches.
+ */
+function normalizeVolatileCheckoutPath(pathname: string): string {
+  for (const rule of VOLATILE_CHECKOUT_PATH_RULES) {
+    const match = rule.exec(pathname);
+    if (match !== null && looksLikeVolatileCheckoutToken(match[2]!)) {
+      return `${match[1]}/:checkout`;
+    }
+  }
+  return pathname;
+}
+
 // The `doc` half of the observation epoch (docs/observation-model.md §4.1):
 // the browser's stable main-document identity, not the URL. The full URL is too
-// volatile to key on — live checkouts (e.g. Shopify) append a rotating query
-// token on every step re-render, which would invalidate every ref between two
-// acts. Origin+pathname is folded in as a fail-closed backstop for a host whose
-// document identity does not move on a logical page change; query-string and
-// fragment churn on the same logical page must not invalidate.
+// volatile to key on — live checkouts (e.g. Shopify) rotate a token in the
+// query string AND in the path on every step re-render, which would invalidate
+// every ref between two acts. A NORMALIZED origin+pathname is folded in as a
+// fail-closed backstop for a host whose document identity does not move on a
+// logical page change; query-string, fragment, and known-volatile checkout
+// token churn on the same logical page must not invalidate.
 function compactV2EpochDoc(session: Session): string {
   let location = session.browser.currentUrl();
   try {
     const parsed = new URL(location);
     if (parsed.origin !== "null" && parsed.origin !== "")
-      location = `${parsed.origin}${parsed.pathname}`;
+      location = `${parsed.origin}${normalizeVolatileCheckoutPath(parsed.pathname)}`;
   } catch {}
   return createHmac("sha256", session.compactV2Secret)
     .update(`${session.browser.mainDocumentIdentity()}\u0000${location}`)

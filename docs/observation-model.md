@@ -177,11 +177,17 @@ and where it is deliberately narrower or more conservative than §4.1 above.
   `(epoch.doc, fingerprint)`. Opaque, unforgeable, and unlinkable across
   sessions. It is *not* an index: it is derived from the element, so
   re-serializing the same page mints the same ref.
-- **Fingerprint** — the DOM `id` when present, unique on the page, and not
-  framework-random; otherwise
-  `(frame, accessibility path, role, accessible name, ordinal among
-  otherwise-identical siblings)`. Both branches are frame-scoped so a control in
-  an embedded frame can never hash onto a main-page ref.
+- **Fingerprint** — four tiers, each consulted only when the one above it does
+  not identify the element uniquely within the inventory: (1) the DOM `id` when
+  present, unique on the page, and not framework-random; (2)
+  `(frame, role/tag/type, accessible name, authored form-control name)`; (3)
+  the containing region, disambiguating same-named controls in different parts
+  of the page; (4) the ordinal among elements the first three leave genuinely
+  indistinguishable. The accessibility path (`screenPath`) is deliberately not
+  an input: its fallback slug embeds the element's index in the inventory, so
+  an autocomplete re-render that merely reorders an address block used to
+  change every fingerprint in it. Every tier is frame-scoped so a control in an
+  embedded frame can never hash onto a main-page ref.
 - **Label** — `@continue-with-google`, slugified from the already-screened
   control description. It is an addressable alias: `operate_act` accepts it and
   resolves it to a ref. A label naming more than one observed control raises
@@ -191,17 +197,27 @@ and where it is deliberately narrower or more conservative than §4.1 above.
   the serialized skeleton actually changed. `doc` is the authorization boundary
   (a real navigation kills every ref minted under it); `rev` binds only the
   positional overflow cursors, so a re-render invalidates a page offset without
-  touching a single ref.
+  touching a single ref. "Main-document identity" means a REPLACED document:
+  `trackMainDocument` counts `domcontentloaded` (one per real main-frame
+  document), not `framenavigated` — Playwright emits the latter for History API
+  navigations too, so a checkout SPA's own `replaceState` used to retire every
+  ref between two fields of one address form.
 
 ### Deviations from §4.1, and why
 
-- **`epoch.doc` still folds in origin+pathname** alongside the document
-  identity, rather than document identity alone. This is a fail-closed
-  backstop: it invalidates a strict superset of what document identity alone
-  would, and it keeps the cross-document isolation guarantee if a host's
-  document identity fails to move on a logical page change. The volatile part
-  of the URL (query string, fragment) is still excluded — that was the actual
-  bug PR #624 patched around.
+- **`epoch.doc` still folds in a normalized origin+pathname** alongside the
+  document identity, rather than document identity alone. This is a fail-closed
+  backstop, and the load-bearing one: document identity now moves only on a real
+  document replacement, so this fold is what retires refs on a same-document
+  SPA route change to a different logical page. Normalized means the volatile
+  parts of the URL are excluded — the query string and fragment (the bug PR #624
+  patched around) and, since #625's follow-up, the volatile token a live
+  checkout writes into its own path (`…/checkouts/cn/<token>/<step>`, collapsed
+  to one key by `normalizeVolatileCheckoutPath`). That exclusion is a CLOSED
+  list of known checkout shapes AND only applies to a segment that looks minted
+  rather than authored; every other path keeps its full identity. Two
+  DIFFERENT checkouts normalize onto the same key on purpose — reaching one from
+  the other replaces the document, which the primary signal catches.
 - **No `invalid` state flag.** §4.2 lists `required`/`invalid`/`disabled`/
   `checked`; the DOM inventory captures the other three but has no
   `aria-invalid` signal to serialize. Adding one is an extractor change, not a
@@ -212,13 +228,21 @@ and where it is deliberately narrower or more conservative than §4.1 above.
 
 ### Known residual
 
-The structural fallback's sibling ordinal is positional. Removing one of two
-*truly indistinguishable* siblings (identical frame, path, role, and accessible
-name) shifts the survivor onto the departed element's fingerprint. Real
-per-row controls carry a distinguishing signal — an authored `id`, differing
-row text, a `data-testid` — which puts them on the id branch or in distinct
-structural groups. This is the same information-theoretic residual documented
-at `volatilePositionalGroups` in `provision-session.ts`.
+The tier-4 sibling ordinal is positional. Removing one of two *truly
+indistinguishable* siblings (identical frame, role, accessible name, control
+name, and region) shifts the survivor onto the departed element's fingerprint.
+Real per-row controls carry a distinguishing signal — an authored `id`, a
+`name`, differing row text — which puts them on an earlier tier. This is the
+same information-theoretic residual documented at `volatilePositionalGroups` in
+`provision-session.ts`.
+
+Tiering is inventory-relative: a control whose accessible name is unique at
+observation time and shares it with a newcomer at act time drops from tier 2 to
+tier 3, changing its fingerprint and failing closed. That is the conservative
+direction, and it replaces a strictly worse failure — under the old scheme the
+region slug (derived from the region's own text) and the path ordinal were both
+in the identity unconditionally, so ordinary form churn moved fingerprints that
+now hold.
 
 ### Phase 2 — redaction, not sealing
 
