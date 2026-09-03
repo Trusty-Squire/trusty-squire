@@ -8406,8 +8406,9 @@ const OTP_ANY_RE = /(?:^|[^0-9])(\d{4,8})(?:[^0-9]|$)/g;
 export function parseVerification(
   text: string,
   links: readonly string[],
+  expectedDomains?: readonly string[],
 ): { code: string | null; link: string | null } {
-  const link = pickVerificationLink([...links]);
+  const link = pickVerificationLink([...links], expectedDomains);
   let code = findOtpCredential(text);
   if (code === null) {
     const m = OTP_ANY_RE.exec(text);
@@ -8424,6 +8425,21 @@ export function parseVerification(
 export function extractSenderEmail(text: string): string | null {
   const m = /<([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})>/.exec(text);
   return m !== null ? m[1]!.toLowerCase() : null;
+}
+
+// Derives the domain(s) pickVerificationLink should prefer: the caller's
+// `sender` search hint (an email address or a bare domain) and the sender
+// address read off the opened message, deduped and lowercased. Exported for
+// unit tests.
+export function expectedVerificationDomains(
+  sender: string | undefined,
+  sourceFrom: string | null,
+): string[] {
+  const domainOf = (s: string): string => (s.includes("@") ? s.split("@").pop()! : s).toLowerCase();
+  const domains = [sender, sourceFrom ?? undefined]
+    .filter((s): s is string => s !== undefined && s.length > 0)
+    .map(domainOf);
+  return [...new Set(domains)];
 }
 
 // Pure: assemble the verification result. When neither a code nor a link was
@@ -8482,7 +8498,7 @@ export function buildVerificationSearchQuery(sender?: string): string {
   return [
     sender !== undefined && sender.length > 0 ? `from:${sender}` : "",
     "newer_than:1d",
-    '(verify OR verification OR confirm OR confirmation OR code OR otp OR passcode OR password OR login OR "log in" OR "sign in" OR "sign-in" OR signin OR "magic link" OR activate OR activation OR welcome)',
+    '(verify OR verification OR confirm OR confirmation OR code OR otp OR passcode OR password OR login OR "log in" OR "sign in" OR "sign-in" OR signin OR "magic link" OR activate OR activation OR welcome OR "link account" OR "link your" OR continue)',
   ]
     .filter((s) => s.length > 0)
     .join(" ");
@@ -8537,9 +8553,10 @@ export async function awaitVerification(
           const openedText = await browser.extractVisibleText();
           const openedLinks = hrefsOf(await browser.extractInteractiveElements());
           sourceFrom = extractSenderEmail(openedText);
-          ({ code, link } = parseVerification(openedText, [...openedLinks, ...listLinks]));
+          const expectedDomains = expectedVerificationDomains(opts.sender, sourceFrom);
+          ({ code, link } = parseVerification(openedText, [...openedLinks, ...listLinks], expectedDomains));
         } else {
-          ({ code, link } = parseVerification(listText, listLinks));
+          ({ code, link } = parseVerification(listText, listLinks, expectedVerificationDomains(opts.sender, null)));
         }
       }
       return { code, link, sourceFrom };
