@@ -760,6 +760,30 @@ extension state on launch and won't reload mid-session.
 | `TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_MS` | `1200000` (20m) | `mcp server`'s idle self-exit bound when it holds **no** open provision session. Backstop for a host that abandons a child process on reconnect without closing its stdio or signaling it (`server.ts`'s `transport.onclose`/EOF/SIGTERM path then never fires). |
 | `TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_WITH_SESSION_MS` | `43200000` (12h) | Process-level idle self-exit bound while a provision session is open. The operator-session watchdog independently closes abandoned browsers after 10 minutes idle and begins bounded terminal teardown at 30 minutes; this wider server bound remains a final host-process backstop. |
 | `TRUSTY_SQUIRE_SERVER_IDLE_CHECK_INTERVAL_MS` | `300000` (5m) | Poll interval for the two idle bounds above. The server detects an expired bound on the next poll, so the default no-session exit occurs after 20–25 minutes of inactivity. Keep this interval well under the no-session timeout. |
+| `TRUSTY_SQUIRE_SERVER_HEARTBEAT_INTERVAL_MS` | `30000` (30s) | How often a running server republishes its heartbeat record (`~/.trusty-squire/server-instances/`): last inbound client message, open sessions, in-flight calls. That record is the only thing that lets the startup reaper below tell "still serving a client" from "wedged". |
+| `TRUSTY_SQUIRE_SERVER_REAP_ORPHAN_GRACE_MS` | `60000` (60s) | How long an ORPHANED prior instance of the same agent identity (PPid collapsed to init when it did not start that way — its spawning host is gone) must be quiet before startup reaps it and its child tree. A well-behaved orphan exits in milliseconds when its stdio peer dies, so still being here past this is wedged. |
+| `TRUSTY_SQUIRE_SERVER_REAP_GRACE_MS` | `2000` (2s) | SIGTERM→SIGKILL grace when the startup reaper terminates a stale instance's process tree. |
+
+### Startup reap of stale prior server instances
+
+A host relaunches `mcp server` on every reconnect but does not reliably kill
+the instance it superseded — a live box carried a superseded server beside its
+replacement plus two orphaned to init for ~31 hours, each keeping a browser
+tree resident. `reapStaleServerInstances()` (`apps/mcp/src/server-instance-registry.ts`)
+runs before the server serves and terminates such an instance plus its PPid
+descendant tree.
+
+**The gate is the whole feature — this box runs many legitimate concurrent
+servers, including several of the SAME identity (one per project/lane).** There
+is no process-name match and no blanket kill anywhere in it. A prior instance is
+a candidate only when its recorded `TRUSTY_SQUIRE_AGENT_IDENTITY` exactly equals
+ours, it is not us, its birth identity still names a live process, and it is
+either orphaned past `TRUSTY_SQUIRE_SERVER_REAP_ORPHAN_GRACE_MS` or quiet past
+the idle bound it should have self-exited on (plus one poll interval of slack).
+Anything unreadable is kept. Killing walks the PPid chain, never the process
+group — a stdio server shares its parent's group, so `kill(-pgid)` would take
+the host agent with it. `serverInstanceReapDecision` is the pure predicate that
+owns this contract; don't widen it without a test.
 
 ### Housekeeper — extracted to its own repo
 
