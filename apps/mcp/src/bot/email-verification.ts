@@ -9,7 +9,17 @@
 // links are unsubscribe/preferences scores <= 0 everywhere, and an
 // earlier version returned links[0] anyway, navigating the bot straight
 // to an unsubscribe URL.
-export function pickVerificationLink(links: readonly string[]): string | null {
+//
+// `expectedDomains` (optional) are hosts the caller already trusts for this
+// verification (typically the service's own domain, from the sender address
+// or the `sender` search hint) — a link on one of them (or a subdomain, e.g.
+// `auth.xata.io` under `xata.io`) gets a small tie-breaking bonus. It never
+// turns a negative/zero score positive on its own.
+export function pickVerificationLink(
+  links: readonly string[],
+  expectedDomains?: readonly string[],
+): string | null {
+  const expected = (expectedDomains ?? []).map((d) => d.toLowerCase()).filter((d) => d.length > 0);
   const scored = links.map((raw, index) => {
     // Decode HTML-escaped separators BEFORE scoring so `&amp;token=` matches the
     // token heuristic below, not just at return time.
@@ -21,6 +31,13 @@ export function pickVerificationLink(links: readonly string[]): string | null {
     // Explicit verification vocabulary — the strongest, unambiguous signal.
     if (lower.includes("verify") || lower.includes("confirm")) score += 10;
     if (lower.includes("activate") || lower.includes("activation")) score += 8;
+    // Account-linking shapes (Keycloak's identity-broker "link your Google
+    // account" flow: `/realms/…/broker/google/link?…` or
+    // `/login-actions/action-token?key=…`) — a bare "link"/"login" URL scores
+    // lower than explicit verify/confirm since it's a more generic word, but
+    // still positive so it isn't dropped as found:false.
+    if (/link[-_]?account|account[-_]?link|\/broker\/|\/link(?:$|[/?#])/.test(lower)) score += 8;
+    if (lower.includes("login") || lower.includes("log-in") || lower.includes("logon")) score += 6;
     // Magic-link / passwordless / auth-callback shapes. A verification link often
     // carries NONE of the words above: a Next.js app (Loops) emails a bare
     // `/api/auth/callback/email?token=…`, and Supabase/Clerk/Auth0 send
@@ -28,12 +45,21 @@ export function pickVerificationLink(links: readonly string[]): string | null {
     // dropped as `link:null` even though it was the only actionable link.
     if (/(?:\/auth\/|\/callback\/|magic[-_]?link|passwordless|sign[-_]?in)/.test(lower)) score += 6;
     if (
-      /[?&](?:token|otp|oob[-_]?code|confirmation[-_]?token|verification[-_]?token|access[-_]?token|auth[-_]?token|code)=/.test(
+      /[?&](?:token|otp|oob[-_]?code|confirmation[-_]?token|verification[-_]?token|access[-_]?token|auth[-_]?token|key|code)=/.test(
         lower,
       )
     )
       score += 6;
+    if (lower.includes("continue")) score += 3;
     if (lower.includes("welcome")) score += 3;
+    if (expected.length > 0) {
+      try {
+        const host = new URL(url).hostname.toLowerCase();
+        if (expected.some((d) => host === d || host.endsWith(`.${d}`))) score += 4;
+      } catch {
+        // Not an absolute URL — no host to compare, no bonus.
+      }
+    }
     return { url, score, index };
   });
   // Ties break to the LATER link. In a multi-message verification thread (Gmail
