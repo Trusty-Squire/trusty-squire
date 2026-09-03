@@ -1716,6 +1716,85 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "confirms Shopify's nested thank-you route only with visible order confirmation evidence",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.route("https://merchant.test/**", async (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: `
+              <button id="pay-now">Pay now</button>
+              <script>
+                document.querySelector("#pay-now").addEventListener("click", () => {
+                  void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
+                  history.replaceState({}, "", "/checkouts/cn/token-123/en-us/thank-you");
+                  document.body.insertAdjacentHTML(
+                    "beforeend",
+                    "<h1>Thank you, Ken!</h1><p>Confirmation #8WV06PY0A</p><p>Your order is confirmed</p>",
+                  );
+                });
+              </script>`,
+          }),
+        );
+        await page.goto("https://merchant.test/checkouts/cn/token-123/en-us");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.submitFilledCheckout()).resolves.toEqual({
+          three_ds_required: false,
+          order_confirmed: true,
+        });
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "does not confirm a declined payment that remains on checkout",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      const now = vi
+        .spyOn(Date, "now")
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(1)
+        .mockReturnValue(15_000);
+      try {
+        const page = await browser.newPage();
+        await page.route("https://merchant.test/**", async (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: `
+              <button id="pay-now">Pay now</button>
+              <script>
+                document.querySelector("#pay-now").addEventListener("click", () => {
+                  void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
+                  document.body.insertAdjacentHTML("beforeend", "<p>Payment was declined</p>");
+                });
+              </script>`,
+          }),
+        );
+        await page.goto("https://merchant.test/checkouts/cn/token-123/en-us");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.submitFilledCheckout()).resolves.toEqual({
+          three_ds_required: false,
+          order_confirmed: false,
+        });
+      } finally {
+        now.mockRestore();
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "does not confirm an order when only a terminal URL query or hash changes",
     async () => {
       const browser = await chromium.launch({ headless: true });

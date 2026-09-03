@@ -783,6 +783,25 @@ function checkoutUrlOrderIdentities(
   }
 }
 
+// Shopify's thank-you route keeps the checkout token in a nested path
+// (`/checkouts/cn/<token>/<locale>/thank-you`), so it has no terminal order
+// identity for checkoutUrlOrderIdentities to compare. Treat it as terminal
+// only when the post-submit page also exposes unambiguous confirmation copy.
+function isShopifyCheckoutThankYouRoute(rawUrl: string): boolean {
+  try {
+    const segments = new URL(rawUrl).pathname
+      .split("/")
+      .filter(Boolean)
+      .map((segment) => decodeURIComponent(segment).toLowerCase().replace(/-/g, "_"));
+    return (
+      (segments[0] === "checkout" || segments[0] === "checkouts") &&
+      segments.at(-1) === "thank_you"
+    );
+  } catch {
+    return false;
+  }
+}
+
 // EbisuMart — a widely-deployed Japanese EC platform (the Hibiya Kadan
 // checkout runs on it) — names its card fields CREDIT_NO / CREDIT_NAME /
 // SECURITY_CD / CREDIT_LIMIT_MONTH / CREDIT_LIMIT_YEAR. PAN name/id and JP
@@ -12976,11 +12995,29 @@ export class BrowserController {
     } catch {
       sameCheckoutOrigin = current.url === baseline.url;
     }
-    return (
+    const newTerminalOrderIdentity =
       sameCheckoutOrigin &&
       current.terminalUrlIdentity !== null &&
-      !baseline.orderUrlIdentities.includes(current.terminalUrlIdentity)
-    );
+      !baseline.orderUrlIdentities.includes(current.terminalUrlIdentity);
+    if (newTerminalOrderIdentity) return true;
+    if (
+      !sameCheckoutOrigin ||
+      current.url === baseline.url ||
+      !isShopifyCheckoutThankYouRoute(current.url)
+    ) {
+      return false;
+    }
+    return await this.page.mainFrame().evaluate(() => {
+      const visibleText = document.body?.innerText ?? "";
+      const confirmationNumber = /\bconfirmation\s*#\s*[a-z0-9][a-z0-9-]{3,}\b/i.test(
+        visibleText,
+      );
+      const confirmedOrder = /\byour order is confirmed\b/i.test(visibleText);
+      const thankYouHeading = Array.from(document.querySelectorAll("h1, h2, [role=heading]")).some(
+        (element) => /\bthank you\b/i.test(element.textContent ?? ""),
+      );
+      return confirmedOrder || (thankYouHeading && confirmationNumber);
+    });
   }
 
   // Let the browser complete the challenge natively (including out-of-band
