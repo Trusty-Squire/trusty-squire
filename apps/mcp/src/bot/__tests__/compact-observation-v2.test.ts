@@ -61,6 +61,44 @@ function element(overrides: Partial<InteractiveElement> = {}): InteractiveElemen
 }
 
 describe("compact observation v2", () => {
+  it("advertises only Shopify's required address-line1 as the delivery-address field", () => {
+    const address = element({
+      tag: "input",
+      role: "combobox",
+      labelText: "Address",
+      autocomplete: "shipping address-line1",
+      required: true,
+      selector: "#shipping-address",
+    });
+    const apartment = element({
+      index: 1,
+      tag: "input",
+      role: "textbox",
+      labelText: "Apartment, suite, etc. (optional)",
+      autocomplete: "shipping address-line2",
+      selector: "#shipping-apartment",
+    });
+    const refs = new Map<InteractiveElement, string>([
+      [address, "Address"],
+      [apartment, "Apartment, suite, etc. (optional)"],
+    ]);
+
+    const rows = safeControls({
+      elements: [address, apartment],
+      legacyRefs: refs,
+      pageOrigin: "https://merchant.invalid",
+      pageUrl: "https://merchant.invalid/checkouts/example/information",
+    }).rows;
+
+    // Before the regression fix both rows carried f=address. That made the
+    // optional textbox look interchangeable with the required combobox.
+    expect(rows[0]).toEqual(
+      expect.objectContaining({ role: "select", state: "r", field: "address" }),
+    );
+    expect(rows[1]).toEqual(expect.objectContaining({ role: "textbox" }));
+    expect(rows[1]).not.toHaveProperty("field");
+  });
+
   it("allows only enum fields even when every raw source contains secrets", () => {
     const planted = "4111111111111111 CVV=123 password=swordfish merchant=Northwind";
     const input = element({

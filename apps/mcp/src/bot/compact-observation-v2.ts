@@ -923,8 +923,21 @@ function fieldOf(el: InteractiveElement, paymentContext = false): SafeFieldV2 | 
     return "region";
   if (hasAutocomplete("postal-code") || /\b(zip|postal)\b/.test(text)) return "postal";
   if (hasAutocomplete("country", "country-name") || /\bcountry\b/.test(text)) return "country";
+  // `address-line2` is the optional apartment/suite field in the HTML
+  // autocomplete vocabulary. Shopify renders it directly below a required
+  // Places-backed `address-line1` combobox. Treating both as `address` makes
+  // the compact action map advertise two interchangeable street fields, and a
+  // caller can put the delivery address in the apartment field instead. Keep
+  // `address` reserved for the required street-address / line-1 control; the
+  // optional secondary line is intentionally not a checkout fill target.
   if (
-    hasAutocomplete("street-address", "address-line1", "address-line2", "address-line3") ||
+    hasAutocomplete("address-line2", "address-line3") ||
+    /\b(?:apartment|apt\.?|suite|unit|floor|building)\b/.test(text) ||
+    /\boptional\b/.test(text)
+  )
+    return undefined;
+  if (
+    hasAutocomplete("street-address", "address-line1") ||
     /\b(address|street)\b/.test(text)
   )
     return "address";
