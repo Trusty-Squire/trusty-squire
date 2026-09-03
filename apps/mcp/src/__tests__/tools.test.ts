@@ -1626,6 +1626,25 @@ describe("audit_log", () => {
     });
     const api = makeMockApi({ listAudit } as unknown as ApiClient);
     const parsed = auditLogTool.inputSchema.parse({ limit: 10, type: "proxy_executed" });
+    const res = (await auditLogTool.handler(parsed, api)) as { view: string; events: unknown[] };
+    // Default is the shaped security ledger; an egress row with no recorded
+    // status can't be shown to have succeeded, so it surfaces as an anomaly.
+    expect(res.view).toBe("ledger");
+    expect(res.events).toHaveLength(1);
+    expect(listAudit).toHaveBeenCalledWith(expect.objectContaining({ type: "proxy_executed" }));
+  });
+
+  it("view:raw passes the legacy filters straight through", async () => {
+    const listAudit = vi.fn().mockResolvedValue({
+      events: [{ id: "e1", type: "proxy_executed", emitted_at: "now" }],
+      next_before: null,
+    });
+    const api = makeMockApi({ listAudit } as unknown as ApiClient);
+    const parsed = auditLogTool.inputSchema.parse({
+      view: "raw",
+      limit: 10,
+      type: "proxy_executed",
+    });
     const res = (await auditLogTool.handler(parsed, api)) as { events: unknown[] };
     expect(res.events).toHaveLength(1);
     expect(listAudit).toHaveBeenCalledWith({ limit: 10, type: "proxy_executed" });

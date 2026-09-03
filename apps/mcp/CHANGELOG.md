@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **`audit_log` now defaults to a readable security ledger.** Routine proxied
+  egress collapses into per credential/host/burst rollups (count, status
+  breakdown, bytes, window, covering grants) instead of one row per call, with
+  per-grant running totals. Lifecycle events and anomalies (non-2xx, 429, proxy
+  errors, rejected calls) stay individual marked rows. Drill down with a
+  rollup's `id` via `expand`; `view: "raw"` returns the flat per-request stream.
+  Existing `type` / `reference` / `limit` / `before` filters are unchanged.
+
 - **Operator browsers are now owner-bound.** Every local launch carries a private Trusty Squire
   marker recorded by a detached watchdog; owner death and startup sweep exact matching processes,
   including surviving process groups, with bounded SIGTERM then SIGKILL escalation.
