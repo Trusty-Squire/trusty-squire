@@ -4452,7 +4452,7 @@ describe("Compact V2 action-map boundary", () => {
     expect(h.clickCalls).toBe(0);
   });
 
-  it("seals OTP-shaped control descriptions from output and query", async () => {
+  it("shows OTP-shaped control descriptions — masking is payment-only", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
@@ -4470,14 +4470,14 @@ describe("Compact V2 action-map boundary", () => {
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
-    expect(JSON.stringify(started)).not.toContain("481920");
-    expect(JSON.stringify(started)).not.toContain("735104");
-    await expect(observeQuery(started.session_id, "481920")).resolves.toMatchObject({
-      safe_table: [],
-    });
-    await expect(observeQuery(started.session_id, "735104")).resolves.toMatchObject({
-      safe_table: [],
-    });
+    // A code rendered on the page is ordinary content the agent must be able to
+    // read; only card material is screened out.
+    expect(JSON.stringify(started)).toContain("481920");
+    expect(JSON.stringify(started)).toContain("735104");
+    const query = await observeQuery(started.session_id, "481920");
+    expect(query.safe_table).toEqual([
+      [expect.stringMatching(/^@e:/), "b", "@your-verification-code-is-481920"],
+    ]);
   });
 
   it("keeps checkout confirmation routes in checkout until positive completion", async () => {
@@ -4537,7 +4537,11 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
     const facts = (started as unknown as { safe_table: Array<[string, string, string?]> })
       .safe_table[0]![2]!;
-    expect(facts).toBe("a=continue");
+    // Merchant copy reaches the wire under the payment-only policy, but only as
+    // a slug: controlLabelV2's [a-z0-9-] charset drops the `|` and `=` the page
+    // tried to forge owned facts with, so the only fact here is the owned one.
+    expect(facts).toBe("@continue-s-d-x-x|a=continue");
+    expect(facts.split("|").slice(1)).toEqual(["a=continue"]);
   });
 
   it("prioritizes payment evidence over an incidental cart upsell", async () => {
@@ -4847,8 +4851,9 @@ describe("Compact V2 action-map boundary", () => {
     ).rejects.toThrow("stale_ref");
     expect(h.selected).toEqual([]);
     const result = await formSelectMany(started.session_id, { [handle]: "Korea" });
-    expect(result.fields).toEqual([expect.objectContaining({ status: "selected" })]);
-    expect(JSON.stringify(result.fields)).not.toContain("South Korea");
+    expect(result.fields).toEqual([
+      expect.objectContaining({ status: "selected", selected_option: "South Korea" }),
+    ]);
     expect(
       JSON.stringify([...paymentSession(started.session_id).committedSelectValues]),
     ).not.toContain("#country");
@@ -4908,7 +4913,7 @@ describe("Compact V2 action-map boundary", () => {
       expect.objectContaining({ status: "selected" }),
       expect.objectContaining({ status: "selected" }),
     ]);
-    expect(JSON.stringify(result.fields)).not.toContain("Ocean Blue");
+    expect(result.fields[0]).toMatchObject({ selected_option: "Ocean Blue" });
   });
 
   it("rejects a bulk target the preceding mutation replaced", async () => {
@@ -5582,7 +5587,7 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     expect(JSON.stringify(full)).not.toContain(secret);
   });
 
-  it("uses one screenshot redaction path while retaining shape and vault-value redaction", async () => {
+  it("uses one screenshot redaction path and redacts only the exact vault value", async () => {
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
     await captureScreenshot(started.session_id);
     expect(h.capturedSealedFieldKeys).toEqual([[]]);
@@ -5592,9 +5597,11 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     h.visibleText = `API key: sk-proj-1234567890abcdefghijklmnopqrstuv ${secret}`;
     h.elements = [];
     const full = await observe(started.session_id, "full");
+    // The injected vault value is masked by exact identity...
     expect(full.text).toContain("[sealed]");
-    expect(full.text).not.toContain("sk-proj-1234567890abcdefghijklmnopqrstuv");
     expect(full.text).not.toContain(secret);
+    // ...and a key the PAGE rendered is left alone: no secret-shape heuristic.
+    expect(full.text).toContain("sk-proj-1234567890abcdefghijklmnopqrstuv");
   });
 
   it("refuses to remember a session that used a locator fallback", async () => {
@@ -8907,7 +8914,11 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
       null,
     )) as Awaited<ReturnType<typeof cartAdd>>;
 
-    expect(added).toMatchObject({ status: "added", cart_delta: "+1", checkout_state: { quantity: 1 } });
+    expect(added).toMatchObject({
+      status: "added",
+      cart_delta: "+1",
+      checkout_state: { quantity: 1 },
+    });
   });
 
   it("cart_clear drops a stale reservation so a same-key retry after clearing still adds", async () => {

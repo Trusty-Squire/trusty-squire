@@ -1,11 +1,5 @@
 import { Buffer } from "node:buffer";
 import type { InteractiveElement } from "./browser.js";
-import {
-  findCredentialTokens,
-  findOtpCredential,
-  isStandaloneOtpCredential,
-  looksLikeCredentialValue,
-} from "./credential-shape.js";
 
 export const OBSERVE_V2_MAX_WIRE_BYTES = 4_096;
 export const OBSERVE_V2_MAX_TOKENS = 1_024;
@@ -217,12 +211,70 @@ function wireControl(row: SafeControlV2): WireControlV2 {
 }
 
 const SAFE_DESCRIPTION_MAX_CHARS = 40;
-const EMAIL_VALUE_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
-const SECRET_ASSIGNMENT_RE = /\b(?:password|passcode|token|api[_ -]?key|secret)\b\s*[:=]\s*\S{4,}/i;
-const HIGH_ENTROPY_TOKEN_RE = /\b[A-Za-z0-9_-]{24,}\b/;
+// PAYMENT-ONLY description screening. Card material is the whole of it: a
+// Luhn-valid PAN span and a labeled CVV/CVC value. Everything else a page
+// renders — OAuth button copy, an email address in a field label, a Gmail
+// subject line, a street address, a shipping option, and yes a rendered API
+// key or recovery code — is ordinary content the driving agent needs to read.
+//
+// This replaces a closed-vocabulary allowlist grammar (~120 permitted words)
+// plus email/entropy/OTP/credential-shape rejections. That grammar is what
+// blanked auth pages (an unlisted word anywhere in a label screened the whole
+// label out) and whole Gmail views, so the agent saw unlabeled role letters
+// where a page full of legible controls existed.
 const CARD_SECURITY_VALUE_RE = /\b(?:cvv|cvc|security\s*code)\s*[:#-]?\s*\d{3,4}\b/i;
-const SAFE_DESCRIPTION_GRAMMAR_RE = /^[\p{L}\p{N}][\p{L}\p{N}\s&'’+,.!?():=/@_$|-]*$/u;
-const SAFE_DESCRIPTION_WORDS = new Set([
+const PAN_MAX_SPAN_CHARS = 96;
+
+function luhnValid(digits: string): boolean {
+  let sum = 0;
+  let double = false;
+  for (let index = digits.length - 1; index >= 0; index -= 1) {
+    let digit = Number(digits[index]);
+    if (double) {
+      digit *= 2;
+      if (digit > 9) digit -= 9;
+    }
+    sum += digit;
+    double = !double;
+  }
+  return sum % 10 === 0;
+}
+
+/** A rendered card number: 13-19 digits in one span that passes Luhn. */
+function containsLuhnPan(value: string): boolean {
+  const positions = Array.from(value.matchAll(/\d/g), (match) => match.index);
+  for (let start = 0; start + 13 <= positions.length; start += 1) {
+    const maxLength = Math.min(19, positions.length - start);
+    for (let length = 13; length <= maxLength; length += 1) {
+      const span = positions.slice(start, start + length);
+      if (span[span.length - 1]! - span[0]! + 1 > PAN_MAX_SPAN_CHARS) break;
+      if (luhnValid(span.map((position) => value[position]).join(""))) return true;
+    }
+  }
+  return false;
+}
+
+/** The one screen every page-derived string passes: it must carry no card value. */
+function carriesPaymentMaterial(value: string): boolean {
+  return containsLuhnPan(value) || CARD_SECURITY_VALUE_RE.test(value);
+}
+
+// ---- Recordable-token screen (NOT observation redaction) -------------------
+// Two surfaces are not the agent's view of the page and keep their original
+// closed-vocabulary screen: the operator's structured stderr audit trail, and
+// the recorded action trace that a captured run publishes to the SHARED skill
+// registry. Both cross a boundary the payment-only observation policy says
+// nothing about — one is a log, the other is cross-user institutional memory —
+// so a page-derived string still has to be recognizable code-owned vocabulary
+// before it lands there. Never use this to screen what `operate_observe`,
+// `operate_observe_query`, or `operate_screenshot` shows the driving agent.
+const RECORDABLE_TOKEN_MAX_CHARS = 40;
+const RECORDABLE_EMAIL_RE = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
+const RECORDABLE_SECRET_ASSIGNMENT_RE =
+  /\b(?:password|passcode|token|api[_ -]?key|secret)\b\s*[:=]\s*\S{4,}/i;
+const RECORDABLE_HIGH_ENTROPY_RE = /\b[A-Za-z0-9_-]{24,}\b/;
+const RECORDABLE_GRAMMAR_RE = /^[\p{L}\p{N}][\p{L}\p{N}\s&'’+,.!?():=/@_$|-]*$/u;
+const RECORDABLE_WORDS = new Set([
   "a",
   "access",
   "account",
@@ -336,56 +388,55 @@ const SAFE_DESCRIPTION_WORDS = new Set([
   "your",
 ]);
 
-function hasSafeDescriptionGrammar(value: string): boolean {
-  if (!SAFE_DESCRIPTION_GRAMMAR_RE.test(value)) return false;
+function hasRecordableGrammar(value: string): boolean {
+  if (!RECORDABLE_GRAMMAR_RE.test(value)) return false;
   const words = value.match(/[\p{L}\p{N}]+/gu) ?? [];
   return (
     words.length > 0 &&
-    // Multi-digit amounts are part of ordinary checkout copy — shipping-method
-    // prices ("Standard $8.00", "Express $15"), totals, ZIP codes — none of
-    // which is secret. PAN-shaped digit runs are still rejected upstream by
-    // hasPanLikeDigits (≥13 digits), and standalone OTP codes by
-    // findOtpCredential/isStandaloneOtpCredential, so 1-6 digit words are
-    // safe label vocabulary.
-    words.every((word) => SAFE_DESCRIPTION_WORDS.has(word.toLowerCase()) || /^\d{1,6}$/.test(word))
+    words.every((word) => RECORDABLE_WORDS.has(word.toLowerCase()) || /^\d{1,6}$/.test(word))
   );
 }
 
-function containsCredentialShape(value: string): boolean {
-  if (findCredentialTokens(value).length > 0) return true;
-  return value
-    .split(/[\s"'`()<>\[\]{},;:=]+/)
-    .filter(Boolean)
-    .some((token) => looksLikeCredentialValue(token));
-}
-
-function hasPanLikeDigits(value: string): boolean {
-  return value.replace(/\D/g, "").length >= 13;
-}
-
 /**
- * A positive safe-text gate for the tiny semantic layer. It receives only
- * title/heading/control-label sources (never input values or arbitrary page
- * regions), rejects credential/card-shaped content, then truncates the
- * remaining human description before it can enter a wire row or delta.
+ * The screen for the audit trail and the registry-bound action trace. Returns
+ * `undefined` for anything outside the code-owned vocabulary; callers turn that
+ * into `<sealed>` or refuse to record the action.
  */
-export function safeDescriptionV2(value: string | null | undefined): string | undefined {
+export function recordableTokenV2(value: string | null | undefined): string | undefined {
   if (typeof value !== "string") return undefined;
   const normalized = value.replace(/\s+/g, " ").trim();
   if (
     normalized.length === 0 ||
-    !hasSafeDescriptionGrammar(normalized) ||
-    hasPanLikeDigits(normalized) ||
-    EMAIL_VALUE_RE.test(normalized) ||
-    SECRET_ASSIGNMENT_RE.test(normalized) ||
-    CARD_SECURITY_VALUE_RE.test(normalized) ||
-    HIGH_ENTROPY_TOKEN_RE.test(normalized) ||
-    findOtpCredential(normalized) !== null ||
-    isStandaloneOtpCredential(normalized) ||
-    containsCredentialShape(normalized)
+    !hasRecordableGrammar(normalized) ||
+    carriesPaymentMaterial(normalized) ||
+    normalized.replace(/\D/g, "").length >= 13 ||
+    RECORDABLE_EMAIL_RE.test(normalized) ||
+    RECORDABLE_SECRET_ASSIGNMENT_RE.test(normalized) ||
+    RECORDABLE_HIGH_ENTROPY_RE.test(normalized)
   ) {
     return undefined;
   }
+  return normalized.length <= RECORDABLE_TOKEN_MAX_CHARS
+    ? normalized
+    : `${normalized.slice(0, RECORDABLE_TOKEN_MAX_CHARS - 1)}…`;
+}
+
+/**
+ * The safe-text gate for the tiny semantic layer. It receives only
+ * title/heading/control-label sources (never input values or arbitrary page
+ * regions), rejects card material, then truncates the remaining human
+ * description before it can enter a wire row or delta. The truncation is the
+ * compactness budget, not redaction.
+ */
+export function safeDescriptionV2(value: string | null | undefined): string | undefined {
+  if (typeof value !== "string") return undefined;
+  // Control characters would break the positional wire encoding; they are not
+  // page copy, so dropping them is formatting rather than masking.
+  const normalized = value
+    .replace(/[\p{Cc}\p{Cf}]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (normalized.length === 0 || carriesPaymentMaterial(normalized)) return undefined;
   return normalized.length <= SAFE_DESCRIPTION_MAX_CHARS
     ? normalized
     : `${normalized.slice(0, SAFE_DESCRIPTION_MAX_CHARS - 1)}…`;
@@ -445,24 +496,16 @@ function safeAutocompleteV2(value: string | null | undefined): string | null {
     : null;
 }
 
+// Structural hostname validity, plus the payment screen. The credential-shape
+// and entropy rejections that used to live here were the same secret-SHAPE
+// heuristic the rest of this layer dropped: they turned a legitimate long
+// subdomain into "<sealed-origin>" and hid which page the agent was on.
 function safeHostnameV2(value: string): boolean {
   const hostname = value.toLowerCase();
-  if (
-    hostname.length === 0 ||
-    hostname.length > 253 ||
-    hasPanLikeDigits(hostname) ||
-    findCredentialTokens(hostname).length > 0 ||
-    containsCredentialShape(hostname)
-  ) {
+  if (hostname.length === 0 || hostname.length > 253 || carriesPaymentMaterial(hostname)) {
     return false;
   }
-  return hostname.split(".").every((label) => {
-    if (label.startsWith("xn--")) return false;
-    if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)) return false;
-    if (/\d{8,}/.test(label)) return false;
-    if (label.length >= 24 && /[a-z]/.test(label) && /\d/.test(label)) return false;
-    return label.length < 32;
-  });
+  return hostname.split(".").every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
 }
 
 export function safeOriginV2(value: string | null | undefined): string | null {
@@ -512,7 +555,7 @@ export function compactV2AuditValue(key: string, value: unknown): unknown {
       typeof host === "string" ? compactV2AuditHost(host) : "<sealed-host>",
     );
   }
-  if (typeof value === "string") return safeDescriptionV2(value) ?? "<sealed>";
+  if (typeof value === "string") return recordableTokenV2(value) ?? "<sealed>";
   if (Array.isArray(value)) return value.map((item) => compactV2AuditValue("", item));
   if (value !== null && typeof value === "object") {
     return Object.fromEntries(
@@ -529,8 +572,12 @@ export function sealRetainedInteractiveElementsV2(
   elements: readonly InteractiveElement[],
   selectorFor: (element: InteractiveElement) => string = () => "",
 ): InteractiveElement[] {
+  // The retained inventory is what the recorded action trace reads its
+  // dom_hint / accessible_name from, so it is screened for RECORDABILITY, not
+  // by the payment-only observation policy. What the agent SEES is built from
+  // freshly extracted elements through safeDescriptionV2.
   const description = (value: string | null | undefined): string | null =>
-    safeDescriptionV2(value) ?? null;
+    recordableTokenV2(value) ?? null;
   const finiteToken = (
     value: string | null | undefined,
     allowed: ReadonlySet<string>,
@@ -808,18 +855,7 @@ function privateQueryTokenV2(value: string): string | null {
 
 function privateQueryTermsV2(value: string): string[] | null {
   const normalized = value.normalize("NFKC").trim().toLowerCase();
-  if (
-    normalized.length < 1 ||
-    normalized.length > 96 ||
-    hasPanLikeDigits(normalized) ||
-    EMAIL_VALUE_RE.test(normalized) ||
-    SECRET_ASSIGNMENT_RE.test(normalized) ||
-    CARD_SECURITY_VALUE_RE.test(normalized) ||
-    HIGH_ENTROPY_TOKEN_RE.test(normalized) ||
-    findOtpCredential(normalized) !== null ||
-    isStandaloneOtpCredential(normalized) ||
-    containsCredentialShape(normalized)
-  ) {
+  if (normalized.length < 1 || normalized.length > 96 || carriesPaymentMaterial(normalized)) {
     return null;
   }
   const rawTerms = normalized.match(/[\p{L}\p{M}\p{N}]{1,48}/gu);
@@ -842,18 +878,7 @@ export function controlMatchesPrivateQueryV2(el: InteractiveElement, query: stri
   return [...controlNamingTexts(el), el.name, el.id].some((candidate) => {
     if (typeof candidate !== "string") return false;
     const normalized = candidate.normalize("NFKC").trim().toLowerCase();
-    if (
-      hasPanLikeDigits(normalized) ||
-      EMAIL_VALUE_RE.test(normalized) ||
-      SECRET_ASSIGNMENT_RE.test(normalized) ||
-      CARD_SECURITY_VALUE_RE.test(normalized) ||
-      HIGH_ENTROPY_TOKEN_RE.test(normalized) ||
-      findOtpCredential(normalized) !== null ||
-      isStandaloneOtpCredential(normalized) ||
-      containsCredentialShape(normalized)
-    ) {
-      return false;
-    }
+    if (carriesPaymentMaterial(normalized)) return false;
     const tokens = candidate.normalize("NFKC").match(/[\p{L}\p{M}\p{N}]{1,48}/gu);
     if (tokens === null) return false;
     const safeTokens = new Set(
@@ -958,10 +983,7 @@ function fieldOf(el: InteractiveElement, paymentContext = false): SafeFieldV2 | 
     /\boptional\b/.test(text)
   )
     return undefined;
-  if (
-    hasAutocomplete("street-address", "address-line1") ||
-    /\b(address|street)\b/.test(text)
-  )
+  if (hasAutocomplete("street-address", "address-line1") || /\b(address|street)\b/.test(text))
     return "address";
   if (
     type === "date" ||

@@ -80,7 +80,6 @@ import {
   untrackOwnerProcess,
 } from "./owner-process-reaper.js";
 import type { RemoteLoginRig } from "./remote-login-display.js";
-import { OBSERVATION_SECRET_SHAPE_SOURCES } from "./credential-shape.js";
 
 // Lazy registration: installing the plugin mutates the chromium singleton
 // from playwright-extra so we only do it once per process. We require()
@@ -938,26 +937,17 @@ const CHECKOUT_CARD_VALUE_FIELD_SELECTORS = [
   CHECKOUT_CARD_NAME_FIELD_SELECTORS,
 ].join(",");
 
-// Defense-in-depth redaction set for operate_screenshot. The capture-scoped
-// guard refuses nonempty secrets before pixels are read; these selectors also
-// identify empty sensitive controls and provide rectangles that are composited
-// over the captured bytes. The set mirrors the card fields
-// fillCheckoutCardIntoFrames writes into, plus payment/type_secret markers and
-// other secret-shaped inputs.
-const SCREENSHOT_SECRET_FIELD_SELECTORS = [
-  '[data-ts-sealed-payment="1"]',
-  'input[type="password" i]',
-  'input[autocomplete~="one-time-code" i]',
-  'input[name*="otp" i]',
-  'input[id*="otp" i]',
-  // "pin" as a bare substring also matches inside "shipping" (s-h-i-p-pin-g),
-  // which masked every Shopify shipping-address input and shipping-rate radio
-  // (name/id "checkout[shipping_address][…]" / "checkout_shipping_…"). Pin
-  // fields are excluded there; a genuine shipping-pin name would still be
-  // caught by the other secret selectors, and "pin" token names remain covered.
-  'input[name*="pin" i]:not([name*="shipping" i])',
-  'input[id*="pin" i]:not([id*="shipping" i])',
-].join(",");
+// Defense-in-depth redaction set for operate_screenshot, under the PAYMENT-ONLY
+// masking policy. The capture-scoped guard refuses nonempty values before pixels
+// are read; these selectors also identify empty card controls and provide
+// rectangles that are composited over the captured bytes. The set is exactly the
+// card fields fillCheckoutCardIntoFrames writes into plus the per-field seal
+// marker type_secret stamps on the ONE element it injected into. Password/OTP/PIN
+// name-shaped selectors are deliberately absent: masking a control because its
+// name looks secret is a shape heuristic, and it blanked ordinary sign-in and
+// verification pages. An operator-injected value still carries the seal marker,
+// so it is masked by identity rather than by shape.
+const SCREENSHOT_SECRET_FIELD_SELECTORS = '[data-ts-sealed-payment="1"]';
 const SCREENSHOT_REDACTION_SELECTORS = `${CHECKOUT_CARD_VALUE_FIELD_SELECTORS},${SCREENSHOT_SECRET_FIELD_SELECTORS}`;
 
 interface SealedElementDescriptor {
@@ -9362,16 +9352,12 @@ export class BrowserController {
           // PR #627's per-node evaluate loop (one round trip per candidate over
           // every element) made dynamic checkout pages slow enough to trip the
           // stability guard below at the payment step and blind the agent.
-          // Shape sources travel as data because page.evaluate code cannot
-          // import; the sources stay byte-identical to the host-side text
-          // scrub (OBSERVATION_SECRET_SHAPE_SOURCES).
           // evaluateHandle (not evaluate): nested DOM nodes serialize as strings
           // through a plain evaluate return; a handle to the array plus property
           // enumeration preserves per-node handles.
           const matchesHandle = await frame.evaluateHandle(
             (args) => {
-              const { secrets, shapeSources } = args;
-              const shapes = shapeSources.map((source) => new RegExp(source, "giu"));
+              const { secrets } = args;
               const hasLuhnPan = (text: string): boolean => {
                 const positions = Array.from(text.matchAll(/\d/g), (match) => match.index);
                 const luhn = (digits: string): boolean => {
@@ -9398,27 +9384,21 @@ export class BrowserController {
                 }
                 return false;
               };
-              // No broad vendor-token catch-all here. DOM identifiers are not
-              // secrets: Shopify-style ids/names like
-              // "checkout_shipping_address_address1" matched the previous
-              // in-page port of findCredentialTokens and masked the entire
-              // shipping block — radios, prices, addresses — out of the
-              // screenshot. Node redaction is now exactly: operator-injected
-              // vault values, Luhn-valid PANs, and the tight secret-shape
-              // signatures (API keys, recovery codes, TOTP, JWTs…).
+              // PAYMENT-ONLY node redaction: the exact values the operator
+              // injected from the vault, and Luhn-valid PANs. There is no
+              // secret-SHAPE pass — a rendered API key, recovery code, TOTP, or
+              // JWT is ordinary page content the agent is meant to read. Shape
+              // matching also kept catching DOM identifiers (Shopify's
+              // "checkout_shipping_address_address1"), masking whole shipping
+              // blocks out of the image.
               const containsInjected = (text: string): boolean =>
                 secrets.some((secret) => secret.length > 0 && text.includes(secret));
               // Values/text also admit a Luhn-valid PAN (a card number rendered
-              // or typed into a field); attributes admit injected values and the
-              // tight secret shapes.
+              // or typed into a field); attributes admit injected values only.
               const secretValue = (text: string, kind: "value" | "attr" | "text"): boolean => {
                 if (text.length === 0) return false;
                 if (containsInjected(text)) return true;
-                if (kind !== "attr" && hasLuhnPan(text)) return true;
-                for (const shape of shapes) {
-                  if (shape.test(text)) return true;
-                }
-                return false;
+                return kind !== "attr" && hasLuhnPan(text);
               };
               const matches = new Set<Element>();
               const check = (el: Element): void => {
@@ -9456,7 +9436,7 @@ export class BrowserController {
               walk(document);
               return Array.from(matches);
             },
-            { secrets, shapeSources: OBSERVATION_SECRET_SHAPE_SOURCES },
+            { secrets },
           );
           const sensitiveProperties = await matchesHandle.getProperties();
           await matchesHandle.dispose().catch(() => undefined);
@@ -9585,8 +9565,8 @@ export class BrowserController {
 
   // Verify the capture set before pixels are read. This is deliberately
   // narrower than the capture-time mask: empty checkout controls are harmless,
-  // but a nonempty type_secret target, password, payment-sealed node, or
-  // Luhn-valid PAN means the requested image could contain a secret. Every
+  // but a nonempty type_secret target, payment-sealed node, or
+  // Luhn-valid PAN means the requested image could contain a card value. Every
   // frame included by the image must be readable; a detached or navigating
   // frame is not evidence that it is safe to capture.
   private async assertOperatorScreenshotFramesNoSealedValues(

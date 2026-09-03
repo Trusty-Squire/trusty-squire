@@ -141,7 +141,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "redacts a password field and a non-input element sealed via data-ts-sealed-payment",
+    "redacts a node sealed via data-ts-sealed-payment but not a bare password field",
     async () => {
       const browser = await launchIsolatedTestBrowser();
       try {
@@ -152,8 +152,11 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
         `);
         const controller = BrowserController.fromHarnessPage(page);
 
+        // Masking is payment-only: the seal marker (the ONE field the operator
+        // injected into) is masked; a password the operator did not inject is
+        // not, and the browser renders it as dots anyway.
         const result = await controller.screenshotForOperator();
-        expect(result.redactedCount).toBe(2);
+        expect(result.redactedCount).toBe(1);
 
         // No style ever written into the page — masking is capture-side only.
         const divStyle = await page
@@ -213,7 +216,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "redacts secret-shaped text and attributes plus an exact injected vault value",
+    "redacts ONLY the exact injected vault value, never secret-shaped page text",
     async () => {
       const browser = await launchIsolatedTestBrowser();
       try {
@@ -228,7 +231,9 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
         const controller = BrowserController.fromHarnessPage(page);
 
         const result = await controller.captureOperatorScreenshot({}, [], [injected]);
-        expect(result.redactedCount).toBe(3);
+        // Only the vault-value node — the rendered API key and recovery code are
+        // page content the agent is meant to read.
+        expect(result.redactedCount).toBe(1);
         const boxes = await Promise.all(
           ["#api", "#recovery", "#vault", "#ordinary"].map(
             async (selector) => await page.locator(selector).boundingBox(),
@@ -240,8 +245,8 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
           result.base64,
           boxes.map((box) => [box!.x + box!.width / 2, box!.y + box!.height / 2]),
         );
-        expect(isMaskMagenta(pixels[0]!)).toBe(true);
-        expect(isMaskMagenta(pixels[1]!)).toBe(true);
+        expect(isMaskMagenta(pixels[0]!)).toBe(false);
+        expect(isMaskMagenta(pixels[1]!)).toBe(false);
         expect(isMaskMagenta(pixels[2]!)).toBe(true);
         expect(isMaskMagenta(pixels[3]!)).toBe(false);
       } finally {
@@ -275,8 +280,9 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
       await page.setContent(`<input type="password" value="" style="display:none">`);
       const controller = BrowserController.fromHarnessPage(page);
 
+      // A password field is outside the payment-only mask set entirely.
       await expect(controller.captureOperatorScreenshot()).resolves.toMatchObject({
-        redactedCount: 1,
+        redactedCount: 0,
       });
     } finally {
       await browser.close();
@@ -664,7 +670,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "still redacts rendered API keys, recovery codes, and TOTPs on a checkout",
+    "leaves rendered API keys, recovery codes, and TOTPs visible on a checkout",
     async () => {
       const browser = await launchIsolatedTestBrowser();
       try {
@@ -684,8 +690,8 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
 
         const result = await controller.captureOperatorScreenshot();
 
-        // Tight secret shapes stay masked; the address/radio nodes do not.
-        expect(result.redactedCount).toBe(3);
+        // Payment-only masking: nothing on this page is card material.
+        expect(result.redactedCount).toBe(0);
         const boxes = await Promise.all(
           [
             "#api",
@@ -701,11 +707,7 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
           result.base64,
           boxes.map((box) => [box!.x + box!.width / 2, box!.y + box!.height / 2]),
         );
-        expect(isMaskMagenta(pixels[0]!)).toBe(true);
-        expect(isMaskMagenta(pixels[1]!)).toBe(true);
-        expect(isMaskMagenta(pixels[2]!)).toBe(true);
-        expect(isMaskMagenta(pixels[3]!)).toBe(false);
-        expect(isMaskMagenta(pixels[4]!)).toBe(false);
+        for (const pixel of pixels) expect(isMaskMagenta(pixel)).toBe(false);
       } finally {
         await browser.close();
       }
@@ -1001,7 +1003,7 @@ describe("operate_screenshot frame targeting (real browser)", () => {
 
 describe("operate_screenshot default redaction (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
-    "default mode keeps ordinary checkout text visible while tight shapes are redacted",
+    "default mode masks nothing on a page with no card material",
     async () => {
       const browser = await launchIsolatedTestBrowser();
       try {
@@ -1016,20 +1018,28 @@ describe("operate_screenshot default redaction (real browser)", () => {
           <p id="key">API key: sk-proj-1234567890abcdefghijklmnopqrstuv</p>
           <p id="token">Token: ghp_AbcdefghijklmnopqrstuvwxyzAbcdefghij</p>
           <p id="aws">Access key: AKIAIOSFODNN7EXAMPLE</p>
-          <p id="jwt">Session: eyJ0ZXN0aW5nX3BsYWNlaG9sZGVyX2FiY2Q.eyJ0ZXN0aW5nX3BsYWNlaG9sZGVyX2VmZ2g.c2lnbmF0dXJlX3BsYWNlaG9sZGVyX2lqa2w (synthetic example)</p>
+          <p id="jwt">Session: eyJhbGciOiJIUzINiJ9.eyJzdWIiOiJhYmMifQ.c2lnbmF0dXJlX3BsYWNlaG9sZGVy (synthetic example)</p>
         `);
         const controller = BrowserController.fromHarnessPage(page);
 
         const result = await controller.screenshotForOperator();
 
-        // Exactly the tight shapes redacted; the ordinary checkout content is
-        // untouched (the PR #627 broad heuristics redacted hundreds of nodes
-        // on pages like this).
-        expect(result.redactedCount).toBe(4);
+        // Nothing here is card material, so nothing is masked — including the
+        // rendered API key / token / AWS key / JWT, which are page content.
+        expect(result.redactedCount).toBe(0);
         const boxes = await Promise.all(
-          ["#product", "#price", "#address", "#coupon", "#zip", "#phone"].map(
-            async (selector) => await page.locator(selector).boundingBox(),
-          ),
+          [
+            "#product",
+            "#price",
+            "#address",
+            "#coupon",
+            "#zip",
+            "#phone",
+            "#key",
+            "#token",
+            "#aws",
+            "#jwt",
+          ].map(async (selector) => await page.locator(selector).boundingBox()),
         );
         const pixels = await samplePixels(
           page,
@@ -1044,13 +1054,16 @@ describe("operate_screenshot default redaction (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "masks rendered secret shapes and operator-injected card/CVV values",
+    "masks operator-injected card/CVV values and nothing else",
     async () => {
       const browser = await launchIsolatedTestBrowser();
       try {
         const page = await browser.newPage();
         const injectedCard = "4242424242424242";
-        const injectedCvv = "123";
+        // Not a substring of the rendered API key below: exact-injected-value
+        // masking is a plain substring match, so a CVV that happens to occur
+        // inside other page text would legitimately mask that text too.
+        const injectedCvv = "917";
         await page.setContent(`
           <p id="key">API key: sk-proj-1234567890abcdefghijklmnopqrstuv</p>
           <input id="injected-card" value="${injectedCard}">
@@ -1061,7 +1074,9 @@ describe("operate_screenshot default redaction (real browser)", () => {
 
         const result = await controller.screenshotForOperator({}, [injectedCard, injectedCvv]);
 
-        expect(result.redactedCount).toBe(3);
+        // HARD INVARIANT: the exact values the operator injected never reach the
+        // image. The rendered API key is left visible.
+        expect(result.redactedCount).toBe(2);
         const boxes = await Promise.all(
           ["#key", "#injected-card", "#injected-cvv", "#ordinary"].map(
             async (selector) => await page.locator(selector).boundingBox(),
@@ -1072,7 +1087,7 @@ describe("operate_screenshot default redaction (real browser)", () => {
           result.base64,
           boxes.map((box) => [box!.x + box!.width / 2, box!.y + box!.height / 2]),
         );
-        expect(isMaskMagenta(pixels[0]!)).toBe(true);
+        expect(isMaskMagenta(pixels[0]!)).toBe(false);
         expect(isMaskMagenta(pixels[1]!)).toBe(true);
         expect(isMaskMagenta(pixels[2]!)).toBe(true);
         expect(isMaskMagenta(pixels[3]!)).toBe(false);

@@ -132,33 +132,46 @@ describe("compact observation v2", () => {
     ]);
   });
 
-  it("removes credential-shaped labels before building the safe table", () => {
+  it("keeps a credential-shaped label — masking is payment-only", () => {
     const button = element({ visibleText: "Copy api_1234567890123" });
     const safe = safeControls({
       elements: [button],
       legacyRefs: new Map([[button, "@e:copy-secret"]]),
       pageOrigin: "https://merchant.invalid",
     });
-    expect(safe.rows).toEqual([expect.objectContaining({ ref: "@e:hhhhhhhhh1", role: "button" })]);
-    expect(JSON.stringify(safe.rows)).not.toContain("api_1234567890123");
+    expect(safe.rows).toEqual([
+      expect.objectContaining({
+        ref: "@e:hhhhhhhhh1",
+        role: "button",
+        label: "@copy-api-" + "1234567890123",
+      }),
+    ]);
   });
 
-  it("rejects arbitrary standalone strings outside the semantic-safe grammar", () => {
-    expect(safeDescriptionV2("correcthorsebattery")).toBeUndefined();
-    expect(safeDescriptionV2("correct horse battery staple")).toBeUndefined();
+  it("keeps arbitrary page copy — only card material screens a description out", () => {
+    expect(safeDescriptionV2("correcthorsebattery")).toBe("correcthorsebattery");
+    expect(safeDescriptionV2("correct horse battery staple")).toBe("correct horse battery staple");
+    expect(safeDescriptionV2("Sign in with Keycloak")).toBe("Sign in with Keycloak");
+    expect(safeDescriptionV2("buyer@example.com")).toBe("buyer@example.com");
+    expect(safeDescriptionV2("sk-proj-1234567890abcdefghijklmnopqrstuv")).toBe(
+      "sk-proj-1234567890abcdefghijklmnopqrstuv",
+    );
+    // The two payment screens survive: a Luhn PAN and a labeled CVV.
+    expect(safeDescriptionV2("4111 1111 1111 1111")).toBeUndefined();
+    expect(safeDescriptionV2("CVV 123")).toBeUndefined();
     expect(
       safePageSemanticsV2({
         title: "correcthorsebattery",
         headings: ["Create your account"],
       }),
-    ).toEqual({ headings: ["Create your account"] });
+    ).toEqual({ title: "correcthorsebattery", headings: ["Create your account"] });
     const button = element({ visibleText: "correcthorsebattery" });
     const safe = safeControls({
       elements: [button],
       legacyRefs: new Map([[button, "@e:standalone-secret"]]),
       pageOrigin: "https://merchant.invalid",
     });
-    expect(safe.rows[0]?.label).toBeUndefined();
+    expect(safe.rows[0]?.label).toBe("@correcthorsebattery");
   });
 
   it("retains only finite DOM semantic tokens", () => {
@@ -180,12 +193,16 @@ describe("compact observation v2", () => {
     expect(JSON.stringify(sealed)).not.toContain("private-selector");
   });
 
-  it("screens retained frame origins through the credential boundary", () => {
+  it("screens retained frame origins through the payment boundary only", () => {
     expect(safeOriginV2("https://payments.example.com")).toBe("https://payments.example.com");
-    expect(safeOriginV2("https://api123456789012345678901234.attacker.test")).toBeNull();
+    // A long high-entropy subdomain is an ordinary host, not a secret.
+    expect(safeOriginV2("https://apikeyabcdefghijklmnopqrstuvwxyz9.attacker.test")).toBe(
+      "https://apikeyabcdefghijklmnopqrstuvwxyz9.attacker.test",
+    );
+    // A card number in the host is still card material.
     expect(safeOriginV2("https://4111-1111-1111-1111.attacker.test")).toBeNull();
     const [sealed] = sealRetainedInteractiveElementsV2([
-      element({ frameOrigin: "https://api123456789012345678901234.attacker.test" }),
+      element({ frameOrigin: "https://4111-1111-1111-1111.attacker.test" }),
     ]);
     expect(sealed?.frameOrigin).toBeNull();
   });
@@ -436,9 +453,24 @@ describe("compact observation v2", () => {
     expect(JSON.stringify(safe.rows)).not.toContain("4111111111111111");
   });
 
-  it("uses the first safe accessibility label after rejecting an unsafe visible value", () => {
+  it("uses the visible text as the label — a high-entropy token is not screened out", () => {
     const button = element({
       visibleText: "abcdefghijklmnopqrstuvwxyz123456",
+      ariaLabel: "Copy API key",
+    });
+    const safe = safeControls({
+      elements: [button],
+      legacyRefs: new Map([[button, "@e:copy"]]),
+      pageOrigin: "https://merchant.invalid",
+    });
+    expect(safe.rows).toEqual([
+      expect.objectContaining({ label: "@abcdefghijklmnopqrstuvwxyz123456" }),
+    ]);
+  });
+
+  it("falls back to the accessibility label when the visible text is card material", () => {
+    const button = element({
+      visibleText: "4111 1111 1111 1111",
       ariaLabel: "Copy API key",
     });
     const safe = safeControls({
