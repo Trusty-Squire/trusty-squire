@@ -3863,10 +3863,18 @@ export class BrowserController {
     if (this.trackedMainDocumentPages.has(page)) return;
     this.trackedMainDocumentPages.add(page);
     this.mainDocumentIdentities.set(page, ++this.mainDocumentSequence);
-    page.on("framenavigated", (frame) => {
-      if (frame === page.mainFrame()) {
-        this.mainDocumentIdentities.set(page, ++this.mainDocumentSequence);
-      }
+    // A REPLACED main document advances the identity; a same-document History
+    // API navigation does not. Playwright emits `framenavigated` for both, so
+    // keying on it made every `history.replaceState` inside an SPA checkout
+    // retire every operator ref mid-form — the identity churned faster than a
+    // multi-field address block could be filled. `domcontentloaded` fires once
+    // per real main-frame document (playwright's client `Frame` gates it on
+    // `!this._parentFrame`), which is exactly the document-replacement signal.
+    // A same-document route change to a genuinely different logical page is
+    // still caught by the observation epoch's normalized origin+pathname fold
+    // (compactV2EpochDoc), which is the backstop this narrowing relies on.
+    page.on("domcontentloaded", () => {
+      this.mainDocumentIdentities.set(page, ++this.mainDocumentSequence);
     });
   }
 

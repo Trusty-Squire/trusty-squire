@@ -6,14 +6,29 @@ import type { InteractiveElement } from "./browser.js";
 // resolving while the agent fills the rest of a form. Mutable state (value,
 // checked, occlusion) and the observation counter are deliberately excluded.
 //
-// Two inputs, in order:
+// Inputs, in strict preference order — each tier is consulted only when the one
+// above it does not identify the element uniquely within the inventory:
 //   1. The DOM `id`, when it is present, unique on the page, and not
 //      framework-random. An authored id is the most stable handle a page
 //      offers and survives arbitrary subtree churn.
-//   2. Otherwise a structural signal: accessibility path + role + normalized
-//      accessible name + the ordinal among otherwise-identical siblings.
+//   2. The stable semantic signals: frame + role/tag/type + accessible name +
+//      the authored form-control `name`. None of those move when a live form
+//      re-renders, so a field whose label is unique in its frame keeps one
+//      fingerprint across arbitrary sibling churn.
+//   3. The containing region, as a disambiguator for same-named controls that
+//      live in different parts of the page ("Continue" in a dialog vs. in the
+//      page form).
+//   4. The ordinal among elements that tiers 1-3 leave genuinely
+//      indistinguishable — a LAST resort, and the only positional input.
 //
-// Both branches are frame-scoped. Without that, a same-shaped control in an
+// The accessibility path (`screenPath`) is deliberately NOT an input. It is
+// built as `<container> > <kind>:<label-or-positional-slug>`: its container is
+// already tier 3, its kind and label are already tier 2, and its fallback slug
+// embeds the element's index in the inventory. A Shopify-style address block
+// that reorders its fields when Places autocomplete re-renders would otherwise
+// change every fingerprint in the block and fail closed on every fill.
+//
+// Every tier is frame-scoped. Without that, a same-shaped control in an
 // embedded frame could hash to the SAME fingerprint as one in the main page and
 // let an act resolve into the wrong document — the frame domain-lock
 // (assertSecretFrameTargetAllowed) must not be the only thing standing between
@@ -60,6 +75,17 @@ function accessibleName(el: InteractiveElement): string {
   );
 }
 
+/**
+ * The authored form-control `name`. It is submitted with the form, so a page
+ * cannot regenerate it per render the way it can a `useId` DOM id, and it keeps
+ * `firstName` distinct from `lastName` even in the instant a floating label is
+ * detached mid-re-render.
+ */
+function controlName(el: InteractiveElement): string {
+  const name = (el.name ?? "").trim();
+  return name.length === 0 || isFrameworkRandomDomId(name) ? "" : normalize(name);
+}
+
 function frameKey(el: InteractiveElement): string {
   return [el.frameOrigin ?? "", el.framePath ?? ""].join(SEP);
 }
@@ -74,9 +100,15 @@ function usableDomId(el: InteractiveElement, idCounts: ReadonlyMap<string, numbe
   return idCounts.get([frameKey(el), id].join(SEP)) === 1 ? id : null;
 }
 
+/** The tier-2 and tier-3 keys for one element (see the header). */
+function structuralKeys(el: InteractiveElement): { semantic: string; regional: string } {
+  const semantic = [frameKey(el), roleKey(el), accessibleName(el), controlName(el)].join(SEP);
+  return { semantic, regional: [semantic, normalize(el.container)].join(SEP) };
+}
+
 /**
  * The durable fingerprint of every element in one inventory. Pure, and
- * order-dependent only through the sibling ordinal — which by construction
+ * order-dependent only through the last-resort ordinal — which by construction
  * applies solely to elements that are otherwise indistinguishable.
  */
 export function elementFingerprints(
@@ -89,6 +121,19 @@ export function elementFingerprints(
     const key = [frameKey(el), id].join(SEP);
     idCounts.set(key, (idCounts.get(key) ?? 0) + 1);
   }
+  // Count first, assign second: a tier identifies an element only when it is
+  // unambiguous across the WHOLE inventory, which is not knowable while still
+  // walking it.
+  const structural = new Map<InteractiveElement, { semantic: string; regional: string }>();
+  const semanticCounts = new Map<string, number>();
+  const regionalCounts = new Map<string, number>();
+  for (const el of elements) {
+    if (usableDomId(el, idCounts) !== null) continue;
+    const keys = structuralKeys(el);
+    structural.set(el, keys);
+    semanticCounts.set(keys.semantic, (semanticCounts.get(keys.semantic) ?? 0) + 1);
+    regionalCounts.set(keys.regional, (regionalCounts.get(keys.regional) ?? 0) + 1);
+  }
   const ordinals = new Map<string, number>();
   const fingerprints = new Map<InteractiveElement, string>();
   for (const el of elements) {
@@ -97,18 +142,18 @@ export function elementFingerprints(
       fingerprints.set(el, ["id", frameKey(el), domId].join(SEP));
       continue;
     }
-    // The accessibility path the DOM inventory captured (`screenPath`, e.g.
-    // "dialog:finish-account > button:create-account"), falling back to the
-    // nearest named container.
-    const structural = [
-      frameKey(el),
-      normalize(el.screenPath ?? el.container),
-      roleKey(el),
-      accessibleName(el),
-    ].join(SEP);
-    const ordinal = (ordinals.get(structural) ?? 0) + 1;
-    ordinals.set(structural, ordinal);
-    fingerprints.set(el, ["path", structural, String(ordinal)].join(SEP));
+    const keys = structural.get(el)!;
+    if (semanticCounts.get(keys.semantic) === 1) {
+      fingerprints.set(el, ["name", keys.semantic].join(SEP));
+      continue;
+    }
+    if (regionalCounts.get(keys.regional) === 1) {
+      fingerprints.set(el, ["region", keys.regional].join(SEP));
+      continue;
+    }
+    const ordinal = (ordinals.get(keys.regional) ?? 0) + 1;
+    ordinals.set(keys.regional, ordinal);
+    fingerprints.set(el, ["ordinal", keys.regional, String(ordinal)].join(SEP));
   }
   return fingerprints;
 }

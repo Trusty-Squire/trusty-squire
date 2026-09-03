@@ -23,6 +23,7 @@ export const SLOW_POST_MERGE_FILES = [
 // suite still covers them as a drift backstop.
 export const REQUIRED_BEHAVIOR_FILES = [
   "src/bot/__tests__/autocomplete-commit-confirm.test.ts",
+  "src/bot/__tests__/browser-document-identity.test.ts",
   "src/bot/__tests__/browser-frame-support.test.ts",
   "src/bot/__tests__/google-login.test.ts",
   "src/bot/__tests__/locator-fallback.test.ts",

@@ -96,6 +96,61 @@ describe("element fingerprints", () => {
     expect(new Set(fingerprintsOf(grid)).size).toBe(3);
   });
 
+  it("survives an autocomplete-driven sibling reorder of an address block", () => {
+    // Shopify's checkout re-renders the delivery block while Places
+    // autocomplete is open: the fields come back in a different order, the
+    // region's text-derived container slug changes, and screenPath's fallback
+    // slug (which embeds the element's inventory index) shifts with them. The
+    // ids are React-random, so identity falls to the structural branch — none
+    // of that churn may move a field's fingerprint.
+    const block = (order: readonly string[], suffix: string) =>
+      order.map((name, position) =>
+        element({
+          index: position,
+          tag: "input",
+          type: "text",
+          role: "textbox",
+          name,
+          labelText: name,
+          id: `:r${position}:`,
+          container: `form:delivery-${suffix}`,
+          screenPath: `form:delivery-${suffix} > input:input-${position}`,
+        }),
+      );
+    const order = ["firstName", "lastName", "address1", "city", "zip"];
+    const before = block(order, "empty");
+    const after = block([...order].reverse(), "suggestions-open");
+    const byName = (block: readonly InteractiveElement[]): Map<string, string> => {
+      const prints = fingerprintsOf(block);
+      return new Map(block.map((el, index) => [el.name!, prints[index]!]));
+    };
+    const beforeByName = byName(before);
+    const afterByName = byName(after);
+    for (const name of order) expect(afterByName.get(name)).toBe(beforeByName.get(name));
+  });
+
+  it("keeps the ordinal a last resort behind the authored control name", () => {
+    // Two same-labelled inputs the page DOES distinguish by `name`: the
+    // ordinal must not be consulted, so swapping them keeps both fingerprints.
+    const pair = (order: readonly string[]) =>
+      order.map((name, position) =>
+        element({
+          index: position,
+          tag: "input",
+          role: "textbox",
+          name,
+          labelText: "Address",
+          container: "form:delivery",
+          screenPath: `form:delivery > input:address-${position}`,
+        }),
+      );
+    const [line1, line2] = fingerprintsOf(pair(["address1", "address2"]));
+    const [swapped2, swapped1] = fingerprintsOf(pair(["address2", "address1"]));
+    expect(swapped1).toBe(line1);
+    expect(swapped2).toBe(line2);
+    expect(line1).not.toBe(line2);
+  });
+
   it("scopes fingerprints to their frame", () => {
     const main = element({ id: "pan", screenPath: "form > input:pan" });
     const framed = element({
