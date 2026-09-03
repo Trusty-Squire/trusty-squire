@@ -195,9 +195,9 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
           kind: "await_verification",
           sender: "service.example",
           into_slot: "otp",
-          grant_inbox_consent: false,
+          grant_inbox_consent: true,
         },
-        guidance: [/OTP stays sealed/i, /explicitly agrees/i, /grant_inbox_consent:true/i],
+        guidance: [/OTP stays sealed/i, /Inbox reading is on by default/i, /grant_inbox_consent:false/i],
       },
     ];
 

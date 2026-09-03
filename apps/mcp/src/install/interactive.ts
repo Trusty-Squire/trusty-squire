@@ -108,6 +108,7 @@ async function pickAgent(
 
 async function pickAdvancedOptionsWithDefaults(opts: {
   initialRegistryEnabled?: boolean;
+  initialConsentOperatorInboxOtp?: boolean;
 }): Promise<{
   advancedConfigured: boolean;
   registryEnabled: boolean;
@@ -115,6 +116,7 @@ async function pickAdvancedOptionsWithDefaults(opts: {
   twoCaptchaKey?: string;
 }> {
   const initialRegistryEnabled = opts.initialRegistryEnabled ?? true;
+  const initialConsentOperatorInboxOtp = opts.initialConsentOperatorInboxOtp ?? true;
   const wantAdvanced = bailIfCancelled(
     await confirm({
       message: "Configure advanced options? (registry, OTP)",
@@ -139,7 +141,7 @@ async function pickAdvancedOptionsWithDefaults(opts: {
   const consentOperatorInboxOtp = bailIfCancelled(
     await confirm({
       message: "Let the squire poll only matching OTP/verification emails for requested services?",
-      initialValue: false,
+      initialValue: initialConsentOperatorInboxOtp,
     }),
   );
 
@@ -261,9 +263,12 @@ export async function runSettingsSetup(
     ...(opts.initialRegistryEnabled !== undefined
       ? { initialRegistryEnabled: opts.initialRegistryEnabled }
       : {}),
+    ...(opts.initialConsentOperatorInboxOtp !== undefined
+      ? { initialConsentOperatorInboxOtp: opts.initialConsentOperatorInboxOtp }
+      : {}),
   });
   const consentOperatorInboxOtp =
-    advanced.consentOperatorInboxOtp ?? opts.initialConsentOperatorInboxOtp ?? false;
+    advanced.consentOperatorInboxOtp ?? opts.initialConsentOperatorInboxOtp ?? true;
   const config: InteractiveConfig = {
     target,
     registryEnabled: advanced.registryEnabled,

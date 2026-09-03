@@ -97,7 +97,8 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   [README payment guide](https://github.com/Trusty-Squire/trusty-squire#one-prompt)
   for `operate_pay` checkout-amount precedence.
 - `operate_act { kind: "await_verification" }` — read the email verification
-  code or link from the user's own inbox, behind an explicit consent gate.
+  code or link from the user's own inbox (on by default). Advanced configuration
+  or `grant_inbox_consent:false` opts out for the session.
 - `operate_act { kind: "extract" }` — capture a revealed API key/secret
   straight into the write-only vault (never back into the conversation).
 - `list_credentials`, `use_credential` — find a stored credential and make an

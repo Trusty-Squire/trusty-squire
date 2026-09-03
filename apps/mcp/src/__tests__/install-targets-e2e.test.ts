@@ -196,7 +196,7 @@ describe("connect --target=<agent> writes a valid config", () => {
       consent_operator_inbox_otp?: boolean;
     };
     expect(session.consent_skillify_telemetry).toBe(false);
-    expect(session.consent_operator_inbox_otp).toBe(false);
+    expect(session.consent_operator_inbox_otp).toBe(true);
   });
 
   it("writes the managed registry URL and skillification consent when registry is enabled", async () => {
@@ -221,7 +221,7 @@ describe("connect --target=<agent> writes a valid config", () => {
         consent_operator_inbox_otp?: boolean;
       };
       expect(session.consent_skillify_telemetry).toBe(true);
-      expect(session.consent_operator_inbox_otp).toBe(false);
+      expect(session.consent_operator_inbox_otp).toBe(true);
     } finally {
       if (prev === undefined) delete process.env.TRUSTY_SQUIRE_REGISTRY_URL;
       else process.env.TRUSTY_SQUIRE_REGISTRY_URL = prev;

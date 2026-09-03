@@ -400,8 +400,9 @@ seal. Maintainers can select the legacy V1 `el_table`/snapshot contract with
   - `solve_captcha` drives the in-session captcha gate and returns the
     fail-fast `needs_user` handoff when it cannot be cleared.
   - `await_verification` reads the user's own inbox for an email verification
-    code/link, with sender-scoped search, explicit inbox consent, and
-    sealed-OTP transfer through `into_slot`.
+    code/link by default, with sender-scoped search and sealed-OTP transfer
+    through `into_slot`. Advanced configuration or
+    `grant_inbox_consent:false` can opt out.
   - `login_prepare_signup`, `login_store_signup`, and `login_load_saved` own
     the sealed username/password lifecycle. `login_prepare_signup` seals the
     user's captured email and a generated password, `login_store_signup`

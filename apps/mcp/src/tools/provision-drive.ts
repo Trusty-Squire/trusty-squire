@@ -66,17 +66,15 @@ import { renderSkillHint, serviceSlugFromUrl } from "../bot/skill-hint.js";
 import { clientFromEnv, generateProvisionId } from "../skill-registry-client.js";
 import { openSessionStorage } from "../session.js";
 
-// PR2 — read the install-time inbox-read consent. Default-OFF: a missing flag
-// (older sessions, no session file) means "not consented", so awaitVerification
-// fails closed and hands the code request back to the user. Operator/housekeeper
-// deployments set consent_operator_inbox_otp=true.
+// Read the install-time inbox-read preference. Inbox reads default on; an
+// explicit false in the saved advanced configuration remains an opt-out.
 async function readInboxConsent(): Promise<boolean> {
   try {
     const storage = await openSessionStorage();
     const data = await storage.read();
-    return data?.consent_operator_inbox_otp === true;
+    return data?.consent_operator_inbox_otp !== false;
   } catch {
-    return false;
+    return true;
   }
 }
 
@@ -929,10 +927,10 @@ const ACTION_REPAIR_BY_KIND: Partial<Record<ActionKind, ActionRepair>> = {
       kind: "await_verification",
       sender: "service.example",
       into_slot: "otp",
-      grant_inbox_consent: false,
+      grant_inbox_consent: true,
     },
     safe_alternative:
-      "Retry await_verification with sender scoped to the service and prefer into_slot so the OTP stays sealed. Leave grant_inbox_consent false unless the user explicitly agrees; only retry with grant_inbox_consent:true after that explicit yes." +
+      "Retry await_verification with sender scoped to the service and prefer into_slot so the OTP stays sealed. Inbox reading is on by default; pass grant_inbox_consent:false to opt out for this session." +
       manualCardRecovery,
   },
   login_prepare_signup: {
@@ -1305,7 +1303,7 @@ async function handleAwaitVerification(args: AwaitVerificationArgs) {
   return await awaitVerification(args.session_id, {
     ...(args.sender !== undefined ? { sender: args.sender } : {}),
     ...(args.into_slot !== undefined ? { intoSlot: args.into_slot } : {}),
-    ...(args.grant_inbox_consent === true ? { grantConsent: true } : {}),
+    ...(args.grant_inbox_consent !== undefined ? { grantConsent: args.grant_inbox_consent } : {}),
   });
 }
 
@@ -1711,8 +1709,9 @@ export const provisionAwaitVerificationTool: Tool<z.infer<typeof verifySchema>> 
     "operate_act and continue. The session stays live; this is a resumable " +
     "hand-back, not a failure. Scoped search-and-extract — reads only the matching " +
     "recent mail, never the whole inbox. If a needs_user(verification_code) says " +
-    "inbox reading isn't consented, ask the user; on an explicit yes retry with " +
-    "grant_inbox_consent:true.",
+    "inbox reading is disabled, ask the user; on an explicit yes retry with " +
+    "grant_inbox_consent:true. Pass grant_inbox_consent:false to disable inbox reading " +
+    "for the current session.",
   inputSchema: verifySchema,
   jsonInputSchema: {
     type: "object",

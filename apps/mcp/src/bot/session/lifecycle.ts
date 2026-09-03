@@ -767,11 +767,9 @@ export interface StartOptions {
   // Registry route guidance the tool layer resolved (renderSkillHint). Attached
   // to the start observation so the agent reads the map before driving.
   hint?: string;
-  // PR2 — may the operator read the inbox for email verification? Sourced from
-  // the install-time `consent_operator_inbox_otp` flag. Default-OFF: when false,
-  // awaitVerification refuses the inbox read and hands the code request back to
-  // the user instead of silently reading mail. Operator/housekeeper deployments
-  // set the flag true (they consent to polling their own OAuth-bound inbox).
+  // May the operator read the inbox for email verification? Sourced from the
+  // install-time `consent_operator_inbox_otp` preference. It defaults on; an
+  // explicit false makes awaitVerification hand the code request back instead.
   consentInboxRead?: boolean;
   // The MCP api-client, threaded from the operate_* tool layer. Enables the
   // captcha gate to spend a VAULTED 2Captcha key via the injecting proxy.
@@ -881,7 +879,7 @@ export async function startProvisionSession(
     compactV2Mode,
     startUrl: opts.serviceUrl,
     hintServed: opts.hint !== undefined,
-    consentInboxRead: opts.consentInboxRead === true,
+    consentInboxRead: opts.consentInboxRead !== false,
     userEmail: workerEmail,
     ...(opts.api !== undefined ? { api: opts.api } : {}),
   });
@@ -965,7 +963,7 @@ export async function startHarnessProvisionSession(
     compactV2Mode: opts.observationFormat === "compact-v2" ? "on" : "off",
     startUrl: opts.serviceUrl,
     hintServed: opts.hint !== undefined,
-    consentInboxRead: false,
+    consentInboxRead: opts.consentInboxRead !== false,
     userEmail: null,
     ...(opts.api === undefined ? {} : { api: opts.api }),
   });
