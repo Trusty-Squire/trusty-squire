@@ -86,11 +86,14 @@
 - release(mcp): 1.1.8
 - release(mcp): 1.1.7 (#435)
 
-## 1.1.11 (2026-08-21)
+## 1.1.12 (2026-08-21)
 
 - **Abandoned MCP servers now self-exit after a bounded idle period.** The server exits after 20
   minutes without client messages when no provision session is open, or after 12 hours with an
   open session, closing only its own provision browsers and leases during normal shutdown teardown.
+
+## 1.1.11 (2026-08-21)
+
 - fix(mcp): reuse connected Google session for identity tasks (#557)
 - fix(mcp): prevent profile cleanup from blocking concurrent sessions (#556)
 - fix(mcp): repin workspace dependencies during stable releases (#555)
