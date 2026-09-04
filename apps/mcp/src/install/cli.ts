@@ -800,6 +800,18 @@ export type ConnectPreflight =
   | { kind: "provisioned"; providers: OAuthProviderId[] }
   | { kind: "unverified" };
 
+type VerifiedConnectPreflight = Exclude<ConnectPreflight, { kind: "unverified" }>;
+
+export function decideConnectPreflight(
+  session: SessionData | null,
+  tokenValid: boolean,
+  providers: null,
+): Extract<ConnectPreflight, { kind: "ceremony" } | { kind: "unverified" }>;
+export function decideConnectPreflight(
+  session: SessionData | null,
+  tokenValid: boolean,
+  providers: OAuthProviderId[],
+): VerifiedConnectPreflight;
 export function decideConnectPreflight(
   session: SessionData | null,
   tokenValid: boolean,
