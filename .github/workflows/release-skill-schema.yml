@@ -29,16 +29,16 @@ concurrency:
 
 permissions:
   contents: write
-  id-token: write   # npm provenance
+  id-token: write # npm provenance
 
 jobs:
   verify:
     runs-on: ubuntu-latest
     outputs:
-      version:        ${{ steps.read.outputs.version }}
-      tag_exists:     ${{ steps.read.outputs.tag_exists }}
-      npm_dist_tag:   ${{ steps.read.outputs.npm_dist_tag }}
-      gh_prerelease:  ${{ steps.read.outputs.gh_prerelease }}
+      version: ${{ steps.read.outputs.version }}
+      tag_exists: ${{ steps.read.outputs.tag_exists }}
+      npm_dist_tag: ${{ steps.read.outputs.npm_dist_tag }}
+      gh_prerelease: ${{ steps.read.outputs.gh_prerelease }}
       should_publish: ${{ steps.read.outputs.should_publish }}
     steps:
       - uses: actions/checkout@v4

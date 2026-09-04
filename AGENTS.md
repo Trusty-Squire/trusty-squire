@@ -124,7 +124,7 @@ A prior agent ran `gh run view` without arguments after pushing a commit. GitHub
 
 ```bash
 # Get the run ID for the commit you just pushed
-gh run list --branch staging --limit 1 --json databaseId,headSha --jq '.[0]'
+gh run list --branch main --limit 1 --json databaseId,headSha --jq '.[0]'
 
 # Then view that specific run
 gh run view <id> --log-failed
@@ -385,28 +385,11 @@ Or in CI:
   run: rm -rf ~/.pnpm-store
 ```
 
-### 5. Staging branch requires prerelease versions
+### 5. Single-`main` release model
 
-> **Superseded by the single-`main` migration.** The release workflows now
-> trigger on `main` only: a push to `main` publishes a PRERELEASE to npm `next`,
-> and a stable `latest` release is an explicit `workflow_dispatch` on **Release
-> mcp**. The rest of this section describes the pre-migration dual-branch model
-> and stops applying once `staging` is deleted — see
-> [`docs/single-main-migration.md`](docs/single-main-migration.md) for the
-> current contract and the maintainer's cutover steps.
-
-The `staging` branch is for testing. Releases from `staging` MUST have a prerelease identifier:
-
-- ✅ `0.6.13-staging.1`
-- ✅ `0.6.13-rc.1`
-- ❌ `0.6.13` (stable version on staging is forbidden)
-
-The `main` branch is for stable releases. Releases from `main` MUST NOT have a prerelease identifier:
-
-- ✅ `0.6.13`
-- ❌ `0.6.13-staging.1` (prerelease version on main is forbidden)
-
-**The rule:** Before cutting a release, check the branch name. If `git branch --show-current` returns `staging`, the version in `package.json` must contain a hyphen. If it returns `main`, the version must not contain a hyphen.
+The dual-branch release rule is superseded. The authoritative release contract
+and maintainer cutover steps are in
+[`docs/single-main-migration.md`](docs/single-main-migration.md).
 
 ### 6. The `verify` job runs before the `publish` job
 
@@ -432,7 +415,7 @@ Unlike `ci.yml` (which builds every `packages/**` dist generically via `pnpm -r 
 
 **This exact bug shipped**: PR #450 added `checkoutFieldSetSignature` to `packages/recipe-schema/src/operator-recipe.ts` without bumping the version past the `0.1.0-rc.1` PR #449 had already published, so `@trusty-squire/mcp@1.1.9-rc.1` crashed at import (`SyntaxError: @trusty-squire/recipe-schema missing checkoutFieldSetSignature`) — fixed by bumping to `0.1.0-rc.2` on `fm/fix-recipe-schema-republish`.
 
-**The rule:** any PR that changes `packages/recipe-schema/src/**` or `packages/skill-schema/src/**` MUST bump that package's `version` in the same PR (prerelease shape on `staging`, matching the branch-shape check the release workflow itself enforces — see gotcha #5). Verify a bump actually shipped the change with `npm view @trusty-squire/<pkg> versions --json` and `npm pack --dry-run` / grepping `dist/index.js` for the new export, not just by reading the source.
+**The rule:** any PR that changes `packages/recipe-schema/src/**` or `packages/skill-schema/src/**` MUST bump that package's `version` in the same PR. Schema releases publish stable versions from `main`; see the authoritative single-branch contract in [`docs/single-main-migration.md`](docs/single-main-migration.md). Verify a bump actually shipped the change with `npm view @trusty-squire/<pkg> versions --json` and `npm pack --dry-run` / grepping `dist/index.js` for the new export, not just by reading the source.
 
 ### 9. `Locator.selectOption({ value })` doesn't fail fast on a value-format mismatch — it eats the full 30s actionability timeout
 
@@ -442,7 +425,7 @@ Playwright's `selectOption({ value })` (and `{ label }`) treats "no `<option>` w
 
 ### 10. Post-submit checkout cleanup must stay bound to its pre-submit documents
 
-`fillAndSubmitCheckout` (`apps/mcp/src/bot/browser.ts`) fills into every CDP-reachable frame present at fill time, then submits, then cleans up filled fields. PR #565's cleanup refactor swapped a narrow, marker-only cleanup for one that also JP-label-stamps and substring-clears card-shaped fields — but wired it to a **fresh** `this.page.frames()` call taken *after* `submitFilledCheckoutInScope` returned. On a checkout that forces 3-D Secure, a method/challenge iframe (`methodurl.vcas.visa.com`, `*.cardinalcommerce.com`, an issuer ACS) can already be attached by then, so cleanup evaluated JS in and cleared fields inside that live, cross-origin authentication frame — corrupting the in-flight device-fingerprint POST and silently failing real EbisuMart/JP 3DS checkouts (root-caused in `ts-operator-3ds-completion`; PR #565's own verification was explicitly "detection only, no submission," so this path went untested).
+`fillAndSubmitCheckout` (`apps/mcp/src/bot/browser.ts`) fills into every CDP-reachable frame present at fill time, then submits, then cleans up filled fields. PR #565's cleanup refactor swapped a narrow, marker-only cleanup for one that also JP-label-stamps and substring-clears card-shaped fields — but wired it to a **fresh** `this.page.frames()` call taken _after_ `submitFilledCheckoutInScope` returned. On a checkout that forces 3-D Secure, a method/challenge iframe (`methodurl.vcas.visa.com`, `*.cardinalcommerce.com`, an issuer ACS) can already be attached by then, so cleanup evaluated JS in and cleared fields inside that live, cross-origin authentication frame — corrupting the in-flight device-fingerprint POST and silently failing real EbisuMart/JP 3DS checkouts (root-caused in `ts-operator-3ds-completion`; PR #565's own verification was explicitly "detection only, no submission," so this path went untested).
 
 **The rule:** cleanup must reuse `fillAndSubmitCheckout`'s pre-submit `fillFrameSnapshot`, preserve each original document's root handle, and perform every stamping, clearing, and verification pass through that handle. Never re-query frames or use fresh frame locators after submission: a 3DS/ACS frame may be newly attached or may replace a snapshotted frame's document, and only document-bound handles make either transition fail closed without retargeting cleanup to the authentication page. See the regression tests `"never clears fields inside an unrecognized 3-D Secure frame during post-submit cleanup"` and `"never clears fields after a filled frame navigates to a 3-D Secure document"` in `browser-payment.test.ts`.
 
@@ -478,7 +461,6 @@ Connect's Google-safe plain browser deliberately has no CDP context. Its
 completion is the install claim plus explicit Finish callback, not a disk-cookie
 probe. See `apps/mcp/src/bot/google-login.ts` and
 `docs/DESIGN-warm-browser-reuse.md`.
-
 
 ### 14. MCP tests have required-fast and post-merge-slow tiers
 
@@ -647,12 +629,12 @@ virgin signup succeeds on an UNCOVERED service (no active skill in registry)
   2026-08-28 read-only A/B used serial, fresh-profile trials against Exa, Groq,
   Cartesia, Replit, Runpod, and Turso from egress `172.93.111.86`:
 
-  | Factor | Arm | Content reached |
-  | --- | --- | ---: |
-  | Launch | self-launch + `connectOverCDP` | 15/18 |
-  | Launch | persistent context | 15/18 |
-  | Driver | Patchright | 15/18 |
-  | Driver | baseline | 15/18 |
+  | Factor | Arm                            | Content reached |
+  | ------ | ------------------------------ | --------------: |
+  | Launch | self-launch + `connectOverCDP` |           15/18 |
+  | Launch | persistent context             |           15/18 |
+  | Driver | Patchright                     |           15/18 |
+  | Driver | baseline                       |           15/18 |
 
   The 72 trials were reachability-only; Replit challenged in every cell. They
   did not exercise interactive Turnstile challenges behind product flows, so the

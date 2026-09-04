@@ -5,12 +5,12 @@ a **single `main` branch**.
 
 **The new model**
 
-| | before | after |
-|---|---|---|
-| rc → npm `next` | version bump on `staging` | version bump on `main` |
-| stable → npm `latest` | version bump on `main` | `workflow_dispatch` on **Release mcp** |
-| CI / deploys | `main` + `staging` | `main` |
-| feature PRs target | `staging` | `main` |
+|                       | before                    | after                                  |
+| --------------------- | ------------------------- | -------------------------------------- |
+| rc → npm `next`       | version bump on `staging` | version bump on `main`                 |
+| stable → npm `latest` | version bump on `main`    | `workflow_dispatch` on **Release mcp** |
+| CI / deploys          | `main` + `staging`        | `main`                                 |
+| feature PRs target    | `staging`                 | `main`                                 |
 
 **Why.** The captain runs `@next` and develops predominantly through firstmate
 crews. The split branch caused repeated stale-checkout drift (`main` and
@@ -90,8 +90,8 @@ git log --oneline origin/staging..origin/main
 git diff --name-status --diff-filter=D origin/main origin/staging
 ```
 
-For every `+` commit and every listed file, answer: *is this change already
-represented on `staging`, or was it deliberately removed there?*
+For every `+` commit and every listed file, answer: _is this change already
+represented on `staging`, or was it deliberately removed there?_
 
 ```bash
 # Is a main-only fix present on staging under its own commit?
@@ -209,14 +209,14 @@ now show a **Run workflow** button.
 Pushing 200+ commits' worth of change onto `main` fires every `main`-triggered
 workflow whose path filter matches. Expect, and watch:
 
-| Workflow | What happens |
-|---|---|
-| `release.yml` | Fires (the push touches the workflow file). `apps/mcp/package.json` holds a prerelease, so the shape gate passes — and because that exact version is already on npm the run short-circuits as a **no-op**. |
-| `release-skill-schema.yml`, `release-recipe-schema.yml` | Fire on the lockfile path. `0.1.6` / `0.1.0` are stable and already published → **no-op**. |
-| `release-api.yml` | **Deploys `trusty-squire-api` to Fly**, and its `release_command` runs `prisma db push`. |
-| `release-registry.yml` | **Deploys `trusty-squire-registry` to Fly.** |
-| `deploy-web.yml` | **Deploys `trustysquire` (trustysquire.ai) to Fly.** |
-| `ci.yml`, `mcp-slow-tests.yml` | Run for signal. |
+| Workflow                                                | What happens                                                                                                                                                                                               |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `release.yml`                                           | Fires (the push touches the workflow file). `apps/mcp/package.json` holds a prerelease, so the shape gate passes — and because that exact version is already on npm the run short-circuits as a **no-op**. |
+| `release-skill-schema.yml`, `release-recipe-schema.yml` | Fire on the lockfile path. `0.1.6` / `0.1.0` are stable and already published → **no-op**.                                                                                                                 |
+| `release-api.yml`                                       | **Deploys `trusty-squire-api` to Fly**, and its `release_command` runs `prisma db push`.                                                                                                                   |
+| `release-registry.yml`                                  | **Deploys `trusty-squire-registry` to Fly.**                                                                                                                                                               |
+| `deploy-web.yml`                                        | **Deploys `trustysquire` (trustysquire.ai) to Fly.**                                                                                                                                                       |
+| `ci.yml`, `mcp-slow-tests.yml`                          | Run for signal.                                                                                                                                                                                            |
 
 The three Fly deploys are real production rollouts of everything `staging`
 accumulated. That is the point of the consolidation — but do it when you can
@@ -314,7 +314,7 @@ Nothing is committed back to `main`, so `main` stays on its rc line. **After a
 promotion, bump `apps/mcp/package.json` to the next rc** (e.g. `1.1.14-rc.1`) so
 the next push to `main` publishes a `next` above the new `latest`.
 
-To promote a version number that is *not* simply the current rc line minus its
+To promote a version number that is _not_ simply the current rc line minus its
 suffix (a version jump, say), bump `apps/mcp/package.json` on `main` first, then
 dispatch.
 
@@ -344,27 +344,27 @@ Known hits as of this runbook, split by whether deleting `staging` breaks them:
 
 **Breaks on delete — fix before or immediately after Step 4**
 
-| File | What it does |
-|---|---|
-| `bin/run-operator-mcp-local.sh` | `git fetch origin staging` + resets a dedicated checkout to `origin/staging` on every launch. **Hard-fails once the branch is gone.** Repoint to `main`. |
-| `tools/release-mcp.mjs` | `const source = "staging"` — branches every release off `staging`, and PRs prereleases to `staging` / stables to `main`. Needs the new model: branch off `main`, rc PRs → `main`, stable = the `workflow_dispatch`. |
-| `tools/__tests__/release-mcp.test.sh` | Fixture renames the test repo's branch to `staging` and asserts `gh pr create --base staging`. Update alongside `release-mcp.mjs`. |
+| File                                  | What it does                                                                                                                                                                                                        |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bin/run-operator-mcp-local.sh`       | `git fetch origin staging` + resets a dedicated checkout to `origin/staging` on every launch. **Hard-fails once the branch is gone.** Repoint to `main`.                                                            |
+| `tools/release-mcp.mjs`               | `const source = "staging"` — branches every release off `staging`, and PRs prereleases to `staging` / stables to `main`. Needs the new model: branch off `main`, rc PRs → `main`, stable = the `workflow_dispatch`. |
+| `tools/__tests__/release-mcp.test.sh` | Fixture renames the test repo's branch to `staging` and asserts `gh pr create --base staging`. Update alongside `release-mcp.mjs`.                                                                                  |
 
 **Stale docs — no runtime impact, but they will mislead agents**
 
-| File | What to fix |
-|---|---|
-| `CLAUDE.md` | "Branch routing (enforced)" section: feature PRs → `staging`, stable cuts → `main`, and the npm-distribution release SOP. |
-| `AGENTS.md` | `gh run list --branch staging` example (~L127); the `main`=stable / `staging`=prerelease rules (~L390-401); the schema-bump prerelease-shape rule (~L427); the operator-MCP `origin/staging` note (~L658). |
-| `apps/mcp/RELEASING.md` | "derives the next RC from `origin/staging`". |
-| `docs/OPERATOR-MCP-LOCAL.md` | Whole doc is written around an `origin/staging` checkout. |
-| `TODOS.md` | Harvester Phase 4: "draft PRs against staging". |
+| File                         | What to fix                                                                                                               |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `CLAUDE.md`                  | "Branch routing (enforced)" section: feature PRs → `staging`, stable cuts → `main`, and the npm-distribution release SOP. |
+| `AGENTS.md`                  | The operator-MCP `origin/staging` note; update it when the local-runner wrapper is repointed.                             |
+| `apps/mcp/RELEASING.md`      | "derives the next RC from `origin/staging`".                                                                              |
+| `docs/OPERATOR-MCP-LOCAL.md` | Whole doc is written around an `origin/staging` checkout.                                                                 |
+| `TODOS.md`                   | Harvester Phase 4: "draft PRs against staging".                                                                           |
 
 **Not branch references — leave alone**
 
 `apps/registry/**` and `apps/mcp/src/skill-cli/cli.ts` use "staging" for the
 skill-lifecycle staging slot; `apps/web/next.config.ts` and
-`apps/api/src/server.ts` use it to mean a staging *environment*;
+`apps/api/src/server.ts` use it to mean a staging _environment_;
 `apps/mcp/CHANGELOG.md`, `corpus/**/*.har` and `replay-eval-output/` are
 historical records.
 
@@ -376,7 +376,7 @@ None of these are visible from the repo — confirm each before `git push origin
 - [ ] **Fly deploys.** `release-api.yml` / `release-registry.yml` /
       `deploy-web.yml` are the only deploy paths and are now `main`-only. Check
       that neither `trusty-squire-api`, `trusty-squire-registry` nor
-      `trustysquire` has a *separate* Fly GitHub integration watching `staging`
+      `trustysquire` has a _separate_ Fly GitHub integration watching `staging`
       (`flyctl apps list`, then the app's GitHub settings).
 - [ ] **Any external CI / preview host** (Vercel, Netlify, Cloudflare Pages,
       Codecov, Renovate/Dependabot base branch) configured against `staging`.
