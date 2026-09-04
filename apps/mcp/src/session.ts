@@ -269,8 +269,9 @@ export class SessionStore {
     if (!isSafeAccountKey(accountId)) return null;
     const own = parseEntry(await this.readJson(this.accountFile(accountId)));
     if (own !== null) return own;
-    // Pre-per-account install: this account's only copy is still the flat
-    // pointer file. Read it in place — never migrate on a read path.
+    // Mixed builds can still write a flat pointer for an account with no
+    // per-account file. That fallback is required for those live sessions;
+    // only a manual file deletion leaves it masking a missing account.
     const pointer = await this.readPointer();
     return pointer !== null && accountKey(pointer) === accountId ? pointer : null;
   }
@@ -337,7 +338,13 @@ export class SessionStore {
         }
       }
     }
-    await fs.rm(this.accountFile(key), { force: true });
+    const targetFile = this.accountFile(key);
+    await fs.rm(targetFile, { force: true });
+    // This catches a writer that re-materialized the legacy-only pointer
+    // account while logout retargeted the pointer. A writer already paused
+    // after its snapshot can still land later, but only for a legacy-only
+    // account and only as a stale credential file, never cross-account reads.
+    await fs.rm(targetFile, { force: true });
   }
 }
 

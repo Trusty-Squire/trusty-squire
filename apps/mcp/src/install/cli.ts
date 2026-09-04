@@ -1289,7 +1289,7 @@ async function resolveTarget(explicit: AgentTarget | undefined): Promise<AgentTa
 async function logout(args: Argv): Promise<void> {
   const storage = await openSessionStorage();
   const target = args.account ?? (await storage.currentAccountId());
-  if (target === null) {
+  if (target === null || (args.account !== undefined && (await storage.read(target)) === null)) {
     console.warn("✓ No local session to clear.");
     return;
   }
