@@ -809,11 +809,14 @@ export function decideConnectPreflight(
     session === null ||
     session.machine_token === undefined ||
     session.agent_session_token === undefined ||
-    session.account_id === undefined ||
-    !tokenValid
+    session.account_id === undefined
   ) {
     return { kind: "ceremony" };
   }
+  // Deliberately precede probe-null: an expired agent token must re-pair, not
+  // silently refresh config into an install that 401s on every MCP call.
+  // Do not flip this ordering.
+  if (!tokenValid) return { kind: "ceremony" };
   if (providers === null) return { kind: "unverified" };
   const provisioned = decideProvisioned(session, tokenValid, providers);
   return provisioned === null

@@ -52,6 +52,10 @@ describe("decideConnectPreflight", () => {
     expect(message).toContain("config was refreshed");
     expect(message).not.toContain("Already connected");
   });
+
+  it("re-pairs an expired agent token even when the live probe failed", () => {
+    expect(decideConnectPreflight(boundSession, false, null)).toEqual({ kind: "ceremony" });
+  });
 });
 
 describe("decideConnectComplete (connect's success gate)", () => {
