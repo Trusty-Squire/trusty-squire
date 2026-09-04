@@ -83,11 +83,11 @@ jobs:
           echo "apps/mcp/package.json version: $PKG_VERSION"
 
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            if [[ "${GITHUB_REF_NAME}" != "main" ]]; then
-              echo "::error::A stable promotion must be dispatched from main, got: ${GITHUB_REF_NAME}"
+            if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+              echo "::error::A stable promotion must be dispatched from refs/heads/main, got: ${GITHUB_REF}"
               exit 1
             fi
-            VERSION="${INPUT_STABLE_VERSION#v}"
+            VERSION="$INPUT_STABLE_VERSION"
             if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
               echo "::error::stable_version must be a bare stable semver (X.Y.Z), got: $INPUT_STABLE_VERSION"
               exit 1
