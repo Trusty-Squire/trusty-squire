@@ -1,53 +1,16 @@
 // MCP session storage.
 //
 // ONE store, ONE pathway: 0600 JSON files under
-// $XDG_CONFIG_HOME/trusty-squire/ (or ~/.config/trusty-squire/). The
-// OS-keychain (keytar) path is gone. It selected itself on headless Linux — the
-// write/delete probe PASSES there — while the per-login gnome-keyring "session"
-// collection is wiped between SSH logins, so the saved session silently
-// vanished and `connect` re-paired on every run. The TRUSTY_SQUIRE_SESSION_FILE
-// escape hatch existed only to opt out of that, so it goes with it: two
-// pathways WAS the ambiguity about where state lives.
+// $XDG_CONFIG_HOME/trusty-squire/ (or ~/.config/trusty-squire/). There is no
+// keychain backend or environment-selectable alternate store.
 //
-// ONE FILE PER ACCOUNT: `sessions/<account_id>.json`.
+// Each account owns its source-of-truth `sessions/<account_id>.json`, written
+// atomically. Do not add a cross-process lock: a write touches only one
+// account's file, so accounts cannot lose each other's updates.
 //
-// The bug this closes: state used to live in a single flat `session.json`. On a
-// live box `account_id` moved from 01KS0BKRYTVE9T9FAQQ31A4MK3 to
-// 01M1N0CBVSCX7GGR94S0JYQW1G when the operator connected under a SECOND Trusty
-// Squire account. The second connect overwrote the first account's binding, so
-// servers still serving the first account read the second account's scope and
-// produced a real `credential_not_found` for a credential that exists in the
-// first account's vault.
-//
-// Per-account files make "adding an account NEVER destroys another's"
-// STRUCTURAL rather than enforced. Writing account B touches only B's file, so
-// there is no shared document to read-modify-write and therefore no race to
-// lose an update in. An earlier revision kept the single-file map and added a
-// cross-process lock to serialize writers; that lock then had to solve stale
-// reclaim, PID reuse, crash-wedged holders, and self-stale payloads — three
-// failure modes (lost update, permanent wedge, stale-reclaim-while-live) that
-// simply do not exist here. Do not reintroduce it: if you find yourself needing
-// a lock, something has gone back to sharing one document.
-//
-// Keying by ACCOUNT is namespacing, not the per-process fragmentation that
-// session-simplify removed: an account is a real, stable identity — the same
-// one the vault is scoped to — while a process is not.
-//
-// `session.json` SURVIVES as the current-account pointer AND the compatibility
-// mirror. It holds the current account's entry in the ORIGINAL flat shape, so
-// the `mcp server` processes already running on this box — which loaded a
-// pre-per-account build weeks ago, read that flat file, and cannot be upgraded
-// in place — keep seeing a binding they understand, including after a new
-// connect. It is last-write-wins by design and needs no lock: the most recent
-// connect IS the current account, so the last writer holding the pointer is the
-// correct answer. It is a POINTER AND A MIRROR, never the source of truth for
-// any account other than the current one.
-//
-// READS NEVER WRITE. An earlier revision migrated the file on read, so merely
-// reading it from a new build reshaped the file under four running older
-// servers, which could then no longer read it. Reads accept the legacy flat
-// file as its own account's entry and rewrite nothing; migration to
-// `sessions/<id>.json` happens only on an explicit write.
+// `session.json` remains the last-write-wins current-account pointer and a
+// flat compatibility mirror for older running builds. Reads never rewrite it;
+// migration to `sessions/<account_id>.json` happens only on an explicit write.
 
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";

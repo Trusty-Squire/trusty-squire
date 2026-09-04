@@ -35,9 +35,7 @@ ui.success("Machine token issued");
 pause();
 
 console.warn("");
-console.warn(
-  "You need to connect your Google and/or GitHub OAuth accounts to use Trusty Squire.",
-);
+console.warn("You need to connect your Google and/or GitHub OAuth accounts to use Trusty Squire.");
 ui.section(1, 2, "Connect Google");
 ui.panel(
   `Open this URL to sign in and confirm:\n\n  ${ui.link(
@@ -51,9 +49,7 @@ ui.success("Wrote Cursor MCP config at ~/Library/.../mcp.json");
 pause();
 
 console.warn("");
-ui.hint(
-  "Some services are GitHub-only (Railway, Vercel, parts of Cloudflare).",
-);
+ui.hint("Some services are GitHub-only (Railway, Vercel, parts of Cloudflare).");
 ui.section(2, 2, "Connect GitHub");
 // Show the prompt with a sample answer
 console.warn(`Add GitHub? [Y/n] ${chalk.bold("y")}`);

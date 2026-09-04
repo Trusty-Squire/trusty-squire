@@ -169,7 +169,6 @@ describe("SessionStore", () => {
     await expect(fs.stat(tmpFile)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(fs.stat(path.join(dir, "sessions"))).rejects.toMatchObject({ code: "ENOENT" });
   });
-
 });
 
 // Running servers cannot be upgraded in place: the box carries `mcp server`

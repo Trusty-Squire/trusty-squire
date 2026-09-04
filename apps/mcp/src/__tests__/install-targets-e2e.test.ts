@@ -287,7 +287,9 @@ describe("connect --target=<agent> writes a valid config", () => {
       });
       return ["google"];
     });
-    const vaultFetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 201 }));
+    const vaultFetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 201 }));
 
     try {
       await connect({

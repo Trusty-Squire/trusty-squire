@@ -400,7 +400,7 @@ export async function runServer(): Promise<void> {
       });
     } catch {
       // A failed session read must remain fail-closed; the next tool call can
-      // retry after a transient keychain/file backend problem clears.
+      // retry after a transient session-storage problem clears.
       return null;
     }
   };

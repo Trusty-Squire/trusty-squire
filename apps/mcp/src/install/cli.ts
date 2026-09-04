@@ -1071,7 +1071,7 @@ async function writeAgentConfig(
   session: SessionData,
 ): Promise<void> {
   // Tokens themselves are NOT in the env — the MCP server reads them
-  // from session storage (keychain / file), which keeps them out of
+  // from the account's 0600 JSON session file, which keeps them out of
   // any child-process listing or shell history.
   const launch = resolveServerLaunch();
   const env: Record<string, string> = {
@@ -1309,9 +1309,7 @@ function printHelp(): void {
   console.warn(`${chalk.bold("Commands")}`);
   console.warn(`  ${ui.code("connect")}                       set up this machine (default)`);
   console.warn(`  ${ui.code("settings")}                      edit registry and OTP choices`);
-  console.warn(
-    `  ${ui.code("logout [--account=<id>]")}       clear ONE account's local session`,
-  );
+  console.warn(`  ${ui.code("logout [--account=<id>]")}       clear ONE account's local session`);
   console.warn("");
   console.warn(`${chalk.bold("Flags for connect")}`);
   console.warn(`  --target=<${Object.keys(AGENTS).join("|")}>`);

@@ -188,6 +188,13 @@ npx @trusty-squire/mcp connect
 
 `connect` is also the only way to sign in again: `--force-relogin` switches the bound account and `--force-relogin=google` or `--force-relogin=github` refreshes one provider session. It reports success only after re-checking the browser profile and finding that Google session live, so a run that binds the machine but leaves no usable session fails loudly with the command to retry rather than reporting a working install.
 
+Local state is kept separately for each connected account, and `connect` pins
+that account in the agent's MCP configuration; connecting another account does
+not replace the first account's state. To remove just one account, run
+`npx @trusty-squire/mcp logout --account=<id>`; without `--account`, `logout`
+removes the most recently connected account. `--account` requires a nonempty
+account ID.
+
 To choose a target explicitly:
 
 ```bash

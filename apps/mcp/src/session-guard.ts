@@ -88,7 +88,11 @@ export function createSessionGuard(
     async bind(): Promise<SessionData | null> {
       const storage = await openStorage();
       const data = await readOwn(storage);
-      if (data !== null && data.agent_session_token !== undefined && data.account_id !== undefined) {
+      if (
+        data !== null &&
+        data.agent_session_token !== undefined &&
+        data.account_id !== undefined
+      ) {
         bound = data.account_id;
         served = true;
       }

@@ -667,29 +667,12 @@ workspace dependencies are built before the server starts.
 
 ## Never touch the operator's live local state from a test or a check
 
-This box runs several LIVE `mcp server` processes against the developer's own
-home. Their state is `~/.config/trusty-squire/session.json`,
-`~/.trusty-squire/chrome-profile`, and `~/.trusty-squire/server-instances/`.
-
-A change to `apps/mcp/src/session.ts` that migrated the session file **on read**
-reshaped that live file the first time the test suite ran, and four running
-older servers — which cannot be upgraded in place — could no longer read it. The
-same suite also fought those servers for the real Chrome profile
-(`ProfileBusyError`), which is what 80+ "failures" in a full run actually were.
-
-So:
-
-- Run every manual check against an isolated config dir (`mktemp -d`, then
-  `XDG_CONFIG_HOME`/`HOME`), never the real one.
-- The suite enforces this itself:
-  `apps/mcp/src/__tests__/setup/isolate-config-home.ts` (wired in
-  `vitest.shared.ts`) gives every test file a throwaway `HOME`. Don't remove it,
-  and don't add a code path that resolves the default session path in a test.
-- Any change to the on-disk session shape must be **backward-safe by design**:
-  reads never rewrite the file, and `session.json` stays readable by a build
-  that is already running. `apps/mcp/src/session.ts`'s header owns that
-  contract, including why session state is one file per account and why the
-  cross-process lock that briefly replaced it was the wrong fix.
+Manual checks must use an isolated `HOME` and `XDG_CONFIG_HOME`, never the
+developer's real state. The test suite enforces this through
+`apps/mcp/src/__tests__/setup/isolate-config-home.ts`, wired in
+`vitest.shared.ts`; preserve that setup and do not resolve the default session
+or profile path from a test. The session-storage compatibility contract lives
+in `apps/mcp/src/session.ts`.
 
 ## Maintaining this file
 

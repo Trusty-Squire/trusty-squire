@@ -819,54 +819,10 @@ housekeeper repo.
 
 ### Session storage (one file per ACCOUNT)
 
-`apps/mcp/src/session.ts` owns the only local session store: 0600 JSON files
-under `$XDG_CONFIG_HOME/trusty-squire/` (or `~/.config/...`). There is **one
-pathway** — the keytar/OS-keychain backend and its `TRUSTY_SQUIRE_SESSION_FILE`
-escape hatch were removed, because on headless Linux keytar's probe PASSES (so
-it got selected) while the per-login keyring is wiped between SSH logins,
-silently losing the session.
-
-State is **one file per account**: `sessions/<account_id>.json`. That is the
-fix for the measured defect — a single flat `session.json` meant connecting a
-SECOND account overwrote the first account's binding, so servers still serving
-the first read the second's scope and produced a real `credential_not_found`
-for a credential that exists in the first account's vault.
-
-Per-account files make "adding an account never destroys another's"
-**structural**, not enforced: writing account B touches only B's file, so there
-is no shared document to read-modify-write and no race to lose an update in. An
-earlier revision kept one document and added a cross-process lock to serialize
-writers; that lock then had to solve stale reclaim, PID reuse, crash-wedged
-holders, and self-stale payloads. **Do not reintroduce it** — needing a lock
-here means something went back to sharing one document.
-
-`session.json` survives as the **current-account pointer and compatibility
-mirror**: the current account's entry in the ORIGINAL flat shape, so `mcp
-server` processes already running a pre-per-account build keep reading a
-binding they understand. Last-write-wins is correct there (the most recent
-connect IS current) so it needs no lock. **Reads never write** — an earlier
-revision migrated on read and broke four live servers; the legacy flat file is
-read in place, and migration into `sessions/` happens only on an explicit write.
-
-A server binds one account (`TRUSTY_SQUIRE_ACCOUNT_ID`, which `connect` pins
-into the host agent's MCP config env; else the most recently connected) and
-reads only that entry. The adopted account is published once via
-`setServingAccountId`; tools read it with `servingAccountId()` and must **never**
-re-resolve from the env or the pointer, or a fallback-bound server ends up
-acting as whichever account connected most recently. `session-guard.ts` turns a
-missing own entry into a loud `account_session_missing`, reported only once the
-server has actually bound and served that account so an install still in flight
-keeps the existing reconnect message.
-
-Several servers on one box are correct and expected — each serves the build it
-launched with and the account it was launched for. Never self-upgrade or reap
-over that.
-
-**Tests must never resolve a real home.** `src/__tests__/setup/isolate-config-home.ts`
-(wired via `vitest.shared.ts`) points `HOME`/`XDG_CONFIG_HOME`/
-`TRUSTY_SQUIRE_PROFILE_DIR` at a throwaway directory for every test file,
-because the dev box's home holds the live servers' session state, Chrome
-profile, and instance records.
+The storage contract and local safety invariants are documented at the owner:
+`apps/mcp/src/session.ts`. The [README install section](README.md#install)
+owns user-facing multi-account and logout guidance; test isolation belongs in
+[AGENTS.md](AGENTS.md#never-touch-the-operators-live-local-state-from-a-test-or-a-check).
 
 ### Vault security + lifecycle surface
 
