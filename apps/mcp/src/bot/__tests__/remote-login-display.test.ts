@@ -13,6 +13,26 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+
+// CI does not install noVNC. Supply only the two core assets the login bridge
+// validates so these process-lifecycle tests remain independent of that host
+// package while exercising the real bridge setup.
+vi.mock("node:fs", async (importOriginal) => {
+  const fs = await importOriginal<typeof import("node:fs")>();
+  const path = await import("node:path");
+  return {
+    ...fs,
+    cpSync: (...args: Parameters<typeof fs.cpSync>) => {
+      const [source, destination] = args;
+      if (source !== "/usr/share/novnc") return fs.cpSync(...args);
+      if (typeof destination !== "string") throw new Error("expected a string noVNC destination");
+      fs.mkdirSync(path.join(destination, "core", "input"), { recursive: true });
+      fs.writeFileSync(path.join(destination, "core", "rfb.js"), "");
+      fs.writeFileSync(path.join(destination, "core", "input", "keysymdef.js"), "");
+    },
+  };
+});
+
 import {
   assertRemoteLoginRigLive,
   describeLoginPortHolder,
@@ -389,7 +409,7 @@ setInterval(() => undefined, 1000);
       },
     };
     writeFileSync(rig.authFile!, "test-xauthority", { mode: 0o600 });
-    writeFileSync(rig.passFile!, rig.vncPassword, { mode: 0o600 });
+    writeFileSync(rig.passFile!, rig.vncPassword!, { mode: 0o600 });
     try {
       await new Promise<void>((resolve) => squatter.listen(namedPort, "127.0.0.1", resolve));
       process.env.TS_LOGIN_PUBLIC_HOSTNAME = "vnc.example.test";
@@ -480,7 +500,7 @@ process.exit(1);
       },
     };
     writeFileSync(rig.authFile!, "test-xauthority", { mode: 0o600 });
-    writeFileSync(rig.passFile!, rig.vncPassword, { mode: 0o600 });
+    writeFileSync(rig.passFile!, rig.vncPassword!, { mode: 0o600 });
     try {
       delete process.env.TS_LOGIN_PUBLIC_HOSTNAME;
       delete process.env.TS_LOGIN_LOCAL_PORT;
