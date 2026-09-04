@@ -206,7 +206,7 @@ failure data for a few days.
 ### Harvester subagent Phase 4 — real draft PRs [strategic]
 
 After Phase 3 hits ≥70% acceptance over 4 weeks: promote to real draft PRs
-against staging, cap of 3 open, rejected-fix memory, auto-resume after fix-rc.
+against main, cap of 3 open, rejected-fix memory, auto-resume after fix-rc.
 
 ### Harvester subagent Phase 5 — scale + multi-machine [strategic]
 

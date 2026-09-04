@@ -645,9 +645,9 @@ virgin signup succeeds on an UNCOVERED service (no active skill in registry)
 
 ## Operator Codex MCP runtime
 
-The operator's Codex MCP runs its dedicated local `origin/staging` checkout via
+The operator's Codex MCP runs its dedicated local `origin/main` checkout via
 `bin/run-operator-mcp-local.sh`, never a package-manager cache. The wrapper
-fetches/resets to staging and caches the build by commit plus lockfile digest;
+fetches/resets to main and caches the build by commit plus lockfile digest;
 see `docs/OPERATOR-MCP-LOCAL.md` for the installed config and force-rebuild
 command. Keep the wrapper's runtime command on `apps/mcp/dist/bin.js server` so
 workspace dependencies are built before the server starts.

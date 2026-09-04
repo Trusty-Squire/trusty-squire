@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Launch the operator MCP from a dedicated local checkout of origin/staging.
+# Launch the operator MCP from a dedicated local checkout of origin/main.
 #
 # The Codex MCP configuration points at this script instead of npx so every
-# launch uses the current staging source without an npm release or cache.
+# launch uses the current main source without an npm release or cache.
 # Install this script in the dedicated checkout (default below), then leave
 # that checkout solely to this wrapper.
 
@@ -26,19 +26,19 @@ sync_and_build() {
   git remote get-url origin >/dev/null 2>&1 \
     || fail "checkout has no origin remote: $CHECKOUT"
 
-  git fetch --quiet origin staging
+  git fetch --quiet origin main
   local target current lock_hash expected_state
-  target="$(git rev-parse origin/staging)"
+  target="$(git rev-parse origin/main)"
   current="$(git rev-parse HEAD)"
 
   # This checkout belongs to the operator. Discard any tracked drift so a
   # launch cannot accidentally run a local or stale revision.
   if [[ "$current" != "$target" ]] \
-    || [[ "$(git branch --show-current)" != "staging" ]] \
+    || [[ "$(git branch --show-current)" != "main" ]] \
     || [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
     git reset --hard --quiet "$target"
-    git checkout --quiet -B staging "$target"
-    git branch --set-upstream-to=origin/staging staging >/dev/null 2>&1 || true
+    git checkout --quiet -B main "$target"
+    git branch --set-upstream-to=origin/main main >/dev/null 2>&1 || true
   fi
 
   lock_hash="$(sha256sum pnpm-lock.yaml | awk '{print $1}')"
@@ -70,11 +70,11 @@ sync_and_build() {
 
 cd "$CHECKOUT"
 readonly RUNNING_COMMIT="$(git rev-parse HEAD)"
-readonly STAGING_COMMIT="$(git rev-parse origin/staging)"
-[[ "$RUNNING_COMMIT" == "$STAGING_COMMIT" ]] \
-  || fail "checkout drifted from origin/staging during startup"
+readonly MAIN_COMMIT="$(git rev-parse origin/main)"
+[[ "$RUNNING_COMMIT" == "$MAIN_COMMIT" ]] \
+  || fail "checkout drifted from origin/main during startup"
 readonly MCP_VERSION="$(node -p "require('./apps/mcp/package.json').version")"
-echo "[operator-mcp] starting @trusty-squire/mcp@$MCP_VERSION from ${RUNNING_COMMIT:0:12} (origin/staging)" >&2
+echo "[operator-mcp] starting @trusty-squire/mcp@$MCP_VERSION from ${RUNNING_COMMIT:0:12} (origin/main)" >&2
 
 # Test and maintenance callers can validate the exact selected build without
 # starting a long-lived stdio server.
