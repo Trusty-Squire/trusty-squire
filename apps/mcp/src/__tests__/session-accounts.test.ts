@@ -92,6 +92,10 @@ describe("SessionStore", () => {
 
     await store.write(entry(ACCOUNT_A, "tok_a"));
     expect(await store.listAccounts()).toEqual([ACCOUNT_A]);
+    await expect(fs.stat(accountFile(UNBOUND_ACCOUNT_KEY))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(await pointerOnDisk()).toMatchObject({ account_id: ACCOUNT_A });
   });
 
   it("clear removes one account and leaves the others installed", async () => {

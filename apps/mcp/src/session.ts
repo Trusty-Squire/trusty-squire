@@ -295,7 +295,11 @@ export class SessionStore {
     const pointer = await this.readPointer();
     if (pointer !== null) {
       const pointerKey = accountKey(pointer);
-      if (pointerKey !== key && isSafeAccountKey(pointerKey)) {
+      if (
+        pointerKey !== key &&
+        pointerKey !== UNBOUND_ACCOUNT_KEY &&
+        isSafeAccountKey(pointerKey)
+      ) {
         await this.writeAtomicIfMissing(this.accountFile(pointerKey), pointer);
       }
     }
