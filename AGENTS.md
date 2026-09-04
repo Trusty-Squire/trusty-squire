@@ -607,12 +607,23 @@ virgin signup succeeds on an UNCOVERED service (no active skill in registry)
 
 ## Browser launch posture
 
+- **`connect` is the only sign-in command, and the login browser is always
+  PLAIN Chrome.** There is no `login` subcommand and no CDP-attached login path
+  — Google's OAuth secure-browser check rejects a CDP attach, and a second
+  command that seeded a provider session outside the account claim let an
+  install report success with no live Google session. Re-auth is
+  `connect --force-relogin[=google|github]`; connect gates its own success on
+  the post-ceremony live provider probe (`decideConnectComplete`,
+  `apps/mcp/src/install/cli.ts`), and the operator's `google_session` wall hands
+  back `resume: "connect"`. Never reintroduce a second sign-in entry point, and
+  never point a user or an agent at `login`.
 - `BrowserController` local launches are new-headless only; do not reintroduce
   virtual-display selection or `DISPLAY` plumbing into automated operator runs.
   `apps/mcp/src/bot/browser.ts` owns the supported local-headless and remote-CDP
   operator paths.
-- Interactive human login is the deliberate exception. When `mcp login`,
-  install/connect, or provider reconnect runs without a user-visible display,
+- Interactive human login is the deliberate exception. When `connect` (the one
+  onboarding and re-auth pathway, including `--force-relogin`) runs without a
+  user-visible display,
   `apps/mcp/src/bot/remote-login-display.ts` starts an on-demand Xvfb + noVNC
   quick tunnel and tears the entire owned rig down with that login. Keep this
   module scoped to login flows. SSH/TTY sessions must not treat an inherited

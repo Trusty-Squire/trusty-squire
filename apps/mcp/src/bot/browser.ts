@@ -37,7 +37,7 @@ import type {
   Request,
 } from "playwright";
 import { createRequire } from "node:module";
-import { Socket, createServer } from "node:net";
+import { Socket } from "node:net";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -2717,46 +2717,6 @@ export async function launchCancellablePersistentContext<T, O extends object>(op
   return { status: "cancelled", closeState: "unknown" };
 }
 
-// Find an ephemeral TCP port for Chrome's --remote-debugging-port.
-function findFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.on("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const addr = srv.address();
-      const port = typeof addr === "object" && addr !== null ? addr.port : 0;
-      srv.close(() => (port > 0 ? resolve(port) : reject(new Error("no port"))));
-    });
-  });
-}
-
-// Poll Chrome's DevTools HTTP endpoint until it answers (the browser is up
-// and accepting CDP), or the deadline passes. Returns the base endpoint URL
-// connectOverCDP accepts.
-async function waitForDevtools(
-  port: number,
-  deadlineMs: number,
-  child?: ChildProcess,
-): Promise<string> {
-  const base = `http://127.0.0.1:${port}`;
-  const deadline = Date.now() + deadlineMs;
-  let lastErr = "";
-  while (Date.now() < deadline) {
-    if (child !== undefined && !childProcessIsRunning(child)) {
-      throw new Error("Chrome exited before its DevTools endpoint became available");
-    }
-    try {
-      const res = await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(2_000) });
-      if (res.ok) return base;
-      lastErr = `HTTP ${res.status}`;
-    } catch (err) {
-      lastErr = err instanceof Error ? err.message : String(err);
-    }
-    await new Promise((r) => setTimeout(r, 200));
-  }
-  throw new Error(`Chrome DevTools endpoint never came up on ${base} (${lastErr})`);
-}
-
 const DEVTOOLS_ACTIVE_PORT_FILE = "DevToolsActivePort";
 
 export async function waitForOwnedDevtoolsEndpoint(
@@ -3302,223 +3262,14 @@ export function stripCloudflareChallengeParams(rawUrl: string): string | null {
   return changed ? u.toString() : null;
 }
 
-export interface SelfLaunchedLogin {
-  context: BrowserContext;
-  // Idempotent: disconnects the CDP browser AND kills the self-launched
-  // Chrome child (a plain context.close() over CDP leaves the process
-  // running — the zombie-chrome leak). Also reaps the profile lock.
-  teardown: () => Promise<void>;
-  forceTeardown: () => void;
-  isRunning: () => boolean;
-  identity: ProfileProcessIdentity | null;
-  marker: string;
-}
-
 export function childProcessIsRunning(child: ChildProcess | null): boolean {
   return child !== null && child.exitCode === null && child.signalCode === null;
-}
-
-export async function attachSelfManagedLoginContext(
-  endpoint: string,
-  child: ChildProcess,
-  profileDir: string,
-  identity: ProfileProcessIdentity | null,
-  options: {
-    launcher?: { connectOverCDP(endpoint: string): Promise<Browser> };
-    terminateChild?: (
-      child: ChildProcess,
-      profileDir: string,
-      identity: ProfileProcessIdentity | null,
-    ) => Promise<ProfileProcessIdentity | null>;
-  } = {},
-): Promise<{ browser: Browser; context: BrowserContext }> {
-  let browser: Browser | null = null;
-  try {
-    browser = await (options.launcher ?? getChromium()).connectOverCDP(endpoint);
-    const context = browser.contexts()[0];
-    if (context === undefined) {
-      throw new Error("self-launched login Chrome exposed no default browser context");
-    }
-    return { browser, context };
-  } catch (error) {
-    await browser?.close().catch(() => undefined);
-    const terminateChild =
-      options.terminateChild ??
-      ((ownedChild, ownedProfileDir, ownedIdentity) =>
-        terminateTrackedProfileChild(ownedChild, ownedProfileDir, {
-          identity: ownedIdentity,
-        }));
-    await terminateChild(child, profileDir, identity);
-    throw error;
-  }
 }
 
 function profileCollisionFromStderr(stderr: string): ProfileBusyError | null {
   return /ProcessSingleton|SingletonLock|profile.*in use/i.test(stderr)
     ? new ProfileBusyError(PROFILE_BUSY_MESSAGE)
     : null;
-}
-
-// Self-launch Chrome + connectOverCDP for the INTERACTIVE login (connect /
-// `mcp login`), instead of Playwright's launchPersistentContext.
-//
-// This is the STATE.md 2026-06-12 finding — the same launcher tell that fails
-// Cloudflare Turnstile from a launchPersistentContext-driven Chrome and passes
-// from a self-launched one — ported to the login path. BrowserController (the
-// signup path) already migrated; the connect login was the last consumer of
-// the detectable launcher. Kept STANDALONE (not a BrowserController method) so
-// the working signup path is untouched.
-//
-// Persistent profile is preserved: --user-data-dir=profileDir means the
-// provider session (Google/GitHub cookies) still lands in the bot's profile,
-// which the connect flow needs to seed for later Gmail-reading / OAuth signups.
-export async function launchSelfManagedLoginContext(params: {
-  binary: string;
-  profileDir: string;
-  initialUrl: string;
-  // App mode (--app=URL) opens a chromeless window for interactive login.
-  appMode: boolean;
-  window: { width: number; height: number };
-  env: NodeJS.ProcessEnv;
-  // Server-only proxy (self-launch can't carry SOCKS/HTTP auth — the caller
-  // falls back to launchPersistentContext for credentialed proxies).
-  proxyServer: string | null;
-  extraArgs?: readonly string[];
-  onSpawned?: (
-    browser: Pick<SelfLaunchedLogin, "teardown" | "forceTeardown" | "isRunning" | "marker">,
-  ) => void;
-}): Promise<SelfLaunchedLogin> {
-  let child: ChildProcess | null = null;
-  let childIdentity: ProfileProcessIdentity | null = null;
-  let browser: Browser | null = null;
-  // Reserve the marker before entering the launch sequence, as BrowserController
-  // does for operate_start. The spawned Chrome inherits this exact marker, so
-  // the owner reaper can bind its birth identity without an unanchored window.
-  const ownership = registerLocalBrowserLaunch(params.profileDir, params.env);
-  const launchMarker = ownership.marker;
-  let spawned = false;
-  let teardownPromise: Promise<void> | undefined;
-  const isRunning = (): boolean => childProcessIsRunning(child);
-  const forceTeardown = (): void => {
-    markLocalBrowserLaunchTerminal(child);
-    if (childIdentity !== null) {
-      const tracked = selfManagedChromes.get(childIdentity.pid);
-      signalOwnedChromeProcessTree(childIdentity, false, "SIGKILL", {
-        ...(tracked === undefined ? {} : { proof: tracked.proof }),
-      });
-      reapProfileHolderIfOwned(params.profileDir, childIdentity);
-      return;
-    }
-    if (childProcessIsRunning(child)) child?.kill("SIGKILL");
-  };
-  const teardown = (): Promise<void> => {
-    teardownPromise ??= (async () => {
-      markLocalBrowserLaunchTerminal(child);
-      if (browser !== null) await closeBrowserContextWithin(browser);
-      if (childProcessIsRunning(child)) {
-        if (childIdentity !== null) {
-          signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
-        } else {
-          child?.kill("SIGTERM");
-        }
-      }
-      await closeLocalBrowserLaunch(launchMarker, params.profileDir);
-    })();
-    return teardownPromise;
-  };
-  let endpoint: string;
-  try {
-    endpoint = await withChromeStartupLock(
-      async () => {
-        const port = await findFreePort();
-        clearStaleSingletonLock(params.profileDir);
-        const argv = [
-          `--remote-debugging-port=${port}`,
-          "--remote-debugging-address=127.0.0.1",
-          `--user-data-dir=${params.profileDir}`,
-          "--no-first-run",
-          "--no-default-browser-check",
-          "--password-store=basic",
-          "--window-position=0,0",
-          `--window-size=${params.window.width},${params.window.height}`,
-          "--lang=en-US",
-          ...(params.extraArgs ?? []),
-          ...(params.proxyServer !== null ? [`--proxy-server=${params.proxyServer}`] : []),
-          // NB: we build argv ourselves, so Playwright's --enable-automation
-          // (and the rest of its launch instrumentation — the actual Turnstile
-          // tell) is never added. That is the whole point of self-launching.
-          params.appMode ? `--app=${params.initialUrl}` : params.initialUrl,
-        ];
-        const launched = spawnLocalBrowser(params.binary, argv, params.profileDir, {
-          detached: process.platform !== "win32",
-          env: ownership.env,
-          stdio: ["ignore", "ignore", "pipe"],
-          marker: launchMarker,
-        });
-        child = launched;
-        spawned = true;
-        let chromeStderr = "";
-        launched.stderr?.on("data", (chunk: Buffer) => {
-          chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
-        });
-        try {
-          params.onSpawned?.({ teardown, forceTeardown, isRunning, marker: launchMarker });
-          const endpoint = await waitForDevtools(port, 30_000, launched);
-          childIdentity = await resolveAttachedProfileChildIdentity(
-            launched,
-            params.profileDir,
-            childIdentity,
-          );
-          if (process.platform === "linux" && childIdentity === null) {
-            throw new Error("self-launched login Chrome exited before identity was proven");
-          }
-          childIdentity = registerSelfManagedChrome(launched, params.profileDir) ?? childIdentity;
-          return endpoint;
-        } catch (err) {
-          forceTeardown();
-          childIdentity = await terminateTrackedProfileChild(launched, params.profileDir, {
-            identity: childIdentity,
-          });
-          const detail = chromeStderr.trim();
-          const collision = profileCollisionFromStderr(detail);
-          if (collision !== null) throw collision;
-          throw new Error(
-            `${err instanceof Error ? err.message : String(err)}` +
-              `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
-          );
-        }
-      },
-      { deadlineMs: 0 },
-    );
-  } catch (error) {
-    if (!spawned) untrackOwnerBrowserLaunch(launchMarker);
-    throw error;
-  }
-  if (child === null) {
-    throw new Error("self-launched login Chrome lost its process handle");
-  }
-
-  let attached: Awaited<ReturnType<typeof attachSelfManagedLoginContext>>;
-  try {
-    attached = await attachSelfManagedLoginContext(
-      endpoint,
-      child,
-      params.profileDir,
-      childIdentity,
-    );
-  } catch (error) {
-    forceTeardown();
-    throw error;
-  }
-  browser = attached.browser;
-  return {
-    context: attached.context,
-    teardown,
-    forceTeardown,
-    isRunning,
-    identity: childIdentity,
-    marker: launchMarker,
-  };
 }
 
 export interface PlainLoginBrowser {
@@ -15898,7 +15649,8 @@ export class BrowserController {
         ? Object.assign(
             new Error(
               `google_session: OAuth did not complete within ${Math.ceil(oauthBudgetMs / 1000)} seconds; ` +
-                "the saved session may have expired, so re-login before retrying",
+                "the saved session may have expired, so reconnect with " +
+                "`npx @trusty-squire/mcp connect --force-relogin=google` before retrying",
             ),
             { code: "google_session" },
           )
@@ -17315,7 +17067,7 @@ export class BrowserController {
     // Each step is best-effort and independent: a throw closing the page
     // or context must NOT skip the browser reap below, or an un-closed Chrome
     // keeps the profile's
-    // SingletonLock held — bricking the next signup + `mcp login`).
+    // SingletonLock held — bricking the next signup + `mcp connect`).
     //
     // EVERY close call is timeout-capped. On a wedged headed Chrome (e.g. a
     // run that crashed mid-captcha-click), BOTH page.close() AND

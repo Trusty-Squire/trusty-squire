@@ -1381,15 +1381,20 @@ describe("googleSessionGate (Change 5 — fail-closed precondition gate)", () =>
     expect(googleSessionGate(["google"])).toEqual({ ok: true });
     expect(googleSessionGate(["github", "google"])).toEqual({ ok: true });
   });
-  it("fails closed to a context-backed login hand-back when Google is absent", () => {
+  // This message reaches the host agent verbatim, so it is the single biggest
+  // propagation vector for a remedy: while it named the (now removed) `login`
+  // subcommand, every agent that hit the wall kept recommending it.
+  it("fails closed to a connect hand-back when Google is absent", () => {
     const r = googleSessionGate([]);
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.needs_user.wall).toBe("google_session");
-      expect(r.needs_user.resume).toBe("login");
+      expect(r.needs_user.resume).toBe("connect");
       expect(r.needs_user.message).toMatch(/has NOT started/i);
-      expect(r.needs_user.message).toContain("login --provider=google --force-relogin");
-      expect(r.needs_user.message).not.toContain("connect --force-relogin");
+      expect(r.needs_user.message).toContain(
+        "npx @trusty-squire/mcp connect --force-relogin=google",
+      );
+      expect(r.needs_user.message).not.toContain(["mcp", "login"].join(" "));
     }
   });
   it("fails closed when only a non-Google provider is live (no autonomous login)", () => {

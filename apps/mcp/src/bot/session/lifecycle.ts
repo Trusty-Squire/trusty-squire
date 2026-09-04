@@ -775,7 +775,11 @@ export interface HarnessStartOptions extends Omit<StartOptions, "profileDir" | "
 export interface NeedsUserLogin {
   wall: "google_session";
   message: string;
-  resume: "login";
+  // The remedy names the ONE onboarding/re-auth pathway. It was `"login"`,
+  // after a CLI subcommand that no longer exists — and because this string
+  // reaches the host agent verbatim, agents kept recommending that dead
+  // command to users. Keep it pointing at `connect`.
+  resume: "connect";
 }
 export function googleSessionGate(
   liveProviders: readonly OAuthProviderId[],
@@ -787,10 +791,10 @@ export function googleSessionGate(
       wall: "google_session",
       message:
         "No live Google session in your Chrome profile, so the operator cannot act " +
-        "as you yet. Log in with `npx @trusty-squire/mcp login --provider=google --force-relogin` " +
+        "as you yet. Reconnect with `npx @trusty-squire/mcp connect --force-relogin=google` " +
         "and retry " +
         "— the task has NOT started and nothing was changed.",
-      resume: "login",
+      resume: "connect",
     },
   };
 }

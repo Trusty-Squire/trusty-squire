@@ -17,7 +17,8 @@ Google OAuth stays in the same real-profile browser context. The serialized
 OAuth boundary retains the authorized target and delegates to
 `BrowserController.loginWithOAuth`; it never swaps or recreates the browser.
 
-Interactive `connect`/`login` uses its persistent real profile too. The
+Interactive `connect` - the one onboarding and re-auth pathway - uses its
+persistent real profile too. The
 plain Google-safe browser has no CDP attachment, and its completion is the
 install claim plus the explicit Finish callback - not a cookie-file read.
 

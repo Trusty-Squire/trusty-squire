@@ -2,12 +2,14 @@
 
 ## Pre-publish manual smoke — interactive login
 
-CI cannot complete an OAuth login. **Run both login paths once per release**:
+CI cannot complete an OAuth login. `connect` is the only sign-in pathway, so
+**run both of its display paths once per release**:
 
-- [ ] `npx @trusty-squire/mcp@<rc> install` (or `login`) opens Chrome and
-      a Google sign-in completes on a machine with a user-visible display.
-- [ ] On a headless Linux host with no user-visible display, `install`,
-      `connect`, or `login` prints a reachable noVNC URL; keyboard and pointer
+- [ ] `npx @trusty-squire/mcp@<rc> connect` opens Chrome and a Google sign-in
+      completes on a machine with a user-visible display, and connect reports
+      success only after its live provider probe sees that Google session.
+- [ ] On a headless Linux host with no user-visible display, `connect`
+      prints a reachable noVNC URL; keyboard and pointer
       input complete sign-in from another device. Record
       `pgrep -a 'Xvfb|x11vnc|websockify|cloudflared'` before each teardown case;
       completion, timeout, error, Ctrl-C, SIGTERM, and SIGHUP must each return
@@ -21,7 +23,7 @@ CI cannot complete an OAuth login. **Run both login paths once per release**:
       completes over a one-off quick tunnel instead.
 - [ ] A normal automated `operate_start` session launches Chrome new-headless
       and starts no Xvfb, x11vnc, websockify, or login tunnel.
-- [ ] Starting a concurrent `connect` or `login` exits non-zero without
+- [ ] Starting a concurrent `connect` exits non-zero without
       waiting and prints `another Trusty Squire session is already using
       the browser — close it first`.
 

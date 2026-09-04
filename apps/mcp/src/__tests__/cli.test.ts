@@ -1,4 +1,5 @@
-// Covers parseArgs (the --provider / --skip-browser flags).
+// Covers parseArgs (the connect flags, and the removals that keep `connect`
+// the one onboarding pathway).
 //
 // The 0.5.1 install flow does not have a separate runLoginStage —
 // the bot's Chrome IS where the user signs in to confirm the install,
@@ -33,19 +34,7 @@ describe("applyInstallPreferences (fresh interactive consent must win)", () => {
   });
 });
 
-describe("parseArgs --provider / --skip-browser", () => {
-  it("parses google and github", () => {
-    expect(parseArgs(["connect", "--provider=google"]).providerArg).toBe("google");
-    expect(parseArgs(["connect", "--provider=github"]).providerArg).toBe("github");
-  });
-
-  it("ignores an unrecognized --provider value", () => {
-    expect(parseArgs(["connect", "--provider=apple"]).providerArg).toBeUndefined();
-    // `both` was a 0.5.0 option; in 0.5.1 the user picks the provider
-    // inside the trustysquire confirm page, so this is silently dropped.
-    expect(parseArgs(["connect", "--provider=both"]).providerArg).toBeUndefined();
-  });
-
+describe("parseArgs --skip-browser", () => {
   it("defaults skipBrowser false and sets it with --skip-browser", () => {
     expect(parseArgs(["connect"]).skipBrowser).toBe(false);
     expect(parseArgs(["connect", "--skip-browser"]).skipBrowser).toBe(true);
@@ -85,6 +74,22 @@ describe("parseArgs deprecated flags", () => {
     expectDeprecatedExit(() => parseArgs(["connect", "--skip-login"]));
     expectDeprecatedExit(() => parseArgs(["connect", "--skip-secondary"]));
   });
+
+  // ONE pathway: `login` and the two flags that existed only to serve it are
+  // gone, and a user (or an agent reading a stale doc) that reaches for them
+  // must be told to use connect instead of silently getting a working command.
+  it("rejects the removed login subcommand and points at connect", () => {
+    const message = expectDeprecatedExit(() => parseArgs(["login"]));
+    expect(message).toContain("`login` has been removed");
+    expect(message).toContain("connect");
+  });
+
+  it("rejects the login-only provider and profile-dir flags", () => {
+    expect(expectDeprecatedExit(() => parseArgs(["connect", "--provider=google"]))).toContain(
+      "--force-relogin",
+    );
+    expectDeprecatedExit(() => parseArgs(["connect", "--profile-dir=/tmp/profile"]));
+  });
 });
 
 describe("parseArgs --force-relogin", () => {
@@ -101,7 +106,9 @@ describe("parseArgs --force-relogin", () => {
   });
 });
 
-function expectDeprecatedExit(fn: () => unknown): void {
+// Returns the message printed to the user, so a caller can assert WHICH
+// replacement the removal points at.
+function expectDeprecatedExit(fn: () => unknown): string {
   const error = vi.spyOn(console, "error").mockImplementation(() => {});
   const exit = vi.spyOn(process, "exit").mockImplementation((code?: string | number | null) => {
     throw new Error(`exit:${code}`);
@@ -109,6 +116,7 @@ function expectDeprecatedExit(fn: () => unknown): void {
   try {
     expect(fn).toThrow("exit:64");
     expect(error).toHaveBeenCalledWith(expect.stringContaining("[trusty-squire]"));
+    return String(error.mock.calls.at(-1)?.[0] ?? "");
   } finally {
     exit.mockRestore();
     error.mockRestore();

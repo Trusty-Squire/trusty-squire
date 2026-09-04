@@ -1,5 +1,5 @@
 // login-state.ts — records which OAuth providers the bot holds a
-// session for. `mcp login` establishes the session in the persistent
+// session for. `mcp connect` establishes the session in the persistent
 // Chrome profile; this marker lets the signup bot know — without an
 // expensive provider round-trip — which providers it can auto-prefer
 // for OAuth-first signup.

@@ -414,7 +414,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const rejected = controller.loginWithOAuth("#oauth", 1_000, "google");
       await expect(rejected).rejects.toMatchObject({
         code: "google_session",
-        message: expect.stringMatching(/session may have expired.*re-login/i),
+        message: expect.stringMatching(
+          /session may have expired.*connect --force-relogin=google/is,
+        ),
       });
       expect(Date.now() - startedAt).toBeLessThan(5_000);
     } finally {

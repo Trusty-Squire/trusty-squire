@@ -1,8 +1,15 @@
 // google-login.ts — Phase 1, T2 (/plan-eng-review).
 //
-// Ensures the bot's persistent Chrome profile holds a valid Google
-// session. This is the one-time interactive login; every signup after
-// it is fully automated.
+// Establishes and reads the provider sessions in the bot's persistent Chrome
+// profile. `connect` (install/cli.ts) is the ONLY caller that opens a login;
+// every signup after it is fully automated.
+//
+// The login browser is always PLAIN Chrome (launchPlainLoginBrowser): no
+// `--remote-debugging-port`, no `connectOverCDP`. Google's OAuth secure-browser
+// check rejects a CDP attach (STATE.md 2026-07-20), so the CDP login path was
+// deleted along with the `login` subcommand rather than kept beside it.
+// Completion therefore never comes off a live BrowserContext — it arrives out
+// of band from the install claim plus its nonce-scoped Finish callback.
 //
 // Interactive login uses a local visible Chrome window when one exists. On a
 // headless host it starts a login-scoped Xvfb + noVNC tunnel so a human can
@@ -19,7 +26,6 @@ import {
   profileProcessIdentity,
   PROFILE_BUSY_MESSAGE,
   ProfileBusyError,
-  reapProfileHolderIfOwned,
   type ProfileCloseState,
   type ProfileProcessIdentity,
   waitForProfileFree,
@@ -29,10 +35,8 @@ import {
   closeBrowserContextWithin,
   extractGoogleAccountEmail,
   launchPlainLoginBrowser,
-  launchSelfManagedLoginContext,
   registerLocalBrowserLaunch,
   resolveChannelBinary,
-  selfLaunchEnabled,
 } from "./browser.js";
 export { extractGoogleAccountEmail };
 import {
@@ -45,7 +49,6 @@ import {
   terminateOwnerBrowserLaunch,
   untrackOwnerBrowserLaunch,
 } from "./owner-process-reaper.js";
-import { clearProviderCookies } from "./login-state.js";
 import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
@@ -196,9 +199,8 @@ async function detectGoogleAccountEmailInContext(context: BrowserContext): Promi
 }
 
 // --- config ------------------------------------------------------------
-// Provider cookie markers for `mcp login` (T13). A cookie proves the provider
-// login succeeded; the Trusty Squire vault return proves its OAuth handoff also
-// finished in that same real profile.
+// Provider cookie markers. A cookie proves the provider login succeeded; the
+// live validation below proves the session behind it is still alive.
 interface LoginTarget {
   provider: OAuthProviderId;
   label: string;
@@ -219,53 +221,6 @@ const LOGIN_TARGETS: Record<OAuthProviderId, LoginTarget> = {
     cookies: ["user_session", "__Host-user_session_same_site"],
   },
 };
-const DEFAULT_LOGIN_WEB_BASE = "https://trustysquire.ai";
-
-export function explicitLoginStartUrl(
-  provider: OAuthProviderId,
-  webBase = process.env.TRUSTY_SQUIRE_WEB_BASE ?? DEFAULT_LOGIN_WEB_BASE,
-): string {
-  const url = new URL(`/v1/auth/oauth/${provider}/start`, webBase);
-  url.searchParams.set("next", "/vault");
-  return url.toString();
-}
-
-interface ExplicitLoginContext {
-  cookies(url?: string): Promise<Array<{ name: string; value?: string; domain?: string }>>;
-  pages(): Array<{ url(): string }>;
-  newPage?: BrowserContext["newPage"];
-}
-
-export async function explicitLoginCompleted(
-  context: ExplicitLoginContext,
-  provider: OAuthProviderId,
-  webBase = process.env.TRUSTY_SQUIRE_WEB_BASE ?? DEFAULT_LOGIN_WEB_BASE,
-): Promise<boolean> {
-  const target = LOGIN_TARGETS[provider];
-  if (provider === "google") {
-    if (context.newPage === undefined) return false;
-    if ((await detectGoogleAccountEmailInContext(context as BrowserContext)) === null) return false;
-  } else {
-    const cookies = await context.cookies(target.cookieOrigin);
-    if (!cookies.some((cookie) => target.cookies.includes(cookie.name))) return false;
-  }
-  const expected = new URL(webBase);
-  const page = context.pages()[0];
-  if (page === undefined) return false;
-  try {
-    const current = new URL(page.url());
-    return (
-      current.origin === expected.origin &&
-      (current.pathname === "/vault" || current.pathname.startsWith("/vault/"))
-    );
-  } catch {
-    return false;
-  }
-}
-export interface LoginResult {
-  status: "satisfied" | "timeout" | "error";
-  detail?: string;
-}
 
 // --- session detection -------------------------------------------------
 async function hasProviderSession(context: BrowserContext, target: LoginTarget): Promise<boolean> {
@@ -614,38 +569,28 @@ function createTrackedLoginBrowserLifecycle(
   return lifecycle;
 }
 
-// Open the bot's visible Chrome at `url` and run `pollUntilDone`
-// against the live context until it resolves true, the deadline passes,
-// or the browser/status check fails. Returns whether the poll succeeded.
+// Open the bot's visible Chrome at `url` and run `pollUntilDone` until it
+// resolves true, the deadline passes, or the browser/status check fails.
 //
-// Extracted so both `mcp login` (poll for Google/GitHub cookies in the
-// bot's profile) AND `install` (poll the API for the install claim)
-// share the same browser-launch infrastructure — one Chrome instance,
-// one Google login event for both use cases.
+// The login browser is always PLAIN Chrome — spawned with no
+// `--remote-debugging-port` and never `connectOverCDP`ed — because Google's
+// OAuth "secure browser" integrity check rejects a CDP-attached Chrome
+// (STATE.md 2026-07-20). Nothing drives this browser: the user signs in
+// themselves and completion arrives out of band, through `connect`'s
+// nonce-scoped Finish callback.
 export interface RunInBotChromeOpts {
   profileDir: string;
   url: string;
   deadline: number;
-  // Returns true once the desired side effect has happened (cookies
-  // present, install claimed, etc.). Re-polled every ~3s.
-  pollUntilDone: (context: BrowserContext) => Promise<boolean>;
+  // Returns true once the ceremony has completed. Re-polled every ~3s. It
+  // takes no BrowserContext on purpose: there is no CDP attach to read one
+  // from.
+  pollUntilDone: () => Promise<boolean>;
   // Short label shown after the local Chrome window opens.
   bannerLabel: string;
   // The install flow has a sign-in phase followed by an explicit Finish
   // step. Resolve this lazily so its heartbeat describes the current phase.
   heartbeatMessage?: string | (() => string);
-  // PLAIN-BROWSER MODE (connect claim). When set, the login browser is launched
-  // as plain Chrome with NO CDP attach — required because Google's OAuth
-  // "secure browser" check rejects a CDP-attached Chrome (see
-  // launchPlainLoginBrowser). In this mode the browser is never driven: the
-  // user signs in in the visible browser, and completion is detected by the
-  // install claim plus its explicit Finish callback. The context-taking
-  // `pollUntilDone` above is IGNORED in
-  // this mode. `mcp login` does NOT set this (it stays on the CDP path).
-  plainProfileLogin?: boolean;
-  // Plain-mode completion predicate, re-polled every ~3s. Required when
-  // plainProfileLogin is set.
-  plainPollUntilDone?: () => Promise<boolean>;
   onProxyDisposition?: (proxy: LoginProxyDisposition) => void;
 }
 
@@ -657,8 +602,9 @@ const LOGIN_STATUS_CHECK_STALLED_ERROR =
 export async function runInBotChrome(
   opts: RunInBotChromeOpts,
 ): Promise<{ status: "satisfied" | "timeout" }> {
-  return await withProfileOperationGuard(opts.profileDir, async () =>
-    await runInBotChromeWithProfileGuard(opts),
+  return await withProfileOperationGuard(
+    opts.profileDir,
+    async () => await runInBotChromeWithProfileGuard(opts),
   );
 }
 
@@ -668,7 +614,7 @@ export interface LoginRunResult {
 }
 
 async function runInBotChromeWithProfileGuard(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
-  // `mcp login` runs in a SEPARATE process from the MCP server, so the
+  // `mcp connect` runs in a SEPARATE process from the MCP server, so the
   // in-process OAuth mutex can't serialize it against an in-flight signup.
   // Chrome's SingletonLock is the cross-process semaphore: reclaim a stale
   // holder, but fail immediately for a live one.
@@ -701,109 +647,49 @@ export async function runDisplayedChrome(
     launchPlainLoginBrowser: typeof launchPlainLoginBrowser;
   } = { resolveChannelBinary, launchPlainLoginBrowser },
 ): Promise<LoginRunResult> {
-  // PLAIN-BROWSER path (connect claim): launch plain Chrome, never attach CDP,
-  // detect completion from the explicit install callback. See
-  // launchPlainLoginBrowser / RunInBotChromeOpts.plainProfileLogin.
-  if (opts.plainProfileLogin === true) {
-    if (opts.plainPollUntilDone === undefined) {
-      throw new Error("plainProfileLogin set without plainPollUntilDone");
-    }
-    const binary = runtime.resolveChannelBinary("chrome");
-    if (binary === null) {
-      throw new Error("no Chrome binary found for the plain login browser");
-    }
-    const proxyOpt = loginProxyOption();
-    const proxyDisposition =
-      proxyOpt !== undefined && proxyOpt.password === undefined
-        ? selfLaunchProxyDisposition(proxyOpt)
-        : null;
-    opts.onProxyDisposition?.(proxyDisposition);
-    const lifecycle = createTrackedLoginBrowserLifecycle();
-    let status: LoginRunResult["status"] = "timeout";
-    let closeState: ProfileCloseState = "unknown";
-    try {
-      const browser = await runtime.launchPlainLoginBrowser({
-        binary,
-        profileDir: opts.profileDir,
-        url: opts.url,
-        window: { width: 1280, height: 800 },
-        env: process.env,
-        // Self-launch/--proxy-server can't carry proxy auth — drop a credentialed
-        // proxy (direct). Connect from the box is the point anyway.
-        proxyServer: proxyDisposition?.server ?? null,
-        extraArgs: ["--no-sandbox", "--disable-dev-shm-usage"],
-      });
-      lifecycle.browserLaunched(
-        async () =>
-          await teardownLoginBrowser({
-            profileDir: opts.profileDir,
-            identity: browser.identity,
-            closeBrowser: browser.teardown,
-            forceClose: browser.forceTeardown,
-            isRunning: browser.isRunning,
-          }),
-      );
-      console.error(`\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`);
-      const ok = await pollUntil(
-        opts.deadline,
-        () => opts.plainPollUntilDone!(),
-        opts.heartbeatMessage,
-        () => {
-          if (!browser.isRunning()) throw new Error(LOGIN_BROWSER_CLOSED_ERROR);
-        },
-      );
-      status = ok ? "satisfied" : "timeout";
-    } finally {
-      closeState = await lifecycle.finish();
-    }
-    return { status: status === "timeout" ? "timeout" : "satisfied", closeState };
+  const binary = runtime.resolveChannelBinary("chrome");
+  if (binary === null) {
+    throw new Error("no Chrome binary found for the plain login browser");
   }
-  const chromium = resolveChromium();
   const proxyOpt = loginProxyOption();
-  opts.onProxyDisposition?.(proxyOpt ?? null);
+  const proxyDisposition =
+    proxyOpt !== undefined && proxyOpt.password === undefined
+      ? selfLaunchProxyDisposition(proxyOpt)
+      : null;
+  opts.onProxyDisposition?.(proxyDisposition);
   const lifecycle = createTrackedLoginBrowserLifecycle();
   let status: LoginRunResult["status"] = "timeout";
   let closeState: ProfileCloseState = "unknown";
   try {
-    const persistent = await launchWithProfileGate(
-      opts.profileDir,
-      () =>
-        launchPersistentLoginContext(chromium, opts.profileDir, {
-          headless: false,
-          viewport: { width: 1280, height: 800 },
-          // Drop Playwright's default --enable-automation switch: it paints the
-          // "Chrome is being controlled by automated test software" infobar AND
-          // is itself an automation fingerprint the provider can read during the
-          // sign-in (so removing it also helps the session survive).
-          ignoreDefaultArgs: ["--enable-automation"],
-          args: [
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-          ],
-          ...(proxyOpt !== undefined ? { proxy: proxyOpt } : {}),
-        }),
-      { failFast: true },
-    );
-    const context = persistent.context;
-    const holderPid = currentProfileHolderPid(opts.profileDir);
-    const identity = holderPid === null ? null : profileProcessIdentity(holderPid, opts.profileDir);
+    const browser = await runtime.launchPlainLoginBrowser({
+      binary,
+      profileDir: opts.profileDir,
+      url: opts.url,
+      window: { width: 1280, height: 800 },
+      env: process.env,
+      // Self-launch/--proxy-server can't carry proxy auth — drop a credentialed
+      // proxy (direct). Connect from the box is the point anyway.
+      proxyServer: proxyDisposition?.server ?? null,
+      extraArgs: ["--no-sandbox", "--disable-dev-shm-usage"],
+    });
     lifecycle.browserLaunched(
       async () =>
         await teardownLoginBrowser({
           profileDir: opts.profileDir,
-          identity,
-          closeBrowser: persistent.close,
-          forceClose: () => reapProfileHolderIfOwned(opts.profileDir, identity),
+          identity: browser.identity,
+          closeBrowser: browser.teardown,
+          forceClose: browser.forceTeardown,
+          isRunning: browser.isRunning,
         }),
     );
-    const page = context.pages()[0] ?? (await context.newPage());
-    await page.goto(opts.url, { waitUntil: "domcontentloaded" });
     console.error(`\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`);
     const ok = await pollUntil(
       opts.deadline,
-      () => opts.pollUntilDone(context),
+      () => opts.pollUntilDone(),
       opts.heartbeatMessage,
+      () => {
+        if (!browser.isRunning()) throw new Error(LOGIN_BROWSER_CLOSED_ERROR);
+      },
     );
     status = ok ? "satisfied" : "timeout";
   } finally {
@@ -815,7 +701,6 @@ export async function runDisplayedChrome(
 export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
   const rig = createRemoteLoginRig();
   let activeTeardown: (() => Promise<void>) | undefined;
-  let plainBrowserIsRunning: (() => boolean) | undefined;
   const removeRigCleanup = registerRemoteLoginRigCleanup(rig, () => activeTeardown);
   const lifecycle = createTrackedLoginBrowserLifecycle(
     async () => await teardownRemoteLoginRig(rig),
@@ -828,10 +713,6 @@ export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<Lo
 
     const proxyOpt = loginProxyOption();
     const chromeBinary = resolveChannelBinary("chrome");
-    const useSelfLaunch =
-      selfLaunchEnabled() &&
-      chromeBinary !== null &&
-      (proxyOpt === undefined || proxyOpt.password === undefined);
     const sharedChromeArgs = [
       "--disable-blink-features=AutomationControlled",
       "--test-type",
@@ -839,119 +720,44 @@ export async function runRemoteLoginChrome(opts: RunInBotChromeOpts): Promise<Lo
       "--disable-dev-shm-usage",
     ] as const;
     const browserEnv = remoteLoginEnvironment(rig);
-    let context: BrowserContext | undefined;
 
-    if (opts.plainProfileLogin === true) {
-      if (opts.plainPollUntilDone === undefined) {
-        throw new Error("plainProfileLogin set without plainPollUntilDone");
-      }
-      if (chromeBinary === null) {
-        throw new Error("no Chrome binary found for the plain login browser");
-      }
-      const proxyDisposition =
-        proxyOpt !== undefined && proxyOpt.password === undefined
-          ? selfLaunchProxyDisposition(proxyOpt)
-          : null;
-      opts.onProxyDisposition?.(proxyDisposition);
-      const browser = await launchPlainLoginBrowser({
-        binary: chromeBinary,
-        profileDir: opts.profileDir,
-        url: opts.url,
-        window: { width: rig.width, height: rig.height },
-        env: browserEnv,
-        proxyServer: proxyDisposition?.server ?? null,
-        extraArgs: sharedChromeArgs,
-      });
-      lifecycle.browserLaunched(
-        async () =>
-          await teardownLoginBrowser({
-            profileDir: opts.profileDir,
-            identity: browser.identity,
-            closeBrowser: browser.teardown,
-            forceClose: browser.forceTeardown,
-          }),
-      );
-      plainBrowserIsRunning = browser.isRunning;
-    } else if (useSelfLaunch && chromeBinary !== null) {
-      const proxyDisposition = selfLaunchProxyDisposition(proxyOpt);
-      opts.onProxyDisposition?.(proxyDisposition);
-      const browser = await launchSelfManagedLoginContext({
-        binary: chromeBinary,
-        profileDir: opts.profileDir,
-        initialUrl: opts.url,
-        appMode: true,
-        window: { width: rig.width, height: rig.height },
-        env: browserEnv,
-        proxyServer: proxyDisposition?.server ?? null,
-        extraArgs: sharedChromeArgs,
-      });
-      lifecycle.browserLaunched(
-        async () =>
-          await teardownLoginBrowser({
-            profileDir: opts.profileDir,
-            identity: browser.identity,
-            closeBrowser: browser.teardown,
-            forceClose: browser.forceTeardown,
-          }),
-      );
-      context = browser.context;
-    } else {
-      const chromium = resolveChromium();
-      opts.onProxyDisposition?.(proxyOpt ?? null);
-      const persistent = await launchWithProfileGate(
-        opts.profileDir,
-        () =>
-          launchPersistentLoginContext(chromium, opts.profileDir, {
-            headless: false,
-            viewport: null,
-            env: browserEnv,
-            ignoreDefaultArgs: ["--enable-automation"],
-            ...(proxyOpt !== undefined ? { proxy: proxyOpt } : {}),
-            args: [
-              "--window-position=0,0",
-              `--window-size=${rig.width},${rig.height}`,
-              `--app=${opts.url}`,
-              ...sharedChromeArgs,
-            ],
-          }),
-        { failFast: true },
-      );
-      const holderPid = currentProfileHolderPid(opts.profileDir);
-      const identity =
-        holderPid === null ? null : profileProcessIdentity(holderPid, opts.profileDir);
-      lifecycle.browserLaunched(
-        async () =>
-          await teardownLoginBrowser({
-            profileDir: opts.profileDir,
-            identity,
-            closeBrowser: persistent.close,
-            forceClose: () => reapProfileHolderIfOwned(opts.profileDir, identity),
-          }),
-      );
-      context = persistent.context;
+    if (chromeBinary === null) {
+      throw new Error("no Chrome binary found for the plain login browser");
     }
-
+    const proxyDisposition =
+      proxyOpt !== undefined && proxyOpt.password === undefined
+        ? selfLaunchProxyDisposition(proxyOpt)
+        : null;
+    opts.onProxyDisposition?.(proxyDisposition);
+    const browser = await launchPlainLoginBrowser({
+      binary: chromeBinary,
+      profileDir: opts.profileDir,
+      url: opts.url,
+      window: { width: rig.width, height: rig.height },
+      env: browserEnv,
+      proxyServer: proxyDisposition?.server ?? null,
+      extraArgs: sharedChromeArgs,
+    });
+    lifecycle.browserLaunched(
+      async () =>
+        await teardownLoginBrowser({
+          profileDir: opts.profileDir,
+          identity: browser.identity,
+          closeBrowser: browser.teardown,
+          forceClose: browser.forceTeardown,
+        }),
+    );
     try {
-      if (context !== undefined) {
-        const page = context.pages()[0] ?? (await context.newPage());
-        await page.goto(opts.url, { waitUntil: "domcontentloaded" });
-      }
-
       await exposeRemoteLoginDisplay(rig, opts.bannerLabel);
       lifecycle.throwIfCancelled();
 
       const completed = await pollUntil(
         opts.deadline,
-        () =>
-          context !== undefined
-            ? opts.pollUntilDone(context)
-            : opts.plainPollUntilDone!(),
+        () => opts.pollUntilDone(),
         opts.heartbeatMessage,
         () => {
           assertRemoteLoginRigLive(rig);
-          if (plainBrowserIsRunning !== undefined && !plainBrowserIsRunning()) {
-            throw new Error(LOGIN_BROWSER_CLOSED_ERROR);
-          }
+          if (!browser.isRunning()) throw new Error(LOGIN_BROWSER_CLOSED_ERROR);
         },
       );
       const closeState = await lifecycle.finish();
@@ -1047,46 +853,6 @@ export function checkLoginStatusWithin(
 }
 
 // --- public entry ------------------------------------------------------
-// Ensures `profileDir` holds a valid session for `provider`, doing
-// whichever login flow the environment calls for. Returns when the
-// session is present, the deadline passes, or setup fails. T13: the
-// provider defaults to Google; `mcp login --provider=github` reuses
-// the same flow against github.com.
-export async function ensureOAuthSession(opts?: {
-  provider?: OAuthProviderId;
-  profileDir?: string;
-  timeoutMinutes?: number;
-  // Opens a fresh provider flow after clearing the selected provider when
-  // requested by `login --force-relogin`.
-  forceOpen?: boolean;
-  webBase?: string;
-}): Promise<LoginResult> {
-  const provider: OAuthProviderId = opts?.provider ?? "google";
-  const target = LOGIN_TARGETS[provider];
-  const profileDir = opts?.profileDir ?? CHROME_PROFILE_DIR;
-  const timeoutMinutes = Math.max(1, opts?.timeoutMinutes ?? 15);
-  const deadline = Date.now() + timeoutMinutes * 60 * 1000;
-
-  try {
-    if (opts?.forceOpen === true && !(await clearProviderCookies(profileDir, provider))) {
-      return { status: "error", detail: `could not clear the existing ${target.label} session` };
-    }
-    const webBase = opts?.webBase ?? process.env.TRUSTY_SQUIRE_WEB_BASE ?? DEFAULT_LOGIN_WEB_BASE;
-    const result = await runInBotChrome({
-      profileDir,
-      url: explicitLoginStartUrl(provider, webBase),
-      deadline,
-      bannerLabel: `You'll see a Chrome window — log into your ${target.label} account.`,
-      pollUntilDone: (ctx) => explicitLoginCompleted(ctx, provider, webBase),
-    });
-    return result.status === "satisfied"
-      ? { status: "satisfied" }
-      : { status: "timeout", detail: "no login completed before the deadline" };
-  } catch (err) {
-    return { status: "error", detail: err instanceof Error ? err.message : String(err) };
-  }
-}
-
 // Public entry for the install flow: opens the trustysquire /install
 // confirm URL in the bot's persistent Chrome profile, runs the
 // user-supplied check until the active flow's completion gate passes
@@ -1127,13 +893,7 @@ export async function openInstallConfirmInBotChrome(
       bannerLabel:
         `You'll see a Chrome window with the Trusty Squire install page. ` +
         `Sign in there to connect this machine — you only sign in once.`,
-      // PLAIN browser — no CDP. Google's OAuth flow (which this confirm page
-      // initiates) rejects a CDP-attached Chrome (STATE.md 2026-07-20). The
-      // context-taking pollUntilDone is never invoked in this mode; supply a
-      // stub to satisfy the (CDP-path) type.
-      plainProfileLogin: true,
-      pollUntilDone: () => Promise.resolve(false),
-      plainPollUntilDone: async () =>
+      pollUntilDone: async () =>
         installClaimPollCompleted(await opts.pollUntilClaimed(completion?.isCompleted() === true)),
       ...(opts.heartbeatMessage !== undefined ? { heartbeatMessage: opts.heartbeatMessage } : {}),
     });
@@ -1149,7 +909,9 @@ export async function openInstallConfirmInBotChrome(
 }
 
 export type InstallClaimPollResult =
-  "pending" | "expired" | { status: "claimed"; provider: OAuthProviderId | null };
+  | "pending"
+  | "expired"
+  | { status: "claimed"; provider: OAuthProviderId | null };
 
 export function installClaimPollCompleted(result: InstallClaimPollResult): boolean {
   if (result === "expired") {

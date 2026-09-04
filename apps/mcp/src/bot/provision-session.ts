@@ -583,7 +583,8 @@ function oauthActionDeadlineError(deadline: OAuthActionDeadline): Error {
     return Object.assign(
       new Error(
         `google_session: OAuth did not complete within ${Math.ceil(deadline.timeoutMs / 1000)} seconds; ` +
-          "the saved session may have expired, so re-login before retrying",
+          "the saved session may have expired, so reconnect with " +
+          "`npx @trusty-squire/mcp connect --force-relogin=google` before retrying",
       ),
       { code: "google_session" },
     );
@@ -8545,7 +8546,9 @@ async function readGmailSearchResultsResilient(
   let links: VerificationLinkCandidate[] = [];
   for (let retry = 0; retry <= GMAIL_TRANSIENT_MAX_RETRIES; retry++) {
     if (retry > 0) {
-      await browser.waitForCaptchaChallengeToSettle(gmailTransientBackoffMs(retry - 1), 0).catch(() => false);
+      await browser
+        .waitForCaptchaChallengeToSettle(gmailTransientBackoffMs(retry - 1), 0)
+        .catch(() => false);
       await browser.goto(searchUrl);
     }
     for (let i = 0; i < 6; i++) {
@@ -8598,7 +8601,10 @@ export async function awaitVerification(
         }[],
       ): VerificationLinkCandidate[] =>
         els
-          .filter((e): e is typeof e & { href: string } => typeof e.href === "string" && e.href.length > 0)
+          .filter(
+            (e): e is typeof e & { href: string } =>
+              typeof e.href === "string" && e.href.length > 0,
+          )
           .map((e) => ({ url: e.href, text: e.visibleText ?? e.labelText ?? e.ariaLabel ?? null }));
       let code: string | null = null;
       let link: string | null = null;
@@ -8618,9 +8624,17 @@ export async function awaitVerification(
           const openedLinks = linkCandidatesOf(await browser.extractInteractiveElements());
           sourceFrom = extractSenderEmail(openedText);
           const expectedDomains = expectedVerificationDomains(opts.sender, sourceFrom);
-          ({ code, link } = parseVerification(openedText, [...openedLinks, ...listLinks], expectedDomains));
+          ({ code, link } = parseVerification(
+            openedText,
+            [...openedLinks, ...listLinks],
+            expectedDomains,
+          ));
         } else {
-          ({ code, link } = parseVerification(listText, listLinks, expectedVerificationDomains(opts.sender, null)));
+          ({ code, link } = parseVerification(
+            listText,
+            listLinks,
+            expectedVerificationDomains(opts.sender, null),
+          ));
         }
       }
       return { code, link, sourceFrom };

@@ -6,9 +6,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { spawn, type ChildProcess } from "node:child_process";
-import type { BrowserContext } from "playwright";
 import {
-  attachSelfManagedLoginContext,
   BrowserController,
   childProcessIsRunning,
   closeLocalBrowserLaunch,
@@ -33,8 +31,6 @@ import {
   classifyGoogleAuthState,
   checkLoginStatusWithin,
   detectActiveProviderSessions,
-  explicitLoginCompleted,
-  explicitLoginStartUrl,
   extractGoogleAccountEmail,
   extractGoogleNumberMatch,
   extractOAuthScopes,
@@ -45,7 +41,6 @@ import {
   scopesAreBasic,
   scrapeGoogleScopePhrases,
   trackActiveLoginBrowser,
-  ensureOAuthSession,
   launchPersistentLoginContext,
   type PersistentLauncher,
   type RunInBotChromeOpts,
@@ -151,14 +146,16 @@ describe("interactive login display routing", () => {
 
 describe("install completion callback", () => {
   it("waits for the explicit Finish callback rather than profile files", async () => {
-    const pollUntilClaimed = vi.fn(async () => ({ status: "claimed", provider: "google" }) as const);
+    const pollUntilClaimed = vi.fn(
+      async () => ({ status: "claimed", provider: "google" }) as const,
+    );
     const runChrome = vi.fn(async (opts: RunInBotChromeOpts) => {
       const callback = new URLSearchParams(new URL(opts.url).hash.slice(1)).get(
         "ts_install_complete",
       );
       expect(callback).not.toBeNull();
       await fetch(`${callback!}?provider=google`, { redirect: "manual" });
-      await expect(opts.plainPollUntilDone!()).resolves.toBe(true);
+      await expect(opts.pollUntilDone()).resolves.toBe(true);
       return { status: "satisfied" as const, closeState: "closed" as const };
     });
 
@@ -173,47 +170,6 @@ describe("install completion callback", () => {
       ),
     ).resolves.toEqual({ status: "claimed" });
     expect(pollUntilClaimed).toHaveBeenCalledWith(true);
-  });
-});
-
-describe("explicit provider login completion", () => {
-  it("starts at Trusty Squire OAuth and returns to the vault", () => {
-    expect(explicitLoginStartUrl("google", "https://trustysquire.ai")).toBe(
-      "https://trustysquire.ai/v1/auth/oauth/google/start?next=%2Fvault",
-    );
-    expect(explicitLoginStartUrl("github", "https://trustysquire.ai")).toBe(
-      "https://trustysquire.ai/v1/auth/oauth/github/start?next=%2Fvault",
-    );
-  });
-
-  it("does not complete on a provider cookie until the OAuth callback reaches the vault", async () => {
-    const cookies = vi.fn(async () => [
-      { name: "SID", value: "live-google-session", domain: ".google.com", path: "/" },
-    ]);
-    const context = {
-      cookies,
-      pages: () => [
-        { url: () => "https://myaccount.google.com/" },
-        { url: () => "https://trustysquire.ai/vault" },
-      ],
-      newPage: vi.fn(async () => ({
-        goto: vi.fn(async () => undefined),
-        url: () => "https://myaccount.google.com/",
-        locator: () => ({
-          evaluateAll: vi.fn(async () => ["Google Account: Test (operator@example.com)"]),
-        }),
-        close: vi.fn(async () => undefined),
-      })) as unknown as BrowserContext["newPage"],
-    };
-
-    await expect(
-      explicitLoginCompleted(context, "google", "https://trustysquire.ai"),
-    ).resolves.toBe(false);
-
-    context.pages = () => [{ url: () => "https://trustysquire.ai/vault" }];
-    await expect(
-      explicitLoginCompleted(context, "google", "https://trustysquire.ai"),
-    ).resolves.toBe(true);
   });
 });
 
@@ -277,8 +233,6 @@ describe("operator shutdown — OAuth-bootstrap login browser cancellation", () 
         deadline: Date.now() + 60_000,
         pollUntilDone: async () => false,
         bannerLabel: "Complete sign-in.",
-        plainProfileLogin: true,
-        plainPollUntilDone: async () => false,
       },
       {
         resolveChannelBinary: () => "/unused/chrome",
@@ -548,7 +502,11 @@ describe("headless login profile contention", () => {
     symlinkSync(`${hostname()}-${process.pid}`, join(profileDir, "SingletonLock"));
 
     try {
-      const result = await ensureOAuthSession({ profileDir });
+      const result = await openInstallConfirmInBotChrome({
+        confirmUrl: "https://example.test/install",
+        pollUntilClaimed: async () => "pending" as const,
+        profileDir,
+      });
       expect(result).toEqual({
         status: "error",
         detail: "another Trusty Squire session is already using the browser — close it first",
@@ -823,53 +781,9 @@ describe("bot Chrome launch consistency", () => {
     ).resolves.toBeUndefined();
     expect(events).toEqual(["terminal", "terminate-marker", "untrack-marker"]);
   });
-
 });
 
-describe("cancelled self-managed Chrome launch", () => {
-  it.each([
-    { failure: "attach", expectedCloseCalls: 0 },
-    { failure: "context", expectedCloseCalls: 1 },
-  ])(
-    "terminates an owned login child after $failure failure",
-    async ({ failure, expectedCloseCalls }) => {
-      const profileDir = mkdtempSync(join(tmpdir(), "ts-login-attach-failure-"));
-      const child = fakeProcess("chrome");
-      Object.assign(child, { pid: 424_240 });
-      const identity = {
-        host: hostname(),
-        pid: 424_240,
-        start_time: "birth",
-        user_data_dir: profileDir,
-      };
-      const close = vi.fn(async () => undefined);
-      const connectOverCDP =
-        failure === "attach"
-          ? vi.fn(async () => {
-              throw new Error("CDP attach failed");
-            })
-          : vi.fn(async () => ({ contexts: () => [], close }));
-      const terminateChild = vi.fn(async () => identity);
-      try {
-        await expect(
-          attachSelfManagedLoginContext("http://127.0.0.1:9222", child, profileDir, identity, {
-            launcher: { connectOverCDP } as never,
-            terminateChild,
-          }),
-        ).rejects.toThrow(
-          failure === "attach"
-            ? "CDP attach failed"
-            : "self-launched login Chrome exposed no default browser context",
-        );
-        expect(close).toHaveBeenCalledTimes(expectedCloseCalls);
-        expect(terminateChild).toHaveBeenCalledWith(child, profileDir, identity);
-      } finally {
-        Object.assign(child, { exitCode: 0 });
-        rmSync(profileDir, { recursive: true, force: true });
-      }
-    },
-  );
-
+describe("login Chrome child custody", () => {
   it("allows a non-Linux attachment to continue with unknown identity", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-nonlinux-chrome-"));
     const child = fakeProcess("chrome");

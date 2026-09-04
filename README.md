@@ -186,6 +186,8 @@ npx @trusty-squire/mcp connect
 
 `connect` signs you in with Google or GitHub, detects your coding agent, and merges the `squire` MCP server into its existing configuration. On a machine with a user-visible desktop, sign-in opens a local Chrome window. On a headless Linux server, including an SSH/TTY session with an inherited virtual display, interactive login starts a login-scoped Xvfb and noVNC stack and prints a URL you can open on another device. The default quick tunnel and every local helper are torn down when that login completes, times out, fails, or is interrupted. Operators may instead set both `TS_LOGIN_PUBLIC_HOSTNAME` and `TS_LOGIN_LOCAL_PORT` to reuse an externally managed named tunnel; Trusty Squire still tears down its per-login display and local listener, but never creates or stops that external tunnel. If that tunnel's fixed local port is busy, login reports it and uses a one-off quick tunnel for that sign-in instead. Restart the agent and ask for the finished website outcome. Trusty Squire is free to start.
 
+`connect` is also the only way to sign in again: `--force-relogin` switches the bound account and `--force-relogin=google` or `--force-relogin=github` refreshes one provider session. It reports success only after re-checking the browser profile and finding that Google session live, so a run that binds the machine but leaves no usable session fails loudly with the command to retry rather than reporting a working install.
+
 To choose a target explicitly:
 
 ```bash
