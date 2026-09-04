@@ -19,6 +19,7 @@ import { revokeAppAccessTool, listAppAccessTool } from "./revoke-app-access.js";
 import { auditLogTool } from "./audit-log.js";
 import { OPERATE_TOOLS } from "./provision-drive.js";
 import { listPaymentCardsTool, operatePayTool, operatePaymentStatusTool } from "./operate-pay.js";
+import { deleteCredentialTool, editCredentialTool } from "./credential-mutations.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
   name: string;
@@ -40,6 +41,9 @@ export interface Tool<TArgs extends Record<string, unknown> = Record<string, unk
 
 export interface ToolContext {
   notifyUser: (message: string, data?: Record<string, unknown>) => Promise<void>;
+  // In-process override for hosts/tests with a tighter transport deadline.
+  // Omitted by the MCP server, which uses operate_pay's one-minute default.
+  paymentApprovalWaitMs?: number;
 }
 
 // Re-exported for convenience; defined in its own module to avoid a
@@ -74,6 +78,8 @@ export function buildToolRegistry(env: NodeJS.ProcessEnv = process.env): Tool[] 
     listCredentialsTool,
     // Vault lifecycle + write-only-sink proxy (the credential surface).
     storeCredentialTool,
+    editCredentialTool,
+    deleteCredentialTool,
     useCredentialTool,
     // Egress grants: a deployed app uses a vaulted credential via the proxy.
     grantAppAccessTool,
@@ -84,8 +90,8 @@ export function buildToolRegistry(env: NodeJS.ProcessEnv = process.env): Tool[] 
     ...(diagnosticsProfileEnabled(env) ? diagnosticsTools : []),
     listPaymentCardsTool,
     operatePayTool,
-    // [P0] Non-blocking payment approval: read-only status + a bounded wait,
-    // so a host never has to block an RPC on the human's phone tap.
+    // Non-charging bounded status for pre-charge approval and post-submit
+    // outcomes; operate_pay owns approval continuation and charge execution.
     operatePaymentStatusTool,
     // Interactive host-driven provisioning (operate_start/observe/act/finish
     // plus recipe save/run; workflow kinds are consolidated under operate_act).
@@ -109,6 +115,8 @@ export { z };
 export {
   listCredentialsTool,
   storeCredentialTool,
+  editCredentialTool,
+  deleteCredentialTool,
   useCredentialTool,
   grantAppAccessTool,
   listAppAccessTool,

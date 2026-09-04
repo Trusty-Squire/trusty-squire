@@ -12,6 +12,7 @@ trap 'rm -rf "$TEST_DIR"' EXIT
 MOCK_BIN="$TEST_DIR/bin"
 ORIGIN_DIR="$TEST_DIR/origin.git"
 CLONE_DIR="$TEST_DIR/clone"
+RC_CLONE_DIR="$TEST_DIR/rc-clone"
 mkdir -p "$MOCK_BIN"
 
 cat >"$MOCK_BIN/gh" <<'EOF'
@@ -103,6 +104,39 @@ git -C "$CLONE_DIR" add -A
 git -C "$CLONE_DIR" commit --quiet -m "fixture"
 git -C "$CLONE_DIR" branch -m staging
 git -C "$CLONE_DIR" push --quiet -u origin staging
+
+# The one-command RC path derives the next version from origin/staging, then
+# performs the same branch/commit/push/PR ceremony as an explicit version.
+git clone --quiet --branch staging "$ORIGIN_DIR" "$RC_CLONE_DIR"
+git -C "$RC_CLONE_DIR" config user.email "test@example.com"
+git -C "$RC_CLONE_DIR" config user.name "Test"
+
+set +e
+RC_OUTPUT=$(cd "$RC_CLONE_DIR" && PATH="$MOCK_BIN:$PATH" node "$ROOT_DIR/tools/release-mcp.mjs" next-rc 2>&1)
+RC_STATUS=$?
+set -e
+
+if [[ $RC_STATUS -ne 0 ]]; then
+  echo "Expected next-rc cut to succeed"
+  printf '%s\n' "$RC_OUTPUT"
+  exit 1
+fi
+
+RC_VERSION=$(node -p "JSON.parse(require('node:fs').readFileSync('$RC_CLONE_DIR/apps/mcp/package.json', 'utf8')).version")
+if [[ "$RC_VERSION" != "1.2.3-rc.2" ]]; then
+  echo "Expected next-rc to derive 1.2.3-rc.2, got $RC_VERSION"
+  exit 1
+fi
+
+if [[ "$(git -C "$RC_CLONE_DIR" branch --show-current)" != "release-1.2.3-rc.2" ]]; then
+  echo "Expected next-rc release branch"
+  exit 1
+fi
+
+if [[ ! -f "$STATE_FILE" ]] || ! grep -q -- "--base staging" "$STATE_FILE"; then
+  echo "Expected gh pr create --base staging for next-rc"
+  exit 1
+fi
 
 set +e
 OUTPUT=$(cd "$CLONE_DIR" && PATH="$MOCK_BIN:$PATH" node "$ROOT_DIR/tools/release-mcp.mjs" 1.2.3 2>&1)

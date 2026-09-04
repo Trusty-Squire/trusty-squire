@@ -84,7 +84,7 @@ export function divider(): void {
 }
 
 // Render a hairline-bordered panel. Reserve for at most ONE focal
-// element per command (the noVNC URL, the install-complete summary).
+// element per command (the install-complete summary).
 // Default border is wine; pass color: 'dim' for an inert/contextual
 // panel.
 export interface PanelOpts {
@@ -98,21 +98,13 @@ export interface PanelOpts {
 export function panel(body: string, opts: PanelOpts = {}): void {
   const color = opts.color ?? "wine";
   const borderColor =
-    color === "wine"
-      ? WINE
-      : color === "dim"
-        ? "#555"
-        : color === "yellow"
-          ? "yellow"
-          : "red";
+    color === "wine" ? WINE : color === "dim" ? "#555" : color === "yellow" ? "yellow" : "red";
   // Tighter padding than the design's previous round-border default:
   // hairline border + 1 column of side padding reads as a Linear-style
   // panel rather than a heavy boxed callout.
   console.warn(
     boxen(body, {
-      ...(opts.title !== undefined
-        ? { title: opts.title, titleAlignment: "left" }
-        : {}),
+      ...(opts.title !== undefined ? { title: opts.title, titleAlignment: "left" } : {}),
       padding: { top: 0, bottom: 0, left: 1, right: 1 },
       borderStyle: "single",
       borderColor,
@@ -145,11 +137,7 @@ export async function withSpinner<T>(opts: {
     return result;
   } catch (err) {
     spinner.fail(
-      opts.fail !== undefined
-        ? opts.fail(err)
-        : err instanceof Error
-          ? err.message
-          : String(err),
+      opts.fail !== undefined ? opts.fail(err) : err instanceof Error ? err.message : String(err),
     );
     throw err;
   }

@@ -6,14 +6,12 @@
 //   POST   /v1/vault/credentials/:id/reveal     → web: decrypt fields (human)
 //   PATCH  /v1/vault/credentials/:id            → web: replace fields
 //   DELETE /v1/vault/credentials/:id            → web: soft delete
-//   PATCH  /v1/vault/credentials/:id/allowed-hosts → web: edit allowlist
-//   PATCH  /v1/vault/credentials/:id/label      → web: rename entry
 //   POST   /v1/vault/credentials/:id/fields     → web: add a field
 //
 // store is an upsert keyed (account, service, label) — re-storing a
-// service overwrites it (that IS rotation). Agents cannot rotate or
-// delete: rotation = re-store; delete is human-only here. The raw value
-// is never returned to an agent; reveal is web-session only.
+// service overwrites it (that IS rotation). Credential metadata edits enter
+// through the signed credential-mutation approval route. The raw value is
+// never returned to an agent; reveal is web-session only.
 
 import { z } from "zod";
 import { ulid } from "ulid";
@@ -23,6 +21,7 @@ import {
   FieldExistsError,
   RestoreConflictError,
   deriveAllowedHosts,
+  normalizeCredentialHosts,
   VAULT_AUDIT_TYPES,
   type VaultAuditType,
 } from "@trusty-squire/vault";
@@ -30,6 +29,7 @@ import type { ApiDeps } from "../services/deps.js";
 import type { EmailForwarder } from "../services/email-forwarder.js";
 import { buildEmailForwarder } from "../services/webhook-forwarder.js";
 import { clearSessionCookie } from "../auth/middleware.js";
+import { credentialLabelSchema } from "../services/credential-metadata.js";
 
 const AUDIT_TYPE_VALUES = Object.values(VAULT_AUDIT_TYPES) as [VaultAuditType, ...VaultAuditType[]];
 
@@ -61,7 +61,7 @@ function faviconDomain(service: string | null, allowedHosts: string[]): string |
 const storeBody = z
   .object({
     service: z.string().min(1).max(120),
-    label: z.string().min(1).max(60).optional(),
+    label: credentialLabelSchema.optional(),
     value: z.string().min(1).max(8192).optional(),
     fields: z.record(z.string().min(1).max(8192)).optional(),
     env_var_suggestion: z.string().min(1).max(120).optional(),
@@ -105,15 +105,6 @@ const patchBody = z
     },
   );
 
-const allowedHostsBody = z.object({
-  hosts: z.array(z.string().min(1).max(253)).max(50),
-});
-
-// Rename an entry — same bound as the store label (1..60).
-const renameBody = z.object({
-  label: z.string().min(1).max(60),
-});
-
 // Add ONE field to an existing entry. Additive only — a name collision
 // is rejected (changing a value is the rotate/PATCH path).
 const addFieldBody = z.object({
@@ -155,72 +146,9 @@ function fieldsFrom(b: {
   return { value: b.value! };
 }
 
-function normaliseHost(raw: string): string | null {
-  let host = raw.trim().toLowerCase();
-  if (host.length === 0) return null;
-  host = host.replace(/^[a-z][a-z0-9+.-]*:\/\//, "");
-  host = host.replace(/[/?#].*$/, "");
-  host = host.replace(/:\d+$/, "");
-  if (host.length === 0 || /\s/.test(host)) return null;
-  if (!/^[a-z0-9.-]+$/.test(host)) return null;
-  return host;
-}
-
-const TWO_LABEL_PUBLIC_SUFFIXES: ReadonlySet<string> = new Set([
-  "co.uk",
-  "org.uk",
-  "gov.uk",
-  "ac.uk",
-  "com.au",
-  "net.au",
-  "org.au",
-  "co.jp",
-  "co.nz",
-  "co.in",
-  "com.br",
-  "co.za",
-  "com.cn",
-  "github.io",
-  "web.app",
-  "firebaseapp.com",
-  "pages.dev",
-  "workers.dev",
-  "vercel.app",
-  "netlify.app",
-  "herokuapp.com",
-]);
-
-function validLoginHost(host: string): boolean {
-  if (host.includes("..") || host.startsWith(".") || host.endsWith(".")) return false;
-  if (host.includes("xn--")) return false;
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return false;
-  const labels = host.split(".");
-  if (labels.length < 2) return false;
-  if (labels.some((label) => label.length === 0 || label.length > 63)) return false;
-  if (TWO_LABEL_PUBLIC_SUFFIXES.has(host)) return false;
-  return true;
-}
-
-function normaliseLoginHost(raw: string): string | null {
-  const trimmed = raw.trim().toLowerCase();
-  if (trimmed.startsWith("*.")) {
-    const suffix = normaliseHost(trimmed.slice(2));
-    if (suffix === null || !validLoginHost(suffix)) return null;
-    return `*.${suffix}`;
-  }
-  const host = normaliseHost(trimmed);
-  return host !== null && validLoginHost(host) ? host : null;
-}
-
 function normaliseLoginHosts(rawHosts: string[] | undefined): string[] | undefined | null {
   if (rawHosts === undefined) return undefined;
-  const hosts: string[] = [];
-  for (const raw of rawHosts) {
-    const host = normaliseLoginHost(raw);
-    if (host === null) return null;
-    if (!hosts.includes(host)) hosts.push(host);
-  }
-  return hosts;
+  return normalizeCredentialHosts(rawHosts, "login");
 }
 
 export const registerVaultRoute: FastifyPluginAsync<{
@@ -550,116 +478,6 @@ export const registerVaultRoute: FastifyPluginAsync<{
     },
   );
 
-  // ── edit allowed hosts (web) ─────────────────────────────────
-  fastify.patch<{ Params: { id: string } }>(
-    "/v1/vault/credentials/:id/allowed-hosts",
-    { preHandler: opts.requireWeb },
-    async (req, reply) => {
-      const auth = req.auth!;
-      if (auth.kind !== "web") return;
-      const parsed = allowedHostsBody.safeParse(req.body);
-      if (!parsed.success) {
-        reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
-        return;
-      }
-      const normalised: string[] = [];
-      for (const raw of parsed.data.hosts) {
-        const host = normaliseHost(raw);
-        if (host === null) {
-          reply.code(400).send({ error: "invalid_host", value: raw });
-          return;
-        }
-        if (!normalised.includes(host)) normalised.push(host);
-      }
-      const target = await opts.deps.credentialStore.findByIdForAccount(
-        req.params.id,
-        auth.account_id,
-      );
-      if (target === null) {
-        reply.code(404).send({ error: "credential_not_found" });
-        return;
-      }
-      await opts.deps.credentialStore.setAllowedHosts(target.reference, normalised);
-      return reply.code(200).send({ allowed_hosts: normalised });
-    },
-  );
-
-  // ── edit sign-in (login) hosts (web) ─────────────────────────
-  // The username/password twin of allowed-hosts: sets metadata.login_hosts —
-  // the sign-in pages where a browser-fill login may be sealed — and stamps
-  // auth_strategy, so setting hosts on a plain multi-field entry converts it
-  // into a proper login credential.
-  fastify.patch<{ Params: { id: string } }>(
-    "/v1/vault/credentials/:id/login-hosts",
-    { preHandler: opts.requireWeb },
-    async (req, reply) => {
-      const auth = req.auth!;
-      if (auth.kind !== "web") return;
-      const parsed = allowedHostsBody.safeParse(req.body);
-      if (!parsed.success) {
-        reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
-        return;
-      }
-      const normalised = normaliseLoginHosts(parsed.data.hosts);
-      if (normalised === null) {
-        reply.code(400).send({ error: "invalid_login_hosts" });
-        return;
-      }
-      const target = await opts.deps.credentialStore.findByIdForAccount(
-        req.params.id,
-        auth.account_id,
-      );
-      if (target === null) {
-        reply.code(404).send({ error: "credential_not_found" });
-        return;
-      }
-      await opts.deps.credentialStore.setLoginHosts(target.reference, normalised ?? []);
-      return reply.code(200).send({ login_hosts: normalised ?? [] });
-    },
-  );
-
-  // ── rename entry (web) ───────────────────────────────────────
-  // Changes the entry's label only — non-secret metadata, no re-encrypt.
-  fastify.patch<{ Params: { id: string } }>(
-    "/v1/vault/credentials/:id/label",
-    { preHandler: opts.requireWeb },
-    async (req, reply) => {
-      const auth = req.auth!;
-      if (auth.kind !== "web") return;
-      const parsed = renameBody.safeParse(req.body);
-      if (!parsed.success) {
-        reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
-        return;
-      }
-      const target = await opts.deps.credentialStore.findByIdForAccount(
-        req.params.id,
-        auth.account_id,
-      );
-      if (target === null) {
-        reply.code(404).send({ error: "credential_not_found" });
-        return;
-      }
-      try {
-        const result = await opts.deps.vault.rename(
-          target.reference,
-          auth.account_id,
-          parsed.data.label,
-        );
-        return reply.code(200).send(result);
-      } catch (err) {
-        if (err instanceof CredentialNotFoundError) {
-          reply.code(404).send({ error: "credential_not_found" });
-          return;
-        }
-        if (err instanceof RestoreConflictError) {
-          reply.code(409).send({ error: "rename_conflict", message: err.message });
-          return;
-        }
-        throw err;
-      }
-    },
-  );
-
   // ── add a field to an entry (web) ────────────────────────────
   // Additive: the server decrypts the existing blob, merges the new
   // field, and re-encrypts (the UI can't supply existing values — the
@@ -760,15 +578,34 @@ async function storeUpsert(
   if (notifyOnCreate && !entry.updated) {
     await notifyNewKey(opts.deps, forwarder, accountId, entry.service, entry.label);
   }
+  const persisted = entry.updated
+    ? await opts.deps.credentialStore.findActive(entry.reference)
+    : null;
+  const persistedMetadata = persisted?.metadata ?? {};
   reply.code(entry.updated ? 200 : 201).send({
     reference: entry.reference,
     service: entry.service,
     label: entry.label,
     field_names: entry.field_names,
-    type: data.type ?? "api_key",
-    auth_strategy: authStrategy ?? null,
-    signin_url: data.signin_url ?? null,
-    login_hosts: loginHosts ?? [],
+    type: persisted?.type ?? data.type ?? "api_key",
+    auth_strategy:
+      persisted !== null
+        ? typeof persistedMetadata.auth_strategy === "string"
+          ? persistedMetadata.auth_strategy
+          : null
+        : (authStrategy ?? null),
+    signin_url:
+      persisted !== null
+        ? typeof persistedMetadata.signin_url === "string"
+          ? persistedMetadata.signin_url
+          : null
+        : (data.signin_url ?? null),
+    login_hosts:
+      persisted !== null
+        ? Array.isArray(persistedMetadata.login_hosts)
+          ? persistedMetadata.login_hosts.filter((host): host is string => typeof host === "string")
+          : []
+        : (loginHosts ?? []),
     allowed_hosts: entry.allowed_hosts,
     created_at: entry.created_at,
     updated: entry.updated,

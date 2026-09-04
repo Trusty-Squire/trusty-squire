@@ -37,30 +37,47 @@ const h = vi.hoisted(() => ({
   providers: ["google"] as string[],
   oauthStatus: "already_valid" as string,
   currentUrl: "",
+  mainDocumentEpoch: 0,
   elements: [] as unknown[],
   visibleText: "",
 }));
 
 vi.mock("../browser.js", () => ({
+  registerLocalBrowserLaunch: (
+    _profileDir: string,
+    baseEnv: NodeJS.ProcessEnv = process.env,
+    marker = "v1:1:test-browser",
+  ) => ({
+    marker,
+    env: { ...baseEnv, TRUSTY_SQUIRE_OPERATOR_BROWSER_MARKER: marker },
+  }),
   BrowserController: class {
     constructor(_opts?: unknown) {}
     async start(): Promise<void> {}
-    matchesLaunchOptions(): boolean {
-      return true;
-    }
     isConnected(): boolean {
       return true;
     }
-    async resetPageForReuse(): Promise<void> {
-      h.currentUrl = "about:blank";
+    async detectSessionProviders(): Promise<string[]> {
+      return h.providers;
+    }
+    async detectGoogleAccountEmail(): Promise<string | null> {
+      return h.providers.includes("google") ? "operator@example.com" : null;
     }
     async goto(url: string): Promise<void> {
       h.currentUrl = url;
+      h.mainDocumentEpoch += 1;
     }
     currentUrl(): string {
       return h.currentUrl;
     }
+    mainDocumentIdentity(): string {
+      return String(h.mainDocumentEpoch);
+    }
     recoverActivePage(): void {}
+    armOpenedTabAdoption(): void {}
+    async adoptOpenedTab(): Promise<string | null> {
+      return null;
+    }
     async extractInteractiveElements(): Promise<unknown[]> {
       return h.elements;
     }
@@ -1515,16 +1532,22 @@ describe("observe-delta mutable-path re-mint rate (#2 assessment)", () => {
 
 describe("observe-delta wiring (real observe() over a mocked browser)", () => {
   let dir: string;
+  let compactV2ModeBeforeTest: string | undefined;
   beforeEach(() => {
+    compactV2ModeBeforeTest = process.env.TRUSTY_SQUIRE_OBSERVE_V2;
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "off";
     h.providers = ["google"];
     h.oauthStatus = "already_valid";
     h.visibleText = "";
     h.currentUrl = "";
+    h.mainDocumentEpoch = 0;
     dir = mkdtempSync(join(tmpdir(), "ts-observe-"));
     process.env.TRUSTY_SQUIRE_OBSERVE_DIR = dir;
   });
   afterEach(async () => {
     await closeAllProvisionSessions();
+    if (compactV2ModeBeforeTest === undefined) delete process.env.TRUSTY_SQUIRE_OBSERVE_V2;
+    else process.env.TRUSTY_SQUIRE_OBSERVE_V2 = compactV2ModeBeforeTest;
     delete process.env.TRUSTY_SQUIRE_OBSERVE_DIR;
     rmSync(dir, { recursive: true, force: true });
   });
@@ -1583,12 +1606,17 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
   });
 
   it("persist FAILURE → full uncollapsed response, no snapshot_file, delta baseline NOT advanced", async () => {
-    h.elements = casetifyPage();
+    h.elements = casetifyPage().map((element) =>
+      element.container === "dialog:signin-promo"
+        ? { ...element, inDialog: true, topmost: true }
+        : element,
+    );
     h.visibleText = "Shop the tech collection.";
     // obs1: persist SUCCEEDS, establishes the delta baseline.
     const start = await startProvisionSession({ serviceUrl: URL });
     const sid = start.session_id;
     expect(typeof start.snapshot_file).toBe("string");
+    expect(start.modal_active).toBe(true);
     const snapshotFile = start.snapshot_file as string;
     const collapsedCount = start.chrome_links_collapsed ?? 0;
     expect(collapsedCount).toBeGreaterThan(0); // obs1 collapsed some chrome links
@@ -1605,6 +1633,7 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     expect(obs2.delta).toBe(false); // NOT a delta (no recovery file)
     expect(obs2.snapshot_file).toBeUndefined();
     expect(obs2.chrome_links_collapsed).toBeUndefined(); // uncollapsed
+    expect(obs2.modal_active).toBe(true);
     expect(rows(obs2).length).toBe(h.elements.length); // EVERY element inline
     expect(obs2.unchanged).toBeUndefined();
     expect(existsSync(snapshotFile)).toBe(false);

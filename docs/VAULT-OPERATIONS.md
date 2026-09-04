@@ -70,6 +70,7 @@ live under the DEK/KEK and are untouched by a master-key rotation.
 | Method + path | Auth | Purpose |
 |---|---|---|
 | `GET /v1/vault/credentials` | web+agent | Metadata list. Now also `age_days`, `last_changed_at`, `rotated_at`, and a `stale` flag (rotation nudge). |
+| `POST /v1/vault/mutation-approvals` | web+agent | Begin a Telegram/passkey-vouched metadata edit or soft delete. The signed payload binds operation, target reference, requesting agent, nonce, and exact before/after metadata. |
 | `POST /v1/vault/credentials/:id/health` | web | Envelope integrity probe — confirms the row still decrypts under the current keyring. No secret returned, no retrieval counted. `healthy:false` ≠ HTTP error. |
 | `POST /v1/vault/credentials/:id/restore` | web | Undelete a soft-deleted credential. `409` if a live `(service,label)` twin holds the slot. |
 | `POST /v1/vault/credentials/revoke-all` | web | Kill-switch: soft-delete every active credential. Requires `{ confirm: true }`. Recoverable via restore until retention sweeps. |
@@ -83,9 +84,49 @@ the second is right-to-be-forgotten.
 The complete vault, payment-audit, and short-lived approval route/auth
 reference is owned by [`apps/api/README.md`](../apps/api/README.md#endpoints).
 
+The web and agent flows share the same server-side mutation chokepoint. The web
+ceremony signs the displayed capability but never writes credential metadata
+directly. After signature verification, one short database transaction locks
+the pending approval, checks expiry using the database clock, verifies the
+signed before-state, applies the metadata edit or soft delete, records the audit
+event, and marks the approval terminal. A transaction failure leaves the
+approval pending and the credential unchanged.
+
 **Rate limiting:** every decrypt path — agent retrieve, runtime
 retrieve, AND web `reveal` — counts against one per-account ceiling
 (100/hr). There is no human-only bypass.
+
+## Reading the audit trail (`audit_log`)
+
+`GET /v1/vault/audit` is, and stays, the flat per-request stream: one row per
+vault action, newest first, keyset-paginated. That stream is unreadable at
+egress volume — a few hundred proxied LLM calls are a few hundred
+`vault.proxy_executed` rows carrying the same reference, host, and requester.
+
+The MCP `audit_log` tool therefore shapes it on READ (nothing about how events
+are recorded changes; `apps/mcp/src/tools/audit-rollup.ts` owns the shaping):
+
+- **`view: "ledger"` (default)** — `events` carries the security-relevant
+  lifecycle rows (stored / rotated / deleted / edited, grant minted / revoked,
+  payments) plus every anomaly, marked `anomaly: true` with an
+  `anomaly_reason`. Routine successful egress is not listed here.
+- **`egress.rollups`** — routine proxied calls collapsed per
+  (credential reference × target host × burst): count, status breakdown, total
+  bytes, first/last timestamp, and the grants live over that window. A burst
+  ends when the gap between adjacent calls exceeds `window_minutes` (60).
+- **`expand: "<rollup id>"`** — the individual calls behind one rollup. The id
+  carries (reference, host, window), so the drill-down is stateless.
+- **`grant_totals`** — cumulative calls / bytes / last-used per egress grant.
+  Attribution is by credential reference within the grant's lifetime: the write
+  side records no grant id on a proxied call, so direct `use_credential` traffic
+  on the same credential is counted here too. The response says so in
+  `attribution`. Per-event provenance is a planned write-side follow-up.
+- **`view: "raw"`** — the unaggregated escape hatch, exactly the server's page.
+
+Only verifiably-2xx egress is allowed to disappear into an aggregate: a non-2xx
+status, a 429, a proxy error, a missing status, a `proxy_rejected`, or any
+non-`success` outcome is surfaced as its own marked ledger row *and* still
+counted in its rollup's totals.
 
 ## Notifications
 
@@ -123,6 +164,7 @@ The hourly in-process retention cron (`retention-cron.ts`) sweeps:
 | **Vault audit events → delete** | **365d** | **`VAULT_AUDIT_RETENTION_DAYS`** |
 | **Payment audit events → delete** | **365d** | **`VAULT_AUDIT_RETENTION_DAYS`** |
 | Expired payment approvals → delete | After `expires_at` | none |
+| Expired credential-mutation approvals → delete | After `expires_at` | none |
 
 Vault and payment audit events share the one-year window — long enough for a
 post-hoc investigation, bounded so the tables do not grow without limit.

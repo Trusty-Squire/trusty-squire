@@ -64,6 +64,14 @@ export function boundCardMeta(cardRef: string | null, cards: readonly CardMeta[]
   return cards.find((card) => card.id === cardRef) ?? null;
 }
 
+// Approval-surface display identity for a bound card: "Label •••• 1234".
+// Non-secret metadata only (label + last4), the same shape the vault renders
+// from CardMeta; never PAN/expiry/CVV. A legacy card with no stored last4
+// (last4 === null) renders label-only.
+export function formatCardIdentity(card: Pick<CardMeta, "label" | "last4">): string {
+  return card.last4 !== null ? `${card.label} •••• ${card.last4}` : card.label;
+}
+
 // Card networks the brand tile has a drawn mark for.
 export type CardNetwork = "visa" | "mastercard" | "amex" | "discover" | "diners" | "jcb";
 

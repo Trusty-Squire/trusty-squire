@@ -4,9 +4,8 @@ name: Release registry
 #
 # The registry has no version semantics — it's a service, not a
 # library. Lifecycle:
-#   - push to main:    run tests, then `flyctl deploy` to
-#                      `trusty-squire-registry` on Fly.
-#   - push to staging: run tests only (no deploy).
+#   - push to main: run tests, then `flyctl deploy` to
+#                   `trusty-squire-registry` on Fly.
 #
 # Path filter: only fires on changes that could affect the registry
 # image (apps/registry, root lockfile, this workflow). Unrelated
@@ -14,7 +13,7 @@ name: Release registry
 
 on:
   push:
-    branches: [main, staging]
+    branches: [main]
     paths:
       - "apps/registry/**"
       # The registry runtime-imports @trusty-squire/skill-schema (workspace:*)

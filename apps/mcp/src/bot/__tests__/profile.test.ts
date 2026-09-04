@@ -4,7 +4,7 @@
 // SingletonLock symlink behind. Without recovery, the next
 // launchPersistentContext aborts with "Failed to create a
 // ProcessSingleton" and bricks every signup AND `mcp login` — the
-// "relogin prompted, no noVNC, still failed" bug. clearStaleSingletonLock
+// "relogin prompted, still failed" bug. clearStaleSingletonLock
 // removes the lock iff its holder pid is provably dead on this host, and
 // NEVER yanks a lock held by a live process.
 
@@ -306,6 +306,38 @@ describe("profile operation guard", () => {
     first.release();
     const second = await acquireFreeProfileOperationGuard(dir, lockRoot);
     second.release();
+  });
+
+  it("evicts and claims a holder proven dead by its recorded identity", () => {
+    const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
+    const lockDir = join(lockRoot, `trusty-squire-profile-${digest}.lock`);
+    mkdirSync(lockDir);
+    writeFileSync(
+      join(lockDir, "owner.json"),
+      JSON.stringify({ host: hostname(), pid: deadPid(), start_time: "gone", token: "dead" }),
+    );
+
+    const lease = acquireProfileOperationGuard(dir, lockRoot);
+    lease.release();
+  });
+
+  it("refuses a holder proven alive by its recorded identity", () => {
+    const first = acquireProfileOperationGuard(dir, lockRoot);
+    expect(() => acquireProfileOperationGuard(dir, lockRoot)).toThrow(ProfileBusyError);
+    first.release();
+  });
+
+  it("refuses an indeterminate holder instead of evicting it", () => {
+    const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
+    const lockDir = join(lockRoot, `trusty-squire-profile-${digest}.lock`);
+    mkdirSync(lockDir);
+    writeFileSync(
+      join(lockDir, "owner.json"),
+      JSON.stringify({ host: "another-host", pid: process.pid, start_time: "unknown", token: "remote" }),
+    );
+
+    expect(() => acquireProfileOperationGuard(dir, lockRoot)).toThrow(ProfileBusyError);
+    expect(existsSync(lockDir)).toBe(true);
   });
 
   it.skipIf(process.platform !== "linux")(

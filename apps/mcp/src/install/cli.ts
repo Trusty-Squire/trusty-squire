@@ -24,8 +24,6 @@
 //   --skip-browser       don't launch the bot's Chrome; just print the
 //                        confirm URL and expect the user to open it in
 //                        their own browser (CI / scripted installs)
-//   --proxy-url=<url>    bake a residential proxy into the MCP config's
-//                        env (UNIVERSAL_BOT_PROXY_URL)
 //   --no-registry        disable managed registry participation
 //
 // Pure module — `runCli()` is invoked by bin.ts. No shebang, no
@@ -51,17 +49,12 @@ import {
   detectActiveProviderSessions,
   ensureOAuthSession,
   openInstallConfirmInBotChrome,
-  profileHasProviderCookies,
   type InstallClaimPollResult,
 } from "../bot/google-login.js";
 import { isOAuthProviderId, type OAuthProviderId } from "../bot/oauth-providers.js";
 import {
-  clearAllProviderMarkers,
   clearBrowserProfile,
   clearProviderCookies,
-  clearProviderLoggedIn,
-  loggedInProviders,
-  markProviderLoggedIn,
 } from "../bot/login-state.js";
 import {
   CHROME_PROFILE_DIR,
@@ -81,7 +74,6 @@ import {
 } from "./interactive.js";
 import chalk from "chalk";
 import { confirm, isCancel } from "@clack/prompts";
-import { normalizeProxyUrl } from "./proxy-url.js";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
 // Managed skill-registry URL. Advanced setup decides whether this is written
@@ -94,10 +86,6 @@ type Argv = {
   command: string;
   target?: AgentTarget;
   apiBase: string;
-  // Residential proxy URL to bake into the written MCP config's env as
-  // UNIVERSAL_BOT_PROXY_URL — so the proxy is set once at install time
-  // and the user never hand-edits the config env.
-  proxyUrl?: string;
   // Optional 2Captcha API key from advanced setup. Stored ENCRYPTED in the
   // vault (never written to the MCP config) by maybeStoreTwoCaptchaKey once the
   // session is paired; the bot spends it through the injecting proxy.
@@ -156,7 +144,6 @@ function parseArgs(argv: string[]): Argv {
   }
   let target: AgentTarget | undefined;
   let apiBase = DEFAULT_API_BASE;
-  let proxyUrl: string | undefined;
   let noRegistry = false;
   let registryConfigured = false;
   let providerArg: ProviderArg | undefined;
@@ -178,14 +165,6 @@ function parseArgs(argv: string[]): Argv {
       target = t;
     } else if (arg.startsWith("--api-base=")) {
       apiBase = arg.slice("--api-base=".length);
-    } else if (arg.startsWith("--proxy-url=")) {
-      const rawProxyUrl = arg.slice("--proxy-url=".length);
-      const normalized = normalizeProxyUrl(rawProxyUrl);
-      if (rawProxyUrl.length > 0 && normalized === undefined) {
-        console.error("invalid --proxy-url. Use http://user:pass@host:port or socks5://host:port.");
-        process.exit(64);
-      }
-      proxyUrl = normalized;
     } else if (arg.startsWith("--registry-url=")) {
       rejectDeprecatedCli(
         "`--registry-url` has been removed. Trusty Squire uses the managed skill registry.",
@@ -229,7 +208,6 @@ function parseArgs(argv: string[]): Argv {
     noInteractive,
   };
   if (target !== undefined) args.target = target;
-  if (proxyUrl !== undefined && proxyUrl.length > 0) args.proxyUrl = proxyUrl;
   if (providerArg !== undefined) args.providerArg = providerArg;
   if (profileDir !== undefined && profileDir.length > 0) args.profileDir = profileDir;
   return args;
@@ -350,14 +328,6 @@ function resolveCopiedNpxServerLaunch(binPath: string): { command: string; args:
 
 export async function runCli(argv: string[]): Promise<void> {
   const args = parseArgs(argv);
-  // Auto-load the operator's harvester.env so a `login`/`connect` here picks
-  // up UNIVERSAL_BOT_PROXY_URL — establishing the provider session through the
-  // SAME residential egress the bot's signups use. Without it, an operator who
-  // forgets `set -a; source harvester.env` creates the session from the box's
-  // datacenter IP; the proxied signups then hit the provider from a residential
-  // IP and the jump silently kills the auth cookie (the GitHub-session-keeps-
-  // getting-wiped bug). No-op for end users (no harvester.env) + non-
-  // overwriting, so an explicitly-set env always wins.
   loadHarvesterEnvFile();
   switch (args.command) {
     case "connect":
@@ -444,12 +414,10 @@ async function settings(args: Argv): Promise<void> {
   if (!args.noInteractive && process.stdin.isTTY === true) {
     const picker = await runSettingsSetup({
       ...(args.target !== undefined ? { initialTarget: args.target } : {}),
-      ...(session.proxy_url !== undefined ? { initialProxyUrl: session.proxy_url } : {}),
       initialRegistryEnabled: session.consent_skillify_telemetry === true,
-      initialConsentOperatorInboxOtp: session.consent_operator_inbox_otp === true,
+      initialConsentOperatorInboxOtp: session.consent_operator_inbox_otp !== false,
     });
     args.target = picker.target;
-    if (picker.proxyUrl !== undefined) args.proxyUrl = picker.proxyUrl;
     args.noRegistry = !picker.registryEnabled;
     args.advancedConfigured = true;
     args.consentOperatorInboxOtp = picker.consentOperatorInboxOtp === true;
@@ -464,8 +432,8 @@ async function settings(args: Argv): Promise<void> {
     if (args.registryConfigured !== true) {
       args.noRegistry = session.consent_skillify_telemetry !== true;
     }
-    if (args.proxyUrl === undefined && session.proxy_url !== undefined) {
-      args.proxyUrl = session.proxy_url;
+    if (args.consentOperatorInboxOtp === undefined) {
+      args.consentOperatorInboxOtp = session.consent_operator_inbox_otp !== false;
     }
   }
 
@@ -475,10 +443,7 @@ async function settings(args: Argv): Promise<void> {
     ...session,
     saved_at: new Date().toISOString(),
     consent_skillify_telemetry: !args.noRegistry,
-    consent_operator_inbox_otp: args.consentOperatorInboxOtp === true,
-    ...(args.proxyUrl !== undefined && args.proxyUrl.trim().length > 0
-      ? { proxy_url: args.proxyUrl.trim() }
-      : {}),
+    consent_operator_inbox_otp: args.consentOperatorInboxOtp !== false,
   };
   await storage.write(updated);
   await writeAgentConfig(target, agent, args);
@@ -527,11 +492,9 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
     // surfaces agent + advanced.
     const picker = await runInteractiveSetup({
       ...(args.target !== undefined ? { initialTarget: args.target } : {}),
-      ...(args.proxyUrl !== undefined ? { initialProxyUrl: args.proxyUrl } : {}),
       initialRegistryEnabled: !args.noRegistry,
     });
     args.target = picker.target;
-    if (picker.proxyUrl !== undefined) args.proxyUrl = picker.proxyUrl;
     args.noRegistry = !picker.registryEnabled;
     args.advancedConfigured = picker.advancedConfigured;
     if (picker.consentOperatorInboxOtp !== undefined) {
@@ -603,11 +566,6 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
   // form clears only one provider; bare --force-relogin is the full-profile
   // account-switch escape hatch.
   if (args.forceRelogin) {
-    if (args.forceReloginProvider !== undefined) {
-      clearProviderLoggedIn(args.forceReloginProvider, profileDir);
-    } else {
-      clearAllProviderMarkers(profileDir);
-    }
     let cookiesCleared: boolean;
     if (args.forceReloginProvider !== undefined) {
       cookiesCleared = await clearProviderCookies(profileDir, args.forceReloginProvider);
@@ -669,9 +627,9 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
     printAsnWarning(asn);
   }
 
-  // Browser confirm: bind this machine + seed the bot's Chrome.
+  // Browser confirm: bind this machine in the bot's real Chrome profile.
   // The user signs into trustysquire from inside the bot's persistent
-  // Chrome profile (with display, or noVNC on a headless box). That
+  // Chrome profile on a visible display. That
   // single sign-in does TWO things at once: trustysquire claims the
   // install (sets agent_session_token), AND the provider session
   // lands in the bot's Chrome profile so future OAuth-based signups
@@ -685,7 +643,6 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
   };
   const session = await runInstallClaim(args.apiBase, target, baseSession, args.skipBrowser, {
     applyServerPrefs: !wantInteractive,
-    ...connectCompletionOptions(args),
   });
   if (session === null) {
     ui.fail(
@@ -699,16 +656,11 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
   await storage.write(session);
   ui.success(`Session saved (${storage.backendName()})`);
   args.noRegistry = session.consent_skillify_telemetry !== true;
-  args.consentOperatorInboxOtp = session.consent_operator_inbox_otp === true;
-  if (session.proxy_url !== undefined) args.proxyUrl = session.proxy_url;
+  args.consentOperatorInboxOtp = session.consent_operator_inbox_otp !== false;
 
-  // 0.8.1 — the bot's persistent profile may have a stale provider
-  // marker from a previous install (the marker is sticky on disk).
-  // The install confirm above only seeded one provider (whichever
-  // OAuth button the user clicked on trustysquire.com), so trusting
-  // the marker would make the step-2 secondary-provider prompt
-  // short-circuit incorrectly. Probe live cookies + rewrite the
-  // marker so loggedInProviders() returns ground truth.
+  // Probe the real profile. Cookie/session state is the source of truth; no
+  // persisted provider marker is allowed to outlive the session it describes.
+  let providers: OAuthProviderId[] = [];
   try {
     const actual = await ui.withSpinner({
       start: "Checking provider sessions",
@@ -718,29 +670,15 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
       // so a dead-but-present GitHub session isn't shown as connected.
       task: () => detectActiveProviderSessions(),
     });
-    if (actual !== null) {
-      clearAllProviderMarkers();
-      for (const p of actual) markProviderLoggedIn(p);
-    }
+    if (actual !== null) providers = actual;
   } catch (err) {
-    // Best-effort: a probe failure (rare — playwright launch should
-    // succeed if the install confirm just opened Chrome there) just
-    // leaves the marker as-is. The downstream secondary prompt's
-    // logic still has the maybeOfferSecondaryProvider escape hatch
-    // (yes/no prompt with the default-yes), so the user can still
-    // reach GitHub even if we mis-identified the live state.
-    //
-    // Surface the reason on stderr so this never recurs invisibly: the
-    // empty catch once hid a launch error (probe missing channel:"chrome",
-    // reaching for an absent bundled Chromium) behind the bare "(continuing)"
-    // ✗ for months, while the stale marker still printed "connected".
+    // The live probe is best-effort at this display boundary.
     console.error(
       `[connect] provider-session probe failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 
-  // Backfill connected_providers from the (now-fresh) bot-side marker.
-  const providers = loggedInProviders();
+  // Persist the current live probe only as connect UX data.
   for (const p of providers) await recordConnectedProvider(p);
   printProviderState(providers);
 
@@ -776,10 +714,9 @@ async function hydrateArgsFromStoredPreferences(args: Argv): Promise<void> {
     const session = await (await openSessionStorage()).read();
     if (session === null) return;
     args.noRegistry = session.consent_skillify_telemetry !== true;
-    args.consentOperatorInboxOtp = session.consent_operator_inbox_otp === true;
-    if (session.proxy_url !== undefined) args.proxyUrl = session.proxy_url;
+    args.consentOperatorInboxOtp = session.consent_operator_inbox_otp !== false;
   } catch {
-    // Best-effort. Missing preferences fall back to the privacy-safe defaults.
+    // Best-effort. Missing inbox preference uses the default-on setting.
   }
 }
 
@@ -795,7 +732,7 @@ function printProviderState(providers: OAuthProviderId[]): void {
 //
 // Default path (`skipBrowser=false`): opens the trustysquire confirm
 // URL in the bot's OWN persistent Chrome profile. The user signs in
-// once — that single sign-in claims the install AND seeds the bot's
+// once — that single sign-in claims the install and establishes the bot's
 // profile with a provider session for future OAuth signups. The
 // pollUntilClaimed callback closes the Chrome window as soon as the
 // API flips the install to claimed.
@@ -888,8 +825,8 @@ async function checkAlreadyProvisioned(): Promise<{ providers: OAuthProviderId[]
     //
     // BUT a BUSY profile (another Chromium already using it — a live operate
     // session, a background heal run, an orphaned Chrome) makes the probe throw.
-    // That must NOT read as "not provisioned": forcing a re-pair (the noVNC
-    // dance) on a transient lock is the connect-loops-forever bug. Fall back to
+    // That must NOT read as "not provisioned": forcing a re-pair on a
+    // transient lock is the connect-loops-forever bug. Fall back to
     // the session's cached connected_providers instead — a busy profile, if
     // anything, means the bot IS wearing its browser session.
     let providers: OAuthProviderId[];
@@ -939,13 +876,11 @@ async function reloginGithubOnly(
   opts: { writeConfig: boolean },
 ): Promise<boolean> {
   ui.heading("Sign in to GitHub");
-  clearProviderLoggedIn("github");
   const result = await ensureOAuthSession({
     provider: "github",
-    apiBaseUrl: args.apiBase,
     forceOpen: true,
   });
-  if (result.status === "logged_in" || result.status === "already_valid") {
+  if (result.status === "satisfied") {
     await recordConnectedProvider("github");
     if (opts.writeConfig) await writeAgentConfig(target, agent, args);
     ui.success("Signed in to GitHub. The bot is ready.");
@@ -987,8 +922,6 @@ async function offerGithubReloginIfDead(
 }
 
 async function syncConnectedProviders(providers: OAuthProviderId[]): Promise<void> {
-  clearAllProviderMarkers();
-  for (const p of providers) markProviderLoggedIn(p);
   try {
     const storage = await openSessionStorage();
     const session = await storage.read();
@@ -1033,7 +966,7 @@ async function recordConnectedProvider(provider: OAuthProviderId): Promise<void>
 function consentFromArgs(args: Argv): InstallConsent {
   return {
     skillifyTelemetry: !args.noRegistry,
-    operatorInboxOtp: args.consentOperatorInboxOtp === true,
+    operatorInboxOtp: args.consentOperatorInboxOtp !== false,
   };
 }
 
@@ -1056,8 +989,7 @@ async function ensureConsentRecorded(consent: InstallConsent, overwrite: boolean
       consent_operator_inbox_otp: consent.operatorInboxOtp,
     });
   } catch {
-    // Best-effort. If we can't persist consent, runtime treats missing
-    // fields as not approved.
+    // Best-effort. Missing preferences use the runtime default (inbox reads on).
   }
 }
 
@@ -1076,9 +1008,6 @@ async function writeAgentConfig(
   const env: Record<string, string> = {
     TRUSTY_SQUIRE_AGENT_IDENTITY: target,
   };
-  if (args.proxyUrl !== undefined) {
-    env.UNIVERSAL_BOT_PROXY_URL = args.proxyUrl;
-  }
   // Skill registry URL. The endpoint is not user-configurable; Advanced setup
   // controls whether it is written at all. Registry participation is also the
   // user's consent to contribute successful non-personal signup recipes.
@@ -1101,9 +1030,6 @@ async function writeAgentConfig(
       ui.hint("  Couldn't write .claude/settings.json permissions (non-fatal)");
     }
   }
-  if (args.proxyUrl !== undefined) {
-    ui.hint(`  Residential proxy baked in: ${args.proxyUrl}`);
-  }
   if (args.noRegistry) {
     ui.hint(
       "  Skill registry disabled — signups are driven fresh by your agent each time " +
@@ -1112,38 +1038,15 @@ async function writeAgentConfig(
   }
 }
 
-// First-time setup stays open after the account claim so the user can finish
-// optional setup. A forced re-login has no remaining onboarding contract — but
-// the account claim (agent token) is NOT the end of the interactive sign-in.
-// The API flips to `claimed` the moment the OAuth identity lands, which on a
-// cold profile is BEFORE the provider's browser session is fully seeded (Google
-// can still be mid-flow with a second cold-profile challenge). Tearing down on
-// the bare claim killed the noVNC out from under that challenge — the "two
-// number picks with a red-close between them" bug. So force-relogin now waits
-// for the requested provider's post-clear cookie presence before it closes;
-// neither an explicit terminal page nor another provider can substitute. The
-// deadline still bounds the wait.
+// The browser remains open until both the account claim and its explicit Finish
+// callback arrive. The callback is emitted after the visible browser flow
+// completes, so it works for onboarding and forced re-login without inspecting
+// Chrome's on-disk cookie database.
 export function shouldCompleteInstallClaim(
   claimed: boolean,
-  completeOnClaim: boolean,
-  sessionSeeded: boolean,
   wizardCompleted = false,
 ): boolean {
-  if (!claimed) return false;
-  // A forced provider relogin is successful only when its provider-specific
-  // completion evidence arrives. Finish alone is not an override: the user may
-  // skip optional GitHub and still send the normal completion callback.
-  if (completeOnClaim) return sessionSeeded;
-  return wizardCompleted;
-}
-
-export function connectCompletionOptions(
-  args: Pick<Argv, "forceRelogin" | "forceReloginProvider">,
-): { completeOnClaim: boolean; completionProvider: OAuthProviderId } {
-  return {
-    completeOnClaim: args.forceRelogin,
-    completionProvider: args.forceReloginProvider ?? "google",
-  };
+  return claimed && wizardCompleted;
 }
 
 // During normal onboarding, claim happens before the browser's Finish step.
@@ -1161,18 +1064,11 @@ async function runInstallClaim(
   skipBrowser: boolean,
   options: {
     // Whether to let the SERVER's stored install_preferences override the local
-    // session's consent/proxy. Only for the non-interactive path (CI / re-install
+    // session's consent choices. Only for the non-interactive path (CI / re-install
     // inheritance). In the interactive flow the user JUST answered these questions,
     // so baseSession is authoritative — applying stale server prefs there silently
-    // discarded a fresh "yes" to inbox-OTP consent (readInboxConsent → false →
-    // await_verification refused despite the user consenting).
+    // discarded a fresh inbox-read preference.
     applyServerPrefs: boolean;
-    // Forced re-login is complete when the fresh account claim and requested
-    // provider seed succeed. Normal onboarding stays open for Finish.
-    completeOnClaim: boolean;
-    // A scoped re-login must wait for the requested provider, not any
-    // pre-existing provider cookie left in the shared browser profile.
-    completionProvider: OAuthProviderId;
   },
 ): Promise<SessionData | null> {
   console.warn(`Connecting this machine to your account…`);
@@ -1184,18 +1080,9 @@ async function runInstallClaim(
   // check at the call site — bare closure-captured `let` doesn't.
   const state: { value: ClaimResult | null } = { value: null };
   // The normal wizard's Finish button invokes the nonce-scoped loopback
-  // callback. First-time onboarding waits for that signal so the user gets a
-  // chance to complete optional setup. Forced re-login instead ends after the
-  // API claim and requested provider seed because no setup remains to wait for.
-  // Plain-login predicate: the connect claim browser runs plain (no CDP — a CDP
-  // attach fails Google's OAuth "secure browser" check). The API delivers the
-  // account claim, the SQLite cookie store proves a forced re-login landed,
-  // and a per-run loopback callback carries the normal wizard's explicit
-  // Finish signal.
-  const pollOnce = async (
-    profileDir: string,
-    wizardCompleted: boolean,
-  ): Promise<InstallClaimPollResult> => {
+  // callback. Every install path waits for it. Plain login deliberately has no
+  // CDP attach, so this callback is the sole browser-completion authority.
+  const pollOnce = async (wizardCompleted: boolean): Promise<InstallClaimPollResult> => {
     let claimedThisPoll = false;
     // Keep state.value warm — the install moves to "claimed" the instant the
     // user finishes signing in.
@@ -1214,28 +1101,10 @@ async function runInstallClaim(
         return "expired";
       }
     }
-    // Tear down once the account is claimed AND the provider session has
-    // actually seeded — not on the bare claim, which can land while Google is
-    // still writing cookies on a cold profile.
     const claimed = state.value !== null;
-    const sessionSeeded =
-      claimed &&
-      options.completeOnClaim &&
-      profileHasProviderCookies(profileDir, options.completionProvider);
-    // No browser URL to watch in plain mode. Normal onboarding keys off the
-    // explicit loopback Finish callback; forced re-login finishes once its
-    // requested provider session is safely seeded.
-    const tearDown = shouldCompleteInstallClaim(
-      claimed,
-      options.completeOnClaim,
-      sessionSeeded,
-      wizardCompleted,
-    );
+    const tearDown = shouldCompleteInstallClaim(claimed, wizardCompleted);
     if (tearDown) {
-      return {
-        status: "claimed",
-        provider: options.completeOnClaim ? options.completionProvider : null,
-      };
+      return { status: "claimed", provider: null };
     }
     if (claimedThisPoll) {
       console.error(chalk.dim(`   ✓ ${claimHeartbeatMessage(true)}`));
@@ -1275,22 +1144,17 @@ async function runInstallClaim(
 
   // Default: run the confirm INSIDE the bot's Chrome. The user signs
   // The wizard page reads provider state from /v1/auth/whoami so no
-  // CLI-side hint is needed. apiBaseUrl threads through to the
-  // headless rig so it can shorten the cloudflared tunnel URL to
-  // `trustysquire.ai/g/<slug>` before printing it in the banner (G15).
+  // CLI-side hint is needed.
   const result = await openInstallConfirmInBotChrome({
     confirmUrl: initiate.confirm_url,
     pollUntilClaimed: pollOnce,
-    apiBaseUrl: apiBase,
     heartbeatMessage: () => claimHeartbeatMessage(state.value !== null),
   });
 
   // rc.33 — surface the underlying error instead of letting the outer
   // wrapper print a generic "browser confirm step never finished."
-  // Most common case: a fresh headless box without the noVNC stack
-  // (x11vnc/novnc/websockify/cloudflared) — the runHeadlessChrome
-  // requireBinaries() throw already names the missing binaries and
-  // the apt-get install line, but the message was getting swallowed.
+  // Surface the underlying browser-launch error rather than replacing it
+  // with a generic confirmation timeout.
   if (result.status === "error") {
     ui.fail(`Couldn't open the confirm page: ${result.detail ?? "unknown error"}`);
     process.exit(1);
@@ -1320,12 +1184,10 @@ export function applyInstallPreferences(
   applyServerPrefs: boolean,
 ): SessionData {
   if (!applyServerPrefs || preferences === undefined) return baseSession;
-  const proxy = preferences.proxy_url?.trim();
   return {
     ...baseSession,
     consent_skillify_telemetry: preferences.registry_enabled === true,
-    consent_operator_inbox_otp: preferences.consent_operator_inbox_otp === true,
-    ...(proxy !== undefined && proxy.length > 0 ? { proxy_url: proxy } : {}),
+    consent_operator_inbox_otp: preferences.consent_operator_inbox_otp !== false,
   };
 }
 
@@ -1378,35 +1240,21 @@ async function loginWithProfileGuard(args: Argv, profileDir: string): Promise<vo
   const provider: OAuthProviderId = args.providerArg ?? args.forceReloginProvider ?? "google";
   const label = provider === "github" ? "GitHub" : "Google";
   ui.heading(`Sign in to ${label}`);
-  // --force-relogin wipes this provider's cookies (via forceOpen below),
-  // so drop its marker up front too. Otherwise a stale marker from a
-  // prior successful login survives a re-login that the user abandons or
-  // that times out (e.g. GitHub's 2FA "verify it's you" never finished) —
-  // leaving logged-in-providers.json claiming a session whose auth cookie
-  // (user_session) no longer exists. ensureOAuthSession re-adds the marker
-  // only when it confirms a live cookie, so success still records it.
-  if (args.forceRelogin) clearProviderLoggedIn(provider, profileDir);
+  ui.hint(`Running @trusty-squire/mcp ${VERSION}.`);
+  // An explicit login always means "open a fresh provider login". Requiring a
+  // second --force-relogin flag made the command silently short-circuit on any
+  // cached cookie, even when the user was deliberately repairing this flow.
+  // forceOpen clears only this provider's live-context cookies before opening
+  // the fresh OAuth flow; other provider sessions remain intact.
   const result = await ensureOAuthSession({
     provider,
-    apiBaseUrl: args.apiBase,
     // --profile-dir pins login to an isolated profile (a secondary
     // personal Google identity) instead of the shared bot profile.
     ...(args.profileDir !== undefined ? { profileDir: args.profileDir } : {}),
-    // 0.8.3-rc.1 — --force-relogin now also applies to the bare
-    // `login` command. Without this, a valid cached session
-    // short-circuits the flow and the operator has no way to open
-    // the noVNC URL — even when the actual problem is a service-
-    // side challenge (GitHub's "verify it's you" / Google's device-
-    // prompt drift) that only an interactive browser session can
-    // clear.
-    ...(args.forceRelogin ? { forceOpen: true } : {}),
+    forceOpen: true,
   });
   switch (result.status) {
-    case "already_valid":
-      await recordConnectedProvider(provider);
-      ui.success(`Already signed in to ${label}.`);
-      return;
-    case "logged_in":
+    case "satisfied":
       await recordConnectedProvider(provider);
       ui.success(`Signed in to ${label}. The bot is ready.`);
       return;
@@ -1426,16 +1274,13 @@ function printHelp(): void {
   console.warn(`${chalk.bold("Commands")}`);
   console.warn(`  ${ui.code("connect")}                       set up this machine (default)`);
   console.warn(`  ${ui.code("login --provider=<p>")}          add a Google or GitHub session`);
-  console.warn(
-    `  ${ui.code("settings")}                      edit registry, OTP, and proxy choices`,
-  );
+  console.warn(`  ${ui.code("settings")}                      edit registry and OTP choices`);
   console.warn(`  ${ui.code("logout")}                        clear the local session`);
   console.warn("");
   console.warn(`${chalk.bold("Flags for connect")}`);
   console.warn(`  --target=<${Object.keys(AGENTS).join("|")}>`);
   console.warn(`  --skip-browser               don't launch a browser (CI mode)`);
   console.warn(`  --force-relogin[=google|github] switch the bound account or one provider`);
-  console.warn(`  --proxy-url=<url>            bake a residential proxy into the bot env`);
   console.warn(`  --no-registry                disable managed registry participation`);
   console.warn(`  --no-interactive             skip the TUI picker (use flag defaults only)`);
   console.warn("");
@@ -1450,7 +1295,6 @@ interface ClaimResult {
   preferences?: {
     registry_enabled?: boolean;
     consent_operator_inbox_otp?: boolean;
-    proxy_url?: string;
   };
 }
 

@@ -2,7 +2,7 @@
 //  #1 — `connect` must not short-circuit on a present-but-EXPIRED agent
 //       token (agent sessions have a 24h absolute cap). agentTokenStillValid
 //       probes the server; only an auth rejection counts as invalid.
-//  #3 — the confirm browser / headless noVNC tunnel must stay open until
+//  #3 — the confirm browser must stay open until
 //       explicit Finish during normal onboarding.
 
 import {
@@ -10,6 +10,7 @@ import {
   lstatSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -21,9 +22,7 @@ import { describe, expect, it } from "vitest";
 import {
   agentTokenStillValid,
   claimHeartbeatMessage,
-  connectCompletionOptions,
   decideProvisioned,
-  parseArgs,
   shouldCompleteInstallClaim,
   withConnectProfileGuard,
 } from "../install/cli.js";
@@ -117,13 +116,14 @@ describe("decideProvisioned (fast-path gate: write config without a re-claim)", 
   });
 });
 
-describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
+describe("shouldCompleteInstallClaim (explicit browser completion)", () => {
   it("keeps one canonical guard while a symlinked profile is reset", async () => {
     const base = mkdtempSync(join(tmpdir(), "ts-connect-profile-"));
     const target = join(base, "profile");
     const alias = join(base, "profile-alias");
     mkdirSync(target);
     writeFileSync(join(target, "stale-state"), "stale");
+    writeFileSync(join(target, "trusty-squire-session-state.json"), "portable-state");
     symlinkSync(target, alias, "dir");
     try {
       await withConnectProfileGuard(alias, async (canonicalProfileDir) => {
@@ -131,6 +131,7 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
         clearBrowserProfile(canonicalProfileDir);
         expect(realpathSync(alias)).toBe(target);
         expect(existsSync(join(target, "stale-state"))).toBe(false);
+        expect(existsSync(join(target, "trusty-squire-session-state.json"))).toBe(false);
         await withProfileOperationGuard(alias, async () => undefined);
       });
       expect(lstatSync(alias).isSymbolicLink()).toBe(true);
@@ -139,85 +140,11 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
     }
   });
 
-  it("completes force-relogin once the provider session has seeded", () => {
-    expect(
-      shouldCompleteInstallClaim(
-        true, // claimed
-        true, // completeOnClaim (force-relogin)
-        true, // sessionSeeded
-      ),
-    ).toBe(true);
-  });
-
-  it("does NOT tear down force-relogin on a bare claim before the session seeds", () => {
-    // The bug: the API flips to `claimed` when the OAuth identity lands, which on
-    // a cold profile is BEFORE Google finishes (its second challenge). Tearing
-    // down here killed the noVNC mid-sign-in. Must stay open.
-    expect(
-      shouldCompleteInstallClaim(
-        true, // claimed
-        true, // completeOnClaim
-        false, // sessionSeeded — sign-in still in flight
-      ),
-    ).toBe(false);
-  });
-
-  it("does not let Finish override the requested provider seed", () => {
-    expect(
-      shouldCompleteInstallClaim(
-        true,
-        true,
-        false, // not seeded…
-        true, // …and Finish cannot substitute for it
-      ),
-    ).toBe(false);
-    expect(shouldCompleteInstallClaim(true, true, false, true)).toBe(false);
-  });
-
-  it("keeps first-time onboarding open for the explicit Finish step", () => {
-    expect(shouldCompleteInstallClaim(true, false, false)).toBe(false);
-  });
-
-  it("completes first-time onboarding only after explicit Finish", () => {
-    expect(shouldCompleteInstallClaim(true, false, false, true)).toBe(true);
-  });
-
-  it("keeps plain onboarding open through optional GitHub until explicit Finish", () => {
-    // Step 1: Google claimed the install and seeded its provider cookie. This
-    // used to close noVNC before the user could complete optional GitHub.
-    expect(shouldCompleteInstallClaim(true, false, true, false)).toBe(false);
-    // Step 2: another provider cookie landing still is not wizard completion.
-    expect(shouldCompleteInstallClaim(true, false, true, false)).toBe(false);
-    // Only the per-run loopback signal fired by Finish is terminal.
-    expect(shouldCompleteInstallClaim(true, false, true, true)).toBe(true);
-  });
-
-  it("does not substitute provider cookies when callback storage is unavailable", () => {
-    expect(shouldCompleteInstallClaim(true, false, true, false)).toBe(false);
-  });
-
-  it("does not accept an explicit Finish signal before the account claim", () => {
-    expect(shouldCompleteInstallClaim(false, false, true, true)).toBe(false);
-    expect(shouldCompleteInstallClaim(true, false, false)).toBe(false);
-  });
-
-  it("never completes before the account claim succeeds", () => {
-    expect(shouldCompleteInstallClaim(false, true, true, true)).toBe(false);
-  });
-
-  it("maps parsed force-relogin flags to connect completion behavior", () => {
-    expect(connectCompletionOptions(parseArgs(["connect"]))).toEqual({
-      completeOnClaim: false,
-      completionProvider: "google",
-    });
-    expect(connectCompletionOptions(parseArgs(["connect", "--force-relogin"]))).toEqual({
-      completeOnClaim: true,
-      completionProvider: "google",
-    });
-    expect(connectCompletionOptions(parseArgs(["connect", "--force-relogin=github"]))).toEqual({
-      completeOnClaim: true,
-      completionProvider: "github",
-    });
+  it("waits for both an account claim and the browser Finish callback", () => {
+    expect(shouldCompleteInstallClaim(false, false)).toBe(false);
+    expect(shouldCompleteInstallClaim(true, false)).toBe(false);
+    expect(shouldCompleteInstallClaim(false, true)).toBe(false);
+    expect(shouldCompleteInstallClaim(true, true)).toBe(true);
   });
 });
 

@@ -50,6 +50,28 @@ describe("single-tier — stale install gate", () => {
       await client.close();
     }
   });
+
+  it("reloads the account-bound session published after the server started", async () => {
+    const recoveredApi = {
+      setRequestingAgent: vi.fn(),
+      listPaymentCards: vi.fn().mockResolvedValue([]),
+    };
+    const loadPersistedSession = vi.fn(async () => recoveredApi as unknown as ApiClient);
+    const server = await buildServer(null, undefined, loadPersistedSession);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: "post-install-test", version: "1.0.0" });
+    await client.connect(clientTransport);
+
+    try {
+      const result = await client.callTool({ name: "list_payment_cards", arguments: {} });
+      expect(result.isError).not.toBe(true);
+      expect(loadPersistedSession).toHaveBeenCalledTimes(1);
+      expect(recoveredApi.listPaymentCards).toHaveBeenCalledTimes(1);
+    } finally {
+      await client.close();
+    }
+  });
 });
 
 describe("MCP client identity", () => {

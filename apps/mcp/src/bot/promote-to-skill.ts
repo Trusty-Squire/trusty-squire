@@ -902,7 +902,7 @@ function translateStep(
       // a known provider AND we haven't already navigated to that
       // provider's auth host, emit a click_oauth_button instead. The
       // distinction matters because the replay engine handles OAuth
-      // clicks specially (checks loggedInProviders before clicking).
+      // clicks specially (checks the live provider session before clicking).
       const oauthProvider = detectOAuthProvider(hintResult.hint);
       if (oauthProvider !== null) {
         // Record the whole menu the page offered, but only when it adds signal

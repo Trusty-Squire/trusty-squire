@@ -238,7 +238,7 @@ describe("operate_act consolidated-kind alias parity", () => {
   it("delegates await_verification through the inbox-consent and sealed-OTP contract", async () => {
     mocks.awaitVerification.mockImplementation(
       async (_sessionId: string, options: { grantConsent?: boolean }) =>
-        options.grantConsent === true
+        options.grantConsent !== false
           ? {
               session_id: "session-verify",
               found: true,
@@ -261,16 +261,28 @@ describe("operate_act consolidated-kind alias parity", () => {
       into_slot: "otp",
     };
 
-    const legacyGate = await provisionAwaitVerificationTool.handler(
+    const legacyDefault = await provisionAwaitVerificationTool.handler(
       provisionAwaitVerificationTool.inputSchema.parse(baseInput),
       null,
     );
-    const consolidatedGate = await provisionActTool.handler(
+    const consolidatedDefault = await provisionActTool.handler(
       provisionActTool.inputSchema.parse({ ...baseInput, kind: "await_verification" }),
       null,
     );
-    expect(consolidatedGate).toEqual(legacyGate);
-    expect(consolidatedGate).toMatchObject({
+    expect(consolidatedDefault).toEqual(legacyDefault);
+    expect(consolidatedDefault).toMatchObject({ found: true, sealed: true });
+
+    const optedOutInput = { ...baseInput, grant_inbox_consent: false };
+    const legacyOptedOut = await provisionAwaitVerificationTool.handler(
+      provisionAwaitVerificationTool.inputSchema.parse(optedOutInput),
+      null,
+    );
+    const consolidatedOptedOut = await provisionActTool.handler(
+      provisionActTool.inputSchema.parse({ ...optedOutInput, kind: "await_verification" }),
+      null,
+    );
+    expect(consolidatedOptedOut).toEqual(legacyOptedOut);
+    expect(consolidatedOptedOut).toMatchObject({
       found: false,
       needs_user: { wall: "verification_code" },
     });
@@ -292,6 +304,11 @@ describe("operate_act consolidated-kind alias parity", () => {
       intoSlot: "otp",
     });
     expect(mocks.awaitVerification).toHaveBeenNthCalledWith(3, "session-verify", {
+      sender: "example.test",
+      intoSlot: "otp",
+      grantConsent: false,
+    });
+    expect(mocks.awaitVerification).toHaveBeenNthCalledWith(5, "session-verify", {
       sender: "example.test",
       intoSlot: "otp",
       grantConsent: true,

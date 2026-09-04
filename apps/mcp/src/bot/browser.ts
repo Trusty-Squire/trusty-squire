@@ -23,6 +23,7 @@
 // gate).
 
 import { chromium as baseChromium } from "playwright";
+import sharp from "sharp";
 import type {
   Browser,
   BrowserContext,
@@ -30,23 +31,24 @@ import type {
   ElementHandle,
   FileChooser,
   Frame,
+  JSHandle,
   Locator,
   Page,
+  Request,
 } from "playwright";
 import { createRequire } from "node:module";
 import { Socket, createServer } from "node:net";
-import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { spawn, type ChildProcess } from "node:child_process";
 import { isSameRecipeDomain } from "@trusty-squire/recipe-schema";
-import { detectAsn, type AsnClass } from "./asn.js";
 import {
-  acquireFreeProfileOperationGuard,
-  CHROME_PROFILE_DIR,
   clearStaleSingletonLock,
   closeProfileWithProof,
   currentProfileHolderPid,
-  launchWithProfileGate,
-  profilePathIdentity,
+  processBirthIdentity,
+  processBirthIdentityState,
   profileProcessIdentity,
   profileProcessIdentityState,
   profileProcessMatches,
@@ -55,25 +57,128 @@ import {
   reapProfileHolderIfOwned,
   signalProfileProcess,
   type ProfileProcessIdentity,
-  type ProfileOperationLease,
+  type ProcessIdentityState,
   type ProfileCloseState,
-  waitForProfileFree,
 } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
 import {
-  GOOGLE_LOGIN_COOKIE_MARKERS,
-  type OperatorWorkerIdentity,
-} from "./operator-profile-pool.js";
-import { startXvfb, xvfbAvailable, type XvfbRig } from "./xvfb.js";
+  createOperatorBrowserMarker,
+  OPERATOR_BROWSER_MARKER_ENV,
+  operatorBrowserProcessMarker,
+  operatorBrowserProcessMatchesMarker,
+  startGlobalOperatorBrowserProcessWatchdog,
+} from "./operator-browser-watchdog.js";
+import {
+  bindOwnerBrowserLaunch,
+  markOwnerBrowserLaunchTerminal,
+  reconcileOwnerBrowserLaunchAfterLeaderExit,
+  terminateOwnerBrowserLaunch,
+  trackOwnerBrowserLaunch,
+  trackOwnerProcess,
+  untrackOwnerBrowserLaunch,
+  untrackOwnerProcess,
+} from "./owner-process-reaper.js";
+import type { RemoteLoginRig } from "./remote-login-display.js";
 
 // Lazy registration: installing the plugin mutates the chromium singleton
 // from playwright-extra so we only do it once per process. We require()
 // the CJS modules lazily (the stealth toolchain only ships CJS) and treat
 // stealth as best-effort — a missing dep should never crash the bot.
 const require = createRequire(import.meta.url);
-
 export type StealthProfile = "baseline" | "cdp_hardened";
+
+// Operator signup runs are deliberately headed. Google, Stytch, and Cloudflare
+// routinely reject a headless Chrome even when it is otherwise self-launched.
+const OPERATOR_BROWSER_HEADLESS = false;
+
+export function registerLocalBrowserLaunch(
+  profileDir: string,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+  marker = createOperatorBrowserMarker(),
+): { marker: string; env: NodeJS.ProcessEnv } {
+  trackOwnerBrowserLaunch(marker, profileDir);
+  return {
+    marker,
+    env: { ...baseEnv, [OPERATOR_BROWSER_MARKER_ENV]: marker },
+  };
+}
+
+export async function closeBrowserContextWithin(
+  context: { close(): Promise<unknown> },
+  timeoutMs = 2_000,
+): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  const outcome = await Promise.race([
+    Promise.resolve()
+      .then(() => context.close())
+      .then(
+        () => true,
+        () => false,
+      ),
+    new Promise<false>((resolveTimeout) => {
+      timer = setTimeout(() => resolveTimeout(false), timeoutMs);
+    }),
+  ]);
+  if (timer !== undefined) clearTimeout(timer);
+  return outcome;
+}
+
+function spawnLocalBrowser(
+  binary: string,
+  args: readonly string[],
+  profileDir: string,
+  options: {
+    env: NodeJS.ProcessEnv;
+    stdio: ["ignore", "ignore", "pipe"];
+    detached: boolean;
+    marker?: string;
+  },
+): ChildProcess {
+  const ownership = registerLocalBrowserLaunch(profileDir, options.env, options.marker);
+  try {
+    const child = spawn(binary, [...args], {
+      env: ownership.env,
+      stdio: options.stdio,
+      detached: options.detached,
+    });
+    localBrowserLaunchMarkers.set(child, ownership.marker);
+    child.once("exit", () => {
+      setTimeout(() => {
+        reconcileOwnerBrowserLaunchAfterLeaderExit(ownership.marker, profileDir);
+      }, 0).unref();
+    });
+    return child;
+  } catch (error) {
+    untrackOwnerBrowserLaunch(ownership.marker);
+    throw error;
+  }
+}
+
+const localBrowserLaunchMarkers = new WeakMap<ChildProcess, string>();
+
+function markLocalBrowserLaunchTerminal(child: ChildProcess | null): void {
+  if (child === null) return;
+  const marker = localBrowserLaunchMarkers.get(child);
+  if (marker !== undefined) markOwnerBrowserLaunchTerminal(marker);
+}
+
+export async function closeLocalBrowserLaunch(
+  marker: string | undefined,
+  profileDir: string,
+  runtime: {
+    markTerminal?: typeof markOwnerBrowserLaunchTerminal;
+    terminate?: typeof terminateOwnerBrowserLaunch;
+    untrack?: typeof untrackOwnerBrowserLaunch;
+  } = {},
+): Promise<void> {
+  if (marker === undefined) return;
+  (runtime.markTerminal ?? markOwnerBrowserLaunchTerminal)(marker);
+  if (!(await (runtime.terminate ?? terminateOwnerBrowserLaunch)(marker, profileDir))) {
+    throw new Error("local login browser closure unproven");
+  }
+  (runtime.untrack ?? untrackOwnerBrowserLaunch)(marker);
+}
 
 export type ContextInitScriptId = "evaluate-name-shim" | "navigator-webdriver" | "webgl-spoof";
 
@@ -225,6 +330,10 @@ export interface CheckoutCard {
   exp_year: string;
   name: string;
   cvv: string;
+  issuer?: string;
+  issuer_source?: "bin_metadata" | "vault_metadata" | "vault_label";
+  network?: string;
+  label?: string;
   billing: {
     line1: string;
     line2?: string;
@@ -268,6 +377,33 @@ export interface CheckoutSubmitResult {
   // only after it observes a terminal merchant order route.
   order_confirmed: boolean;
   challenge_url?: string;
+  // Passive post-submit ACS evidence. This is never an approval gate.
+  payment_instrument_mismatch?: PaymentInstrumentMismatch;
+}
+
+export interface PaymentInstrumentMismatch {
+  kind: "payment_instrument_mismatch";
+  confidence: "high" | "low";
+  evidence_used: Array<"last4" | "issuer" | "network">;
+  expected: { last4: string; issuer?: string; network?: string; label?: string };
+  observed: { last4?: string; issuer?: string; network?: string };
+  provenance: {
+    expected: {
+      last4: "released_card";
+      issuer?: "bin_metadata" | "vault_metadata" | "vault_label";
+      network?: "vault_metadata";
+      label?: "vault_label";
+    };
+    observed: "3ds_challenge";
+  };
+}
+
+interface PaymentInstrumentExpectation {
+  last4: string;
+  issuer?: string;
+  issuer_source?: "bin_metadata" | "vault_metadata" | "vault_label";
+  network?: string;
+  label?: string;
 }
 
 export type ClickDispatchStatus = "not_dispatched" | "dispatched" | "unknown";
@@ -302,7 +438,7 @@ export function clickDispatchStatusForError(error: unknown): ClickDispatchStatus
 // machine (rc.21-rc.22) intercepted the challenge instead and could never
 // finish a decoupled/app-push ACS handshake in the headless operator
 // browser; do not reintroduce interception here.
-export type ThreeDsResolution = "succeeded" | "failed" | "timeout";
+export type ThreeDsResolution = "succeeded" | "failed" | "challenge_pending" | "timeout";
 
 interface CheckoutFrameDescriptor {
   url: string;
@@ -352,6 +488,31 @@ export function recognizedPaymentProviderFrame(frameUrl: string, pageUrl: string
   );
 }
 
+// 3-D Secure ACS/directory-server hosts that the host-scope guard
+// (requestHostInScope, below) must let through for XHR/fetch — NEVER for
+// card-fill (that stays RECOGNIZED_PAYMENT_PROVIDER_FRAME_HOSTS-only; keep
+// these two lists separate so widening network scope for a challenge can
+// never also widen where the raw PAN is allowed to be typed).
+//
+// Root cause (2026-08-23, Hibiya Kadan/EbisuMart live decoupled-3DS hang,
+// reproduced deterministically with a local ACS fixture — see
+// browser-decoupled-3ds.test.ts): detectThreeDsChallenge already treats a
+// cardinalcommerce.com frame as a legitimate 3DS authority (the urlPattern
+// above), but requestHostInScope did not — so the ACS page's OWN decoupled-
+// authentication status poll (a `fetch`/`XHR` to its own backend) was
+// fail-closed ABORTED by installHostScopeGuard the instant the challenge
+// attached, because cardinalcommerce.com was never a `start`-declared or
+// sibling-domain host for the checkout session. The issuer approval landed
+// out-of-band in ~2 seconds — nowhere near the wait budget — but the ACS
+// page's client-side JS could never learn about it, so it never redirected
+// or auto-submitted its CRes, and waitForThreeDsResolution correctly polled
+// forever for a navigation that could never happen. No wait-duration fix
+// (resumability, a longer budget) can repair this: the browser is stuck
+// independent of how long we watch it.
+const THREE_DS_ACS_NETWORK_HOSTS: readonly string[] = [
+  "cardinalcommerce.com", // Visa/Mastercard/etc.'s shared ACS/StepUp vendor — the one host requestHostInScope was missing that detectThreeDsChallenge's urlPattern above already names.
+];
+
 // Card fields exist on the page but only inside a frame that is NOT a
 // recognized payment-provider surface. Carries the frame origin so the
 // refusal names what was refused without ever filling it.
@@ -380,6 +541,39 @@ export class PaymentSubmitOutcomeUnknownError extends Error {
     super("payment_submit_outcome_unknown");
     this.name = "PaymentSubmitOutcomeUnknownError";
   }
+}
+
+export async function runCaptureConfirmedPaymentSubmit<T>(options: {
+  click: (markInputDispatchPossible: () => void) => Promise<void>;
+  readEvidence: () => Promise<{ baseline: T | null; dispatched: boolean }>;
+  clear: () => Promise<void>;
+  onSubmitDispatched?: () => void;
+}): Promise<T | null> {
+  let clickError: unknown;
+  let inputDispatchPossible = false;
+  try {
+    await options.click(() => {
+      inputDispatchPossible = true;
+    });
+  } catch (error) {
+    clickError = error;
+  }
+  if (
+    clickError instanceof BrowserClickDispatchError &&
+    clickError.dispatchStatus === "not_dispatched"
+  ) {
+    await options.clear();
+    throw clickError;
+  }
+  const evidence = await options.readEvidence();
+  await options.clear();
+  if (!evidence.dispatched) {
+    if (clickError !== undefined && !inputDispatchPossible) throw clickError;
+    throw new PaymentSubmitOutcomeUnknownError();
+  }
+  options.onSubmitDispatched?.();
+  if (clickError !== undefined) throw new PaymentSubmitOutcomeUnknownError();
+  return evidence.baseline;
 }
 
 const CHECKOUT_TERMINAL_RESERVED_SEGMENTS = new Set([
@@ -588,15 +782,206 @@ function checkoutUrlOrderIdentities(
   }
 }
 
-const CHECKOUT_PAN_FIELD_SELECTORS =
-  'input[autocomplete~="cc-number"],input[name*="cardnumber" i],input[id*="card-number" i],input[id*="cardnumber" i]';
+// Shopify's thank-you route keeps the checkout token in a nested path
+// (`/checkouts/cn/<token>/<locale>/thank-you`), so it has no terminal order
+// identity for checkoutUrlOrderIdentities to compare. Treat it as terminal
+// only when the post-submit page also exposes unambiguous confirmation copy.
+function isShopifyCheckoutThankYouRoute(rawUrl: string): boolean {
+  try {
+    const segments = new URL(rawUrl).pathname
+      .split("/")
+      .filter(Boolean)
+      .map((segment) => decodeURIComponent(segment).toLowerCase().replace(/-/g, "_"));
+    return (
+      (segments[0] === "checkout" || segments[0] === "checkouts") && segments.at(-1) === "thank_you"
+    );
+  } catch {
+    return false;
+  }
+}
+
+// EbisuMart — a widely-deployed Japanese EC platform (the Hibiya Kadan
+// checkout runs on it) — names its card fields CREDIT_NO / CREDIT_NAME /
+// SECURITY_CD / CREDIT_LIMIT_MONTH / CREDIT_LIMIT_YEAR. PAN name/id and JP
+// label conventions are normalized to data-ts-jp-card-field by
+// stampJapaneseCardLabelFields so this selector stays valid for both
+// frame.locator() and native element.matches() calls.
+const CHECKOUT_NON_CARD_IDENTITY_EXCLUSION =
+  ':not([name*="gift" i]):not([id*="gift" i]):not([name*="loyalty" i]):not([id*="loyalty" i]):not([name*="point" i]):not([id*="point" i]):not([name*="prepaid" i]):not([id*="prepaid" i]):not([name*="member" i]):not([id*="member" i])';
+
+const CHECKOUT_LEGACY_PAN_FIELD_SELECTORS = [
+  'input[autocomplete~="cc-number"]',
+  'input[name*="cardnumber" i]',
+  'input[id*="card-number" i]',
+  'input[id*="cardnumber" i]',
+]
+  .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
+  .join(",");
+
+const CHECKOUT_PAN_FIELD_SELECTORS = [
+  CHECKOUT_LEGACY_PAN_FIELD_SELECTORS,
+  `input[data-ts-jp-card-field="pan"]${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
+].join(",");
+
+const CHECKOUT_CONSERVATIVE_EXPIRY_MONTH_FIELD_SELECTORS = [
+  '[autocomplete~="cc-exp-month"]',
+  'select[name*="credit" i][name*="month" i]',
+  'select[name*="limit" i][name*="month" i]',
+  'select[id*="limit" i][id*="month" i]',
+  'select[data-ts-jp-card-exp="month"]',
+]
+  .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
+  .join(",");
+
+const CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS = [
+  CHECKOUT_CONSERVATIVE_EXPIRY_MONTH_FIELD_SELECTORS,
+  ...[
+    '[name*="exp_month" i]',
+    '[name*="expmonth" i]',
+    '[name*="exp" i][name*="month" i]',
+    '[id*="exp" i][id*="month" i]',
+  ].map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`),
+].join(",");
+
+const CHECKOUT_CONSERVATIVE_EXPIRY_YEAR_FIELD_SELECTORS = [
+  '[autocomplete~="cc-exp-year"]',
+  'select[name*="credit" i][name*="year" i]',
+  'select[name*="limit" i][name*="year" i]',
+  'select[id*="limit" i][id*="year" i]',
+  'select[data-ts-jp-card-exp="year"]',
+]
+  .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
+  .join(",");
+
+const CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS = [
+  CHECKOUT_CONSERVATIVE_EXPIRY_YEAR_FIELD_SELECTORS,
+  ...[
+    '[name*="exp_year" i]',
+    '[name*="expyear" i]',
+    '[name*="exp" i][name*="year" i]',
+    '[id*="exp" i][id*="year" i]',
+  ].map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`),
+].join(",");
+
+const CHECKOUT_CONSERVATIVE_COMBINED_EXPIRY_INPUT_SELECTORS = [
+  'input[autocomplete~="cc-exp"]',
+  'input[name="exp" i]',
+  'input[id="exp" i]',
+  'input[placeholder="MM/YY" i]',
+  'input[placeholder="MM / YY" i]',
+  'input[aria-label="MM/YY" i]',
+  'input[aria-label="MM / YY" i]',
+  'input[data-ts-card-expiry="combined"]',
+].map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`);
+
+const CHECKOUT_COMBINED_EXPIRY_INPUT_SELECTORS = [
+  ...CHECKOUT_CONSERVATIVE_COMBINED_EXPIRY_INPUT_SELECTORS,
+  'input[name*="expir" i]:not([name*="month" i]):not([name*="year" i])',
+  'input[name*="exp-date" i]',
+  'input[id*="expir" i]:not([id*="month" i]):not([id*="year" i])',
+  'input[id*="exp-date" i]',
+].map((selector) =>
+  selector.includes(CHECKOUT_NON_CARD_IDENTITY_EXCLUSION)
+    ? selector
+    : `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
+);
+
+const CHECKOUT_CONSERVATIVE_COMBINED_EXPIRY_FIELD_SELECTORS = [
+  ...CHECKOUT_CONSERVATIVE_COMBINED_EXPIRY_INPUT_SELECTORS,
+  `label:has-text("MM/YY") input${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
+  `label:has-text("MM / YY") input${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
+].join(",");
+
+const CHECKOUT_COMBINED_EXPIRY_FIELD_SELECTORS = [
+  ...CHECKOUT_COMBINED_EXPIRY_INPUT_SELECTORS,
+  `label:has-text("MM/YY") input${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
+  `label:has-text("MM / YY") input${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`,
+].join(",");
+
+const CHECKOUT_COMBINED_EXPIRY_GROUP_SELECTORS = CHECKOUT_COMBINED_EXPIRY_INPUT_SELECTORS.join(",");
+
+const CHECKOUT_CONSERVATIVE_CVV_FIELD_SELECTORS = [
+  'input[autocomplete~="cc-csc"]',
+  'input[data-ts-jp-card-field="cvv"]',
+]
+  .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
+  .join(",");
+
+const CHECKOUT_CVV_FIELD_SELECTORS = [
+  CHECKOUT_CONSERVATIVE_CVV_FIELD_SELECTORS,
+  ...[
+    'input[name*="cvv" i]',
+    'input[name*="cvc" i]',
+    'input[name*="security-code" i]',
+    'input[id*="cvv" i]',
+    'input[id*="cvc" i]',
+  ].map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`),
+].join(",");
+
+const CHECKOUT_CARD_NAME_FIELD_SELECTORS = [
+  'input[autocomplete~="cc-name"]',
+  'input[name*="cardholder" i]',
+  'input[name*="card-name" i]',
+  'input[id*="cardholder" i]',
+  'input[data-ts-jp-card-field="name"]',
+]
+  .map((selector) => `${selector}${CHECKOUT_NON_CARD_IDENTITY_EXCLUSION}`)
+  .join(",");
 
 const CHECKOUT_CARD_VALUE_FIELD_SELECTORS = [
   CHECKOUT_PAN_FIELD_SELECTORS,
-  'input[autocomplete~="cc-exp"],input[autocomplete~="cc-exp-month"],input[autocomplete~="cc-exp-year"],input[name*="expir" i],input[name="exp" i],input[name*="exp_month" i],input[name*="expmonth" i],input[name*="exp_year" i],input[name*="expyear" i],input[id*="expir" i],input[id="exp" i],input[id*="exp-date" i],input[id*="exp" i][id*="month" i],input[id*="exp" i][id*="year" i],input[placeholder="MM/YY" i],input[placeholder="MM / YY" i],input[aria-label="MM/YY" i],input[aria-label="MM / YY" i]',
-  'input[autocomplete~="cc-csc"],input[name*="cvv" i],input[name*="cvc" i],input[name*="security-code" i],input[id*="cvv" i],input[id*="cvc" i]',
-  'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i]',
+  CHECKOUT_COMBINED_EXPIRY_GROUP_SELECTORS,
+  CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS,
+  CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS,
+  CHECKOUT_CVV_FIELD_SELECTORS,
+  CHECKOUT_CARD_NAME_FIELD_SELECTORS,
 ].join(",");
+
+// Defense-in-depth redaction set for operate_screenshot, under the PAYMENT-ONLY
+// masking policy. The capture-scoped guard refuses nonempty values before pixels
+// are read; these selectors also identify empty card controls and provide
+// rectangles that are composited over the captured bytes. The set is exactly the
+// card fields fillCheckoutCardIntoFrames writes into plus the per-field seal
+// marker type_secret stamps on the ONE element it injected into. Password/OTP/PIN
+// name-shaped selectors are deliberately absent: masking a control because its
+// name looks secret is a shape heuristic, and it blanked ordinary sign-in and
+// verification pages. An operator-injected value still carries the seal marker,
+// so it is masked by identity rather than by shape.
+const SCREENSHOT_SECRET_FIELD_SELECTORS = '[data-ts-sealed-payment="1"]';
+const SCREENSHOT_REDACTION_SELECTORS = `${CHECKOUT_CARD_VALUE_FIELD_SELECTORS},${SCREENSHOT_SECRET_FIELD_SELECTORS}`;
+
+interface SealedElementDescriptor {
+  tag: string;
+  type: string | null;
+  id: string | null;
+  name: string | null;
+  testId: string | null;
+  labelText: string | null;
+  ariaLabel: string | null;
+  placeholder: string | null;
+  landmark: string | null;
+  ordinal: number;
+}
+
+function sealedElementSemanticKeys(descriptor: SealedElementDescriptor): string[] {
+  const clean = (value: string | null | undefined): string =>
+    (value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+  const tag = clean(descriptor.tag);
+  const type = clean(descriptor.type);
+  const landmark = clean(descriptor.landmark);
+  const label = clean(descriptor.labelText ?? descriptor.ariaLabel ?? descriptor.placeholder);
+  return Array.from(
+    new Set(
+      [
+        clean(descriptor.testId) ? `test:${clean(descriptor.testId)}` : "",
+        clean(descriptor.id) ? `id:${clean(descriptor.id)}` : "",
+        clean(descriptor.name) ? `name:${tag}:${type}:${clean(descriptor.name)}` : "",
+        label ? `label:${landmark}:${tag}:${type}:${label}` : "",
+        `position:${landmark}:${tag}:${type}:${descriptor.ordinal}`,
+      ].filter((key) => key.length > 0),
+    ),
+  );
+}
 
 // Charge-verb button labels — the click that may move money. Used by
 // submitFilledCheckout to find the charge control, and by operate_act's
@@ -613,12 +998,372 @@ const CHECKOUT_CARD_VALUE_FIELD_SELECTORS = [
 export const CHECKOUT_SUBMIT_LABEL_RE =
   /^(?:pay(?:\s+now)?|place\s+order|complete\s+(?:order|purchase|payment)|submit\s+payment|buy\s+now|confirm\s+(?:order|payment))\b|^ご?注文(?:内容)?[をの]?確定|^ご?注文する|^確定(?:する|$)|^購入(?:する|を確定|$)|^今すぐ(?:購入|注文|支払)|^支払う|^お?支払い(?:を確定|$)/i;
 
+const CHECKOUT_PAYMENT_EXECUTION_PATHS = new Set([
+  "authorize",
+  "capture",
+  "charge",
+  "charges",
+  "completecheckout",
+  "completeorder",
+  "confirmpayment",
+  "orders",
+  "placeorder",
+  "purchase",
+]);
+const CHECKOUT_PAYMENT_EXECUTION_MUTATIONS = new Set([
+  "authorizepayment",
+  "capturepayment",
+  "completecheckout",
+  "completeorder",
+  "completepayment",
+  "confirmpayment",
+  "createcharge",
+  "placeorder",
+  "submitpayment",
+]);
+const CHECKOUT_PAYMENT_EXCLUDED_PATH_SEGMENTS = new Set([
+  "analytics",
+  "collect",
+  "events",
+  "logs",
+  "metrics",
+  "paymentmethods",
+  "setupintents",
+  "telemetry",
+  "tokenization",
+  "tokens",
+  "tracking",
+]);
+const CHECKOUT_PAYMENT_REQUEST_OBSERVATION_MS = 15_000;
+
+function normalizedPaymentOperation(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function isCheckoutPaymentExecutionOperation(value: string): boolean {
+  return CHECKOUT_PAYMENT_EXECUTION_MUTATIONS.has(normalizedPaymentOperation(value));
+}
+
+function collectGraphqlMutationCandidates(query: string, candidates: string[]): void {
+  const mutation =
+    /\bmutation\b(?:\s+([A-Za-z_][A-Za-z0-9_-]*))?(?:\s*\([^{}]*\))?(?:\s+@[^{]+)?\s*\{\s*(?:([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*)?([A-Za-z_][A-Za-z0-9_-]*)/gi;
+  for (const match of query.matchAll(mutation)) {
+    if (match[1] !== undefined) candidates.push(match[1]);
+    if (match[3] !== undefined) candidates.push(match[3]);
+  }
+}
+
+function hasCheckoutPaymentExecutionPayload(request: Request): boolean {
+  const payload = request.postData();
+  if (payload === null) return false;
+  const candidates: string[] = [];
+  try {
+    const parsed = JSON.parse(payload) as unknown;
+    if (parsed === null || Array.isArray(parsed) || typeof parsed !== "object") return false;
+    const record = parsed as Record<string, unknown>;
+    if (typeof record.operationName === "string") candidates.push(record.operationName);
+    if (typeof record.query === "string")
+      collectGraphqlMutationCandidates(record.query, candidates);
+  } catch {
+    const form = new URLSearchParams(payload);
+    const operationName = form.get("operationName");
+    if (operationName !== null) candidates.push(operationName);
+    const query = form.get("query");
+    collectGraphqlMutationCandidates(query ?? payload, candidates);
+  }
+  return candidates.some(isCheckoutPaymentExecutionOperation);
+}
+
+function isCheckoutPaymentRequest(request: Request): boolean {
+  if (!["document", "fetch", "xhr"].includes(request.resourceType())) return false;
+  const method = request.method().toUpperCase();
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return false;
+  try {
+    const segments = new URL(request.url()).pathname.split("/").filter(Boolean);
+    const normalizedSegments = segments.map(normalizedPaymentOperation);
+    if (
+      normalizedSegments.some((segment) => CHECKOUT_PAYMENT_EXCLUDED_PATH_SEGMENTS.has(segment))
+    ) {
+      return false;
+    }
+    const lastSegment = segments.at(-1);
+    if (
+      lastSegment !== undefined &&
+      CHECKOUT_PAYMENT_EXECUTION_PATHS.has(normalizedPaymentOperation(lastSegment))
+    ) {
+      return true;
+    }
+    if (
+      lastSegment !== undefined &&
+      (normalizedPaymentOperation(lastSegment) === "confirm" ||
+        normalizedPaymentOperation(lastSegment) === "capture") &&
+      segments.some((segment) => normalizedPaymentOperation(segment) === "paymentintents")
+    ) {
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  return hasCheckoutPaymentExecutionPayload(request);
+}
+
 export function checkoutSubmitLabel(signals: {
   ariaLabel?: string | null;
   inputValue?: string | null;
   textContent?: string | null;
 }): string {
   return (signals.ariaLabel || signals.inputValue || signals.textContent || "").trim();
+}
+
+// Cross-frame saved-card selection primitives (submitFilledCheckoutInScope's
+// money fence). A merchant-owned saved/new-card radio can legitimately control
+// card fields living in a DIFFERENT, recognized hosted-fields iframe, so
+// detection/verification aggregates a per-frame read-only SCAN across every
+// frame while the click-side RESOLVE runs only inside the radio's own frame
+// (an HTML radio group cannot span frames). These run in the PAGE via
+// frame.evaluate and are deliberately module-level, named, and fully
+// self-contained: Playwright serializes an evaluate callback via toString(),
+// so a reference to any outer module binding (e.g. a shared marker-name
+// constant) would be an undefined identifier at runtime inside the page — the
+// data-ts-checkout-selection marker name is therefore a literal in each
+// function.
+interface SavedCardSelectionScan {
+  competingRadioCount: number;
+  competingSelectOption: boolean;
+  sealedFieldValues: Array<string | null>;
+  markedCount: number;
+  markedUncheckedCount: number;
+}
+
+function scanSavedCardSelectionInPage(): SavedCardSelectionScan {
+  const savedCardPattern =
+    /(?:••+|\*{2,}|●+|×{2,}|x{4,})[\s-]*\d{2,4}\b|\bending\s+in\s+\d{4}\b|\bcard\s+on\s+file\b|\bsaved\s+card\b|登録済みのカード|前回(?:利用|使用)したカード|保存されたカード/iu;
+  const roots: Array<Document | ShadowRoot> = [document];
+  for (let index = 0; index < roots.length; index += 1) {
+    const root = roots[index]!;
+    for (const element of Array.from(root.querySelectorAll("*"))) {
+      const shadowRoot = element.shadowRoot;
+      if (shadowRoot !== null) roots.push(shadowRoot);
+    }
+  }
+  const isFilledCardField = (element: Element | null): boolean =>
+    element?.getAttribute("data-ts-sealed-payment") === "1";
+  const associatedLabelText = (control: Element): string[] => {
+    const labels = new Set<HTMLLabelElement>();
+    if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement) {
+      for (const label of Array.from(control.labels ?? [])) labels.add(label);
+    }
+    const id = control.getAttribute("id");
+    if (id !== null && id.length > 0) {
+      const root = control.getRootNode();
+      if (!(root instanceof Document) && !(root instanceof ShadowRoot)) {
+        throw new Error("saved-card control has no inspectable root");
+      }
+      for (const label of Array.from(root.querySelectorAll<HTMLLabelElement>("label[for]"))) {
+        if (label.htmlFor === id) labels.add(label);
+      }
+    }
+    return Array.from(labels, (label) => label.textContent ?? "");
+  };
+  const containerFor = (el: Element): Element | null =>
+    el.closest("[role='radio'],li,div") ?? el.parentElement;
+  const isChecked = (el: Element): boolean =>
+    el instanceof HTMLInputElement ? el.checked : el.getAttribute("aria-checked") === "true";
+  const labelTextFor = (el: Element, container: Element | null): string =>
+    [el.getAttribute("aria-label"), ...associatedLabelText(el), container?.textContent]
+      .filter((value): value is string => typeof value === "string")
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  let competingRadioCount = 0;
+  let competingSelectOption = false;
+  for (const root of roots) {
+    for (const candidate of Array.from(
+      root.querySelectorAll('input[type="radio"]:checked,[role="radio"][aria-checked="true"]'),
+    )) {
+      if (isFilledCardField(candidate)) continue;
+      const text = labelTextFor(candidate, containerFor(candidate));
+      if (text.length > 0 && savedCardPattern.test(text)) competingRadioCount += 1;
+    }
+    for (const select of Array.from(root.querySelectorAll("select"))) {
+      if (isFilledCardField(select)) continue;
+      for (const option of Array.from(select.selectedOptions)) {
+        if (isFilledCardField(option)) continue;
+        const text = [
+          option.textContent,
+          select.getAttribute("aria-label"),
+          ...associatedLabelText(select),
+        ]
+          .filter((value): value is string => typeof value === "string")
+          .join(" ")
+          .replace(/\s+/g, " ")
+          .trim();
+        if (text.length > 0 && savedCardPattern.test(text)) competingSelectOption = true;
+      }
+    }
+  }
+  const sealedFieldValues = roots.flatMap((root) =>
+    Array.from(root.querySelectorAll('[data-ts-sealed-payment="1"]')).map((el) =>
+      el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement ? el.value : null,
+    ),
+  );
+  let markedCount = 0;
+  let markedUncheckedCount = 0;
+  for (const root of roots) {
+    for (const marked of Array.from(root.querySelectorAll('[data-ts-checkout-selection="1"]'))) {
+      markedCount += 1;
+      if (!isChecked(marked)) markedUncheckedCount += 1;
+    }
+  }
+  return {
+    competingRadioCount,
+    competingSelectOption,
+    sealedFieldValues,
+    markedCount,
+    markedUncheckedCount,
+  };
+}
+
+function clearSavedCardSelectionMarkersInPage(): void {
+  const roots: Array<Document | ShadowRoot> = [document];
+  for (let index = 0; index < roots.length; index += 1) {
+    const root = roots[index]!;
+    for (const element of Array.from(root.querySelectorAll("*"))) {
+      const shadowRoot = element.shadowRoot;
+      if (shadowRoot !== null) roots.push(shadowRoot);
+    }
+  }
+  for (const root of roots) {
+    for (const marked of Array.from(root.querySelectorAll("[data-ts-checkout-selection]"))) {
+      marked.removeAttribute("data-ts-checkout-selection");
+    }
+  }
+}
+
+function resolveSavedCardSelectionInPage():
+  | { status: "resolved"; clicked: number }
+  | { status: "ambiguous" } {
+  const savedCardPattern =
+    /(?:••+|\*{2,}|●+|×{2,}|x{4,})[\s-]*\d{2,4}\b|\bending\s+in\s+\d{4}\b|\bcard\s+on\s+file\b|\bsaved\s+card\b|登録済みのカード|前回(?:利用|使用)したカード|保存されたカード/iu;
+  const roots: Array<Document | ShadowRoot> = [document];
+  for (let index = 0; index < roots.length; index += 1) {
+    const root = roots[index]!;
+    for (const element of Array.from(root.querySelectorAll("*"))) {
+      const shadowRoot = element.shadowRoot;
+      if (shadowRoot !== null) roots.push(shadowRoot);
+    }
+  }
+  const isFilledCardField = (element: Element | null): boolean =>
+    element?.getAttribute("data-ts-sealed-payment") === "1";
+  const associatedLabelText = (control: Element): string[] => {
+    const labels = new Set<HTMLLabelElement>();
+    if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement) {
+      for (const label of Array.from(control.labels ?? [])) labels.add(label);
+    }
+    const id = control.getAttribute("id");
+    if (id !== null && id.length > 0) {
+      const root = control.getRootNode();
+      if (!(root instanceof Document) && !(root instanceof ShadowRoot)) {
+        throw new Error("saved-card control has no inspectable root");
+      }
+      for (const label of Array.from(root.querySelectorAll<HTMLLabelElement>("label[for]"))) {
+        if (label.htmlFor === id) labels.add(label);
+      }
+    }
+    return Array.from(labels, (label) => label.textContent ?? "");
+  };
+  const containerFor = (el: Element): Element | null =>
+    el.closest("[role='radio'],li,div") ?? el.parentElement;
+  const isChecked = (el: Element): boolean =>
+    el instanceof HTMLInputElement ? el.checked : el.getAttribute("aria-checked") === "true";
+  const labelTextFor = (el: Element, container: Element | null): string =>
+    [el.getAttribute("aria-label"), ...associatedLabelText(el), container?.textContent]
+      .filter((value): value is string => typeof value === "string")
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const competingRadios: Array<{ el: Element; root: Document | ShadowRoot }> = [];
+  for (const root of roots) {
+    for (const candidate of Array.from(
+      root.querySelectorAll('input[type="radio"]:checked,[role="radio"][aria-checked="true"]'),
+    )) {
+      if (isFilledCardField(candidate)) continue;
+      const text = labelTextFor(candidate, containerFor(candidate));
+      if (text.length > 0 && savedCardPattern.test(text)) {
+        competingRadios.push({ el: candidate, root });
+      }
+    }
+  }
+  let clicked = 0;
+  for (const { el: radio, root } of competingRadios) {
+    const radioGroup = radio.closest('[role="radiogroup"]');
+    const siblings: Element[] =
+      radio instanceof HTMLInputElement && radio.name.length > 0
+        ? Array.from(
+            (radio.form ?? root).querySelectorAll(
+              `input[type="radio"][name="${CSS.escape(radio.name)}"]`,
+            ),
+          )
+        : radioGroup !== null
+          ? Array.from(radioGroup.querySelectorAll('[role="radio"]'))
+          : [];
+    const candidates = siblings.filter((sibling) => {
+      if (sibling === radio || isChecked(sibling)) return false;
+      const text = labelTextFor(sibling, containerFor(sibling));
+      return !(text.length > 0 && savedCardPattern.test(text));
+    });
+    // Prefer whichever candidate structurally OWNS one of our sealed fields
+    // (its container wraps the actual form we just filled) — an i18n-agnostic,
+    // DOM-structural signal. That preference only holds when it is UNIQUE:
+    // two or more owning candidates must never silently resolve to the first
+    // DOM-order match. With no owning candidate, fall back to the sole
+    // remaining candidate only when exactly one exists.
+    const owningCandidates = candidates.filter((sibling) => {
+      const container = containerFor(sibling) ?? sibling;
+      return container.querySelector('[data-ts-sealed-payment="1"]') !== null;
+    });
+    const target =
+      owningCandidates.length === 1
+        ? owningCandidates[0]
+        : owningCandidates.length === 0 && candidates.length === 1
+          ? candidates[0]
+          : undefined;
+    if (target === undefined) return { status: "ambiguous" };
+    const requeryScope: ParentNode =
+      radio instanceof HTMLInputElement && radio.name.length > 0 ? root : (radioGroup ?? root);
+    const requerySelector =
+      radio instanceof HTMLInputElement && radio.name.length > 0
+        ? `input[type="radio"][name="${CSS.escape(radio.name)}"]`
+        : '[role="radio"]';
+    (target as HTMLElement).click();
+    // The click can synchronously rerender the group (framework-controlled
+    // radios), detaching the node we just clicked — marking that stale
+    // reference would leave the LIVE checked radio unmarked and force a false
+    // refusal later. Re-identify the marking target from the live tree: the
+    // group must now contain exactly one connected, checked, non-saved-shaped
+    // member; anything else is genuinely ambiguous.
+    const liveChecked = Array.from(requeryScope.querySelectorAll(requerySelector)).filter(
+      (member) => {
+        if (!member.isConnected || !isChecked(member)) return false;
+        const text = labelTextFor(member, containerFor(member));
+        return !(text.length > 0 && savedCardPattern.test(text));
+      },
+    );
+    if (liveChecked.length !== 1) return { status: "ambiguous" };
+    liveChecked[0]!.setAttribute("data-ts-checkout-selection", "1");
+    clicked += 1;
+  }
+  return { status: "resolved", clicked };
+}
+
+// Carried from resolveCompetingSavedCardSelection to the charge-click boundary
+// so the exact resolved state can be independently re-verified right before
+// the pay button is clicked.
+interface SavedCardSelectionVerification {
+  sealedValuesByFrame: ReadonlyMap<Frame, ReadonlyArray<string | null>>;
+  expectedMarkedCount: number;
 }
 
 // Descriptor-level PayPal surface classifier retained for callers that need to
@@ -705,6 +1450,7 @@ export function requestHostInScope(
   if (bySuffix("gstatic.com") && /^\/recaptcha(?:\/|$)/u.test(parsedUrl.pathname)) return true;
   if (
     RECOGNIZED_PAYMENT_PROVIDER_FRAME_HOSTS.some(bySuffix) ||
+    THREE_DS_ACS_NETWORK_HOSTS.some(bySuffix) ||
     host.endsWith(".firebaseapp.com") ||
     host.endsWith(".web.app")
   ) {
@@ -1603,16 +2349,12 @@ export interface BrowserControllerOptions {
   // and should be disabled in unit tests so they run fast and
   // deterministically.
   humanize?: boolean;
-  // Persistent Chrome profile directory. Signup runs launch from this
-  // profile so an OAuth signup reuses the Google session google-login.ts
-  // established. Defaults to CHROME_PROFILE_DIR.
+  // Per-session persistent Chrome profile directory. Required by start().
   profileDir?: string;
-  profileOperationLease?: ProfileOperationLease;
-  // Per-launch egress override. When set, this run routes through this proxy
-  // instead of the env-global UNIVERSAL_BOT_PROXY_URL — so a fleet of verify
-  // identities can each egress from a distinct residential IP in ONE process
-  // (no containers). Subject to the same ASN-class gating + liveness probe as
-  // the env proxy. Unset → fall back to the env behavior.
+  // Per-launch egress override. A session may supply its own proxy without
+  // affecting any other browser session. It is honored regardless of the host
+  // ASN; malformed or unreachable values fail startup rather than using direct
+  // egress. Unset means direct egress.
   proxyUrl?: string;
 }
 
@@ -1652,8 +2394,9 @@ export function extractGoogleAccountEmail(pageText: string): string | null {
 
 // Map a cookie jar to the OAuth providers that have a LIVE logged-in session.
 // The auth cookies that mean "signed in": GitHub → `user_session`; Google →
-// any of the *SID session cookies (NID / CONSENT / 1P_JAR are set even when
-// logged out, so they are deliberately NOT signals). Host-scoped so a
+// a legacy *SID cookie. NID / CONSENT / 1P_JAR and the current account-chooser
+// family are set even when logged out, so they are deliberately NOT signals.
+// Host-scoped so a
 // google.com cookie can't pass for github. Cookie NAMES + presence only;
 // values are checked for non-triviality, never logged. Exported for tests.
 export function sessionProvidersFromCookies(
@@ -1663,14 +2406,7 @@ export function sessionProvidersFromCookies(
     provider: OAuthProviderId;
     host: RegExp;
     names: readonly string[];
-  }> = [
-    { provider: "github", host: /(^|\.)github\.com$/i, names: ["user_session"] },
-    {
-      provider: "google",
-      host: /(^|\.)google\.com$/i,
-      names: GOOGLE_LOGIN_COOKIE_MARKERS,
-    },
-  ];
+  }> = [{ provider: "github", host: /(^|\.)github\.com$/i, names: ["user_session"] }];
   const live: OAuthProviderId[] = [];
   for (const sig of SIGNATURES) {
     const present = cookies.some(
@@ -1681,6 +2417,13 @@ export function sessionProvidersFromCookies(
     );
     if (present) live.push(sig.provider);
   }
+  const googleSession = cookies.some(
+    (cookie) =>
+      /(^|\.)google\.com$/i.test(cookie.domain.replace(/^\./, "")) &&
+      ["__Secure-1PSID", "SID", "HSID", "SSID", "APISID", "SAPISID"].includes(cookie.name) &&
+      cookie.value.length > 10,
+  );
+  if (googleSession) live.push("google");
   return live;
 }
 
@@ -1842,7 +2585,7 @@ export function resolveChannelBinary(channel: string | null): string | null {
 // Cloudflare Turnstile's interactive challenge FAILS a Playwright/patchright
 // launchPersistentContext-driven Chrome and PASSES a Chrome the operator
 // launches itself and then attaches to over CDP — every other variable held
-// constant (same box, same datacenter IP, same Xvfb display, same Chrome 148
+// constant (same box, same datacenter IP, same headed display, same Chrome 148
 // binary, same software-WebGL, same humanized click). The discriminator
 // matrix:
 //   launchPersistentContext + CDP click   → "Verification failed"
@@ -2014,6 +2757,44 @@ async function waitForDevtools(
   throw new Error(`Chrome DevTools endpoint never came up on ${base} (${lastErr})`);
 }
 
+const DEVTOOLS_ACTIVE_PORT_FILE = "DevToolsActivePort";
+
+export async function waitForOwnedDevtoolsEndpoint(
+  profileDir: string,
+  deadlineMs: number,
+  child: ChildProcess,
+): Promise<string> {
+  const activePortPath = join(profileDir, DEVTOOLS_ACTIVE_PORT_FILE);
+  const deadline = Date.now() + deadlineMs;
+  let lastErr = "";
+  while (Date.now() < deadline) {
+    if (!childProcessIsRunning(child)) {
+      throw new Error("Chrome exited before its owned DevTools endpoint became available");
+    }
+    try {
+      const [portText, browserPath] = (await readFile(activePortPath, "utf8")).split(/\r?\n/);
+      const port = Number(portText);
+      if (
+        !Number.isInteger(port) ||
+        port < 1 ||
+        port > 65_535 ||
+        browserPath === undefined ||
+        !/^\/devtools\/browser\/[A-Za-z0-9-]+$/.test(browserPath)
+      ) {
+        throw new Error("invalid DevToolsActivePort contents");
+      }
+      return `ws://127.0.0.1:${port}${browserPath}`;
+    } catch (error) {
+      lastErr = error instanceof Error ? error.message : String(error);
+    }
+    await new Promise<void>((resolveWait) => {
+      const timer = setTimeout(resolveWait, 200);
+      timer.unref();
+    });
+  }
+  throw new Error(`Owned Chrome DevTools endpoint was not published (${lastErr})`);
+}
+
 export async function withChromeStartupLock<T>(
   fn: () => Promise<T>,
   opts: { deadlineMs?: number; lockDir?: string } = {},
@@ -2054,15 +2835,30 @@ export async function withChromeStartupLock<T>(
   }
 }
 
-const selfManagedChromes = new Map<number, ProfileProcessIdentity>();
+interface SelfManagedChrome {
+  identity: ProfileProcessIdentity;
+  // A detached POSIX child becomes the leader of a dedicated process group.
+  // Chrome's renderer/GPU descendants stay in that group, so a verified group
+  // signal tears down the entire browser rather than only its profile root.
+  processGroup: boolean;
+  proof: OwnedChromeProcessTreeProof;
+}
+
+export interface OwnedChromeProcessTreeProof {
+  identity: ProfileProcessIdentity;
+  processGroup: boolean;
+  members: Array<Pick<ProfileProcessIdentity, "pid" | "start_time">>;
+}
+
+const selfManagedChromes = new Map<number, SelfManagedChrome>();
+const ownedChromeProcessTrees = new Set<OwnedChromeProcessTreeProof>();
 let selfManagedCleanupInstalled = false;
 let selfManagedTerminationSignalExitEnabled = true;
-let orphanVerifierReapRan = false;
-const orphanOperatorProfilesReaped = new Set<string>();
 
 function cleanupSelfManagedChromes(): void {
-  for (const identity of selfManagedChromes.values()) {
-    signalProfileProcess(identity, identity.user_data_dir, "SIGKILL");
+  for (const proof of ownedChromeProcessTrees) {
+    signalOwnedChromeProcessTree(proof.identity, proof.processGroup, "SIGKILL", { proof });
+    untrackOwnerProcess(proof.identity);
   }
   selfManagedChromes.clear();
 }
@@ -2075,7 +2871,25 @@ const onSelfManagedSigint = (): void => exitForSelfManagedSignal(2);
 const onSelfManagedSigterm = (): void => exitForSelfManagedSignal(15);
 const onSelfManagedSighup = (): void => exitForSelfManagedSignal(1);
 
-// Whether the self-managed SIGINT/SIGTERM handlers may exit the process.
+const selfManagedTerminationSignalHandlers = [
+  ["SIGHUP", onSelfManagedSighup],
+  ["SIGINT", onSelfManagedSigint],
+  ["SIGTERM", onSelfManagedSigterm],
+] as const;
+
+type SelfManagedSignalRuntime = Pick<NodeJS.Process, "once" | "removeListener">;
+
+export function synchronizeSelfManagedChromeTerminationSignalHandlers(
+  enabled: boolean,
+  runtime: SelfManagedSignalRuntime = process,
+): void {
+  for (const [signal, handler] of selfManagedTerminationSignalHandlers) {
+    if (enabled) runtime.once(signal, handler);
+    else runtime.removeListener(signal, handler);
+  }
+}
+
+// Whether the self-managed termination-signal handlers may exit the process.
 // False means another shutdown owner (the MCP server's disconnect coordinator,
 // or an in-flight interactive login) holds process-exit responsibility.
 export function isSelfManagedChromeTerminationSignalExitEnabled(): boolean {
@@ -2086,13 +2900,7 @@ export function setSelfManagedChromeTerminationSignalExitEnabled(enabled: boolea
   if (selfManagedTerminationSignalExitEnabled === enabled) return;
   selfManagedTerminationSignalExitEnabled = enabled;
   if (!selfManagedCleanupInstalled) return;
-  if (enabled) {
-    process.once("SIGINT", onSelfManagedSigint);
-    process.once("SIGTERM", onSelfManagedSigterm);
-  } else {
-    process.removeListener("SIGINT", onSelfManagedSigint);
-    process.removeListener("SIGTERM", onSelfManagedSigterm);
-  }
+  synchronizeSelfManagedChromeTerminationSignalHandlers(enabled);
 }
 
 function installSelfManagedChromeCleanup(): void {
@@ -2100,21 +2908,36 @@ function installSelfManagedChromeCleanup(): void {
   selfManagedCleanupInstalled = true;
   process.once("exit", cleanupSelfManagedChromes);
   if (selfManagedTerminationSignalExitEnabled) {
-    process.once("SIGINT", onSelfManagedSigint);
-    process.once("SIGTERM", onSelfManagedSigterm);
+    synchronizeSelfManagedChromeTerminationSignalHandlers(true);
   }
-  process.once("SIGHUP", onSelfManagedSighup);
 }
 
 function registerSelfManagedChrome(
   child: ChildProcess,
   profileDir: string,
+  processGroup = false,
 ): ProfileProcessIdentity | null {
   installSelfManagedChromeCleanup();
   const identity = child.pid === undefined ? null : profileProcessIdentity(child.pid, profileDir);
-  if (identity !== null) selfManagedChromes.set(identity.pid, identity);
+  if (identity !== null) {
+    const proof = trackOwnedChromeProcessTree(identity, processGroup);
+    if (proof !== null) {
+      const marker = proof.identity.process_marker;
+      if (marker !== undefined && !bindOwnerBrowserLaunch(marker, proof.identity)) {
+        releaseOwnedChromeProcessTree(proof);
+        throw new Error("local browser launch identity could not be bound to owner custody");
+      }
+      selfManagedChromes.set(identity.pid, { identity, processGroup, proof });
+    }
+  }
   child.once("exit", () => {
-    if (child.pid !== undefined) selfManagedChromes.delete(child.pid);
+    if (child.pid === undefined) return;
+    const tracked = selfManagedChromes.get(child.pid);
+    if (tracked === undefined) return;
+    if (ownedChromeProcessTreeState(tracked.proof) === "stale") {
+      releaseOwnedChromeProcessTree(tracked.proof);
+      selfManagedChromes.delete(child.pid);
+    }
   });
   return identity;
 }
@@ -2125,12 +2948,18 @@ async function waitForTrackedProfileChildIdentity(
   readIdentity: (pid: number, profileDir: string) => ProfileProcessIdentity | null,
   timeoutMs: number,
   pollMs: number,
+  processGroup = false,
 ): Promise<ProfileProcessIdentity | null> {
   const deadline = Date.now() + timeoutMs;
   while (childProcessIsRunning(child)) {
     const identity = child.pid === undefined ? null : readIdentity(child.pid, profileDir);
     if (identity !== null) {
-      selfManagedChromes.set(identity.pid, identity);
+      const existing = selfManagedChromes.get(identity.pid);
+      const proof =
+        existing?.identity.start_time === identity.start_time
+          ? existing.proof
+          : trackOwnedChromeProcessTree(identity, processGroup);
+      if (proof !== null) selfManagedChromes.set(identity.pid, { identity, processGroup, proof });
       return identity;
     }
     if (Date.now() >= deadline) return null;
@@ -2151,6 +2980,7 @@ export async function resolveAttachedProfileChildIdentity(
     readIdentity?: (pid: number, profileDir: string) => ProfileProcessIdentity | null;
     identityTimeoutMs?: number;
     identityPollMs?: number;
+    processGroup?: boolean;
   } = {},
 ): Promise<ProfileProcessIdentity | null> {
   if (identity !== null || (options.platform ?? process.platform) !== "linux") return identity;
@@ -2160,7 +2990,204 @@ export async function resolveAttachedProfileChildIdentity(
     options.readIdentity ?? profileProcessIdentity,
     options.identityTimeoutMs ?? PROFILE_IDENTITY_PROOF_TIMEOUT_MS,
     options.identityPollMs ?? PROFILE_IDENTITY_POLL_MS,
+    options.processGroup ?? false,
   );
+}
+
+// Call this ONLY for a Chrome child spawned with detached:true. The identity
+// check protects against PID reuse, then POSIX negative-PID signalling reaches
+// Chrome's renderer/GPU/helper tree in one operation. A normal profile-root
+// signal remains the portable fallback for launchPersistentContext and Windows.
+export function signalOwnedChromeProcessTree(
+  identity: ProfileProcessIdentity,
+  processGroup: boolean,
+  signal: NodeJS.Signals,
+  options: {
+    platform?: NodeJS.Platform;
+    profileMatches?: (identity: ProfileProcessIdentity, profileDir: string) => boolean;
+    kill?: (pid: number, signal: NodeJS.Signals) => unknown;
+    processTreePids?: (rootPid: number) => number[];
+    readBirthIdentity?: typeof processBirthIdentity;
+    memberState?: typeof processBirthIdentityState;
+    processGroupId?: (pid: number) => number | null;
+    proof?: OwnedChromeProcessTreeProof;
+  } = {},
+): boolean {
+  const profileMatches = options.profileMatches ?? profileProcessMatches;
+  const kill = options.kill ?? process.kill;
+  const proof =
+    options.proof ??
+    captureOwnedChromeProcessTreeProof(identity, processGroup, {
+      profileMatches,
+      ...(options.platform === undefined ? {} : { platform: options.platform }),
+      ...(options.processTreePids === undefined
+        ? {}
+        : { processTreePids: options.processTreePids }),
+      ...(options.readBirthIdentity === undefined
+        ? {}
+        : { readBirthIdentity: options.readBirthIdentity }),
+    });
+  if (proof === null) return false;
+  const platform = options.platform ?? process.platform;
+  const memberState = options.memberState ?? processBirthIdentityState;
+  const matchingMembers = proof.members.filter((member) => memberState(member) === "matching");
+  const matchingGroupMember =
+    proof.processGroup && platform !== "win32"
+      ? matchingMembers.some(
+          (member) =>
+            platform !== "linux" ||
+            (options.processGroupId ?? linuxProcessGroupId)(member.pid) === proof.identity.pid,
+        )
+      : false;
+  if (matchingGroupMember) {
+    try {
+      kill(-proof.identity.pid, signal);
+      return true;
+    } catch {
+      // A process may exit between the proof and the signal. Fall through to
+      // the root PID only while it is still identity-proven.
+    }
+  }
+  let signalled = false;
+  // Signal leaves first. This covers the Playwright persistent-context fallback
+  // (including chrome-headless-shell), whose child is not a detached process
+  // group leader but whose renderer tree is still rooted at the identity-proven
+  // browser PID.
+  for (const member of [...proof.members].reverse()) {
+    if (memberState(member) !== "matching") continue;
+    try {
+      kill(member.pid, signal);
+      signalled = true;
+    } catch {
+      // A child can naturally exit while the tree is being walked.
+    }
+  }
+  return signalled;
+}
+
+export function captureOwnedChromeProcessTreeProof(
+  identity: ProfileProcessIdentity,
+  processGroup: boolean,
+  options: {
+    platform?: NodeJS.Platform;
+    profileMatches?: (identity: ProfileProcessIdentity, profileDir: string) => boolean;
+    processTreePids?: (rootPid: number) => number[];
+    readBirthIdentity?: typeof processBirthIdentity;
+  } = {},
+): OwnedChromeProcessTreeProof | null {
+  const profileMatches = options.profileMatches ?? profileProcessMatches;
+  if (!profileMatches(identity, identity.user_data_dir)) return null;
+  const platform = options.platform ?? process.platform;
+  const pids =
+    platform === "linux"
+      ? (options.processTreePids ?? linuxProcessTreePids)(identity.pid)
+      : [identity.pid];
+  const readBirthIdentity = options.readBirthIdentity ?? processBirthIdentity;
+  const members = pids.flatMap((pid) => {
+    if (pid === identity.pid) return [{ pid, start_time: identity.start_time }];
+    const member = readBirthIdentity(pid);
+    return member === null ? [] : [member];
+  });
+  if (!members.some((member) => member.pid === identity.pid)) {
+    members.unshift({ pid: identity.pid, start_time: identity.start_time });
+  }
+  return { identity, processGroup, members };
+}
+
+function trackOwnedChromeProcessTree(
+  identity: ProfileProcessIdentity,
+  processGroup: boolean,
+): OwnedChromeProcessTreeProof | null {
+  installSelfManagedChromeCleanup();
+  const marker = operatorBrowserProcessMarker(identity.pid);
+  const trackedIdentity = marker === null ? identity : { ...identity, process_marker: marker };
+  const proof = captureOwnedChromeProcessTreeProof(trackedIdentity, processGroup);
+  if (proof === null) return null;
+  ownedChromeProcessTrees.add(proof);
+  trackOwnerProcess(proof.identity);
+  return proof;
+}
+
+function releaseOwnedChromeProcessTree(proof: OwnedChromeProcessTreeProof | null): void {
+  if (proof === null) return;
+  ownedChromeProcessTrees.delete(proof);
+  untrackOwnerProcess(proof.identity);
+}
+
+export function ownedChromeProcessTreeState(
+  proof: OwnedChromeProcessTreeProof,
+  options: {
+    platform?: NodeJS.Platform;
+    profileMatches?: (identity: ProfileProcessIdentity, profileDir: string) => boolean;
+    memberState?: typeof processBirthIdentityState;
+  } = {},
+): ProcessIdentityState {
+  const memberState = options.memberState ?? processBirthIdentityState;
+  let sawUnknown = false;
+  for (const member of proof.members) {
+    const state = memberState(member);
+    if (state === "matching") return "matching";
+    if (state === "unknown") sawUnknown = true;
+  }
+  return sawUnknown ? "unknown" : "stale";
+}
+
+function linuxProcessGroupId(pid: number): number | null {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const closeParen = stat.lastIndexOf(")");
+    if (closeParen < 0) return null;
+    const processGroupId = Number(
+      stat
+        .slice(closeParen + 2)
+        .trim()
+        .split(/\s+/)[2],
+    );
+    return Number.isSafeInteger(processGroupId) ? processGroupId : null;
+  } catch {
+    return null;
+  }
+}
+
+function linuxProcessTreePids(rootPid: number): number[] {
+  try {
+    const childrenByParent = new Map<number, number[]>();
+    for (const entry of readdirSync("/proc")) {
+      if (!/^\d+$/.test(entry)) continue;
+      const pid = Number(entry);
+      try {
+        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+        const closeParen = stat.lastIndexOf(")");
+        if (closeParen < 0) continue;
+        const parentPid = Number(
+          stat
+            .slice(closeParen + 2)
+            .trim()
+            .split(/\s+/)[1],
+        );
+        if (!Number.isSafeInteger(parentPid)) continue;
+        const children = childrenByParent.get(parentPid) ?? [];
+        children.push(pid);
+        childrenByParent.set(parentPid, children);
+      } catch {
+        // Processes leave /proc constantly; a partial tree is still safer than
+        // abandoning the profile-root browser after a failed close.
+      }
+    }
+    const pids: number[] = [];
+    const pending = [rootPid];
+    const seen = new Set<number>();
+    while (pending.length > 0) {
+      const pid = pending.pop()!;
+      if (seen.has(pid)) continue;
+      seen.add(pid);
+      pids.push(pid);
+      for (const child of childrenByParent.get(pid) ?? []) pending.push(child);
+    }
+    return pids;
+  } catch {
+    return [rootPid];
+  }
 }
 
 export async function terminateTrackedProfileChild(
@@ -2173,6 +3200,7 @@ export async function terminateTrackedProfileChild(
     terminate?: (identity: ProfileProcessIdentity, profileDir: string) => boolean;
     identityTimeoutMs?: number;
     identityPollMs?: number;
+    processGroup?: boolean;
   } = {},
 ): Promise<ProfileProcessIdentity | null> {
   const readIdentity = options.readIdentity ?? profileProcessIdentity;
@@ -2192,9 +3220,21 @@ export async function terminateTrackedProfileChild(
       readIdentity,
       options.identityTimeoutMs ?? PROFILE_IDENTITY_PROOF_TIMEOUT_MS,
       options.identityPollMs ?? PROFILE_IDENTITY_POLL_MS,
+      options.processGroup ?? false,
     );
     if (identity === null) break;
-    selfManagedChromes.set(identity.pid, identity);
+    const existing = selfManagedChromes.get(identity.pid);
+    const proof =
+      existing?.identity.start_time === identity.start_time
+        ? existing.proof
+        : trackOwnedChromeProcessTree(identity, options.processGroup ?? false);
+    if (proof !== null) {
+      selfManagedChromes.set(identity.pid, {
+        identity,
+        processGroup: options.processGroup ?? false,
+        proof,
+      });
+    }
     const terminated = terminate(identity, profileDir);
     if (!terminated) {
       identity = null;
@@ -2207,114 +3247,8 @@ export async function terminateTrackedProfileChild(
       });
     }
   }
-  if (child.pid !== undefined) selfManagedChromes.delete(child.pid);
   return identity;
 }
-
-// Stale verifier/operator browsers are the expensive leak mode: if the MCP process dies
-// mid-verify, self-launched Chrome survives as PPID=1 with a
-// ~/.trusty-squire/profiles/verify-* or ~/.trusty-squire/chrome-profile
-// user-data-dir. It keeps the profile lock,
-// burns memory, and may leave defunct helper children. A live verifier should
-// never be parented to init, so these are safe to reap at the next browser
-// startup. Best-effort and Linux-only; failure must not block signups.
-export function matchesReapableBrowserArgs(
-  args: string,
-  profileDirs: readonly string[],
-  includeVerifier: boolean,
-): boolean {
-  return reapableBrowserProfile(args, profileDirs, includeVerifier) !== null;
-}
-
-function reapableBrowserProfile(
-  args: string,
-  profileDirs: readonly string[],
-  includeVerifier: boolean,
-): string | null {
-  if (!/(?:chrome|chromium)/i.test(args)) return null;
-  const configuredProfiles = new Map(
-    profileDirs.map((profileDir) => [profileDir, profilePathIdentity(profileDir)]),
-  );
-  const match = /--user-data-dir=(?:"([^"]+)"|'([^']+)'|([^\s]+))(?=\s|$)/.exec(args);
-  const candidate = match?.[1] ?? match?.[2] ?? match?.[3];
-  if (candidate !== undefined) {
-    const identity = profilePathIdentity(candidate);
-    if ([...configuredProfiles.values()].includes(identity)) return identity;
-    if (includeVerifier && /[/\\]\.trusty-squire[/\\]profiles[/\\]verify-[^/\\]+$/.test(identity)) {
-      return identity;
-    }
-  }
-  for (const [profileDir, identity] of configuredProfiles) {
-    for (const exactPath of new Set([profileDir, identity])) {
-      const variants = [exactPath, `"${exactPath}"`, `'${exactPath}'`];
-      if (
-        variants.some((variant) => {
-          const option = `--user-data-dir=${variant}`;
-          const offset = args.indexOf(option);
-          return (
-            offset >= 0 &&
-            /\s|$/.test(args.slice(offset + option.length, offset + option.length + 1))
-          );
-        })
-      ) {
-        return identity;
-      }
-    }
-  }
-  return null;
-}
-
-export function claimOrphanBrowserReapScope(profileDir: string): {
-  includeVerifier: boolean;
-  profileDirs: string[];
-} | null {
-  const includeVerifier = !orphanVerifierReapRan;
-  const profileDirs = [...new Set([CHROME_PROFILE_DIR, profileDir])].filter(
-    (candidate) => !orphanOperatorProfilesReaped.has(candidate),
-  );
-  if (!includeVerifier && profileDirs.length === 0) return null;
-  orphanVerifierReapRan = true;
-  for (const candidate of profileDirs) orphanOperatorProfilesReaped.add(candidate);
-  return { includeVerifier, profileDirs };
-}
-
-function reapOrphanedBrowsersOnce(profileDir: string): void {
-  if (process.platform !== "linux") return;
-  const scope = claimOrphanBrowserReapScope(profileDir);
-  if (scope === null) return;
-  let rows = "";
-  try {
-    rows = execFileSync("ps", ["-eo", "pid=,ppid=,args="], {
-      stdio: ["ignore", "pipe", "ignore"],
-    }).toString("utf8");
-  } catch {
-    return;
-  }
-  const identities: ProfileProcessIdentity[] = [];
-  for (const line of rows.split("\n")) {
-    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
-    if (match === null) continue;
-    const pid = Number(match[1]);
-    const ppid = Number(match[2]);
-    const args = match[3] ?? "";
-    const expectedProfile = reapableBrowserProfile(args, scope.profileDirs, scope.includeVerifier);
-    if (Number.isFinite(pid) && ppid === 1 && expectedProfile !== null) {
-      const identity = profileProcessIdentity(pid, expectedProfile);
-      if (identity !== null) identities.push(identity);
-    }
-  }
-  if (identities.length === 0) return;
-  console.error(`[operator] reaping ${identities.length} orphaned Chrome process(es)`);
-  for (const identity of identities) {
-    signalProfileProcess(identity, identity.user_data_dir, "SIGTERM");
-  }
-  setTimeout(() => {
-    for (const identity of identities) {
-      signalProfileProcess(identity, identity.user_data_dir, "SIGKILL");
-    }
-  }, 2_000).unref();
-}
-
 // Classify an anti-bot interstitial page from its (title + body) text.
 // `onInterstitial` matches the static Cloudflare/Turnstile challenge copy.
 // `verificationPassed` is the signal the challenge SUCCEEDED — but
@@ -2375,7 +3309,9 @@ export interface SelfLaunchedLogin {
   // running — the zombie-chrome leak). Also reaps the profile lock.
   teardown: () => Promise<void>;
   forceTeardown: () => void;
+  isRunning: () => boolean;
   identity: ProfileProcessIdentity | null;
+  marker: string;
 }
 
 export function childProcessIsRunning(child: ChildProcess | null): boolean {
@@ -2440,8 +3376,7 @@ export async function launchSelfManagedLoginContext(params: {
   binary: string;
   profileDir: string;
   initialUrl: string;
-  // App mode (--app=URL) opens a chromeless window — the connect noVNC path
-  // needs it so tabs/URL bar don't eat the phone-shaped framebuffer.
+  // App mode (--app=URL) opens a chromeless window for interactive login.
   appMode: boolean;
   window: { width: number; height: number };
   env: NodeJS.ProcessEnv;
@@ -2449,99 +3384,141 @@ export async function launchSelfManagedLoginContext(params: {
   // falls back to launchPersistentContext for credentialed proxies).
   proxyServer: string | null;
   extraArgs?: readonly string[];
+  onSpawned?: (
+    browser: Pick<SelfLaunchedLogin, "teardown" | "forceTeardown" | "isRunning" | "marker">,
+  ) => void;
 }): Promise<SelfLaunchedLogin> {
   let child: ChildProcess | null = null;
   let childIdentity: ProfileProcessIdentity | null = null;
-  const endpoint = await withChromeStartupLock(
-    async () => {
-      const port = await findFreePort();
-      clearStaleSingletonLock(params.profileDir);
-      const argv = [
-        `--remote-debugging-port=${port}`,
-        "--remote-debugging-address=127.0.0.1",
-        `--user-data-dir=${params.profileDir}`,
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--password-store=basic",
-        "--window-position=0,0",
-        `--window-size=${params.window.width},${params.window.height}`,
-        "--lang=en-US",
-        ...(params.extraArgs ?? []),
-        ...(params.proxyServer !== null ? [`--proxy-server=${params.proxyServer}`] : []),
-        // NB: we build argv ourselves, so Playwright's --enable-automation
-        // (and the rest of its launch instrumentation — the actual Turnstile
-        // tell) is never added. That is the whole point of self-launching.
-        params.appMode ? `--app=${params.initialUrl}` : params.initialUrl,
-      ];
-      const spawned = spawn(params.binary, argv, {
-        env: params.env,
-        stdio: ["ignore", "ignore", "pipe"],
+  let browser: Browser | null = null;
+  // Reserve the marker before entering the launch sequence, as BrowserController
+  // does for operate_start. The spawned Chrome inherits this exact marker, so
+  // the owner reaper can bind its birth identity without an unanchored window.
+  const ownership = registerLocalBrowserLaunch(params.profileDir, params.env);
+  const launchMarker = ownership.marker;
+  let spawned = false;
+  let teardownPromise: Promise<void> | undefined;
+  const isRunning = (): boolean => childProcessIsRunning(child);
+  const forceTeardown = (): void => {
+    markLocalBrowserLaunchTerminal(child);
+    if (childIdentity !== null) {
+      const tracked = selfManagedChromes.get(childIdentity.pid);
+      signalOwnedChromeProcessTree(childIdentity, false, "SIGKILL", {
+        ...(tracked === undefined ? {} : { proof: tracked.proof }),
       });
-      child = spawned;
-      childIdentity = registerSelfManagedChrome(spawned, params.profileDir);
-      let chromeStderr = "";
-      spawned.stderr?.on("data", (chunk: Buffer) => {
-        chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
-      });
-      try {
-        const endpoint = await waitForDevtools(port, 30_000, spawned);
-        childIdentity = await resolveAttachedProfileChildIdentity(
-          spawned,
-          params.profileDir,
-          childIdentity,
-        );
-        if (process.platform === "linux" && childIdentity === null) {
-          throw new Error("self-launched login Chrome exited before identity was proven");
+      reapProfileHolderIfOwned(params.profileDir, childIdentity);
+      return;
+    }
+    if (childProcessIsRunning(child)) child?.kill("SIGKILL");
+  };
+  const teardown = (): Promise<void> => {
+    teardownPromise ??= (async () => {
+      markLocalBrowserLaunchTerminal(child);
+      if (browser !== null) await closeBrowserContextWithin(browser);
+      if (childProcessIsRunning(child)) {
+        if (childIdentity !== null) {
+          signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
+        } else {
+          child?.kill("SIGTERM");
         }
-        return endpoint;
-      } catch (err) {
-        childIdentity = await terminateTrackedProfileChild(spawned, params.profileDir, {
-          identity: childIdentity,
-        });
-        const detail = chromeStderr.trim();
-        const collision = profileCollisionFromStderr(detail);
-        if (collision !== null) throw collision;
-        throw new Error(
-          `${err instanceof Error ? err.message : String(err)}` +
-            `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
-        );
       }
-    },
-    { deadlineMs: 0 },
-  );
+      await closeLocalBrowserLaunch(launchMarker, params.profileDir);
+    })();
+    return teardownPromise;
+  };
+  let endpoint: string;
+  try {
+    endpoint = await withChromeStartupLock(
+      async () => {
+        const port = await findFreePort();
+        clearStaleSingletonLock(params.profileDir);
+        const argv = [
+          `--remote-debugging-port=${port}`,
+          "--remote-debugging-address=127.0.0.1",
+          `--user-data-dir=${params.profileDir}`,
+          "--no-first-run",
+          "--no-default-browser-check",
+          "--password-store=basic",
+          "--window-position=0,0",
+          `--window-size=${params.window.width},${params.window.height}`,
+          "--lang=en-US",
+          ...(params.extraArgs ?? []),
+          ...(params.proxyServer !== null ? [`--proxy-server=${params.proxyServer}`] : []),
+          // NB: we build argv ourselves, so Playwright's --enable-automation
+          // (and the rest of its launch instrumentation — the actual Turnstile
+          // tell) is never added. That is the whole point of self-launching.
+          params.appMode ? `--app=${params.initialUrl}` : params.initialUrl,
+        ];
+        const launched = spawnLocalBrowser(params.binary, argv, params.profileDir, {
+          detached: process.platform !== "win32",
+          env: ownership.env,
+          stdio: ["ignore", "ignore", "pipe"],
+          marker: launchMarker,
+        });
+        child = launched;
+        spawned = true;
+        let chromeStderr = "";
+        launched.stderr?.on("data", (chunk: Buffer) => {
+          chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
+        });
+        try {
+          params.onSpawned?.({ teardown, forceTeardown, isRunning, marker: launchMarker });
+          const endpoint = await waitForDevtools(port, 30_000, launched);
+          childIdentity = await resolveAttachedProfileChildIdentity(
+            launched,
+            params.profileDir,
+            childIdentity,
+          );
+          if (process.platform === "linux" && childIdentity === null) {
+            throw new Error("self-launched login Chrome exited before identity was proven");
+          }
+          childIdentity = registerSelfManagedChrome(launched, params.profileDir) ?? childIdentity;
+          return endpoint;
+        } catch (err) {
+          forceTeardown();
+          childIdentity = await terminateTrackedProfileChild(launched, params.profileDir, {
+            identity: childIdentity,
+          });
+          const detail = chromeStderr.trim();
+          const collision = profileCollisionFromStderr(detail);
+          if (collision !== null) throw collision;
+          throw new Error(
+            `${err instanceof Error ? err.message : String(err)}` +
+              `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
+          );
+        }
+      },
+      { deadlineMs: 0 },
+    );
+  } catch (error) {
+    if (!spawned) untrackOwnerBrowserLaunch(launchMarker);
+    throw error;
+  }
   if (child === null) {
     throw new Error("self-launched login Chrome lost its process handle");
   }
 
-  const { browser, context } = await attachSelfManagedLoginContext(
-    endpoint,
-    child,
-    params.profileDir,
-    childIdentity,
-  );
-
-  let torn = false;
-  const teardown = async (): Promise<void> => {
-    if (torn) return;
-    torn = true;
-    // Disconnect the CDP browser first; over connectOverCDP this leaves the
-    // real Chrome running, so kill the child explicitly (SIGTERM, then a
-    // hard SIGKILL after a short grace) to avoid the zombie-chrome leak.
-    await browser.close();
-    if (child !== null && childIdentity !== null) {
-      signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
-    }
+  let attached: Awaited<ReturnType<typeof attachSelfManagedLoginContext>>;
+  try {
+    attached = await attachSelfManagedLoginContext(
+      endpoint,
+      child,
+      params.profileDir,
+      childIdentity,
+    );
+  } catch (error) {
+    forceTeardown();
+    throw error;
+  }
+  browser = attached.browser;
+  return {
+    context: attached.context,
+    teardown,
+    forceTeardown,
+    isRunning,
+    identity: childIdentity,
+    marker: launchMarker,
   };
-
-  const forceTeardown = (): void => {
-    if (childIdentity !== null) {
-      signalProfileProcess(childIdentity, params.profileDir, "SIGKILL");
-      selfManagedChromes.delete(childIdentity.pid);
-    }
-    reapProfileHolderIfOwned(params.profileDir, childIdentity);
-  };
-
-  return { context, teardown, forceTeardown, identity: childIdentity };
 }
 
 export interface PlainLoginBrowser {
@@ -2552,6 +3529,7 @@ export interface PlainLoginBrowser {
   // for the polling loop to fail loudly if the visible browser disappears.
   isRunning: () => boolean;
   identity: ProfileProcessIdentity | null;
+  marker: string;
 }
 
 // Launch a TRULY PLAIN Chrome for the interactive connect claim — NO
@@ -2565,10 +3543,9 @@ export interface PlainLoginBrowser {
 // though the same CDP browser passes a DIRECT accounts.google.com sign-in. The
 // tell is the CDP attachment itself (NOT the launcher, NOT the flags, NOT
 // `navigator.webdriver` — all separately ruled out). The connect claim doesn't
-// need to drive the browser: the USER signs in over noVNC, completion is read
-// from the API (`installPoll`), and provider seeding is read from the profile's
-// SQLite cookie store (`profileHasProviderCookies`). So we spawn Chrome and
-// only ever kill it — never attach.
+// need to drive the browser: the USER signs in interactively, completion comes
+// from the API (`installPoll`) plus its explicit Finish callback. So we spawn
+// Chrome and only ever kill it — never attach.
 //
 // Persistent profile is preserved (--user-data-dir=profileDir) so the Google/
 // GitHub session still lands in the bot's profile for later signups.
@@ -2576,7 +3553,7 @@ export async function launchPlainLoginBrowser(params: {
   binary: string;
   profileDir: string;
   // App mode (--app=URL) opens a chromeless window so the install page fills the
-  // phone-shaped noVNC framebuffer.
+  // interactive browser window.
   url: string;
   window: { width: number; height: number };
   env: NodeJS.ProcessEnv;
@@ -2585,121 +3562,188 @@ export async function launchPlainLoginBrowser(params: {
 }): Promise<PlainLoginBrowser> {
   let child: ChildProcess | null = null;
   let childIdentity: ProfileProcessIdentity | null = null;
-  await withChromeStartupLock(
-    async () => {
-      clearStaleSingletonLock(params.profileDir);
-      const argv = [
-        `--user-data-dir=${params.profileDir}`,
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--password-store=basic",
-        "--window-position=0,0",
-        `--window-size=${params.window.width},${params.window.height}`,
-        "--lang=en-US",
-        ...(params.extraArgs ?? []),
-        ...(params.proxyServer !== null ? [`--proxy-server=${params.proxyServer}`] : []),
-        `--app=${params.url}`,
-      ];
-      const spawned = spawn(params.binary, argv, {
-        env: params.env,
-        stdio: ["ignore", "ignore", "pipe"],
-      });
-      child = spawned;
-      childIdentity = registerSelfManagedChrome(spawned, params.profileDir);
-      let chromeStderr = "";
-      spawned.stderr?.on("data", (chunk: Buffer) => {
-        chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
-      });
-      // Give Chrome a moment to actually come up (or die). Unlike the CDP path
-      // there is no devtools endpoint to poll — but a crash-on-launch (bad
-      // profile, missing lib) should surface here, not 15min later as a blank
-      // noVNC. If the process is already dead, throw with its stderr.
-      await new Promise((r) => setTimeout(r, 1_200));
-      childIdentity ??=
-        spawned.pid === undefined ? null : profileProcessIdentity(spawned.pid, params.profileDir);
-      childIdentity = await resolveAttachedProfileChildIdentity(
-        spawned,
-        params.profileDir,
-        childIdentity,
-      );
-      if (childIdentity !== null) selfManagedChromes.set(childIdentity.pid, childIdentity);
-      if (!childProcessIsRunning(spawned)) {
-        reapProfileHolderIfOwned(params.profileDir, childIdentity);
-        const detail = chromeStderr.trim();
-        const collision = profileCollisionFromStderr(detail);
-        if (collision !== null) throw collision;
-        const termination =
-          spawned.exitCode !== null
-            ? `code ${spawned.exitCode}`
-            : `signal ${spawned.signalCode ?? "unknown"}`;
-        throw new Error(
-          `plain login Chrome exited immediately (${termination})` +
-            `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
+  // Login's plain browser is the no-CDP path used for Google sign-in. Reserve
+  // its marker before launch so the rc.15 fail-closed reaper bind is legitimate.
+  const ownership = registerLocalBrowserLaunch(params.profileDir, params.env);
+  const launchMarker = ownership.marker;
+  let spawned = false;
+  try {
+    await withChromeStartupLock(
+      async () => {
+        clearStaleSingletonLock(params.profileDir);
+        const argv = [
+          `--user-data-dir=${params.profileDir}`,
+          "--no-first-run",
+          "--no-default-browser-check",
+          "--password-store=basic",
+          "--window-position=0,0",
+          `--window-size=${params.window.width},${params.window.height}`,
+          "--lang=en-US",
+          ...(params.extraArgs ?? []),
+          ...(params.proxyServer !== null ? [`--proxy-server=${params.proxyServer}`] : []),
+          `--app=${params.url}`,
+        ];
+        const launched = spawnLocalBrowser(params.binary, argv, params.profileDir, {
+          detached: process.platform !== "win32",
+          env: ownership.env,
+          stdio: ["ignore", "ignore", "pipe"],
+          marker: launchMarker,
+        });
+        child = launched;
+        spawned = true;
+        let chromeStderr = "";
+        launched.stderr?.on("data", (chunk: Buffer) => {
+          chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
+        });
+        // Give Chrome a moment to actually come up (or die). Unlike the CDP path
+        // there is no devtools endpoint to poll — but a crash-on-launch (bad
+        // profile, missing lib) should surface here, not 15min later as a blank
+        // browser. If the process is already dead, throw with its stderr.
+        await new Promise((r) => setTimeout(r, 1_200));
+        childIdentity ??=
+          launched.pid === undefined
+            ? null
+            : profileProcessIdentity(launched.pid, params.profileDir);
+        childIdentity = await resolveAttachedProfileChildIdentity(
+          launched,
+          params.profileDir,
+          childIdentity,
         );
-      }
-      if (process.platform === "linux" && childIdentity === null) {
-        throw new Error("plain login Chrome identity could not be proven");
-      }
-    },
-    { deadlineMs: 0 },
-  );
+        childIdentity = registerSelfManagedChrome(launched, params.profileDir) ?? childIdentity;
+        if (childIdentity !== null) {
+          const existing = selfManagedChromes.get(childIdentity.pid);
+          const proof =
+            existing?.identity.start_time === childIdentity.start_time
+              ? existing.proof
+              : trackOwnedChromeProcessTree(childIdentity, false);
+          if (proof !== null) {
+            selfManagedChromes.set(childIdentity.pid, {
+              identity: childIdentity,
+              processGroup: false,
+              proof,
+            });
+          }
+          // Bind the owner-launch anchor to the profile-proven child identity.
+          // registerSelfManagedChrome only binds when it can read the marker back
+          // from the process, but Chrome erases the marker from its own environ
+          // when it rewrites process titles, so that bind is skipped here. Use
+          // the marker we generated for THIS launch, keyed to the tracked launch
+          // record, so teardown can trust this anchor and reap the marker-only
+          // wrapper processes (the google-chrome launcher's stdout/stderr `cat`
+          // relays and crashpad) instead of reporting closure unproven.
+          bindOwnerBrowserLaunch(launchMarker, childIdentity);
+        }
+        if (!childProcessIsRunning(launched)) {
+          reapProfileHolderIfOwned(params.profileDir, childIdentity);
+          const detail = chromeStderr.trim();
+          const collision = profileCollisionFromStderr(detail);
+          if (collision !== null) throw collision;
+          const termination =
+            launched.exitCode !== null
+              ? `code ${launched.exitCode}`
+              : `signal ${launched.signalCode ?? "unknown"}`;
+          throw new Error(
+            `plain login Chrome exited immediately (${termination})` +
+              `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
+          );
+        }
+        if (process.platform === "linux" && childIdentity === null) {
+          throw new Error("plain login Chrome identity could not be proven");
+        }
+      },
+      { deadlineMs: 0 },
+    );
+  } catch (error) {
+    if (!spawned) untrackOwnerBrowserLaunch(launchMarker);
+    throw error;
+  }
 
-  let torn = false;
+  let teardownPromise: Promise<void> | undefined;
   const forceTeardown = (): void => {
+    markLocalBrowserLaunchTerminal(child);
     if (childIdentity !== null) {
-      signalProfileProcess(childIdentity, params.profileDir, "SIGKILL");
-      selfManagedChromes.delete(childIdentity.pid);
+      const tracked = selfManagedChromes.get(childIdentity.pid);
+      signalOwnedChromeProcessTree(childIdentity, false, "SIGKILL", {
+        ...(tracked === undefined ? {} : { proof: tracked.proof }),
+      });
+    } else if (childProcessIsRunning(child)) {
+      child?.kill("SIGKILL");
     }
     reapProfileHolderIfOwned(params.profileDir, childIdentity);
   };
-  const teardown = async (): Promise<void> => {
-    if (torn) return;
-    torn = true;
-    if (child !== null && childIdentity !== null) {
-      signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
-    }
+  const teardown = (): Promise<void> => {
+    teardownPromise ??= (async () => {
+      markLocalBrowserLaunchTerminal(child);
+      if (child !== null && childIdentity !== null) {
+        signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
+      } else if (childProcessIsRunning(child)) {
+        child?.kill("SIGTERM");
+      }
+      await closeLocalBrowserLaunch(launchMarker, params.profileDir);
+    })();
+    return teardownPromise;
   };
   return {
     teardown,
     forceTeardown,
     isRunning: () => childProcessIsRunning(child),
     identity: childIdentity,
+    marker: launchMarker,
   };
 }
 
 export class BrowserController {
-  // The persistent browser context. Persistent (launchPersistentContext)
-  // rather than an ephemeral context so the profile carries the user's
-  // Google session across runs — see profile.ts / google-login.ts.
+  // A persistent browser context backed by the user's real Chrome profile.
   private context: BrowserContext | null = null;
   private page: Page | null = null;
   private checkoutCardGroupScope: CheckoutCardGroupScope | undefined;
   private checkoutOutcomeBaseline: CheckoutOutcomeBaseline | undefined;
+  private paymentInstrumentExpectation: PaymentInstrumentExpectation | undefined;
+  private observedPaymentInstrumentMismatch: PaymentInstrumentMismatch | undefined;
   private checkoutSubmitSequence = 0;
   private clickDispatchSequence = 0;
+  private sealedDocumentSequence = 0;
+  private readonly sealedDocuments = new Map<
+    Frame,
+    { handle: JSHandle<Document>; identity: string }
+  >();
+  private mainDocumentSequence = 0;
+  private readonly mainDocumentIdentities = new WeakMap<Page, number>();
+  private readonly trackedMainDocumentPages = new WeakSet<Page>();
   // The page start() configured with the controller's navigation/captcha
-  // handlers. OAuth may temporarily switch `this.page` to a popup, but warm
+  // handlers. OAuth may temporarily switch `this.page` to a popup, but session
   // reuse must always restore this original page rather than adopting a popup
   // whose lifecycle handlers were never installed.
   private primaryPage: Page | null = null;
+  // Tabs the PAGE opened (target=_blank / window.open) since the operator armed
+  // adoption for an action, oldest first. A real user lands on the tab their
+  // click opened — an email magic-link button in Gmail is the case this exists
+  // for — so the operator has to follow it too. Reading the link's href instead
+  // is not an option: a single-use login token is sealed and must never be
+  // handed to the model as text.
+  private openedTabs: Page[] = [];
   // Self-launch path (Turnstile-safe; see selfLaunchEnabled). When we spawn
   // Chrome ourselves and attach over CDP, these hold the child process and
   // the connected Browser so close() can tear both down.
   private childChrome: ChildProcess | null = null;
   private childChromeIdentity: ProfileProcessIdentity | null = null;
+  private childChromeProcessGroup = false;
+  private ownedDisplayRig: RemoteLoginRig | null = null;
+  private ownedChromeProcessTreeProof: OwnedChromeProcessTreeProof | null = null;
+  private operatorProcessMarker: string | null = null;
+  private ownerLaunchTracked = false;
   private cdpBrowser: Browser | null = null;
   // True once a local browser context launched this session.
   private launchedContext = false;
   private launchedProfileHolderIdentity: ProfileProcessIdentity | null = null;
-  private profileOperationLease: ProfileOperationLease | null = null;
   private startPromise: Promise<void> | null = null;
   private closePromise: Promise<ProfileCloseState> | null = null;
   private startCancellationRequested = false;
   private startLaunchCommitted = false;
   private startSettled = false;
   private persistentFallbackLaunchInFlight = false;
+  private persistentFallbackOwnershipMonitor: Promise<void> | null = null;
   private persistentFallbackCancellationState: ProfileCloseState | null = null;
-  private profilePoolReusable = true;
   private resolveStartCancellation: (() => void) | null = null;
   private readonly startCancellation = new Promise<void>((resolveCancellation) => {
     this.resolveStartCancellation = resolveCancellation;
@@ -2730,6 +3774,7 @@ export class BrowserController {
   private hostScopeAllowedHostsProvider:
     | (() => { allowedHosts: readonly string[]; siblingDomainHosts: readonly string[] })
     | null = null;
+  private readonly operationScopedAllowedHosts = new Map<string, number>();
   private hostScopeGuardInstallation: Promise<void> | null = null;
 
   // Feed the current session's allowed hosts to the request-scope guard. Read
@@ -2742,7 +3787,7 @@ export class BrowserController {
     siblingDomainProvider: () => readonly string[] = provider,
   ): Promise<void> {
     this.hostScopeAllowedHostsProvider = () => ({
-      allowedHosts: provider(),
+      allowedHosts: [...provider(), ...this.operationScopedAllowedHosts.keys()],
       siblingDomainHosts: siblingDomainProvider(),
     });
     this.hostScopeGuardInstallation ??= this.installHostScopeGuard().catch((error: unknown) => {
@@ -2750,6 +3795,28 @@ export class BrowserController {
       throw error;
     });
     await this.hostScopeGuardInstallation;
+  }
+
+  async withTemporaryHostScopeAllowedHosts<T>(
+    hosts: readonly string[],
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const normalized = [...new Set(hosts.map((host) => host.trim().toLowerCase()).filter(Boolean))];
+    for (const host of normalized) {
+      this.operationScopedAllowedHosts.set(
+        host,
+        (this.operationScopedAllowedHosts.get(host) ?? 0) + 1,
+      );
+    }
+    try {
+      return await operation();
+    } finally {
+      for (const host of normalized) {
+        const remaining = (this.operationScopedAllowedHosts.get(host) ?? 1) - 1;
+        if (remaining <= 0) this.operationScopedAllowedHosts.delete(host);
+        else this.operationScopedAllowedHosts.set(host, remaining);
+      }
+    }
   }
 
   // Defect-A fail-fast request-scope guard. Only XHR/fetch subresource API
@@ -2797,35 +3864,46 @@ export class BrowserController {
   private oauthProductPage: Page | null = null;
   private oauthProviderPage: Page | null = null;
   private oauthProviderPageClosed = false;
-  // Deep-investigation instrumentation (UNIVERSAL_BOT_OAUTH_DEBUG): a ring
-  // buffer of OAuth/SSO-relevant network responses, so we can see WHY a Clerk/
-  // Stytch SSO callback fails to persist a session (cookie not set, FAPI
-  // rejection, etc.) without guessing. Off by default; zero cost when unset.
-  private oauthNetLog: Array<{ url: string; status: number; setCookie: boolean; ct: string }> = [];
-  private oauthNetListenerAttached = false;
 
-  // F13 — on-demand Xvfb. Set when start() determined the host has no
-  // display surface but Xvfb is available, so Chrome can run with
-  // `headless: false` against a virtual display (Cloudflare/Stytch et
-  // al. detect Chromium-headless and block their signup forms). Torn
-  // down by close().
-  private xvfb: XvfbRig | null = null;
+  // Surfaced in the run trail so operators can distinguish local headed,
+  // remote, and headless launches.
+  private launchedMode: "headed" | "headless" | "remote" | "unknown" = "unknown";
 
-  // F13 — which launch path start() took. Surfaced via .launchMode so
-  // the agent can push it into the run's step trail and we can see
-  // (from outside the box) whether the bot ran headed.
-  private launchedMode: "display" | "xvfb" | "headless" | "remote" | "unknown" = "unknown";
-
-  get launchMode(): "display" | "xvfb" | "headless" | "remote" | "unknown" {
+  get launchMode(): "headed" | "headless" | "remote" | "unknown" {
     return this.launchedMode;
   }
 
   constructor(opts: BrowserControllerOptions = {}) {
     this.humanize = opts.humanize ?? true;
-    this.profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
-    this.profileOperationLease = opts.profileOperationLease ?? null;
+    this.profileDir = opts.profileDir ?? "";
     this.proxyOverride =
       opts.proxyUrl !== undefined && opts.proxyUrl.trim().length > 0 ? opts.proxyUrl.trim() : null;
+  }
+
+  private trackMainDocument(page: Page): void {
+    if (this.trackedMainDocumentPages.has(page)) return;
+    this.trackedMainDocumentPages.add(page);
+    this.mainDocumentIdentities.set(page, ++this.mainDocumentSequence);
+    // A REPLACED main document advances the identity; a same-document History
+    // API navigation does not. Playwright emits `framenavigated` for both, so
+    // keying on it made every `history.replaceState` inside an SPA checkout
+    // retire every operator ref mid-form — the identity churned faster than a
+    // multi-field address block could be filled. `domcontentloaded` fires once
+    // per real main-frame document (playwright's client `Frame` gates it on
+    // `!this._parentFrame`), which is exactly the document-replacement signal.
+    // A same-document route change to a genuinely different logical page is
+    // still caught by the observation epoch's normalized origin+pathname fold
+    // (compactV2EpochDoc), which is the backstop this narrowing relies on.
+    page.on("domcontentloaded", () => {
+      this.mainDocumentIdentities.set(page, ++this.mainDocumentSequence);
+    });
+  }
+
+  mainDocumentIdentity(): string {
+    const page = this.page;
+    if (page === null) return "none";
+    this.trackMainDocument(page);
+    return String(this.mainDocumentIdentities.get(page));
   }
 
   /** Attach normal controller behavior to a harness-owned Playwright page. */
@@ -2834,31 +3912,95 @@ export class BrowserController {
     controller.context = page.context();
     controller.page = page;
     controller.primaryPage = page;
+    controller.trackMainDocument(page);
+    controller.trackOpenedTabs(page.context());
     controller.harnessAttachedPage = true;
     controller.launchedMode = "headless";
     return controller;
   }
 
-  // Per-launch egress override (verify-fleet identities each get their own IP).
-  // null → use the env-global proxy. See resolveProxy().
+  // Record every page the CONTEXT opens. Covers window.open popups and
+  // target=_blank tabs alike; Playwright emits the same context-level "page"
+  // event for both.
+  private trackOpenedTabs(context: BrowserContext): void {
+    context.on("page", (page) => {
+      this.trackMainDocument(page);
+      this.openedTabs.push(page);
+      // Bounded: adoption only ever reads the newest followable entry, and a
+      // controller driven by something other than the operator's click path
+      // never arms (and so never drains) this queue.
+      if (this.openedTabs.length > 8) this.openedTabs.splice(0, this.openedTabs.length - 8);
+    });
+  }
+
+  // Per-launch egress override. null means direct egress. Explicit overrides
+  // are never subject to host-network classification.
   private readonly proxyOverride: string | null;
 
-  // Warm reuse is deliberately narrow: a browser belongs to exactly one
-  // persistent profile and one explicit egress override. Undefined/blank proxy
-  // values both mean "use the environment/default route".
-  matchesLaunchOptions(opts: Pick<BrowserControllerOptions, "profileDir" | "proxyUrl">): boolean {
-    const profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
-    const proxyUrl =
-      opts.proxyUrl !== undefined && opts.proxyUrl.trim().length > 0 ? opts.proxyUrl.trim() : null;
-    return this.profileDir === profileDir && this.proxyOverride === proxyUrl;
+  operatorBrowserMarker(): string {
+    this.operatorProcessMarker ??= createOperatorBrowserMarker();
+    return this.operatorProcessMarker;
   }
 
-  /** Identity persisted by the operator profile lease for owner-safe crash recovery. */
-  operatorWorkerIdentity(): OperatorWorkerIdentity | null {
-    return this.childChromeIdentity ?? this.launchedProfileHolderIdentity;
+  private async ownedHeadedBrowserEnvironment(): Promise<NodeJS.ProcessEnv> {
+    if (this.ownedDisplayRig === null) {
+      const { createXvfbDisplayRig, startRemoteLoginDisplay } =
+        await import("./remote-login-display.js");
+      const rig = createXvfbDisplayRig();
+      this.ownedDisplayRig = rig;
+      await startRemoteLoginDisplay(rig);
+    }
+    const { remoteLoginEnvironment } = await import("./remote-login-display.js");
+    const rig = this.ownedDisplayRig;
+    if (rig === null) throw new Error("headed operator display did not start");
+    return remoteLoginEnvironment(rig, process.env);
   }
 
-  // Required health gate for a warm browser. BrowserContext alone is not a
+  private async teardownOwnedDisplay(): Promise<void> {
+    const rig = this.ownedDisplayRig;
+    this.ownedDisplayRig = null;
+    if (rig === null) return;
+    const { teardownRemoteLoginRig } = await import("./remote-login-display.js");
+    await teardownRemoteLoginRig(rig);
+  }
+
+  private adoptOwnedChromeProcessTree(
+    identity: ProfileProcessIdentity,
+    processGroup: boolean,
+  ): OwnedChromeProcessTreeProof | null {
+    if (
+      this.ownedChromeProcessTreeProof?.identity.pid === identity.pid &&
+      this.ownedChromeProcessTreeProof.identity.start_time === identity.start_time
+    ) {
+      return this.ownedChromeProcessTreeProof;
+    }
+    const tracked = selfManagedChromes.get(identity.pid);
+    const proof =
+      tracked?.identity.start_time === identity.start_time
+        ? tracked.proof
+        : trackOwnedChromeProcessTree(identity, processGroup);
+    if (proof !== null && this.ownerLaunchTracked) {
+      if (!bindOwnerBrowserLaunch(this.operatorBrowserMarker(), proof.identity)) {
+        releaseOwnedChromeProcessTree(proof);
+        throw new Error("local browser launch identity could not be bound to owner custody");
+      }
+    }
+    if (proof !== null) this.ownedChromeProcessTreeProof = proof;
+    return proof;
+  }
+
+  private signalCurrentSelfManagedChrome(
+    identity: ProfileProcessIdentity,
+    signal: NodeJS.Signals,
+  ): boolean {
+    return signalOwnedChromeProcessTree(identity, this.childChromeProcessGroup, signal, {
+      ...(this.ownedChromeProcessTreeProof === null
+        ? {}
+        : { proof: this.ownedChromeProcessTreeProof }),
+    });
+  }
+
+  // Required health gate for a live session browser. BrowserContext alone is not a
   // sufficient signal: a dead CDP transport can leave stale JS objects behind.
   isConnected(): boolean {
     const browser = this.cdpBrowser ?? this.context?.browser() ?? null;
@@ -2910,7 +4052,6 @@ export class BrowserController {
   //   • locale/geo/permissions → applied post-connect by start()
   private async launchSelfManagedContext(params: {
     binary: string;
-    headless: boolean;
     args: readonly string[];
     proxy: ProxySettings | null;
     env: NodeJS.ProcessEnv;
@@ -2938,75 +4079,102 @@ export class BrowserController {
       }
       return ctx;
     }
-    const endpoint = await withChromeStartupLock(
-      async () => {
-        this.throwIfStartCancelled();
-        const port = await findFreePort();
-        this.throwIfStartCancelled();
-        clearStaleSingletonLock(this.profileDir);
-        const argv = [
-          `--remote-debugging-port=${port}`,
-          "--remote-debugging-address=127.0.0.1",
-          `--user-data-dir=${this.profileDir}`,
-          "--no-first-run",
-          "--no-default-browser-check",
-          "--password-store=basic",
-          "--window-position=0,0",
-          `--window-size=${params.window.width},${params.window.height}`,
-          "--lang=en-US",
-          ...params.args,
-          ...(params.proxy !== null ? [`--proxy-server=${params.proxy.server}`] : []),
-          ...(params.headless ? ["--headless=new"] : []),
-          "about:blank",
-        ];
-        this.commitProfileLaunch();
-        const child = spawn(params.binary, argv, {
-          env: params.env,
-          stdio: ["ignore", "ignore", "pipe"],
-        });
-        this.childChrome = child;
-        this.childChromeIdentity = registerSelfManagedChrome(child, this.profileDir);
-        let chromeStderr = "";
-        let chromeExit = "";
-        child.stderr?.on("data", (chunk: Buffer) => {
-          chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
-        });
-        child.on("exit", (code, signal) => {
-          chromeExit = ` exit=${code ?? "null"} signal=${signal ?? "none"}`;
-        });
-        if (this.startCancellationRequested) {
-          await this.cancelSpawnedSelfManagedChrome(child);
-          throw new Error("BrowserController start cancelled");
+    const endpoint = await (async () => {
+      this.throwIfStartCancelled();
+      clearStaleSingletonLock(this.profileDir);
+      rmSync(join(this.profileDir, DEVTOOLS_ACTIVE_PORT_FILE), { force: true });
+      const argv = [
+        "--remote-debugging-port=0",
+        "--remote-debugging-address=127.0.0.1",
+        `--user-data-dir=${this.profileDir}`,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--password-store=basic",
+        "--window-position=0,0",
+        `--window-size=${params.window.width},${params.window.height}`,
+        "--lang=en-US",
+        ...params.args,
+        ...(params.proxy !== null ? [`--proxy-server=${params.proxy.server}`] : []),
+        "about:blank",
+      ];
+      this.commitProfileLaunch();
+      const child = spawnLocalBrowser(params.binary, argv, this.profileDir, {
+        env: params.env,
+        stdio: ["ignore", "ignore", "pipe"],
+        // A dedicated process group gives the session a single, identity-
+        // proven teardown target for Chrome plus every renderer/GPU helper.
+        detached: process.platform !== "win32",
+        marker: this.operatorBrowserMarker(),
+      });
+      this.childChrome = child;
+      this.childChromeProcessGroup = process.platform !== "win32";
+      this.childChromeIdentity = registerSelfManagedChrome(
+        child,
+        this.profileDir,
+        this.childChromeProcessGroup,
+      );
+      if (this.childChromeIdentity !== null) {
+        this.adoptOwnedChromeProcessTree(this.childChromeIdentity, this.childChromeProcessGroup);
+      }
+      let chromeStderr = "";
+      let chromeExit = "";
+      child.stderr?.on("data", (chunk: Buffer) => {
+        chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
+      });
+      child.on("exit", (code, signal) => {
+        chromeExit = ` exit=${code ?? "null"} signal=${signal ?? "none"}`;
+      });
+      if (this.startCancellationRequested) {
+        await this.cancelSpawnedSelfManagedChrome(child);
+        throw new Error("BrowserController start cancelled");
+      }
+      try {
+        const endpoint = await waitForOwnedDevtoolsEndpoint(this.profileDir, 30_000, child);
+        this.childChromeIdentity = await resolveAttachedProfileChildIdentity(
+          child,
+          this.profileDir,
+          this.childChromeIdentity,
+          { processGroup: this.childChromeProcessGroup },
+        );
+        if (process.platform === "linux" && this.childChromeIdentity === null) {
+          throw new Error("self-launched Chrome exited before identity was proven");
         }
-        try {
-          const endpoint = await waitForDevtools(port, 30_000);
-          this.childChromeIdentity = await resolveAttachedProfileChildIdentity(
-            child,
-            this.profileDir,
-            this.childChromeIdentity,
-          );
-          if (process.platform === "linux" && this.childChromeIdentity === null) {
-            throw new Error("self-launched Chrome exited before identity was proven");
-          }
-          return endpoint;
-        } catch (err) {
-          const alive =
-            this.childChromeIdentity !== null &&
-            profileProcessMatches(this.childChromeIdentity, this.profileDir);
-          this.childChromeIdentity = await terminateTrackedProfileChild(child, this.profileDir, {
-            identity: this.childChromeIdentity,
-          });
-          this.childChrome = null;
-          this.childChromeIdentity = null;
-          const detail = chromeStderr.trim();
-          throw new Error(
-            `${err instanceof Error ? err.message : String(err)}; Chrome pid=${child.pid ?? "unknown"} alive=${alive ? 1 : 0}` +
-              `${chromeExit}${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
-          );
+        if (this.childChromeIdentity !== null) {
+          this.adoptOwnedChromeProcessTree(this.childChromeIdentity, this.childChromeProcessGroup);
         }
-      },
-      { deadlineMs: 0 },
-    );
+        return endpoint;
+      } catch (err) {
+        const alive =
+          this.childChromeIdentity !== null &&
+          profileProcessMatches(this.childChromeIdentity, this.profileDir);
+        this.childChromeIdentity = await terminateTrackedProfileChild(child, this.profileDir, {
+          identity: this.childChromeIdentity,
+          terminate: (identity, profileDir) => {
+            const signalled = signalOwnedChromeProcessTree(
+              identity,
+              this.childChromeProcessGroup,
+              "SIGKILL",
+              {
+                ...(this.ownedChromeProcessTreeProof === null
+                  ? {}
+                  : { proof: this.ownedChromeProcessTreeProof }),
+              },
+            );
+            reapProfileHolderIfOwned(profileDir, identity);
+            return signalled;
+          },
+          processGroup: this.childChromeProcessGroup,
+        });
+        this.childChrome = null;
+        this.childChromeIdentity = null;
+        this.childChromeProcessGroup = false;
+        const detail = chromeStderr.trim();
+        throw new Error(
+          `${err instanceof Error ? err.message : String(err)}; Chrome pid=${child.pid ?? "unknown"} alive=${alive ? 1 : 0}` +
+            `${chromeExit}${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
+        );
+      }
+    })();
     // Use the patchright launcher's connectOverCDP — it's the exact path the
     // falsification experiment validated (its connect avoids Runtime.enable,
     // which a plain attach would emit). The anti-detection that matters here
@@ -3024,9 +4192,25 @@ export class BrowserController {
   private async cancelSpawnedSelfManagedChrome(child: ChildProcess): Promise<void> {
     this.childChromeIdentity = await terminateTrackedProfileChild(child, this.profileDir, {
       identity: this.childChromeIdentity,
+      terminate: (identity, profileDir) => {
+        const signalled = signalOwnedChromeProcessTree(
+          identity,
+          this.childChromeProcessGroup,
+          "SIGKILL",
+          {
+            ...(this.ownedChromeProcessTreeProof === null
+              ? {}
+              : { proof: this.ownedChromeProcessTreeProof }),
+          },
+        );
+        reapProfileHolderIfOwned(profileDir, identity);
+        return signalled;
+      },
+      processGroup: this.childChromeProcessGroup,
     });
     if (this.childChrome === child) this.childChrome = null;
     this.childChromeIdentity = null;
+    this.childChromeProcessGroup = false;
   }
 
   // Resource blocking for speed (BOT_BLOCK_RESOURCES, default OFF). Aborts
@@ -3102,6 +4286,9 @@ export class BrowserController {
   }
 
   async start(): Promise<void> {
+    if (this.profileDir.length === 0) {
+      throw new Error("BrowserController.start requires a per-session profile directory");
+    }
     if (this.closePromise !== null) throw new Error("BrowserController is already closing");
     this.startPromise ??= this.startOnce();
     await this.startPromise;
@@ -3109,26 +4296,17 @@ export class BrowserController {
 
   private async startOnce(): Promise<void> {
     const remoteMode = (process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0;
-    const lease =
-      this.profileOperationLease ??
-      (remoteMode ? null : await acquireFreeProfileOperationGuard(this.profileDir));
-    this.profileOperationLease = lease;
+    if (!remoteMode) startGlobalOperatorBrowserProcessWatchdog();
     try {
-      await this.startWithProfileGuard();
+      await this.startBrowser();
       if (this.startCancellationRequested) {
-        await this.closeWithProfileGuard();
+        await this.closeBrowser();
         throw new Error("BrowserController start cancelled");
       }
     } catch (err) {
+      await this.teardownOwnedDisplay().catch(() => undefined);
       if (this.startCancellationRequested && this.persistentFallbackCancellationState === null) {
-        await this.closeWithProfileGuard().catch(() => undefined);
-      }
-      if (
-        this.persistentFallbackCancellationState === null ||
-        this.persistentFallbackCancellationState === "closed"
-      ) {
-        this.profileOperationLease = null;
-        lease?.release();
+        await this.closeBrowser().catch(() => undefined);
       }
       throw err;
     } finally {
@@ -3145,9 +4323,8 @@ export class BrowserController {
     this.startLaunchCommitted = true;
   }
 
-  private async startWithProfileGuard(): Promise<void> {
+  private async startBrowser(): Promise<void> {
     this.throwIfStartCancelled();
-    reapOrphanedBrowsersOnce(this.profileDir);
     const channel = await detectChromiumChannel();
     this.throwIfStartCancelled();
     this.launchedChannel = channel;
@@ -3158,13 +4335,13 @@ export class BrowserController {
     // module's existing logging convention).
     console.error(
       `[operator] launching browser channel=${channel ?? "bundled-chromium"} ` +
-        `proxy=${proxy?.server ?? "direct"}`,
+        `proxy=${proxy === null ? "direct" : "configured"}`,
     );
     // Remote-CDP mode (BOT_CDP_ENDPOINT): the browser runs on a REMOTE host
     // (e.g. a Mac with a real GPU + residential egress) and we attach over CDP
     // across Tailscale. The remote machine IS a real device, so we spoof
     // NOTHING — no WebGL/device fingerprint patch (a fake-Intel string over a
-    // real Apple-GPU output would be its own mismatch tell), no local Xvfb, no
+    // real Apple-GPU output would be its own mismatch tell), no local display, no
     // egress-geo override (the remote host's real timezone + residential IP are
     // authentic). software-WebGL output is exactly what the toughest anti-bot
     // (hCaptcha Enterprise) scores; only real hardware fixes the pixel
@@ -3173,16 +4350,21 @@ export class BrowserController {
     if (remoteMode) {
       console.error(
         `[operator] REMOTE-CDP mode — attaching to ${(process.env.BOT_CDP_ENDPOINT ?? "").trim()} ` +
-          `(real-host GPU + egress; local fingerprint spoof + Xvfb DISABLED)`,
+          `(real-host GPU + egress; local fingerprint spoof + display setup disabled)`,
       );
     }
+    if (!remoteMode && !this.ownerLaunchTracked) {
+      registerLocalBrowserLaunch(this.profileDir, process.env, this.operatorBrowserMarker());
+      this.ownerLaunchTracked = true;
+    }
+    const browserEnv = remoteMode ? process.env : await this.ownedHeadedBrowserEnvironment();
     // T3.1: probe where this run's traffic actually exits so the
     // browser's declared timezone matches its egress IP (a US-timezone
     // browser on a foreign proxy IP is itself an anti-bot signal).
     // Done before the real launch: launchPersistentContext bakes the
     // timezone in at creation, with no way to set it afterward. Skipped in
     // remote mode — the remote host's own clock/IP are the authentic truth.
-    const geo = remoteMode ? null : await this.probeEgressGeo(channel, proxy);
+    const geo = remoteMode ? null : await this.probeEgressGeo(channel, proxy, browserEnv);
     this.throwIfStartCancelled();
     if (geo !== null) {
       console.error(
@@ -3192,88 +4374,13 @@ export class BrowserController {
             : ""),
       );
     }
-    // F13 — decide whether to spin up Xvfb and run Chrome headed.
-    // Modern SaaS signups (Cloudflare/Stytch, Clerk, Auth0) detect
-    // Chromium-headless via JS fingerprints and gate their forms
-    // behind the check. Running headed against Xvfb defeats the gate
-    // — the user never sees the display.
-    //
-    // The decision matrix:
-    //   - UNIVERSAL_BOT_HEADLESS=true (explicit opt-in): keep true
-    //     headless. CI / Codespaces that lack Xvfb.
-    //   - UNIVERSAL_BOT_HEADLESS=false (explicit opt-out): the
-    //     current pre-F13 behavior — DISPLAY must exist already.
-    //   - default + DISPLAY set: run headed against the existing
-    //     display (laptop/desktop install).
-    //   - default + no DISPLAY + Xvfb on PATH: spawn Xvfb, run
-    //     headed against it (the headless-server install — what
-    //     Cloudflare needed).
-    //   - default + no DISPLAY + no Xvfb: fall back to true
-    //     headless with a clear stderr warning.
-    let chromeEnv: NodeJS.ProcessEnv | undefined;
-    let chromeHeadless: boolean;
-    const explicitHeadless = process.env.UNIVERSAL_BOT_HEADLESS;
-    const hostHasDisplay =
-      process.platform === "darwin" ||
-      process.platform === "win32" ||
-      (typeof process.env.DISPLAY === "string" && process.env.DISPLAY.length > 0);
-    if (explicitHeadless === "true") {
-      chromeHeadless = true;
-      this.launchedMode = "headless";
-    } else if (explicitHeadless === "false") {
-      chromeHeadless = false;
-      this.launchedMode = "display";
-    } else if (hostHasDisplay) {
-      chromeHeadless = false;
-      this.launchedMode = "display";
-    } else if (xvfbAvailable()) {
-      try {
-        // 1920×1080 — the most common real desktop resolution. The old
-        // 1280×720 here was exactly Playwright's emulated-device viewport
-        // default (the code's own comments flag that as an anti-bot tell),
-        // and with viewport:null the page read it straight back. A 720p
-        // screen whose availHeight==height (no taskbar) is a headless
-        // signature strict Turnstiles (exa/cartesia) score against.
-        const xvfb = await startXvfb({ width: 1920, height: 1080 });
-        if (this.startCancellationRequested) {
-          xvfb.stop();
-          this.throwIfStartCancelled();
-        }
-        this.xvfb = xvfb;
-        chromeEnv = { ...process.env, DISPLAY: xvfb.display };
-        chromeHeadless = false;
-        this.launchedMode = "xvfb";
-        console.error(
-          `[operator] no DISPLAY — spawned Xvfb at ${this.xvfb.display} for headed Chrome`,
-        );
-      } catch (err) {
-        console.error(
-          `[operator] Xvfb failed (${err instanceof Error ? err.message : String(err)}) — ` +
-            `falling back to true headless; Cloudflare/Stytch-class signups may fail`,
-        );
-        chromeHeadless = true;
-        this.launchedMode = "headless";
-      }
-    } else {
-      console.error(
-        `[operator] no DISPLAY and Xvfb not installed — running true headless. ` +
-          `For Cloudflare/Stytch-class signups install xvfb: apt-get install -y xvfb`,
-      );
-      chromeHeadless = true;
-      this.launchedMode = "headless";
-    }
+    // Keep the operator browser headed: the browser runs on the operator's
+    // Xvfb display, preserving the normal Chrome surface OAuth providers see.
+    this.launchedMode = "headed";
 
-    const free = await waitForProfileFree(this.profileDir, { deadlineMs: 0 });
-    this.throwIfStartCancelled();
-    if (!free) {
-      throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
-    }
-
-    // T3: a PERSISTENT context. The profile dir carries the user's
-    // Google session (established by `mcp login` — see google-login.ts),
-    // so the OAuth-first signup path reuses it instead of starting
-    // logged-out. launchPersistentContext takes launch + context
-    // options in one call.
+    // T3: a PERSISTENT context backed by this operator session's unique
+    // profile. launchPersistentContext takes launch + context options in one
+    // call.
     // Resolve the launcher first so activeStealthProfile is set before we
     // decide on executablePath below.
     const launcher = getChromium();
@@ -3287,7 +4394,7 @@ export class BrowserController {
     this.launchedChannel = channel;
     // Launch args shared by BOTH paths (launchPersistentContext and the
     // self-launch). See the per-flag rationale: swiftshader gives a real
-    // (software) WebGL context on the GPU-less Xvfb box; the others are the
+    // (software) WebGL context on GPU-less hosts; the others are the
     // standard headless/sandbox flags. The three background-throttling disables
     // are payment correctness controls: a backgrounded CardinalCommerce ACS
     // frame must keep running its timers long enough to finish the issuer's OOB
@@ -3317,40 +4424,31 @@ export class BrowserController {
     const selfLaunchBinary = selfLaunchEnabled()
       ? (resolveChannelBinary(channel) ?? (channel === null ? launcher.executablePath() : null))
       : null;
-    const proxyHasAuth =
-      proxy !== null && typeof proxy.username === "string" && proxy.username.length > 0;
     const useSelfLaunch =
-      selfLaunchBinary !== null && existsSync(selfLaunchBinary) && !proxyHasAuth;
-
+      selfLaunchBinary !== null && existsSync(selfLaunchBinary) && canSelfLaunchWithProxy(proxy);
     let context: BrowserContext;
     this.throwIfStartCancelled();
     if (useSelfLaunch && selfLaunchBinary !== null) {
       console.error(
         `[operator] self-launch + connectOverCDP (Turnstile-safe launch) binary=${selfLaunchBinary}`,
       );
-      const window =
-        this.launchedMode === "xvfb"
-          ? { width: 1920, height: 1080 }
-          : { width: 1280, height: 1024 };
+      const window = { width: 1280, height: 1024 };
       const selfEnv: NodeJS.ProcessEnv = {
-        ...(chromeEnv ?? process.env),
+        ...browserEnv,
         TZ: geo?.timezoneId ?? "America/New_York",
+        [OPERATOR_BROWSER_MARKER_ENV]: this.operatorBrowserMarker(),
       };
-      context = await launchWithProfileGate(
-        this.profileDir,
-        () => {
-          this.throwIfStartCancelled();
-          return this.launchSelfManagedContext({
-            binary: selfLaunchBinary,
-            headless: chromeHeadless,
-            args: launchArgs,
-            proxy,
-            env: selfEnv,
-            window,
-          });
-        },
-        { failFast: true },
-      );
+      const launch = () => {
+        this.throwIfStartCancelled();
+        return this.launchSelfManagedContext({
+          binary: selfLaunchBinary,
+          args: launchArgs,
+          proxy,
+          env: selfEnv,
+          window,
+        });
+      };
+      context = await launch();
       try {
         await context.grantPermissions(grantedPermissions);
         if (geo?.geolocation !== undefined) {
@@ -3364,49 +4462,58 @@ export class BrowserController {
         );
       }
     } else {
-      this.profilePoolReusable = false;
       this.persistentFallbackLaunchInFlight = true;
+      this.startPersistentFallbackOwnershipMonitor();
       const cleanupProfileHolder = async (): Promise<ProfileCloseState> => {
         const proof = await this.waitForPersistentFallbackIdentity();
         if (proof.state === "absent") return "closed";
         if (proof.state === "unknown") return "unknown";
         const { identity } = proof;
-        signalProfileProcess(identity, this.profileDir, "SIGKILL");
-        return (await this.waitForOwnedProfileExit(identity)) ? "closed" : "unknown";
+        const treeProof = this.adoptOwnedChromeProcessTree(identity, false);
+        signalOwnedChromeProcessTree(identity, false, "SIGKILL", {
+          ...(treeProof === null ? {} : { proof: treeProof }),
+        });
+        return (await this.waitForOwnedProfileExit(identity, treeProof)) ? "closed" : "unknown";
       };
       const cleanupCancelled = async (lateContext: BrowserContext): Promise<ProfileCloseState> => {
-        const proof = await this.waitForPersistentFallbackIdentity();
+        const proof = await this.waitForPersistentFallbackIdentity().catch(
+          () => ({ state: "unknown" }) as const,
+        );
         if (proof.state !== "owned") {
           await lateContext.close().catch(() => undefined);
           return proof.state === "absent" ? "closed" : "unknown";
         }
         const { identity } = proof;
+        const treeProof = this.adoptOwnedChromeProcessTree(identity, false);
         const closeState = await closeProfileWithProof({
           profileDir: this.profileDir,
           identity,
           close: () => lateContext.close(),
           forceClose: () => {
-            signalProfileProcess(identity, this.profileDir, "SIGKILL");
+            signalOwnedChromeProcessTree(identity, false, "SIGKILL", {
+              ...(treeProof === null ? {} : { proof: treeProof }),
+            });
             reapProfileHolderIfOwned(this.profileDir, identity);
           },
+          ...(treeProof === null
+            ? {}
+            : { identityState: () => ownedChromeProcessTreeState(treeProof) }),
         });
         if (closeState === "closed") return closeState;
-        return (await this.waitForOwnedProfileExit(identity)) ? "closed" : "unknown";
+        return (await this.waitForOwnedProfileExit(identity, treeProof)) ? "closed" : "unknown";
       };
       const outcome = await (async () => {
         try {
           return await launchCancellablePersistentContext({
-            launch: (options) =>
-              launchWithProfileGate(
-                this.profileDir,
-                () => launcher.launchPersistentContext(this.profileDir, options),
-                { failFast: true },
-              ),
+            launch: (options) => launcher.launchPersistentContext(this.profileDir, options),
             options: {
-              headless: chromeHeadless,
-              ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
+              headless: OPERATOR_BROWSER_HEADLESS,
+              env: {
+                ...browserEnv,
+                [OPERATOR_BROWSER_MARKER_ENV]: this.operatorBrowserMarker(),
+              },
               ...(channel !== null ? { channel } : {}),
-              ...(proxy !== null ? { proxy } : {}),
+              ...persistentProxyOptions(proxy),
               args: [...launchArgs],
               viewport: null,
               locale: "en-US",
@@ -3445,9 +4552,28 @@ export class BrowserController {
       }
       this.context = context;
       this.launchedContext = true;
-      const holderPid = currentProfileHolderPid(this.profileDir);
-      this.launchedProfileHolderIdentity =
-        holderPid === null ? null : profileProcessIdentity(holderPid, this.profileDir);
+      this.launchedProfileHolderIdentity = await this.requirePersistentFallbackOwnership(
+        async () => {
+          markOwnerBrowserLaunchTerminal(this.operatorBrowserMarker());
+          await Promise.race([
+            context.close().catch(() => undefined),
+            new Promise<void>((resolveWait) => {
+              const timer = setTimeout(resolveWait, PERSISTENT_CONTEXT_CANCELLATION_SETTLE_MS);
+              timer.unref();
+            }),
+          ]);
+          const markerClosed = await terminateOwnerBrowserLaunch(
+            this.operatorBrowserMarker(),
+            this.profileDir,
+          );
+          if (markerClosed) {
+            untrackOwnerBrowserLaunch(this.operatorBrowserMarker());
+            this.ownerLaunchTracked = false;
+          }
+          this.context = null;
+          this.launchedContext = false;
+        },
+      );
       this.commitProfileLaunch();
       this.persistentFallbackLaunchInFlight = false;
     }
@@ -3459,9 +4585,15 @@ export class BrowserController {
       this.launchedProfileHolderIdentity =
         this.childChromeIdentity ??
         (holderPid === null ? null : profileProcessIdentity(holderPid, this.profileDir));
+      if (this.launchedProfileHolderIdentity !== null) {
+        this.adoptOwnedChromeProcessTree(
+          this.launchedProfileHolderIdentity,
+          this.childChromeIdentity !== null && this.childChromeProcessGroup,
+        );
+      }
     }
     if (this.startCancellationRequested) {
-      await this.closeWithProfileGuard();
+      await this.closeBrowser();
       throw new Error("BrowserController start cancelled");
     }
     // Speed: optionally abort heavy/irrelevant requests before any navigation.
@@ -3566,7 +4698,7 @@ export class BrowserController {
             get: () => 8,
             configurable: true,
           });
-          // Screen availHeight tell: a headless Xvfb screen reports
+          // Screen availHeight tell: a virtual screen reports
           // availHeight == height (no OS taskbar), whereas a real Windows
           // desktop reserves ~40px for the taskbar (availHeight = height-40,
           // availWidth = width). Reinstate that gap so the screen reads like
@@ -3597,7 +4729,10 @@ export class BrowserController {
     if (contextInitScripts.includes("webgl-spoof")) {
       await context.addInitScript({ content: installWebglSpoofScript });
     }
+    for (const page of context.pages()) this.trackMainDocument(page);
+    this.trackOpenedTabs(context);
     this.page = context.pages()[0] ?? (await context.newPage());
+    this.trackMainDocument(this.page);
     this.primaryPage = this.page;
     // In baseline mode addInitScript covers document-start page JS, but
     // Playwright's page.evaluate utility execution can run in a separate realm.
@@ -3731,6 +4866,7 @@ export class BrowserController {
   private async probeEgressGeo(
     channel: string | null,
     proxy: ProxySettings | null,
+    browserEnv: NodeJS.ProcessEnv,
   ): Promise<EgressGeo | null> {
     if (proxy === null) {
       try {
@@ -3749,7 +4885,8 @@ export class BrowserController {
     let probe: Browser | undefined;
     try {
       probe = await getChromium().launch({
-        headless: process.env.UNIVERSAL_BOT_HEADLESS !== "false",
+        headless: OPERATOR_BROWSER_HEADLESS,
+        env: browserEnv,
         ...(channel !== null ? { channel } : {}),
         ...(proxy !== null ? { proxy } : {}),
         args: ["--no-sandbox", "--disable-dev-shm-usage"],
@@ -3772,68 +4909,13 @@ export class BrowserController {
     }
   }
 
-  // Decide whether this run egresses through a residential proxy, and
-  // return Playwright's proxy settings or null for a direct connection.
-  //
-  // The fast path: when UNIVERSAL_BOT_PROXY_URL is unset (the default),
-  // this returns null before doing anything — no ASN lookup, no added
-  // latency for the ~80% of users who never configure a proxy.
-  //
-  // When a proxy IS configured, it's used only for datacenter-class
-  // egress: reCAPTCHA/Cloudflare score datacenter IPs as bot-likely no
-  // matter how clean the fingerprint is, while residential users
-  // already pass — so routing them through the proxy would just burn
-  // money. UNIVERSAL_BOT_PROXY_ALWAYS=true forces it on for networks
-  // that misclassify as "unknown". A malformed URL never aborts the
-  // run — we log and fall back to a direct connection.
+  // Resolve the deliberate per-session egress selection. A session proxy is
+  // not an optimization hint: falling back to the host's IP could submit a
+  // geo-gated flow from the wrong country, so malformed or unreachable values
+  // abort startup rather than silently egressing directly.
   private async resolveProxy(): Promise<ProxySettings | null> {
-    // Per-launch override (verify fleet) wins over the env-global proxy.
-    const raw = this.proxyOverride ?? process.env.UNIVERSAL_BOT_PROXY_URL;
-    if (raw === undefined || raw.trim().length === 0) return null;
-
-    let proxy: ProxySettings;
-    try {
-      proxy = parseProxyUrl(raw);
-    } catch (err) {
-      console.error(
-        `[operator] UNIVERSAL_BOT_PROXY_URL is malformed — running ` +
-          `direct: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return null;
-    }
-
-    const forceAlways = process.env.UNIVERSAL_BOT_PROXY_ALWAYS === "true";
-    // detectAsn is best-effort (5s timeout, null on failure) → "unknown".
-    const asn = await detectAsn();
-    const asnClass: AsnClass = asn?.class ?? "unknown";
-    if (shouldRouteThroughProxy(asnClass, forceAlways)) {
-      // Proxy liveness probe. A dead proxy (gost crashed, Tailscale down) makes
-      // EVERY navigation time out for 60s and silently breaks the whole heal
-      // pass — MEASURED 2026-06-12: the Mac gost SOCKS5 went down and every
-      // discover died on page.goto Timeout. A cheap TCP connect to the SOCKS
-      // host tells us it's reachable; if not, fall back to DIRECT (the box's own
-      // datacenter egress) so the run still serves the services that don't block
-      // datacenter IPs, instead of dying entirely. Self-healing > silent stall.
-      const reachable = await isProxyReachable(proxy.server);
-      if (!reachable) {
-        console.error(
-          `[operator] proxy ${proxy.server} is UNREACHABLE — falling back to ` +
-            `DIRECT egress (datacenter IP; anti-bot services may block it, but far ` +
-            `better than every navigation timing out)`,
-        );
-        return null;
-      }
-      console.error(
-        `[operator] routing through residential proxy ` +
-          `(asn=${asnClass}${forceAlways ? ", forced" : ""})`,
-      );
-      return proxy;
-    }
-    console.error(
-      `[operator] direct connection (asn=${asnClass}) — proxy ` +
-        `configured but not needed for this network`,
-    );
-    return null;
+    if (this.proxyOverride === null) return null;
+    return resolveExplicitProxy(this.proxyOverride);
   }
 
   // Reload the current page. Used by the post-verify flow to make a SPA
@@ -4090,15 +5172,49 @@ export class BrowserController {
     }
   }
 
-  async type(selector: string, text: string): Promise<void> {
+  async type(selector: string, text: string, sealed = false): Promise<string[]> {
+    if (!this.page) throw new Error("Browser not started");
+    return await this.withModalInertNeutralized(selector, () =>
+      this.typeInner(selector, text, sealed),
+    );
+  }
+
+  /**
+   * Commit Shopify's required shipping street field after type/autocomplete.
+   * Shopify Places only begins geocoding on this field's change/blur boundary;
+   * dispatching change and moving focus away mirrors the user's Tab action.
+   * This is intentionally not a generic post-type event mechanism.
+   */
+  async commitRequiredShippingAddressLine1(selector: string): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    await this.page
+      .locator(selector)
+      .first()
+      .evaluate((field) => {
+        field.dispatchEvent(new Event("change", { bubbles: true }));
+        if (field instanceof HTMLElement) field.blur();
+      });
+    // Allow Shopify's bounded Places/geocoding request to begin before the
+    // caller observes the delivery-method section.
+    await this.sleep(500);
+  }
+
+  private async typeInner(selector: string, text: string, sealed = false): Promise<string[]> {
     if (!this.page) throw new Error("Browser not started");
     // Wait for element to be visible and enabled before typing.
     await this.page.waitForSelector(selector, { state: "visible", timeout: 10000 });
+    const locator = this.page.locator(selector);
+    const sealedFieldKeys = sealed
+      ? await this.operatorScreenshotIdentityKeys(locator, this.page.mainFrame())
+      : [];
+    if (sealed) {
+      await locator.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
+    }
 
     if (!this.humanize) {
       // Fast path for tests / non-humanized runs.
       await this.page.fill(selector, text);
-      return;
+      return sealedFieldKeys;
     }
 
     // Humanized typing:
@@ -4120,7 +5236,6 @@ export class BrowserController {
     // discarded after char 1. Switching to a single pressSequentially
     // call lets the browser's auto-advance handler move focus naturally.
     await this.humanClick(selector);
-    const locator = this.page.locator(selector);
     // Clear any prefilled value before typing. Only meaningful for
     // single-input fields; multi-input OTP forms ignore this since
     // each box is its own input.
@@ -4131,6 +5246,7 @@ export class BrowserController {
     // hook, and over-engineering it added zero observable behavior-
     // score improvement.
     await locator.pressSequentially(text, { delay: rand(40, 110) });
+    return sealedFieldKeys;
   }
 
   // Best-effort scan for the SPECIFIC unfilled required field(s) blocking a
@@ -4309,7 +5425,133 @@ export class BrowserController {
     await chooser.setFiles(filePath);
   }
 
+  // Ancestors marked `inert` for a "hide the background while a modal is
+  // open" trick are meant to sit OUTSIDE a truly-portaled dialog (Angular
+  // CDK/Material's overlay container is a sibling of the app root, and only
+  // the app root gets marked inert — unaffected by this). A dialog that
+  // isn't portaled to <body> — it only escapes its container VISUALLY via
+  // position:fixed — remains a structural DESCENDANT of the inert ancestor,
+  // and Chromium's real hit-testing (which Playwright's actionability check
+  // relies on) skips an inert subtree entirely: a normal click() on such a
+  // control hangs waiting for actionability that never arrives (see the
+  // matching neutralizeInertForHitTest in extractElementsFromContext, which
+  // covers el_table's topmost/occludedBy reporting for the same case).
+  // Scoped tight — only neutralized when the target itself resolves inside a
+  // detected dialog/modal region — so a genuine background control outside
+  // any modal keeps its inert protection (money-fence boundary untouched).
+  // Ancestors are tagged with a marker attribute (not held as live handles)
+  // so the restore step re-finds exactly what THIS call neutralized even
+  // across the intervening await.
+  private async withModalInertNeutralized<T>(
+    selector: string,
+    fn: (modalActive: boolean) => Promise<T>,
+  ): Promise<T> {
+    if (!this.page) throw new Error("Browser not started");
+    const marker = "data-ts-inert-neutralized";
+    const anchorMarker = "data-ts-inert-region-anchor";
+    const modalActive = await this.page
+      .$eval(
+        selector,
+        (el, markers) => {
+          const { marker, anchorMarker } = markers;
+          const composedParent = (node: Node): Element | null => {
+            const parent = node.parentNode;
+            if (parent === null) return null;
+            if (parent instanceof ShadowRoot) return parent.host;
+            return parent instanceof Element ? parent : null;
+          };
+          const isDialogElement = (element: Element): boolean =>
+            element.getAttribute("role") === "dialog" ||
+            element.tagName.toLowerCase() === "dialog" ||
+            element.getAttribute("aria-modal") === "true";
+          const nearestModalRegion = (element: Element): Element | null => {
+            let cur: Element | null = element;
+            while (cur !== null) {
+              if (isDialogElement(cur)) return cur;
+              cur = composedParent(cur);
+            }
+            return null;
+          };
+          const region = nearestModalRegion(el);
+          if (region === null) return false;
+          region.setAttribute(anchorMarker, "1");
+          let cur: Element | null = el;
+          while (cur !== null) {
+            if (cur.hasAttribute("inert")) {
+              cur.removeAttribute("inert");
+              cur.setAttribute(marker, "1");
+            }
+            cur = composedParent(cur);
+          }
+          return true;
+        },
+        { marker, anchorMarker },
+      )
+      .catch(() => false);
+    try {
+      return await fn(modalActive);
+    } finally {
+      await this.page
+        .evaluate(
+          (markers) => {
+            const { marker, anchorMarker } = markers;
+            const isDialogElement = (element: Element): boolean =>
+              element.getAttribute("role") === "dialog" ||
+              element.tagName.toLowerCase() === "dialog" ||
+              element.getAttribute("aria-modal") === "true";
+            // Only a currently open/rendered dialog counts as still active:
+            // HTMLDialogElement.close() leaves the <dialog> connected without
+            // `open`, and frameworks keep hidden role="dialog" nodes mounted
+            // after closing — a stale remnant must not keep the background
+            // locked once the modal genuinely closed.
+            const isRenderedDialog = (element: Element): boolean => {
+              if (!isDialogElement(element)) return false;
+              if (element instanceof HTMLDialogElement) return element.open;
+              if (typeof element.checkVisibility === "function")
+                return element.checkVisibility({ visibilityProperty: true });
+              if (element.hasAttribute("hidden")) return false;
+              const style = window.getComputedStyle(element);
+              return style.display !== "none" && style.visibility !== "hidden";
+            };
+            const subtreeHasDialog = (root: Element | ShadowRoot): boolean => {
+              if (root instanceof Element) {
+                if (isRenderedDialog(root)) return true;
+                if (root.shadowRoot !== null && subtreeHasDialog(root.shadowRoot)) return true;
+              }
+              for (const el of Array.from(root.querySelectorAll("*"))) {
+                if (isRenderedDialog(el)) return true;
+                if (el.shadowRoot !== null && subtreeHasDialog(el.shadowRoot)) return true;
+              }
+              return false;
+            };
+            const cleanupAndRestore = (root: Document | ShadowRoot): void => {
+              root
+                .querySelectorAll(`[${anchorMarker}]`)
+                .forEach((el) => el.removeAttribute(anchorMarker));
+              root.querySelectorAll(`[${marker}]`).forEach((el) => {
+                el.removeAttribute(marker);
+                if (subtreeHasDialog(el)) el.setAttribute("inert", "");
+              });
+              root.querySelectorAll("*").forEach((el) => {
+                if (el.shadowRoot !== null) cleanupAndRestore(el.shadowRoot);
+              });
+            };
+            cleanupAndRestore(document);
+          },
+          { marker, anchorMarker },
+        )
+        .catch(() => undefined);
+    }
+  }
+
   async click(selector: string): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    await this.withModalInertNeutralized(selector, (modalActive) =>
+      this.clickInner(selector, modalActive),
+    );
+  }
+
+  private async clickInner(selector: string, modalActive: boolean): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     // Radio/checkbox inputs — especially the visually-hidden kind behind a
     // styled label (kinde's `kui-util-hide-visually` SDK-picker radios) — don't
@@ -4371,7 +5613,12 @@ export class BrowserController {
       if (optRole !== "") {
         const role = optRole as "option" | "menuitem" | "menuitemradio";
         if (optName.length > 0) {
-          const byName = this.page.getByRole(role, { name: optName, exact: false }).first();
+          const byName = modalActive
+            ? this.page
+                .locator("[data-ts-inert-region-anchor]")
+                .getByRole(role, { name: optName, exact: false })
+                .first()
+            : this.page.getByRole(role, { name: optName, exact: false }).first();
           if ((await byName.count().catch(() => 0)) > 0) {
             await byName.click({ timeout: 8000 });
             return;
@@ -5048,17 +6295,27 @@ export class BrowserController {
     }
   }
 
-  async typeHandle(handle: ElementHandle<Element>, text: string, sealed = false): Promise<void> {
+  async typeHandle(
+    handle: ElementHandle<Element>,
+    text: string,
+    sealed = false,
+  ): Promise<string[]> {
+    const ownerFrame = await handle.ownerFrame();
+    if (ownerFrame === null) throw new Error("locator target has no owning frame");
+    const sealedFieldKeys = sealed
+      ? await this.operatorScreenshotIdentityKeys(handle, ownerFrame)
+      : [];
     if (sealed) {
       await handle.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
     }
     if (!this.humanize) {
       await handle.fill(text);
-      return;
+      return sealedFieldKeys;
     }
     await handle.click({ timeout: 8000 }).catch(() => undefined);
     await handle.fill("").catch(() => undefined);
     await handle.type(text, { delay: rand(40, 110) });
+    return sealedFieldKeys;
   }
 
   // Dispatch a DOM .click() in the page context. Some React copy buttons fire
@@ -5734,6 +6991,13 @@ export class BrowserController {
   // first option — preserves the existing behavior for native
   // selects whose contents are interchangeable (country pickers).
   async selectOption(selector: string, optionMatcher?: string): Promise<string> {
+    if (!this.page) throw new Error("Browser not started");
+    return await this.withModalInertNeutralized(selector, () =>
+      this.selectOptionInner(selector, optionMatcher),
+    );
+  }
+
+  private async selectOptionInner(selector: string, optionMatcher?: string): Promise<string> {
     if (!this.page) throw new Error("Browser not started");
     await this.page.waitForSelector(selector, { state: "attached", timeout: 10000 });
     let activeSelector = selector;
@@ -6702,7 +7966,7 @@ export class BrowserController {
     // device memory, screen, languages, webdriver flag. Turnstile
     // error 600010 ("internal client execution error") usually points
     // at one of these returning something the challenge JS can't
-    // handle (e.g. SwiftShader/llvmpipe renderer under Xvfb).
+    // handle (e.g. a SwiftShader/llvmpipe renderer).
     if (process.env.UNIVERSAL_BOT_CAPTCHA_TRACE === "1") {
       try {
         const fp = await this.page.evaluate(() => {
@@ -7637,12 +8901,6 @@ export class BrowserController {
         },
         { tok: token, key: responseKey },
       );
-      if (process.env.UNIVERSAL_BOT_OAUTH_DEBUG) {
-        console.error(
-          `[captcha] hCaptcha inject diag: ok=${diag.ok} textareas=${diag.textareas} ` +
-            `widgets=${diag.widgets} callbackFired=${diag.callbackFired} hcaptchaGlobal=${diag.hasHcaptchaGlobal}`,
-        );
-      }
       return diag.ok;
     } catch {
       return false;
@@ -7857,6 +9115,938 @@ export class BrowserController {
     return buffer.toString("base64");
   }
 
+  // Resolve a caller-supplied frame reference to a live Frame, or null for
+  // "the whole page" (no frame args given). Throws when a reference was
+  // given but nothing matches — a silent fallback to the full page would
+  // make operate_screenshot's frame targeting unreliable for exactly the
+  // case it exists for (an unpredictable ACS/challenge iframe).
+  private resolveOperatorScreenshotFrame(opts: {
+    frameIndex?: number;
+    frameUrlContains?: string;
+  }): Frame | null {
+    if (!this.page) throw new Error("Browser not started");
+    if (opts.frameIndex !== undefined) {
+      const frame = this.page.frames()[opts.frameIndex];
+      if (frame === undefined) throw new Error("screenshot_frame_not_found");
+      return frame;
+    }
+    if (opts.frameUrlContains !== undefined) {
+      const needle = opts.frameUrlContains.toLowerCase();
+      const frame = this.page.frames().find((f) => f.url().toLowerCase().includes(needle));
+      if (frame === undefined) throw new Error("screenshot_frame_not_found");
+      return frame;
+    }
+    return null;
+  }
+
+  private async operatorScreenshotCaptureScope(targetFrame: Frame | null): Promise<{
+    frames: Frame[];
+    strictFrames: ReadonlySet<Frame>;
+    clip: { x: number; y: number; width: number; height: number } | null;
+  }> {
+    if (!this.page) throw new Error("Browser not started");
+    if (targetFrame === null || targetFrame === this.page.mainFrame()) {
+      const frames = this.page.frames();
+      return { frames, strictFrames: new Set(frames), clip: null };
+    }
+    const strictFrames = new Set<Frame>();
+    const visit = (frame: Frame): void => {
+      strictFrames.add(frame);
+      for (const child of frame.childFrames()) visit(child);
+    };
+    visit(targetFrame);
+    const targetHandle = await targetFrame.frameElement();
+    const clip = await targetHandle.boundingBox();
+    await targetHandle.dispose().catch(() => undefined);
+    if (clip === null) throw new Error("screenshot_redaction_unresolved");
+    const intersects = (box: { x: number; y: number; width: number; height: number }): boolean =>
+      box.x < clip.x + clip.width &&
+      box.x + box.width > clip.x &&
+      box.y < clip.y + clip.height &&
+      box.y + box.height > clip.y;
+    const frames: Frame[] = [];
+    for (const frame of this.page.frames()) {
+      if (frame === this.page.mainFrame() || strictFrames.has(frame)) {
+        frames.push(frame);
+        continue;
+      }
+      const handle = await frame.frameElement();
+      try {
+        const box = await handle.boundingBox();
+        if (box !== null && intersects(box)) frames.push(frame);
+      } finally {
+        await handle.dispose().catch(() => undefined);
+      }
+    }
+    return { frames, strictFrames, clip };
+  }
+
+  private async sealedDocumentIdentity(frame: Frame): Promise<string> {
+    const current = this.sealedDocuments.get(frame);
+    if (
+      current !== undefined &&
+      !frame.isDetached() &&
+      (await frame.evaluate((expected) => document === expected, current.handle).catch(() => false))
+    ) {
+      return current.identity;
+    }
+    await current?.handle.dispose().catch(() => undefined);
+    const handle = await frame.evaluateHandle(() => document);
+    const identity = `document-${this.sealedDocumentSequence++}`;
+    this.sealedDocuments.set(frame, { handle, identity });
+    return identity;
+  }
+
+  private async operatorScreenshotIdentityKeys(
+    target: Locator | ElementHandle<Element>,
+    frame: Frame,
+  ): Promise<string[]> {
+    const descriptor = await (target as unknown as ElementHandle<Element>).evaluate((el) => {
+      const clean = (value: string | null | undefined): string | null => {
+        const normalized = (value ?? "").replace(/\s+/g, " ").trim();
+        return normalized.length > 0 ? normalized : null;
+      };
+      const labelFor = (element: Element): string | null => {
+        const id = element.getAttribute("id");
+        if (id !== null && id.length > 0) {
+          const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+          if (label !== null) return clean(label.textContent);
+        }
+        const labelledBy = element.getAttribute("aria-labelledby");
+        if (labelledBy !== null) {
+          const text = labelledBy
+            .split(/\s+/)
+            .map((part) => clean(document.getElementById(part)?.textContent))
+            .filter((part): part is string => part !== null)
+            .join(" ");
+          if (text.length > 0) return text;
+        }
+        return clean(element.closest("label")?.textContent);
+      };
+      const controls = Array.from(
+        (el.getRootNode() as Document | ShadowRoot).querySelectorAll(
+          "input,textarea,select,[contenteditable='true']",
+        ),
+      );
+      return {
+        tag: el.tagName.toLowerCase(),
+        type: el.getAttribute("type"),
+        id: el.getAttribute("id"),
+        name: el.getAttribute("name"),
+        testId:
+          el.getAttribute("data-testid") ??
+          el.getAttribute("data-test-id") ??
+          el.getAttribute("data-test") ??
+          el.getAttribute("data-cy") ??
+          el.getAttribute("data-qa"),
+        labelText: labelFor(el),
+        ariaLabel: el.getAttribute("aria-label"),
+        placeholder: el.getAttribute("placeholder"),
+        landmark:
+          el.closest("header,main,footer,nav,aside,article,section")?.tagName.toLowerCase() ?? null,
+        ordinal: controls.indexOf(el),
+      } satisfies SealedElementDescriptor;
+    });
+    const documentIdentity = await this.sealedDocumentIdentity(frame);
+    return sealedElementSemanticKeys(descriptor).map((key) => `${documentIdentity}:${key}`);
+  }
+
+  private async resolveOperatorScreenshotSealedLocators(
+    frames: readonly Frame[],
+    sealedFieldKeys: ReadonlySet<string>,
+  ): Promise<Map<Frame, Locator[]>> {
+    const byFrame = new Map<Frame, Locator[]>();
+    for (const frame of frames) {
+      const matches: Locator[] = [];
+      const candidates = await frame
+        .locator("input,textarea,select,[contenteditable='true']")
+        .all();
+      for (const candidate of candidates) {
+        const keys = await this.operatorScreenshotIdentityKeys(candidate, frame);
+        if (keys.some((key) => sealedFieldKeys.has(key))) matches.push(candidate);
+      }
+      byFrame.set(frame, matches);
+    }
+    return byFrame;
+  }
+
+  // Resolve every card-shaped/sealed field in the captured frames to a
+  // screenshot redaction rectangles — text-masking (presentFieldValue in
+  // provision-session.ts) only covers the JSON observation, not a rendered
+  // image. Beyond the attribute-based
+  // selector set, every renderable input/textarea whose CURRENT value contains
+  // a Luhn-valid PAN span is masked too (containsLuhnPanSpan — the same
+  // detection the payment paths use), so a card number sitting in a field the
+  // fixed selectors don't recognize still never reaches the image. Fail-closed
+  // throughout: a selector that cannot be queried, a value that cannot be
+  // read, or a matched element whose geometry cannot be resolved (boundingBox
+  // returns null rather than throwing) aborts the whole capture rather than
+  // shrinking the redaction. The per-frame count signature lets the caller
+  // verify the redaction set stayed stable across the capture window.
+  private async collectOperatorScreenshotMask(
+    frames: readonly Frame[],
+    extraRedactionSelectors: readonly string[],
+    sealedLocators: ReadonlyMap<Frame, readonly Locator[]> = new Map(),
+    knownSecrets: readonly string[] = [],
+    captureClip: { x: number; y: number; width: number; height: number } | null = null,
+    strictFrames: ReadonlySet<Frame> = new Set(frames),
+  ): Promise<{
+    rectangles: Array<{ x: number; y: number; width: number; height: number }>;
+    redactedCount: number;
+    signature: string;
+    handles: ElementHandle<Node>[];
+  }> {
+    const selector = [SCREENSHOT_REDACTION_SELECTORS, ...extraRedactionSelectors].join(",");
+    const secrets = knownSecrets.filter((value) => value.length > 0);
+    const rectangles: Array<{ x: number; y: number; width: number; height: number }> = [];
+    const handles: ElementHandle<Node>[] = [];
+    const signatureParts: string[] = [];
+    try {
+      for (const [frameIndex, frame] of frames.entries()) {
+        let frameCount = 0;
+        const handlesStart = handles.length;
+        const rectanglesStart = rectangles.length;
+        const signatureStart = signatureParts.length;
+        try {
+          const frameHandles = await frame.locator(selector).elementHandles();
+          for (const locator of sealedLocators.get(frame) ?? []) {
+            const handle = await locator.elementHandle({ timeout: 5_000 });
+            if (handle === null) throw new Error("screenshot_redaction_unresolved");
+            if (
+              !(await handle.evaluate((el, matchSelector) => el.matches(matchSelector), selector))
+            ) {
+              frameHandles.push(handle);
+            } else {
+              await handle.dispose();
+            }
+          }
+          const valueCandidates = await frame
+            .locator('input:not([type="hidden" i]),textarea')
+            .elementHandles();
+          for (const candidate of valueCandidates) {
+            const value = await candidate.inputValue({ timeout: 5_000 });
+            if (!containsLuhnPanSpan(value)) {
+              await candidate.dispose();
+              continue;
+            }
+            const duplicate = await Promise.all(
+              frameHandles.map(
+                async (existing) => await candidate.evaluate((el, other) => el === other, existing),
+              ),
+            );
+            if (duplicate.includes(true)) {
+              await candidate.dispose();
+              continue;
+            }
+            frameHandles.push(candidate);
+          }
+          // A secret is not necessarily a form value. It can be reflected by a
+          // page into visible text, title/aria/placeholder attributes, or a
+          // browser-autofill preview. Find the smallest renderable owner node
+          // (direct text only, never a parent merely because a child is secret)
+          // and mask that node's rectangle. This intentionally does not attempt
+          // to cover pixels in canvas/image/SVG/QR/cross-origin rendering; that
+          // residual is the accepted D2 observation-model posture.
+          //
+          // One in-page pass returns every matching node in a single round trip;
+          // PR #627's per-node evaluate loop (one round trip per candidate over
+          // every element) made dynamic checkout pages slow enough to trip the
+          // stability guard below at the payment step and blind the agent.
+          // evaluateHandle (not evaluate): nested DOM nodes serialize as strings
+          // through a plain evaluate return; a handle to the array plus property
+          // enumeration preserves per-node handles.
+          const matchesHandle = await frame.evaluateHandle(
+            (args) => {
+              const { secrets } = args;
+              const hasLuhnPan = (text: string): boolean => {
+                const positions = Array.from(text.matchAll(/\d/g), (match) => match.index);
+                const luhn = (digits: string): boolean => {
+                  let sum = 0;
+                  let double = false;
+                  for (let index = digits.length - 1; index >= 0; index -= 1) {
+                    let digit = Number(digits[index]);
+                    if (double) {
+                      digit *= 2;
+                      if (digit > 9) digit -= 9;
+                    }
+                    sum += digit;
+                    double = !double;
+                  }
+                  return sum % 10 === 0;
+                };
+                for (let start = 0; start + 13 <= positions.length; start += 1) {
+                  const maxLength = Math.min(19, positions.length - start);
+                  for (let length = 13; length <= maxLength; length += 1) {
+                    const span = positions.slice(start, start + length);
+                    if (span[span.length - 1]! - span[0]! + 1 > 96) break;
+                    if (luhn(span.map((position) => text[position]).join(""))) return true;
+                  }
+                }
+                return false;
+              };
+              // PAYMENT-ONLY node redaction: the exact values the operator
+              // injected from the vault, and Luhn-valid PANs. There is no
+              // secret-SHAPE pass — a rendered API key, recovery code, TOTP, or
+              // JWT is ordinary page content the agent is meant to read. Shape
+              // matching also kept catching DOM identifiers (Shopify's
+              // "checkout_shipping_address_address1"), masking whole shipping
+              // blocks out of the image.
+              const containsInjected = (text: string): boolean =>
+                secrets.some((secret) => secret.length > 0 && text.includes(secret));
+              // Values/text also admit a Luhn-valid PAN (a card number rendered
+              // or typed into a field); attributes admit injected values only.
+              const secretValue = (text: string, kind: "value" | "attr" | "text"): boolean => {
+                if (text.length === 0) return false;
+                if (containsInjected(text)) return true;
+                return kind !== "attr" && hasLuhnPan(text);
+              };
+              const matches = new Set<Element>();
+              const check = (el: Element): void => {
+                const state =
+                  el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+                    ? el.value
+                    : el instanceof HTMLSelectElement
+                      ? `${el.value} ${el.options[el.selectedIndex]?.textContent ?? ""}`
+                      : "";
+                if (state.length > 0 && secretValue(state, "value")) {
+                  matches.add(el);
+                  return;
+                }
+                for (const attribute of Array.from(el.attributes)) {
+                  if (secretValue(attribute.value, "attr")) {
+                    matches.add(el);
+                    return;
+                  }
+                }
+                const directText = Array.from(el.childNodes)
+                  .filter((node) => node.nodeType === Node.TEXT_NODE)
+                  .map((node) => node.textContent ?? "")
+                  .join(" ")
+                  .trim();
+                if (directText.length > 0 && secretValue(directText, "text")) matches.add(el);
+              };
+              // Walk the light DOM and every open shadow root — parity with the
+              // piercing the old frame.locator("*") candidates provided.
+              const walk = (root: Document | ShadowRoot | Element): void => {
+                for (const el of Array.from(root.querySelectorAll("*"))) {
+                  check(el);
+                  if (el.shadowRoot !== null) walk(el.shadowRoot);
+                }
+              };
+              walk(document);
+              return Array.from(matches);
+            },
+            { secrets },
+          );
+          const sensitiveProperties = await matchesHandle.getProperties();
+          await matchesHandle.dispose().catch(() => undefined);
+          for (const property of sensitiveProperties.values()) {
+            const candidate = property.asElement();
+            if (candidate === null) {
+              await property.dispose().catch(() => undefined);
+              throw new Error("screenshot_redaction_unresolved");
+            }
+            const duplicate = await Promise.all(
+              frameHandles.map(
+                async (existing) => await candidate.evaluate((el, other) => el === other, existing),
+              ),
+            );
+            if (duplicate.includes(true)) {
+              await candidate.dispose();
+              continue;
+            }
+            frameHandles.push(candidate);
+          }
+          for (const handle of frameHandles) {
+            if (!(await handle.evaluate((el) => el.isConnected))) {
+              throw new Error("screenshot_redaction_unresolved");
+            }
+            const box = await handle.boundingBox();
+            if (
+              captureClip !== null &&
+              !strictFrames.has(frame) &&
+              (box === null ||
+                box.x >= captureClip.x + captureClip.width ||
+                box.x + box.width <= captureClip.x ||
+                box.y >= captureClip.y + captureClip.height ||
+                box.y + box.height <= captureClip.y)
+            ) {
+              await handle.dispose();
+              continue;
+            }
+            handles.push(handle);
+            if (box !== null) rectangles.push(box);
+            signatureParts.push(
+              `${frameIndex}:${box === null ? "hidden" : [box.x, box.y, box.width, box.height].join(":")}`,
+            );
+            frameCount += 1;
+          }
+          signatureParts.push(`count:${frameIndex}:${frameCount}`);
+        } catch {
+          const discarded = handles.splice(handlesStart);
+          rectangles.splice(rectanglesStart);
+          signatureParts.splice(signatureStart);
+          await Promise.all(
+            discarded.map(async (handle) => await handle.dispose().catch(() => undefined)),
+          );
+          // An unreadable embedded third-party frame is part of the accepted
+          // cross-origin residual risk. Do not blind an otherwise ordinary
+          // checkout page because analytics/chat cannot be inspected. The main
+          // document and an explicitly targeted frame still fail closed.
+          if (
+            frame === this.page?.mainFrame() ||
+            (captureClip !== null && strictFrames.has(frame))
+          ) {
+            throw new Error("screenshot_redaction_unresolved");
+          }
+          // If this frame may contain a session-injected value, preserving the
+          // vault guarantee wins over the normal cross-origin residual: hide
+          // only this uninspectable iframe, never the surrounding page.
+          if (secrets.length > 0 || (sealedLocators.get(frame)?.length ?? 0) > 0) {
+            const owner = await frame.frameElement();
+            try {
+              const box = await owner.boundingBox();
+              if (box === null) throw new Error("screenshot_redaction_unresolved");
+              rectangles.push(box);
+              signatureParts.push(
+                `${frameIndex}:opaque:${[box.x, box.y, box.width, box.height].join(":")}`,
+              );
+              frameCount = 1;
+            } finally {
+              await owner.dispose().catch(() => undefined);
+            }
+          }
+          signatureParts.push(`uninspectable:${frameIndex}`);
+          signatureParts.push(`count:${frameIndex}:${frameCount}`);
+        }
+      }
+    } catch {
+      await Promise.all(
+        handles.map(async (handle) => await handle.dispose().catch(() => undefined)),
+      );
+      throw new Error("screenshot_redaction_unresolved");
+    }
+    return {
+      rectangles,
+      redactedCount: handles.length,
+      signature: signatureParts.join("|"),
+      handles,
+    };
+  }
+
+  private async redactOperatorScreenshot(
+    buffer: Buffer,
+    rectangles: ReadonlyArray<{ x: number; y: number; width: number; height: number }>,
+    origin: { x: number; y: number },
+    captureSize: { width: number; height: number },
+  ): Promise<string> {
+    const metadata = await sharp(buffer).metadata();
+    if (metadata.width === undefined || metadata.height === undefined) {
+      throw new Error("screenshot_redaction_unresolved");
+    }
+    const scaleX = metadata.width / captureSize.width;
+    const scaleY = metadata.height / captureSize.height;
+    const rects = rectangles
+      .map(
+        (box) =>
+          `<rect x="${(box.x - origin.x) * scaleX}" y="${(box.y - origin.y) * scaleY}" width="${box.width * scaleX}" height="${box.height * scaleY}" fill="#ff00ff"/>`,
+      )
+      .join("");
+    const overlay = Buffer.from(
+      `<svg width="${metadata.width}" height="${metadata.height}" xmlns="http://www.w3.org/2000/svg">${rects}</svg>`,
+    );
+    return (
+      await sharp(buffer)
+        .composite([{ input: overlay, blend: "over" }])
+        .jpeg({ quality: 80 })
+        .toBuffer()
+    ).toString("base64");
+  }
+
+  // Verify the capture set before pixels are read. This is deliberately
+  // narrower than the capture-time mask: empty checkout controls are harmless,
+  // but a nonempty type_secret target, payment-sealed node, or
+  // Luhn-valid PAN means the requested image could contain a card value. Every
+  // frame included by the image must be readable; a detached or navigating
+  // frame is not evidence that it is safe to capture.
+  private async assertOperatorScreenshotFramesNoSealedValues(
+    frames: readonly Frame[],
+    extraRedactionSelectors: readonly string[],
+    sealedLocators: ReadonlyMap<Frame, readonly Locator[]> = new Map(),
+    captureClip: { x: number; y: number; width: number; height: number } | null = null,
+    strictFrames: ReadonlySet<Frame> = new Set(frames),
+  ): Promise<void> {
+    const sealedSelector = [SCREENSHOT_REDACTION_SELECTORS, ...extraRedactionSelectors].join(",");
+
+    try {
+      for (const frame of frames) {
+        if (frame.isDetached()) throw new Error("frame detached");
+        const sealedMatches = [
+          ...(await frame.locator(sealedSelector).all()),
+          ...(sealedLocators.get(frame) ?? []),
+        ];
+        for (const match of sealedMatches) {
+          const box = strictFrames.has(frame) ? null : await match.boundingBox();
+          if (
+            captureClip !== null &&
+            !strictFrames.has(frame) &&
+            (box === null ||
+              box.x >= captureClip.x + captureClip.width ||
+              box.x + box.width <= captureClip.x ||
+              box.y >= captureClip.y + captureClip.height ||
+              box.y + box.height <= captureClip.y)
+          ) {
+            continue;
+          }
+          const hasValue = await match.evaluate((el) => {
+            if (el instanceof HTMLSelectElement) {
+              const optionText = el.options[el.selectedIndex]?.textContent ?? "";
+              const normalizedOption = optionText.replace(/\s+/g, " ").trim();
+              const placeholder =
+                /^(?:select|choose)?\s*(?:a\s+)?(?:month|year|mm|yy)?\s*(?:\.\.\.|[-–—]*)$/i;
+              return (
+                el.value.trim().length > 0 ||
+                (normalizedOption.length > 0 && !placeholder.test(normalizedOption))
+              );
+            }
+            if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+              return el.value.trim().length > 0;
+            }
+            return (el.textContent ?? "").trim().length > 0;
+          });
+          if (hasValue) throw new Error("sealed value");
+        }
+        const candidates = await frame.locator('input:not([type="hidden" i]),textarea').all();
+        for (const candidate of candidates) {
+          const box = strictFrames.has(frame) ? null : await candidate.boundingBox();
+          if (
+            captureClip !== null &&
+            !strictFrames.has(frame) &&
+            (box === null ||
+              box.x >= captureClip.x + captureClip.width ||
+              box.x + box.width <= captureClip.x ||
+              box.y >= captureClip.y + captureClip.height ||
+              box.y + box.height <= captureClip.y)
+          ) {
+            continue;
+          }
+          const hasPan = await candidate.evaluate((el) => {
+            const text =
+              el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement ? el.value : "";
+            const digits = Array.from(text.matchAll(/\d/g), (match) => match.index);
+            const luhn = (value: string): boolean => {
+              let sum = 0;
+              let double = false;
+              for (let index = value.length - 1; index >= 0; index -= 1) {
+                let digit = Number(value[index]);
+                if (double) {
+                  digit *= 2;
+                  if (digit > 9) digit -= 9;
+                }
+                sum += digit;
+                double = !double;
+              }
+              return sum % 10 === 0;
+            };
+            for (let start = 0; start + 13 <= digits.length; start += 1) {
+              const maxLength = Math.min(19, digits.length - start);
+              for (let length = 13; length <= maxLength; length += 1) {
+                const positions = digits.slice(start, start + length);
+                if (
+                  positions[positions.length - 1]! - positions[0]! + 1 >
+                  PAYMENT_PAN_MAX_SPAN_CHARS
+                ) {
+                  break;
+                }
+                if (luhn(positions.map((position) => text[position]).join(""))) return true;
+              }
+            }
+            return false;
+          });
+          if (hasPan) throw new Error("card value");
+        }
+        if (strictFrames.has(frame) || captureClip === null || frame !== this.page?.mainFrame()) {
+          const renderedText = await frame.evaluate(
+            () => document.body?.innerText ?? document.documentElement?.innerText ?? "",
+          );
+          if (containsLuhnPanSpan(renderedText)) throw new Error("rendered card value");
+        } else {
+          const renderedTextInClip = await frame.evaluate((clip) => {
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+            const texts: string[] = [];
+            let node = walker.nextNode();
+            while (node !== null) {
+              const text = node.textContent ?? "";
+              if (/\d/.test(text)) {
+                const range = document.createRange();
+                range.selectNodeContents(node);
+                const overlaps = Array.from(range.getClientRects()).some(
+                  (rect) =>
+                    rect.left < clip.x + clip.width &&
+                    rect.right > clip.x &&
+                    rect.top < clip.y + clip.height &&
+                    rect.bottom > clip.y,
+                );
+                if (overlaps) texts.push(text);
+              }
+              node = walker.nextNode();
+            }
+            return texts.join(" ");
+          }, captureClip);
+          if (containsLuhnPanSpan(renderedTextInClip)) throw new Error("rendered card value");
+        }
+      }
+    } catch {
+      throw new Error("screenshot_unavailable_sealed_context");
+    }
+  }
+
+  async captureOperatorScreenshot(
+    opts: {
+      frameIndex?: number;
+      frameUrlContains?: string;
+      fullPage?: boolean;
+    } = {},
+    sealedFieldKeys: readonly string[] = [],
+    knownSecrets: readonly string[] = [],
+  ): Promise<{
+    base64: string;
+    frameUrl: string | null;
+    frameCount: number;
+    redactedCount: number;
+  }> {
+    if (!this.page) throw new Error("Browser not started");
+    const targetFrame = this.resolveOperatorScreenshotFrame(opts);
+    const scope = await this.operatorScreenshotCaptureScope(targetFrame);
+    const { frames } = scope;
+    const documents: JSHandle<Document>[] = [];
+    try {
+      for (const frame of frames) {
+        if (frame.isDetached()) throw new Error("frame detached");
+        documents.push(await frame.evaluateHandle(() => document));
+      }
+      const sealedLocators = await this.resolveOperatorScreenshotSealedLocators(
+        frames,
+        new Set(sealedFieldKeys),
+      );
+      const documentsStillCurrent = async (): Promise<boolean> => {
+        if (documents.length !== frames.length) return false;
+        for (let index = 0; index < frames.length; index += 1) {
+          const frame = frames[index]!;
+          if (frame.isDetached()) return false;
+          if (!(await frame.evaluate((expected) => document === expected, documents[index]!))) {
+            return false;
+          }
+        }
+        return true;
+      };
+      if (!(await documentsStillCurrent())) {
+        // Give a navigation caught between scope resolution and this check one
+        // short settle before rejecting a genuinely changed document.
+        await this.wait(0.5);
+        if (!(await documentsStillCurrent())) {
+          throw new Error("screenshot_unavailable_sealed_context");
+        }
+      }
+      let captured:
+        | {
+            base64: string;
+            frameUrl: string | null;
+            frameCount: number;
+            redactedCount: number;
+          }
+        | undefined;
+      let attemptScope = scope;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (attempt > 0) {
+          attemptScope = await this.operatorScreenshotCaptureScope(targetFrame);
+          if (
+            attemptScope.frames.length !== frames.length ||
+            !frames.every((frame, index) => attemptScope.frames[index] === frame)
+          ) {
+            throw new Error("screenshot_unavailable_sealed_context");
+          }
+        }
+        try {
+          captured = await this.screenshotForOperatorResolved(
+            opts,
+            targetFrame,
+            frames,
+            sealedLocators,
+            attemptScope,
+            async () => {
+              if (!(await documentsStillCurrent())) {
+                // The redaction set is collected immediately before capture and
+                // re-collected after it. A new/moved/replaced secret node makes
+                // the image unstable and is discarded; it never seals the
+                // surrounding document.
+                throw new Error("screenshot_unavailable_sealed_context");
+              }
+            },
+            knownSecrets,
+          );
+          break;
+        } catch (error) {
+          if (
+            attempt === 0 &&
+            error instanceof Error &&
+            error.message === "screenshot_redaction_unstable"
+          ) {
+            continue;
+          }
+          throw error;
+        }
+      }
+      if (captured === undefined) throw new Error("screenshot_unavailable_sealed_context");
+      if (!(await documentsStillCurrent())) {
+        throw new Error("screenshot_unavailable_sealed_context");
+      }
+      return captured;
+    } catch (error) {
+      if (error instanceof Error && error.message === "screenshot_frame_not_found") throw error;
+      if (error instanceof Error && error.message === "screenshot_unavailable_sealed_context") {
+        throw error;
+      }
+      throw new Error("screenshot_unavailable_sealed_context");
+    } finally {
+      await Promise.all(
+        documents.map(async (document) => await document.dispose().catch(() => undefined)),
+      );
+    }
+  }
+
+  // Low-level read-only capture used by captureOperatorScreenshot after its
+  // capture-scoped node-redaction discovery, and directly by redaction tests. It
+  // never navigates, clicks, types, focuses, or mutates the DOM. Redaction
+  // covers every frame included in the image: the whole page composites its
+  // visible frames, while an isolated frame includes only that frame.
+  // `extraRedactionSelectors` is retained for callers that already resolved
+  // additional sensitive elements; production capture passes durable locators.
+  async screenshotForOperator(
+    opts: {
+      frameIndex?: number;
+      frameUrlContains?: string;
+      fullPage?: boolean;
+      extraRedactionSelectors?: readonly string[];
+    } = {},
+    knownSecrets: readonly string[] = [],
+  ): Promise<{
+    base64: string;
+    frameUrl: string | null;
+    frameCount: number;
+    redactedCount: number;
+  }> {
+    if (!this.page) throw new Error("Browser not started");
+    const targetFrame = this.resolveOperatorScreenshotFrame(opts);
+    const scope = await this.operatorScreenshotCaptureScope(targetFrame);
+    return await this.screenshotForOperatorResolved(
+      opts,
+      targetFrame,
+      scope.frames,
+      new Map(),
+      scope,
+      undefined,
+      knownSecrets,
+    );
+  }
+
+  private async screenshotForOperatorResolved(
+    opts: {
+      fullPage?: boolean;
+      extraRedactionSelectors?: readonly string[];
+    },
+    targetFrame: Frame | null,
+    framesBefore: readonly Frame[],
+    sealedLocators: ReadonlyMap<Frame, readonly Locator[]> = new Map(),
+    scope: {
+      frames: Frame[];
+      strictFrames: ReadonlySet<Frame>;
+      clip: { x: number; y: number; width: number; height: number } | null;
+    } = { frames: [...framesBefore], strictFrames: new Set(framesBefore), clip: null },
+    beforeCapture?: () => Promise<void>,
+    knownSecrets: readonly string[] = [],
+  ): Promise<{
+    base64: string;
+    frameUrl: string | null;
+    frameCount: number;
+    redactedCount: number;
+  }> {
+    if (!this.page) throw new Error("Browser not started");
+    const page = this.page;
+    const extraRedactionSelectors = opts.extraRedactionSelectors ?? [];
+    const before = await this.collectOperatorScreenshotMask(
+      framesBefore,
+      extraRedactionSelectors,
+      sealedLocators,
+      knownSecrets,
+      scope.clip,
+      scope.strictFrames,
+    );
+    const { rectangles, redactedCount, signature } = before;
+    let recheck: typeof before | undefined;
+    try {
+      // caret:"initial" skips Playwright's default caret-hiding pass, which
+      // writes (and restores) caret-color on every editable element's inline
+      // style — this capture must leave element styles untouched.
+      let buffer: Buffer;
+      let origin = { x: 0, y: 0 };
+      let captureSize: { width: number; height: number };
+      const cdp = await page.context().newCDPSession(page);
+      try {
+        if (targetFrame !== null && targetFrame !== page.mainFrame()) {
+          const handle = await targetFrame.frameElement();
+          try {
+            const box = await handle.boundingBox();
+            if (box === null) throw new Error("screenshot_redaction_unresolved");
+            if (
+              scope.clip === null ||
+              box.x !== scope.clip.x ||
+              box.y !== scope.clip.y ||
+              box.width !== scope.clip.width ||
+              box.height !== scope.clip.height
+            ) {
+              throw new Error("screenshot_redaction_unresolved");
+            }
+            const scroll = await page.evaluate(() => ({ x: window.scrollX, y: window.scrollY }));
+            origin = { x: box.x, y: box.y };
+            captureSize = { width: box.width, height: box.height };
+            await beforeCapture?.();
+            const result = await cdp.send("Page.captureScreenshot", {
+              format: "jpeg",
+              quality: 80,
+              fromSurface: true,
+              captureBeyondViewport: true,
+              clip: {
+                x: box.x + scroll.x,
+                y: box.y + scroll.y,
+                width: box.width,
+                height: box.height,
+                scale: 1,
+              },
+            });
+            buffer = Buffer.from(result.data, "base64");
+          } finally {
+            await handle.dispose().catch(() => undefined);
+          }
+        } else if (opts.fullPage === true) {
+          const dimensions = await page.evaluate(() => ({
+            origin: { x: -window.scrollX, y: -window.scrollY },
+            size: {
+              width: document.documentElement.scrollWidth,
+              height: document.documentElement.scrollHeight,
+            },
+          }));
+          origin = dimensions.origin;
+          captureSize = dimensions.size;
+          await beforeCapture?.();
+          const result = await cdp.send("Page.captureScreenshot", {
+            format: "jpeg",
+            quality: 80,
+            fromSurface: true,
+            captureBeyondViewport: true,
+            clip: {
+              x: 0,
+              y: 0,
+              width: dimensions.size.width,
+              height: dimensions.size.height,
+              scale: 1,
+            },
+          });
+          buffer = Buffer.from(result.data, "base64");
+        } else {
+          const viewport = page.viewportSize();
+          if (viewport === null) throw new Error("screenshot_redaction_unresolved");
+          captureSize = viewport;
+          await beforeCapture?.();
+          const result = await cdp.send("Page.captureScreenshot", {
+            format: "jpeg",
+            quality: 80,
+            fromSurface: true,
+          });
+          buffer = Buffer.from(result.data, "base64");
+        }
+      } finally {
+        await cdp.detach().catch(() => undefined);
+      }
+      // Stability guard: the mask set was fixed before a capture that can take
+      // seconds. If the page grew another matching field or frame meanwhile,
+      // the image may hold pixels no mask covered — re-run the same collection
+      // and discard the image unless the frame set and per-frame redaction
+      // signature are unchanged.
+      const scopeAfter = await this.operatorScreenshotCaptureScope(targetFrame);
+      const framesAfter = scopeAfter.frames;
+      let framesStable =
+        JSON.stringify(scopeAfter.clip) === JSON.stringify(scope.clip) &&
+        framesAfter.length === framesBefore.length &&
+        framesBefore.every((frame, index) => framesAfter[index] === frame);
+      let maskStable = framesStable;
+      if (framesStable) {
+        try {
+          recheck = await this.collectOperatorScreenshotMask(
+            framesAfter,
+            extraRedactionSelectors,
+            sealedLocators,
+            knownSecrets,
+            scope.clip,
+            scope.strictFrames,
+          );
+          maskStable =
+            recheck.signature === signature && recheck.handles.length === before.handles.length;
+          if (maskStable) {
+            for (let index = 0; index < before.handles.length; index += 1) {
+              if (
+                !(await recheck.handles[index]!.evaluate(
+                  (el, expected) => el === expected,
+                  before.handles[index]!,
+                ))
+              ) {
+                maskStable = false;
+                break;
+              }
+            }
+          }
+        } catch {
+          maskStable = false;
+        }
+      }
+      if (!maskStable) {
+        if (!framesStable) {
+          throw new Error("screenshot_redaction_unstable");
+        }
+        // The node set drifted while capture was in flight. Paint the union of
+        // both samplings, so every secret found at either end is covered. A
+        // frame-set change still refuses because it can add unseen pixels.
+        const unionRectangles = [...rectangles, ...(recheck?.rectangles ?? [])];
+        const unionBase64 = await this.redactOperatorScreenshot(
+          buffer,
+          unionRectangles,
+          origin,
+          captureSize,
+        );
+        return {
+          base64: unionBase64,
+          frameUrl: targetFrame?.url() ?? null,
+          frameCount: page.frames().length,
+          redactedCount: unionRectangles.length,
+        };
+      }
+      const base64 = await this.redactOperatorScreenshot(buffer, rectangles, origin, captureSize);
+      return {
+        base64,
+        frameUrl: targetFrame?.url() ?? null,
+        frameCount: page.frames().length,
+        redactedCount,
+      };
+    } finally {
+      await Promise.all([
+        ...before.handles.map(async (handle) => await handle.dispose().catch(() => undefined)),
+        ...(recheck?.handles ?? []).map(
+          async (handle) => await handle.dispose().catch(() => undefined),
+        ),
+      ]);
+    }
+  }
+
   async getState(): Promise<BrowserState> {
     if (!this.page) throw new Error("Browser not started");
     // page.content() / page.title() / screenshot() all throw
@@ -7901,6 +10091,34 @@ export class BrowserController {
   async extractVisibleText(): Promise<string> {
     if (!this.page) throw new Error("Browser not started");
     return await this.page.evaluate(extractObservationVisibleText);
+  }
+
+  /**
+   * Tiny structural source for compact V2. The raw values never leave the
+   * provision session: compact-observation-v2 applies its allowlist seal
+   * before the result is stored, delta'd, or emitted.
+   */
+  async extractObservationSemantics(): Promise<{ title: string; headings: string[] }> {
+    if (!this.page) throw new Error("Browser not started");
+    return await this.page.evaluate(() => {
+      const visible = (element: Element): boolean => {
+        const html = element as HTMLElement;
+        const style = window.getComputedStyle(html);
+        const rect = html.getBoundingClientRect();
+        return (
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          rect.width > 0 &&
+          rect.height > 0
+        );
+      };
+      const headings = Array.from(document.querySelectorAll("h1,h2"))
+        .filter(visible)
+        .map((element) => (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 160))
+        .filter(Boolean)
+        .slice(0, 2);
+      return { title: document.title.slice(0, 160), headings };
+    });
   }
 
   async readCheckoutSummary(fallbackCurrency?: string): Promise<CheckoutSummary> {
@@ -8265,6 +10483,27 @@ export class BrowserController {
     return includeDetails ? items : items.map(({ title, quantity }) => ({ title, quantity }));
   }
 
+  // Deterministic cart-normalize primitive: Shopify's standard Ajax Cart API
+  // exposes POST /cart/clear.js on every storefront's own origin — no DOM
+  // markup dependency, so it works regardless of theme. This is how an
+  // operator reaches a KNOWN (empty) cart quantity before a fresh cart_add,
+  // rather than accumulating quantity across separate operate_start sessions
+  // on the shared persistent profile.
+  async clearCart(): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    return await this.page.evaluate(async () => {
+      try {
+        const response = await fetch("/cart/clear.js", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        });
+        return response.ok;
+      } catch {
+        return false;
+      }
+    });
+  }
+
   async readSettledCheckoutReviewSummary(
     fallbackCurrency?: string,
     timeoutMs = 12_000,
@@ -8332,11 +10571,11 @@ export class BrowserController {
   }
 
   // The first frame that actually renders a visible card (PAN) input, or null.
-  private async panFieldFrame(): Promise<Frame | null> {
+  private async panFieldFrame(frames?: readonly Frame[]): Promise<Frame | null> {
     if (!this.page) return null;
-    for (const frame of this.page.frames()) {
+    for (const frame of frames ?? this.page.frames()) {
       const locator = frame.locator(CHECKOUT_PAN_FIELD_SELECTORS);
-      const count = Math.min(await locator.count().catch(() => 0), 10);
+      const count = await locator.count().catch(() => 0);
       for (let i = 0; i < count; i += 1) {
         const input = locator.nth(i);
         if (
@@ -8350,7 +10589,7 @@ export class BrowserController {
     return null;
   }
 
-  // Bounded wait for a PAN field to appear anywhere on the page. A
+  // Bounded wait for a PAN field to appear in caller-eligible frames. A
   // single-page checkout's card entry can live in a cross-origin PCI iframe
   // (e.g. Shopify's checkout.pci.shopifyinc.com) that mounts only after the
   // payment section itself renders — later than the total becomes readable,
@@ -8358,14 +10597,335 @@ export class BrowserController {
   // fillAndSubmitCheckout/fillCheckoutCardFields used to take one frames()
   // snapshot at call time; a frame that hadn't mounted YET at that exact
   // instant made a genuinely fillable checkout fail closed.
-  private async waitForPanField(timeoutMs: number): Promise<void> {
+  private async waitForPanField(
+    timeoutMs: number,
+    frameAllowed: (frame: Frame) => boolean = () => true,
+  ): Promise<void> {
     if (!this.page) return;
     const deadline = Date.now() + timeoutMs;
     while (true) {
-      if ((await this.panFieldFrame()) !== null) return;
+      // A JP form whose PAN carries no name/id hint (see
+      // stampJapaneseCardLabelFields) is only visible to
+      // CHECKOUT_PAN_FIELD_SELECTORS once stamped — without this,
+      // panFieldFrame() below can never match and every call here burns its
+      // full timeoutMs even though the field was on the page from the start.
+      const frames = this.page.frames().filter(frameAllowed);
+      await this.stampJapaneseCardLabelFields(frames);
+      if ((await this.panFieldFrame(frames)) !== null) return;
       if (Date.now() >= deadline) return;
       await this.page.waitForTimeout(200).catch(() => undefined);
     }
+  }
+
+  // Split checkout waits are event-driven: a trusted hosted-field frame can
+  // attach as about:blank and only later navigate to its processor URL. Watch
+  // both lifecycle events and then wait inside that exact frame for the PAN.
+  // A settled page with a PAN only in excluded frames returns immediately so
+  // the caller can produce its existing fail-closed frame-origin refusal.
+  private async waitForRecognizedPanField(pageUrl: string, deadline?: number): Promise<void> {
+    if (!this.page) return;
+    const page = this.page;
+    const frameAllowed = (frame: Frame): boolean =>
+      frame === page.mainFrame() || recognizedPaymentProviderFrame(frame.url(), pageUrl);
+    const remaining = (): number =>
+      deadline === undefined ? 0 : Math.max(0, deadline - Date.now());
+    let done = false;
+    let resolveDone!: () => void;
+    const complete = (): void => {
+      if (done) return;
+      done = true;
+      resolveDone();
+    };
+    const completed = new Promise<void>((resolve) => {
+      resolveDone = resolve;
+    });
+    const observeTrustedFrame = (frame: Frame): void => {
+      if (done || !frameAllowed(frame)) return;
+      void (async () => {
+        // JP checkouts can expose their PAN only through an associated label,
+        // so normalize the trusted frame before starting its selector wait.
+        // This preserves the existing conservative label-to-control contract
+        // while never evaluating or mutating an excluded payment frame.
+        await this.stampJapaneseCardLabelFields([frame]);
+        if ((await this.panFieldFrame([frame])) !== null) {
+          complete();
+          return;
+        }
+        await frame
+          .waitForSelector(CHECKOUT_PAN_FIELD_SELECTORS, {
+            state: "visible",
+            timeout: remaining(),
+          })
+          .then(() => complete())
+          .catch(() => undefined);
+      })();
+    };
+    const settleOrRefuse = (): void => {
+      void page
+        .waitForLoadState("networkidle", { timeout: remaining() })
+        .then(async () => {
+          if (done) return;
+          const frames = page.frames();
+          const trustedFrames = frames.filter(frameAllowed);
+          await this.stampJapaneseCardLabelFields(trustedFrames);
+          if ((await this.panFieldFrame(trustedFrames)) !== null) {
+            complete();
+            return;
+          }
+          // Do not reject while a recognized provider frame is still live:
+          // its PAN may appear after the provider's own hydration work. The
+          // deadline governs that wait; there is no local timing heuristic.
+          if (frames.some((frame) => frame !== page.mainFrame() && frameAllowed(frame))) return;
+          complete();
+        })
+        .catch(() => undefined);
+    };
+    const onFrameLifecycle = (frame: Frame): void => {
+      observeTrustedFrame(frame);
+      settleOrRefuse();
+    };
+    page.on("frameattached", onFrameLifecycle);
+    page.on("framenavigated", onFrameLifecycle);
+    for (const frame of page.frames()) observeTrustedFrame(frame);
+    settleOrRefuse();
+    let deadlineTimer: NodeJS.Timeout | undefined;
+    if (deadline !== undefined) {
+      const timeout = remaining();
+      if (timeout <= 0) complete();
+      else deadlineTimer = setTimeout(complete, timeout);
+    }
+    try {
+      await completed;
+    } finally {
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      page.off("frameattached", onFrameLifecycle);
+      page.off("framenavigated", onFrameLifecycle);
+    }
+  }
+
+  // Normalizes conservative PAN name/id conventions and scans
+  // dt/th/label/"table-label" elements for カード番号 / カード名義 /
+  // セキュリティコード and stamps the associated single text input with
+  // data-ts-jp-card-field; 有効期限 stamps its month/year <select>s via their
+  // own first ("月を指定"/"年を指定") option text, since the label spans both
+  // selects rather than identifying one. Conservative on purpose: a hidden,
+  // non-text, or unassociated control is left unstamped rather than guessed —
+  // a wrong-field card fill is worse than a fill_field_not_found refusal.
+  private async stampJapaneseCardLabelFields(frames: readonly Frame[]): Promise<void> {
+    await Promise.all(
+      frames.map(async (frame, frameIndex) => {
+        const documentElement = await frame.$("html").catch(() => null);
+        if (documentElement === null) return;
+        try {
+          await this.stampJapaneseCardLabelFieldsInDocument(documentElement, frameIndex);
+        } catch {
+          return;
+        } finally {
+          await documentElement.dispose().catch(() => undefined);
+        }
+      }),
+    );
+  }
+
+  private async stampJapaneseCardLabelFieldsInDocument(
+    documentElement: ElementHandle<HTMLElement>,
+    frameIndex: number,
+  ): Promise<void> {
+    const excludedCardIdentities = ["gift", "loyalty", "point", "prepaid", "member"];
+    const panLabels = ["カード番号"];
+    const excludedCardLabels = [
+      "ギフト",
+      "ポイント",
+      "プリペイド",
+      "会員",
+      "メンバー",
+      "ロイヤルティ",
+      "ロイヤリティ",
+    ];
+    const nameLabels = ["カード名義"];
+    const cvvLabels = ["セキュリティコード", "セキュリティーコード"];
+    const expiryLabels = ["有効期限"];
+    await documentElement.evaluate(
+      (root, labels) => {
+        const document = root.ownerDocument;
+        document
+          .querySelectorAll(
+            "[data-ts-jp-card-field],[data-ts-jp-card-exp],[data-ts-jp-card-exp-group],[data-ts-card-expiry]",
+          )
+          .forEach((element) => {
+            element.removeAttribute("data-ts-jp-card-field");
+            element.removeAttribute("data-ts-jp-card-exp");
+            element.removeAttribute("data-ts-jp-card-exp-group");
+            element.removeAttribute("data-ts-card-expiry");
+          });
+        const isVisible = (element: HTMLElement): boolean => {
+          if (element.matches(":disabled") || element.getClientRects().length === 0) {
+            return false;
+          }
+          let current: Element | null = element;
+          while (current !== null) {
+            const style = getComputedStyle(current);
+            if (
+              style.display === "none" ||
+              style.visibility === "hidden" ||
+              style.visibility === "collapse" ||
+              Number.parseFloat(style.opacity) <= 0
+            ) {
+              return false;
+            }
+            current = current.parentElement;
+          }
+          return true;
+        };
+        const isTextInput = (element: Element): element is HTMLInputElement =>
+          element instanceof HTMLInputElement &&
+          (element.type === "text" || element.type === "tel") &&
+          isVisible(element);
+        const identityTokens = (value: string): string[] =>
+          value
+            .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+            .toLowerCase()
+            .split(/[^a-z0-9]+/)
+            .filter((token) => token.length > 0);
+        const isPanIdentity = (value: string): boolean => {
+          const tokens = identityTokens(value);
+          const approvedPrefixes = new Set(["payment", "checkout", "primary", "backup"]);
+          while (approvedPrefixes.has(tokens[0] ?? "")) tokens.shift();
+          return [
+            "card-no",
+            "card-number",
+            "cardno",
+            "cardnumber",
+            "credit-no",
+            "creditno",
+          ].includes(tokens.join("-"));
+        };
+        const isCvvIdentity = (value: string): boolean =>
+          ["security-cd", "securitycd", "sec-code", "seccode"].includes(
+            identityTokens(value).join("-"),
+          );
+        const isNameIdentity = (value: string): boolean =>
+          ["card-name", "cardname", "credit-name", "creditname"].includes(
+            identityTokens(value).join("-"),
+          );
+        const isCombinedExpiryIdentity = (value: string): boolean => {
+          const tokens = identityTokens(value);
+          const prefixes = new Set(["card", "credit", "cc"]);
+          if (prefixes.has(tokens[0] ?? "")) tokens.shift();
+          if (tokens.length === 1) {
+            return [
+              "exp",
+              "expiry",
+              "expiration",
+              "expdate",
+              "expirydate",
+              "expirationdate",
+            ].includes(tokens[0] ?? "");
+          }
+          return (
+            tokens.length === 2 &&
+            ["exp", "expiry", "expiration"].includes(tokens[0] ?? "") &&
+            tokens[1] === "date"
+          );
+        };
+        document.querySelectorAll("input[name],input[id]").forEach((element) => {
+          if (!(element instanceof HTMLInputElement) || !isVisible(element)) return;
+          const identities = [element.getAttribute("name") ?? "", element.id];
+          const excluded = identities.some((identity) => {
+            const lower = identity.toLowerCase();
+            return labels.excludedCardIdentities.some((token) => lower.includes(token));
+          });
+          if (excluded) return;
+          if (isTextInput(element) && identities.some(isPanIdentity))
+            element.setAttribute("data-ts-jp-card-field", "pan");
+          if (isTextInput(element) && identities.some(isCvvIdentity))
+            element.setAttribute("data-ts-jp-card-field", "cvv");
+          if (isTextInput(element) && identities.some(isNameIdentity))
+            element.setAttribute("data-ts-jp-card-field", "name");
+          if (identities.some(isCombinedExpiryIdentity))
+            element.setAttribute("data-ts-card-expiry", "combined");
+        });
+        const associatedElements = (host: Element, selector: string): Element[] => {
+          const associated = new Set<Element>();
+          if (host instanceof HTMLLabelElement && host.htmlFor.length > 0) {
+            const byId = document.getElementById(host.htmlFor);
+            if (byId?.matches(selector)) associated.add(byId);
+          }
+          host.querySelectorAll(selector).forEach((element) => associated.add(element));
+          const sibling = host.nextElementSibling;
+          if (sibling !== null) {
+            if (sibling.matches(selector)) associated.add(sibling);
+            sibling.querySelectorAll(selector).forEach((element) => associated.add(element));
+            if (selector === "select" && sibling instanceof HTMLSelectElement) {
+              let adjacent = sibling.nextElementSibling;
+              while (adjacent instanceof HTMLSelectElement) {
+                associated.add(adjacent);
+                adjacent = adjacent.nextElementSibling;
+              }
+            }
+          }
+          return [...associated];
+        };
+        const stampField = (
+          host: Element,
+          fieldLabels: string[],
+          attrValue: string,
+          excludedLabels: string[] = [],
+        ): void => {
+          const text = (host.textContent ?? "").trim();
+          if (!fieldLabels.some((label) => text.includes(label))) return;
+          if (excludedLabels.some((label) => text.includes(label))) return;
+          const inputs = associatedElements(host, "input").filter(isTextInput);
+          const [input] = inputs;
+          if (inputs.length === 1 && input !== undefined) {
+            input.setAttribute("data-ts-jp-card-field", attrValue);
+          }
+        };
+        let expiryGroupSequence = 0;
+        document.querySelectorAll("dt, th, label, .table-label, .form-label").forEach((host) => {
+          stampField(host, labels.pan, "pan", labels.excludedCard);
+          stampField(host, labels.name, "name", labels.excludedCard);
+          stampField(host, labels.cvv, "cvv", labels.excludedCard);
+          const text = (host.textContent ?? "").trim();
+          if (!labels.expiry.some((label) => text.includes(label))) return;
+          if (labels.excludedCard.some((label) => text.includes(label))) return;
+          const selects = associatedElements(host, "select").filter(
+            (element): element is HTMLSelectElement =>
+              element instanceof HTMLSelectElement && isVisible(element),
+          );
+          const monthSelects = selects.filter((select) =>
+            (select.options[0]?.textContent ?? "").includes("月"),
+          );
+          const yearSelects = selects.filter((select) =>
+            (select.options[0]?.textContent ?? "").includes("年"),
+          );
+          const [monthSelect] = monthSelects;
+          const [yearSelect] = yearSelects;
+          if (
+            monthSelects.length === 1 &&
+            yearSelects.length === 1 &&
+            monthSelect !== undefined &&
+            yearSelect !== undefined &&
+            monthSelect !== yearSelect
+          ) {
+            const group = `ts-jp-exp-${labels.frameIndex}-${expiryGroupSequence++}`;
+            monthSelect.setAttribute("data-ts-jp-card-exp", "month");
+            yearSelect.setAttribute("data-ts-jp-card-exp", "year");
+            monthSelect.setAttribute("data-ts-jp-card-exp-group", group);
+            yearSelect.setAttribute("data-ts-jp-card-exp-group", group);
+          }
+        });
+      },
+      {
+        frameIndex,
+        excludedCardIdentities,
+        pan: panLabels,
+        excludedCard: excludedCardLabels,
+        name: nameLabels,
+        cvv: cvvLabels,
+        expiry: expiryLabels,
+      },
+    );
   }
 
   // Common autocomplete/name selectors. No PSP-specific adapters. `frames` is
@@ -8380,18 +10940,6 @@ export class BrowserController {
     assertFrameEgress?: (frame: Frame, resolvedOrigin?: string) => void,
   ): Promise<CheckoutCardGroupScope | undefined> {
     const filled = new Set<string>();
-    const expiryMonthSelectors =
-      '[autocomplete~="cc-exp-month"],[name*="exp_month" i],[name*="expmonth" i],[name*="exp" i][name*="month" i],[id*="exp" i][id*="month" i]';
-    const expiryYearSelectors =
-      '[autocomplete~="cc-exp-year"],[name*="exp_year" i],[name*="expyear" i],[name*="exp" i][name*="year" i],[id*="exp" i][id*="year" i]';
-    const combinedExpirySelectors =
-      'input[autocomplete~="cc-exp"],input[name*="expir" i]:not([name*="month" i]):not([name*="year" i]),input[name="exp" i],input[name*="exp-date" i],input[id*="expir" i]:not([id*="month" i]):not([id*="year" i]),input[id="exp" i],input[id*="exp-date" i],input[placeholder="MM/YY" i],input[placeholder="MM / YY" i],input[aria-label="MM/YY" i],input[aria-label="MM / YY" i],label:has-text("MM/YY") input,label:has-text("MM / YY") input';
-    const combinedExpiryGroupSelectors =
-      'input[autocomplete~="cc-exp"],input[name*="expir" i]:not([name*="month" i]):not([name*="year" i]),input[name="exp" i],input[name*="exp-date" i],input[id*="expir" i]:not([id*="month" i]):not([id*="year" i]),input[id="exp" i],input[id*="exp-date" i],input[placeholder="MM/YY" i],input[placeholder="MM / YY" i],input[aria-label="MM/YY" i],input[aria-label="MM / YY" i]';
-    const cvvSelectors =
-      'input[autocomplete~="cc-csc"],input[name*="cvv" i],input[name*="cvc" i],input[name*="security-code" i],input[id*="cvv" i],input[id*="cvc" i]';
-    const nameSelectors =
-      'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i]';
 
     type CardGroup = CheckoutCardGroupRoot & { panTopmost: boolean };
     const groups = new Map<string, CardGroup>();
@@ -8415,9 +10963,10 @@ export class BrowserController {
           .catch(() => undefined),
       ),
     );
+    await this.stampJapaneseCardLabelFields(frames);
     for (const [frameIndex, frame] of frames.entries()) {
       const pans = frame.locator(CHECKOUT_PAN_FIELD_SELECTORS);
-      const count = Math.min(await pans.count().catch(() => 0), 10);
+      const count = await pans.count().catch(() => 0);
       for (let index = 0; index < count; index += 1) {
         const pan = pans.nth(index);
         if (!(await pan.isVisible().catch(() => false))) continue;
@@ -8452,10 +11001,10 @@ export class BrowserController {
                 root instanceof HTMLFormElement
                   ? Array.from(root.elements)
                   : Array.from(root.querySelectorAll("input,select,textarea,button"));
-              const has = (root: Element, selector: string): boolean =>
-                ownedControls(root).some(
+              const count = (root: Element, selector: string): number =>
+                ownedControls(root).filter(
                   (element) => element.matches(selector) && isFillable(element),
-                );
+                ).length;
               // Match the operator observation's actual rendered hit-test, rather
               // than trusting structural visibility. Shopify can mount two complete
               // PCI forms at once while one is covered by the other.
@@ -8476,13 +11025,15 @@ export class BrowserController {
               const form = input instanceof HTMLInputElement ? input.form : input.closest("form");
               let root: Element | null = form ?? input.parentElement;
               while (root !== null && root !== document.body && root !== document.documentElement) {
-                const hasCombinedExpiry = has(root, selectors.combinedExpiry);
-                const hasSplitExpiry =
-                  has(root, selectors.expiryMonth) && has(root, selectors.expiryYear);
+                const combinedExpiryCount = count(root, selectors.combinedExpiry);
+                const expiryMonthCount = count(root, selectors.expiryMonth);
+                const expiryYearCount = count(root, selectors.expiryYear);
+                const hasCombinedExpiry = combinedExpiryCount === 1;
+                const hasSplitExpiry = expiryMonthCount === 1 && expiryYearCount === 1;
                 const complete =
-                  has(root, selectors.pan) &&
-                  has(root, selectors.cvv) &&
-                  has(root, selectors.name) &&
+                  count(root, selectors.pan) === 1 &&
+                  count(root, selectors.cvv) === 1 &&
+                  count(root, selectors.name) === 1 &&
                   (hasCombinedExpiry || hasSplitExpiry);
                 if (complete) {
                   const existing = root.getAttribute("data-ts-payment-card-group");
@@ -8505,11 +11056,11 @@ export class BrowserController {
             {
               token: proposedToken,
               pan: CHECKOUT_PAN_FIELD_SELECTORS,
-              cvv: cvvSelectors,
-              name: nameSelectors,
-              combinedExpiry: combinedExpiryGroupSelectors,
-              expiryMonth: expiryMonthSelectors,
-              expiryYear: expiryYearSelectors,
+              cvv: CHECKOUT_CVV_FIELD_SELECTORS,
+              name: CHECKOUT_CARD_NAME_FIELD_SELECTORS,
+              combinedExpiry: CHECKOUT_COMBINED_EXPIRY_GROUP_SELECTORS,
+              expiryMonth: CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS,
+              expiryYear: CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS,
             },
           )
           .catch(() => null);
@@ -8525,6 +11076,7 @@ export class BrowserController {
     }
 
     let cardGroup: CardGroup | undefined;
+    let cardGroupResolvedByTopmostPan = false;
     if (groups.size === 1) {
       cardGroup = [...groups.values()][0];
     } else if (groups.size > 1) {
@@ -8535,6 +11087,7 @@ export class BrowserController {
       const topmost = [...groups.values()].filter((group) => group.panTopmost);
       if (topmost.length !== 1) throw new Error("payment_card_form_ambiguous");
       cardGroup = topmost[0];
+      cardGroupResolvedByTopmostPan = true;
     } else if (fillablePanCount > 1) {
       // Multiple PAN anchors with no single complete container are not safe to
       // combine. A provider topology with one PAN and separate hosted-field
@@ -8846,11 +11399,11 @@ export class BrowserController {
             groupToken: cardGroup.token,
             selectors: {
               pan: CHECKOUT_PAN_FIELD_SELECTORS,
-              cvv: cvvSelectors,
-              name: nameSelectors,
-              combinedExpiry: combinedExpiryGroupSelectors,
-              expiryMonth: expiryMonthSelectors,
-              expiryYear: expiryYearSelectors,
+              cvv: CHECKOUT_CVV_FIELD_SELECTORS,
+              name: CHECKOUT_CARD_NAME_FIELD_SELECTORS,
+              combinedExpiry: CHECKOUT_COMBINED_EXPIRY_GROUP_SELECTORS,
+              expiryMonth: CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS,
+              expiryYear: CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS,
             },
           },
         )
@@ -8889,6 +11442,115 @@ export class BrowserController {
       }
     }
 
+    const cardFieldCandidates = (selectors: string): Array<{ frame: Frame; matches: Locator }> =>
+      cardGroup !== undefined
+        ? [
+            {
+              frame: cardGroup.frame,
+              matches: cardGroup.frame
+                .locator(selectors)
+                .and(
+                  cardGroup.frame.locator(
+                    `[data-ts-payment-card-control-group="${cardGroup.token}"]`,
+                  ),
+                ),
+            },
+          ]
+        : frames.map((frame) => ({ frame, matches: frame.locator(selectors) }));
+    const fillableCardFields = async (
+      selectors: string,
+    ): Promise<Array<{ frame: Frame; field: Locator }>> => {
+      const fillable: Array<{ frame: Frame; field: Locator }> = [];
+      for (const { frame, matches } of cardFieldCandidates(selectors)) {
+        const count = await matches.count().catch(() => 0);
+        for (let index = 0; index < count; index += 1) {
+          const field = matches.nth(index);
+          if (!(await field.isVisible().catch(() => false))) continue;
+          if (await field.isEnabled().catch(() => false)) fillable.push({ frame, field });
+        }
+      }
+      return fillable;
+    };
+    const countFillableCardFields = async (selectors: string): Promise<number> => {
+      return (await fillableCardFields(selectors)).length;
+    };
+    const requireExactlyOneCardField = async (field: string, selectors: string): Promise<void> => {
+      const count = await countFillableCardFields(selectors);
+      if (count > 1) throw new Error("payment_card_form_ambiguous");
+      if (count === 0) throw new Error(`payment_field_not_found:${field}`);
+    };
+    const refuseAmbiguousCardField = async (selectors: string): Promise<void> => {
+      if ((await countFillableCardFields(selectors)) > 1) {
+        throw new Error("payment_card_form_ambiguous");
+      }
+    };
+    const splitExpiryFieldsShareGroup = async (
+      monthSelectors: string,
+      yearSelectors: string,
+    ): Promise<boolean> => {
+      const months = await fillableCardFields(monthSelectors);
+      const years = await fillableCardFields(yearSelectors);
+      if (months.length !== 1 || years.length !== 1) return false;
+      const [month] = months;
+      const [year] = years;
+      if (month === undefined || year === undefined) return false;
+      if (month.frame === year.frame) {
+        const yearHandle = await year.field.elementHandle().catch(() => null);
+        if (yearHandle === null) return false;
+        const related = await month.field
+          .evaluate((monthElement, yearElement) => {
+            if (monthElement === yearElement) return false;
+            const monthControl = monthElement as HTMLInputElement | HTMLSelectElement;
+            const yearControl = yearElement as HTMLInputElement | HTMLSelectElement;
+            const monthOwner = monthElement.getAttribute("data-ts-payment-card-control-group");
+            const yearOwner = yearElement.getAttribute("data-ts-payment-card-control-group");
+            if (monthOwner !== null || yearOwner !== null) {
+              return monthOwner !== null && monthOwner === yearOwner;
+            }
+            const monthRoot = monthElement.closest("[data-ts-payment-card-group]");
+            const yearRoot = yearElement.closest("[data-ts-payment-card-group]");
+            if (monthRoot !== null || yearRoot !== null) return monthRoot === yearRoot;
+            const monthForm = monthControl.form ?? monthElement.closest("form");
+            const yearForm = yearControl.form ?? yearElement.closest("form");
+            return monthForm !== null && monthForm === yearForm;
+          }, yearHandle)
+          .catch(() => false);
+        await yearHandle.dispose().catch(() => undefined);
+        if (!related) return false;
+      }
+      const signatures = async (field: Locator): Promise<string[]> =>
+        await field
+          .evaluate((element) => {
+            const result = new Set<string>();
+            const stamped = element.getAttribute("data-ts-jp-card-exp-group");
+            if (stamped !== null && stamped.length > 0) result.add(`stamp:${stamped}`);
+            const excludedIdentityParts = ["gift", "loyalty", "point", "prepaid", "member"];
+            for (const value of [
+              element.getAttribute("autocomplete") ?? "",
+              element.getAttribute("name") ?? "",
+              element.id,
+            ]) {
+              const normalized = value
+                .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, "-")
+                .replace(/^-+|-+$/g, "");
+              if (excludedIdentityParts.some((part) => normalized.includes(part))) continue;
+              const group = normalized
+                .replace(/(?:^|-)(?:month|year)(?=-|$)/g, "-")
+                .replace(/(?:month|year)$/g, "")
+                .replace(/-+/g, "-")
+                .replace(/^-+|-+$/g, "");
+              if (group.length > 0) result.add(`identity:${group}`);
+            }
+            return [...result];
+          })
+          .catch(() => []);
+      const monthSignatures = await signatures(month.field);
+      const yearSignatures = new Set(await signatures(year.field));
+      return monthSignatures.some((signature) => yearSignatures.has(signature));
+    };
+
     const fillFirst = async (
       field: string,
       value: string | undefined,
@@ -8898,30 +11560,30 @@ export class BrowserController {
       withinBillingContext = false,
     ): Promise<boolean> => {
       if (value === undefined || value.length === 0) return false;
-      const candidates: Array<{ frame: Frame; matches: Locator }> =
-        withinCardGroup && cardGroup !== undefined
-          ? [
-              {
-                frame: cardGroup.frame,
-                matches: cardGroup.frame
-                  .locator(selectors)
-                  .and(
-                    cardGroup.frame.locator(
-                      `[data-ts-payment-card-control-group="${cardGroup.token}"]`,
-                    ),
-                  ),
-              },
-            ]
-          : withinBillingContext
-            ? billingRoots.map(({ frame, token }) => ({
-                frame,
-                matches: frame
-                  .locator(selectors)
-                  .and(frame.locator(`[data-ts-payment-billing-owner="${token}"]`)),
-              }))
-            : frames.map((frame) => ({ frame, matches: frame.locator(selectors) }));
+      // A card-group field is scanned ONCE via fillableCardFields — the same
+      // pass that decides the ambiguity/zero-candidate outcome below is reused
+      // for the actual fill target, rather than re-querying and re-checking
+      // visibility/enabled across every candidate a second time. On a form
+      // with many same-field-shaped decoys, a second full O(N) scan here was
+      // the dominant cost (and, pre-count-cap-fix, the source of a 30s+ hang).
+      let candidates: Array<{ frame: Frame; matches: Locator }>;
+      if (withinCardGroup) {
+        const fillable = await fillableCardFields(selectors);
+        if (fillable.length > 1) throw new Error("payment_card_form_ambiguous");
+        if (fillable.length === 0) return false;
+        candidates = [{ frame: fillable[0]!.frame, matches: fillable[0]!.field }];
+      } else if (withinBillingContext) {
+        candidates = billingRoots.map(({ frame, token }) => ({
+          frame,
+          matches: frame
+            .locator(selectors)
+            .and(frame.locator(`[data-ts-payment-billing-owner="${token}"]`)),
+        }));
+      } else {
+        candidates = frames.map((frame) => ({ frame, matches: frame.locator(selectors) }));
+      }
       for (const { frame, matches } of candidates) {
-        const count = Math.min(await matches.count().catch(() => 0), 10);
+        const count = await matches.count().catch(() => 0);
         for (let i = 0; i < count; i += 1) {
           const input = matches.nth(i);
           if (!(await input.isVisible().catch(() => false))) continue;
@@ -8970,8 +11632,15 @@ export class BrowserController {
             let { handle } = resolved;
             try {
               if (resolved.tag === "select") {
+                // A value-format mismatch (e.g. a 4-digit exp_year against a
+                // 2-digit <option value>, common on JP expiry selects — see
+                // stampJapaneseCardLabelFields) is not a transient
+                // actionability gap, so it must not eat Playwright's default
+                // 30s actionability wait before falling back to the label
+                // match. The element's visibility/enabled state was already
+                // confirmed by resolveHandle() above.
                 let selected = await handle
-                  .selectOption({ value })
+                  .selectOption({ value }, { timeout: 3000 })
                   .then((values) => values.length > 0)
                   .catch(() => {
                     assertFrameEgress(frame);
@@ -8983,7 +11652,7 @@ export class BrowserController {
                   if (fallback === null) continue;
                   handle = fallback.handle;
                   selected = await handle
-                    .selectOption({ label: value })
+                    .selectOption({ label: value }, { timeout: 3000 })
                     .then((values) => values.length > 0)
                     .catch(() => {
                       assertFrameEgress(frame);
@@ -9023,13 +11692,17 @@ export class BrowserController {
           const tag = await input.evaluate((el) => el.tagName.toLowerCase()).catch(() => "");
           await input.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
           if (tag === "select") {
+            // See the matching comment in the assertFrameEgress branch above:
+            // an explicit short timeout keeps a value-format mismatch from
+            // eating Playwright's default 30s actionability wait before the
+            // label fallback runs.
             const selected =
               (await input
-                .selectOption({ value })
+                .selectOption({ value }, { timeout: 3000 })
                 .then(() => true)
                 .catch(() => false)) ||
               (await input
-                .selectOption({ label: value })
+                .selectOption({ label: value }, { timeout: 3000 })
                 .then(() => true)
                 .catch(() => false));
             if (!selected) continue;
@@ -9045,30 +11718,48 @@ export class BrowserController {
       }
       return false;
     };
-    const hasFillable = async (selectors: string, withinCardGroup = false): Promise<boolean> => {
-      const candidateFrames =
-        withinCardGroup && cardGroup !== undefined ? [cardGroup.frame] : frames;
-      for (const frame of candidateFrames) {
-        const matches =
-          withinCardGroup && cardGroup !== undefined
-            ? frame
-                .locator(selectors)
-                .and(frame.locator(`[data-ts-payment-card-control-group="${cardGroup.token}"]`))
-            : frame.locator(selectors);
-        const count = Math.min(await matches.count().catch(() => 0), 10);
-        for (let i = 0; i < count; i += 1) {
-          const input = matches.nth(i);
-          if (!(await input.isVisible().catch(() => false))) continue;
-          if (await input.isEnabled().catch(() => false)) return true;
-        }
-      }
-      return false;
-    };
-
+    await requireExactlyOneCardField("pan", CHECKOUT_PAN_FIELD_SELECTORS);
+    const usesLegacyPanSelectors =
+      (await countFillableCardFields(CHECKOUT_LEGACY_PAN_FIELD_SELECTORS)) === 1;
+    const cvvSelectors = usesLegacyPanSelectors
+      ? CHECKOUT_CVV_FIELD_SELECTORS
+      : CHECKOUT_CONSERVATIVE_CVV_FIELD_SELECTORS;
+    const expiryMonthSelectors = usesLegacyPanSelectors
+      ? CHECKOUT_EXPIRY_MONTH_FIELD_SELECTORS
+      : CHECKOUT_CONSERVATIVE_EXPIRY_MONTH_FIELD_SELECTORS;
+    const expiryYearSelectors = usesLegacyPanSelectors
+      ? CHECKOUT_EXPIRY_YEAR_FIELD_SELECTORS
+      : CHECKOUT_CONSERVATIVE_EXPIRY_YEAR_FIELD_SELECTORS;
+    await refuseAmbiguousCardField(cvvSelectors);
+    await refuseAmbiguousCardField(CHECKOUT_CARD_NAME_FIELD_SELECTORS);
+    const combinedExpirySelectors = usesLegacyPanSelectors
+      ? CHECKOUT_COMBINED_EXPIRY_FIELD_SELECTORS
+      : CHECKOUT_CONSERVATIVE_COMBINED_EXPIRY_FIELD_SELECTORS;
+    const combinedExpiryCount = await countFillableCardFields(combinedExpirySelectors);
+    const expiryMonthCount = await countFillableCardFields(expiryMonthSelectors);
+    const expiryYearCount = await countFillableCardFields(expiryYearSelectors);
+    if (combinedExpiryCount > 1 || expiryMonthCount > 1 || expiryYearCount > 1) {
+      throw new Error("payment_card_form_ambiguous");
+    }
+    const hasCombinedExpiry = combinedExpiryCount === 1;
+    const hasSplitExpiry = expiryMonthCount === 1 && expiryYearCount === 1;
+    if (
+      hasCombinedExpiry &&
+      hasSplitExpiry &&
+      !(usesLegacyPanSelectors && cardGroupResolvedByTopmostPan)
+    ) {
+      throw new Error("payment_card_form_ambiguous");
+    }
+    if (
+      hasSplitExpiry &&
+      !(await splitExpiryFieldsShareGroup(expiryMonthSelectors, expiryYearSelectors))
+    ) {
+      throw new Error("payment_card_form_ambiguous");
+    }
+    if (!hasCombinedExpiry && !hasSplitExpiry) {
+      throw new Error("payment_field_not_found:expiry");
+    }
     await fillFirst("pan", card.pan, CHECKOUT_PAN_FIELD_SELECTORS, false, true);
-    const hasSplitExpiry =
-      (await hasFillable(expiryMonthSelectors, true)) &&
-      (await hasFillable(expiryYearSelectors, true));
     if (hasSplitExpiry) {
       await fillFirst(
         "exp_month",
@@ -9102,7 +11793,7 @@ export class BrowserController {
     }
     const fields: Array<[string, string | undefined, string, string?]> = [
       ["cvv", card.cvv, cvvSelectors],
-      ["name", card.name, nameSelectors],
+      ["name", card.name, CHECKOUT_CARD_NAME_FIELD_SELECTORS],
       [
         "line1",
         card.billing.line1,
@@ -9160,20 +11851,83 @@ export class BrowserController {
       : { selected: cardGroup, groups: [...groups.values()] };
   }
 
-  async fillAndSubmitCheckout(card: CheckoutCard): Promise<CheckoutSubmitResult> {
+  async fillAndSubmitCheckout(
+    card: CheckoutCard,
+    options: { onSubmitDispatched?: () => void; beforeSubmitDispatch?: () => void | number } = {},
+  ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     this.checkoutCardGroupScope = undefined;
+    this.paymentInstrumentExpectation = undefined;
+    this.observedPaymentInstrumentMismatch = undefined;
+    let primary:
+      | { kind: "outcome"; value: CheckoutSubmitResult }
+      | { kind: "error"; value: unknown };
+    // Snapshot the frames fill actually wrote into, BEFORE submission, and
+    // reuse that exact set for cleanup below — never a fresh this.page.frames()
+    // taken after submitFilledCheckoutInScope returns. fill (a single vetted
+    // call) is trusted to write into every frame reachable at this point, but
+    // a 3-D Secure method/challenge iframe (methodurl.vcas.visa.com,
+    // *.cardinalcommerce.com, an issuer ACS) can attach or replace a snapshotted
+    // frame's document AFTER the submit click. Re-deriving cleanup targets would let the JP
+    // label-stamp scan and substring field-clear it delegates to evaluate JS
+    // in and mutate that live authentication hand-off, corrupting the
+    // in-flight device-fingerprint POST (regression: ts-operator-3ds-completion).
+    let fillFrameSnapshot: readonly {
+      frame: Frame;
+      url: string;
+      documentElement: ElementHandle<HTMLElement> | null;
+    }[] = [];
     try {
       await this.waitForPanField(10_000);
+      fillFrameSnapshot = await Promise.all(
+        this.page.frames().map(async (frame) => ({
+          frame,
+          url: frame.url(),
+          documentElement: await frame.$("html").catch(() => null),
+        })),
+      );
+      const fillFrames = fillFrameSnapshot.map(({ frame }) => frame);
       // A single-page checkout's generic address controls are its shipping
       // controls. Only an explicitly marked billing control is eligible here:
       // sealing a shipping field would make the payment cleanup erase the
       // merchant's selected address, country, and shipping rate after submit.
-      const cardGroup = await this.fillCheckoutCardIntoFrames(this.page.frames(), card, true);
-      return await this.submitFilledCheckoutInScope(cardGroup);
-    } finally {
-      await this.clearSealedPaymentFields();
+      const cardGroup = await this.fillCheckoutCardIntoFrames(fillFrames, card, true);
+      this.rememberPaymentInstrumentExpectation(card);
+      primary = {
+        kind: "outcome",
+        value: await this.submitFilledCheckoutInScope(
+          cardGroup,
+          options.onSubmitDispatched,
+          options.beforeSubmitDispatch,
+        ),
+      };
+    } catch (error) {
+      primary = { kind: "error", value: error };
     }
+    try {
+      if (fillFrameSnapshot.length > 0) {
+        // History URL changes preserve this root handle; real ACS navigation invalidates it.
+        await this.clearCheckoutCardFieldsInDocuments(
+          fillFrameSnapshot.flatMap(({ documentElement }, frameIndex) =>
+            documentElement === null ? [] : [{ documentElement, frameIndex }],
+          ),
+        );
+      } else {
+        await this.clearCheckoutCardFieldsInFrames(this.page.frames());
+      }
+    } catch (error) {
+      console.error(
+        `[payment-cleanup] ${error instanceof Error ? error.message : "payment_fields_not_cleared"}`,
+      );
+    } finally {
+      await Promise.all(
+        fillFrameSnapshot.map(({ documentElement }) =>
+          documentElement?.dispose().catch(() => undefined),
+        ),
+      );
+    }
+    if (primary.kind === "error") throw primary.value;
+    return primary.value;
   }
 
   // Split-checkout card entry (operate_pay phase="fill_card"): fill the
@@ -9185,7 +11939,10 @@ export class BrowserController {
   // left behind. On success the filled values STAY in the page (the site
   // needs them at its confirm step) marked data-ts-sealed-payment, which
   // extractInteractiveElements reports as sealed so observations mask them.
-  async fillCheckoutCardFields(card: CheckoutCard): Promise<void> {
+  async fillCheckoutCardFields(
+    card: CheckoutCard,
+    options: { deadline?: number } = {},
+  ): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     this.checkoutCardGroupScope = undefined;
     const page = this.page;
@@ -9193,11 +11950,10 @@ export class BrowserController {
     if (!recognizedPaymentProviderFrame(pageUrl, pageUrl)) {
       throw new Error("payment_checkout_https_required");
     }
-    // Same late-mount tolerance as fillAndSubmitCheckout: wait for a PAN
-    // field to appear anywhere before taking the trusted-frame snapshot below
-    // (which still restricts the actual fill to recognized frames — this only
-    // decides WHEN to look, never WHERE it's allowed to write).
-    await this.waitForPanField(10_000);
+    await this.waitForRecognizedPanField(pageUrl, options.deadline);
+    if (options.deadline !== undefined && Date.now() >= options.deadline) {
+      throw new Error("payment_approval_expired");
+    }
     const allowed = page
       .frames()
       .filter(
@@ -9253,6 +12009,7 @@ export class BrowserController {
   // carry one (if any) so the refusal is diagnosable without filling it.
   private async excludedPanFrameOrigin(allowed: ReadonlySet<Frame>): Promise<string | null> {
     if (!this.page) return null;
+    await this.stampJapaneseCardLabelFields(this.page.frames());
     for (const frame of this.page.frames()) {
       if (allowed.has(frame)) continue;
       const count = await frame
@@ -9270,6 +12027,122 @@ export class BrowserController {
     return null;
   }
 
+  private async scanSavedCardSelectionAcrossFrames(): Promise<Map<Frame, SavedCardSelectionScan>> {
+    if (!this.page) throw new Error("Browser not started");
+    const entries = await Promise.all(
+      this.page.frames().map(async (frame) => {
+        try {
+          return [frame, await frame.evaluate(scanSavedCardSelectionInPage)] as const;
+        } catch {
+          throw new Error("payment_card_selection_ambiguous");
+        }
+      }),
+    );
+    return new Map(entries);
+  }
+
+  // Re-runs the global scan and confirms the resolved state still holds: no
+  // competing saved-card selection anywhere, every marked (clicked) new-card
+  // control is STILL checked and none has vanished (a weaker "no saved card
+  // checked" test would miss a marked radio that was unchecked with nothing
+  // re-checked), and every sealed field across every frame still holds its
+  // snapshotted non-empty value.
+  private async savedCardSelectionVerified(
+    verification: SavedCardSelectionVerification,
+  ): Promise<boolean> {
+    const scans = await this.scanSavedCardSelectionAcrossFrames();
+    let markedCount = 0;
+    for (const scan of scans.values()) {
+      if (scan.competingRadioCount > 0 || scan.competingSelectOption) return false;
+      if (scan.markedUncheckedCount > 0) return false;
+      markedCount += scan.markedCount;
+    }
+    if (markedCount !== verification.expectedMarkedCount) return false;
+    for (const [frame, before] of verification.sealedValuesByFrame) {
+      const after = scans.get(frame)?.sealedFieldValues;
+      if (after === undefined || after.length !== before.length) return false;
+      for (let index = 0; index < before.length; index += 1) {
+        const beforeValue = before[index] ?? null;
+        const afterValue = after[index] ?? null;
+        if (beforeValue === null && afterValue === null) continue;
+        if (beforeValue === null || afterValue === null) return false;
+        if (beforeValue.length === 0 || afterValue !== beforeValue) return false;
+      }
+    }
+    for (const [frame, scan] of scans) {
+      if (!verification.sealedValuesByFrame.has(frame) && scan.sealedFieldValues.length > 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // "none": no competing saved-card selection found anywhere — nothing to do.
+  // "resolved": a competing saved-card RADIO was found and positively
+  // resolved — the sole unambiguous new-card sibling in its choice group was
+  // clicked (real, event-firing radio-group semantics: clicking it natively
+  // unchecks the saved-card radio too) and marked, then a global re-scan
+  // verified no competing selection remains anywhere and every filled card
+  // field the operator sealed — in ANY frame, including a recognized
+  // hosted-fields iframe the radio's frame does not contain — still holds its
+  // value. The returned verification state lets submitFilledCheckoutInScope
+  // repeat that exact check at the charge-click boundary.
+  // "ambiguous": a competing selection exists and either it is a saved-card
+  // <select> OPTION (never auto-resolved — a select's "change" semantics
+  // vary too much across frameworks to trust a synthetic commit the way a
+  // native radio click can be trusted), or a competing radio's choice group
+  // has zero or more-than-one plausible new-card candidate, or resolving it
+  // did not actually clear the competing selection, or it cleared/reset the
+  // filled card fields. Fail-closed refusal is the ONLY outcome here — never
+  // silently re-fill (the raw card bytes are already gone by this point in
+  // the call chain) and never guess between multiple candidates.
+  private async resolveCompetingSavedCardSelection(): Promise<
+    | { outcome: "none" | "resolved"; verification: SavedCardSelectionVerification }
+    | { outcome: "ambiguous" }
+  > {
+    if (!this.page) throw new Error("Browser not started");
+    for (const frame of this.page.frames()) {
+      try {
+        await frame.evaluate(clearSavedCardSelectionMarkersInPage);
+      } catch {
+        throw new Error("payment_card_selection_ambiguous");
+      }
+    }
+    const initial = await this.scanSavedCardSelectionAcrossFrames();
+    const sealedValuesByFrame = new Map(
+      [...initial.entries()].map(([frame, scan]) => [frame, scan.sealedFieldValues] as const),
+    );
+    const anySelectOption = [...initial.values()].some((scan) => scan.competingSelectOption);
+    const radioFrames = [...initial.entries()]
+      .filter(([, scan]) => scan.competingRadioCount > 0)
+      .map(([frame]) => frame);
+    if (!anySelectOption && radioFrames.length === 0) {
+      return { outcome: "none", verification: { sealedValuesByFrame, expectedMarkedCount: 0 } };
+    }
+    if (anySelectOption) return { outcome: "ambiguous" };
+    if (![...sealedValuesByFrame.values()].some((values) => values.length > 0)) {
+      return { outcome: "ambiguous" };
+    }
+    let expectedMarkedCount = 0;
+    for (const frame of radioFrames) {
+      let resolved: { status: "resolved"; clicked: number } | { status: "ambiguous" };
+      try {
+        resolved = await frame.evaluate(resolveSavedCardSelectionInPage);
+      } catch {
+        throw new Error("payment_card_selection_ambiguous");
+      }
+      if (resolved.status === "ambiguous") return { outcome: "ambiguous" };
+      expectedMarkedCount += resolved.clicked;
+    }
+    if (expectedMarkedCount === 0) return { outcome: "ambiguous" };
+    const verification: SavedCardSelectionVerification = {
+      sealedValuesByFrame,
+      expectedMarkedCount,
+    };
+    if (!(await this.savedCardSelectionVerified(verification))) return { outcome: "ambiguous" };
+    return { outcome: "resolved", verification };
+  }
+
   // The charge: find and click the pay/place-order control, then poll for a
   // terminal merchant order route or a 3-D Secure challenge. Callers gate this
   // on a verified visible total.
@@ -9279,11 +12152,18 @@ export class BrowserController {
 
   private async submitFilledCheckoutInScope(
     cardGroup?: CheckoutCardGroupScope,
+    onSubmitDispatched?: () => void,
+    beforeSubmitDispatch?: () => void | number,
   ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
+    const savedCardSelection = await this.resolveCompetingSavedCardSelection();
+    if (savedCardSelection.outcome === "ambiguous") {
+      throw new Error("payment_card_selection_ambiguous");
+    }
     let outcomeBaseline: CheckoutOutcomeBaseline | undefined;
     this.checkoutOutcomeBaseline = undefined;
     let submitted = false;
+    let clearSubmittedDispatchTracking: (() => Promise<void>) | null = null;
     for (const frame of this.page.frames()) {
       const matches = frame.locator('button,input[type="submit"],[role="button"]');
       const count = Math.min(await matches.count().catch(() => 0), 100);
@@ -9335,153 +12215,193 @@ export class BrowserController {
         const label = checkoutSubmitLabel(labelSignals ?? {});
         if (!CHECKOUT_SUBMIT_LABEL_RE.test(label)) continue;
         const dispatchToken = `ts-payment-submit-${this.checkoutSubmitSequence++}`;
-        const dispatchBaselineStorageKey = `__trusty_squire_payment_baseline_${dispatchToken}`;
         const preDispatchFrameUrls = this.page.frames().map((pageFrame) => pageFrame.url());
+        const clickOnlyOutcomeBaseline = checkoutOutcomeBaselineFromDispatchSnapshot({
+          url: this.page.url(),
+          urls: preDispatchFrameUrls,
+        });
+        let submitDispatchedReported = false;
+        const reportSubmitDispatched = (): void => {
+          if (submitDispatchedReported) return;
+          onSubmitDispatched?.();
+          submitDispatchedReported = true;
+        };
         const dispatchTrackingInstalled = await candidate
-          .evaluate(
-            (element, options) => {
-              const { baselineStorageKey, frameUrls, token } = options;
+          .evaluate((element, token) => {
+            const stateWindow = window as Window & {
+              __trustySquirePaymentSubmitDispatch?: {
+                token: string;
+                validationBlocked: boolean;
+              };
+            };
+            const tracked = element as Element & {
+              __tsPaymentSubmitDispatchListeners?: Array<{
+                capture: boolean;
+                event: "invalid";
+                listener: EventListener;
+                target: Element;
+              }>;
+            };
+            const priorTracking = tracked.__tsPaymentSubmitDispatchListeners;
+            if (priorTracking !== undefined) {
+              for (const registration of priorTracking) {
+                registration.target.removeEventListener(
+                  registration.event,
+                  registration.listener,
+                  registration.capture,
+                );
+              }
+            }
+            stateWindow.__trustySquirePaymentSubmitDispatch = {
+              token,
+              validationBlocked: false,
+            };
+            const form =
+              element instanceof HTMLButtonElement || element instanceof HTMLInputElement
+                ? element.form
+                : element.closest("form");
+            const submitTargets = form !== null ? [form] : Array.from(document.forms);
+            const registrations: Array<{
+              capture: boolean;
+              event: "invalid";
+              listener: EventListener;
+              target: Element;
+            }> = [];
+            const invalidListener: EventListener = () => {
+              const state = stateWindow.__trustySquirePaymentSubmitDispatch;
+              if (state?.token === token) state.validationBlocked = true;
+            };
+            registrations.push(
+              ...submitTargets.map((target) => ({
+                capture: true,
+                event: "invalid" as const,
+                listener: invalidListener,
+                target,
+              })),
+            );
+            tracked.__tsPaymentSubmitDispatchListeners = registrations;
+            for (const registration of registrations) {
+              registration.target.addEventListener(registration.event, registration.listener, {
+                capture: registration.capture,
+                once: true,
+              });
+            }
+          }, dispatchToken)
+          .then(() => true)
+          .catch(() => false);
+        if (!dispatchTrackingInstalled) {
+          continue;
+        }
+        let paymentRequestTrackingArmed = false;
+        let concretePaymentRequestObserved = false;
+        let resolveConcretePaymentRequest = (): void => undefined;
+        const concretePaymentRequest = new Promise<void>((resolve) => {
+          resolveConcretePaymentRequest = resolve;
+        });
+        let navigationObserved = false;
+        let navigationTerminalObserved = false;
+        let navigationThreeDsObserved = false;
+        let resolveNavigationOutcome = (): void => undefined;
+        const navigationOutcome = new Promise<void>((resolve) => {
+          resolveNavigationOutcome = resolve;
+        });
+        const paymentRequestListener = (request: Request): void => {
+          const activePage = this.page;
+          if (!paymentRequestTrackingArmed || activePage === null) return;
+          let sourceFrame: Frame;
+          try {
+            sourceFrame = request.frame();
+          } catch {
+            return;
+          }
+          if (sourceFrame !== frame && sourceFrame !== activePage.mainFrame()) return;
+          if (!isCheckoutPaymentRequest(request)) return;
+          concretePaymentRequestObserved = true;
+          resolveConcretePaymentRequest();
+        };
+        const navigationListener = (): void => {
+          if (!paymentRequestTrackingArmed || this.page === null) return;
+          navigationObserved = true;
+          void (async () => {
+            if (await this.hasConfirmedCheckoutOutcome(clickOnlyOutcomeBaseline)) {
+              navigationTerminalObserved = true;
+              resolveNavigationOutcome();
+              return;
+            }
+            const challenge = await this.detectThreeDsChallenge().catch(() => undefined);
+            if (challenge?.three_ds_required === true) {
+              navigationThreeDsObserved = true;
+              resolveNavigationOutcome();
+            }
+          })();
+        };
+        this.page.on("request", paymentRequestListener);
+        this.page.on("framenavigated", navigationListener);
+        const waitForDispatchEvidence = async (): Promise<void> => {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          await Promise.race([
+            concretePaymentRequest,
+            navigationOutcome,
+            new Promise<void>((resolve) => {
+              timer = setTimeout(resolve, CHECKOUT_PAYMENT_REQUEST_OBSERVATION_MS);
+            }),
+          ]);
+          if (timer !== undefined) clearTimeout(timer);
+        };
+        const readDispatchState = async (): Promise<{
+          validationBlocked: boolean;
+        } | null> =>
+          await frame
+            .evaluate((token) => {
               const stateWindow = window as Window & {
                 __trustySquirePaymentSubmitDispatch?: {
                   token: string;
-                  dispatched: boolean;
+                  validationBlocked: boolean;
                 };
               };
-              const tracked = element as Element & {
-                __tsPaymentSubmitDispatchListener?: EventListener;
+              const state = stateWindow.__trustySquirePaymentSubmitDispatch;
+              return {
+                validationBlocked: state?.token === token && state.validationBlocked,
               };
-              if (tracked.__tsPaymentSubmitDispatchListener !== undefined) {
-                element.removeEventListener(
-                  "click",
-                  tracked.__tsPaymentSubmitDispatchListener,
-                  true,
-                );
-              }
-              stateWindow.__trustySquirePaymentSubmitDispatch = {
-                token,
-                dispatched: false,
-              };
-              const listener: EventListener = () => {
-                const state = stateWindow.__trustySquirePaymentSubmitDispatch;
-                if (state?.token !== token) return;
-                try {
-                  const merchantWindow = window.top;
-                  if (merchantWindow === null) return;
-                  const urls = new Set(frameUrls);
-                  const collectFrameUrls = (currentWindow: Window): void => {
-                    try {
-                      urls.add(currentWindow.location.href);
-                      for (let index = 0; index < currentWindow.frames.length; index += 1) {
-                        collectFrameUrls(currentWindow.frames[index]!);
-                      }
-                    } catch (error) {
-                      void error;
-                    }
-                  };
-                  collectFrameUrls(merchantWindow);
-                  const snapshot: CheckoutOutcomeDispatchSnapshot = {
-                    url: merchantWindow.location.href,
-                    urls: [...urls],
-                  };
-                  const baselineWindow = merchantWindow as Window & {
-                    __trustySquirePaymentDispatchBaselines?: Record<
-                      string,
-                      CheckoutOutcomeDispatchSnapshot
-                    >;
-                  };
-                  baselineWindow.__trustySquirePaymentDispatchBaselines ??= {};
-                  baselineWindow.__trustySquirePaymentDispatchBaselines[token] = snapshot;
-                  try {
-                    merchantWindow.sessionStorage.setItem(
-                      baselineStorageKey,
-                      JSON.stringify(snapshot),
-                    );
-                  } catch (error) {
-                    void error;
-                  }
-                } finally {
-                  state.dispatched = true;
-                }
-              };
-              tracked.__tsPaymentSubmitDispatchListener = listener;
-              element.addEventListener("click", listener, { capture: true, once: true });
-            },
-            {
-              baselineStorageKey: dispatchBaselineStorageKey,
-              frameUrls: preDispatchFrameUrls,
-              token: dispatchToken,
-            },
-          )
-          .then(() => true)
-          .catch(() => false);
-        if (!dispatchTrackingInstalled) continue;
-        const readDispatchOutcomeBaseline = async (): Promise<CheckoutOutcomeBaseline | null> => {
-          const snapshot = await this.page!.mainFrame()
-            .evaluate(
-              ({ baselineStorageKey, token }) => {
-                const baselineWindow = window as Window & {
-                  __trustySquirePaymentDispatchBaselines?: Record<
-                    string,
-                    CheckoutOutcomeDispatchSnapshot
-                  >;
-                };
-                let captured =
-                  baselineWindow.__trustySquirePaymentDispatchBaselines?.[token] ?? null;
-                if (captured !== null) {
-                  delete baselineWindow.__trustySquirePaymentDispatchBaselines?.[token];
-                }
-                if (captured === null) {
-                  try {
-                    const stored = sessionStorage.getItem(baselineStorageKey);
-                    if (stored !== null) {
-                      captured = JSON.parse(stored) as CheckoutOutcomeDispatchSnapshot;
-                    }
-                  } catch {
-                    captured = null;
-                  }
-                }
-                try {
-                  sessionStorage.removeItem(baselineStorageKey);
-                } catch (error) {
-                  void error;
-                }
-                return captured;
-              },
-              { baselineStorageKey: dispatchBaselineStorageKey, token: dispatchToken },
-            )
+            }, dispatchToken)
             .catch(() => null);
-          if (
-            snapshot === null ||
-            typeof snapshot.url !== "string" ||
-            !Array.isArray(snapshot.urls) ||
-            !snapshot.urls.every((url) => typeof url === "string")
-          ) {
-            return null;
-          }
-          return checkoutOutcomeBaselineFromDispatchSnapshot(snapshot);
-        };
         const clearDispatchTracking = async (): Promise<void> => {
+          paymentRequestTrackingArmed = false;
+          this.page?.off("request", paymentRequestListener);
+          this.page?.off("framenavigated", navigationListener);
           await candidate
-            .evaluate((element) => {
-              const tracked = element as Element & {
-                __tsPaymentSubmitDispatchListener?: EventListener;
-              };
-              if (tracked.__tsPaymentSubmitDispatchListener !== undefined) {
-                element.removeEventListener(
-                  "click",
-                  tracked.__tsPaymentSubmitDispatchListener,
-                  true,
-                );
-                delete tracked.__tsPaymentSubmitDispatchListener;
-              }
-            })
+            .evaluate(
+              (element) => {
+                const tracked = element as Element & {
+                  __tsPaymentSubmitDispatchListeners?: Array<{
+                    capture: boolean;
+                    event: "invalid";
+                    listener: EventListener;
+                    target: Element;
+                  }>;
+                };
+                const tracking = tracked.__tsPaymentSubmitDispatchListeners;
+                if (tracking !== undefined) {
+                  for (const registration of tracking) {
+                    registration.target.removeEventListener(
+                      registration.event,
+                      registration.listener,
+                      registration.capture,
+                    );
+                  }
+                  delete tracked.__tsPaymentSubmitDispatchListeners;
+                }
+              },
+              undefined,
+              { timeout: 250 },
+            )
             .catch(() => undefined);
           await frame
             .evaluate((token) => {
               const stateWindow = window as Window & {
                 __trustySquirePaymentSubmitDispatch?: {
                   token: string;
-                  dispatched: boolean;
+                  validationBlocked: boolean;
                 };
               };
               if (stateWindow.__trustySquirePaymentSubmitDispatch?.token === token) {
@@ -9489,41 +12409,84 @@ export class BrowserController {
               }
             }, dispatchToken)
             .catch(() => undefined);
-          await readDispatchOutcomeBaseline();
         };
+        // Money-fence boundary: the async pay-button scan above (visibility/
+        // enabled/ownership/label checks, dispatch-tracking install) is a real
+        // window in which a page update — or the resolution click's own side
+        // effects — could restore the saved-card selection or clear the filled
+        // fields. bringToFront runs FIRST because its focus/visibility events
+        // can themselves trigger a merchant default-selection revert; the
+        // re-verification is then the LAST thing before the charge click is
+        // dispatched — never proceed on a stale check.
+        let capturedBaseline: CheckoutOutcomeBaseline | null = null;
         try {
           await this.page.bringToFront().catch(() => undefined);
-          await candidate.click();
-        } catch (error) {
-          const dispatchState = await frame
-            .evaluate((token) => {
-              const stateWindow = window as Window & {
-                __trustySquirePaymentSubmitDispatch?: {
-                  token: string;
-                  dispatched: boolean;
-                };
-              };
-              const state = stateWindow.__trustySquirePaymentSubmitDispatch;
+          await candidate.click({ trial: true });
+          if (!(await this.savedCardSelectionVerified(savedCardSelection.verification))) {
+            throw new Error("payment_card_selection_ambiguous");
+          }
+          capturedBaseline = await runCaptureConfirmedPaymentSubmit({
+            click: async (markInputDispatchPossible) => {
+              let remainingMs: void | number;
+              try {
+                remainingMs = beforeSubmitDispatch?.();
+              } catch (error) {
+                throw new BrowserClickDispatchError("not_dispatched", error);
+              }
+              paymentRequestTrackingArmed = true;
+              markInputDispatchPossible();
+              await candidate.click({
+                noWaitAfter: true,
+                ...(typeof remainingMs === "number"
+                  ? { timeout: Math.max(1, Math.ceil(remainingMs)) }
+                  : {}),
+              });
+            },
+            readEvidence: async () => {
+              await waitForDispatchEvidence();
+              const dispatchState = await readDispatchState();
+              const clickOnlyOutcomeConfirmed =
+                navigationTerminalObserved ||
+                (await this.hasConfirmedCheckoutOutcome(clickOnlyOutcomeBaseline));
+              const clickOnlyThreeDsObserved =
+                navigationObserved &&
+                (navigationThreeDsObserved ||
+                  (await this.detectThreeDsChallenge().catch(() => undefined))
+                    ?.three_ds_required === true);
+              const clickOnlyDispatchObserved =
+                (concretePaymentRequestObserved && dispatchState?.validationBlocked !== true) ||
+                clickOnlyOutcomeConfirmed ||
+                clickOnlyThreeDsObserved;
               return {
-                sameDocument: state?.token === token,
-                dispatched: state?.token === token && state.dispatched,
+                baseline: clickOnlyDispatchObserved ? clickOnlyOutcomeBaseline : null,
+                dispatched: clickOnlyDispatchObserved,
               };
-            }, dispatchToken)
-            .catch(() => null);
+            },
+            clear: async () => undefined,
+            onSubmitDispatched: reportSubmitDispatched,
+          });
+          clearSubmittedDispatchTracking = clearDispatchTracking;
+        } catch (error) {
           await clearDispatchTracking();
-          if (dispatchState?.sameDocument === true && !dispatchState.dispatched) throw error;
-          throw new PaymentSubmitOutcomeUnknownError();
+          throw error;
         }
-        outcomeBaseline =
-          (await readDispatchOutcomeBaseline()) ?? (await this.captureCheckoutOutcomeBaseline());
+        try {
+          outcomeBaseline = capturedBaseline ?? (await this.captureCheckoutOutcomeBaseline());
+        } catch (error) {
+          await clearSubmittedDispatchTracking?.();
+          clearSubmittedDispatchTracking = null;
+          throw error;
+        }
         this.checkoutOutcomeBaseline = outcomeBaseline;
-        await clearDispatchTracking();
         submitted = true;
         break;
       }
       if (submitted) break;
     }
-    if (!submitted || outcomeBaseline === undefined) throw new Error("payment_submit_not_found");
+    if (!submitted || outcomeBaseline === undefined) {
+      await clearSubmittedDispatchTracking?.();
+      throw new Error("payment_submit_not_found");
+    }
     try {
       const challengeDeadline = Date.now() + 15_000;
       while (Date.now() < challengeDeadline) {
@@ -9531,13 +12494,22 @@ export class BrowserController {
           return { three_ds_required: false, order_confirmed: true };
         }
         const challenge = await this.detectThreeDsChallenge();
-        if (challenge.three_ds_required) return challenge;
+        if (challenge.three_ds_required) {
+          return challenge;
+        }
         await this.page.waitForTimeout(250).catch(() => undefined);
       }
       return { three_ds_required: false, order_confirmed: false };
     } catch (error) {
-      if (error instanceof PaymentSubmitOutcomeUnknownError) throw error;
+      if (
+        error instanceof PaymentSubmitOutcomeUnknownError ||
+        error instanceof BrowserClickDispatchError
+      ) {
+        throw error;
+      }
       throw new PaymentSubmitOutcomeUnknownError();
+    } finally {
+      await clearSubmittedDispatchTracking?.();
     }
   }
 
@@ -9573,28 +12545,170 @@ export class BrowserController {
     await this.clearCheckoutCardFieldsInFrames(this.page.frames());
   }
 
+  private async clearCheckoutCardFieldsInDocuments(
+    documents: readonly {
+      documentElement: ElementHandle<HTMLElement>;
+      frameIndex: number;
+    }[],
+  ): Promise<void> {
+    if (!this.page) return;
+    await Promise.all(
+      documents.map(({ documentElement, frameIndex }) =>
+        this.stampJapaneseCardLabelFieldsInDocument(documentElement, frameIndex),
+      ),
+    );
+    for (const { documentElement } of documents) {
+      await documentElement.evaluate((root, selectors) => {
+        const document = root.ownerDocument;
+        const fields = Array.from(document.querySelectorAll(selectors)).slice(0, 40);
+        for (const element of fields) {
+          if (
+            !(element instanceof HTMLInputElement) &&
+            !(element instanceof HTMLTextAreaElement) &&
+            !(element instanceof HTMLSelectElement)
+          ) {
+            continue;
+          }
+          if (element.value.length > 0 || element.hasAttribute("data-ts-sealed-payment")) {
+            element.value = "";
+            if (element instanceof HTMLSelectElement && element.value !== "") {
+              element.selectedIndex = -1;
+            }
+            element.dispatchEvent(new Event("input", { bubbles: true }));
+            element.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+          element.removeAttribute("data-ts-sealed-payment");
+        }
+        document.querySelectorAll('[data-ts-sealed-payment="1"]').forEach((element) => {
+          if (
+            element instanceof HTMLInputElement ||
+            element instanceof HTMLTextAreaElement ||
+            element instanceof HTMLSelectElement
+          ) {
+            element.value = "";
+          }
+          element.removeAttribute("data-ts-sealed-payment");
+        });
+      }, CHECKOUT_CARD_VALUE_FIELD_SELECTORS);
+    }
+    await this.page.waitForTimeout(0).catch(() => undefined);
+    await Promise.all(
+      documents.map(({ documentElement, frameIndex }) =>
+        this.stampJapaneseCardLabelFieldsInDocument(documentElement, frameIndex),
+      ),
+    );
+    const visibleTexts: string[] = [];
+    for (const { documentElement } of documents) {
+      const result = await documentElement.evaluate((root, selectors) => {
+        const document = root.ownerDocument;
+        const uncleared = Array.from(document.querySelectorAll(selectors)).some(
+          (element) =>
+            (element instanceof HTMLInputElement ||
+              element instanceof HTMLTextAreaElement ||
+              element instanceof HTMLSelectElement) &&
+            element.value.length > 0,
+        );
+        const body = document.body;
+        if (body === null) return { uncleared, visibleText: "" };
+        const view = document.defaultView;
+        if (view === null) return { uncleared, visibleText: "" };
+        const hidden: Array<{ element: HTMLElement | SVGElement; style: string | null }> = [];
+        let visibleText = "";
+        try {
+          for (const element of Array.from(body.querySelectorAll("*"))) {
+            if (!(element instanceof HTMLElement || element instanceof SVGElement)) continue;
+            if (view.getComputedStyle(element).opacity === "0") {
+              hidden.push({ element, style: element.getAttribute("style") });
+              element.style.setProperty("display", "none", "important");
+            }
+          }
+          visibleText = body.innerText ?? "";
+        } finally {
+          for (const { element, style } of hidden) {
+            if (style === null) {
+              element.style.removeProperty("display");
+              if (element.getAttribute("style") === "") element.removeAttribute("style");
+            } else {
+              element.setAttribute("style", style);
+            }
+          }
+        }
+        return { uncleared, visibleText };
+      }, CHECKOUT_CARD_VALUE_FIELD_SELECTORS);
+      if (result.uncleared) throw new Error("payment_fields_not_cleared");
+      visibleTexts.push(result.visibleText);
+    }
+    if (visibleTexts.some((text) => containsVisiblePaymentMaterial(text))) {
+      throw new Error("payment_fields_not_cleared");
+    }
+    const interactiveElements = await this.extractInteractiveElements().catch(() => undefined);
+    if (interactiveElements === undefined) throw new Error("payment_fields_not_cleared");
+    const interactiveText = interactiveElements
+      .flatMap((element) => [
+        element.ariaLabel,
+        element.title,
+        element.value,
+        element.labelText,
+        element.visibleText,
+        element.iconLabel,
+        element.placeholder,
+        element.name,
+        element.testId,
+        element.screenPath,
+        element.container,
+        element.occludedBy,
+      ])
+      .filter((value): value is string => typeof value === "string")
+      .join("\n");
+    if (containsVisiblePaymentMaterial(interactiveText)) {
+      throw new Error("payment_fields_not_cleared");
+    }
+  }
+
   private async clearCheckoutCardFieldsInFrames(frames: readonly Frame[]): Promise<void> {
     if (!this.page) return;
+    await this.stampJapaneseCardLabelFields(frames);
     for (const frame of frames) {
       const fields = frame.locator(CHECKOUT_CARD_VALUE_FIELD_SELECTORS);
       const count = Math.min(await fields.count().catch(() => 0), 40);
-      for (let i = 0; i < count; i += 1) {
-        const field = fields.nth(i);
-        await field.fill("").catch(() => undefined);
-        await field
-          .evaluate((element) => element.removeAttribute("data-ts-sealed-payment"))
-          .catch(() => undefined);
-      }
+      // Cleanup is verified semantically below, so clear in one DOM pass.
+      // Per-field fill("") performs actionability waits and can spend 30s on
+      // the first hidden PAN candidate after an early ambiguity refusal.
+      await fields
+        .evaluateAll((elements, limit) => {
+          for (const element of elements.slice(0, limit)) {
+            if (
+              !(element instanceof HTMLInputElement) &&
+              !(element instanceof HTMLTextAreaElement) &&
+              !(element instanceof HTMLSelectElement)
+            ) {
+              continue;
+            }
+            if (element.value.length > 0 || element.hasAttribute("data-ts-sealed-payment")) {
+              element.value = "";
+              if (element instanceof HTMLSelectElement && element.value !== "") {
+                element.selectedIndex = -1;
+              }
+              element.dispatchEvent(new Event("input", { bubbles: true }));
+              element.dispatchEvent(new Event("change", { bubbles: true }));
+            }
+            element.removeAttribute("data-ts-sealed-payment");
+          }
+        }, count)
+        .catch(() => undefined);
     }
     await this.clearSealedPaymentFieldsInFrames(frames);
     await this.page.waitForTimeout(0).catch(() => undefined);
+    await this.stampJapaneseCardLabelFields(frames);
     for (const frame of frames) {
       const uncleared = await frame
         .locator(CHECKOUT_CARD_VALUE_FIELD_SELECTORS)
         .evaluateAll((elements) =>
           elements.some(
             (element) =>
-              (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) &&
+              (element instanceof HTMLInputElement ||
+                element instanceof HTMLTextAreaElement ||
+                element instanceof HTMLSelectElement) &&
               element.value.length > 0,
           ),
         )
@@ -9673,13 +12787,174 @@ export class BrowserController {
     }
   }
 
-  private async detectThreeDsChallenge(): Promise<CheckoutSubmitResult> {
+  private async frameWithinThreeDsStructuralFrame(frame: Frame): Promise<boolean> {
+    if (!this.page) return false;
+    let current: Frame | null = frame;
+    while (current !== this.page.mainFrame()) {
+      if (current === null) return false;
+      const frameElement = await current.frameElement().catch(() => null);
+      if (frameElement === null) return false;
+      try {
+        if (
+          await frameElement
+            .evaluate(
+              (element) =>
+                element instanceof Element &&
+                element.matches('iframe[title*="3d secure" i],iframe[name*="3ds" i]'),
+            )
+            .catch(() => false)
+        ) {
+          return true;
+        }
+      } finally {
+        await frameElement.dispose().catch(() => undefined);
+      }
+      current = current.parentFrame();
+    }
+    return false;
+  }
+
+  private rememberPaymentInstrumentExpectation(
+    card: Pick<CheckoutCard, "pan" | "issuer" | "issuer_source" | "network" | "label">,
+  ): void {
+    const comparableIssuer = (value: string | undefined) => {
+      const remainder = value
+        ?.replace(
+          /american\s+express|master\s*card|amex|visa|discover|diners\s+club|jcb|unionpay/gi,
+          " ",
+        )
+        .split(/\s+/)
+        .filter(
+          (token) =>
+            token.length > 0 &&
+            !/^(?:card|platinum|gold|infinite|signature|classic|debit|credit|business|corporate|rewards|world|elite|sapphire|personal|work|travel)$/i.test(
+              token,
+            ),
+        )
+        .join(" ")
+        .trim();
+      return remainder !== undefined && /^(?=.{2,32}$)[A-Za-z][A-Za-z0-9&.' -]*$/.test(remainder)
+        ? remainder
+        : undefined;
+    };
+    const networkIssuer = comparableIssuer(card.network);
+    const labelIssuer = comparableIssuer(card.label);
+    const issuer =
+      card.issuer !== undefined && card.issuer_source !== undefined
+        ? card.issuer
+        : (networkIssuer ?? labelIssuer);
+    const issuerSource =
+      card.issuer !== undefined && card.issuer_source !== undefined
+        ? card.issuer_source
+        : networkIssuer !== undefined
+          ? "vault_metadata"
+          : labelIssuer !== undefined
+            ? "vault_label"
+            : undefined;
+    this.paymentInstrumentExpectation = {
+      last4: card.pan.slice(-4),
+      ...(issuer !== undefined && issuerSource !== undefined
+        ? { issuer, issuer_source: issuerSource }
+        : {}),
+      ...(card.network !== undefined ? { network: card.network } : {}),
+      ...(card.label !== undefined ? { label: card.label } : {}),
+    };
+  }
+
+  private comparePaymentInstrumentEvidence(
+    expected: PaymentInstrumentExpectation | undefined,
+    challengeText: string,
+  ): PaymentInstrumentMismatch | undefined {
+    if (expected === undefined) return undefined;
+    // ACS copy is untrusted display evidence, so normalize only for
+    // comparison and return the bounded, non-secret fragments below. Never
+    // modify the live challenge or translate its controls.
+    const observedLast4 =
+      challengeText.match(/(?:card|ending|last\s*four|\*{2,}|•{2,})[^\d]{0,20}(\d{4})\b/i)?.[1] ??
+      undefined;
+    const observedIssuer =
+      challengeText.match(/\b([A-Z][A-Z0-9]{2,})\s+(?:app|bank)\b/)?.[1] ??
+      challengeText
+        .match(/\b(?:issuer|bank|app)\s*[:\-]\s*([A-Za-z][A-Za-z0-9 .-]{1,48})/i)?.[1]
+        ?.trim();
+    const observedNetwork = challengeText.match(
+      /\b(visa|mastercard|amex|american express)\b/i,
+    )?.[1];
+    const normalizedExpectedIssuer = expected.issuer?.replace(/[^a-z0-9]/gi, "").toLowerCase();
+    const normalizedObservedIssuer = observedIssuer?.replace(/[^a-z0-9]/gi, "").toLowerCase();
+    const networkFamily = (value: string | undefined) => {
+      const normalized = value?.replace(/[^a-z0-9]/gi, "").toLowerCase();
+      if (normalized === undefined) return undefined;
+      if (normalized.includes("mastercard")) return "mastercard";
+      if (normalized.includes("americanexpress") || normalized.includes("amex")) return "amex";
+      if (normalized.includes("visa")) return "visa";
+      if (normalized.includes("discover")) return "discover";
+      if (normalized.includes("diners")) return "diners";
+      if (normalized.includes("unionpay")) return "unionpay";
+      if (normalized.includes("jcb")) return "jcb";
+      return normalized;
+    };
+    const last4Mismatch = observedLast4 !== undefined && observedLast4 !== expected.last4;
+    const issuerMismatch =
+      expected.issuer !== undefined &&
+      normalizedExpectedIssuer !== undefined &&
+      normalizedObservedIssuer !== undefined &&
+      !normalizedObservedIssuer.includes(normalizedExpectedIssuer) &&
+      !normalizedExpectedIssuer.includes(normalizedObservedIssuer);
+    const networkMismatch =
+      observedNetwork !== undefined &&
+      expected.network !== undefined &&
+      networkFamily(observedNetwork) !== networkFamily(expected.network);
+    if (!last4Mismatch && !issuerMismatch && !networkMismatch) return undefined;
+    const evidenceUsed: Array<"last4" | "issuer" | "network"> = [];
+    if (last4Mismatch) evidenceUsed.push("last4");
+    if (issuerMismatch) evidenceUsed.push("issuer");
+    if (networkMismatch) evidenceUsed.push("network");
+    return {
+      kind: "payment_instrument_mismatch",
+      confidence:
+        last4Mismatch || networkMismatch || expected.issuer_source === "bin_metadata"
+          ? "high"
+          : "low",
+      evidence_used: evidenceUsed,
+      expected: {
+        last4: expected.last4,
+        ...(expected.issuer !== undefined ? { issuer: expected.issuer } : {}),
+        ...(expected.network !== undefined ? { network: expected.network } : {}),
+        ...(expected.label !== undefined ? { label: expected.label } : {}),
+      },
+      observed: {
+        ...(observedLast4 !== undefined ? { last4: observedLast4 } : {}),
+        ...(observedIssuer !== undefined ? { issuer: observedIssuer } : {}),
+        ...(observedNetwork !== undefined ? { network: observedNetwork } : {}),
+      },
+      provenance: {
+        expected: {
+          last4: "released_card",
+          ...(expected.issuer !== undefined && expected.issuer_source !== undefined
+            ? { issuer: expected.issuer_source }
+            : {}),
+          ...(expected.network !== undefined ? { network: "vault_metadata" as const } : {}),
+          ...(expected.label !== undefined ? { label: "vault_label" as const } : {}),
+        },
+        observed: "3ds_challenge",
+      },
+    };
+  }
+
+  private async detectThreeDsChallenge(
+    expectedCard?: Pick<CheckoutCard, "pan" | "issuer" | "issuer_source" | "network" | "label">,
+  ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
+    if (expectedCard !== undefined) {
+      this.rememberPaymentInstrumentExpectation(expectedCard);
+    }
     // Cross-processor 3DS signals only — never key on a single PSP's internal
     // state. CardinalCommerce backs the ACS/StepUp flow for many processors
     // (not just Stripe), so its host is a generic signal, not Stripe-specific.
     const urlPattern =
       /(?:https?:\/\/(?:[^/]+\.)*cardinalcommerce\.com\/(?:v\d+\/)?cruise\/stepup(?:[/?#]|$)|https?:\/\/hooks\.stripe\.com\/3d_secure|3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/3ds(?:2)?\/|\/acs\/)/i;
+    let challengeFallback: CheckoutSubmitResult | undefined;
     for (const frame of this.page.frames()) {
       // A captcha frame (fraud-check, not authentication) must never be
       // misread as a 3DS challenge — e.g. Stripe's invisible hCaptcha frame
@@ -9696,17 +12971,32 @@ export class BrowserController {
       const detected =
         urlPattern.test(frame.url()) ||
         structural ||
+        (await this.frameWithinThreeDsStructuralFrame(frame)) ||
         /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i.test(
           text,
         );
       if (!detected) continue;
-      return {
+      const mismatch = this.comparePaymentInstrumentEvidence(
+        this.paymentInstrumentExpectation,
+        text,
+      );
+      const result: CheckoutSubmitResult = {
         three_ds_required: true,
         order_confirmed: false,
         challenge_url: frame.url() || this.page.url(),
+        ...(mismatch !== undefined ? { payment_instrument_mismatch: mismatch } : {}),
       };
+      if (mismatch !== undefined) {
+        this.observedPaymentInstrumentMismatch = mismatch;
+        return result;
+      }
+      challengeFallback ??= result;
     }
-    return { three_ds_required: false, order_confirmed: false };
+    return challengeFallback ?? { three_ds_required: false, order_confirmed: false };
+  }
+
+  paymentInstrumentMismatch(): PaymentInstrumentMismatch | undefined {
+    return this.observedPaymentInstrumentMismatch;
   }
 
   private async captureCheckoutOutcomeBaseline(): Promise<CheckoutOutcomeBaseline> {
@@ -9728,11 +13018,27 @@ export class BrowserController {
     } catch {
       sameCheckoutOrigin = current.url === baseline.url;
     }
-    return (
+    const newTerminalOrderIdentity =
       sameCheckoutOrigin &&
       current.terminalUrlIdentity !== null &&
-      !baseline.orderUrlIdentities.includes(current.terminalUrlIdentity)
-    );
+      !baseline.orderUrlIdentities.includes(current.terminalUrlIdentity);
+    if (newTerminalOrderIdentity) return true;
+    if (
+      !sameCheckoutOrigin ||
+      current.url === baseline.url ||
+      !isShopifyCheckoutThankYouRoute(current.url)
+    ) {
+      return false;
+    }
+    return await this.page.mainFrame().evaluate(() => {
+      const visibleText = document.body?.innerText ?? "";
+      const confirmationNumber = /\bconfirmation\s*#\s*[a-z0-9][a-z0-9-]{3,}\b/i.test(visibleText);
+      const confirmedOrder = /\byour order is confirmed\b/i.test(visibleText);
+      const thankYouHeading = Array.from(document.querySelectorAll("h1, h2, [role=heading]")).some(
+        (element) => /\bthank you\b/i.test(element.textContent ?? ""),
+      );
+      return confirmedOrder || (thankYouHeading && confirmationNumber);
+    });
   }
 
   // Let the browser complete the challenge natively (including out-of-band
@@ -9745,9 +13051,16 @@ export class BrowserController {
       this.checkoutOutcomeBaseline ?? (await this.captureCheckoutOutcomeBaseline());
     const failureText =
       /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
-    const deadline = Date.now() + timeoutMs;
-    do {
+    const deadline = Date.now() + Math.max(timeoutMs, 0);
+    const mismatchAtEntry = this.observedPaymentInstrumentMismatch;
+    let challengeObserved = false;
+    while (true) {
       await this.page.bringToFront().catch(() => undefined);
+      const challenge = await this.detectThreeDsChallenge().catch(() => undefined);
+      if (challenge?.three_ds_required === true) challengeObserved = true;
+      if (mismatchAtEntry === undefined && this.observedPaymentInstrumentMismatch !== undefined) {
+        return challengeObserved ? "challenge_pending" : "timeout";
+      }
       if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) return "succeeded";
       const texts = await Promise.all(
         this.page
@@ -9759,9 +13072,10 @@ export class BrowserController {
           ),
       );
       if (texts.some((text) => failureText.test(text))) return "failed";
-      await this.page.waitForTimeout(1_000).catch(() => undefined);
-    } while (Date.now() <= deadline);
-    return "timeout";
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) return challengeObserved ? "challenge_pending" : "timeout";
+      await this.page.waitForTimeout(Math.min(1_000, remainingMs)).catch(() => undefined);
+    }
   }
 
   // Deterministic Firebase/GCP credential extraction. Every Firebase project
@@ -11506,6 +14820,17 @@ export class BrowserController {
           '[role="dialog"],dialog,[aria-modal="true"],nav,main,header,footer,aside,form,section,article',
         );
 
+      const regionIds = new Map<Element, number>();
+      let nextRegionId = 1;
+      const regionId = (region: Element | null): number | null => {
+        if (region === null) return null;
+        const existing = regionIds.get(region);
+        if (existing !== undefined) return existing;
+        const id = nextRegionId++;
+        regionIds.set(region, id);
+        return id;
+      };
+
       const regionName = (region: Element | null): string | null => {
         if (region === null) return null;
         const role = region.getAttribute("role");
@@ -11542,40 +14867,99 @@ export class BrowserController {
         return tag;
       };
 
+      const composedParent = (node: Node): Element | null => {
+        const parent = node.parentNode;
+        if (parent === null) return null;
+        if (parent instanceof ShadowRoot) return parent.host;
+        return parent instanceof Element ? parent : null;
+      };
+
+      const isDialogElement = (el: Element): boolean =>
+        el.getAttribute("role") === "dialog" ||
+        el.tagName.toLowerCase() === "dialog" ||
+        el.getAttribute("aria-modal") === "true";
+
+      const nearestModalRegion = (el: Element): Element | null => {
+        let cur: Element | null = el;
+        while (cur !== null) {
+          if (isDialogElement(cur)) return cur;
+          cur = composedParent(cur);
+        }
+        return null;
+      };
+
+      // `inert`, used to hide the background while a modal is open, is meant
+      // to sit on a SIBLING of a truly-portaled dialog (Angular CDK/Material
+      // append the overlay container as a sibling of the app root and mark
+      // only the app root inert — that structure is unaffected by this).
+      // Some dialogs are never portaled to <body> at all: they merely escape
+      // their container VISUALLY via position:fixed while remaining a
+      // structural DESCENDANT of whatever ancestor got marked inert for the
+      // background-hiding trick. `inert` (unlike display/visibility/opacity)
+      // makes Chromium's native hit-testing skip the entire subtree, so
+      // document.elementFromPoint never resolves to the escaped dialog or
+      // anything inside it — every one of its controls reports
+      // topmost:false/occludedBy even though it is the genuinely visible,
+      // user-clickable control (and a real click on it hangs the same way —
+      // see withModalInertNeutralized in browser.ts). Scoped tight: only
+      // ancestors of an element found by a dedicated nearest-DIALOG search are
+      // neutralized. The composed-tree walk pierces open shadow-root boundaries;
+      // closed roots remain unreachable like the rest of the extractor. A real
+      // background control outside any modal keeps its inert protection
+      // (money-fence boundary untouched).
+      const neutralizeInertForHitTest = (el: Element): Element[] => {
+        if (nearestModalRegion(el) === null) return [];
+        const neutralized: Element[] = [];
+        let cur: Element | null = el;
+        while (cur !== null) {
+          if (cur.hasAttribute("inert")) {
+            cur.removeAttribute("inert");
+            neutralized.push(cur);
+          }
+          cur = composedParent(cur);
+        }
+        return neutralized;
+      };
+
       const topmostStatus = (el: Element): { topmost: boolean; occludedBy: string | null } => {
         const r = el.getBoundingClientRect();
         if (r.width < 1 || r.height < 1) return { topmost: false, occludedBy: null };
         const x = Math.min(window.innerWidth - 1, Math.max(0, r.left + r.width / 2));
         const y = Math.min(window.innerHeight - 1, Math.max(0, r.top + r.height / 2));
-        let top = document.elementFromPoint(x, y);
-        if (top === null) return { topmost: false, occludedBy: null };
-        // document.elementFromPoint returns the shadow HOST, not the control
-        // nested in its open shadow root — so a shadow-DOM CTA (Casetify's
-        // Add-to-Cart web component) hit-tested against its own host would be
-        // reported occludedBy that host and topmost:false, and the host agent
-        // would skip a button nothing actually covers. Re-hit-test inside each
-        // open shadow root at the same point to reach the deepest composed
-        // element, matching what the user's pointer would strike. Closed roots
-        // yield a null shadowRoot and the descent stops — same as the DOM.
-        while (top.shadowRoot !== null) {
-          const deeper = top.shadowRoot.elementFromPoint(x, y);
-          if (deeper === null || deeper === top) break;
-          top = deeper;
-        }
-        if (top === el || el.contains(top)) return { topmost: true, occludedBy: null };
-        let owner: Node | null = top;
-        while (owner !== null) {
-          if (owner === el) return { topmost: true, occludedBy: null };
-          const assignedSlot: HTMLSlotElement | null =
-            owner instanceof Element || owner instanceof Text ? owner.assignedSlot : null;
-          if (assignedSlot !== null) {
-            owner = assignedSlot;
-            continue;
+        const neutralized = neutralizeInertForHitTest(el);
+        try {
+          let top = document.elementFromPoint(x, y);
+          if (top === null) return { topmost: false, occludedBy: null };
+          // document.elementFromPoint returns the shadow HOST, not the control
+          // nested in its open shadow root — so a shadow-DOM CTA (Casetify's
+          // Add-to-Cart web component) hit-tested against its own host would be
+          // reported occludedBy that host and topmost:false, and the host agent
+          // would skip a button nothing actually covers. Re-hit-test inside each
+          // open shadow root at the same point to reach the deepest composed
+          // element, matching what the user's pointer would strike. Closed roots
+          // yield a null shadowRoot and the descent stops — same as the DOM.
+          while (top.shadowRoot !== null) {
+            const deeper = top.shadowRoot.elementFromPoint(x, y);
+            if (deeper === null || deeper === top) break;
+            top = deeper;
           }
-          const parent: ParentNode | null = owner.parentNode;
-          owner = parent instanceof ShadowRoot ? parent.host : parent;
+          if (top === el || el.contains(top)) return { topmost: true, occludedBy: null };
+          let owner: Node | null = top;
+          while (owner !== null) {
+            if (owner === el) return { topmost: true, occludedBy: null };
+            const assignedSlot: HTMLSlotElement | null =
+              owner instanceof Element || owner instanceof Text ? owner.assignedSlot : null;
+            if (assignedSlot !== null) {
+              owner = assignedSlot;
+              continue;
+            }
+            const parent: ParentNode | null = owner.parentNode;
+            owner = parent instanceof ShadowRoot ? parent.host : parent;
+          }
+          return { topmost: false, occludedBy: regionName(regionFor(top)) ?? elementKind(top) };
+        } finally {
+          for (const a of neutralized) a.setAttribute("inert", "");
         }
-        return { topmost: false, occludedBy: regionName(regionFor(top)) ?? elementKind(top) };
       };
 
       // N1 onboarding-wizard cards (2026-06-08). Chakra/React card pickers
@@ -11698,12 +15082,18 @@ export class BrowserController {
         landmark: string | null;
         value: string | null;
         checked: boolean | null;
+        disabled: boolean | null;
+        required: boolean | null;
         selectOptions: Array<{ value: string; text: string }> | null;
         selectedOptionText: string | null;
         interactedThisRun: boolean;
         sealed: boolean;
+        sealedOrdinal: number;
         screenPath: string | null;
         container: string | null;
+        inDialog: boolean;
+        containerId: number | null;
+        formId: number | null;
         topmost: boolean | null;
         occludedBy: string | null;
         autocomplete: string | null;
@@ -11754,7 +15144,11 @@ export class BrowserController {
         const isGoogleGSIIframe =
           el instanceof HTMLIFrameElement &&
           (el.getAttribute("src") ?? "").includes("accounts.google.com/gsi/button");
-        const container = regionName(regionFor(el));
+        const region = regionFor(el);
+        const container = regionName(region);
+        const containerId = regionId(region);
+        const inDialog = nearestModalRegion(el) !== null;
+        const formId = regionId(el.closest("form"));
         const status = topmostStatus(el);
         const pathLabel = isGoogleGSIIframe
           ? "Continue with Google"
@@ -11825,6 +15219,10 @@ export class BrowserController {
             el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio")
               ? el.checked
               : null,
+          disabled:
+            el.matches(":disabled") || el.getAttribute("aria-disabled") === "true" ? true : null,
+          required:
+            el.matches(":required") || el.getAttribute("aria-required") === "true" ? true : null,
           // For <select>: the currently-selected option's visible text
           // and a short list of available option labels. The combination
           // is how the planner detects the "React-defaulted dropdown"
@@ -11851,10 +15249,18 @@ export class BrowserController {
               : null,
           interactedThisRun: el.getAttribute("data-ts-touched") === "1",
           sealed: el.getAttribute("data-ts-sealed-payment") === "1",
+          sealedOrdinal: Array.from(
+            (el.getRootNode() as Document | ShadowRoot).querySelectorAll(
+              "input,textarea,select,[contenteditable='true']",
+            ),
+          ).indexOf(el),
           screenPath:
             `${container ?? "body:root"} > ${elementKind(el)}:` +
             slug(pathLabel, `${elementKind(el)}-${out.length}`),
           container,
+          inDialog,
+          containerId,
+          formId,
           topmost: status.topmost,
           occludedBy: status.occludedBy,
         });
@@ -12029,6 +15435,104 @@ export class BrowserController {
     return target.frameOrigin;
   }
 
+  private async withModalInertNeutralizedInFrame<T>(
+    frame: Frame,
+    handle: ElementHandle<Element>,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const marker = "data-ts-inert-neutralized";
+    const anchorMarker = "data-ts-inert-region-anchor";
+    await handle
+      .evaluate(
+        (el, markers) => {
+          const { marker, anchorMarker } = markers;
+          const composedParent = (node: Node): Element | null => {
+            const parent = node.parentNode;
+            if (parent === null) return null;
+            if (parent instanceof ShadowRoot) return parent.host;
+            return parent instanceof Element ? parent : null;
+          };
+          const isDialogElement = (element: Element): boolean =>
+            element.getAttribute("role") === "dialog" ||
+            element.tagName.toLowerCase() === "dialog" ||
+            element.getAttribute("aria-modal") === "true";
+          const nearestModalRegion = (element: Element): Element | null => {
+            let cur: Element | null = element;
+            while (cur !== null) {
+              if (isDialogElement(cur)) return cur;
+              cur = composedParent(cur);
+            }
+            return null;
+          };
+          const region = nearestModalRegion(el);
+          if (region === null) return;
+          region.setAttribute(anchorMarker, "1");
+          let cur: Element | null = el;
+          while (cur !== null) {
+            if (cur.hasAttribute("inert")) {
+              cur.removeAttribute("inert");
+              cur.setAttribute(marker, "1");
+            }
+            cur = composedParent(cur);
+          }
+        },
+        { marker, anchorMarker },
+      )
+      .catch(() => undefined);
+    try {
+      return await fn();
+    } finally {
+      await frame
+        .evaluate(
+          (markers) => {
+            const { marker, anchorMarker } = markers;
+            const isDialogElement = (element: Element): boolean =>
+              element.getAttribute("role") === "dialog" ||
+              element.tagName.toLowerCase() === "dialog" ||
+              element.getAttribute("aria-modal") === "true";
+            // Mirrors the main-frame restore: only an open/rendered dialog
+            // keeps the background locked — a closed <dialog> or hidden
+            // role="dialog" remnant does not.
+            const isRenderedDialog = (element: Element): boolean => {
+              if (!isDialogElement(element)) return false;
+              if (element instanceof HTMLDialogElement) return element.open;
+              if (typeof element.checkVisibility === "function")
+                return element.checkVisibility({ visibilityProperty: true });
+              if (element.hasAttribute("hidden")) return false;
+              const style = window.getComputedStyle(element);
+              return style.display !== "none" && style.visibility !== "hidden";
+            };
+            const subtreeHasDialog = (root: Element | ShadowRoot): boolean => {
+              if (root instanceof Element) {
+                if (isRenderedDialog(root)) return true;
+                if (root.shadowRoot !== null && subtreeHasDialog(root.shadowRoot)) return true;
+              }
+              for (const el of Array.from(root.querySelectorAll("*"))) {
+                if (isRenderedDialog(el)) return true;
+                if (el.shadowRoot !== null && subtreeHasDialog(el.shadowRoot)) return true;
+              }
+              return false;
+            };
+            const cleanupAndRestore = (root: Document | ShadowRoot): void => {
+              root
+                .querySelectorAll(`[${anchorMarker}]`)
+                .forEach((el) => el.removeAttribute(anchorMarker));
+              root.querySelectorAll(`[${marker}]`).forEach((el) => {
+                el.removeAttribute(marker);
+                if (subtreeHasDialog(el)) el.setAttribute("inert", "");
+              });
+              root.querySelectorAll("*").forEach((el) => {
+                if (el.shadowRoot !== null) cleanupAndRestore(el.shadowRoot);
+              });
+            };
+            cleanupAndRestore(document);
+          },
+          { marker, anchorMarker },
+        )
+        .catch(() => undefined);
+    }
+  }
+
   // Frame-scoped click. Deliberately simpler than click() above (no radio/
   // checkbox/aria-toggle special-casing) — it's the escape hatch for a
   // control that lives inside an <iframe>, mirroring how resolvePageTarget is
@@ -12045,7 +15549,18 @@ export class BrowserController {
       );
     }
     try {
-      await handle.click({ timeout: 8000 });
+      // Derive the frame from the already-validated handle rather than
+      // re-resolving the index-based frame path: child-frame indices can
+      // shift during the intervening async security checks, and neutralize +
+      // restore must run against the document the handle actually lives in.
+      const frame = await handle.ownerFrame();
+      if (frame === null) {
+        await handle.click({ timeout: 8000 });
+      } else {
+        await this.withModalInertNeutralizedInFrame(frame, handle, () =>
+          handle.click({ timeout: 8000 }),
+        );
+      }
     } finally {
       await handle.dispose().catch(() => undefined);
     }
@@ -12069,20 +15584,34 @@ export class BrowserController {
   // type_secret targets that resolve into a frame. Same humanized-vs-fast
   // split as type() above, without the multi-input-OTP auto-advance nuance —
   // out of scope for the checkout-option case this exists for.
-  async typeInFrame(target: FrameTarget, selector: string, text: string): Promise<void> {
+  async typeInFrame(
+    target: FrameTarget,
+    selector: string,
+    text: string,
+    sealed = false,
+  ): Promise<string[]> {
     const handle = await this.resolveFrameElement(target, selector);
     if (handle === null) {
       throw new Error(`type: the target's frame is no longer present (${this.frameLabel(target)})`);
     }
     try {
       await handle.waitForElementState("visible", { timeout: 10000 });
+      const frame = await handle.ownerFrame();
+      if (frame === null) throw new Error("type target has no owning frame");
+      const sealedFieldKeys = sealed
+        ? await this.operatorScreenshotIdentityKeys(handle, frame)
+        : [];
+      if (sealed) {
+        await handle.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
+      }
       if (!this.humanize) {
         await handle.fill(text);
-        return;
+        return sealedFieldKeys;
       }
       await handle.click({ timeout: 8000 }).catch(() => undefined);
       await handle.fill("").catch(() => undefined);
       await handle.type(text, { delay: rand(40, 110) });
+      return sealedFieldKeys;
     } finally {
       await handle.dispose().catch(() => undefined);
     }
@@ -12170,8 +15699,21 @@ export class BrowserController {
     const page = this.page;
     const mainRaw = await this.extractElementsFromContext(page);
     const mainGroups = assignCardRadioGroups(mainRaw.clusterMeta);
+    const mainDocumentIdentity = await this.sealedDocumentIdentity(page.mainFrame());
     const mainElements = mainRaw.out.map((e, i) => ({
       ...e,
+      sealedIdentityKeys: sealedElementSemanticKeys({
+        tag: e.tag,
+        type: e.type,
+        id: e.id,
+        name: e.name,
+        testId: e.testId,
+        labelText: e.labelText,
+        ariaLabel: e.ariaLabel,
+        placeholder: e.placeholder,
+        landmark: e.landmark,
+        ordinal: e.sealedOrdinal,
+      }).map((key) => `${mainDocumentIdentity}:${key}`),
       cardRadioGroup: mainGroups[i] ?? null,
       frameOrigin: null,
       frameUrl: null,
@@ -12202,10 +15744,23 @@ export class BrowserController {
         const raw = await this.extractElementsFromContext(frame);
         const security = await this.frameSecurity(frame);
         const frameOrigin = security.origin;
+        const frameDocumentIdentity = await this.sealedDocumentIdentity(frame);
         const groups = assignCardRadioGroups(raw.clusterMeta);
         for (const [i, e] of raw.out.entries()) {
           framedElements.push({
             ...e,
+            sealedIdentityKeys: sealedElementSemanticKeys({
+              tag: e.tag,
+              type: e.type,
+              id: e.id,
+              name: e.name,
+              testId: e.testId,
+              labelText: e.labelText,
+              ariaLabel: e.ariaLabel,
+              placeholder: e.placeholder,
+              landmark: e.landmark,
+              ordinal: e.sealedOrdinal,
+            }).map((key) => `${frameDocumentIdentity}:${key}`),
             cardRadioGroup: groups[i] ?? null,
             frameOrigin,
             frameUrl,
@@ -12281,7 +15836,6 @@ export class BrowserController {
   // settleAfterOAuth() restores the product page afterwards.
   async startOAuth(selector: string): Promise<void> {
     if (!this.page || !this.context) throw new Error("Browser not started");
-    this.maybeAttachOAuthNetListener();
     if (
       !/accounts\.google\.com|github\.com\/login|login\.microsoftonline\.com/i.test(this.page.url())
     ) {
@@ -12320,29 +15874,58 @@ export class BrowserController {
   // clicks the product's already-observed OAuth control and waits for the
   // provider-owned window to finish; no credentials, frames, or consent scopes
   // are read or bypassed here.
-  async loginWithOAuth(selector: string, settleTimeoutMs = 12_000): Promise<void> {
+  async loginWithOAuth(
+    selector: string,
+    settleTimeoutMs = 30_000,
+    consentProvider?: OAuthProviderId,
+    expectedGoogleAccountEmail?: string | null,
+  ): Promise<void> {
     const product = this.page;
     const context = this.context;
     if (product === null || product.isClosed() || context === null) {
       throw new Error("OAuth login cannot start because the product page is unavailable");
     }
 
-    this.maybeAttachOAuthNetListener();
     this.oauthProductPage = product;
     this.oauthProviderPage = null;
     this.oauthProviderPageClosed = false;
+    const oauthBudgetMs = Math.max(1, settleTimeoutMs);
     const productUrl = product.url();
+    const oauthDeadline = Date.now() + oauthBudgetMs;
+    const remainingBudgetMs = (): number => Math.max(1, oauthDeadline - Date.now());
+    const deadlineError = (): Error =>
+      consentProvider === "google"
+        ? Object.assign(
+            new Error(
+              `google_session: OAuth did not complete within ${Math.ceil(oauthBudgetMs / 1000)} seconds; ` +
+                "the saved session may have expired, so re-login before retrying",
+            ),
+            { code: "google_session" },
+          )
+        : new Error(
+            `OAuth login is still awaiting the provider after ${Math.ceil(oauthBudgetMs / 1000)} seconds. Retry oauth_login; do not read or close the browser session.`,
+          );
     let recovery: Page | null = null;
     let providerPage: Page | null = null;
     let productDeparted = false;
+    let resolveProductDeparture: () => void = () => undefined;
+    const productDeparturePromise = new Promise<void>((resolve) => {
+      resolveProductDeparture = resolve;
+    });
     const onProductNavigation = (frame: Frame): void => {
       if (frame !== product.mainFrame()) return;
-      if (!this.isOAuthProductUrl(frame.url(), productUrl)) productDeparted = true;
+      if (!this.isOAuthProductUrl(frame.url(), productUrl)) {
+        productDeparted = true;
+        resolveProductDeparture();
+      }
     };
     product.on("framenavigated", onProductNavigation);
     try {
       recovery = await context.newPage();
-      await recovery.goto(productUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
+      await recovery.goto(productUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: remainingBudgetMs(),
+      });
 
       let resolvePopup: (page: Page | null) => void = () => undefined;
       const popupPromise = new Promise<Page | null>((resolve) => {
@@ -12354,6 +15937,7 @@ export class BrowserController {
       };
       context.on("page", onPopup);
       try {
+        if (Date.now() >= oauthDeadline) throw deadlineError();
         try {
           await this.click(selector);
         } catch (error) {
@@ -12361,32 +15945,66 @@ export class BrowserController {
         }
         providerPage = await Promise.race([
           popupPromise,
-          this.sleep(Math.min(settleTimeoutMs, 2_000)).then(() => null),
+          // A same-tab provider redirect is just as conclusive as a popup.
+          // Do not burn two seconds of the OAuth budget waiting for a window
+          // that this service will never open.
+          productDeparturePromise.then(() => null),
+          this.sleep(Math.min(remainingBudgetMs(), 2_000)).then(() => null),
         ]);
       } finally {
         context.off("page", onPopup);
         resolvePopup(null);
+        resolveProductDeparture();
       }
       const transient = providerPage ?? product;
+      productDeparted = productDeparted || !this.isOAuthProductUrl(transient.url(), productUrl);
       const durableProduct = providerPage === null ? recovery : product;
       this.oauthProductPage = durableProduct;
       this.oauthProviderPage = transient;
       this.oauthProviderPageClosed = transient.isClosed();
       this.restoreProductPageWhenOAuthPageCloses(transient, durableProduct);
-      const settled = await this.waitForOAuthLifecycle(
-        transient,
-        productUrl,
-        settleTimeoutMs,
-        providerPage === null,
-        productDeparted,
-      );
-      if (settled === null) {
-        throw new Error(
-          `OAuth login is still awaiting the provider after ${Math.ceil(settleTimeoutMs / 1000)} seconds. Retry oauth_login; do not read or close the browser session.`,
+      this.page = transient;
+      let settled: "closed" | "returned" | null = null;
+      if (consentProvider === undefined) {
+        settled = await this.waitForOAuthLifecycle(
+          transient,
+          productUrl,
+          remainingBudgetMs(),
+          providerPage === null,
+          productDeparted,
         );
+      } else {
+        const deadline = oauthDeadline;
+        while (settled === null && Date.now() < deadline) {
+          const remaining = deadline - Date.now();
+          settled = await this.waitForOAuthLifecycle(
+            transient,
+            productUrl,
+            Math.min(1_000, remaining),
+            providerPage === null,
+            productDeparted,
+          );
+          if (settled !== null || transient.isClosed()) break;
+          productDeparted = productDeparted || !this.isOAuthProductUrl(transient.url(), productUrl);
+          if (Date.now() >= deadline) break;
+          const consentBudgetMs = deadline - Date.now();
+          const advanced = await this.advanceOAuthConsent(
+            consentProvider,
+            consentBudgetMs,
+            expectedGoogleAccountEmail,
+          ).catch(() => false);
+          if (!advanced) await this.sleep(Math.min(250, remainingBudgetMs()));
+        }
+      }
+      if (settled === null) {
+        throw deadlineError();
       }
       if (providerPage === null && product.isClosed()) {
-        await recovery.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
+        if (Date.now() >= oauthDeadline) throw deadlineError();
+        await recovery.reload({
+          waitUntil: "domcontentloaded",
+          timeout: remainingBudgetMs(),
+        });
       }
     } finally {
       product.off("framenavigated", onProductNavigation);
@@ -12404,7 +16022,9 @@ export class BrowserController {
       if (this.page !== null && !this.page.isClosed()) {
         await this.page.bringToFront().catch(() => undefined);
         await this.page
-          .waitForLoadState("domcontentloaded", { timeout: 30_000 })
+          .waitForLoadState("domcontentloaded", {
+            timeout: remainingBudgetMs(),
+          })
           .catch(() => undefined);
       }
     }
@@ -12450,12 +16070,23 @@ export class BrowserController {
       const url = page.url();
       const isProduct = this.isOAuthProductUrl(url, productUrl);
       if (startsOnProduct && departed && isProduct) {
-        const remaining = Math.max(1, deadline - Date.now());
-        const idle = await page
-          .waitForLoadState("networkidle", { timeout: remaining })
+        // A return to the relying party is the OAuth completion signal. A
+        // dashboard can keep polling or streaming forever, so networkidle is
+        // not a valid requirement for a completed OAuth redirect.
+        const returnedUrl = url;
+        const ready = await page
+          .waitForLoadState("domcontentloaded", { timeout: Math.max(1, deadline - Date.now()) })
           .then(() => true)
           .catch(() => false);
-        return idle && !page.isClosed() && this.isOAuthProductUrl(page.url(), productUrl)
+        if (!ready || page.isClosed() || !this.isOAuthProductUrl(page.url(), productUrl)) {
+          return null;
+        }
+        // Require the return URL to survive one event-loop turn so a transient
+        // callback hop is never reported as the final product page.
+        await this.sleep(Math.min(50, Math.max(1, deadline - Date.now())));
+        return !page.isClosed() &&
+          page.url() === returnedUrl &&
+          this.isOAuthProductUrl(page.url(), productUrl)
           ? "returned"
           : null;
       }
@@ -12463,130 +16094,6 @@ export class BrowserController {
       await this.sleep(50);
     }
     return page.isClosed() ? "closed" : null;
-  }
-
-  // ── OAuth/SSO debug instrumentation (UNIVERSAL_BOT_OAUTH_DEBUG) ──
-  // Attach a context-level response recorder ONCE. Records SSO-relevant
-  // responses (the service host + Clerk/Stytch/WorkOS FAPI hosts) with their
-  // status + whether they set a cookie — the signal for "did the callback's
-  // session-establish request succeed and set the session cookie?"
-  private maybeAttachOAuthNetListener(): void {
-    if (this.oauthNetListenerAttached) return;
-    if (!/^(1|true|on)$/i.test(process.env.UNIVERSAL_BOT_OAUTH_DEBUG ?? "")) return;
-    if (!this.context) return;
-    this.oauthNetListenerAttached = true;
-    const RELEVANT =
-      /clerk|stytch|workos|accounts\.|\/sso|\/oauth|\/session|\/sign|callback|\/v1\/client/i;
-    this.context.on("response", (res) => {
-      void (async () => {
-        try {
-          const url = res.url();
-          if (!RELEVANT.test(url)) return;
-          const headers = res.headers();
-          if (this.oauthNetLog.length >= 200) return;
-          const entry: {
-            url: string;
-            status: number;
-            setCookie: boolean;
-            ct: string;
-            body?: string;
-          } = {
-            url: url.slice(0, 200),
-            status: res.status(),
-            setCookie: "set-cookie" in headers || "Set-Cookie" in headers,
-            ct: (headers["content-type"] ?? "").slice(0, 40),
-          };
-          // Capture the body of a Clerk/Stytch/WorkOS sign-in/up/callback error
-          // (>=400) — its error code is the definitive tell (captcha_invalid vs
-          // transfer vs identifier_*). JSON only, bounded.
-          if (
-            res.status() >= 400 &&
-            /\/v1\/client\/(sign_ins|sign_ups)|oauth_callback|\/session/i.test(url)
-          ) {
-            entry.body = (await res.text().catch(() => "")).slice(0, 800);
-          }
-          this.oauthNetLog.push(entry);
-        } catch {
-          // best-effort observability — never perturb the run
-        }
-      })();
-    });
-  }
-
-  // Dump cookies + the SSO network log to a file for post-mortem. Called at the
-  // oauth_session_not_persisted decision point when UNIVERSAL_BOT_OAUTH_DEBUG.
-  async dumpOAuthDebug(service: string, label: string): Promise<void> {
-    if (!/^(1|true|on)$/i.test(process.env.UNIVERSAL_BOT_OAUTH_DEBUG ?? "")) return;
-    if (!this.context) return;
-    try {
-      const cookies = await this.context.cookies();
-      const cookieSummary = cookies.map((c) => ({
-        name: c.name,
-        domain: c.domain,
-        path: c.path,
-        len: c.value.length,
-        httpOnly: c.httpOnly,
-        secure: c.secure,
-        sameSite: c.sameSite,
-      }));
-      const url = this.page ? this.page.url() : "(no page)";
-      // Capture the live Clerk SDK state — the definitive read on whether a
-      // sign-up transfer is available (the new-user-OAuth fix hinges on this).
-      const clerkState = this.page
-        ? await this.page
-            .evaluate(() => {
-              const w = window as unknown as { Clerk?: Record<string, unknown> };
-              const c = w.Clerk;
-              if (c === undefined) return { present: false };
-              const client = (c as { client?: Record<string, unknown> }).client;
-              const si = client?.["signIn"] as Record<string, unknown> | undefined;
-              const su = client?.["signUp"] as Record<string, unknown> | undefined;
-              const ffv = si?.["firstFactorVerification"] as Record<string, unknown> | undefined;
-              return {
-                present: true,
-                loaded: (c as { loaded?: unknown }).loaded ?? null,
-                signInStatus: si?.["status"] ?? null,
-                signInFFVStatus: ffv?.["status"] ?? null,
-                signInFFVError: ffv?.["error"] ?? null,
-                signUpStatus: su?.["status"] ?? null,
-                signUpMissingFields: su?.["missingFields"] ?? null,
-                hasSignUpCreate: typeof (su as { create?: unknown })?.create === "function",
-              };
-            })
-            .catch((e: unknown) => ({ present: "evalError", err: String(e).slice(0, 120) }))
-        : { present: false };
-      const consoleText = await this.extractText().catch(() => "");
-      const { writeFileSync, mkdirSync } = await import("node:fs");
-      const { join } = await import("node:path");
-      const { homedir } = await import("node:os");
-      const dir = join(homedir(), ".trusty-squire", "oauth-debug");
-      mkdirSync(dir, { recursive: true });
-      const ts = process.env.OAUTH_DEBUG_TS ?? String(this.oauthNetLog.length);
-      const path = join(dir, `${service}-${label}-${ts}.json`);
-      writeFileSync(
-        path,
-        JSON.stringify(
-          {
-            service,
-            label,
-            finalUrl: url,
-            clerkState,
-            cookies: cookieSummary,
-            netLog: this.oauthNetLog,
-            pageText: consoleText.slice(0, 600),
-          },
-          null,
-          2,
-        ),
-      );
-      console.error(
-        `[oauth-debug] wrote ${path} (${cookieSummary.length} cookies, ${this.oauthNetLog.length} net entries)`,
-      );
-    } catch (err) {
-      console.error(
-        `[oauth-debug] dump failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
   }
 
   // Read the page's Rails/OmniAuth CSRF token (<meta name="csrf-token">).
@@ -12856,6 +16363,70 @@ export class BrowserController {
     return this.adoptLivePage();
   }
 
+  // ───────────── new-tab adoption ─────────────
+  //
+  // Arm adoption immediately BEFORE an action that may open a tab. Anything
+  // already queued belonged to an earlier action and is not this action's to
+  // follow.
+  armOpenedTabAdoption(): void {
+    this.openedTabs.length = 0;
+  }
+
+  // Adopt the newest live tab opened since armOpenedTabAdoption() as the active
+  // page, so the next observe/act reads the tab the click actually opened.
+  // Returns the adopted URL, or null when the action opened no followable tab.
+  //
+  // `graceMs` covers the window between the click returning and Playwright
+  // delivering the context "page" event; a caller that has already waited for
+  // the page to settle passes 0 and just drains what arrived.
+  async adoptOpenedTab(graceMs = 0): Promise<string | null> {
+    const deadline = Date.now() + Math.max(0, graceMs);
+    let candidate = this.takeFollowableTab();
+    while (candidate === null && Date.now() < deadline) {
+      await this.sleep(50);
+      candidate = this.takeFollowableTab();
+    }
+    if (candidate === null) return null;
+    this.openedTabs.length = 0;
+    // A window.open target starts at about:blank and is navigated a tick later.
+    // Adopting it while blank would report an empty page to the host, so wait
+    // (bounded) for the document it was opened for.
+    const blank = (url: string): boolean =>
+      url === "" || url === "about:blank" || url === "about:srcdoc";
+    for (let i = 0; i < 40 && !candidate.isClosed() && blank(candidate.url()); i++) {
+      await this.sleep(50);
+    }
+    if (candidate.isClosed()) return null;
+    this.page = candidate;
+    this.trackMainDocument(candidate);
+    await candidate.bringToFront().catch(() => undefined);
+    await candidate
+      .waitForLoadState("domcontentloaded", { timeout: 15_000 })
+      .catch(() => undefined);
+    return candidate.isClosed() ? null : candidate.url();
+  }
+
+  // Newest queued tab the operator may follow. Pages the controller itself owns
+  // (the active page, the primary page, either side of an OAuth handshake, a
+  // recovery tab) are never adoption candidates — those lifecycles are managed
+  // by the code that created them.
+  private takeFollowableTab(): Page | null {
+    for (let i = this.openedTabs.length - 1; i >= 0; i--) {
+      const tab = this.openedTabs[i]!;
+      if (tab.isClosed()) continue;
+      if (
+        tab === this.page ||
+        tab === this.primaryPage ||
+        tab === this.oauthProductPage ||
+        tab === this.oauthProviderPage
+      ) {
+        continue;
+      }
+      return tab;
+    }
+    return null;
+  }
+
   private adoptLivePage(): boolean {
     if (this.page !== null && !this.page.isClosed()) return true;
     if (this.context === null) return false;
@@ -13103,14 +16674,7 @@ export class BrowserController {
     }
   }
 
-  // Which OAuth providers have a LIVE session in this profile's cookie jar.
-  // The logged-in-providers.json marker is a memo that drifts out of sync
-  // (a --force-relogin clears it, a misclassified run clears it, a parallel
-  // run overwrites it) — so a session that is genuinely live in the cookies
-  // can go invisible to provider selection, which is exactly how a warm
-  // GitHub session got skipped in favour of a broken Google path. The cookie
-  // jar is the ground truth: read it directly. Cookie NAMES + presence only;
-  // values are never read into logs. Best-effort — a read failure returns [].
+  // Which OAuth providers have a live session in this profile's cookie jar.
   async detectSessionProviders(): Promise<OAuthProviderId[]> {
     if (this.context === null) return [];
     try {
@@ -13120,12 +16684,17 @@ export class BrowserController {
     }
   }
 
-  async detectGoogleAccountEmail(): Promise<string | null> {
+  async detectGoogleAccountEmail(expectedGoogleAccountEmail?: string): Promise<string | null> {
     if (this.context === null) return null;
     let identityPage: Page | null = null;
     try {
       identityPage = await this.context.newPage();
-      await identityPage.goto("https://myaccount.google.com/", {
+      const identityUrl = new URL("https://myaccount.google.com/");
+      const expectedEmail = expectedGoogleAccountEmail?.trim();
+      if (expectedEmail !== undefined && expectedEmail.length > 0) {
+        identityUrl.searchParams.set("authuser", expectedEmail);
+      }
+      await identityPage.goto(identityUrl.href, {
         waitUntil: "domcontentloaded",
         timeout: 20_000,
       });
@@ -13148,12 +16717,21 @@ export class BrowserController {
     }
   }
 
-  // Advance a provider's consent / account-chooser screen by one click
-  // — the scope-gated auto-approve (T7/T13). Returns false when no
+  // Advance a provider's consent / account-chooser screen by one click.
+  // Returns false when no
   // approve control is present — the agent then aborts rather than
   // hang. Clicks only; never types (the critical guarantee holds here).
-  async advanceOAuthConsent(provider: OAuthProviderId): Promise<boolean> {
+  async advanceOAuthConsent(
+    provider: OAuthProviderId,
+    timeoutMs = 8_000,
+    expectedGoogleAccountEmail?: string | null,
+  ): Promise<boolean> {
     if (!this.page) throw new Error("Browser not started");
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    const hasBudget = (): boolean => Date.now() < deadline;
+    const boundedTimeout = (limitMs: number): number =>
+      Math.max(1, Math.min(limitMs, deadline - Date.now()));
+    if (!hasBudget()) return false;
     if (provider === "github") {
       // GitHub App install flow can include an account target chooser before
       // the Install/Authorize screen:
@@ -13163,8 +16741,10 @@ export class BrowserController {
       // consent loop re-classify the next GitHub page.
       if (/\/apps\/[^/]+\/installations\/select_target\b/.test(new URL(this.page.url()).pathname)) {
         const startUrl = this.page.url();
+        if (!hasBudget()) return false;
         const clicked = await this.page
-          .evaluate(() => {
+          .evaluate((expiresAt) => {
+            if (Date.now() >= expiresAt) return false;
             const visible = (el: HTMLElement): boolean => {
               const r = el.getBoundingClientRect();
               const s = window.getComputedStyle(el);
@@ -13195,13 +16775,16 @@ export class BrowserController {
                 return true;
               });
             if (target === undefined) return false;
+            if (Date.now() >= expiresAt) return false;
             target.click();
             return true;
-          })
+          }, deadline)
           .catch(() => false);
         if (clicked) {
           const advanced = await this.page
-            .waitForFunction((s) => window.location.href !== s, startUrl, { timeout: 8000 })
+            .waitForFunction((s) => window.location.href !== s, startUrl, {
+              timeout: boundedTimeout(8_000),
+            })
             .then(() => true)
             .catch(() => false);
           if (advanced) return true;
@@ -13234,7 +16817,7 @@ export class BrowserController {
         // (MEASURED 2026-06-11: defang's "Authorize DefangLabs"). Poll up to
         // 12s for it to enable before clicking.
         {
-          const deadline = Date.now() + 12_000;
+          const deadline = Date.now() + boundedTimeout(12_000);
           while (Date.now() < deadline) {
             const disabled = await btn
               .evaluate((el) => {
@@ -13249,8 +16832,9 @@ export class BrowserController {
             await this.sleep(400);
           }
         }
+        if (!hasBudget()) return false;
         try {
-          await btn.click({ timeout: 8000 });
+          await btn.click({ timeout: boundedTimeout(8_000) });
         } catch {
           continue;
         }
@@ -13259,7 +16843,9 @@ export class BrowserController {
         // click silently failed (wrong element, or button disabled
         // behind a hidden iframe). Return false so the caller knows.
         const advanced = await this.page
-          .waitForFunction((s) => window.location.href !== s, startUrl, { timeout: 4000 })
+          .waitForFunction((s) => window.location.href !== s, startUrl, {
+            timeout: boundedTimeout(4_000),
+          })
           .then(() => true)
           .catch(() => false);
         if (advanced) return true;
@@ -13295,10 +16881,90 @@ export class BrowserController {
     }
     // Google. Account chooser: Google renders each account with a
     // stable data-identifier attribute (the account email).
-    const tile = this.page.locator("[data-identifier]").first();
-    if ((await tile.count().catch(() => 0)) > 0) {
+    const tiles = this.page.locator("[data-identifier]");
+    const expectedEmail = expectedGoogleAccountEmail?.trim().toLowerCase() ?? null;
+    const matchingTileIndexes = await tiles
+      .evaluateAll((elements, expected) => {
+        return elements.flatMap((element, index) => {
+          const html = element as HTMLElement;
+          const rect = html.getBoundingClientRect();
+          const style = window.getComputedStyle(html);
+          const identifier = element.getAttribute("data-identifier")?.trim().toLowerCase();
+          return rect.width >= 2 &&
+            rect.height >= 2 &&
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            identifier !== undefined &&
+            (expected === null || identifier === expected)
+            ? [index]
+            : [];
+        });
+      }, expectedEmail)
+      .catch(() => [] as number[]);
+    // Without account metadata, a sole visible chooser tile is still
+    // unambiguous. Multiple accounts remain intentionally untouched.
+    if (matchingTileIndexes.length === 1) {
+      if (!hasBudget()) return false;
       try {
-        await tile.click({ timeout: 8000 });
+        await tiles.nth(matchingTileIndexes[0]!).click({ timeout: boundedTimeout(1_000) });
+        return true;
+      } catch {
+        // fall through to the approve-button path
+      }
+    }
+    // Google's current account chooser also renders an identity as
+    // an ordinary semantic button/link without data-identifier. Select only a
+    // visible account-shaped row carrying an email address, and exclude only
+    // account-management alternatives. Authentication state is not inferred
+    // from provider-page content; completion remains the OAuth lifecycle signal.
+    // The identity text stays inside the provider page and is never returned.
+    const accountRows = this.page.locator('button, [role="button"], [role="link"], a[href]');
+    const accountRowLabels = await accountRows
+      .evaluateAll((elements) => {
+        const EXCLUDED = /(?:\buse another account|\bremove an account|\bmanage accounts?\b)/i;
+        return elements.map((element, index) => {
+          const html = element as HTMLElement;
+          const rect = html.getBoundingClientRect();
+          const style = window.getComputedStyle(html);
+          if (
+            rect.width < 2 ||
+            rect.height < 2 ||
+            style.display === "none" ||
+            style.visibility === "hidden"
+          ) {
+            return null;
+          }
+          const labels = [
+            element.getAttribute("aria-label") ?? "",
+            element.textContent ?? "",
+            ...Array.from(element.querySelectorAll<HTMLElement>("[aria-label], *")).flatMap(
+              (descendant) => [
+                descendant.getAttribute("aria-label") ?? "",
+                descendant.textContent ?? "",
+              ],
+            ),
+          ]
+            .map((label) => label.replace(/\s+/g, " ").trim())
+            .filter((label) => label.length > 0);
+          return labels.some((label) => EXCLUDED.test(label)) ? null : { index, labels };
+        });
+      })
+      .catch(() => [] as Array<{ index: number; labels: string[] } | null>);
+    const matchingAccountRows =
+      expectedEmail === null
+        ? []
+        : accountRowLabels.filter((candidate) => {
+            if (candidate === null) return false;
+            return candidate.labels.some((label) => {
+              const emails = label.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? [];
+              return emails.some((email) => email.toLowerCase() === expectedEmail);
+            });
+          });
+    const accountRowIndex = matchingAccountRows.length === 1 ? matchingAccountRows[0]!.index : -1;
+    if (accountRowIndex >= 0) {
+      if (!hasBudget()) return false;
+      try {
+        await accountRows.nth(accountRowIndex).click({ timeout: boundedTimeout(1_000) });
         return true;
       } catch {
         // fall through to the approve-button path
@@ -13315,13 +16981,14 @@ export class BrowserController {
     const APPROVE_NAME = /^(?:continue|allow|accept|agree)\b/i;
     const approve = this.page.getByRole("button", { name: APPROVE_NAME }).first();
     try {
-      await approve.waitFor({ state: "visible", timeout: 8000 });
+      await approve.waitFor({ state: "visible", timeout: boundedTimeout(1_000) });
     } catch {
       // not visible within the window — fall through to the DOM-scan path
     }
     if ((await approve.count().catch(() => 0)) > 0) {
+      if (!hasBudget()) return false;
       try {
-        await approve.click({ timeout: 8000 });
+        await approve.click({ timeout: boundedTimeout(1_000) });
         return true;
       } catch {
         // fall through to the DOM-scan fallback
@@ -13332,8 +16999,10 @@ export class BrowserController {
     // <div role>/<span> or an <input type=submit value="Allow access">).
     // Click the first visible candidate whose text is an approve verb and
     // is NOT a cancel/deny/back. Log what was visible on failure.
+    if (!hasBudget()) return false;
     const clicked = await this.page
-      .evaluate(() => {
+      .evaluate((expiresAt) => {
+        if (Date.now() >= expiresAt) return null;
         const APPROVE = /^(?:continue|allow|accept|agree)\b/i;
         const DENY = /\b(?:cancel|deny|back|no\b|not now|reject)\b/i;
         const els = Array.from(
@@ -13346,12 +17015,13 @@ export class BrowserController {
           if (t.length === 0 || t.length > 40) continue;
           if (DENY.test(t)) continue;
           if (APPROVE.test(t)) {
+            if (Date.now() >= expiresAt) return null;
             (el as HTMLElement).click();
             return t.slice(0, 40);
           }
         }
         return null;
-      })
+      }, deadline)
       .catch(() => null);
     if (clicked !== null) return true;
     const seen = await this.page
@@ -13434,54 +17104,6 @@ export class BrowserController {
     }
   }
 
-  // End one sequential task without tearing down Chrome. The original,
-  // handler-bound page survives; OAuth popups and any other incidental tabs are
-  // closed. about:blank replaces the task document while the persistent profile
-  // (cookies, OAuth identity, local profile data) intentionally remains intact.
-  async resetPageForReuse(): Promise<void> {
-    if (!this.profilePoolReusable) throw new Error("browser profile is not pool-reusable");
-    const context = this.context;
-    const primaryPage = this.primaryPage;
-    if (!this.isConnected() || context === null || primaryPage === null || primaryPage.isClosed()) {
-      throw new Error("warm browser page is not reusable");
-    }
-
-    this.page = primaryPage;
-    this.oauthProductPage = null;
-    this.oauthProviderPage = null;
-    this.oauthProviderPageClosed = false;
-    this.oauthNetLog = [];
-    this.mouseX = 100;
-    this.mouseY = 100;
-
-    for (const page of context.pages()) {
-      if (page !== primaryPage && !page.isClosed()) {
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        try {
-          await Promise.race([
-            page.close(),
-            new Promise<never>((_, reject) => {
-              timer = setTimeout(
-                () => reject(new Error("timed out closing warm browser popup")),
-                5_000,
-              );
-              timer.unref();
-            }),
-          ]);
-        } finally {
-          if (timer !== undefined) clearTimeout(timer);
-        }
-      }
-    }
-    if (context.pages().some((page) => page !== primaryPage && !page.isClosed())) {
-      throw new Error("warm browser reset left a non-primary page open");
-    }
-    await primaryPage.goto("about:blank", {
-      waitUntil: "domcontentloaded",
-      timeout: 30_000,
-    });
-  }
-
   async close(options: { cancelStart?: boolean } = {}): Promise<ProfileCloseState> {
     if (options.cancelStart === true) {
       this.startCancellationRequested = true;
@@ -13492,36 +17114,59 @@ export class BrowserController {
     return await this.closePromise;
   }
 
-  private async closeCancelledStart(): Promise<ProfileCloseState> {
-    if (this.persistentFallbackLaunchInFlight) {
-      await this.startPromise?.catch(() => undefined);
-    }
-    if (this.persistentFallbackCancellationState !== null) {
-      const closeState = this.persistentFallbackCancellationState;
-      if (closeState === "closed") {
-        const lease = this.profileOperationLease;
-        this.profileOperationLease = null;
-        lease?.release();
-      }
-      return closeState;
-    }
-    if (!this.startLaunchCommitted) {
-      await this.closeWithProfileGuard();
-      const lease = this.profileOperationLease;
-      this.profileOperationLease = null;
-      lease?.release();
-      return "closed";
-    }
-    const [closeState] = await Promise.all([
-      this.closeWithProfileGuard(),
+  async waitForCancelledStartQuiescence(): Promise<void> {
+    if (!this.startCancellationRequested) return;
+    await Promise.allSettled([
+      this.startPromise ?? Promise.resolve(),
       this.reapCancelledStartProcess(),
     ]);
-    if (this.startSettled) {
-      const lease = this.profileOperationLease;
-      this.profileOperationLease = null;
-      lease?.release();
+    await this.persistentFallbackOwnershipMonitor?.catch(() => undefined);
+  }
+
+  async forceCloseOwnedProcessTree(): Promise<ProfileCloseState> {
+    this.startCancellationRequested = true;
+    this.resolveStartCancellation?.();
+    this.resolveStartCancellation = null;
+    const marker = this.operatorBrowserMarker();
+    if (this.ownerLaunchTracked) markOwnerBrowserLaunchTerminal(marker);
+    const proof = this.ownedChromeProcessTreeProof;
+    const identity = proof?.identity ?? this.currentOwnedProfileIdentity();
+    if (identity !== null) {
+      signalOwnedChromeProcessTree(identity, proof?.processGroup ?? false, "SIGKILL", {
+        ...(proof === null ? {} : { proof }),
+      });
+      reapProfileHolderIfOwned(this.profileDir, identity);
     }
-    return closeState;
+    const closed =
+      identity === null
+        ? this.startSettled && !this.launchedContext
+        : await this.waitForOwnedProfileExit(identity, proof);
+    if (closed && proof !== null) {
+      releaseOwnedChromeProcessTree(proof);
+      const tracked = selfManagedChromes.get(proof.identity.pid);
+      if (tracked?.proof === proof) selfManagedChromes.delete(proof.identity.pid);
+      if (this.ownedChromeProcessTreeProof === proof) this.ownedChromeProcessTreeProof = null;
+    }
+    const markerClosed =
+      !this.ownerLaunchTracked || (await terminateOwnerBrowserLaunch(marker, this.profileDir));
+    if (closed && markerClosed && this.ownerLaunchTracked) {
+      untrackOwnerBrowserLaunch(marker);
+      this.ownerLaunchTracked = false;
+    }
+    await this.teardownOwnedDisplay().catch(() => undefined);
+    return closed && markerClosed ? "closed" : "unknown";
+  }
+
+  private async closeCancelledStart(): Promise<ProfileCloseState> {
+    void this.reapCancelledStartProcess().catch(() => undefined);
+    if (this.persistentFallbackCancellationState !== null) {
+      return this.persistentFallbackCancellationState;
+    }
+    if (!this.startLaunchCommitted) {
+      const closeState = await this.closeBrowser();
+      return this.startSettled ? closeState : "unknown";
+    }
+    return await this.closeBrowser();
   }
 
   private async reapCancelledStartProcess(): Promise<void> {
@@ -13533,38 +17178,114 @@ export class BrowserController {
     while (!this.startSettled) {
       const identity = this.currentOwnedProfileIdentity();
       if (identity !== null) {
-        signalProfileProcess(identity, this.profileDir, "SIGKILL");
+        this.signalCurrentSelfManagedChrome(identity, "SIGKILL");
         reapProfileHolderIfOwned(this.profileDir, identity);
       }
       await new Promise<void>((resolveWait) => {
-        setTimeout(resolveWait, 25);
+        const timer = setTimeout(resolveWait, 25);
+        timer.unref();
       });
     }
   }
 
   private currentOwnedProfileIdentity(): ProfileProcessIdentity | null {
-    const known = this.childChromeIdentity ?? this.launchedProfileHolderIdentity;
+    const known =
+      this.ownedChromeProcessTreeProof?.identity ??
+      this.childChromeIdentity ??
+      this.launchedProfileHolderIdentity;
     if (known !== null) return known;
     const holderPid = currentProfileHolderPid(this.profileDir);
-    return holderPid === null ? null : profileProcessIdentity(holderPid, this.profileDir);
+    if (holderPid === null) return null;
+    const identity = profileProcessIdentity(holderPid, this.profileDir);
+    if (identity === null) return null;
+    if (!this.startCancellationRequested) return identity;
+    return operatorBrowserProcessMatchesMarker(identity.pid, this.operatorBrowserMarker())
+      ? identity
+      : null;
   }
 
   private async waitForPersistentFallbackIdentity(): Promise<PersistentFallbackIdentityProof> {
-    return await resolvePersistentFallbackIdentity({ profileDir: this.profileDir });
+    if (this.ownedChromeProcessTreeProof !== null) {
+      return { state: "owned", identity: this.ownedChromeProcessTreeProof.identity };
+    }
+    const proof = await resolvePersistentFallbackIdentity({ profileDir: this.profileDir });
+    if (
+      proof.state === "owned" &&
+      this.startCancellationRequested &&
+      !operatorBrowserProcessMatchesMarker(proof.identity.pid, this.operatorBrowserMarker())
+    ) {
+      return { state: "unknown" };
+    }
+    if (proof.state === "owned") this.adoptOwnedChromeProcessTree(proof.identity, false);
+    return proof;
   }
 
-  private async waitForOwnedProfileExit(identity: ProfileProcessIdentity): Promise<boolean> {
+  private async requirePersistentFallbackOwnership(
+    cleanupUnproven: () => Promise<void>,
+  ): Promise<ProfileProcessIdentity> {
+    try {
+      const proof = await this.waitForPersistentFallbackIdentity();
+      if (proof.state !== "owned" || this.ownedChromeProcessTreeProof === null) {
+        throw new Error("persistent browser launch identity could not be bound to owner custody");
+      }
+      return proof.identity;
+    } catch (error) {
+      await cleanupUnproven().catch(() => undefined);
+      this.persistentFallbackLaunchInFlight = false;
+      throw error;
+    }
+  }
+
+  private startPersistentFallbackOwnershipMonitor(): void {
+    if (this.persistentFallbackOwnershipMonitor !== null) return;
+    this.persistentFallbackOwnershipMonitor = (async () => {
+      while (this.persistentFallbackLaunchInFlight && this.ownedChromeProcessTreeProof === null) {
+        const holderPid = currentProfileHolderPid(this.profileDir);
+        const identity =
+          holderPid === null ? null : profileProcessIdentity(holderPid, this.profileDir);
+        const controllerOwnsIdentity =
+          identity !== null &&
+          (!this.startCancellationRequested ||
+            operatorBrowserProcessMatchesMarker(identity.pid, this.operatorBrowserMarker()));
+        if (identity !== null && controllerOwnsIdentity) {
+          this.launchedProfileHolderIdentity = identity;
+          try {
+            this.adoptOwnedChromeProcessTree(identity, false);
+          } catch {}
+          return;
+        }
+        await new Promise<void>((resolveWait) => {
+          const timer = setTimeout(resolveWait, PROFILE_IDENTITY_POLL_MS);
+          timer.unref();
+        });
+      }
+    })();
+  }
+
+  private async waitForOwnedProfileExit(
+    identity: ProfileProcessIdentity,
+    existingProof?: OwnedChromeProcessTreeProof | null,
+  ): Promise<boolean> {
     const deadline = Date.now() + PROFILE_IDENTITY_PROOF_TIMEOUT_MS;
-    let state = profileProcessIdentityState(identity, this.profileDir);
+    const proof = existingProof ?? captureOwnedChromeProcessTreeProof(identity, false);
+    let state =
+      proof === null
+        ? profileProcessIdentityState(identity, this.profileDir)
+        : ownedChromeProcessTreeState(proof);
     while (state !== "stale" && Date.now() < deadline) {
-      if (profileProcessMatches(identity, this.profileDir)) {
-        signalProfileProcess(identity, this.profileDir, "SIGKILL");
+      if (proof !== null) {
+        signalOwnedChromeProcessTree(identity, false, "SIGKILL", { proof });
+      } else if (profileProcessMatches(identity, this.profileDir)) {
+        signalOwnedChromeProcessTree(identity, false, "SIGKILL");
       }
       await new Promise<void>((resolveWait) => {
         const timer = setTimeout(resolveWait, PROFILE_IDENTITY_POLL_MS);
         timer.unref();
       });
-      state = profileProcessIdentityState(identity, this.profileDir);
+      state =
+        proof === null
+          ? profileProcessIdentityState(identity, this.profileDir)
+          : ownedChromeProcessTreeState(proof);
     }
     if (state !== "stale") return false;
     reapProfileHolderIfOwned(this.profileDir, identity);
@@ -13576,30 +17297,24 @@ export class BrowserController {
       await Promise.race([this.startPromise.catch(() => undefined), this.startCancellation]);
     }
     if (this.startCancellationRequested) return await this.closeCancelledStart();
-    try {
-      return await this.closeWithProfileGuard();
-    } finally {
-      const lease = this.profileOperationLease;
-      this.profileOperationLease = null;
-      lease?.release();
-    }
+    return await this.closeBrowser();
   }
 
-  private async closeWithProfileGuard(): Promise<ProfileCloseState> {
+  private async closeBrowser(): Promise<ProfileCloseState> {
     if (this.harnessAttachedPage) {
       this.page = null;
       this.primaryPage = null;
       this.oauthProductPage = null;
       this.oauthProviderPage = null;
       this.oauthProviderPageClosed = false;
-      this.oauthNetLog = [];
       this.context = null;
       return "closed";
     }
+    const marker = this.operatorBrowserMarker();
+    if (this.ownerLaunchTracked) markOwnerBrowserLaunchTerminal(marker);
     // Each step is best-effort and independent: a throw closing the page
-    // or context must NOT skip the Xvfb teardown below, or the virtual
-    // display leaks (orphaned Xvfb procs pile up over a long-lived MCP
-    // server and, worse, the un-closed Chrome keeps the profile's
+    // or context must NOT skip the browser reap below, or an un-closed Chrome
+    // keeps the profile's
     // SingletonLock held — bricking the next signup + `mcp login`).
     //
     // EVERY close call is timeout-capped. On a wedged headed Chrome (e.g. a
@@ -13613,54 +17328,84 @@ export class BrowserController {
     const context = this.context;
     const cdpBrowser = this.cdpBrowser;
     const childIdentity = this.childChromeIdentity;
+    const childChromeProcessGroup = this.childChromeProcessGroup;
     const holderIdentity = this.launchedProfileHolderIdentity ?? this.currentOwnedProfileIdentity();
-    const identity = childIdentity ?? holderIdentity;
+    const identity = this.ownedChromeProcessTreeProof?.identity ?? childIdentity ?? holderIdentity;
+    const treeProof =
+      identity === null
+        ? null
+        : (this.ownedChromeProcessTreeProof ??
+          this.adoptOwnedChromeProcessTree(
+            identity,
+            childIdentity !== null ? childChromeProcessGroup : false,
+          ));
     this.page = null;
     this.primaryPage = null;
     this.oauthProductPage = null;
     this.oauthProviderPage = null;
     this.oauthProviderPageClosed = false;
-    this.oauthNetLog = [];
     this.context = null;
     this.cdpBrowser = null;
     this.childChrome = null;
     this.childChromeIdentity = null;
+    this.childChromeProcessGroup = false;
     this.launchedContext = false;
     this.launchedProfileHolderIdentity = null;
     const closeState = await closeProfileWithProof({
       profileDir: this.profileDir,
       identity,
       close: async () => {
-        if (page !== null) await page.close();
-        if (context !== null) await context.close();
-        if (cdpBrowser !== null) await cdpBrowser.close();
-        if (childIdentity !== null) {
-          signalProfileProcess(childIdentity, this.profileDir, "SIGTERM");
+        if (identity !== null) {
+          signalOwnedChromeProcessTree(
+            identity,
+            treeProof?.processGroup ?? (childIdentity !== null ? childChromeProcessGroup : false),
+            "SIGTERM",
+            { ...(treeProof === null ? {} : { proof: treeProof }) },
+          );
         }
+        // A process-tree SIGTERM can close the CDP target before Playwright
+        // observes it. That is successful teardown, not a reason to skip the
+        // proof/reap path or retain a cleanly closed ephemeral profile.
+        if (page !== null) await page.close().catch(() => undefined);
+        if (context !== null) await context.close().catch(() => undefined);
+        if (cdpBrowser !== null) await cdpBrowser.close().catch(() => undefined);
       },
       forceClose: () => {
-        if (identity !== null) signalProfileProcess(identity, this.profileDir, "SIGKILL");
+        if (identity !== null) {
+          signalOwnedChromeProcessTree(
+            identity,
+            treeProof?.processGroup ?? (childIdentity !== null ? childChromeProcessGroup : false),
+            "SIGKILL",
+            { ...(treeProof === null ? {} : { proof: treeProof }) },
+          );
+        }
         reapProfileHolderIfOwned(this.profileDir, identity);
       },
+      ...(treeProof === null
+        ? {}
+        : { identityState: () => ownedChromeProcessTreeState(treeProof) }),
     });
     // Self-launch path: disconnect the CDP browser and SIGKILL the Chrome we
     // spawned. context.close() on a connectOverCDP context only disconnects —
     // it does NOT necessarily exit the browser process, which would leak the
     // SingletonLock and brick the next run (the reap below is the backstop, but
     // killing our own child directly is cleaner and faster).
-    if (childIdentity !== null) selfManagedChromes.delete(childIdentity.pid);
-    // F13 — release the on-demand Xvfb if we spawned one. Order
-    // matters: kill Chrome (context.close) first so it has its
-    // display until it exits, THEN kill Xvfb.
-    if (this.xvfb !== null) {
-      try {
-        this.xvfb.stop();
-      } catch {
-        /* best-effort */
+    if (treeProof !== null && ownedChromeProcessTreeState(treeProof) === "stale") {
+      releaseOwnedChromeProcessTree(treeProof);
+      const tracked = selfManagedChromes.get(treeProof.identity.pid);
+      if (tracked?.proof === treeProof) selfManagedChromes.delete(treeProof.identity.pid);
+      if (this.ownedChromeProcessTreeProof === treeProof) {
+        this.ownedChromeProcessTreeProof = null;
       }
-      this.xvfb = null;
     }
-    return closeState;
+    const markerClosed =
+      !this.ownerLaunchTracked || (await terminateOwnerBrowserLaunch(marker, this.profileDir));
+    if (markerClosed && this.ownerLaunchTracked) {
+      untrackOwnerBrowserLaunch(marker);
+      this.ownerLaunchTracked = false;
+    }
+    await this.teardownOwnedDisplay().catch(() => undefined);
+    return closeState === "closed" && !markerClosed ? "force_closed_unproven" : closeState;
   }
 }
 
@@ -13904,15 +17649,22 @@ export interface ProxySettings {
   password?: string;
 }
 
-// Parse a UNIVERSAL_BOT_PROXY_URL — e.g. "http://user:pass@host:8080" or
+export function proxyHasCredentials(proxy: ProxySettings | null): boolean {
+  return (
+    proxy !== null &&
+    ((typeof proxy.username === "string" && proxy.username.length > 0) ||
+      (typeof proxy.password === "string" && proxy.password.length > 0))
+  );
+}
+
+// Parse a per-session proxy URL — e.g. "http://user:pass@host:8080" or
 // "socks5://host:1080" — into Playwright's proxy option shape. Playwright
 // wants credentials separate from `server`, so we split them out and
 // percent-decode them (residential providers embed session IDs with
 // reserved characters in the username, which arrive %-encoded).
 //
 // Throws on a URL the WHATWG parser rejects, or one with no host (a bare
-// "host:port" parses as a scheme with an empty host) — the caller logs
-// and falls back to a direct connection.
+// "host:port" parses as a scheme with an empty host).
 //
 // Exported for unit testing — URL parsing is the error-prone bit.
 // Cheap TCP liveness probe for a proxy `server` string ("socks5://host:port").
@@ -13925,7 +17677,7 @@ export async function isProxyReachable(server: string, timeoutMs = 4000): Promis
   try {
     const u = new URL(server);
     host = u.hostname;
-    port = Number(u.port) || (u.protocol.startsWith("socks") ? 1080 : 8080);
+    port = Number(u.port) || proxyDefaultPort(u.protocol);
   } catch {
     return false;
   }
@@ -13951,10 +17703,17 @@ export async function isProxyReachable(server: string, timeoutMs = 4000): Promis
   });
 }
 
+export function proxyDefaultPort(protocol: string): number {
+  if (protocol === "http:") return 80;
+  if (protocol === "https:") return 443;
+  if (protocol.startsWith("socks")) return 1080;
+  return 8080;
+}
+
 export function parseProxyUrl(raw: string): ProxySettings {
   const u = new URL(raw.trim());
   if (u.hostname.length === 0) {
-    throw new Error(`proxy URL has no host: "${raw}" (expected e.g. http://host:port)`);
+    throw new Error("proxy URL has no host");
   }
   // `host` includes the port; `protocol` keeps its trailing ":".
   const settings: ProxySettings = { server: `${u.protocol}//${u.host}` };
@@ -13963,14 +17722,37 @@ export function parseProxyUrl(raw: string): ProxySettings {
   return settings;
 }
 
-// Should this run route through the configured proxy? True when the
-// egress network is datacenter-class (the case the proxy exists for) or
-// when the operator forced it on. Residential/unknown without the
-// override stay direct — the ~80% who don't need it pay nothing.
-//
-// Exported for unit testing.
-export function shouldRouteThroughProxy(asnClass: AsnClass, forceAlways: boolean): boolean {
-  return forceAlways || asnClass === "datacenter";
+/** Resolve an explicit session proxy, refusing an unsafe direct fallback. */
+export async function resolveExplicitProxy(
+  raw: string,
+  probe: (server: string) => Promise<boolean> = isProxyReachable,
+): Promise<ProxySettings> {
+  let proxy: ProxySettings;
+  try {
+    proxy = parseProxyUrl(raw);
+  } catch (err) {
+    throw new Error(
+      `explicit session proxy is malformed; refusing direct egress: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+  if (!(await probe(proxy.server))) {
+    throw new Error(
+      `explicit session proxy ${proxy.server} is unreachable; refusing direct egress`,
+    );
+  }
+  return proxy;
+}
+
+/** Self-launched Chrome cannot authenticate an HTTP/SOCKS proxy. */
+export function canSelfLaunchWithProxy(proxy: ProxySettings | null): boolean {
+  return !proxyHasCredentials(proxy);
+}
+
+/** Options passed to launchPersistentContext, including proxy credentials. */
+export function persistentProxyOptions(proxy: ProxySettings | null): { proxy?: ProxySettings } {
+  return proxy === null ? {} : { proxy };
 }
 
 // ───────────── egress geo match (T3.1) ─────────────
@@ -14049,6 +17831,8 @@ export interface InteractiveElement {
   inViewport: boolean;
   inConsentWidget: boolean;
   sealed?: boolean;
+  sealedIdentityKeys?: string[];
+  sealedOrdinal?: number;
   // T13 follow-up — OAuth-affordance signals. `href` is the link
   // target (an OAuth <a> points at e.g. /identity/login/google/);
   // `iconLabel` folds in a descendant <img alt> / <svg><title> /
@@ -14099,6 +17883,10 @@ export interface InteractiveElement {
   // Null for everything else. Use this (not `value`) to identify
   // unticked checkboxes — checkbox `value` is the static attribute.
   checked?: boolean | null;
+  /** Native or ARIA disabled state captured with the interactive DOM record. */
+  disabled?: boolean | null;
+  /** Native or ARIA required state captured with the interactive DOM record. */
+  required?: boolean | null;
   // <select>-only: the visible text of the currently-selected option
   // and a short list of available option labels (capped to 8 — long
   // pickers like countries blow the inventory rendering). Lets the
@@ -14121,6 +17909,10 @@ export interface InteractiveElement {
   // element is actually reachable at its center point.
   screenPath?: string | null;
   container?: string | null;
+  // Dedicated dialog-role/aria-modal ancestry via composed tree (pierces open shadows).
+  inDialog?: boolean;
+  containerId?: number | null;
+  formId?: number | null;
   topmost?: boolean | null;
   occludedBy?: string | null;
   // T38 — card-radio cluster membership. Set on elements that are

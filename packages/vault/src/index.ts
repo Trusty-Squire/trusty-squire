@@ -12,10 +12,13 @@ export type {
 } from "./types.js";
 
 export { VAULT_AUDIT_TYPES } from "./types.js";
+export { CredentialSlotConflictError } from "./types.js";
 
 export {
   CredentialVault,
   coerceFieldMap,
+  normalizeCredentialHosts,
+  normalizeCredentialLabel,
   CredentialNotFoundError,
   FieldExistsError,
   StaleAssertionError,
@@ -23,6 +26,7 @@ export {
   AllowlistViolationError,
   RestoreConflictError,
   DEFAULT_LABEL,
+  MAX_CREDENTIAL_LABEL_LENGTH,
   type CredentialVaultDeps,
   type VaultEntry,
   type VaultStoreInput,

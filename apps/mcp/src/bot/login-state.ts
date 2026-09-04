@@ -4,15 +4,24 @@
 // expensive provider round-trip — which providers it can auto-prefer
 // for OAuth-first signup.
 
-import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
   CHROME_PROFILE_DIR,
+  currentProfileHolderPid,
   launchWithProfileGate,
+  profileProcessIdentity,
   ProfileBusyError,
   withProfileOperationGuard,
 } from "./profile.js";
-import { isOAuthProviderId, type OAuthProviderId } from "./oauth-providers.js";
+import { type OAuthProviderId } from "./oauth-providers.js";
+import { closeBrowserContextWithin, registerLocalBrowserLaunch } from "./browser.js";
+import {
+  bindOwnerBrowserLaunch,
+  markOwnerBrowserLaunchTerminal,
+  terminateOwnerBrowserLaunch,
+  untrackOwnerBrowserLaunch,
+} from "./owner-process-reaper.js";
 
 interface ProviderCookieContext {
   cookies(): Promise<Array<{ name: string; domain: string; path: string }>>;
@@ -45,119 +54,6 @@ export async function clearProviderCookiesFromContext(
   return !(await context.cookies()).some((cookie) => belongs(cookie.domain));
 }
 
-function markerPath(profileDir: string): string {
-  return join(profileDir, "logged-in-providers.json");
-}
-
-// PR3 signin-vault: the email of the account logged into the profile, per
-// provider, captured AT LOGIN (the one moment it's certain). The operator fills
-// this as the signup email so accounts are user-owned, and it is the SAME
-// account whose inbox awaitVerification reads (browser-sourced → fill-email and
-// read-inbox are consistent by construction). Separate file so the provider
-// array format above is unchanged.
-function emailMarkerPath(profileDir: string): string {
-  return join(profileDir, "provider-emails.json");
-}
-
-// The captured email for `provider`, or null. Best-effort; never throws.
-export function loggedInEmail(
-  provider: OAuthProviderId,
-  profileDir: string = CHROME_PROFILE_DIR,
-): string | null {
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(emailMarkerPath(profileDir), "utf8"));
-    if (parsed === null || typeof parsed !== "object") return null;
-    const v = (parsed as Record<string, unknown>)[provider];
-    return typeof v === "string" && v.length > 0 ? v : null;
-  } catch {
-    return null;
-  }
-}
-
-// Record the logged-in email for `provider`. Idempotent overwrite. Best-effort.
-export function recordProviderEmail(
-  provider: OAuthProviderId,
-  email: string,
-  profileDir: string = CHROME_PROFILE_DIR,
-): void {
-  if (email.length === 0) return;
-  try {
-    let current: Record<string, unknown> = {};
-    try {
-      const parsed: unknown = JSON.parse(readFileSync(emailMarkerPath(profileDir), "utf8"));
-      if (parsed !== null && typeof parsed === "object")
-        current = parsed as Record<string, unknown>;
-    } catch {
-      /* no marker yet */
-    }
-    current[provider] = email;
-    mkdirSync(profileDir, { recursive: true });
-    writeFileSync(emailMarkerPath(profileDir), JSON.stringify(current), "utf8");
-  } catch {
-    /* best-effort — provision can still proceed, just without a pre-known email */
-  }
-}
-
-// Providers with a confirmed session in the profile. Best-effort: a
-// missing or malformed marker yields []. Never throws.
-export function loggedInProviders(profileDir: string = CHROME_PROFILE_DIR): OAuthProviderId[] {
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(markerPath(profileDir), "utf8"));
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (v): v is OAuthProviderId => typeof v === "string" && isOAuthProviderId(v),
-    );
-  } catch {
-    return [];
-  }
-}
-
-// Record that `provider` has a confirmed session. Idempotent. Best-
-// effort: a write failure is swallowed — the bot still works, it just
-// won't auto-prefer this provider until the next successful login.
-export function markProviderLoggedIn(
-  provider: OAuthProviderId,
-  profileDir: string = CHROME_PROFILE_DIR,
-): void {
-  try {
-    const providers = new Set(loggedInProviders(profileDir));
-    if (providers.has(provider)) return;
-    providers.add(provider);
-    mkdirSync(profileDir, { recursive: true });
-    writeFileSync(markerPath(profileDir), JSON.stringify([...providers]), "utf8");
-  } catch {
-    /* best-effort — auto-prefer just won't kick in for this provider */
-  }
-}
-
-// Drop `provider` from the confirmed-session marker. Called when an
-// OAuth flow aborted with needs_login — the previously-recorded
-// session is no longer usable. Next signup then falls back to
-// form-fill instead of optimistically retrying OAuth and failing the
-// same way. Idempotent + best-effort.
-export function clearProviderLoggedIn(
-  provider: OAuthProviderId,
-  profileDir: string = CHROME_PROFILE_DIR,
-): void {
-  try {
-    const providers = loggedInProviders(profileDir).filter((p) => p !== provider);
-    writeFileSync(markerPath(profileDir), JSON.stringify(providers), "utf8");
-  } catch {
-    /* best-effort */
-  }
-}
-
-// Wipe the marker entirely. Used by `connect --force-relogin` so the
-// step-2/2 prompt reflects THIS run's actual cookie state instead of
-// silently relying on the union of every prior session. Best-effort.
-export function clearAllProviderMarkers(profileDir: string = CHROME_PROFILE_DIR): void {
-  try {
-    writeFileSync(markerPath(profileDir), JSON.stringify([]), "utf8");
-  } catch {
-    /* best-effort */
-  }
-}
-
 // Wipe Google + GitHub cookies through a short-lived Chrome context. This uses
 // Chrome's own cookie API, so it works on every supported Node version and can
 // verify the targeted rows are actually gone before the plain, non-CDP OAuth
@@ -165,27 +61,80 @@ export function clearAllProviderMarkers(profileDir: string = CHROME_PROFILE_DIR)
 export async function clearProviderCookies(
   profileDir: string = CHROME_PROFILE_DIR,
   provider?: OAuthProviderId,
+  runtime: {
+    loadChromium?: () => Promise<{
+      launchPersistentContext(
+        profileDir: string,
+        options: Record<string, unknown>,
+      ): Promise<ProviderCookieContext>;
+    }>;
+    registerLaunch?: typeof registerLocalBrowserLaunch;
+    markTerminal?: typeof markOwnerBrowserLaunchTerminal;
+    terminate?: typeof terminateOwnerBrowserLaunch;
+    untrack?: typeof untrackOwnerBrowserLaunch;
+    bindLaunch?: (marker: string, profileDir: string) => boolean;
+    closeTimeoutMs?: number;
+  } = {},
 ): Promise<boolean> {
   return await withProfileOperationGuard(profileDir, async () => {
     let context: ProviderCookieContext | null = null;
+    let ownership: { marker: string; env: NodeJS.ProcessEnv } | null = null;
+    let cleared = false;
+    let lifecycleClosed = true;
     try {
-      const { chromium } = await import("patchright");
+      const chromium = (await runtime.loadChromium?.()) ?? (await import("patchright")).chromium;
       context = await launchWithProfileGate(
         profileDir,
-        () =>
-          chromium.launchPersistentContext(profileDir, {
+        () => {
+          ownership = (runtime.registerLaunch ?? registerLocalBrowserLaunch)(profileDir);
+          return chromium.launchPersistentContext(profileDir, {
             channel: "chrome",
             headless: true,
-          }),
+            env: ownership.env,
+          });
+        },
         { failFast: true },
       );
-      return await clearProviderCookiesFromContext(context, provider);
+      const registeredOwnership = ownership as {
+        marker: string;
+        env: NodeJS.ProcessEnv;
+      } | null;
+      const bindLaunch =
+        runtime.bindLaunch ??
+        ((marker: string, ownedProfileDir: string): boolean => {
+          if (process.platform !== "linux") return true;
+          const holderPid = currentProfileHolderPid(ownedProfileDir);
+          const identity =
+            holderPid === null ? null : profileProcessIdentity(holderPid, ownedProfileDir);
+          return identity !== null && bindOwnerBrowserLaunch(marker, identity);
+        });
+      if (registeredOwnership === null || !bindLaunch(registeredOwnership.marker, profileDir)) {
+        throw new Error("cookie-clear browser identity could not be bound to owner custody");
+      }
+      cleared = await clearProviderCookiesFromContext(context, provider);
+      if (!cleared) return false;
     } catch (err) {
       if (err instanceof ProfileBusyError) throw err;
-      return false;
+      cleared = false;
     } finally {
-      await context?.close().catch(() => undefined);
+      const registeredOwnership = ownership as {
+        marker: string;
+        env: NodeJS.ProcessEnv;
+      } | null;
+      if (registeredOwnership === null) {
+        if (context !== null) await closeBrowserContextWithin(context, runtime.closeTimeoutMs);
+      } else {
+        const marker = registeredOwnership.marker;
+        (runtime.markTerminal ?? markOwnerBrowserLaunchTerminal)(marker);
+        if (context !== null) await closeBrowserContextWithin(context, runtime.closeTimeoutMs);
+        lifecycleClosed = await (runtime.terminate ?? terminateOwnerBrowserLaunch)(
+          marker,
+          profileDir,
+        ).catch(() => false);
+        if (lifecycleClosed) (runtime.untrack ?? untrackOwnerBrowserLaunch)(marker);
+      }
     }
+    return cleared && lifecycleClosed;
   });
 }
 

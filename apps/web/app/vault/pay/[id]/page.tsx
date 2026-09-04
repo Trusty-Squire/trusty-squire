@@ -7,11 +7,14 @@ import { sealToRecipient } from "@trusty-squire/vault/hpke";
 import { AppShell } from "../../../components/AppShell";
 import { CardEntry } from "../../../components/CardEntry";
 import { ApiError, apiGet, apiPost } from "../../../lib/api";
+import { formatCardIdentity } from "../../../lib/wallet";
 import { getPairingState, isPaymentPasskeyUnavailable, pairDevice } from "../../../lib/pairing";
 import { getVouchflow } from "../../../lib/vouchflow";
 
 interface CeremonyCard {
   blob: string;
+  label: string;
+  last4: string | null;
 }
 
 interface CardDetails {
@@ -94,6 +97,10 @@ export default function PaymentApprovalPage() {
   const [busy, setBusy] = useState(false);
   const [binding, setBinding] = useState(false);
   const [savedCardId, setSavedCardId] = useState<string | null>(null);
+  const [savedCardMeta, setSavedCardMeta] = useState<{
+    label: string;
+    last4: string | null;
+  } | null>(null);
   const [cardMetadataError, setCardMetadataError] = useState<string | null>(null);
   const [needsPasskeySetup, setNeedsPasskeySetup] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -121,12 +128,9 @@ export default function PaymentApprovalPage() {
   useEffect(() => {
     let cancelled = false;
     void fetchCeremony()
-      .then(async (current) => {
+      .then((current) => {
         if (cancelled) return;
         applyCeremony(current);
-        // A card-less approval is the enrollment fallback, not the hot path.
-        // It still needs OAuth because creating and binding a card mutates the vault.
-        if (current.card_ref === null) await apiGet("/v1/vault/e2e");
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -153,8 +157,9 @@ export default function PaymentApprovalPage() {
   }, [applyCeremony, fetchCeremony]);
 
   const bindCard = useCallback(
-    async (cardId: string) => {
+    async (cardId: string, cardMeta?: { label: string; last4: string | null }) => {
       setSavedCardId(cardId);
+      if (cardMeta !== undefined) setSavedCardMeta(cardMeta);
       setBinding(true);
       setError(null);
       try {
@@ -272,6 +277,21 @@ export default function PaymentApprovalPage() {
     }
   }, [ceremony, id]);
 
+  const denyApproval = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await apiPost(`/v1/pay/approvals/${encodeURIComponent(id)}/deny`, {});
+      setCeremony((current) => (current === null ? null : { ...current, status: "denied" }));
+      setApproval((current) => (current === null ? null : { ...current, status: "denied" }));
+      setSubmitted(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to deny payment approval.");
+    } finally {
+      setBusy(false);
+    }
+  }, [id]);
+
   const setUpPasskey = useCallback(async () => {
     setBusy(true);
     setError(null);
@@ -294,9 +314,11 @@ export default function PaymentApprovalPage() {
   const terminalMessage =
     currentStatus === "approved"
       ? "Approved — you can return to your session."
-      : currentStatus === "expired"
-        ? "This payment approval has expired."
-        : "This payment is no longer pending.";
+      : currentStatus === "denied"
+        ? "Payment denied — you can return to your session."
+        : currentStatus === "expired"
+          ? "This payment approval has expired."
+          : "This payment is no longer pending.";
   const isJitOrigin = jitOrigin === true;
   const jitBindingMismatch =
     isJitOrigin &&
@@ -308,10 +330,11 @@ export default function PaymentApprovalPage() {
   const needsCard = ceremony?.status === "pending" && ceremony.card_ref === null;
   const amountLabel =
     approval !== null ? formatAmount(approval.amount_cents, approval.currency) : "";
-  const cardLine =
-    approval?.card?.last4 != null
-      ? `${approval.card.brand !== null ? `${approval.card.brand} ` : ""}··${approval.card.last4}`
-      : "your saved card";
+  const boundCard =
+    ceremony?.card_ref == null
+      ? null
+      : (ceremony.card ?? (ceremony.card_ref === savedCardId ? savedCardMeta : null));
+  const cardLine = boundCard === null ? "this payment's card" : formatCardIdentity(boundCard);
 
   return (
     <AppShell anonymous>
@@ -354,7 +377,9 @@ export default function PaymentApprovalPage() {
               </button>
             </div>
           ) : (
-            <CardEntry onSaved={({ id: cardId }) => void bindCard(cardId)} />
+            <CardEntry
+              onSaved={({ id: cardId, label, last4 }) => void bindCard(cardId, { label, last4 })}
+            />
           )}
         </section>
       )}
@@ -395,36 +420,48 @@ export default function PaymentApprovalPage() {
           <p className="pay-anchor">
             Pay with <span className="mono">{cardLine}</span> · {amountLabel} to {approval.merchant}
           </p>
-          {jitReviewBlocked ? (
-            <div className="app-banner err">
-              {jitBindingMismatch
-                ? "This payment was attached to a different card than the one you added."
-                : (cardMetadataError ?? "We couldn't load the saved card for this payment.")}
-              {!jitBindingMismatch && (
-                <button className="linkbtn" type="button" onClick={() => void refreshCeremony()}>
-                  Retry
-                </button>
-              )}
+          <div style={{ display: "grid", gap: "10px" }}>
+            {jitReviewBlocked ? (
+              <div className="app-banner err">
+                {jitBindingMismatch
+                  ? "This payment was attached to a different card than the one you added."
+                  : (cardMetadataError ?? "We couldn't load the saved card for this payment.")}
+                {!jitBindingMismatch && (
+                  <button className="linkbtn" type="button" onClick={() => void refreshCeremony()}>
+                    Retry
+                  </button>
+                )}
+              </div>
+            ) : needsPasskeySetup ? (
+              <button
+                className="btn-primary"
+                type="button"
+                onClick={() => void setUpPasskey()}
+                disabled={busy}
+              >
+                {busy ? "Setting up…" : "Sign in and set up passkey"}
+              </button>
+            ) : (
+              <button
+                className="btn-primary"
+                type="button"
+                onClick={() => void prepareApproval()}
+                disabled={busy}
+              >
+                {busy ? "Working…" : "Approve payment"}
+              </button>
+            )}
+            <div>
+              <button
+                className="btn-secondary"
+                type="button"
+                onClick={() => void denyApproval()}
+                disabled={busy}
+              >
+                Deny payment
+              </button>
             </div>
-          ) : needsPasskeySetup ? (
-            <button
-              className="btn-primary"
-              type="button"
-              onClick={() => void setUpPasskey()}
-              disabled={busy}
-            >
-              {busy ? "Setting up…" : "Sign in and set up passkey"}
-            </button>
-          ) : (
-            <button
-              className="btn-primary"
-              type="button"
-              onClick={() => void prepareApproval()}
-              disabled={busy}
-            >
-              {busy ? "Approving…" : "Approve payment"}
-            </button>
-          )}
+          </div>
         </section>
       )}
     </AppShell>

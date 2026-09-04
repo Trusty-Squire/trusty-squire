@@ -57,9 +57,8 @@ async function dispatch(): Promise<number> {
 dispatch()
   .then((code) => {
     // The install/login/logout CLI commands DO return — and we force
-    // an exit afterwards: the headless install rig spawns several
-    // long-running processes (Xvfb, x11vnc, websockify, cloudflared,
-    // Chrome), and even after teardown SIGTERMs them, Node's event
+    // an exit afterwards: Chrome can keep Node's event loop alive briefly
+    // after teardown, and Node's event
     // loop can stay alive a beat longer waiting for the kernel to
     // actually reap them. Without this exit the CLI appears to hang
     // after printing "You're done."

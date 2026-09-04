@@ -50,7 +50,7 @@ describe("payment approval relay", () => {
       sessionSecret: SESSION_SECRET,
       now: () => new Date(nowMs),
     });
-    server = await buildServer({ deps });
+    server = await buildServer({ deps, vouchVerifier: async () => ({}) });
     const account = await deps.accountStore.createAccount("payer@example.test", "Payer");
     const other = await deps.accountStore.createAccount("other@example.test", "Other");
     agentToken = await makeAgentToken(deps, account.id, new Date(nowMs));
@@ -232,7 +232,7 @@ describe("payment approval relay", () => {
   it("creates a pending approval and returns it", async () => {
     const created = await createApproval();
     expect(created.nonce).toMatch(/^[A-Za-z0-9_-]{22}$/);
-    expect(created.agent).toBe("Hermes");
+    expect(created.agent).toBe("synthetic-payment-test-agent");
     expect(created.expires_at).toBe("2026-07-23T12:10:00.000Z");
 
     const response = await server.inject({
@@ -253,14 +253,14 @@ describe("payment approval relay", () => {
       operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
       item: "Synthetic Book",
       reason: "Synthetic test purchase",
-      agent: "Hermes",
+      agent: "synthetic-payment-test-agent",
       jws: null,
       sealed_card: null,
       expires_at: created.expires_at,
     });
   });
 
-  it("discloses server-record payment details but never card data before authorization", async () => {
+  it("discloses bound-card display metadata but no plaintext card fields before authorization", async () => {
     const cardId = await createOwnedCard(webCookie);
     const created = await createApproval(cardId);
     const response = await server.inject({
@@ -281,7 +281,14 @@ describe("payment approval relay", () => {
       operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
       approval_payload_sha256: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
     });
-    expect(JSON.stringify(response.json())).not.toContain("4242");
+    expect(response.json().card).toEqual({
+      blob: '{ "ciphertext": "synthetic-sealed-card" }',
+      label: "Synthetic Visa",
+      last4: "4242",
+    });
+    expect(response.json().card).not.toHaveProperty("pan");
+    expect(response.json().card).not.toHaveProperty("expiry");
+    expect(response.json().card).not.toHaveProperty("cvv");
   });
 
   it("rejects legacy review-bound submissions as a stale payment client", async () => {
@@ -318,7 +325,7 @@ describe("payment approval relay", () => {
     });
   });
 
-  it("stores item/reason and the MCP client requester header", async () => {
+  it("stores item/reason and ignores a forged requester header", async () => {
     const response = await server.inject({
       method: "POST",
       url: "/v1/pay/approvals",
@@ -340,7 +347,7 @@ describe("payment approval relay", () => {
     });
     expect(response.statusCode).toBe(201);
     const created = response.json() as { id: string; agent: string };
-    expect(created.agent).toBe("synthetic-shopping-agent");
+    expect(created.agent).toBe("synthetic-payment-test-agent");
 
     const get = await server.inject({
       method: "GET",
@@ -351,7 +358,7 @@ describe("payment approval relay", () => {
     expect(get.json()).toMatchObject({
       item: "Synthetic Widget",
       reason: "Restocking synthetic inventory",
-      agent: "synthetic-shopping-agent",
+      agent: "synthetic-payment-test-agent",
     });
   });
 
@@ -533,6 +540,111 @@ describe("payment approval relay", () => {
     });
   });
 
+  it("marks only a previously accepted relay candidate for bounded expiry handling", async () => {
+    await server.close();
+    const verifier = vi.fn(async () => ({}));
+    server = await buildServer({ deps, vouchVerifier: verifier });
+    const created = await createApproval();
+    const submission = makeSubmission(created);
+
+    const relayed = await relaySubmission(created.id, submission);
+    expect(relayed.approvalStatus).toBe(202);
+    expect(verifier).toHaveBeenNthCalledWith(
+      1,
+      expect.not.objectContaining({ previouslyVerifiedRelay: true }),
+    );
+
+    const confirm = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: submission,
+    });
+    expect(confirm.statusCode).toBe(200);
+    expect(verifier).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ previouslyVerifiedRelay: true }),
+    );
+  });
+
+  it("refuses confirmation when approval expires during vouch verification", async () => {
+    const created = await createApproval();
+    const submission = makeSubmission(created);
+    await relaySubmission(created.id, submission);
+    nowMs = Date.parse(created.expires_at) - 1;
+    await server.close();
+    server = await buildServer({
+      deps,
+      vouchVerifier: async () => {
+        nowMs += 2;
+        return {};
+      },
+    });
+
+    const confirm = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: submission,
+    });
+    expect(confirm.statusCode).toBe(409);
+    expect(confirm.json()).toEqual({ error: "payment_approval_candidate_changed" });
+    expect((await deps.pendingPaymentApprovalStore.getById(created.id))?.status).toBe("pending");
+  });
+
+  it("returns terminal denial when denial wins confirmation", async () => {
+    const created = await createApproval();
+    const submission = makeSubmission(created);
+    await relaySubmission(created.id, submission);
+    await server.close();
+    server = await buildServer({
+      deps,
+      vouchVerifier: async () => {
+        await deps.pendingPaymentApprovalStore.deny(created.id, new Date(nowMs));
+        return {};
+      },
+    });
+
+    const confirm = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: submission,
+    });
+
+    expect(confirm.statusCode).toBe(409);
+    expect(confirm.json()).toEqual({ error: "payment_approval_denied" });
+    expect((await deps.pendingPaymentApprovalStore.getById(created.id))?.status).toBe("denied");
+  });
+
+  it("rejects an expired approved relay before vouch verification", async () => {
+    await server.close();
+    const verifier = vi.fn(async () => ({}));
+    server = await buildServer({ deps, vouchVerifier: verifier });
+    const created = await createApproval();
+    const submission = makeSubmission(created);
+    await relaySubmission(created.id, submission);
+    const confirmed = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: submission,
+    });
+    expect(confirmed.statusCode).toBe(200);
+    expect(verifier).toHaveBeenCalledTimes(2);
+    nowMs = Date.parse(created.expires_at) + 1;
+
+    const expired = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: submission,
+    });
+    expect(expired.statusCode).toBe(409);
+    expect(expired.json()).toEqual({ error: "payment_approval_expired" });
+    expect(verifier).toHaveBeenCalledTimes(2);
+  });
+
   it.each(["review", "approval"] as const)(
     "peeks at an in-flight %s candidate without consuming delivery state",
     async (binding) => {
@@ -546,7 +658,7 @@ describe("payment approval relay", () => {
               approval_payload_sha256: createHash("sha256")
                 .update(
                   JSON.stringify({
-                    agent: "Hermes",
+                    agent: "synthetic-payment-test-agent",
                     amount_cents: 2599,
                     approval_id: created.id,
                     card_ref: "card_synthetic_1",
@@ -725,6 +837,30 @@ describe("payment approval relay", () => {
     expect(approve.json()).toEqual({ error: "payment_approval_expired" });
   });
 
+  it("returns a denial committed at the approval wait deadline", async () => {
+    const created = await createApproval();
+    const peek = vi
+      .spyOn(deps.pendingPaymentApprovalStore, "peekRelayCandidateForAccount")
+      .mockImplementationOnce(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        await deps.pendingPaymentApprovalStore.deny(created.id, new Date(nowMs));
+        return null;
+      });
+
+    try {
+      const status = await server.inject({
+        method: "GET",
+        url: `/v1/pay/approvals/${created.id}?wait_for_submission=1&peek_submission=1&wait_ms=1`,
+        headers: { authorization: `Bearer ${agentToken}` },
+      });
+
+      expect(status.statusCode).toBe(200);
+      expect(status.json()).toMatchObject({ status: "denied", jws: null, sealed_card: null });
+    } finally {
+      peek.mockRestore();
+    }
+  });
+
   it("pushes to Telegram on create when the account has a linked chat", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal("fetch", fetchMock);
@@ -741,6 +877,49 @@ describe("payment approval relay", () => {
     expect(body.chat_id).toBe("555000111");
     expect(body.text).toContain("USD 25.99");
     expect(body.text).toContain(`/vault/pay/${created.id}`);
+  });
+
+  it("uses truthful generic card copy for a cardless Telegram approval", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "synthetic-bot-token");
+    const account = await deps.accountStore.findAccountByEmail("payer@example.test");
+    await deps.accountStore.setTelegramChatId(account!.id, "555000111");
+
+    const created = await createCardlessApproval();
+
+    const approvalCall = fetchMock.mock.calls.find(([, init]) =>
+      ((init as RequestInit).body?.toString() ?? "").includes(`/vault/pay/${created.id}`),
+    );
+    const body = JSON.parse((approvalCall![1] as RequestInit).body as string);
+    expect(body.text).toContain("A card will be entered during checkout.");
+    expect(body.text).not.toContain("your saved card");
+  });
+
+  it("names the bound card (label + last4) in the Telegram approval prompt, with no secret fields", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "synthetic-bot-token");
+    const account = await deps.accountStore.findAccountByEmail("payer@example.test");
+    await deps.accountStore.setTelegramChatId(account!.id, "555000111");
+    const cardId = await createOwnedCard(webCookie, "9192");
+    const blob = '{ "ciphertext": "synthetic-sealed-card" }';
+
+    const created = await createApproval(cardId);
+
+    // The card-store audit also pushes a vault alert, so locate the approval
+    // push by its vault URL rather than assuming a single call.
+    const approvalCall = fetchMock.mock.calls.find(([, init]) =>
+      ((init as RequestInit).body?.toString() ?? "").includes(`/vault/pay/${created.id}`),
+    );
+    expect(approvalCall).toBeTruthy();
+    const body = JSON.parse((approvalCall![1] as RequestInit).body as string);
+    expect(body.chat_id).toBe("555000111");
+    expect(body.text).toContain("Synthetic Visa •••• 9192");
+    expect(body.text).toContain(`/vault/pay/${created.id}`);
+    // The sealed blob and the raw PAN never render.
+    expect(body.text).not.toContain("synthetic-sealed-card");
+    expect(body.text).not.toContain(blob);
   });
 
   it("formats zero-decimal approval currencies without fake cents in Telegram", async () => {

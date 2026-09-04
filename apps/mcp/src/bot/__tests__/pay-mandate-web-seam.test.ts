@@ -255,7 +255,7 @@ async function runSeam(cfg: {
     }
     if (
       (url.endsWith("/v1/pay/approvals/appr_seam") ||
-        url.endsWith("/v1/pay/approvals/appr_seam?wait_for_submission=1")) &&
+        url.includes("/v1/pay/approvals/appr_seam?wait_for_submission=1")) &&
       init?.method === "GET"
     ) {
       const operatorPubkey = String(approvalBodies[0]!.operator_pubkey);

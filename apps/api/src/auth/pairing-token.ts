@@ -44,7 +44,6 @@ export interface PairingTokenRecord {
   // chose in the web wizard.
   registry_enabled: boolean | null;
   consent_operator_inbox_otp: boolean | null;
-  proxy_url: string | null;
 }
 
 export interface PairingTokenStore {
@@ -66,7 +65,6 @@ export interface PairingTokenStore {
 export interface InstallPreferences {
   registry_enabled?: boolean;
   consent_operator_inbox_otp?: boolean;
-  proxy_url?: string | null;
 }
 
 export function issuePairingToken(
@@ -85,7 +83,6 @@ export function issuePairingToken(
     machine_token: machineToken,
     registry_enabled: null,
     consent_operator_inbox_otp: null,
-    proxy_url: null,
   };
 }
 
@@ -120,7 +117,6 @@ export class InMemoryPairingTokenStore implements PairingTokenStore {
     r.agent_session_raw_token = rawAgentToken;
     r.registry_enabled = preferences.registry_enabled ?? null;
     r.consent_operator_inbox_otp = preferences.consent_operator_inbox_otp ?? null;
-    r.proxy_url = preferences.proxy_url ?? null;
     return true;
   }
 

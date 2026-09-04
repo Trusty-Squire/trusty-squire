@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { chromium, type Browser, type Page } from "playwright";
 import { describe, expect, it, vi } from "vitest";
 import {
+  BrowserClickDispatchError,
   BrowserController,
   CHECKOUT_SUBMIT_LABEL_RE,
   hasPayPalHostedCheckoutFrame,
@@ -11,13 +12,19 @@ import {
   parseCheckoutAmounts,
   parseStructuredCheckoutTotal,
   recognizedPaymentProviderFrame,
+  runCaptureConfirmedPaymentSubmit,
   type CheckoutSubmitResult,
   UnrecognizedPaymentFrameError,
 } from "../browser.js";
 import {
   cartAdd,
+  claimActivePaymentForOperatePay,
   closeAllProvisionSessions,
+  finishProvisionSession,
+  observe,
+  releaseActivePaymentLease,
   startHarnessProvisionSession,
+  withPaymentSessionCall,
 } from "../provision-session.js";
 
 // The real-browser checkout-fill test needs a Playwright Chromium binary. The
@@ -25,11 +32,116 @@ import {
 // does not — skip there rather than fail the release. The pure parsing tests
 // below always run.
 let chromiumAvailable = false;
+const APPROVAL_CARD = {
+  pan: "4242424242424242",
+  exp_month: "12",
+  exp_year: "30",
+  cvv: "123",
+  name: "Synthetic Cardholder",
+  billing: {
+    line1: "123 Synthetic Street",
+    city: "Testville",
+    postal_code: "10001",
+    country: "US",
+  },
+};
 try {
   chromiumAvailable = existsSync(chromium.executablePath());
 } catch {
   chromiumAvailable = false;
 }
+
+describe("captured payment submit dispatch", () => {
+  it("does not report dispatch when the click fails before capture", async () => {
+    const onSubmitDispatched = vi.fn();
+    const clear = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      runCaptureConfirmedPaymentSubmit({
+        click: async () => {
+          throw new Error("element detached");
+        },
+        readEvidence: async () => ({ baseline: null, dispatched: false }),
+        clear,
+        onSubmitDispatched,
+      }),
+    ).rejects.toThrow("element detached");
+
+    expect(clear).toHaveBeenCalledOnce();
+    expect(onSubmitDispatched).not.toHaveBeenCalled();
+  });
+
+  it("reports capture-confirmed dispatch before returning an unknown outcome", async () => {
+    const onSubmitDispatched = vi.fn();
+
+    await expect(
+      runCaptureConfirmedPaymentSubmit({
+        click: async () => {
+          throw new Error("navigation interrupted click completion");
+        },
+        readEvidence: async () => ({ baseline: { url: "before" }, dispatched: true }),
+        clear: async () => undefined,
+        onSubmitDispatched,
+      }),
+    ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
+
+    expect(onSubmitDispatched).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the outcome unknown without claiming dispatch when click evidence is absent", async () => {
+    const onSubmitDispatched = vi.fn();
+
+    await expect(
+      runCaptureConfirmedPaymentSubmit({
+        click: async (markInputDispatchPossible) => {
+          markInputDispatchPossible();
+          throw new Error("target closed after input dispatch");
+        },
+        readEvidence: async () => ({ baseline: null, dispatched: false }),
+        clear: async () => undefined,
+        onSubmitDispatched,
+      }),
+    ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
+
+    expect(onSubmitDispatched).not.toHaveBeenCalled();
+  });
+
+  it("preserves a proven pre-dispatch approval rejection", async () => {
+    const onSubmitDispatched = vi.fn();
+
+    await expect(
+      runCaptureConfirmedPaymentSubmit({
+        click: async (markInputDispatchPossible) => {
+          markInputDispatchPossible();
+          throw new BrowserClickDispatchError(
+            "not_dispatched",
+            new Error("payment_approval_expired"),
+          );
+        },
+        readEvidence: async () => ({ baseline: null, dispatched: false }),
+        clear: async () => undefined,
+        onSubmitDispatched,
+      }),
+    ).rejects.toThrow("payment_approval_expired");
+
+    expect(onSubmitDispatched).not.toHaveBeenCalled();
+  });
+
+  it("does not convert trusted input completion into submit evidence", async () => {
+    const onSubmitDispatched = vi.fn();
+
+    await expect(
+      runCaptureConfirmedPaymentSubmit({
+        click: async () => undefined,
+        readEvidence: async () => ({ baseline: null, dispatched: false }),
+        clear: async () => undefined,
+        onSubmitDispatched,
+      }),
+    ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
+
+    expect(onSubmitDispatched).not.toHaveBeenCalled();
+  });
+});
 
 describe("charge-verb label recognition (CHECKOUT_SUBMIT_LABEL_RE)", () => {
   it("recognizes English charge verbs (regression)", () => {
@@ -439,67 +551,484 @@ describe("checkout payment parsing", () => {
     },
   );
 
+  type CheckoutControl = "native" | "external" | "role";
+  interface CheckoutDispatchHarnessOptions {
+    control: CheckoutControl;
+    required?: boolean;
+    action: string;
+    responses?: Record<string, { body?: string; contentType?: string; delayMs?: number }>;
+  }
+
+  async function runCheckoutDispatchHarness(options: CheckoutDispatchHarnessOptions): Promise<{
+    dispatches: number;
+    error?: unknown;
+    invalid: boolean;
+    requests: string[];
+    result?: CheckoutSubmitResult;
+  }> {
+    const checkoutUrl = "https://merchant.test/checkout";
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      const requests: string[] = [];
+      const controlMarkup =
+        options.control === "native"
+          ? '<button type="submit">Pay now</button>'
+          : options.control === "external"
+            ? '<button type="button">Pay now</button>'
+            : '<div role="button" tabindex="0">Pay now</div>';
+      const controlSelector = options.control === "role" ? '[role="button"]' : "button";
+      const formControl = options.control === "native" ? controlMarkup : "";
+      const externalControl = options.control === "native" ? "" : controlMarkup;
+      await page.route("**/*", async (route) => {
+        const url = route.request().url();
+        if (url === checkoutUrl) {
+          await route.fulfill({
+            contentType: "text/html",
+            body: `
+              <form id="checkout">
+                ${options.required === true ? '<input id="required-field" required>' : ""}
+                ${formControl}
+              </form>
+              ${externalControl}
+              <script>
+                const form = document.querySelector("#checkout");
+                const control = document.querySelector(${JSON.stringify(controlSelector)});
+                document.querySelector("#required-field")?.addEventListener("invalid", () => {
+                  document.body.dataset.invalid = "true";
+                });
+                const run = async (event) => {
+                  if (event.type === "submit") event.preventDefault();
+                  ${options.action}
+                };
+                ${options.control === "native" ? 'form.addEventListener("submit", run);' : 'control.addEventListener("click", run);'}
+              </script>`,
+          });
+          return;
+        }
+        requests.push(url);
+        const response = options.responses?.[url];
+        if (response === undefined) {
+          await route.fulfill({ status: 404, body: "not found" });
+          return;
+        }
+        if (response.delayMs !== undefined) {
+          await new Promise((resolve) => setTimeout(resolve, response.delayMs));
+        }
+        await route.fulfill({
+          body: response.body ?? "ok",
+          contentType: response.contentType ?? "text/plain",
+        });
+      });
+      await page.goto(checkoutUrl);
+      const controller = BrowserController.fromHarnessPage(page);
+      const onSubmitDispatched = vi.fn();
+      let result: CheckoutSubmitResult | undefined;
+      let error: unknown;
+      try {
+        result = await (
+          controller as unknown as {
+            submitFilledCheckoutInScope: (
+              cardGroup: undefined,
+              onDispatched: () => void,
+            ) => Promise<CheckoutSubmitResult>;
+          }
+        ).submitFilledCheckoutInScope(undefined, onSubmitDispatched);
+      } catch (caught) {
+        error = caught;
+      }
+      return {
+        dispatches: onSubmitDispatched.mock.calls.length,
+        ...(error !== undefined ? { error } : {}),
+        invalid: (await page.locator("body").getAttribute("data-invalid")) === "true",
+        requests,
+        ...(result !== undefined ? { result } : {}),
+      };
+    } finally {
+      await browser.close();
+    }
+  }
+
   it.skipIf(!chromiumAvailable)(
-    "submits a Japanese checkout via its ご注文を確定する charge button, skipping non-charge buttons",
+    "keeps native, external, and role-button validation blocks outside the charge boundary",
+    async () => {
+      const cases: CheckoutDispatchHarnessOptions[] = [
+        { control: "native", required: true, action: "" },
+        {
+          control: "external",
+          required: true,
+          action: 'await fetch("/v1/payment_methods", { method: "POST" }); form.requestSubmit();',
+          responses: { "https://merchant.test/v1/payment_methods": {} },
+        },
+        {
+          control: "role",
+          required: true,
+          action: 'await fetch("/analytics/orders", { method: "POST" }); form.requestSubmit();',
+          responses: { "https://merchant.test/analytics/orders": {} },
+        },
+      ];
+      for (const testCase of cases) {
+        const observed = await runCheckoutDispatchHarness(testCase);
+        expect(observed.error, testCase.control).toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
+        expect(observed.invalid, testCase.control).toBe(true);
+        expect(observed.dispatches, testCase.control).toBe(0);
+      }
+    },
+    60_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "tracks concrete charge traffic across native, external, and role controls",
+    async () => {
+      const cases: CheckoutDispatchHarnessOptions[] = [
+        {
+          control: "native",
+          action:
+            'await fetch("/charge", { method: "POST" }); history.pushState({}, "", "/receipt/REST-1");',
+          responses: { "https://merchant.test/charge": {} },
+        },
+        {
+          control: "external",
+          action:
+            'await fetch("/graphql", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ operationName: "CompleteCheckout" }) }); history.pushState({}, "", "/receipt/GQL-1");',
+          responses: { "https://merchant.test/graphql": {} },
+        },
+        {
+          control: "role",
+          action:
+            'await fetch("/v1/payment_methods", { method: "POST" }); await fetch("/graphql", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ operationName: "CompleteCheckout" }) }); history.pushState({}, "", "/receipt/DELAY-1");',
+          responses: {
+            "https://merchant.test/v1/payment_methods": { delayMs: 100 },
+            "https://merchant.test/graphql": {},
+          },
+        },
+      ];
+      for (const testCase of cases) {
+        const observed = await runCheckoutDispatchHarness(testCase);
+        expect(observed.error, testCase.control).toBeUndefined();
+        expect(observed.result, testCase.control).toEqual({
+          three_ds_required: false,
+          order_confirmed: true,
+        });
+        expect(observed.dispatches, testCase.control).toBe(1);
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "keeps observing after nonterminal navigation until a late order request",
+    async () => {
+      const observed = await runCheckoutDispatchHarness({
+        control: "external",
+        action: 'window.location.href = "/processing";',
+        responses: {
+          "https://merchant.test/processing": {
+            contentType: "text/html",
+            body: '<script>void (async () => { await fetch("/api/orders", { method: "POST" }); history.pushState({}, "", "/receipt/LATE-1"); })();</script>',
+          },
+          "https://merchant.test/api/orders": {},
+        },
+      });
+      expect(observed.error).toBeUndefined();
+      expect(observed.result).toEqual({ three_ds_required: false, order_confirmed: true });
+      expect(observed.requests).toContain("https://merchant.test/api/orders");
+      expect(observed.dispatches).toBe(1);
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "runs the approval fence immediately before the charge click",
     async () => {
       const browser = await chromium.launch({ headless: true });
       try {
         const page = await browser.newPage();
         await page.setContent(`
-        <form id="checkout">
-          <input autocomplete="cc-number">
-          <input autocomplete="cc-exp">
-          <input autocomplete="cc-csc">
-          <input autocomplete="cc-name">
-          <button type="button" id="change-payment">お支払い方法を変更する</button>
-          <button type="button" id="back">戻る</button>
-          <button type="submit" id="charge">ご注文を確定する</button>
-        </form>
-        <script>
-          document.querySelector("#change-payment").addEventListener("click", () => {
-            document.body.dataset.wrongClick = "change-payment";
-          });
-          document.querySelector("#back").addEventListener("click", () => {
-            document.body.dataset.wrongClick = "back";
-          });
-          document.querySelector("#checkout").addEventListener("submit", (event) => {
-            event.preventDefault();
-            document.body.dataset.submitted = "true";
-            setTimeout(() => {
-              const challenge = document.createElement("iframe");
-              challenge.title = "3D Secure";
-              document.body.append(challenge);
-            }, 200);
-          });
-        </script>
-      `);
-        const controller = new BrowserController({ humanize: false });
-        (controller as unknown as { page: Page }).page = page;
-        const bringToFront = vi.spyOn(page, "bringToFront");
-
-        const result = await controller.fillAndSubmitCheckout({
-          pan: "4242424242424242",
-          exp_month: "12",
-          exp_year: "30",
-          cvv: "123",
-          name: "Synthetic Cardholder",
-          billing: {
-            line1: "123 Synthetic Street",
-            city: "Testville",
-            postal_code: "10001",
-            country: "JP",
-          },
+          <form>
+            <input autocomplete="cc-number"><input autocomplete="cc-exp">
+            <input autocomplete="cc-csc"><input autocomplete="cc-name">
+            <button type="submit">Pay now</button>
+          </form>`);
+        const controller = BrowserController.fromHarnessPage(page);
+        const beforeSubmitDispatch = vi.fn(() => {
+          throw new Error("payment_approval_expired");
         });
-
-        expect(await page.locator("body").getAttribute("data-submitted")).toBe("true");
-        expect(await page.locator("body").getAttribute("data-wrong-click")).toBeNull();
-        expect(result.three_ds_required).toBe(true);
-        expect(bringToFront).toHaveBeenCalled();
+        await expect(
+          controller.fillAndSubmitCheckout(APPROVAL_CARD, { beforeSubmitDispatch }),
+        ).rejects.toThrow("payment_approval_expired");
+        expect(beforeSubmitDispatch).toHaveBeenCalledOnce();
       } finally {
         await browser.close();
       }
     },
-    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "holds the payment action lease across a submit-associated SPA charge and 3DS follow-up",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      let sessionId: string | undefined;
+      try {
+        const context = await browser.newContext();
+        const page = await context.newPage();
+        let analyticsRequests = 0;
+        let chargeRequests = 0;
+        let releaseChargeResponse!: () => void;
+        const chargeResponseAllowed = new Promise<void>((resolve) => {
+          releaseChargeResponse = resolve;
+        });
+        let reportChargeStarted!: () => void;
+        const chargeStarted = new Promise<void>((resolve) => {
+          reportChargeStarted = resolve;
+        });
+        let leaseHeldDuringCharge = false;
+        let activeSession: Parameters<typeof claimActivePaymentForOperatePay>[1];
+        await context.route("https://merchant.test/checkout", async (route) => {
+          await route.fulfill({
+            contentType: "text/html",
+            body: `
+              <form id="checkout">
+                <input autocomplete="cc-number">
+                <input autocomplete="cc-exp">
+                <input autocomplete="cc-csc">
+                <input autocomplete="cc-name">
+                <button type="submit">Pay now</button>
+              </form>
+              <script>
+                document.querySelector("#checkout").addEventListener("submit", async (event) => {
+                  event.preventDefault();
+                  void fetch("/analytics").catch(() => undefined);
+                  await fetch("/charge", { method: "POST" });
+                  document.body.insertAdjacentHTML("beforeend", "<p>Authenticate payment</p>");
+                });
+              </script>
+            `,
+          });
+        });
+        await context.route("https://merchant.test/analytics", async (route) => {
+          analyticsRequests += 1;
+          await route.fulfill({ body: "ok" });
+        });
+        await context.route("https://merchant.test/charge", async (route) => {
+          chargeRequests += 1;
+          try {
+            claimActivePaymentForOperatePay(undefined, activeSession);
+          } catch (error) {
+            leaseHeldDuringCharge =
+              error instanceof Error &&
+              /another payment operation is already in progress/.test(error.message);
+          }
+          reportChargeStarted();
+          await chargeResponseAllowed;
+          await route.fulfill({ body: "ok" });
+        });
+        const controller = BrowserController.fromHarnessPage(page);
+        const started = await startHarnessProvisionSession({
+          serviceUrl: "https://merchant.test/checkout",
+          browser: controller,
+        });
+        sessionId = started.session_id;
+
+        let leaseReleased = false;
+        const action = withPaymentSessionCall(sessionId, async (session) => {
+          activeSession = session;
+          const claim = claimActivePaymentForOperatePay(undefined, session);
+          if (claim.kind !== "lease") throw new Error("expected payment action lease");
+          try {
+            return await controller.fillAndSubmitCheckout(APPROVAL_CARD, {
+              beforeSubmitDispatch: () => 100,
+            });
+          } finally {
+            leaseReleased = releaseActivePaymentLease(claim.lease, true, session);
+          }
+        });
+
+        await chargeStarted;
+        expect(leaseHeldDuringCharge).toBe(true);
+        const observation = await observe(sessionId, "full");
+        expect(JSON.stringify(observation)).not.toContain(APPROVAL_CARD.pan);
+        expect(JSON.stringify(observation)).not.toContain(`"value":"${APPROVAL_CARD.cvv}"`);
+        releaseChargeResponse();
+
+        await expect(action).resolves.toMatchObject({
+          three_ds_required: true,
+          order_confirmed: false,
+        });
+
+        expect(analyticsRequests).toBe(1);
+        expect(chargeRequests).toBe(1);
+        expect(leaseReleased).toBe(true);
+        await withPaymentSessionCall(sessionId, async (session) => {
+          const fresh = claimActivePaymentForOperatePay(undefined, session);
+          if (fresh.kind !== "lease") throw new Error("expected released payment lease");
+          expect(releaseActivePaymentLease(fresh.lease, true, session)).toBe(true);
+        });
+      } finally {
+        if (sessionId !== undefined) {
+          await finishProvisionSession(sessionId).catch(() => undefined);
+        }
+        await browser.close();
+      }
+    },
+    15_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "holds the payment action lease across native charge navigation and its 3DS follow-up",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      let sessionId: string | undefined;
+      try {
+        const context = await browser.newContext();
+        const page = await context.newPage();
+        let threeDsRequests = 0;
+        let releaseThreeDsResponse!: () => void;
+        const threeDsResponseAllowed = new Promise<void>((resolve) => {
+          releaseThreeDsResponse = resolve;
+        });
+        let reportThreeDsStarted!: () => void;
+        const threeDsStarted = new Promise<void>((resolve) => {
+          reportThreeDsStarted = resolve;
+        });
+        let leaseHeldDuringThreeDs = false;
+        let activeSession: Parameters<typeof claimActivePaymentForOperatePay>[1];
+        await context.route("https://merchant.test/checkout", async (route) => {
+          await route.fulfill({
+            contentType: "text/html",
+            body: `
+              <form action="https://merchant.test/charge" method="post">
+                <input autocomplete="cc-number">
+                <input autocomplete="cc-exp">
+                <input autocomplete="cc-csc">
+                <input autocomplete="cc-name">
+                <button type="submit">Pay now</button>
+              </form>
+            `,
+          });
+        });
+        await context.route("https://merchant.test/charge", async (route) => {
+          await route.fulfill({
+            contentType: "text/html",
+            body: `<script>
+              void (async () => {
+                await fetch("https://merchant.test/3ds");
+                document.body.textContent = "Authenticate payment";
+              })();
+            </script>`,
+          });
+        });
+        await context.route("https://merchant.test/3ds", async (route) => {
+          threeDsRequests += 1;
+          try {
+            claimActivePaymentForOperatePay(undefined, activeSession);
+          } catch (error) {
+            leaseHeldDuringThreeDs =
+              error instanceof Error &&
+              /another payment operation is already in progress/.test(error.message);
+          }
+          reportThreeDsStarted();
+          await threeDsResponseAllowed;
+          await route.fulfill({ body: "ok" });
+        });
+        const controller = BrowserController.fromHarnessPage(page);
+        const started = await startHarnessProvisionSession({
+          serviceUrl: "https://merchant.test/checkout",
+          browser: controller,
+        });
+        sessionId = started.session_id;
+
+        let leaseReleased = false;
+        const action = withPaymentSessionCall(sessionId, async (session) => {
+          activeSession = session;
+          const claim = claimActivePaymentForOperatePay(undefined, session);
+          if (claim.kind !== "lease") throw new Error("expected payment action lease");
+          try {
+            return await controller.fillAndSubmitCheckout(APPROVAL_CARD, {
+              beforeSubmitDispatch: () => 100,
+            });
+          } finally {
+            leaseReleased = releaseActivePaymentLease(claim.lease, true, session);
+          }
+        });
+
+        await threeDsStarted;
+        expect(leaseHeldDuringThreeDs).toBe(true);
+        releaseThreeDsResponse();
+
+        const result = await action;
+        expect(result).toMatchObject({
+          three_ds_required: true,
+          order_confirmed: false,
+        });
+        expect(JSON.stringify(result)).not.toContain(APPROVAL_CARD.pan);
+        expect(JSON.stringify(result)).not.toContain(APPROVAL_CARD.cvv);
+        expect(threeDsRequests).toBe(1);
+        expect(leaseReleased).toBe(true);
+        await withPaymentSessionCall(sessionId, async (session) => {
+          const fresh = claimActivePaymentForOperatePay(undefined, session);
+          if (fresh.kind !== "lease") throw new Error("expected released payment lease");
+          expect(releaseActivePaymentLease(fresh.lease, true, session)).toBe(true);
+        });
+      } finally {
+        if (sessionId !== undefined) {
+          await finishProvisionSession(sessionId).catch(() => undefined);
+        }
+        await browser.close();
+      }
+    },
+    60_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "allows 3DS follow-up after an authorized SPA charge dispatch",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const context = await browser.newContext();
+        const page = await context.newPage();
+        let threeDsRequests = 0;
+        await context.route("https://merchant.test/charge", async (route) => {
+          await route.fulfill({ body: "charge accepted" });
+        });
+        await context.route("https://merchant.test/3ds", async (route) => {
+          threeDsRequests += 1;
+          await route.fulfill({ body: "ok" });
+        });
+        await context.route("https://merchant.test/checkout", async (route) => {
+          await route.fulfill({ body: "checkout" });
+        });
+        await page.goto("https://merchant.test/checkout");
+        await page.setContent(`
+          <form>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-exp">
+            <input autocomplete="cc-csc">
+            <input autocomplete="cc-name">
+            <button type="submit">Pay now</button>
+          </form>
+          <script>
+            document.querySelector("form").addEventListener("submit", async (event) => {
+              event.preventDefault();
+              await fetch("https://merchant.test/charge", { method: "POST" });
+              setTimeout(async () => {
+                await fetch("https://merchant.test/3ds");
+                history.pushState({}, "", "/thank-you/order-123");
+              }, 150);
+            });
+          </script>
+        `);
+        const controller = BrowserController.fromHarnessPage(page);
+
+        await expect(
+          controller.fillAndSubmitCheckout(APPROVAL_CARD, { beforeSubmitDispatch: () => 100 }),
+        ).resolves.toEqual({ three_ds_required: false, order_confirmed: true });
+        expect(threeDsRequests).toBe(1);
+        await context.close();
+      } finally {
+        await browser.close();
+      }
+    },
   );
 
   it.skipIf(!chromiumAvailable)(
@@ -874,6 +1403,7 @@ describe("checkout payment parsing", () => {
           <button id="pay">Pay now</button>
           <script>
             document.querySelector("#pay").addEventListener("click", () => {
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               const frame = document.createElement("iframe");
               frame.src = "${pciUrl}";
               document.body.append(frame);
@@ -913,6 +1443,7 @@ describe("checkout payment parsing", () => {
           <button id="pay">Pay now</button>
           <script>
             document.querySelector("#pay").addEventListener("click", () => {
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               const frame = document.createElement("iframe");
               frame.src = ${JSON.stringify(collectionUrl)};
               document.body.append(frame);
@@ -1033,6 +1564,7 @@ describe("checkout payment parsing", () => {
           <script>
             document.querySelector("#checkout").addEventListener("submit", (event) => {
               event.preventDefault();
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               document.querySelector("#existing-confirmation").innerHTML =
                 "<span>Order confirmed</span><span>.</span>";
             });
@@ -1092,6 +1624,7 @@ describe("checkout payment parsing", () => {
               return getAttribute(name);
             };
             document.querySelector("#pay-now").addEventListener("click", () => {
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               document.body.dataset.earlyConfirmationAtPay = String(
                 document.querySelector("#early-confirmation") !== null,
               );
@@ -1156,6 +1689,7 @@ describe("checkout payment parsing", () => {
                   <button id="pay-now">Pay now</button>
                   <script>
                     document.querySelector("#pay-now").addEventListener("click", () => {
+                      void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
                       ${clickAction};
                     });
                   </script>`,
@@ -1182,6 +1716,85 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "confirms Shopify's nested thank-you route only with visible order confirmation evidence",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.route("https://merchant.test/**", async (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: `
+              <button id="pay-now">Pay now</button>
+              <script>
+                document.querySelector("#pay-now").addEventListener("click", () => {
+                  void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
+                  history.replaceState({}, "", "/checkouts/cn/token-123/en-us/thank-you");
+                  document.body.insertAdjacentHTML(
+                    "beforeend",
+                    "<h1>Thank you, Ken!</h1><p>Confirmation #8WV06PY0A</p><p>Your order is confirmed</p>",
+                  );
+                });
+              </script>`,
+          }),
+        );
+        await page.goto("https://merchant.test/checkouts/cn/token-123/en-us");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.submitFilledCheckout()).resolves.toEqual({
+          three_ds_required: false,
+          order_confirmed: true,
+        });
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "does not confirm a declined payment that remains on checkout",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      const now = vi
+        .spyOn(Date, "now")
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(1)
+        .mockReturnValue(15_000);
+      try {
+        const page = await browser.newPage();
+        await page.route("https://merchant.test/**", async (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: `
+              <button id="pay-now">Pay now</button>
+              <script>
+                document.querySelector("#pay-now").addEventListener("click", () => {
+                  void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
+                  document.body.insertAdjacentHTML("beforeend", "<p>Payment was declined</p>");
+                });
+              </script>`,
+          }),
+        );
+        await page.goto("https://merchant.test/checkouts/cn/token-123/en-us");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.submitFilledCheckout()).resolves.toEqual({
+          three_ds_required: false,
+          order_confirmed: false,
+        });
+      } finally {
+        now.mockRestore();
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "does not confirm an order when only a terminal URL query or hash changes",
     async () => {
       const browser = await chromium.launch({ headless: true });
@@ -1200,6 +1813,7 @@ describe("checkout payment parsing", () => {
               <button id="pay-now">Pay now</button>
               <script>
                 document.querySelector("#pay-now").addEventListener("click", () => {
+                  void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
                   history.replaceState({}, "", "/receipt/123?attempt=2#retry");
                 });
               </script>`,
@@ -1239,6 +1853,7 @@ describe("checkout payment parsing", () => {
               <button id="pay-now">Pay now</button>
               <script>
                 document.querySelector("#pay-now").addEventListener("click", () => {
+                  void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
                   history.replaceState({}, "", "/orders/ORD-123/confirmation");
                 });
               </script>`,
@@ -1278,6 +1893,7 @@ describe("checkout payment parsing", () => {
               <button id="pay-now">Pay now</button>
               <script>
                 document.querySelector("#pay-now").addEventListener("click", () => {
+                  void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
                   history.replaceState({}, "", "/orders/ORD-123/confirmation");
                 });
               </script>`,
@@ -1317,6 +1933,7 @@ describe("checkout payment parsing", () => {
               <button id="pay-now">Pay now</button>
               <script>
                 document.querySelector("#pay-now").addEventListener("click", () => {
+                  void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
                   history.replaceState({}, "", "/orders/ORD-123/confirmation");
                 });
               </script>`,
@@ -1361,6 +1978,7 @@ describe("checkout payment parsing", () => {
                     <button id="pay-now">Pay now</button>
                     <script>
                       document.querySelector("#pay-now").addEventListener("click", () => {
+                        void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
                         history.replaceState({}, "", "/orders/ORD-123/confirmation");
                       });
                     </script>`,
@@ -1401,6 +2019,7 @@ describe("checkout payment parsing", () => {
               <button id="pay-now">Pay now</button>
               <script>
                 document.querySelector("#pay-now").addEventListener("click", () => {
+                  void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
                   history.replaceState({}, "", "/checkout/ORD-123/thank_you");
                 });
               </script>`,
@@ -1454,7 +2073,7 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "keeps a click failure pre-dispatch when no charge event fired",
+    "keeps a click failure unknown when no charge evidence fired",
     async () => {
       const browser = await chromium.launch({ headless: true });
       try {
@@ -1475,12 +2094,12 @@ describe("checkout payment parsing", () => {
         (controller as unknown as { page: Page }).page = page;
 
         const error = await controller.submitFilledCheckout().catch((caught) => caught);
-        expect(error).toBeInstanceOf(Error);
-        expect(error).not.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
+        expect(error).toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
       } finally {
         await browser.close();
       }
     },
+    20_000,
   );
 
   it.skipIf(!chromiumAvailable)(
@@ -1517,6 +2136,7 @@ describe("checkout payment parsing", () => {
           <script>
             document.querySelector("#checkout").addEventListener("submit", (event) => {
               event.preventDefault();
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               document.body.insertAdjacentHTML(
                 "beforeend",
                 '<p style="display:none">Order confirmed</p>' +
@@ -1588,6 +2208,7 @@ describe("checkout payment parsing", () => {
               document.body.append(frame);
             }, 500);
             document.querySelector("#place-order").addEventListener("click", () => {
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
               document.body.dataset.submitted = "true";
             });
           </script>
@@ -2205,6 +2826,205 @@ describe("3-D Secure resolution", () => {
     return { browser, page, controller };
   };
 
+  // Gateway-token override fixture: the checkout accepts newly-filled fields,
+  // but its synthetic backend deliberately chooses a stored ENBD token and
+  // renders that token's ACS. No network or charge is involved. Exercise both
+  // ways an ACS can be surfaced by real gateways.
+  const detectTokenOverride = async (
+    topLevel: boolean,
+    challengeCopy: string,
+    issuerSource: "bin_metadata" | null = "bin_metadata",
+    label = "Travel",
+  ) => {
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.setContent(
+      topLevel
+        ? `<main><p>3D Secure authentication — ${challengeCopy}</p></main>`
+        : `<main>Complete your payment securely</main><iframe title="3D Secure authentication" srcdoc="<p>${challengeCopy}</p>"></iframe>`,
+    );
+    if (!topLevel) {
+      await page.waitForFunction(
+        () => document.querySelector("iframe")?.contentDocument?.body?.innerText.length !== 0,
+      );
+    }
+    const controller = new BrowserController({ humanize: false });
+    (controller as unknown as { page: Page }).page = page;
+    try {
+      return await (
+        controller as unknown as {
+          detectThreeDsChallenge: (card: {
+            pan: string;
+            issuer?: string;
+            issuer_source?: "bin_metadata";
+            label?: string;
+          }) => Promise<CheckoutSubmitResult>;
+        }
+      ).detectThreeDsChallenge({
+        pan: "5555555555559192",
+        ...(issuerSource !== null ? { issuer: "DBS", issuer_source: issuerSource } : { label }),
+      });
+    } finally {
+      await browser.close();
+    }
+  };
+
+  it.skipIf(!chromiumAvailable)(
+    "warns when a top-level token-override ACS names another issuer",
+    async () => {
+      await expect(detectTokenOverride(true, "Approve in your ENBDX app")).resolves.toMatchObject({
+        three_ds_required: true,
+        payment_instrument_mismatch: {
+          kind: "payment_instrument_mismatch",
+          expected: { last4: "9192", issuer: "DBS" },
+          observed: { issuer: "ENBDX" },
+          provenance: {
+            expected: { last4: "released_card", issuer: "bin_metadata" },
+            observed: "3ds_challenge",
+          },
+        },
+      });
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "warns when an iframe token-override ACS names another issuer",
+    async () => {
+      await expect(detectTokenOverride(false, "Approve in your ENBDX app")).resolves.toMatchObject({
+        payment_instrument_mismatch: { observed: { issuer: "ENBDX" } },
+      });
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "does not warn when the ACS evidence matches the released card",
+    async () => {
+      await expect(
+        detectTokenOverride(false, "Approve in your DBS app for card ending 9192"),
+      ).resolves.toMatchObject({
+        three_ds_required: true,
+      });
+      const result = await detectTokenOverride(
+        false,
+        "Approve in your DBS app for card ending 9192",
+      );
+      expect(result).not.toHaveProperty("payment_instrument_mismatch");
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "does not treat an editable card label as issuer evidence",
+    async () => {
+      const result = await detectTokenOverride(false, "Approve in your ENBDX app", null);
+      expect(result).not.toHaveProperty("payment_instrument_mismatch");
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)("marks comparable label evidence as low confidence", async () => {
+    await expect(
+      detectTokenOverride(false, "Approve in your ENBDX app", null, "DBS Mastercard"),
+    ).resolves.toMatchObject({
+      payment_instrument_mismatch: {
+        confidence: "low",
+        evidence_used: ["issuer"],
+        expected: { issuer: "DBS", label: "DBS Mastercard" },
+        observed: { issuer: "ENBDX" },
+        provenance: { expected: { issuer: "vault_label" } },
+      },
+    });
+  });
+
+  it.skipIf(!chromiumAvailable)("canonicalizes qualified vault network metadata", async () => {
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.setContent("<p>3D Secure authentication — Mastercard Identity Check</p>");
+    const controller = new BrowserController({ humanize: false });
+    (controller as unknown as { page: Page }).page = page;
+    try {
+      const result = await (
+        controller as unknown as {
+          detectThreeDsChallenge: (card: {
+            pan: string;
+            network: string;
+          }) => Promise<CheckoutSubmitResult>;
+        }
+      ).detectThreeDsChallenge({ pan: "5555555555559192", network: "Mastercard DBS" });
+      expect(result).not.toHaveProperty("payment_instrument_mismatch");
+      await page.setContent("<p>3D Secure authentication — Approve in your ENBDX app</p>");
+      await expect(
+        (
+          controller as unknown as {
+            detectThreeDsChallenge: (card: {
+              pan: string;
+              network: string;
+            }) => Promise<CheckoutSubmitResult>;
+          }
+        ).detectThreeDsChallenge({ pan: "5555555555559192", network: "Mastercard World Elite" }),
+      ).resolves.not.toHaveProperty("payment_instrument_mismatch");
+      await expect(
+        (
+          controller as unknown as {
+            detectThreeDsChallenge: (card: {
+              pan: string;
+              network: string;
+            }) => Promise<CheckoutSubmitResult>;
+          }
+        ).detectThreeDsChallenge({ pan: "5555555555559192", network: "Mastercard DBS" }),
+      ).resolves.toMatchObject({
+        payment_instrument_mismatch: {
+          confidence: "low",
+          evidence_used: ["issuer"],
+          expected: { issuer: "DBS", network: "Mastercard DBS" },
+          observed: { issuer: "ENBDX" },
+          provenance: { expected: { issuer: "vault_metadata" } },
+        },
+      });
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it.skipIf(!chromiumAvailable)(
+    "observes mismatch evidence that renders during an existing 3DS wait",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      const page = await browser.newPage();
+      await page.setContent(
+        '<iframe title="3D Secure authentication" srcdoc="<p>3D Secure authentication — Loading</p>"></iframe>',
+      );
+      const controller = new BrowserController({ humanize: false });
+      (controller as unknown as { page: Page }).page = page;
+      const privateController = controller as unknown as {
+        detectThreeDsChallenge: (card: {
+          pan: string;
+          issuer: string;
+          issuer_source: "bin_metadata";
+        }) => Promise<CheckoutSubmitResult>;
+      };
+      try {
+        const initial = await privateController.detectThreeDsChallenge({
+          pan: "5555555555559192",
+          issuer: "DBS",
+          issuer_source: "bin_metadata",
+        });
+        expect(initial).not.toHaveProperty("payment_instrument_mismatch");
+        await page
+          .frameLocator('iframe[title="3D Secure authentication"]')
+          .locator("p")
+          .evaluate((element) => {
+            element.textContent = "3D Secure authentication — Approve in your ENBDX app";
+          });
+        await controller.waitForThreeDsResolution(0);
+        expect(controller.paymentInstrumentMismatch()).toMatchObject({
+          observed: { issuer: "ENBDX" },
+          provenance: { observed: "3ds_challenge" },
+        });
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
   it.skipIf(!chromiumAvailable)(
     "resolves succeeded from the outer page's own order route while the challenge frame stays open and unresponsive",
     async () => {
@@ -2223,12 +3043,15 @@ describe("3-D Secure resolution", () => {
 
   it.skipIf(!chromiumAvailable)("returns failed for visible decline text", async () => {
     const { browser, page, controller } = await setupChallenge();
+    const wait = vi.spyOn(page, "waitForTimeout");
     try {
       await page.locator("body").evaluate((body) => {
         body.insertAdjacentHTML("beforeend", "<p>Payment declined</p>");
       });
       await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("failed");
+      expect(wait).not.toHaveBeenCalled();
     } finally {
+      wait.mockRestore();
       await browser.close();
     }
   });
@@ -2267,7 +3090,8 @@ describe("3-D Secure resolution", () => {
             }
           ).detectThreeDsChallenge(),
         ).resolves.toEqual({ three_ds_required: false, order_confirmed: false });
-        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
+        await expect(controller.waitForThreeDsResolution(2_500)).resolves.toBe("timeout");
+        expect(wait.mock.calls.map(([timeout]) => timeout)).toEqual([1_000, 1_000, 500]);
       } finally {
         wait.mockRestore();
         now.mockRestore();
@@ -2277,7 +3101,7 @@ describe("3-D Secure resolution", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "returns timeout when neither an order route nor a decline appears",
+    "reports a pending challenge when neither an order route nor a decline appears",
     async () => {
       const { browser, page, controller } = await setupChallenge();
       let clock = 0;
@@ -2286,7 +3110,7 @@ describe("3-D Secure resolution", () => {
         clock += timeout;
       });
       try {
-        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("challenge_pending");
       } finally {
         wait.mockRestore();
         now.mockRestore();
@@ -2306,7 +3130,7 @@ describe("3-D Secure resolution", () => {
       });
       try {
         await page.evaluate(() => history.replaceState({}, "", "/checkout?success_url=/done"));
-        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("challenge_pending");
       } finally {
         wait.mockRestore();
         now.mockRestore();
@@ -2335,6 +3159,7 @@ describe("3-D Secure resolution", () => {
         <script>
           document.querySelector("#checkout").addEventListener("submit", (event) => {
             event.preventDefault();
+            void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
             document.body.dataset.submitted = "true";
           });
         </script>
@@ -2449,6 +3274,40 @@ describe("split-checkout card fill (real browser)", () => {
         document.body.dataset.submitted = "true";
       });
     </script>`;
+
+  it.skipIf(!chromiumAvailable)(
+    "retains expected evidence when submit dispatch becomes uncertain",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent(FRAME_FORM);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+        (
+          controller as unknown as {
+            submitFilledCheckoutInScope: () => Promise<CheckoutSubmitResult>;
+          }
+        ).submitFilledCheckoutInScope = async () => {
+          throw new PaymentSubmitOutcomeUnknownError();
+        };
+
+        await expect(
+          controller.fillAndSubmitCheckout({ ...CARD, network: "Mastercard" }),
+        ).rejects.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
+        await page.setContent(
+          '<iframe title="3D Secure authentication" srcdoc="<p>Card ending 0005</p>"></iframe>',
+        );
+        await controller.waitForThreeDsResolution(0);
+        expect(controller.paymentInstrumentMismatch()).toMatchObject({
+          expected: { last4: "4242", network: "Mastercard" },
+          observed: { last4: "0005" },
+        });
+      } finally {
+        await browser.close();
+      }
+    },
+  );
 
   const TOPMOST_SPLIT_PAN_STYLE = `
     <style>
@@ -2603,6 +3462,62 @@ describe("split-checkout card fill (real browser)", () => {
         await browser.close();
       }
     },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "waits for Shopify's trusted PCI PAN instead of an earlier untrusted checkout-frame decoy",
+    async () => {
+      const pageUrl = "https://whitejade.example.test/checkout";
+      const transientShopifyFrameUrl = "https://checkout.shopify.com/payment-shell";
+      const pciUrl = "https://checkout.pci.shopifyinc.com/build/number-ltr.html";
+      const hydrationUrl = "https://whitejade.example.test/checkout-hydration";
+      let releaseHydration!: () => void;
+      const hydrationPending = new Promise<void>((resolve) => {
+        releaseHydration = resolve;
+      });
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <title>White Jade checkout</title>
+          <iframe src="${transientShopifyFrameUrl}"></iframe>
+          <script>
+            void fetch(${JSON.stringify(hydrationUrl)});
+          </script>`,
+        // Shopify's checkout shell is not an approved card-egress surface. It
+        // can transiently expose card-shaped controls while it hydrates the
+        // actual checkout.pci.shopifyinc.com hosted fields.
+        [transientShopifyFrameUrl]: '<input autocomplete="cc-number">',
+        [pciUrl]: FRAME_FORM,
+      });
+      try {
+        await page.route(hydrationUrl, async (route) => {
+          await hydrationPending;
+          await route.fulfill({ status: 204 });
+        });
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        const fill = controller.fillCheckoutCardFields(CARD);
+        await page.evaluate((url) => {
+          const frame = document.createElement("iframe");
+          frame.src = url;
+          document.body.append(frame);
+        }, pciUrl);
+        await fill;
+        releaseHydration();
+
+        const pciFrame = page.frames().find((frame) => frame.url() === pciUrl)!;
+        expect(await pciFrame.locator('[autocomplete="cc-number"]').inputValue()).toBe(CARD.pan);
+        expect(await pciFrame.locator('[autocomplete="cc-csc"]').inputValue()).toBe(CARD.cvv);
+        const transientFrame = page
+          .frames()
+          .find((frame) => frame.url() === transientShopifyFrameUrl)!;
+        expect(await transientFrame.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
   );
 
   it.skipIf(!chromiumAvailable)(
@@ -2808,6 +3723,265 @@ describe("split-checkout card fill (real browser)", () => {
         await browser.close();
       }
     },
+  );
+
+  // Regression (ts-operator-3ds-completion): fillAndSubmitCheckout's post-submit
+  // cleanup used to re-derive its frame list from a fresh this.page.frames() call
+  // taken AFTER submission, so a 3-D Secure method/challenge iframe attached by
+  // the time cleanup ran got its DOM scanned and any card-shaped field cleared —
+  // corrupting the in-flight device-fingerprint hand-off to the real ACS on real
+  // EbisuMart/JP checkouts. Cleanup must reuse the exact frame snapshot fill
+  // wrote into (captured before the submit click): an unrecognized 3DS-provider
+  // frame that only attaches afterward must never be touched, even if one of
+  // its fields happens to look card-shaped.
+  it.skipIf(!chromiumAvailable)(
+    "never clears fields inside an unrecognized 3-D Secure frame during post-submit cleanup",
+    async () => {
+      const pageUrl = "https://hibiyakadan.test/cart_seisan.html";
+      const methodUrl = "https://methodurl.vcas-issuer.test/DeviceFingerprintWeb/method";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <title>Hibiya Kadan</title>
+          <form id="card-form">
+            <input name="CREDIT_NO">
+            <input name="CREDIT_NAME">
+            <input name="SECURITY_CD">
+            <select name="CREDIT_LIMIT_MONTH"><option value=""></option><option value="12">12</option></select>
+            <select name="CREDIT_LIMIT_YEAR"><option value=""></option><option value="30">30</option></select>
+          </form>
+          <button id="place-order">注文する</button>
+          <script>
+            document.querySelector("#place-order").addEventListener("click", () => {
+              const frame = document.createElement("iframe");
+              frame.src = ${JSON.stringify(methodUrl)};
+              frame.style.cssText = "display:none;width:0;height:0;border:0";
+              frame.width = "0";
+              frame.height = "0";
+              document.body.append(frame);
+              setTimeout(() => history.pushState({}, "", "/checkouts/order987/thank_you"), 300);
+            });
+          </script>`,
+        [methodUrl]: `
+          <input type="hidden" id="acs-cardnumber-token" value="untouched-fingerprint-token">
+          <p>3DS method</p>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillAndSubmitCheckout(CARD);
+
+        const acsFrame = page.frames().find((candidate) => candidate.url() === methodUrl);
+        expect(acsFrame).toBeDefined();
+        expect(await acsFrame!.locator("#acs-cardnumber-token").inputValue()).toBe(
+          "untouched-fingerprint-token",
+        );
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "never clears fields after a filled frame navigates to a 3-D Secure document",
+    async () => {
+      const pageUrl = "https://store.kobeejapan.net/checkout";
+      const frameUrl = "https://checkout.pci.shopifyinc.com/card-fields-navigation";
+      const acsUrl = "https://issuer-stronghold.test/acs/challenge";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <title>Kobee Japan</title>
+          <iframe src="${frameUrl}"></iframe>
+          <button id="place-order">Place order</button>
+          <script>
+            document.querySelector("#place-order").addEventListener("click", () => {
+              document.querySelector("iframe").src = ${JSON.stringify(acsUrl)};
+            });
+          </script>`,
+        [frameUrl]: `
+          <form>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp-month">
+            <input autocomplete="cc-exp-year">
+            <input autocomplete="cc-csc">
+          </form>`,
+        [acsUrl]: `
+          <title>3-D Secure authentication</title>
+          <input type="hidden" id="acs-cardnumber-token" value="untouched-challenge-token">
+          <p>Authenticate payment</p>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        const originalPaymentFrame = page.frames().find((frame) => frame.url() === frameUrl);
+        expect(originalPaymentFrame).toBeDefined();
+        const result = await controller.fillAndSubmitCheckout(CARD);
+
+        expect(result.three_ds_required).toBe(true);
+        const acsFrame = page.frames().find((frame) => frame.url() === acsUrl);
+        expect(acsFrame).toBe(originalPaymentFrame);
+        expect(await acsFrame!.locator("#acs-cardnumber-token").inputValue()).toBe(
+          "untouched-challenge-token",
+        );
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "never retargets cleanup when a filled frame navigates during cleanup",
+    async () => {
+      const pageUrl = "https://store.kobeejapan.net/checkout-cleanup-race";
+      const frameUrl = "https://checkout.pci.shopifyinc.com/card-fields-cleanup-race";
+      const challengeUrl = "https://challenge-signal.test/3ds/challenge";
+      const acsUrl = "https://issuer-stronghold.test/acs/delayed-challenge";
+      const auxiliaryFrames = Array.from(
+        { length: 8 },
+        (_, index) => `<iframe srcdoc="<p>auxiliary-${index}</p>"></iframe>`,
+      ).join("");
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <title>Kobee Japan</title>
+          ${auxiliaryFrames}
+          <iframe id="payment-frame" src="${frameUrl}"></iframe>
+          <button id="place-order">Place order</button>
+          <script>
+            window.addEventListener("message", (event) => {
+              if (event.data === "cleanup-navigation-started") {
+                document.body.dataset.cleanupNavigationStarted = "true";
+              }
+            });
+            document.querySelector("#place-order").addEventListener("click", () => {
+              document.querySelector("#payment-frame").contentWindow.postMessage(
+                "arm-cleanup-navigation",
+                "*",
+              );
+              const challenge = document.createElement("iframe");
+              challenge.src = ${JSON.stringify(challengeUrl)};
+              challenge.title = "3D Secure";
+              challenge.style.cssText = "display:block;width:320px;height:240px";
+              document.body.append(challenge);
+            });
+          </script>`,
+        [frameUrl]: `
+          <form>
+            <input id="card-number" autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp-month">
+            <input autocomplete="cc-exp-year">
+            <input autocomplete="cc-csc">
+          </form>
+          <script>
+            let cleanupNavigationArmed = false;
+            window.addEventListener("message", (event) => {
+              if (event.data === "arm-cleanup-navigation") cleanupNavigationArmed = true;
+            });
+            new MutationObserver((records) => {
+              if (
+                cleanupNavigationArmed &&
+                records.some((record) => record.attributeName === "data-ts-jp-card-field")
+              ) {
+                cleanupNavigationArmed = false;
+                parent.postMessage("cleanup-navigation-started", "*");
+                location.href = ${JSON.stringify(acsUrl)};
+              }
+            }).observe(document.querySelector("#card-number"), {
+              attributes: true,
+              attributeFilter: ["data-ts-jp-card-field"],
+            });
+          </script>`,
+        [challengeUrl]: `<p>3-D Secure challenge</p>`,
+        [acsUrl]: `
+          <title>Issuer ACS</title>
+          <input type="hidden" id="acs-cardnumber-token" value="untouched-race-token">
+          <p>Authenticate payment</p>`,
+      });
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+        const originalPaymentFrame = page.frames().find((frame) => frame.url() === frameUrl);
+        expect(originalPaymentFrame).toBeDefined();
+        const acsNavigation = page.waitForEvent("framenavigated", {
+          predicate: (frame) => frame.url() === acsUrl,
+          timeout: 10_000,
+        });
+
+        const result = await controller.fillAndSubmitCheckout(CARD);
+        const acsFrame = await acsNavigation;
+
+        expect(result.three_ds_required).toBe(true);
+        expect(acsFrame).toBe(originalPaymentFrame);
+        expect(await page.locator("body").getAttribute("data-cleanup-navigation-started")).toBe(
+          "true",
+        );
+        expect(await acsFrame.locator("#acs-cardnumber-token").inputValue()).toBe(
+          "untouched-race-token",
+        );
+        expect(consoleError).toHaveBeenCalledWith(expect.stringContaining("[payment-cleanup]"));
+      } finally {
+        consoleError.mockRestore();
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "still clears card fields after same-document order confirmation navigation",
+    async () => {
+      const pageUrl = "https://merchant-garden.test/checkout";
+      const receiptUrl = "https://merchant-garden.test/receipt/ORD-12345";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp-month">
+            <input autocomplete="cc-exp-year">
+            <input autocomplete="cc-csc">
+            <button type="button" id="place-order">Place order</button>
+          </form>
+          <script>
+            document.querySelector("#place-order").addEventListener("click", () => {
+              history.pushState({}, "", "/receipt/ORD-12345");
+              document.body.insertAdjacentHTML("beforeend", "<p>Order confirmed</p>");
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        const originalMainFrame = page.mainFrame();
+        const result = await controller.fillAndSubmitCheckout(CARD);
+
+        expect(result).toEqual({ three_ds_required: false, order_confirmed: true });
+        expect(page.mainFrame()).toBe(originalMainFrame);
+        expect(page.url()).toBe(receiptUrl);
+        expect(await page.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
+        expect(await page.locator('[autocomplete="cc-name"]').inputValue()).toBe("");
+        expect(await page.locator('[autocomplete="cc-exp-month"]').inputValue()).toBe("");
+        expect(await page.locator('[autocomplete="cc-exp-year"]').inputValue()).toBe("");
+        expect(await page.locator('[autocomplete="cc-csc"]').inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
   );
 
   it.skipIf(!chromiumAvailable)(
@@ -3524,6 +4698,146 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "semantically clears controlled split expiry after terminal fill failure",
+    async () => {
+      const pageUrl = "https://shop.example.test/terminal-controlled-expiry";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form>
+            <input autocomplete="cc-number" id="pan">
+            <select name="CREDIT_LIMIT_MONTH" id="month">
+              <option value=""></option><option value="12">December</option>
+            </select>
+            <select name="CREDIT_LIMIT_YEAR" id="year">
+              <option value=""></option><option value="30">Two thousand thirty</option>
+            </select>
+            <input autocomplete="cc-csc" id="cvv">
+            <input autocomplete="cc-name" id="holder">
+          </form>
+          <script>
+            for (const id of ["month", "year"]) {
+              const select = document.getElementById(id);
+              let stored = "";
+              select.addEventListener("change", () => { stored = select.value; });
+              new MutationObserver(() => { select.value = stored; }).observe(select, {
+                attributes: true,
+                attributeFilter: ["data-ts-sealed-payment"],
+              });
+            }
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_submit_not_found",
+        );
+        const values = await page
+          .locator("input,select")
+          .evaluateAll((controls) =>
+            controls.map((control) => (control as HTMLInputElement | HTMLSelectElement).value),
+          );
+        expect(values.every((value) => value === "")).toBe(true);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "preserves a terminal submit failure when card cleanup also fails",
+    async () => {
+      const pageUrl = "https://shop.example.test/terminal-primary-error";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-exp">
+            <input autocomplete="cc-csc">
+            <input autocomplete="cc-name">
+          </form>
+          <div id="preview"></div>
+          <script>
+            document.querySelector('[autocomplete="cc-number"]').addEventListener("input", (event) => {
+              if (event.target.value !== "") {
+                document.querySelector("#preview").textContent = "Card " + event.target.value;
+              }
+            });
+          </script>`,
+      });
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_submit_not_found",
+        );
+        expect(consoleError).toHaveBeenCalledWith("[payment-cleanup] payment_fields_not_cleared");
+        expect(await page.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
+        expect(await page.locator("#preview").innerText()).toContain(CARD.pan);
+      } finally {
+        consoleError.mockRestore();
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "preserves a confirmed payment outcome when card cleanup also fails",
+    async () => {
+      const pageUrl = "https://shop.example.test/terminal-confirmed-cleanup-failure";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-exp">
+            <input autocomplete="cc-csc">
+            <input autocomplete="cc-name">
+            <button type="button" id="pay-now">Pay now</button>
+          </form>
+          <div id="preview"></div>
+          <script>
+            document.querySelector('[autocomplete="cc-number"]').addEventListener("input", (event) => {
+              if (event.target.value !== "") {
+                document.querySelector("#preview").textContent = "Card " + event.target.value;
+              }
+            });
+            document.querySelector("#pay-now").addEventListener("click", () => {
+              history.pushState({}, "", "/receipt/ORD-12345");
+              document.body.insertAdjacentHTML("beforeend", "<p>Order confirmed</p>");
+            });
+          </script>`,
+      });
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+        const onSubmitDispatched = vi.fn();
+
+        await expect(
+          controller.fillAndSubmitCheckout(CARD, { onSubmitDispatched }),
+        ).resolves.toEqual({
+          three_ds_required: false,
+          order_confirmed: true,
+        });
+        expect(onSubmitDispatched).toHaveBeenCalledOnce();
+        expect(consoleError).toHaveBeenCalledWith("[payment-cleanup] payment_fields_not_cleared");
+        expect(await page.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
+        expect(await page.locator("#preview").innerText()).toContain(CARD.pan);
+      } finally {
+        consoleError.mockRestore();
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "keeps cleanup sealed when card data survives in interactive metadata",
     async () => {
       const pageUrl = "https://shop.example.test/checkout/payment";
@@ -3594,6 +4908,1386 @@ describe("split-checkout card fill (real browser)", () => {
         await browser.close();
       }
     },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "fills a Hibiya-Kadan-shaped EbisuMart checkout (CREDIT_NO/CREDIT_NAME/SECURITY_CD + select expiry) without touching an unrelated month/year select",
+    async () => {
+      const pageUrl = "https://shop.example.test/cart_seisan.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <title>ご注文の入力</title>
+          <form id="seisanForm" action="https://shop.example.test/submit">
+            <div>
+              <dt>カード名義</dt>
+              <dd><input type="text" name="CREDIT_NAME" id="CREDIT_NAME"></dd>
+            </div>
+            <div>
+              <dt>カード番号</dt>
+              <dd><input type="text" name="CREDIT_NO" id="CREDIT_NO" placeholder="0123456789012345"></dd>
+            </div>
+            <div>
+              <dt>お支払い回数</dt>
+              <dd><select name="CREDIT_COUNT"><option value="1">一括払い</option></select></dd>
+            </div>
+            <div>
+              <dt>有効期限</dt>
+              <dd>
+                <select name="CREDIT_LIMIT_MONTH" id="CREDIT_LIMIT_MONTH">
+                  <option value="" selected>月を指定</option>
+                  <option value="01">1</option><option value="02">2</option><option value="03">3</option>
+                  <option value="04">4</option><option value="05">5</option><option value="06">6</option>
+                  <option value="07">7</option><option value="08">8</option><option value="09">9</option>
+                  <option value="10">10</option><option value="11">11</option><option value="12">12</option>
+                </select>
+                <select name="CREDIT_LIMIT_YEAR" id="CREDIT_LIMIT_YEAR">
+                  <option value="" selected>年を指定</option>
+                  <option value="26">2026</option><option value="27">2027</option><option value="28">2028</option>
+                  <option value="29">2029</option><option value="30">2030</option><option value="31">2031</option>
+                </select>
+              </dd>
+            </div>
+            <div>
+              <dt>セキュリティコード</dt>
+              <dd><input type="text" name="SECURITY_CD" id="SECURITY_CD"></dd>
+            </div>
+            <!-- unrelated month/year select + a hidden lookalike name the broadened
+                 selectors must NOT match, guarding against a wrong-field fill. -->
+            <div>
+              <dt>お届け希望日</dt>
+              <dd>
+                <select name="SEND_HOPE_DATE_MONTH" id="SEND_HOPE_DATE_MONTH"><option value="" selected>--</option><option value="9">9</option></select>
+                <select name="SEND_HOPE_DATE_YEAR" id="SEND_HOPE_DATE_YEAR"><option value="" selected>--</option><option value="2026">2026</option></select>
+              </dd>
+            </div>
+            <input type="hidden" name="MASKED_TOKEN_CREDIT_NO" value="">
+            <button type="submit">ご注文を確定する</button>
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        // A 4-digit exp_year exercises the select's value="26"-miss /
+        // label="2026"-hit fallback already built into fillFirst's select branch.
+        await controller.fillCheckoutCardFields({ ...CARD, exp_year: "2030" });
+
+        expect(await page.locator("#CREDIT_NO").inputValue()).toBe(CARD.pan);
+        expect(await page.locator("#CREDIT_NAME").inputValue()).toBe(CARD.name);
+        expect(await page.locator("#SECURITY_CD").inputValue()).toBe(CARD.cvv);
+        expect(await page.locator("#CREDIT_LIMIT_MONTH").inputValue()).toBe("12");
+        expect(await page.locator("#CREDIT_LIMIT_YEAR").inputValue()).toBe("30");
+        expect(await page.locator("#SEND_HOPE_DATE_MONTH").inputValue()).toBe("");
+        expect(await page.locator("#SEND_HOPE_DATE_YEAR").inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+    15_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "fills a JP checkout via the dt/dd label-text fallback when field names carry no card hint at all",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <title>ご注文の入力</title>
+          <form id="checkoutForm" action="https://shop.example.test/submit">
+            <dl>
+              <dt><span class="title">カード番号</span></dt>
+              <dd class="table-content"><div class="input-wrapper"><input type="text" name="f_1" id="f_1"></div></dd>
+            </dl>
+            <dl>
+              <dt><span class="title">カード名義</span></dt>
+              <dd class="table-content"><input type="text" name="f_2" id="f_2"></dd>
+            </dl>
+            <dl>
+              <dt><span class="title">有効期限</span></dt>
+              <dd class="table-content">
+                <select name="f_3" id="f_3">
+                  <option value="" selected>月を指定</option>
+                  <option value="01">1</option><option value="02">2</option><option value="03">3</option>
+                  <option value="04">4</option><option value="05">5</option><option value="06">6</option>
+                  <option value="07">7</option><option value="08">8</option><option value="09">9</option>
+                  <option value="10">10</option><option value="11">11</option><option value="12">12</option>
+                </select>
+                <select name="f_4" id="f_4">
+                  <option value="" selected>年を指定</option>
+                  <option value="26">2026</option><option value="27">2027</option><option value="28">2028</option>
+                  <option value="29">2029</option><option value="30">2030</option><option value="31">2031</option>
+                </select>
+              </dd>
+            </dl>
+            <dl>
+              <dt><span class="title">セキュリティコード</span></dt>
+              <dd class="table-content"><input type="text" name="f_5" id="f_5"></dd>
+            </dl>
+            <button type="submit">確定する</button>
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillCheckoutCardFields(CARD);
+
+        expect(await page.locator("#f_1").inputValue()).toBe(CARD.pan);
+        expect(await page.locator("#f_2").inputValue()).toBe(CARD.name);
+        expect(await page.locator("#f_5").inputValue()).toBe(CARD.cvv);
+        expect(await page.locator("#f_3").inputValue()).toBe(CARD.exp_month.padStart(2, "0"));
+        expect(await page.locator("#f_4").inputValue()).toBe(CARD.exp_year);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "excludes non-card CVV identities and JP labels",
+    async () => {
+      const cases = [
+        {
+          name: "gift-cvv-identity",
+          cvv: '<input type="text" name="GIFT_SECURITY_CD" id="false-cvv">',
+        },
+        {
+          name: "security-cd-note",
+          cvv: '<input type="text" name="SECURITY_CD_NOTE" id="false-field">',
+        },
+        {
+          name: "gift-cvv-label",
+          cvv: '<dl><dt>ギフトセキュリティコード</dt><dd><input type="text" id="field-z"></dd></dl>',
+        },
+      ];
+      for (const testCase of cases) {
+        const pageUrl = `https://shop.example.test/${testCase.name}.html`;
+        const { page, browser } = await servePages({
+          [pageUrl]: `
+            <meta charset="utf-8">
+            <form>
+              <input type="text" autocomplete="cc-number" id="pan">
+              <input type="text" autocomplete="cc-name" id="holder">
+              <input type="text" autocomplete="cc-exp" id="expiry">
+              ${testCase.cvv}
+            </form>`,
+        });
+        try {
+          await page.goto(pageUrl);
+          const controller = new BrowserController({ humanize: false });
+          (controller as unknown as { page: Page }).page = page;
+
+          await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+            "payment_field_not_found:cvv",
+          );
+          await expect(
+            page
+              .locator("input")
+              .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
+          ).resolves.toEqual(["", "", "", ""]);
+        } finally {
+          await browser.close();
+        }
+      }
+    },
+    15_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "leaves non-card holder identity and label candidates untouched",
+    async () => {
+      const pageUrl = "https://shop.example.test/gift-holder-fields.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form>
+            <input type="text" autocomplete="cc-number" id="pan">
+            <input type="text" autocomplete="cc-exp" id="expiry">
+            <input type="text" autocomplete="cc-csc" id="cvv">
+            <input type="text" name="GIFT_CREDIT_NAME" id="gift-holder">
+            <input type="text" name="CARD_NAME_NOTE" id="holder-note">
+            <dl><dt>ギフトカード名義</dt><dd><input type="text" id="field-holder"></dd></dl>
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillCheckoutCardFields(CARD);
+        expect(await page.locator("#gift-holder").inputValue()).toBe("");
+        expect(await page.locator("#holder-note").inputValue()).toBe("");
+        expect(await page.locator("#field-holder").inputValue()).toBe("");
+        expect(await page.locator("#pan").inputValue()).toBe(CARD.pan);
+        expect(await page.locator("#cvv").inputValue()).toBe(CARD.cvv);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "preserves legacy Western combined and split expiry detection",
+    async () => {
+      const cases = [
+        {
+          name: "combined",
+          expiry: '<input name="payment_expiration" id="expiry">',
+          expected: async (page: Page) => {
+            expect(await page.locator("#expiry").inputValue()).toBe("1230");
+          },
+        },
+        {
+          name: "split",
+          expiry: `
+            <select name="payment_exp_month" id="month">
+              <option value=""></option><option value="12">December</option>
+            </select>
+            <select name="payment_exp_year" id="year">
+              <option value=""></option><option value="30">2030</option>
+            </select>`,
+          expected: async (page: Page) => {
+            expect(await page.locator("#month").inputValue()).toBe("12");
+            expect(await page.locator("#year").inputValue()).toBe("30");
+          },
+        },
+      ];
+      for (const testCase of cases) {
+        const pageUrl = `https://shop.example.test/legacy-western-${testCase.name}.html`;
+        const { page, browser } = await servePages({
+          [pageUrl]: `
+            <form>
+              <input autocomplete="cc-number" id="pan">
+              <input autocomplete="cc-name" id="holder">
+              ${testCase.expiry}
+              <input autocomplete="cc-csc" id="cvv">
+            </form>`,
+        });
+        try {
+          await page.goto(pageUrl);
+          const controller = new BrowserController({ humanize: false });
+          (controller as unknown as { page: Page }).page = page;
+
+          await controller.fillCheckoutCardFields(CARD);
+          await testCase.expected(page);
+          expect(await page.locator("#pan").inputValue()).toBe(CARD.pan);
+          expect(await page.locator("#cvv").inputValue()).toBe(CARD.cvv);
+        } finally {
+          await browser.close();
+        }
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)("preserves legacy Western number-input PAN detection", async () => {
+    const pageUrl = "https://shop.example.test/legacy-number-pan.html";
+    const { page, browser } = await servePages({
+      [pageUrl]: `
+          <form>
+            <input type="number" name="cardnumber" id="legacy-pan">
+            <input autocomplete="cc-name" id="holder">
+            <input autocomplete="cc-exp" id="expiry">
+            <input autocomplete="cc-csc" id="cvv">
+          </form>`,
+    });
+    try {
+      await page.goto(pageUrl);
+      const controller = new BrowserController({ humanize: false });
+      (controller as unknown as { page: Page }).page = page;
+
+      await controller.fillCheckoutCardFields(CARD);
+      expect(await page.locator("#legacy-pan").inputValue()).toBe(CARD.pan);
+      expect(await page.locator("#cvv").inputValue()).toBe(CARD.cvv);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses ambiguous and unrelated expiry topologies before filling",
+    async () => {
+      const cases = [
+        {
+          name: "combined-and-split",
+          expiry: `
+            <input type="text" autocomplete="cc-exp" id="card-expiry">
+            <select name="card_exp_month"><option value=""></option><option value="12">12</option></select>
+            <select name="card_exp_year"><option value=""></option><option value="30">30</option></select>`,
+        },
+        {
+          name: "same-split-control",
+          expiry: '<input type="text" name="exp_month_exp_year" id="shared-expiry">',
+        },
+        {
+          name: "different-split-groups",
+          expiry: `
+            <select name="credit_limit_month" id="credit-month"><option value=""></option></select>
+            <input type="text" name="card_exp_year" id="card-year">`,
+        },
+      ];
+      for (const testCase of cases) {
+        const pageUrl = `https://shop.example.test/${testCase.name}.html`;
+        const { page, browser } = await servePages({
+          [pageUrl]: `
+            <meta charset="utf-8">
+            <form>
+              <input type="text" autocomplete="cc-number" id="pan">
+              <input type="text" autocomplete="cc-name" id="holder">
+              ${testCase.expiry}
+              <input type="text" autocomplete="cc-csc" id="cvv">
+            </form>`,
+        });
+        try {
+          await page.goto(pageUrl);
+          const controller = new BrowserController({ humanize: false });
+          (controller as unknown as { page: Page }).page = page;
+
+          await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+            "payment_card_form_ambiguous",
+          );
+          const values = await page
+            .locator("input,select")
+            .evaluateAll((controls) =>
+              controls.map((control) => (control as HTMLInputElement | HTMLSelectElement).value),
+            );
+          expect(values.every((value) => value === "")).toBe(true);
+        } finally {
+          await browser.close();
+        }
+      }
+    },
+    15_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses non-card expiry identities and JP labels before filling",
+    async () => {
+      const cases = [
+        {
+          name: "membership-expiry",
+          jpIdentity: false,
+          expiry: `
+            <select name="membership_exp_month"><option value=""></option><option value="12">12</option></select>
+            <select name="membership_exp_year"><option value=""></option><option value="30">30</option></select>`,
+        },
+        {
+          name: "gift-card-expiry-label",
+          jpIdentity: false,
+          expiry: `
+            <dl>
+              <dt>ギフトカード有効期限</dt>
+              <dd>
+                <select id="field-a"><option value="">月を指定</option><option value="12">12</option></select>
+                <select id="field-b"><option value="">年を指定</option><option value="30">2030</option></select>
+              </dd>
+            </dl>`,
+        },
+        {
+          name: "order-expiration-note",
+          jpIdentity: true,
+          expiry: '<input type="text" name="order_expiration_note" id="false-expiry">',
+        },
+      ];
+      for (const testCase of cases) {
+        const pageUrl = `https://shop.example.test/${testCase.name}.html`;
+        const { page, browser } = await servePages({
+          [pageUrl]: `
+            <meta charset="utf-8">
+            <form>
+              <input type="text" ${testCase.jpIdentity ? 'name="CREDIT_NO"' : 'autocomplete="cc-number"'} id="pan">
+              <input type="text" ${testCase.jpIdentity ? 'name="CREDIT_NAME"' : 'autocomplete="cc-name"'} id="holder">
+              ${testCase.expiry}
+              <input type="text" ${testCase.jpIdentity ? 'name="SECURITY_CD"' : 'autocomplete="cc-csc"'} id="cvv">
+            </form>`,
+        });
+        try {
+          await page.goto(pageUrl);
+          const controller = new BrowserController({ humanize: false });
+          (controller as unknown as { page: Page }).page = page;
+
+          await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+            "payment_field_not_found:expiry",
+          );
+          const values = await page
+            .locator("input,select")
+            .evaluateAll((controls) =>
+              controls.map((control) => (control as HTMLInputElement | HTMLSelectElement).value),
+            );
+          expect(values.every((value) => value === "")).toBe(true);
+        } finally {
+          await browser.close();
+        }
+      }
+    },
+    15_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses legacy expiry and CVV sibling candidates on JP-only card forms",
+    async () => {
+      const cases = [
+        {
+          name: "legacy-expiry-siblings",
+          controls: `
+            <select name="order_exp_month" id="false-month">
+              <option value=""></option><option value="12">12</option>
+            </select>
+            <select name="order_exp_year" id="false-year">
+              <option value=""></option><option value="30">30</option>
+            </select>
+            <input name="SECURITY_CD" id="cvv">`,
+          expectedError: "payment_field_not_found:expiry",
+        },
+        {
+          name: "legacy-cvv-sibling",
+          controls: `
+            <select name="CREDIT_LIMIT_MONTH" id="month">
+              <option value=""></option><option value="12">12</option>
+            </select>
+            <select name="CREDIT_LIMIT_YEAR" id="year">
+              <option value=""></option><option value="30">2030</option>
+            </select>
+            <input name="CVC_NOTE" id="false-cvv">`,
+          expectedError: "payment_field_not_found:cvv",
+        },
+      ];
+      for (const testCase of cases) {
+        const pageUrl = `https://shop.example.test/${testCase.name}.html`;
+        const { page, browser } = await servePages({
+          [pageUrl]: `
+            <form>
+              <input name="CREDIT_NO" id="pan">
+              <input name="CREDIT_NAME" id="holder">
+              ${testCase.controls}
+            </form>
+            <script>
+              for (const id of ["false-month", "false-year"]) {
+                const field = document.getElementById(id);
+                if (field) field.addEventListener("change", (event) => {
+                  if (event.target.value) document.body.dataset.falseExpiryTouched = "true";
+                });
+              }
+              const falseCvv = document.getElementById("false-cvv");
+              if (falseCvv) falseCvv.addEventListener("input", (event) => {
+                if (event.target.value) document.body.dataset.falseCvvTouched = "true";
+              });
+            </script>`,
+        });
+        try {
+          await page.goto(pageUrl);
+          const controller = new BrowserController({ humanize: false });
+          (controller as unknown as { page: Page }).page = page;
+
+          await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+            testCase.expectedError,
+          );
+          expect(await page.locator("body").getAttribute("data-false-expiry-touched")).toBeNull();
+          expect(await page.locator("body").getAttribute("data-false-cvv-touched")).toBeNull();
+          const values = await page
+            .locator("input,select")
+            .evaluateAll((controls) =>
+              controls.map((control) => (control as HTMLInputElement | HTMLSelectElement).value),
+            );
+          expect(values.every((value) => value === "")).toBe(true);
+        } finally {
+          await browser.close();
+        }
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "rejects a trailing-token PAN identity beside segmented card inputs",
+    async () => {
+      const pageUrl = "https://shop.example.test/card-no-note-and-segmented.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form>
+            <input name="CARD_NO_NOTE" id="false-pan">
+            <dl>
+              <dt>カード番号</dt>
+              <dd>
+                <input id="pan-1"><input id="pan-2">
+                <input id="pan-3"><input id="pan-4">
+              </dd>
+            </dl>
+            <input name="CREDIT_NAME" id="holder">
+            <select name="CREDIT_LIMIT_MONTH"><option value=""></option><option value="12">12</option></select>
+            <select name="CREDIT_LIMIT_YEAR"><option value=""></option><option value="30">2030</option></select>
+            <input name="SECURITY_CD" id="cvv">
+          </form>
+          <script>
+            document.getElementById("false-pan").addEventListener("input", (event) => {
+              if (event.target.value) document.body.dataset.falsePanValue = event.target.value;
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+          "payment_field_not_found:pan",
+        );
+        expect(await page.locator("body").getAttribute("data-false-pan-value")).toBeNull();
+        const values = await page
+          .locator("input")
+          .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value));
+        expect(values.every((value) => value === "")).toBe(true);
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses a JP card-number label associated with four visible PAN segments",
+    async () => {
+      const pageUrl = "https://shop.example.test/segmented-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form>
+            <dl>
+              <dt>カード番号</dt>
+              <dd>
+                <input type="text" id="f_1"><input type="text" id="f_2">
+                <input type="text" id="f_3"><input type="text" id="f_4">
+              </dd>
+            </dl>
+            <dl><dt>カード名義</dt><dd><input type="text" id="f_5"></dd></dl>
+            <dl>
+              <dt>有効期限</dt>
+              <dd>
+                <select id="f_6"><option value="">月を指定</option><option value="12">12</option></select>
+                <select id="f_7"><option value="">年を指定</option><option value="30">2030</option></select>
+              </dd>
+            </dl>
+            <dl><dt>セキュリティコード</dt><dd><input type="text" id="f_8"></dd></dl>
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+          "payment_field_not_found:pan",
+        );
+        await expect(
+          page
+            .locator("input")
+            .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
+        ).resolves.toEqual(["", "", "", "", "", ""]);
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses ambiguous same-form JP PAN substring candidates before filling",
+    async () => {
+      const pageUrl = "https://shop.example.test/ambiguous-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form>
+            <input type="text" name="BACKUP_CARD_NO" id="backup-card">
+            <input type="text" name="CREDIT_NO" id="credit-card">
+            <input type="text" name="CREDIT_NAME" id="holder">
+            <select name="CREDIT_LIMIT_MONTH"><option value="">月を指定</option><option value="12">12</option></select>
+            <select name="CREDIT_LIMIT_YEAR"><option value="">年を指定</option><option value="30">2030</option></select>
+            <input type="text" name="SECURITY_CD" id="cvv">
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+          "payment_card_form_ambiguous",
+        );
+        expect(await page.locator("#backup-card").inputValue()).toBe("");
+        expect(await page.locator("#credit-card").inputValue()).toBe("");
+        expect(await page.locator("#holder").inputValue()).toBe("");
+        expect(await page.locator("#cvv").inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses a gift-card false singleton beside a segmented JP PAN",
+    async () => {
+      const pageUrl = "https://shop.example.test/gift-and-segmented-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form>
+            <input type="text" name="GIFT_CARD_NO" id="gift-card">
+            <dl>
+              <dt>カード番号</dt>
+              <dd>
+                <input type="text" id="pan-1"><input type="text" id="pan-2">
+                <input type="text" id="pan-3"><input type="text" id="pan-4">
+              </dd>
+            </dl>
+            <input type="text" name="CREDIT_NAME" id="holder">
+            <select name="CREDIT_LIMIT_MONTH"><option value="">月を指定</option><option value="12">12</option></select>
+            <select name="CREDIT_LIMIT_YEAR"><option value="">年を指定</option><option value="30">2030</option></select>
+            <input type="text" name="SECURITY_CD" id="cvv">
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+          "payment_field_not_found:pan",
+        );
+        await expect(
+          page
+            .locator("input")
+            .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
+        ).resolves.toEqual(["", "", "", "", "", "", ""]);
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses a compound gift-card label beside a segmented JP PAN",
+    async () => {
+      const pageUrl = "https://shop.example.test/gift-label-and-segmented-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form>
+            <dl><dt>ギフトカード番号</dt><dd><input type="text" id="opaque-token"></dd></dl>
+            <dl>
+              <dt>カード番号</dt>
+              <dd>
+                <input type="text" id="pan-1"><input type="text" id="pan-2">
+                <input type="text" id="pan-3"><input type="text" id="pan-4">
+              </dd>
+            </dl>
+            <input type="text" name="CREDIT_NAME" id="holder">
+            <select name="CREDIT_LIMIT_MONTH"><option value="">月を指定</option><option value="12">12</option></select>
+            <select name="CREDIT_LIMIT_YEAR"><option value="">年を指定</option><option value="30">2030</option></select>
+            <input type="text" name="SECURITY_CD" id="cvv">
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+          "payment_field_not_found:pan",
+        );
+        await expect(
+          page
+            .locator("input")
+            .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
+        ).resolves.toEqual(["", "", "", "", "", "", ""]);
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses a token-prefix false singleton beside a segmented JP PAN",
+    async () => {
+      const pageUrl = "https://shop.example.test/card-note-and-segmented-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form>
+            <input type="text" name="CARD_NOTE" id="unrelated-note">
+            <dl>
+              <dt>カード番号</dt>
+              <dd>
+                <input type="text" id="pan-1"><input type="text" id="pan-2">
+                <input type="text" id="pan-3"><input type="text" id="pan-4">
+              </dd>
+            </dl>
+            <input type="text" name="CREDIT_NAME" id="holder">
+            <select name="CREDIT_LIMIT_MONTH"><option value="">月を指定</option><option value="12">12</option></select>
+            <select name="CREDIT_LIMIT_YEAR"><option value="">年を指定</option><option value="30">2030</option></select>
+            <input type="text" name="SECURITY_CD" id="cvv">
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+          "payment_field_not_found:pan",
+        );
+        await expect(
+          page
+            .locator("input")
+            .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
+        ).resolves.toEqual(["", "", "", "", "", "", ""]);
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "counts visible PAN candidates beyond the first ten before filling",
+    async () => {
+      const pageUrl = "https://shop.example.test/long-ambiguous-checkout.html";
+      const hiddenPans = Array.from(
+        { length: 9 },
+        (_, index) =>
+          `<input type="text" name="CARD_NO_HIDDEN_${index}" autocomplete="cc-number" hidden>`,
+      ).join("");
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form>
+            ${hiddenPans}
+            <input type="text" name="CREDIT_NO" id="credit-card">
+            <input type="text" name="BACKUP_CARD_NO" id="backup-card">
+            <input type="text" name="CREDIT_NAME" id="holder">
+            <select name="CREDIT_LIMIT_MONTH"><option value="">月を指定</option><option value="12">12</option></select>
+            <select name="CREDIT_LIMIT_YEAR"><option value="">年を指定</option><option value="30">2030</option></select>
+            <input type="text" name="SECURITY_CD" id="cvv">
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_card_form_ambiguous",
+        );
+        expect(await page.locator("#credit-card").inputValue()).toBe("");
+        expect(await page.locator("#backup-card").inputValue()).toBe("");
+        expect(await page.locator("#holder").inputValue()).toBe("");
+        expect(await page.locator("#cvv").inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "discovers complete card groups beyond the first ten PAN anchors",
+    async () => {
+      const pageUrl = "https://shop.example.test/long-multi-form-checkout.html";
+      const hiddenPans = Array.from(
+        { length: 9 },
+        () => '<input type="text" autocomplete="cc-number" hidden>',
+      ).join("");
+      const form = (prefix: string): string => `
+        <form>
+          <input type="text" autocomplete="cc-number" id="${prefix}-pan">
+          <input type="text" autocomplete="cc-name" id="${prefix}-holder">
+          <input type="text" autocomplete="cc-exp-month" id="${prefix}-month">
+          <input type="text" autocomplete="cc-exp-year" id="${prefix}-year">
+          <input type="text" autocomplete="cc-csc" id="${prefix}-cvv">
+        </form>`;
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <style>main { display: flex; gap: 24px } form { width: 280px }</style>
+          <main>${form("first")}${hiddenPans}${form("second")}</main>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_card_form_ambiguous",
+        );
+        expect(await page.locator("#first-pan").inputValue()).toBe("");
+        expect(await page.locator("#second-pan").inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "positively selects the new-card radio and completes on the filled card, deselecting the competing saved card",
+    async () => {
+      // EbisuMart-shaped repeat-customer checkout: a "new card" fieldset (what
+      // we fill, matching card_ref) alongside a DEFAULT-CHECKED "use my saved
+      // card" radio for a DIFFERENT stored card. Money-fence: the released and
+      // audited card must be the one that is actually charged. The captain's
+      // decision (2026-08-23) is to actively resolve this rather than refuse:
+      // click the new-card radio (deselecting the saved one via normal
+      // radio-group semantics), verify the filled fields survived and the
+      // saved card is no longer selected, THEN submit — never guess, never
+      // silently leave the saved card able to win.
+      const pageUrl = "https://hibiyakadan.example.test/cart_seisan.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form id="checkout">
+            <label>
+              <input id="saved-radio" type="radio" name="payment_method" value="saved" checked>
+              Card on file: Visa •••• 9012
+            </label>
+            <label>
+              <input id="new-radio" type="radio" name="payment_method" value="new">
+              Use a different card
+            </label>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Place order</button>
+          </form>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillAndSubmitCheckout(CARD);
+
+        // Submitted on the FIRST attempt (no retry/re-fill) with the radio
+        // flip already resolved — the same fill that was verified intact
+        // right before the click, per resolveCompetingSavedCardSelection's
+        // own field-value check.
+        expect(await page.evaluate(() => document.body.dataset.submitted)).toBe("true");
+        expect(await page.locator("#saved-radio").isChecked()).toBe(false);
+        expect(await page.locator("#new-radio").isChecked()).toBe(true);
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "positively selects the new-card radio when the filled card fields live in a recognized hosted-fields iframe",
+    async () => {
+      // EbisuMart-adjacent split topology: the merchant-owned saved/new-card
+      // radio group lives in the MAIN frame while the card fields it controls
+      // live in a recognized hosted-fields iframe. The sealed-field evidence
+      // that gates positive resolution is aggregated ACROSS frames, so this
+      // must resolve — refusal here would make the cross-frame repeat-customer
+      // checkout a dead end even though exactly one new-card candidate exists.
+      const pageUrl = "https://shop.example.test/cross-frame-new-card-checkout.html";
+      const frameUrl = "https://checkout.pci.shopifyinc.com/card-fields";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <label>
+            <input id="saved-radio" type="radio" name="payment_method" value="saved" checked>
+            Card on file: Visa •••• 9012
+          </label>
+          <label>
+            <input id="new-radio" type="radio" name="payment_method" value="new">
+            Use a different card
+          </label>
+          <iframe src="${frameUrl}"></iframe>`,
+        [frameUrl]: `
+          <form id="card-form">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay now</button>
+          </form>
+          <script>
+            document.querySelector("#card-form").addEventListener("submit", (event) => {
+              event.preventDefault();
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillAndSubmitCheckout(CARD);
+
+        const frame = page.frames().find((candidate) => candidate.url() === frameUrl)!;
+        expect(await frame.locator("body").getAttribute("data-submitted")).toBe("true");
+        expect(await page.locator("#saved-radio").isChecked()).toBe(false);
+        expect(await page.locator("#new-radio").isChecked()).toBe(true);
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "still refuses when the new-card radio's choice group has two equally-plausible non-saved candidates",
+    async () => {
+      // Genuinely unresolvable: no structural (sealed-field-owning) or
+      // sole-candidate signal picks between "Use a different card" and
+      // "Corporate card" — guessing between them risks the SAME wrong-card
+      // charge #572 fixed. Refusal must still be the last resort here.
+      const pageUrl = "https://shop.example.test/multi-candidate-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form id="checkout">
+            <label><input type="radio" name="payment_method" value="saved" checked>Card on file •••• 9012</label>
+            <label><input type="radio" name="payment_method" value="new">Use a different card</label>
+            <label><input type="radio" name="payment_method" value="corporate">Corporate card</label>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay</button>
+          </form>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_card_selection_ambiguous",
+        );
+        expect(await page.evaluate(() => document.body.dataset.submitted)).toBeUndefined();
+        expect(await page.locator("[autocomplete='cc-number']").inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses (never re-fills) when selecting the new-card radio itself clears the filled fields",
+    async () => {
+      // A framework that resets the "new card" fieldset's own state when its
+      // radio is (re-)selected — verification must catch this and refuse,
+      // never attempt to re-fill (the raw card bytes are gone by this point
+      // in the call chain anyway).
+      const pageUrl = "https://shop.example.test/reset-on-toggle-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form id="checkout">
+            <label><input type="radio" name="payment_method" value="saved" checked>Card on file •••• 9012</label>
+            <label><input id="new-radio" type="radio" name="payment_method" value="new">Use a different card</label>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay</button>
+          </form>
+          <script>
+            document.querySelector("#new-radio").addEventListener("change", () => {
+              for (const el of document.querySelectorAll(
+                "[autocomplete='cc-number'],[autocomplete='cc-csc']",
+              )) {
+                el.value = "";
+              }
+            });
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_card_selection_ambiguous",
+        );
+        expect(await page.evaluate(() => document.body.dataset.submitted)).toBeUndefined();
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses a saved-card selection in a different frame from the filled card fields",
+    async () => {
+      const pageUrl = "https://shop.example.test/cross-frame-checkout.html";
+      const frameUrl = "https://checkout.pci.shopifyinc.com/card-fields";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <label>
+            <input type="radio" name="payment_method" value="saved" checked>
+            Saved card •••• 9012
+          </label>
+          <iframe src="${frameUrl}"></iframe>`,
+        [frameUrl]: `
+          <form id="card-form">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay now</button>
+          </form>
+          <script>
+            document.querySelector("#card-form").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_card_selection_ambiguous",
+        );
+        const frame = page.frames().find((candidate) => candidate.url() === frameUrl)!;
+        expect(await frame.locator("body").getAttribute("data-submitted")).toBeNull();
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses a saved-card radio associated to the card form from outside its subtree",
+    async () => {
+      const pageUrl = "https://shop.example.test/form-associated-radio-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form id="checkout">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay</button>
+          </form>
+          <input id="saved-card" form="checkout" type="radio" name="payment_method" value="saved" checked>
+          <label for="saved-card">Card on file ending in 9012</label>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_card_selection_ambiguous",
+        );
+        expect(await page.evaluate(() => document.body.dataset.submitted)).toBeUndefined();
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses a selected saved-card option alongside the filled card fields",
+    async () => {
+      const pageUrl = "https://shop.example.test/saved-card-select-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form id="checkout">
+            <label for="payment-source">Payment source</label>
+            <select id="payment-source">
+              <option value="saved" selected>Saved card •••• 9012</option>
+              <option value="new">New card</option>
+            </select>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay</button>
+          </form>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_card_selection_ambiguous",
+        );
+        expect(await page.evaluate(() => document.body.dataset.submitted)).toBeUndefined();
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "excludes the exact filled expiry select from saved-card option detection",
+    async () => {
+      const pageUrl = "https://shop.example.test/filled-expiry-select-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form id="checkout">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <select autocomplete="cc-exp-month"><option value="12">12</option></select>
+            <select autocomplete="cc-exp-year"><option value="30">Saved card •••• 30</option></select>
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay</button>
+          </form>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillAndSubmitCheckout(CARD);
+        expect(await page.evaluate(() => document.body.dataset.submitted)).toBe("true");
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses a saved-card selection nested in open shadow roots",
+    async () => {
+      const pageUrl = "https://shop.example.test/shadow-saved-card-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <saved-card-source id="saved-source"></saved-card-source>
+          <form id="checkout">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay</button>
+          </form>
+          <script>
+            const outer = document.querySelector("#saved-source").attachShadow({ mode: "open" });
+            outer.innerHTML = '<saved-card-choice id="saved-choice"></saved-card-choice>';
+            const inner = outer.querySelector("#saved-choice").attachShadow({ mode: "open" });
+            inner.innerHTML =
+              '<input id="saved-card" type="radio" checked>' +
+              '<label for="saved-card">Saved card •••• 9012</label>';
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillAndSubmitCheckout(CARD)).rejects.toThrow(
+          "payment_card_selection_ambiguous",
+        );
+        expect(await page.evaluate(() => document.body.dataset.submitted)).toBeUndefined();
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses submission when saved-card inspection cannot complete",
+    async () => {
+      const pageUrl = "https://shop.example.test/detached-card-inspection.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay</button>
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+        await controller.fillCheckoutCardFields(CARD);
+        const evaluate = vi.spyOn(page.mainFrame(), "evaluate");
+        evaluate.mockRejectedValueOnce(new Error("frame detached during inspection"));
+
+        await expect(controller.submitFilledCheckout()).rejects.toThrow(
+          "payment_card_selection_ambiguous",
+        );
+        evaluate.mockRestore();
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "still submits when the checked payment-method option is an unrelated non-card choice",
+    async () => {
+      // A "Credit Card" vs. "PayPal" method toggle is a legitimate, unrelated
+      // selection (no masked PAN, no saved-card marker) — must not false-
+      // positive the competing-saved-card refusal.
+      const pageUrl = "https://shop.example.test/method-toggle-checkout.html";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <form id="checkout">
+            <label><input type="radio" name="payment_method" value="card" checked> Credit Card</label>
+            <label><input type="radio" name="payment_method" value="paypal"> PayPal</label>
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay</button>
+          </form>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              void fetch("https://merchant.test/charges", { method: "POST", mode: "no-cors" });
+              document.body.dataset.submitted = "true";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillAndSubmitCheckout(CARD);
+        expect(await page.evaluate(() => document.body.dataset.submitted)).toBe("true");
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "resolves label-for and wrapped-label JP expiry pairs and cleans replaced selects",
+    async () => {
+      const expiryOptions = `
+        <option value="">月を指定</option><option value="12">December</option>`;
+      const yearOptions = `
+        <option value="">年を指定</option><option value="30">Two thousand thirty</option>`;
+      const cases = [
+        {
+          name: "label-for",
+          expiry: `
+            <label for="field-a">有効期限</label>
+            <select id="field-a">${expiryOptions}</select>
+            <select id="field-b">${yearOptions}</select>`,
+        },
+        {
+          name: "wrapped-label",
+          expiry: `
+            <label>有効期限
+              <select id="field-a">${expiryOptions}</select>
+              <select id="field-b">${yearOptions}</select>
+            </label>`,
+        },
+      ];
+
+      for (const testCase of cases) {
+        const pageUrl = `https://shop.example.test/${testCase.name}.html`;
+        const { page, browser } = await servePages({
+          [pageUrl]: `
+            <meta charset="utf-8">
+            <form>
+              <input autocomplete="cc-number">
+              <input autocomplete="cc-name">
+              ${testCase.expiry}
+              <input autocomplete="cc-csc">
+            </form>`,
+        });
+        try {
+          await page.goto(pageUrl);
+          const controller = new BrowserController({ humanize: false });
+          (controller as unknown as { page: Page }).page = page;
+
+          await controller.fillCheckoutCardFields(CARD);
+          expect(await page.locator("#field-a").inputValue()).toBe("12");
+          expect(await page.locator("#field-b").inputValue()).toBe("30");
+
+          await page.locator("select").evaluateAll((selects) => {
+            for (const original of selects) {
+              const replacement = original.cloneNode(true) as HTMLSelectElement;
+              replacement.removeAttribute("data-ts-sealed-payment");
+              replacement.removeAttribute("data-ts-jp-card-exp");
+              replacement.removeAttribute("data-ts-jp-card-exp-group");
+              replacement.removeAttribute("data-ts-jp-card-field");
+              replacement.value = (original as HTMLSelectElement).value;
+              original.replaceWith(replacement);
+            }
+          });
+          await controller.clearCheckoutCardFields();
+
+          expect(await page.locator("#field-a").inputValue()).toBe("");
+          expect(await page.locator("#field-b").inputValue()).toBe("");
+        } finally {
+          await browser.close();
+        }
+      }
+    },
+    15_000,
   );
 });
 describe("3DS detection vs captcha frames", () => {

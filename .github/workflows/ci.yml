@@ -1,6 +1,6 @@
 name: CI
 
-# Pragmatic CI: runs only what actually passes locally on `staging`.
+# Pragmatic CI: runs only what actually passes locally on `main`.
 #
 # The previous workspace-wide `pnpm lint / typecheck / test` had been
 # broken for weeks (31 lint errors, typecheck failures in api +
@@ -18,9 +18,9 @@ name: CI
 
 on:
   push:
-    branches: [main, staging]
+    branches: [main]
   pull_request:
-    branches: [main, staging]
+    branches: [main]
 
 # A newer commit makes an in-flight PR validation obsolete. Cancelling it avoids
 # paying for the old test/build jobs while preserving the latest merge-ref gate.
@@ -174,7 +174,7 @@ jobs:
 
   typecheck:
     # Pull requests already run against GitHub's synthetic merge ref. On the
-    # resulting main/staging push, package release workflows provide any
+    # resulting main push, package release workflows provide any
     # component-specific gate; rerunning this workspace check is duplicate cost.
     needs: secret-scan
     if: >-
@@ -265,6 +265,41 @@ jobs:
         if: needs.secret-scan.outputs.web == 'true'
         run: pnpm seo:verify-services
 
+  # better-sqlite3 is a required runtime dependency for the MCP server. Its
+  # Node 26 prebuild prevents npx installs from falling back to a fragile
+  # node-gyp compile on users' machines.
+  mcp-node26-native-prebuild:
+    needs: secret-scan
+    if: >-
+      github.event_name == 'pull_request' &&
+      needs.secret-scan.outputs.mcp == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: pnpm
+      - name: Install MCP without a usable node-gyp toolchain
+        env:
+          CC: /bin/false
+          CXX: /bin/false
+          PYTHON: /bin/false
+          NODE_GYP_FORCE_PYTHON: /bin/false
+          npm_config_python: /bin/false
+        run: pnpm install --frozen-lockfile --filter '@trusty-squire/mcp...'
+      - name: Load better-sqlite3 on Node 26
+        run: |
+          pnpm --filter '@trusty-squire/mcp' exec node -e '
+            const Database = require("better-sqlite3");
+            const version = new Database(":memory:").prepare("select sqlite_version() as version").get().version;
+            if (!version) throw new Error("better-sqlite3 did not return a SQLite version");
+            console.log(`better-sqlite3 loaded SQLite ${version}`);
+          '
+
   test:
     needs: secret-scan
     if: >-
@@ -306,7 +341,13 @@ jobs:
       - name: Replay-engine frozen corpus gate
         if: needs.secret-scan.outputs.replay_eval == 'true'
         run: pnpm -F @trusty-squire/mcp test replay-harness
-      # Per-package test over every package whose suite passes locally.
+      # Per-package test over every package whose suite passes locally. MCP's
+      # required tier keeps all payment/card-sealing coverage AND the operator
+      # behavior suites (operate-session-flow, oauth-lifecycle, etc. via
+      # vitest.tiers.ts REQUIRED_BEHAVIOR_FILES), so behavior breakage fails
+      # the PR before merge. Only genuinely slow non-behavioral files (corpus
+      # evals, packaging smoke, replay harness) defer to the post-merge/nightly
+      # workflow in mcp-slow-tests.yml.
       # (registry + vault were historically excluded; the registry "prisma
       # drift" failures are resolved — both are green and now run here.)
       - name: Test (green packages)
@@ -340,6 +381,10 @@ jobs:
           fi
           for p in "${PKGS[@]}"; do
             echo "::group::$p"
-            pnpm --filter "$p" test
+            if [[ "$p" == "@trusty-squire/mcp" ]]; then
+              pnpm --filter "$p" test:fast
+            else
+              pnpm --filter "$p" test
+            fi
             echo "::endgroup::"
           done

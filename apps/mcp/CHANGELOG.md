@@ -1,19 +1,106 @@
 # Changelog — @trusty-squire/mcp
 
-## 1.1.12 (2026-08-21)
+## Unreleased
+
+- **`audit_log` now defaults to a readable security ledger.** Routine proxied
+  egress collapses into per credential/host/burst rollups (count, status
+  breakdown, bytes, window, covering grants) instead of one row per call, with
+  per-grant running totals. Lifecycle events and anomalies (non-2xx, 429, proxy
+  errors, rejected calls) stay individual marked rows. Drill down with a
+  rollup's `id` via `expand`; `view: "raw"` returns the flat per-request stream.
+  Existing `type` / `reference` / `limit` / `before` filters are unchanged.
+
+- **Operator browsers are now owner-bound.** Every local launch carries a private Trusty Squire
+  marker recorded by a detached watchdog; owner death and startup sweep exact matching processes,
+  including surviving process groups, with bounded SIGTERM then SIGKILL escalation.
+- **Idle operator sessions are reaped after one hour by default.** The per-session watchdog never
+  crosses an in-flight action boundary. Normal session teardown removes observation snapshots,
+  while the existing profile pool remains the sole owner of profile-directory cleanup.
+
+## 1.1.13-rc.14 (2026-08-30)
+
+- fix(mcp): preserve authenticated login capture (#611)
+
+## 1.1.13-rc.13 (2026-08-30)
+
+- fix(mcp): restore explicit login vault handoff (#609)
+- fix(ci): install Chromium for MCP slow tests (#608)
+
+## 1.1.13-rc.12 (2026-08-30)
+
+- fix(mcp): prevent OAuth handoff hangs (#606)
+- ci: cut MCP release validation latency (#605)
+
+## 1.1.13-rc.9 (2026-08-28)
+
+- fix(mcp): contain runaway operator browsers (#596)
+
+## 1.1.13-rc.8 (2026-08-27)
+
+- fix(mcp): Node 26 better-sqlite3 prebuild so @next installs without a source build (#594)
+
+## 1.1.13-rc.7 (2026-08-25)
+
+- feat(mcp): add per-session proxy to operate_start (#585)
+
+## 1.1.13-rc.6 (2026-08-24)
+
+- fix(mcp): scope screenshot sealing to active captures (#581)
+- fix(mcp): warn when 3DS evidence identifies a different card (#580)
+- fix: identify the bound card in payment approvals (#579)
+
+## 1.1.13-rc.5 (2026-08-23)
+
+- feat(mcp): operate_screenshot; fix decoupled-3DS network scope; positive new-card selection (#574)
+
+## 1.1.13-rc.4 (2026-08-23)
+
+- fix(mcp): guard payment card selection and resume post-submit 3DS waits (#572)
+
+## 1.1.13-rc.3 (2026-08-23)
+
+- fix(mcp): stop post-submit checkout cleanup from touching 3DS frames (#570)
+- feat(vault): gate credential mutations with signed vouches (#569)
+- fix(web): align social preview copy with homepage voice (#567)
+
+## 1.1.13-rc.2 (2026-08-22)
+
+- fix(mcp): detect JP/EbisuMart checkout card fields for operate_pay fill (#565)
+- fix(mcp): keep inert-nested modal controls operable (#564)
+
+## 1.1.13-rc.1 (2026-08-21)
+
+- fix(mcp): strip Google cookies from pooled profiles (#562)
+- fix(mcp): reap abandoned server and browser processes (#560)
+- fix(mcp): reuse connected Google session for identity tasks (#557)
+- fix(mcp): prevent profile cleanup from blocking concurrent sessions (#556)
+- fix(mcp): repin workspace dependencies during stable releases (#555)
+- feat(web): relaunch homepage with interactive task gallery (#553)
+- chore: swap hero tagline to 'Empower agents with auth and payments' across README, web assets, and docs (#552)
+- feat(web): expand positioning to provisioning and payments (#551)
+- feat(mcp): expand auth and payment positioning (#550)
+- fix(mcp): migrate legacy recipe verbs safely (#547)
+- release(api): deploy payment completion fix to prod (#509)
+- fix(pay): accept the operator's card_ref key on approval confirm (#476)
+- ci: retrigger checks
+- release(mcp): 1.1.8
+- release(mcp): 1.1.7 (#435)
+
+## 1.1.11 (2026-08-21)
 
 - **Abandoned MCP servers now self-exit after a bounded idle period.** The server exits after 20
   minutes without client messages when no provision session is open, or after 12 hours with an
   open session, closing only its own provision browsers and leases during normal shutdown teardown.
-
-## 1.1.11 (2026-08-21)
-
 - fix(mcp): reuse connected Google session for identity tasks (#557)
 - fix(mcp): prevent profile cleanup from blocking concurrent sessions (#556)
 - fix(mcp): repin workspace dependencies during stable releases (#555)
 
 ## 1.1.10 (2026-08-19)
 
+- **Concurrent operator starts no longer wait behind expired-profile deletion.** Reclamation now
+  moves stale lease bookkeeping into a private tombstone under the shared seed lock, releases the
+  lock, and only then deletes the potentially large Chrome profile directory. One session can stay
+  parked for payment approval while another starts without that cleanup starving it.
 - feat(web): relaunch homepage with interactive task gallery (#553)
 - chore: swap hero tagline to 'Empower agents with auth and payments' across README, web assets, and docs (#552)
 - feat(web): expand positioning to provisioning and payments (#551)

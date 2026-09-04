@@ -16,16 +16,15 @@
 //  - no credential is ever read back to the agent except via the explicit
 //    `finish`/extract path; the vault stays write-only.
 
-import { createHash, randomInt, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomInt } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  BrowserController,
   CHECKOUT_SUBMIT_LABEL_RE,
   clickDispatchStatusForError,
   parseCheckoutAmount,
+  type BrowserController,
   type ClickDispatchStatus,
   type CheckoutSummary,
   type FrameTarget,
@@ -36,22 +35,43 @@ import type {
   CartCheckoutObservation,
   PendingApprovalWait,
   PendingCardFill,
+  PendingThreeDsWait,
+  TerminalPaymentApprovalStatus,
 } from "./pay-operator.js";
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
+import {
+  buildSafeControlsV2,
+  checkoutStageFromUrlV2,
+  compactV2LegacyRefForHandle,
+  compactV2PayloadWithinBudget,
+  COMPACT_V2_HANDLE_LENGTH,
+  isCompactV2Handle,
+  isCompactV2Label,
+  controlMatchesPrivateQueryV2,
+  diffSafeControlsV2,
+  equalSafePageSemanticsV2,
+  encodeV2Delta,
+  encodeV2Page,
+  compactV2AuditHost,
+  compactV2AuditUrl,
+  compactV2AuditValue,
+  recordableTokenV2,
+  safeDescriptionV2,
+  safeOriginV2,
+  safePageSemanticsV2,
+  sealRetainedInteractiveElementsV2,
+  safeStageV2,
+  type SafeControlV2,
+  type ObservationEpochV2,
+  type ObservationSemanticSourceV2,
+  type SafePageSemanticsV2,
+  type SafeObservationIndexV2,
+  type SafeStageV2,
+} from "./compact-observation-v2.js";
+import { elementFingerprints } from "./element-fingerprint.js";
 import type { ApiClient } from "../api-client.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
-import { pickVerificationLink } from "./email-verification.js";
-import {
-  acquireOperatorProfile,
-  OperatorProfileAcquisitionInterruptedError,
-  type OperatorProfileLease,
-} from "./operator-profile-pool.js";
-import {
-  acquireDirectIdentityProfile,
-  OperatorDirectIdentityAcquisitionInterruptedError,
-  type DirectIdentityProfileLease,
-} from "./operator-direct-identity.js";
-import { loginSessionGuidance } from "./skill-hint.js";
+import { pickVerificationLink, type VerificationLinkCandidate } from "./email-verification.js";
 import {
   type OperatorRecipe,
   type TraceEntry,
@@ -93,7 +113,6 @@ import {
   currentRunId,
   resetCaptureChain,
   resolveCaptureDir,
-  type OnboardingRoundCapture,
 } from "./onboarding-capture.js";
 import {
   promoteToSkill,
@@ -109,6 +128,7 @@ import {
   looksLikeCredentialValue,
   isCredentialNoise,
   findCredentialTokens,
+  findOtpCredential,
   keyFamilyPrefix,
   pickRelaxedNearCopyCredential,
 } from "./credential-shape.js";
@@ -235,28 +255,32 @@ export interface ScreenOutline {
 
 export interface Observation {
   session_id: string;
+  // V1 emits the full page location. Compact V2 emits only a screened origin;
+  // its path/query remain inside the sealed page identity.
   url: string;
   // Registry route guidance, present ONLY on the first (start) observation when
   // a skill exists for the service. The host agent reads it before driving.
   hint?: string;
-  // Layout-aware page prose (innerText) so the agent can read passages,
-  // questions, masked-key hints, etc. Capped to keep tool payloads bounded.
+  // V1 layout-aware page prose (innerText), capped to keep tool payloads
+  // bounded. Compact V2 deliberately emits an empty string.
   text: string;
   // Domain-aware steering for the host planner. This is not a script; it is
   // guardrail context for states the raw page text routinely misleads agents on.
   guidance?: string;
-  // Compact relational view of interactive DOM regions. This is intentionally
-  // smaller than raw DOM but preserves hierarchy/occlusion that flat text loses.
+  // V1 full-mode relational view of interactive DOM regions. This is
+  // intentionally smaller than raw DOM but preserves hierarchy/occlusion that
+  // flat text loses.
   screen?: ScreenOutline;
-  // AXI-style planner scan surface. Additive in full mode: the rich `elements`
-  // inventory remains the source of truth for actionability/state.
+  // V1 AXI-style planner scan surface. Additive in full mode: the rich
+  // `elements` inventory remains the source of truth for actionability/state.
   accessibility?: AccessibilitySnapshot;
-  // FULL-mode element inventory (the legacy escape hatch): one JSON object per
-  // element with every field. In COMPACT mode `elements` is absent and the
-  // element set rides on `el_table` instead (see below).
+  // V1 FULL-mode element inventory (the legacy escape hatch): one JSON object
+  // per element with every field. In V1 COMPACT mode `elements` is absent and
+  // the element set rides on `el_table` instead (see below).
   elements?: ObservedElement[];
-  // COMPACT-mode element inventory as a tab-delimited table (docs/DESIGN-observe-
-  // compact.md § Phase 4). The first line is a tab-joined HEADER naming the
+  // V1 COMPACT-mode element inventory as a tab-delimited table
+  // (docs/DESIGN-observe-compact.md § Legacy V1 Phase 4). The first line is a
+  // tab-joined HEADER naming the
   // columns present in this emit (a subset of ref,label,tag,role,type,value_len,
   // checked,href,testId,topmost,occluded_by,frame_origin, always starting
   // ref,label,tag);
@@ -270,12 +294,18 @@ export interface Observation {
   // chrome links, which stay in snapshot_file). `detail:"full"` uses `elements`
   // (JSON), never this.
   el_table?: string;
-  // Compact-mode bookkeeping so omission is never silent: the complete current
-  // element count (including delta/collapsed omissions), and whether page text
-  // was capped at 4000 characters. Absent in full mode.
+  // V1 compact-mode bookkeeping so omission is never silent: the complete
+  // current element count (including delta/collapsed omissions), and whether
+  // page text was capped at 4000 characters. Absent in full mode.
   elements_total?: number;
   text_truncated?: boolean;
-  // Per-session observe delta (docs/DESIGN-observe-compact.md). On a DELTA emit,
+  // True when a dialog/modal region (role="dialog", <dialog>, aria-modal="true")
+  // currently has at least one topmost (unoccluded) element — i.e. a modal is
+  // open and interactable. Omitted (never `false`) when no modal is active, so
+  // its presence alone is the signal.
+  modal_active?: boolean;
+  // V1 per-session observe delta (docs/DESIGN-observe-compact.md). On a DELTA
+  // emit,
   // `el_table` carries ONLY the rows whose compact form changed vs the previous
   // observation; `delta` is true and `unchanged` counts the elements that were
   // identical and therefore omitted (present in the persisted snapshot_file).
@@ -285,24 +315,26 @@ export interface Observation {
   // collapsed chrome links that remain in snapshot_file. If persistence fails,
   // snapshot_file is absent and `el_table` is instead complete and uncollapsed.
   // A full snapshot is emitted on the first observe, a URL change, or high churn
-  // (SPA re-render).
+  // (SPA re-render). Compact V2 also uses `delta:true`, but only for its sealed
+  // safe map; it never exposes the V1 snapshot or inventory recovery fields.
   delta?: boolean;
   unchanged?: number;
   removed?: string[];
-  // Set on a DELTA emit when the (normalized, same-cap) page text is identical to
-  // the previous observation's — the `text` field is then emitted EMPTY and the
-  // host reuses the prior text (recoverable in full from snapshot_file).
+  // V1-only: set on a DELTA emit when the (normalized, same-cap) page text is
+  // identical to the previous observation's — the `text` field is then emitted
+  // EMPTY and the host reuses the prior text (recoverable in full from
+  // snapshot_file).
   // Corpus-measured: 38% of re-observes have byte-identical text, and the text
   // blob is a large share of each observe.
   text_unchanged?: boolean;
-  // FULL compact emit only: count of plain chrome-region <a> links collapsed out
-  // of `el_table` (a site-dependent bonus). The collapsed links stay in
+  // V1 FULL compact emit only: count of plain chrome-region <a> links collapsed
+  // out of `el_table` (a site-dependent bonus). The collapsed links stay in
   // snapshot_file. Buttons/inputs/dismiss controls are never collapsed.
   chrome_links_collapsed?: number;
-  // Every observe writes the COMPLETE current snapshot (all elements, WITH the
-  // verbose `path` field) to this session-scoped file, so the host can re-expand
-  // the full inventory after ITS own context compacts, or grep for an element the
-  // delta didn't re-show. The delta's safety net — without it, delta is unsafe.
+  // Every V1 observe writes the COMPLETE current snapshot (all elements, WITH
+  // the verbose `path` field) to this session-scoped file, so the host can
+  // re-expand the full inventory after ITS own context compacts, or grep for an
+  // element the delta didn't re-show. Compact V2 never writes or emits this path.
   snapshot_file?: string;
   // Phase 2 — set to "none" on the minimal ack returned by
   // operate_act{observe:"none"} (action ran; no perception emitted — call
@@ -319,8 +351,8 @@ export interface Observation {
   };
   // Change 5 — fail-closed identity hand-back: set ONLY when an operate task
   // required a live Google session that was absent. The task did NOT start; the
-  // host asks the user to connect, then retries. No browser was driven.
-  needs_user?: NeedsUserConnect;
+  // host asks the user to log in, then retries. No browser was driven.
+  needs_user?: NeedsUserLogin;
   // PR3 signin-vault: the user's own email (the Google identity captured at
   // login), present on the start observation when known. The host fills THIS as
   // the signup email so the account is user-owned, and it is the same identity
@@ -334,6 +366,15 @@ export interface Observation {
   // canonical cart URL and safe retry semantics from operate_act { kind: "cart_add" }.
   cart_delta?: "+1" | "0" | "unknown";
   selected_option?: string;
+  // compact-v2's closed action map. It is intentionally value-free and does
+  // not use the V1 snapshot-file recovery protocol.
+  format?: "compact-v2";
+  stage?: SafeStageV2;
+  generation?: number;
+  safe_table?: SafeControlV2[];
+  semantic?: SafePageSemanticsV2;
+  overflow?: { remaining: number; next_cursor: string };
+  hint_overflow?: { remaining: number; next_cursor: string };
 }
 
 export interface AccessibilitySnapshot {
@@ -384,15 +425,16 @@ export type ProvisionAction =
     }
   | { kind: "goto"; url: string }
   | { kind: "press"; key: string }
-  // Route an OAuth-provider button through startOAuth so the popup is adopted
-  // as the active page (the host then observes the account chooser/consent).
-  | { kind: "oauth_click"; target: string }
+  // Route every OAuth-provider action through the narrow auth lease. This
+  // serializes only the provider login/capture moment; all other work remains
+  // parallel.
+  | { kind: "oauth_click"; target: string; provider?: OAuthProviderId }
   // Return to the product page after the OAuth handshake completes.
   | { kind: "oauth_settle" }
   // Atomic operator OAuth action. A recovery product tab and explicit provider
   // lifecycle tracking prevent a normal provider close from leaving the model
   // on a detached Playwright handle.
-  | { kind: "oauth_login"; target: string }
+  | { kind: "oauth_login"; target: string; provider?: OAuthProviderId }
   // Operator surface — declare a host to cross into mid-session (multi-app
   // tasks: GCP Console → Firebase → the user's app). Pushed to the allow-set
   // with source "mid_session" and audited; the goto gate then permits it.
@@ -415,620 +457,305 @@ export interface ReplayRepairBinding {
   hole: string;
 }
 
-// Where a host on the allow-set came from. start = declared at operate_start;
-// mid_session = added via an allow_host action; auto_widen = an organic
-// same-base-domain redirect we trust. Source-tracked so every widening is
-// attributable, and so auto-widen only chains off START hosts (no scope creep
-// off an agent-declared mid_session host) and credential egress can exclude
-// mid_session task scope.
-export type HostSource = "start" | "mid_session" | "auto_widen";
+// The Session data model and its single construction contract live in
+// session/model.ts. This module stays the compatibility facade: it owns the
+// registry, every mutation, and every operation over a Session, and re-exports
+// the session types so no caller import changed.
+export type { AllowedHostEntry, HostSource, Session } from "./session/model.js";
+import type {
+  CartAddRecord,
+  CartIdentityContext,
+  CartMutation,
+  ReplayExpectedField,
+  ReplayState,
+  RecordedValueSource,
+  Session,
+} from "./session/model.js";
+import {
+  egressSeedHosts,
+  hostStrings,
+  registrableHost,
+  serviceLoginRouteHosts,
+} from "./session/hosts.js";
+// Phase 2 — the lifecycle registry transaction moved to session/lifecycle.ts as
+// one unit (registry, real-profile lease, call leases and drains, watchdog,
+// bounded close, terminal owner, artifact cleanup, start/finish/shutdown).
+// Everything it owns is re-exported below, so no caller import changed.
+import {
+  activeSessionCount,
+  audit,
+  closeAllProvisionSessions,
+  finishProvisionSession,
+  finishProvisionSessionWithPreparation,
+  googleSessionGate,
+  observeSnapshotDir,
+  paymentSession,
+  sessionForCall,
+  startProvisionSession as startProvisionSessionInternal,
+  startHarnessProvisionSession as startHarnessProvisionSessionInternal,
+  withPaymentSessionCall,
+  withProvisionSessionCall,
+  type HarnessStartOptions,
+  type NeedsUserLogin,
+  type SessionStartPorts,
+  type StartOptions,
+} from "./session/lifecycle.js";
 
-export interface AllowedHostEntry {
-  host: string;
-  source: HostSource;
+export {
+  activeSessionCount,
+  closeAllProvisionSessions,
+  finishProvisionSession,
+  finishProvisionSessionWithPreparation,
+  googleSessionGate,
+  paymentSession,
+  withPaymentSessionCall,
+  withProvisionSessionCall,
+};
+export type { HarnessStartOptions, NeedsUserLogin, StartOptions };
+export type { FinishResult, PreparedFinishResult } from "./session/lifecycle.js";
+
+let oauthActionLeaseTail: Promise<void> = Promise.resolve();
+
+const DEFAULT_OAUTH_LOGIN_LEASE_COOLDOWN_MS = 3_000;
+const DEFAULT_OAUTH_ACTION_TIMEOUT_MS = 30_000;
+
+interface OAuthActionDeadline {
+  expiresAt: number;
+  timeoutMs: number;
+  provider: OAuthProviderId | undefined;
+  timedOut: boolean;
+  inFlight: Set<Promise<unknown>>;
 }
 
-interface ReplayExpectedField {
-  stepIndex: number;
-  hole: string;
-  expected: string;
-  target: RecipeTarget | null;
-  kind: "type" | "select" | "set_phone_country";
+function oauthActionTimeoutMs(): number {
+  const configured = Number(process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0
+    ? Math.min(configured, DEFAULT_OAUTH_ACTION_TIMEOUT_MS)
+    : DEFAULT_OAUTH_ACTION_TIMEOUT_MS;
 }
 
-interface ReplayState {
-  recipeName: string;
-  recipeHash: string;
-  bindingsHash: string;
-  boundPostcondition: Postcondition;
-  moneyPath: boolean;
-  nextIndex: number | null;
-  expectedFields: Map<number, ReplayExpectedField>;
-  verifiedFields: Set<number>;
-  failure?: { reason: "field_missing" | "field_value_mismatch"; field: string };
-  // replay-per-leg-signature — index of this recipe's OWN first money field,
-  // or null when none exists. > 0 means there's a genuine non-money prefix
-  // (a catalog/storefront leg) ahead of it, which is what lets a field
-  // failure degrade to leg_fallback_required instead of the terminal
-  // human_required — see humanRequired in replayOperatorRecipe.
-  legStartIndex: number | null;
-}
-
-interface RecordedValueSource {
-  traceIndex: number;
-  hole?: string;
-  literal: string;
-}
-
-interface CartAddRecord {
-  productIdentity: string;
-  optionsHash: string;
-  idempotencyKey: string;
-  phase: "reserved" | "click_started" | "complete";
-  promise: Promise<CartAddResult> | null;
-  result: CartAddResult | null;
-}
-
-interface CartMutation {
-  productIdentity: string | null;
-  optionsHash: string | null;
-  cartDelta: "+1" | "0" | "unknown";
-  origin: string;
-}
-
-interface CartIdentityContext {
-  productIdentity: string;
-  optionsHash: string;
-  onActionReady?: () => void;
-}
-
-export interface Session {
-  id: string;
-  browser: BrowserController;
-  allowedHosts: AllowedHostEntry[];
-  generation: number;
-  // Sealed credential slots: secret values extracted in-session and held ONLY
-  // here so a later type_secret can enter them into another site's form. Never
-  // returned to the host (the write-only-vault moat extended to transfers).
-  secretSlots: Map<string, string>;
-  // PR3 privacy — element target keys (screenPath/testId/ref) of fields a sealed
-  // secret slot was typed into via type_secret. A subsequent observation masks
-  // their DOM value so the cleartext can't surface to the host. Password-type
-  // inputs are masked unconditionally; this covers the rest (OTP/token fields,
-  // the email filled from the sealed login slot).
-  sealedFieldKeys: Set<string>;
-  // The last extracted elements, kept so resolveTarget can be unit-tested
-  // against a snapshot, but act() always RE-extracts first (re-resolution).
-  lastElements: InteractiveElement[];
-  // Per-session observe delta baseline: the previous observation's stable-ref →
-  // serialized-compact-element (payload form, so `path` is already EXCLUDED — a
-  // layout-only shift must not read as a change). Each observe diffs the current
-  // compact set against this and emits only what changed. Null until the first
-  // observe. Reset on a URL change so a delta never crosses pages.
-  prevObserve: ObserveDeltaState | null;
-  observeSnapshotFile: string | null;
-  // Phase A operator-recipe capture (docs/ARCHITECTURE.md): the
-  // ordered, TEXT-targeted action trace of this session, so a successful run can
-  // be `remember`ed as a replayable rail. Records visible text + non-secret
-  // params only — sealed secret values stay in secretSlots, never the trace.
-  actionTrace: TraceEntry[];
-  recordedValues: RecordedValueSource[];
-  committedSelectValues: Map<string, string>;
-  // MEDIUM capture rounds for skill synthesis at verified success (docs/DESIGN-
-  // operator-hints.md): inventory + action + url per step, no screenshots, raw
-  // html only on the extract round. Accumulated live; written + promoted at
-  // operate_finish on a verified success.
-  captureRounds: OnboardingRoundCapture[];
-  // Deliverable #1 measurement (docs/DESIGN-operator-hints.md): when the session
-  // started and whether a registry hint was served this run, so finish emits the
-  // hint-on vs hint-off lift signal (success rate + time, bucketed).
-  startedAt: number;
-  hintServed: boolean;
-  // The session's START url (service_url at operate_start, or the resolved
-  // entry on an operate_recipe_run replay). Persisted as the recipe's canonical
-  // entry_url so a replay always opens at a STABLE page, never a mid-flow
-  // single-use link inferred from the trace.
-  startUrl: string;
-  // PR2 — whether this session may read the inbox for email verification. From
-  // the install-time consent flag; gates awaitVerification (fail-closed).
-  consentInboxRead: boolean;
-  // PR3 — the user's own email (Google identity captured at login), or null when
-  // unknown. The authoritative signup email + the identity whose inbox is read.
-  userEmail: string | null;
-  // The MCP api-client (when the tool layer passed one through). Lets the captcha
-  // gate spend a VAULTED 2Captcha key through the injecting proxy instead of a
-  // raw env key. Undefined → the gate falls back to TWOCAPTCHA_API_KEY.
-  api?: ApiClient;
-  // Set when a step used the text=/css= locator action fallback. Such an action
-  // resolves off-inventory, so it cannot be synthesized into a portable skill
-  // step — this flag suppresses auto-promotion so no silently-incomplete skill
-  // ships (captureAndPromoteSession).
-  usedLocatorFallback: boolean;
-  recipeRejectionReason: string | null;
-  replayState: ReplayState | null;
-  // One session-wide payment lease is claimed before any await. The
-  // pending -> confirming transition prevents duplicate confirmation, while
-  // submitStarted forbids restoring retry state after a charge may have begun.
-  // "sealed" survives unverified field cleanup and blocks later payments.
-  // [P0] "awaiting_approval" is a NEW rest state (not held during a call —
-  // operate_pay no longer blocks): the human hasn't tapped approve yet. A
-  // later operate_pay call validates the stored approval before reusing it;
-  // stale or terminal resources are replaced. operate_payment_status reads it
-  // without changing it.
-  activePayment:
-    | { status: "operating"; lease: ActivePaymentLease }
-    | { status: "awaiting_approval"; state: PendingApprovalWait }
-    | { status: "pending"; pending: PendingCardFill }
-    | { status: "confirming"; pending: PendingCardFill; submitStarted: boolean }
-    | { status: "sealed" }
-    | null;
-  paymentFieldSealActive: boolean;
-  // Snapshot of the single approval a filled card belongs to, captured at
-  // fill time (setActivePendingCardFill / completeActivePaymentLeaseWithPendingFill)
-  // so the place-order guard below still has what it needs after activePayment
-  // itself has moved on to "confirming" or "sealed" (sealed drops `pending`).
-  // Cleared only at session (re)init or after verified full field cleanup.
-  placeOrderApproval: {
-    approvalId: string;
-    mandateId?: string;
-    merchant: string;
-    amountCents: number;
-    currency: string;
-    cardRef: string;
-    last4: string;
-  } | null;
-  // True once a checkout-submit-labeled operate_act click has fired against
-  // placeOrderApproval. A second one is refused — one human passkey approval
-  // authorizes at most one place-order attempt (see enforcePlaceOrderGuard).
-  placeOrderAttempted: boolean;
-  // The most recent real checkout total this session actually observed on a
-  // page (e.g. the cart step), scoped to that page's own origin. Split
-  // checkouts (Rakuten-style) show no total on the card-entry page itself;
-  // operate_pay {phase:"fill_card"} falls back to this ONLY when the live
-  // card-entry page has no readable total of its own, and only when the
-  // origin still matches. Replaced (never accumulated) on each successful
-  // observe of a page with a parseable total; never a caller-supplied value.
-  lastCartCheckout: CartCheckoutObservation | null;
-  // Per-line idempotency records are local to the one active browser/cart. A
-  // retry must inspect this before it ever reaches a merchant add button.
-  cartAdds: Map<string, CartAddRecord>;
-  cartAddsByIdempotencyKey: Map<string, CartAddRecord>;
-  cartUrls: Map<string, string>;
-  lastCartMutation: CartMutation | null;
-  // A finish first flips this bit, then waits for outstanding call leases.  A
-  // session-addressed operation always captures the Session object before it
-  // awaits, so a later session can never be substituted into an old callback.
-  closing: boolean;
-  callCount: number;
-  callDrainWaiters: Set<() => void>;
-}
-
-// Plain host list for the pieces that only need the names (goto gate, audit,
-// observed-hosts). The source metadata stays on the Session.
-function hostStrings(session: Session): string[] {
-  return session.allowedHosts.map((e) => e.host);
-}
-
-// Hosts that may seed credential EGRESS (where a stored key is later sent by
-// the proxy): start + auto_widen, never mid_session task scope — a wide operate
-// scope must not silently over-grant a key's egress allow-list (Codex). The
-// vault unions these with the service-default + any agent-declared egress_hosts.
-function egressSeedHosts(session: Session): string[] {
-  return session.allowedHosts.filter((e) => e.source !== "mid_session").map((e) => e.host);
-}
-
-function merchantSiblingSeedHosts(session: Session): string[] {
-  return session.allowedHosts.filter((e) => e.source !== "mid_session").map((e) => e.host);
-}
-
-const sessions = new Map<string, Session>();
-
-// Either lease kind — the isolated per-session profile-pool clone, or the
-// direct exclusive lease on the canonical Google-authenticated profile
-// (operator-direct-identity.ts) — drives the same warm-browser lifecycle
-// below identically; only acquireWarmBrowser cares which one it holds.
-type OperatorLease = OperatorProfileLease | DirectIdentityProfileLease;
-
-interface WarmBrowser {
-  controller: BrowserController;
-  lease: OperatorLease;
-}
-
-interface AcquiredBrowser {
-  controller: BrowserController;
-  profileDir: string;
-}
-
-interface StartingBrowser {
-  controller: BrowserController;
-  lease: OperatorLease;
-  launch: Promise<void>;
-  cancelRequested: boolean;
-}
-
-interface CapacityWaiter {
-  generation: number;
-  cancelRequested: boolean;
-  abortController: AbortController;
-  wake: () => void;
-  settled: Promise<void>;
-  resolveSettled: () => void;
-}
-
-// The pool and canonical-profile guard are authoritative for their respective
-// cross-process capacity. These maps only retain the local controller/lease
-// pairing needed for lifecycle cleanup; they deliberately do not impose a
-// process-global single-session gate.
-const leasedBrowsers = new Map<BrowserController, WarmBrowser>();
-const startingBrowsers = new Set<StartingBrowser>();
-const capacityWaiters = new Set<CapacityWaiter>();
-let shutdownGeneration = 0;
-const START_CAPACITY_WAIT_MS = 30_000;
-const START_CAPACITY_RETRY_MS = 50;
-
-function isOperatorCapacityError(error: unknown): boolean {
-  return error instanceof Error && error.message.startsWith("operate_start capacity reached:");
-}
-
-async function acquireOperatorProfileBounded(
-  opts: StartOptions,
-  sessionId: string,
-  generation: number,
-): Promise<OperatorProfileLease> {
-  let wake = (): void => undefined;
-  let resolveSettled = (): void => undefined;
-  const waiter: CapacityWaiter = {
-    generation,
-    cancelRequested: false,
-    abortController: new AbortController(),
-    wake: () => wake(),
-    settled: new Promise<void>((resolve) => {
-      resolveSettled = resolve;
-    }),
-    resolveSettled: () => resolveSettled(),
-  };
-  capacityWaiters.add(waiter);
-  const deadline = Date.now() + START_CAPACITY_WAIT_MS;
-  try {
-    for (;;) {
-      if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
-        throw new Error("operate_start cancelled: operator server is shutting down");
-      }
-      try {
-        const lease = await acquireOperatorProfile(sessionId, {
-          ...(opts.profileDir !== undefined ? { sourceProfileDir: opts.profileDir } : {}),
-          deadline,
-          signal: waiter.abortController.signal,
-        });
-        if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
-          await lease.destroy();
-          throw new Error("operate_start cancelled: operator server is shutting down");
-        }
-        return lease;
-      } catch (error) {
-        if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
-          throw new Error("operate_start cancelled: operator server is shutting down");
-        }
-        if (
-          error instanceof OperatorProfileAcquisitionInterruptedError &&
-          error.reason === "cancelled"
-        ) {
-          throw new Error("operate_start cancelled: operator server is shutting down");
-        }
-        if (
-          error instanceof OperatorProfileAcquisitionInterruptedError &&
-          error.reason === "timeout"
-        ) {
-          if (error.phase === "seed_lock") {
-            throw new Error(
-              "operate_start failed: start deadline exceeded while waiting to acquire the shared seed lock",
-            );
-          }
-          throw new Error(
-            "operate_start failed: start deadline exceeded while acquiring an isolated operator profile",
-          );
-        }
-        if (isOperatorCapacityError(error) && Date.now() >= deadline) {
-          throw new Error(
-            "operate_start capacity wait timed out: 2 operator sessions are active; finish one and retry",
-          );
-        }
-        if (!isOperatorCapacityError(error)) {
-          throw error;
-        }
-        await new Promise<void>((resolve) => {
-          wake = resolve;
-          const timer = setTimeout(resolve, START_CAPACITY_RETRY_MS);
-          waiter.wake = () => {
-            clearTimeout(timer);
-            resolve();
-          };
-        });
-      }
-    }
-  } finally {
-    capacityWaiters.delete(waiter);
-    waiter.resolveSettled();
-  }
-}
-
-// The Google-authenticated counterpart of acquireOperatorProfileBounded — see
-// operator-direct-identity.ts. Registers the same CapacityWaiter shape so
-// closeAllProvisionSessions cancels an in-flight acquisition uniformly,
-// but the underlying resource is the single canonical profile, not a
-// two-slot pool: acquireDirectIdentityProfile already polls/blocks
-// internally, so there is no outer capacity-retry loop to drive here.
-async function acquireDirectIdentityProfileBounded(
-  opts: StartOptions,
-  generation: number,
-): Promise<DirectIdentityProfileLease> {
-  const waiter: CapacityWaiter = {
-    generation,
-    cancelRequested: false,
-    abortController: new AbortController(),
-    wake: () => undefined,
-    settled: Promise.resolve(),
-    resolveSettled: () => undefined,
-  };
-  let resolveSettled = (): void => undefined;
-  waiter.settled = new Promise<void>((resolve) => {
-    resolveSettled = resolve;
-  });
-  waiter.resolveSettled = () => resolveSettled();
-  capacityWaiters.add(waiter);
-  try {
-    if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
-      throw new Error("operate_start cancelled: operator server is shutting down");
-    }
-    try {
-      return await acquireDirectIdentityProfile({
-        ...(opts.profileDir !== undefined ? { profileDir: opts.profileDir } : {}),
-        deadline: Date.now() + START_CAPACITY_WAIT_MS,
-        signal: waiter.abortController.signal,
-      });
-    } catch (error) {
-      if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
-        throw new Error("operate_start cancelled: operator server is shutting down");
-      }
-      if (error instanceof OperatorDirectIdentityAcquisitionInterruptedError) {
-        throw error.reason === "cancelled"
-          ? new Error("operate_start cancelled: operator server is shutting down")
-          : new Error(
-              "operate_start capacity reached: the Google-identity operator profile is in " +
-                "use by another session; finish it and retry",
-            );
-      }
-      throw error;
-    }
-  } finally {
-    capacityWaiters.delete(waiter);
-    waiter.resolveSettled();
-  }
-}
-
-async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promise<AcquiredBrowser> {
-  if ((process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0) {
-    throw new Error("operate_start does not support remote CDP with isolated profile leases");
-  }
-  const generation = shutdownGeneration;
-  const lease: OperatorLease =
-    opts.requireLiveIdentity === true
-      ? await acquireDirectIdentityProfileBounded(opts, generation)
-      : await acquireOperatorProfileBounded(opts, sessionId, generation);
-  if (generation !== shutdownGeneration) {
-    await lease.destroy();
-    throw new Error("operate_start cancelled: operator server is shutting down");
-  }
-  const controller = new BrowserController({
-    profileDir: lease.profileDir,
-    ...("takeProfileOperationLease" in lease
-      ? { profileOperationLease: lease.takeProfileOperationLease() }
-      : {}),
-    ...(opts.proxyUrl !== undefined ? { proxyUrl: opts.proxyUrl } : {}),
-  });
-  const pending: StartingBrowser = {
-    controller,
-    lease,
-    launch: startBrowserBounded(controller, sessionId),
-    cancelRequested: false,
-  };
-  startingBrowsers.add(pending);
-  try {
-    await pending.launch;
-    if (pending.cancelRequested) {
-      throw new Error("operate_start cancelled: operator server is shutting down");
-    }
-    // Several unit harnesses replace BrowserController with the narrow legacy
-    // shape. Production controllers always expose identity; a harness without
-    // a real process simply leaves the descriptor worker-less.
-    if (typeof controller.operatorWorkerIdentity === "function") {
-      const worker = controller.operatorWorkerIdentity();
-      if (worker !== null) lease.bindWorker(worker);
-    }
-  } catch (err) {
-    if (!pending.cancelRequested) {
-      await closeLeasedBrowser(controller, lease, false);
-    }
-    throw err;
-  } finally {
-    startingBrowsers.delete(pending);
-  }
-  leasedBrowsers.set(controller, { controller, lease });
-  return { controller, profileDir: lease.profileDir };
-}
-
-async function releaseWarmBrowserPage(
-  browser: BrowserController,
-  reusable: boolean,
-): Promise<void> {
-  const slot = leasedBrowsers.get(browser);
-  if (slot === undefined) {
-    await browser.close().catch(() => undefined);
-    return;
-  }
-  leasedBrowsers.delete(browser);
-  try {
-    if (reusable) await browser.resetPageForReuse();
-    await closeLeasedBrowser(browser, slot.lease, reusable);
-  } catch {
-    await closeLeasedBrowser(browser, slot.lease, false);
-  }
-}
-
-async function closeLeasedBrowser(
-  browser: BrowserController,
-  lease: OperatorLease,
-  reusable: boolean,
-): Promise<void> {
-  const closeState = await browser.close().catch(() => "unknown" as const);
-  if (closeState !== "closed") {
-    await lease.retain(!reusable);
-    return;
-  }
-  if (reusable) await lease.returnWarm(closeState);
-  else await lease.destroy();
-}
-
-function sessionForCall(sessionId: string): Session | undefined {
-  return sessions.get(sessionId);
-}
-
-// Money rule (simplified 2026-08-16): the fence is the live human biometric
-// approval per charge, not a software re-check of replay field values. The
-// only surviving invariant — a card-charging trace step is never blind-
-// replayed — is enforced unconditionally where operate_pay steps are
-// encountered during replay (see replayOperatorRecipe), not here.
-function assertPaymentSessionAllowed(session: Session): void {
-  if (session.closing) {
-    throw new Error(`provision session ${session.id} is closing`);
-  }
-}
-
-// Resolve the compatibility omission once, at tool entry.  In particular, do
-// not repeat this lookup in completion callbacks: after an await, a different
-// session could otherwise become the sole process-local session.
-export function paymentSession(sessionId?: string): Session {
-  let session: Session | undefined;
-  if (sessionId !== undefined) {
-    session = sessionForCall(sessionId);
-    if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  } else {
-    if (sessions.size !== 1) {
-      throw new Error(
-        sessions.size === 0
-          ? "operate_pay requires one active operate_start browser session"
-          : "operate_pay requires session_id when multiple operator sessions are active",
-      );
-    }
-    session = sessions.values().next().value!;
-  }
-  assertPaymentSessionAllowed(session);
-  return session;
-}
-
-function acquireSessionCallLease(session: Session): () => void {
-  if (session.closing) throw new Error(`provision session ${session.id} is closing`);
-  session.callCount += 1;
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    session.callCount -= 1;
-    if (session.callCount === 0) {
-      for (const wake of session.callDrainWaiters) wake();
-      session.callDrainWaiters.clear();
-    }
+function oauthActionDeadline(provider: OAuthProviderId | undefined): OAuthActionDeadline {
+  const timeoutMs = oauthActionTimeoutMs();
+  return {
+    expiresAt: Date.now() + timeoutMs,
+    timeoutMs,
+    provider,
+    timedOut: false,
+    inFlight: new Set(),
   };
 }
 
-async function waitForSessionCallsToDrain(session: Session): Promise<void> {
-  if (session.callCount === 0) return;
-  await new Promise<void>((resolve) => session.callDrainWaiters.add(resolve));
+function oauthActionRemainingMs(deadline: OAuthActionDeadline): number {
+  return Math.max(0, deadline.expiresAt - Date.now());
 }
 
-async function withSelectedProvisionSessionCall<T>(
-  session: Session,
-  fn: (session: Session) => Promise<T>,
+function trackOAuthActionPromise<T>(
+  deadline: OAuthActionDeadline,
+  promise: Promise<T>,
 ): Promise<T> {
-  const release = acquireSessionCallLease(session);
-  try {
-    return await fn(session);
-  } finally {
-    release();
+  deadline.inFlight.add(promise);
+  void promise.then(
+    () => deadline.inFlight.delete(promise),
+    () => deadline.inFlight.delete(promise),
+  );
+  return promise;
+}
+
+function expireOAuthAction(deadline: OAuthActionDeadline): void {
+  if (deadline.timedOut) return;
+  deadline.timedOut = true;
+}
+
+async function waitForOAuthActionQuiescence(deadline: OAuthActionDeadline): Promise<void> {
+  for (;;) {
+    const pending = [...deadline.inFlight];
+    if (pending.length === 0) {
+      await Promise.resolve();
+      if (deadline.inFlight.size === 0) return;
+      continue;
+    }
+    await Promise.allSettled(pending);
   }
 }
 
-export async function withProvisionSessionCall<T>(
-  sessionId: string,
-  fn: (session: Session) => Promise<T>,
-): Promise<T> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  return await withSelectedProvisionSessionCall(session, fn);
-}
-
-export async function withPaymentSessionCall<T>(
-  sessionId: string | undefined,
-  fn: (session: Session) => Promise<T>,
-): Promise<T> {
-  const session = paymentSession(sessionId);
-  return await withSelectedProvisionSessionCall(session, fn);
-}
-
-const settle = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-
-// Audit trail (security posture): every session action emits one structured
-// stderr line the host's MCP log captures. The `provision-audit` marker makes
-// the trail greppable. No credential VALUES are ever logged — only the action
-// shape + url.
-function audit(sessionId: string, event: string, detail: Record<string, unknown> = {}): void {
-  process.stderr.write(
-    `${JSON.stringify({ marker: "provision-audit", surface: "operate", session_id: sessionId, event, ...detail })}\n`,
+function oauthActionDeadlineError(deadline: OAuthActionDeadline): Error {
+  if (deadline.provider === undefined || deadline.provider === "google") {
+    return Object.assign(
+      new Error(
+        `google_session: OAuth did not complete within ${Math.ceil(deadline.timeoutMs / 1000)} seconds; ` +
+          "the saved session may have expired, so re-login before retrying",
+      ),
+      { code: "google_session" },
+    );
+  }
+  return new Error(
+    `OAuth action did not complete within ${Math.ceil(deadline.timeoutMs / 1000)} seconds`,
   );
 }
 
-// operate_start's browser launch is the one UNBOUNDED step in the session
-// bootstrap: on a fresh box the first launch downloads Chromium and spins up a
-// virtual display (Xvfb), and a wedged profile lock or missing browser deps can
-// otherwise hang it indefinitely — a real dogfood run sat on a silent ~30-min
-// hang here with zero feedback (the worst first-run failure: the user assumes
-// it's broken and never comes back). Cap it so a stuck launch fails LOUDLY with
-// an actionable message. The default is generous (a cold Chromium download is
-// legitimately multi-minute — better to wait than false-fail a slow-but-working
-// launch); tune with BOT_START_TIMEOUT_MS. On timeout we close() the
-// half-launched browser so a wedged Chrome can't keep the profile lock and brick
-// the next attempt.
-const START_TIMEOUT_MS = Number(process.env.BOT_START_TIMEOUT_MS) || 600_000;
-
-async function startBrowserBounded(browser: BrowserController, sessionId: string): Promise<void> {
-  audit(sessionId, "browser_launch", {
-    note: "first launch may download Chromium + start Xvfb; slow but one-time",
-    timeout_ms: START_TIMEOUT_MS,
-  });
+async function withinOAuthActionDeadline<T>(
+  promise: Promise<T>,
+  deadline: OAuthActionDeadline,
+): Promise<T> {
+  const tracked = trackOAuthActionPromise(deadline, promise);
+  const remainingMs = oauthActionRemainingMs(deadline);
+  if (remainingMs <= 0 || deadline.timedOut) {
+    expireOAuthAction(deadline);
+    throw oauthActionDeadlineError(deadline);
+  }
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error("__browser_start_timeout__")), START_TIMEOUT_MS);
-  });
   try {
-    await Promise.race([browser.start(), timeout]);
-  } catch (err) {
-    if (err instanceof Error && err.message === "__browser_start_timeout__") {
-      // Release the wedged Chrome/profile lock so the next operate_start isn't bricked.
-      await browser.close({ cancelStart: true }).catch(() => undefined);
-      throw new Error(
-        `operate_start: browser did not launch within ${Math.round(START_TIMEOUT_MS / 1000)}s. ` +
-          "On a fresh machine the first launch downloads Chromium and starts a virtual display " +
-          "(Xvfb) — slow but one-time. A hang this long usually means the browser binaries or Xvfb " +
-          "are missing on this box. Retry once (a partial download resumes and later launches reuse " +
-          "the cache); if it recurs, run `npx @trusty-squire/mcp connect` here to install the browser " +
-          "deps, or raise BOT_START_TIMEOUT_MS to wait longer.",
-      );
-    }
-    throw err;
+    return await Promise.race([
+      tracked,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          expireOAuthAction(deadline);
+          reject(oauthActionDeadlineError(deadline));
+        }, remainingMs);
+      }),
+    ]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
 }
+
+function oauthLoginLeaseCooldownMs(): number {
+  const configured = Number(process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS);
+  return Number.isFinite(configured) && configured >= 0
+    ? Math.min(configured, 60_000)
+    : DEFAULT_OAUTH_LOGIN_LEASE_COOLDOWN_MS;
+}
+
+async function waitForOAuthLeaseCooldown(cooldownMs: number): Promise<void> {
+  if (cooldownMs <= 0) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, cooldownMs);
+    timer.unref();
+  });
+}
+
+async function withOAuthActionLease<T>(
+  deadline: OAuthActionDeadline | undefined,
+  run: () => Promise<T>,
+  releaseCooldownMs = 0,
+): Promise<T> {
+  let release!: () => void;
+  const previous = oauthActionLeaseTail;
+  const turn = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  oauthActionLeaseTail = previous.then(() => turn);
+  let acquired = false;
+  try {
+    if (deadline === undefined) await previous;
+    else await withinOAuthActionDeadline(previous, deadline);
+    acquired = true;
+    return await run();
+  } finally {
+    if (deadline === undefined) {
+      release();
+    } else if (!acquired) {
+      void previous.then(release, release);
+    } else {
+      void waitForOAuthActionQuiescence(deadline)
+        .then(() => waitForOAuthLeaseCooldown(releaseCooldownMs))
+        .then(release, release);
+    }
+  }
+}
+
+async function withOAuthActionBoundary<T>(
+  session: Session,
+  provider: OAuthProviderId | undefined,
+  run: (deadline: OAuthActionDeadline) => Promise<T>,
+): Promise<T> {
+  const deadline = oauthActionDeadline(provider);
+  const releaseCooldownMs = oauthLoginLeaseCooldownMs();
+  // A deadline expiry must NOT terminalize the session: the in-flight OAuth
+  // operation is budget-bounded (loginWithOAuth races its own completion
+  // window), so unwinding needs no teardown. Force-closing here used to
+  // deregister a healthy session mid-handoff, leaving the pending
+  // chooser/consent screen unreachable — observe/screenshot/oauth_settle all
+  // returned "unknown provision session" and the only recovery was a fresh
+  // session that lost all progress. The timeout surfaces as a recoverable
+  // error while the session, browser, and page stay valid for inspection and
+  // a settle/retry. Serialization custody is unchanged: the lease below still
+  // drains the in-flight work (plus the cooldown) before the next OAuth
+  // action acquires it, and a genuinely dead browser still surfaces as
+  // unavailable through its own close paths.
+  return await withOAuthActionLease(
+    deadline,
+    async () => {
+      return await withinOAuthActionDeadline(run(deadline), deadline);
+    },
+    releaseCooldownMs,
+  );
+}
+
+async function runSerializedGoogleIdentityOperation<T>(
+  session: Session,
+  operation: (browser: BrowserController) => Promise<T>,
+  options: { deadline?: OAuthActionDeadline } = {},
+): Promise<{ browser: BrowserController; result: T }> {
+  const browser = session.browser;
+  const result =
+    options.deadline === undefined
+      ? await operation(browser)
+      : await withinOAuthActionDeadline(operation(browser), options.deadline);
+  return { browser, result };
+}
+
+async function runDetachedGoogleIdentityOperation<T>(
+  session: Session,
+  operation: (browser: BrowserController) => Promise<T>,
+): Promise<T> {
+  return await withOAuthActionLease(
+    undefined,
+    async () => (await runSerializedGoogleIdentityOperation(session, operation)).result,
+  );
+}
+async function runSerializedOAuthBoundary(
+  session: Session,
+  authorizedElement: InteractiveElement,
+  authorizedElements: readonly InteractiveElement[],
+  provider: OAuthProviderId | undefined,
+  deadline: OAuthActionDeadline,
+): Promise<BrowserController> {
+  const authorizedRef = provisionElementRefs(authorizedElements).get(authorizedElement);
+  if (authorizedRef === undefined) {
+    throw new Error("OAuth action target was not present in the authorized action map");
+  }
+  const expectedGoogleAccountEmail = session.userEmail ?? undefined;
+  const completed = await runSerializedGoogleIdentityOperation(
+    session,
+    async (browser) => {
+      // The action was authorized against the session's isolated browser before
+      // the canonical profile was opened. Re-extract inside the same serialized
+      // operation and require the identical structural element identity before
+      // clicking; this keeps stale-handle protection without letting a prepared
+      // canonical browser escape the boundary on reobserve_required.
+      const fresh = await browser.extractInteractiveElements();
+      retainSessionElements(session, fresh);
+      const resolved = resolveTarget(fresh, authorizedRef);
+      if (resolved === null) {
+        throw new Error(
+          "OAuth action target changed during the identity handoff; re-observe before retrying",
+        );
+      }
+      await browser.loginWithOAuth(
+        resolved.selector,
+        oauthActionRemainingMs(deadline),
+        provider,
+        provider === "github" ? undefined : expectedGoogleAccountEmail,
+      );
+      await settleAfterStateChange(browser);
+    },
+    { deadline },
+  );
+  return completed.browser;
+}
+
+const settle = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // ── pure helpers (exported for unit tests) ──
 
@@ -1082,7 +809,7 @@ function baseIdentityFields(el: InteractiveElement): string[] {
     el.container ?? "",
     el.role ?? "",
     el.tag,
-    elementRef(el),
+    elementRef({ ...el, value: null }),
     el.href ?? "",
     el.type ?? "",
     // Frame origin — WITHOUT this, an element's `selector` (folded into
@@ -1356,6 +1083,17 @@ export class TargetStaleError extends Error {
   }
 }
 
+class CompactV2StaleRefError extends Error {}
+class ProvisionTargetNotAllowedError extends Error {}
+class ProvisionTargetMissingError extends Error {}
+class CompactV2ActionFailureError extends Error {}
+/**
+ * A `@label` that names more than one observed control. Extends the
+ * already-sealed failure channel so its message survives V2's opaque error
+ * mapping: it carries ONLY refs the agent already holds, never page text.
+ */
+class CompactV2AmbiguousLabelError extends CompactV2ActionFailureError {}
+
 function replacementCandidates(elements: readonly InteractiveElement[]): Record<string, string[]> {
   const refs = provisionElementRefs(elements);
   const candidates: Record<string, string[]> = {};
@@ -1471,6 +1209,19 @@ function isPendingCardFilledField(el: InteractiveElement): boolean {
   );
 }
 
+// Shopify defers address geocoding (and therefore delivery-rate loading) until
+// its required shipping street field is committed. Keep this deliberately
+// narrow: ordinary text fields and even other autocomplete controls retain
+// their existing type-only behavior.
+function isRequiredShippingAddressLine1(el: InteractiveElement): boolean {
+  if (!el.required) return false;
+  const autocomplete = (el.autocomplete ?? "")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((token) => token.length > 0);
+  return autocomplete.includes("shipping") && autocomplete.includes("address-line1");
+}
+
 function pendingCardSecretKind(el: InteractiveElement): "pan" | "cvv" | null {
   const autocomplete = (el.autocomplete ?? "").toLowerCase().split(/\s+/);
   const signal = `${el.name ?? ""} ${el.id ?? ""}`.toLowerCase();
@@ -1519,8 +1270,42 @@ function redactPaymentObservationText(
   );
 }
 
-function presentPaymentSafeString(value: string, paymentSealActive: boolean): string {
-  return paymentSealActive ? redactPaymentObservationText(value, [], true) : value;
+// D2 observation redaction, PAYMENT-ONLY: an injected vault value can be
+// reflected outside its original input (a page may put it in helper text, an
+// aria label, or a preview URL), so every host-facing text surface is scrubbed
+// by EXACT injected value. There is no secret-SHAPE pass — a rendered API key,
+// recovery code, TOTP, or JWT is ordinary page content the agent must be able
+// to read.
+const OBSERVATION_SECRET_PLACEHOLDER = "[sealed]";
+
+function redactObservationText(
+  text: string,
+  elements: readonly InteractiveElement[],
+  paymentSealActive: boolean,
+  knownSecrets: readonly string[],
+): string {
+  let redacted = redactPaymentObservationText(text, elements, paymentSealActive);
+  // Exact injected vault values are redacted in EVERY mode — this is the vault
+  // guarantee, not a heuristic.
+  for (const secret of [...knownSecrets]
+    .filter((value) => value.length > 0)
+    .sort((a, b) => b.length - a.length)) {
+    redacted = redacted.split(secret).join(OBSERVATION_SECRET_PLACEHOLDER);
+  }
+  // A rendered Luhn-valid PAN is a card value, not a heuristic guess.
+  return redactLuhnPanSpans(redacted);
+}
+
+function presentPaymentSafeString(
+  value: string,
+  paymentSealActive: boolean,
+  knownSecrets: readonly string[] = [],
+): string {
+  // Synthetic test inventories and a few legacy adapters omit optional string
+  // fields despite the public interface. Preserve their old pass-through
+  // behavior; real browser strings still always cross the redaction boundary.
+  if (typeof value !== "string") return value;
+  return redactObservationText(value, [], paymentSealActive, knownSecrets);
 }
 
 const PAYMENT_PAN_MAX_SPAN_CHARS = 96;
@@ -1672,6 +1457,128 @@ export function resolveTarget(
   return best?.el ?? null;
 }
 
+function invalidateCompactV2Snapshot(
+  session: Pick<Session, "compactV2Refs" | "compactV2Index" | "compactV2Previous">,
+): void {
+  session.compactV2Refs = new Map();
+  session.compactV2Index = null;
+  session.compactV2Previous = null;
+}
+
+function throwCompactV2StaleRef(): never {
+  // Deliberately opaque: stale V2 errors must not construct V1 replacement
+  // candidates or reveal raw labels/legacy identities outside the safe view.
+  throw new CompactV2StaleRefError("stale_ref");
+}
+
+interface CompactV2TargetAuthorization {
+  legacyRef: string;
+  row: SafeControlV2;
+}
+
+/**
+ * The parts of an observed row that carry what the agent CHOSE the control for.
+ * `state`, `visibility` and `choice` legitimately churn on a live form and are
+ * excluded, so a ref stays actionable across a re-render; role, intent, field
+ * class, frame and label are not — a control whose label went from "Continue"
+ * to "Delete account" is no longer the control the agent reasoned about, even
+ * though its fingerprint (its DOM id) never moved.
+ */
+function sameCompactV2Intent(left: SafeControlV2, right: SafeControlV2): boolean {
+  return (
+    left.role === right.role &&
+    left.action === right.action &&
+    left.field === right.field &&
+    left.frame === right.frame &&
+    left.label === right.label
+  );
+}
+
+/** Row equality over the sealed representation only — never raw page data. */
+function sameCompactV2Control(left: SafeControlV2, right: SafeControlV2): boolean {
+  return (
+    left.role === right.role &&
+    left.state === right.state &&
+    left.visibility === right.visibility &&
+    left.action === right.action &&
+    left.field === right.field &&
+    left.label === right.label &&
+    left.choice === right.choice &&
+    left.frame === right.frame
+  );
+}
+
+/**
+ * Authorize an agent-supplied target against the observed skeleton. Two forms:
+ * a `@e:` handle (the durable fingerprint) or a `@label` alias, which resolves
+ * to exactly one observed handle or fails — never a guess. Only the epoch's
+ * `doc` gates here; a benign re-render since the observation is expected and is
+ * settled at act time against live elements.
+ */
+function compactV2AuthorizationForTarget(
+  session: Session,
+  target: string,
+): CompactV2TargetAuthorization {
+  const index = session.compactV2Index;
+  if (index === null) throwCompactV2StaleRef();
+  if (index.expiresAt < Date.now() || index.epoch.doc !== compactV2EpochDoc(session)) {
+    invalidateCompactV2Snapshot(session);
+    throwCompactV2StaleRef();
+  }
+  const row = isCompactV2Label(target)
+    ? resolveCompactV2Label(index.rows, target)
+    : index.rows.find((candidate) => candidate.ref === target);
+  if (row === undefined) throwCompactV2StaleRef();
+  const legacy = compactV2LegacyRefForHandle(session.compactV2Refs, row.ref);
+  if (legacy === null) throwCompactV2StaleRef();
+  return { legacyRef: legacy, row };
+}
+
+/** A label acts only when it names exactly one observed control. */
+function resolveCompactV2Label(
+  rows: readonly SafeControlV2[],
+  label: string,
+): SafeControlV2 | undefined {
+  const matches = rows.filter((row) => row.label === label);
+  if (matches.length > 1) {
+    throw new CompactV2AmbiguousLabelError(
+      `ambiguous_target: "${label}" names ${matches.length} controls. ` +
+        `Retry with one exact ref: ${matches.map((row) => row.ref).join(", ")}`,
+    );
+  }
+  return matches[0];
+}
+
+/**
+ * Re-resolve an authorized ref against LIVE elements. The handle is minted from
+ * the element's durable fingerprint under the current document epoch, so this
+ * survives a re-render between two acts (the whole point of the identity model)
+ * while a replaced document, a removed control, or a control that changed role
+ * under the same fingerprint all fail closed.
+ */
+function resolveAuthorizedCompactV2Target(
+  session: Session,
+  elements: readonly InteractiveElement[],
+  authorization: CompactV2TargetAuthorization,
+): InteractiveElement {
+  const index = session.compactV2Index;
+  if (index === null || index.epoch.doc !== compactV2EpochDoc(session)) {
+    invalidateCompactV2Snapshot(session);
+    throwCompactV2StaleRef();
+  }
+  const live = compactV2LiveControls(session, elements);
+  const matches = live.rows.filter((row) => row.ref === authorization.row.ref);
+  // Fingerprints are unique within an inventory by construction, so >1 means a
+  // broken invariant rather than an addressable ambiguity: refuse either way.
+  if (matches.length !== 1) throwCompactV2StaleRef();
+  const liveRow = matches[0]!;
+  if (!sameCompactV2Intent(liveRow, authorization.row)) throwCompactV2StaleRef();
+  const legacy = live.byRef.get(liveRow.ref);
+  const resolved = legacy === undefined ? null : resolveTarget(elements, legacy);
+  if (resolved === null) throwCompactV2StaleRef();
+  return resolved;
+}
+
 // Squire's OWN control plane. The operator browser runs in the connect-seeded
 // profile, so it is authenticated as the user (a live Google session). It must
 // therefore NEVER be allowed to reach Squire's own web app / API: otherwise a
@@ -1694,8 +1601,9 @@ export function isSquireControlPlaneHost(host: string): boolean {
 }
 
 // Domain-scope check for an agent-initiated goto. Allows the target host, any
-// subdomain of it, the configured auth hosts, and *.firebaseapp.com /
-// *.web.app auth handlers. Organic redirects are NOT routed through here.
+// subdomain of it, exact service-specific login routes, the configured auth
+// hosts, and *.firebaseapp.com / *.web.app auth handlers. Organic redirects
+// are NOT routed through here.
 export function hostAllowed(url: string, allowedHosts: readonly string[]): boolean {
   let host: string;
   try {
@@ -1708,6 +1616,7 @@ export function hostAllowed(url: string, allowedHosts: readonly string[]): boole
   if (isSquireControlPlaneHost(host)) return false;
   const ok = (allowed: string): boolean => host === allowed || host.endsWith(`.${allowed}`);
   if (allowedHosts.some(ok)) return true;
+  if (serviceLoginRouteHosts(allowedHosts).includes(host)) return true;
   if (DEFAULT_AUTH_HOSTS.some(ok)) return true;
   if (host.endsWith(".firebaseapp.com") || host.endsWith(".web.app")) return true;
   return false;
@@ -1733,7 +1642,7 @@ type FrameScopedTarget = Pick<
 function frameTargetFor(el: FrameScopedTarget): FrameTarget | null {
   if (el.framePath === undefined || el.framePath === null) return null;
   if (el.frameOrigin === undefined || el.frameOrigin === null) {
-    throw new Error("frame target lacks an origin");
+    throw new ProvisionTargetNotAllowedError("frame target lacks an origin");
   }
   return {
     framePath: el.framePath,
@@ -1758,14 +1667,14 @@ function assertFrameTargetAllowed(session: Session, el: FrameScopedTarget, kind:
   // message below suggests allow_host, which can never succeed for a null
   // origin — a remedy the model would loop on forever.
   if (el.frameOpaque === true || el.frameOrigin === "null") {
-    throw new Error(
+    throw new ProvisionTargetNotAllowedError(
       `${kind} refused: the target lives in an opaque (null-origin) frame — a sandboxed ` +
         `iframe without allow-same-origin, or an unconfirmed about:blank/srcdoc document. ` +
         `No host declaration can ever permit a null origin; this control is not reachable ` +
         `through operate_act. Drive the page's own controls instead.`,
     );
   }
-  throw new Error(
+  throw new ProvisionTargetNotAllowedError(
     `${kind} blocked by domain-scope: the target lives in a cross-domain frame ` +
       `(${el.frameOrigin ?? el.frameUrl}) outside the allowed hosts ` +
       `[${hostStrings(session).join(", ")}] + auth providers. ` +
@@ -1783,14 +1692,14 @@ function assertSecretFrameTargetAllowed(session: Session, el: FrameScopedTarget)
   const target = frameTargetFor(el);
   if (target === null) return;
   if (target.frameOpaque === true) {
-    throw new Error(
+    throw new ProvisionTargetNotAllowedError(
       "type_secret refused: the target lives in an opaque frame. Secrets may only be " +
         "typed into the main frame or a frame on the page's own domain.",
     );
   }
   const pageUrl = session.browser.currentUrl();
   if (isSameRecipeDomain(target.frameOrigin, pageUrl)) return;
-  throw new Error(
+  throw new ProvisionTargetNotAllowedError(
     `type_secret refused: the target lives in a cross-domain frame ` +
       `(${target.frameOrigin}), not the page's own domain. Secrets may only be ` +
       `typed into the main frame or a frame on the page's own domain.`,
@@ -1807,7 +1716,7 @@ function assertSecretFrameTargetAllowed(session: Session, el: FrameScopedTarget)
 // feature. Refuse explicitly instead.
 function assertNoFrameTarget(el: InteractiveElement, kind: string): void {
   if (el.framePath === undefined || el.framePath === null) return;
-  throw new Error(
+  throw new ProvisionTargetNotAllowedError(
     `operate_act kind="${kind}" does not yet support a target inside an <iframe> ` +
       `(frame ${el.frameOrigin ?? "unknown"}). Use click/js_click/type/type_secret/select ` +
       `for frame targets.`,
@@ -2257,6 +2166,7 @@ export function buildScreenOutline(
   pageText: string,
   sealedFieldKeys: ReadonlySet<string> = new Set<string>(),
   paymentSealActive = false,
+  knownSecrets: readonly string[] = [],
 ): ScreenOutline | undefined {
   if (elements.length === 0) return undefined;
   const byRegion = new Map<string, ScreenRegion>();
@@ -2265,8 +2175,8 @@ export function buildScreenOutline(
     const role = id.split(":")[0] ?? "region";
     const existing = byRegion.get(id);
     const region: ScreenRegion = existing ?? {
-      id: presentPaymentSafeString(id, paymentSealActive),
-      role: presentPaymentSafeString(role, paymentSealActive),
+      id: presentPaymentSafeString(id, paymentSealActive, knownSecrets),
+      role: presentPaymentSafeString(role, paymentSealActive, knownSecrets),
       topmost: false,
       occluded_by: null,
       children: [],
@@ -2279,25 +2189,28 @@ export function buildScreenOutline(
       el.occludedBy !== null &&
       el.occludedBy !== undefined
     ) {
-      region.occluded_by = presentPaymentSafeString(el.occludedBy, paymentSealActive);
+      region.occluded_by = presentPaymentSafeString(el.occludedBy, paymentSealActive, knownSecrets);
     }
     if (region.children.length < 10) {
       region.children.push({
         ref:
           el.screenPath !== null && el.screenPath !== undefined
-            ? presentPaymentSafeString(el.screenPath, paymentSealActive)
-            : presentLabel(el, sealedFieldKeys, paymentSealActive),
-        role: el.role === null ? null : presentPaymentSafeString(el.role, paymentSealActive),
-        text: presentLabel(el, sealedFieldKeys, paymentSealActive),
+            ? presentPaymentSafeString(el.screenPath, paymentSealActive, knownSecrets)
+            : presentLabel(el, sealedFieldKeys, paymentSealActive, knownSecrets),
+        role:
+          el.role === null
+            ? null
+            : presentPaymentSafeString(el.role, paymentSealActive, knownSecrets),
+        text: presentLabel(el, sealedFieldKeys, paymentSealActive, knownSecrets),
         href:
           el.href === null || el.href === undefined
             ? null
-            : presentPaymentSafeString(el.href, paymentSealActive),
+            : presentPaymentSafeString(el.href, paymentSealActive, knownSecrets),
         topmost: el.topmost ?? null,
         occluded_by:
           el.occludedBy === null || el.occludedBy === undefined
             ? null
-            : presentPaymentSafeString(el.occludedBy, paymentSealActive),
+            : presentPaymentSafeString(el.occludedBy, paymentSealActive, knownSecrets),
       });
     }
     byRegion.set(id, region);
@@ -2333,18 +2246,20 @@ const SEALED_FIELD_PLACEHOLDER = "[sealed]";
 function isSealedFieldValue(el: InteractiveElement, sealed: ReadonlySet<string>): boolean {
   if (el.sealed === true) return true;
   if ((el.type ?? "").toLowerCase() === "password") return true;
+  if ((el.sealedIdentityKeys ?? []).some((key) => sealed.has(key))) return true;
   return elementTargetKeys(el).some((k) => sealed.has(k));
 }
 function presentFieldValue(
   el: InteractiveElement,
   sealed: ReadonlySet<string>,
   paymentSealActive = false,
+  knownSecrets: readonly string[] = [],
 ): string | null {
   const v = el.value ?? null;
   if (v === null || v.length === 0) return v;
   return isSealedFieldValue(el, sealed)
     ? SEALED_FIELD_PLACEHOLDER
-    : presentPaymentSafeString(v, paymentSealActive);
+    : presentPaymentSafeString(v, paymentSealActive, knownSecrets);
 }
 // The host-facing LABEL. elementRef falls back to a field's VALUE when it has no
 // other label text — which would leak a sealed secret as the element's name. For
@@ -2355,11 +2270,12 @@ function presentLabel(
   el: InteractiveElement,
   sealed: ReadonlySet<string>,
   paymentSealActive = false,
+  knownSecrets: readonly string[] = [],
 ): string {
   const label = isSealedFieldValue(el, sealed)
     ? elementRef({ ...el, value: null })
     : elementRef(el);
-  return presentPaymentSafeString(label, paymentSealActive);
+  return presentPaymentSafeString(label, paymentSealActive, knownSecrets);
 }
 
 export function buildAccessibilitySnapshot(
@@ -2367,6 +2283,7 @@ export function buildAccessibilitySnapshot(
   limit = 12000,
   sealedFieldKeys: ReadonlySet<string> = new Set<string>(),
   paymentSealActive = false,
+  knownSecrets: readonly string[] = [],
 ): AccessibilitySnapshot | undefined {
   if (elements.length === 0) return undefined;
   const refs = provisionElementRefs(elements);
@@ -2383,21 +2300,28 @@ export function buildAccessibilitySnapshot(
     entries.length > 24 || entries.some(([, group]) => group.length > 16);
   const lines: string[] = ["RootWebArea"];
   for (const [region, group] of entries.slice(0, 24)) {
-    lines.push(`  region "${presentPaymentSafeString(region, paymentSealActive)}"`);
+    lines.push(`  region "${presentPaymentSafeString(region, paymentSealActive, knownSecrets)}"`);
     for (const el of group.slice(0, 16)) {
-      const label = presentLabel(el, sealedFieldKeys, paymentSealActive).replace(/"/g, '\\"');
-      const role = presentPaymentSafeString(roleForAccessibility(el), paymentSealActive);
-      const shownValue = presentFieldValue(el, sealedFieldKeys, paymentSealActive);
+      const label = presentLabel(el, sealedFieldKeys, paymentSealActive, knownSecrets).replace(
+        /"/g,
+        '\\"',
+      );
+      const role = presentPaymentSafeString(
+        roleForAccessibility(el),
+        paymentSealActive,
+        knownSecrets,
+      );
+      const shownValue = presentFieldValue(el, sealedFieldKeys, paymentSealActive, knownSecrets);
       const flags = [
         el.value !== undefined && el.value !== null
           ? `value="${(shownValue ?? "").slice(0, 60)}"`
           : null,
         el.checked !== undefined && el.checked !== null ? `checked=${el.checked}` : null,
         el.href !== undefined && el.href !== null
-          ? `href="${presentPaymentSafeString(el.href, paymentSealActive).slice(0, 120)}"`
+          ? `href="${presentPaymentSafeString(el.href, paymentSealActive, knownSecrets).slice(0, 120)}"`
           : null,
         el.topmost === false
-          ? `occluded_by="${presentPaymentSafeString(el.occludedBy ?? "unknown", paymentSealActive)}"`
+          ? `occluded_by="${presentPaymentSafeString(el.occludedBy ?? "unknown", paymentSealActive, knownSecrets)}"`
           : null,
       ].filter((v): v is string => v !== null);
       lines.push(
@@ -2429,14 +2353,6 @@ export function buildAccessibilitySnapshot(
     total_chars: tree.length,
     source: "interactive_dom",
   };
-}
-
-function registrableHost(url: string): string | null {
-  try {
-    return new URL(url).hostname.toLowerCase();
-  } catch {
-    return null;
-  }
 }
 
 function baseDomain(host: string): string {
@@ -2487,267 +2403,26 @@ function widenAllowedHostsFromCurrentUrl(session: Session): void {
 }
 
 // ── session lifecycle ──
-
-export interface StartOptions {
-  serviceUrl: string;
-  // Canonical Chrome profile: the pool's seed source for ordinary sessions and
-  // the directly opened profile for requireLiveIdentity. Defaults to
-  // CHROME_PROFILE_DIR.
-  profileDir?: string;
-  proxyUrl?: string;
-  // Extra hosts to widen domain-scope (e.g. a known custom IdP/mail host).
-  // Seeded with source "start" alongside the service host. A multi-app operate
-  // task declares every app it spans here (GCP + Firebase + the user's app);
-  // the single-service signup case passes none (the one degenerate host).
-  extraAllowedHosts?: readonly string[];
-  // Registry route guidance the tool layer resolved (renderSkillHint). Attached
-  // to the start observation so the agent reads the map before driving.
-  hint?: string;
-  // Change 5 — operate tasks that act AS the user require a live Google session
-  // in the bot profile before driving. When true and no live session exists,
-  // start hands back (needs_user.connect) BEFORE touching the task.
-  requireLiveIdentity?: boolean;
-  // PR2 — may the operator read the inbox for email verification? Sourced from
-  // the install-time `consent_operator_inbox_otp` flag. Default-OFF: when false,
-  // awaitVerification refuses the inbox read and hands the code request back to
-  // the user instead of silently reading mail. Operator/housekeeper deployments
-  // set the flag true (they consent to polling their own OAuth-bound inbox).
-  consentInboxRead?: boolean;
-  // The MCP api-client, threaded from the operate_* tool layer. Enables the
-  // captcha gate to spend a VAULTED 2Captcha key via the injecting proxy.
-  api?: ApiClient;
-}
-
-export interface HarnessStartOptions extends Omit<StartOptions, "profileDir" | "proxyUrl"> {
-  browser: BrowserController;
-}
-
-// Fail-closed precondition GATE — NOT autonomous recovery. An operate task that
-// acts as the user needs a LIVE Google session before it drives; absent /
-// expired / 2FA-challenged → hand back BEFORE the task starts, so the
-// human-in-the-loop dependency is explicit, never hidden (Codex). Pairs with the
-// install-time gate (install/cli.ts) that already requires a Google session.
-export interface NeedsUserConnect {
-  wall: "google_session";
-  message: string;
-  resume: "connect";
-}
-export function googleSessionGate(
-  liveProviders: readonly OAuthProviderId[],
-): { ok: true } | { ok: false; needs_user: NeedsUserConnect } {
-  if (liveProviders.includes("google")) return { ok: true };
-  return {
-    ok: false,
-    needs_user: {
-      wall: "google_session",
-      message:
-        "No live Google session in the bot profile, so the operator cannot act " +
-        "as you yet. Refresh it with `npx @trusty-squire/mcp connect --force-relogin` " +
-        "— plain `connect` may report 'already connected' from a cached marker and " +
-        "skip the sign-in, so it will NOT fix a stale/expired session. Then retry " +
-        "— the task has NOT started and nothing was changed.",
-      resume: "connect",
-    },
-  };
-}
-
-async function ensureProvisionPrimaryProviderSession(
-  browser: BrowserController,
-): Promise<OAuthProviderId[]> {
-  if (typeof browser.detectSessionProviders !== "function") return [];
-  return await browser.detectSessionProviders().catch(() => [] as OAuthProviderId[]);
-}
+//
+// The transaction itself lives in session/lifecycle.ts. These two wrappers are
+// the facade: they bind the perception collaborators the start paths need, so
+// the lifecycle module keeps a one-way dependency on this file (types only).
+const sessionStartPorts: SessionStartPorts = {
+  observeSession: async (session, detail, startMetadata) =>
+    await observeSession(session, detail, startMetadata),
+  compactV2StartMetadata: (registryHint, loginHint, userEmail) =>
+    compactV2StartMetadata(registryHint, loginHint, userEmail),
+};
 
 export async function startProvisionSession(opts: StartOptions): Promise<Observation> {
-  const id = randomUUID();
-  let browser: BrowserController;
-  let liveProviders: OAuthProviderId[];
-  let workerEmail: string | null;
-  const acquired = await acquireWarmBrowser(opts, id);
-  browser = acquired.controller;
-  // Probe the selected browser: ordinary sessions use a claimed/cloned worker,
-  // while requireLiveIdentity uses the canonical login-authoring profile directly.
-  // The immutable seed is never opened by Chrome during an operator start.
-  liveProviders = await ensureProvisionPrimaryProviderSession(browser);
-  workerEmail =
-    typeof browser.detectGoogleAccountEmail === "function"
-      ? await browser.detectGoogleAccountEmail().catch(() => null)
-      : null;
-  // Change 5 — fail-closed identity gate BEFORE driving. If an operate task
-  // needs to act as the user and there's no live Google session, hand back now;
-  // do not start the browser or the task. No autonomous login is attempted.
-  if (opts.requireLiveIdentity === true) {
-    const gate = googleSessionGate(liveProviders);
-    if (!gate.ok) {
-      audit(id, "connect_gate", { ok: false, wall: "google_session" });
-      await releaseWarmBrowserPage(browser, true);
-      return { session_id: id, url: "", text: "", elements: [], needs_user: gate.needs_user };
-    }
-  }
-  const targetHost = registrableHost(opts.serviceUrl);
-  const seedHosts = [
-    ...(targetHost !== null ? [targetHost] : []),
-    ...(opts.extraAllowedHosts ?? []),
-  ];
-  // All start-declared hosts are sourced "start" — auto-widen chains off these,
-  // and credential egress may seed from these (but never from mid_session).
-  const allowedHosts: AllowedHostEntry[] = [...new Set(seedHosts)].map((host) => ({
-    host,
-    source: "start" as const,
-  }));
-  const session: Session = {
-    id,
-    browser,
-    allowedHosts,
-    generation: 0,
-    secretSlots: new Map(),
-    sealedFieldKeys: new Set(),
-    lastElements: [],
-    prevObserve: null,
-    observeSnapshotFile: null,
-    actionTrace: [],
-    recordedValues: [],
-    committedSelectValues: new Map(),
-    captureRounds: [],
-    usedLocatorFallback: false,
-    recipeRejectionReason: null,
-    replayState: null,
-    activePayment: null,
-    paymentFieldSealActive: false,
-    placeOrderApproval: null,
-    placeOrderAttempted: false,
-    lastCartCheckout: null,
-    cartAdds: new Map(),
-    cartAddsByIdempotencyKey: new Map(),
-    cartUrls: new Map(),
-    lastCartMutation: null,
-    closing: false,
-    callCount: 0,
-    callDrainWaiters: new Set(),
-    startedAt: Date.now(),
-    hintServed: opts.hint !== undefined,
-    startUrl: opts.serviceUrl,
-    consentInboxRead: opts.consentInboxRead === true,
-    userEmail: workerEmail,
-    ...(opts.api !== undefined ? { api: opts.api } : {}),
-  };
-  sessions.set(id, session);
-  try {
-    if (typeof browser.setHostScopeAllowedHosts === "function") {
-      await browser.setHostScopeAllowedHosts(
-        () => hostStrings(session),
-        () => merchantSiblingSeedHosts(session),
-      );
-    }
-    audit(id, "start", {
-      service_url: opts.serviceUrl,
-      allowed_hosts: hostStrings(session),
-      has_hint: opts.hint !== undefined,
-    });
-    await browser.goto(opts.serviceUrl);
-    // A cookie/consent overlay (Usercentrics/OneTrust/…) renders after load and its
-    // backdrop occludes the ENTIRE form — the agent then sees every element
-    // occluded_by a div and gives up, or falls back to the only thing that looks
-    // clickable (e.g. a "Connect wallet" CTA on the Robinhood faucet). Dismiss it
-    // BEFORE the first observation so the real actionable form is operable.
-    // dismissConsentBanner() existed but had NO call sites (dead code); it only
-    // clicks banner-specific CTAs (accept/reject all), so a false click is unlikely.
-    // Best-effort + one retry, since the widget lazy-loads a beat after the goto.
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const cta = await browser.dismissConsentBanner().catch(() => null);
-      if (cta !== null) {
-        audit(id, "consent_dismissed", { cta });
-        break;
-      }
-      if (attempt === 0) await browser.waitForCaptchaChallengeToSettle(800, 0).catch(() => false);
-    }
-    const observation = await observeSession(session);
-    // Tell the agent which provider the user actually has a live session for
-    // (Google-preferred) — the bot knows from the profile cookies, so the agent
-    // doesn't have to guess. Composed with the skill route hint (if any).
-    const hintParts = [
-      loginSessionGuidance(liveProviders),
-      ...(opts.hint !== undefined ? [opts.hint] : []),
-    ];
-    return {
-      ...observation,
-      hint: hintParts.join("\n"),
-      ...(session.userEmail !== null ? { user_email: session.userEmail } : {}),
-    };
-  } catch (err) {
-    sessions.delete(id);
-    await releaseWarmBrowserPage(browser, false);
-    throw err;
-  }
+  return await startProvisionSessionInternal(opts, sessionStartPorts);
 }
 
 /** Start a normal guarded session on a caller-owned harness page. */
 export async function startHarnessProvisionSession(
   opts: HarnessStartOptions,
 ): Promise<Observation> {
-  const id = randomUUID();
-  if (opts.requireLiveIdentity === true) {
-    throw new Error("harness sessions cannot request live identity");
-  }
-  const targetHost = registrableHost(opts.serviceUrl);
-  const allowedHosts: AllowedHostEntry[] = [
-    ...(targetHost === null ? [] : [targetHost]),
-    ...(opts.extraAllowedHosts ?? []),
-  ]
-    .filter((host, index, hosts) => hosts.indexOf(host) === index)
-    .map((host) => ({
-      host,
-      source: "start" as const,
-    }));
-  const session: Session = {
-    id,
-    browser: opts.browser,
-    allowedHosts,
-    generation: 0,
-    secretSlots: new Map(),
-    sealedFieldKeys: new Set(),
-    lastElements: [],
-    prevObserve: null,
-    observeSnapshotFile: null,
-    actionTrace: [],
-    recordedValues: [],
-    committedSelectValues: new Map(),
-    captureRounds: [],
-    usedLocatorFallback: false,
-    recipeRejectionReason: null,
-    replayState: null,
-    activePayment: null,
-    paymentFieldSealActive: false,
-    placeOrderApproval: null,
-    placeOrderAttempted: false,
-    lastCartCheckout: null,
-    cartAdds: new Map(),
-    cartAddsByIdempotencyKey: new Map(),
-    cartUrls: new Map(),
-    lastCartMutation: null,
-    closing: false,
-    callCount: 0,
-    callDrainWaiters: new Set(),
-    startedAt: Date.now(),
-    hintServed: opts.hint !== undefined,
-    startUrl: opts.serviceUrl,
-    consentInboxRead: false,
-    userEmail: null,
-    ...(opts.api === undefined ? {} : { api: opts.api }),
-  };
-  sessions.set(id, session);
-  try {
-    audit(id, "start_harness", {
-      service_url: opts.serviceUrl,
-      allowed_hosts: hostStrings(session),
-    });
-    await opts.browser.goto(opts.serviceUrl);
-    return { ...(await observeSession(session)), hint: opts.hint ?? "" };
-  } catch (error) {
-    sessions.delete(id);
-    await opts.browser.close().catch(() => undefined);
-    throw error;
-  }
+  return await startHarnessProvisionSessionInternal(opts, sessionStartPorts);
 }
 
 export async function observe(
@@ -2757,6 +2432,40 @@ export async function observe(
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   return await observeSession(session, detail);
+}
+
+export interface ScreenshotCapture {
+  session_id: string;
+  url: string;
+  frame_url: string | null;
+  frame_count: number;
+  redacted_count: number;
+  image: { mime_type: string; data_base64: string };
+}
+
+// operate_screenshot's session-level entry point. Session-known secret values
+// remain inside the operator process and are used only to locate node-level
+// pixel masks; they are never included in a tool response.
+//
+export async function captureScreenshot(
+  sessionId: string,
+  opts: { frameIndex?: number; frameUrlContains?: string; fullPage?: boolean } = {},
+): Promise<ScreenshotCapture> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const captured = await session.browser.captureOperatorScreenshot(
+    opts,
+    [...session.sealedFieldKeys],
+    [...session.secretSlots.values()],
+  );
+  return {
+    session_id: sessionId,
+    url: session.browser.currentUrl(),
+    frame_url: captured.frameUrl,
+    frame_count: captured.frameCount,
+    redacted_count: captured.redactedCount,
+    image: { mime_type: "image/jpeg", data_base64: captured.base64 },
+  };
 }
 
 // Hosts to seed credential EGRESS from when storing a key extracted in this
@@ -2817,18 +2526,25 @@ export function currentProvisionUrl(sessionId: string): string {
   return session.browser.currentUrl();
 }
 
+export function isCompactV2ProvisionSession(sessionId: string): boolean {
+  return sessionForCall(sessionId)?.compactV2Mode === "on";
+}
+
 function activeProvisionSession(): Session {
   return paymentSession();
 }
 
 export function activeProvisionBrowser(): BrowserController {
-  return activeProvisionSession().browser;
+  const session = activeProvisionSession();
+  invalidateCompactV2Snapshot(session);
+  return session.browser;
 }
 
 export async function activeProvisionBrowserForPayment(
   selectedSession?: Session,
 ): Promise<BrowserController> {
   const session = selectedSession ?? activeProvisionSession();
+  invalidateCompactV2Snapshot(session);
   return session.browser;
 }
 
@@ -2870,12 +2586,128 @@ export function getActivePendingCardFill(selectedSession?: Session): PendingCard
   return state?.status === "pending" ? state.pending : null;
 }
 
-// [P0] Read-only: the outstanding approval a prior operate_pay call left
-// waiting on the human, if any. Backs operate_payment_status, which does not
-// touch session state and just reports on it.
+// The outstanding approval a prior bounded operate_pay call left waiting on
+// the human, if any. A status read may transition this exact state to terminal
+// denial/expiry and scrub its private operator key.
 export function getActivePendingApproval(selectedSession?: Session): PendingApprovalWait | null {
   const state = (selectedSession ?? activeProvisionSession()).activePayment;
   return state?.status === "awaiting_approval" ? state.state : null;
+}
+
+export function getTerminalPaymentApproval(
+  selectedSession?: Session,
+): { state: PendingApprovalWait; terminalStatus: TerminalPaymentApprovalStatus } | null {
+  const activePayment = (selectedSession ?? activeProvisionSession()).activePayment;
+  return activePayment?.status === "terminal_approval"
+    ? { state: activePayment.state, terminalStatus: activePayment.terminalStatus }
+    : null;
+}
+
+export function completeActivePendingApprovalWithTerminalStatus(
+  state: PendingApprovalWait,
+  terminalStatus: "denied" | "expired",
+  selectedSession?: Session,
+): boolean {
+  const session = selectedSession ?? activeProvisionSession();
+  const activePayment = session.activePayment;
+  if (activePayment?.status !== "awaiting_approval" || activePayment.state !== state) return false;
+  state.keypair.privateKey = "";
+  session.activePayment = { status: "terminal_approval", state, terminalStatus };
+  return true;
+}
+
+export function completeActivePaymentLeaseWithTerminalApproval(
+  lease: ActivePaymentLease,
+  state: PendingApprovalWait,
+  terminalStatus: TerminalPaymentApprovalStatus,
+  selectedSession?: Session,
+): void {
+  const session = selectedSession ?? activeProvisionSession();
+  const activePayment = session.activePayment;
+  if (activePayment?.status !== "operating" || activePayment.lease !== lease) {
+    throw new Error(
+      "operate_pay terminal approval completed without ownership of the active payment lease",
+    );
+  }
+  state.keypair.privateKey = "";
+  session.activePayment = { status: "terminal_approval", state, terminalStatus };
+}
+
+export function getActivePendingThreeDs(selectedSession?: Session): PendingThreeDsWait | null {
+  return (selectedSession ?? activeProvisionSession()).pendingThreeDs ?? null;
+}
+
+export function armPaymentDispatchHandoff(
+  state: PendingThreeDsWait,
+  selectedSession?: Session,
+): void {
+  const session = selectedSession ?? activeProvisionSession();
+  if (session.paymentDispatchClosed || (session.closing && session.paymentCallCount === 0)) {
+    throw new Error(`provision session ${session.id} closed before payment dispatch`);
+  }
+  let resolveSettled = (): void => undefined;
+  const settled = new Promise<void>((resolve) => {
+    resolveSettled = resolve;
+  });
+  session.paymentDispatchHandoff = {
+    state,
+    settled,
+    resolveSettled,
+    terminalizing: false,
+    terminalComplete: false,
+    released: false,
+    auditPromise: null,
+  };
+}
+
+export function finishPaymentDispatchHandoff(
+  state: PendingThreeDsWait,
+  selectedSession?: Session,
+): void {
+  const session = selectedSession ?? activeProvisionSession();
+  const handoff = session.paymentDispatchHandoff;
+  if (handoff?.state !== state) return;
+  handoff.released = true;
+  handoff.resolveSettled();
+  if (!handoff.terminalizing || handoff.terminalComplete) {
+    session.paymentDispatchHandoff = null;
+  }
+}
+
+export async function coordinatePaymentDispatchAudit(
+  state: PendingThreeDsWait,
+  recordAudit: () => Promise<void>,
+  selectedSession?: Session,
+): Promise<void> {
+  const session = selectedSession ?? activeProvisionSession();
+  const handoff = session.paymentDispatchHandoff;
+  if (handoff?.state === state) {
+    handoff.auditPromise ??= recordAudit();
+    await handoff.auditPromise;
+    return;
+  }
+  await recordAudit();
+}
+
+export function setActivePendingThreeDs(
+  state: PendingThreeDsWait,
+  selectedSession?: Session,
+): void {
+  const session = selectedSession ?? activeProvisionSession();
+  const handoff = session.paymentDispatchHandoff;
+  if (session.closing && handoff?.state !== state) return;
+  session.pendingThreeDs = state;
+  if (handoff?.state === state) handoff.resolveSettled();
+}
+
+export function clearActivePendingThreeDsIfCurrent(
+  state: PendingThreeDsWait,
+  selectedSession?: Session,
+): boolean {
+  const session = selectedSession ?? activeProvisionSession();
+  if (session.pendingThreeDs !== state) return false;
+  session.pendingThreeDs = null;
+  return true;
 }
 
 export interface ActivePaymentLease {
@@ -2885,6 +2717,11 @@ export interface ActivePaymentLease {
 export type ActivePaymentClaim =
   | { kind: "lease"; lease: ActivePaymentLease; resumeApproval?: PendingApprovalWait }
   | { kind: "confirm"; pending: PendingCardFill }
+  | {
+      kind: "terminal";
+      state: PendingApprovalWait;
+      terminalStatus: TerminalPaymentApprovalStatus;
+    }
   | { kind: "missing_confirm" };
 
 export function claimActivePaymentForOperatePay(
@@ -2892,6 +2729,12 @@ export function claimActivePaymentForOperatePay(
   selectedSession?: Session,
 ): ActivePaymentClaim {
   const session = selectedSession ?? activeProvisionSession();
+  if (getActivePendingThreeDs(session) !== null) {
+    throw new Error(
+      "operate_pay refused: a prior charge has unresolved 3-D Secure state; call " +
+        "operate_payment_status first",
+    );
+  }
   const state = session.activePayment;
   if (state?.status === "operating") {
     throw new Error("operate_pay refused: another payment operation is already in progress");
@@ -2901,6 +2744,13 @@ export function claimActivePaymentForOperatePay(
   }
   if (state?.status === "sealed") {
     throw new Error("operate_pay refused: payment field cleanup remains unverified");
+  }
+  if (state?.status === "terminal_approval") {
+    return {
+      kind: "terminal",
+      state: state.state,
+      terminalStatus: state.terminalStatus,
+    };
   }
   if (state?.status === "pending") {
     if (phase !== "confirm") {
@@ -3086,6 +2936,20 @@ function alreadyInCartResult(result: CartAddResult): CartAddResult {
   };
 }
 
+async function capturePrivateCheckoutState(session: Session): Promise<CheckoutState | undefined> {
+  const elements = await session.browser.extractInteractiveElements();
+  retainSessionElements(session, elements);
+  const url = session.browser.currentUrl();
+  const text = redactObservationText(
+    await session.browser.extractVisibleText(),
+    elements,
+    session.paymentFieldSealActive,
+    [...session.secretSlots.values()],
+  );
+  const liveCheckout = await captureCartCheckoutForFillCardFallback(session, url);
+  return checkoutStateForObservation(session, url, text.slice(0, 12_000), elements, liveCheckout);
+}
+
 async function reconcileReservedCartAdd(
   session: Session,
   record: CartAddRecord,
@@ -3110,13 +2974,13 @@ async function reconcileReservedCartAdd(
         cartDelta: "0",
         origin: originForUrl(session.browser.currentUrl()) ?? "",
       };
-      const observed = await observeSession(session);
-      if (observed.checkout_state === undefined) throw error;
+      const checkoutState = await capturePrivateCheckoutState(session);
+      if (checkoutState === undefined) throw error;
       const result: CartAddResult = {
         status: "already_in_cart",
         cart_delta: "0",
-        cart_url: observed.checkout_state.cart_url,
-        checkout_state: { ...observed.checkout_state, quantity },
+        cart_url: checkoutState.cart_url,
+        checkout_state: { ...checkoutState, quantity },
         postcondition: {
           product_identity: record.productIdentity,
           options_hash: record.optionsHash,
@@ -3144,13 +3008,13 @@ async function performCartAdd(session: Session, record: CartAddRecord): Promise<
       cartDelta: "0",
       origin: originForUrl(session.browser.currentUrl()) ?? "",
     };
-    const observed = await observeSession(session);
-    if (observed.checkout_state === undefined) throw new Error("cart state was not observable");
+    const checkoutState = await capturePrivateCheckoutState(session);
+    if (checkoutState === undefined) throw new Error("cart state was not observable");
     return {
       status: "already_in_cart",
       cart_delta: "0",
-      cart_url: observed.checkout_state.cart_url,
-      checkout_state: { ...observed.checkout_state, quantity: beforeQuantity },
+      cart_url: checkoutState.cart_url,
+      checkout_state: { ...checkoutState, quantity: beforeQuantity },
       postcondition: {
         product_identity: record.productIdentity,
         options_hash: record.optionsHash,
@@ -3166,31 +3030,37 @@ async function performCartAdd(session: Session, record: CartAddRecord): Promise<
     'text="カートに追加"',
   ];
   let addError: unknown;
-  let observed: Observation | null = null;
+  let actionResult: InternalActResult | null = null;
   for (const target of addTargets) {
     try {
-      observed = await act(session.id, { kind: "click", target }, "compact", {
-        productIdentity: record.productIdentity,
-        optionsHash: record.optionsHash,
-        onActionReady: () => {
-          record.phase = "click_started";
+      actionResult = await actInternally(
+        session.id,
+        { kind: "click", target },
+        "compact",
+        {
+          productIdentity: record.productIdentity,
+          optionsHash: record.optionsHash,
+          onActionReady: () => {
+            record.phase = "click_started";
+          },
         },
-      });
+        true,
+      );
       addError = undefined;
       break;
     } catch (error) {
       addError = error;
-      if (!(error instanceof Error) || !error.message.startsWith("no element matched locator")) {
+      if (!(error instanceof ProvisionTargetMissingError)) {
         throw error;
       }
     }
   }
-  if (addError !== undefined || observed === null) throw addError;
+  if (addError !== undefined || actionResult === null) throw addError;
   const afterQuantity = await cartLineQuantity(session, record.productIdentity, record.optionsHash);
   if (afterQuantity === null || afterQuantity <= 0) {
     throw new Error("requested product/variant line was not observable after add");
   }
-  const checkoutState = observed.checkout_state;
+  const checkoutState = actionResult.outcome.checkoutState;
   if (checkoutState === undefined) throw new Error("cart state was not observable after add");
   const cartDelta =
     beforeQuantity === null
@@ -3216,6 +3086,34 @@ async function performCartAdd(session: Session, record: CartAddRecord): Promise<
       options_hash: record.optionsHash,
       quantity: afterQuantity,
     },
+  };
+}
+
+export interface CartClearResult {
+  status: "cleared";
+  cart_url: string | null;
+  checkout_state?: CheckoutState;
+}
+
+// Deterministic cart-normalize affordance: empty the cart before a cart_add so
+// a run reaches a KNOWN quantity regardless of what accumulated in the shared
+// persistent-profile cart across earlier operate_start sessions. Drops the
+// local idempotency reservations too — a stale "already_in_cart" for a line
+// that no longer exists must not suppress a real add after the clear.
+export async function cartClear(sessionId: string): Promise<CartClearResult> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const cleared = await session.browser.clearCart();
+  if (!cleared) throw new Error("cart_clear failed to reach the cart-clear endpoint");
+  session.cartAdds.clear();
+  session.cartAddsByIdempotencyKey.clear();
+  session.lastCartMutation = null;
+  session.lastCartCheckout = null;
+  const observed = await observeSession(session);
+  return {
+    status: "cleared",
+    cart_url: observed.checkout_state?.cart_url ?? null,
+    ...(observed.checkout_state !== undefined ? { checkout_state: observed.checkout_state } : {}),
   };
 }
 
@@ -3386,15 +3284,16 @@ export function toCompactElement(
   // pass false.
   elide = false,
   paymentSealActive = false,
+  knownSecrets: readonly string[] = [],
 ): ObservedElement {
   const out: ObservedElement = {
     ref,
-    label: presentLabel(el, sealed, paymentSealActive),
-    tag: presentPaymentSafeString(el.tag, paymentSealActive),
+    label: presentLabel(el, sealed, paymentSealActive, knownSecrets),
+    tag: presentPaymentSafeString(el.tag, paymentSealActive, knownSecrets),
   };
-  if (el.role) out.role = presentPaymentSafeString(el.role, paymentSealActive);
+  if (el.role) out.role = presentPaymentSafeString(el.role, paymentSealActive, knownSecrets);
   if (el.type && !(elide && shouldElideType(el))) {
-    out.type = presentPaymentSafeString(el.type, paymentSealActive);
+    out.type = presentPaymentSafeString(el.type, paymentSealActive, knownSecrets);
   }
   // value_len is a LENGTH signal, not the value — report the REAL character count.
   // presentFieldValue masks a sealed field to "[sealed]" (8 chars), so using its
@@ -3404,17 +3303,17 @@ export function toCompactElement(
   const realLen = (el.value ?? "").length;
   if (realLen > 0) out.value_len = realLen;
   if (el.checked !== null && el.checked !== undefined) out.checked = el.checked;
-  if (el.href) out.href = presentPaymentSafeString(el.href, paymentSealActive);
-  if (el.testId) out.testId = presentPaymentSafeString(el.testId, paymentSealActive);
+  if (el.href) out.href = presentPaymentSafeString(el.href, paymentSealActive, knownSecrets);
+  if (el.testId) out.testId = presentPaymentSafeString(el.testId, paymentSealActive, knownSecrets);
   if (includePath && el.screenPath) {
-    out.path = presentPaymentSafeString(el.screenPath, paymentSealActive);
+    out.path = presentPaymentSafeString(el.screenPath, paymentSealActive, knownSecrets);
   }
   if (el.topmost === false) out.topmost = false;
   if (el.occludedBy) {
-    out.occluded_by = presentPaymentSafeString(el.occludedBy, paymentSealActive);
+    out.occluded_by = presentPaymentSafeString(el.occludedBy, paymentSealActive, knownSecrets);
   }
   if (el.frameOrigin) {
-    out.frame_origin = presentPaymentSafeString(el.frameOrigin, paymentSealActive);
+    out.frame_origin = presentPaymentSafeString(el.frameOrigin, paymentSealActive, knownSecrets);
   }
   annotatePaymentControl(out, el);
   return out;
@@ -3585,12 +3484,6 @@ function emitElements(
 // a write failure must NEVER break an observe. Rolling one file per session (the
 // latest COMPLETE inventory) — that's what the host wants when it re-expands
 // after a context compaction or greps for an element the delta didn't re-show.
-function observeSnapshotDir(sessionId: string): string {
-  const override = (process.env.TRUSTY_SQUIRE_OBSERVE_DIR ?? "").trim();
-  const parent = override.length > 0 ? override : join(tmpdir(), "trusty-squire-observe");
-  return join(parent, sessionId);
-}
-
 function persistObserveSnapshot(
   session: Session,
   generation: number,
@@ -3769,6 +3662,7 @@ export function buildCompactObservation(args: {
   elements: readonly InteractiveElement[];
   sealed?: ReadonlySet<string>;
   paymentSealActive?: boolean;
+  knownSecrets?: readonly string[];
   prev: ObserveDeltaState | null;
   // Wire encoding of the emitted element set. Default "columnar" (the tab table).
   // The eval harness passes "json" to measure the columnar transform's marginal
@@ -3783,6 +3677,7 @@ export function buildCompactObservation(args: {
   const encode = args.encode ?? "columnar";
   const elide = args.elide ?? true;
   const paymentSealActive = args.paymentSealActive ?? false;
+  const knownSecrets = args.knownSecrets ?? [];
   const refs = provisionElementRefs(elements);
   const refOf = (el: InteractiveElement): string => refs.get(el) ?? provisionElementRef(el);
 
@@ -3791,13 +3686,25 @@ export function buildCompactObservation(args: {
   const fileElements: ObservedElement[] = [];
   for (const el of elements) {
     const ref = refOf(el);
-    fullByRef.set(ref, toCompactElement(el, ref, sealed, false, elide, paymentSealActive));
+    fullByRef.set(
+      ref,
+      toCompactElement(el, ref, sealed, false, elide, paymentSealActive, knownSecrets),
+    );
     serializedByRef.set(ref, JSON.stringify(fullByRef.get(ref)));
     // The persisted file keeps FULL fidelity (path included, no elision) so a
     // re-expansion after a host compaction loses nothing.
-    fileElements.push(toCompactElement(el, ref, sealed, true, false, paymentSealActive));
+    fileElements.push(
+      toCompactElement(el, ref, sealed, true, false, paymentSealActive, knownSecrets),
+    );
   }
   const nextState: ObserveDeltaState = { url, byRef: serializedByRef, text };
+
+  // A dialog/modal region with at least one topmost (unoccluded) element is
+  // "active" — the host planner should treat it as the current interaction
+  // surface rather than the page behind it. Uses each element's dedicated
+  // dialog-membership flag, independent of container grouping, and the FULL
+  // element set so it stays accurate on every emit, delta or full.
+  const modalActive = elements.some((el) => el.inDialog === true && el.topmost !== false);
 
   const base: Observation = {
     session_id: sessionId,
@@ -3806,6 +3713,7 @@ export function buildCompactObservation(args: {
     ...(args.guidance !== undefined ? { guidance: args.guidance } : {}),
     elements_total: elements.length,
     ...(args.textTruncated === true ? { text_truncated: true } : {}),
+    ...(modalActive ? { modal_active: true } : {}),
   };
 
   // Delta path: same URL as last observe, and churn under the threshold.
@@ -3894,26 +3802,7 @@ async function captureCartCheckoutForFillCardFallback(
 }
 
 function checkoutStageFromUrl(url: string): CheckoutState["stage"] | null {
-  let pathname = "";
-  try {
-    pathname = decodeURIComponent(new URL(url).pathname).toLowerCase();
-  } catch {
-    return null;
-  }
-  if (
-    /(?:^|\/)(?:checkout|secure[-_]?checkout|payment|order[-_]?review|order\/review)(?:\.(?:php|html?))?(?:\/|$)/i.test(
-      pathname,
-    )
-  ) {
-    return "checkout";
-  }
-  if (
-    /(?:^|\/)(?:cart|shopping[-_]?cart|view[-_]?cart|basket|bag)(?:\.(?:php|html?))?(?:\/|$)/i.test(
-      pathname,
-    )
-  )
-    return "cart";
-  return null;
+  return checkoutStageFromUrlV2(url);
 }
 
 function checkoutStage(
@@ -4168,29 +4057,632 @@ function isCartAffectingAction(
   );
 }
 
+function retainSessionElements(session: Session, elements: InteractiveElement[]): void {
+  session.lastElements =
+    session.compactV2Mode === "on"
+      ? sealRetainedInteractiveElementsV2(elements, (element) =>
+          compactV2CorrelationSelector(session, element),
+        )
+      : elements;
+}
+
+function compactV2CommittedSelectKey(session: Session, selector: string): string {
+  if (session.compactV2Mode !== "on") return selector;
+  return createHmac("sha256", session.compactV2Secret)
+    .update(`select-key\0${selector}`)
+    .digest("base64url");
+}
+
+function compactV2CommittedSelectValue(session: Session, value: string): string {
+  if (session.compactV2Mode !== "on") return value;
+  return createHmac("sha256", session.compactV2Secret)
+    .update(`select-value\0${value}`)
+    .digest("base64url");
+}
+
+function clearCommittedSelectValue(session: Session, selector: string): void {
+  session.committedSelectValues.delete(compactV2CommittedSelectKey(session, selector));
+}
+
+function compactV2CorrelationSelector(session: Session, element: InteractiveElement): string {
+  const binding = JSON.stringify([
+    element.frameOrigin ?? null,
+    element.framePath ?? null,
+    element.selector,
+  ]);
+  return `@c:${createHmac("sha256", session.compactV2Secret)
+    .update(binding)
+    .digest("base64url")
+    .slice(0, 22)}`;
+}
+
+function replaySafeElementForSession(
+  session: Session,
+  element: InteractiveElement | null,
+): InteractiveElement | null {
+  if (element === null || session.compactV2Mode !== "on") return element;
+  if (element.frameOrigin !== null && element.frameOrigin !== undefined) {
+    if (safeOriginV2(element.frameOrigin) === null) {
+      rejectRecipeRecording(session, "compact_v2_unrepresentable_frame_origin");
+      return null;
+    }
+  }
+  return (
+    sealRetainedInteractiveElementsV2([element], (candidate) =>
+      compactV2CorrelationSelector(session, candidate),
+    )[0] ?? null
+  );
+}
+
+export interface CompactV2StartMetadata {
+  hintPages?: string[];
+  userEmail?: string;
+}
+
+function splitUtf8Pages(value: string, maxBytes: number): string[] {
+  if (value.length === 0) return [];
+  const pages: string[] = [];
+  let page = "";
+  let bytes = 0;
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > maxBytes && page.length > 0) {
+      pages.push(page);
+      page = "";
+      bytes = 0;
+    }
+    page += character;
+    bytes += characterBytes;
+  }
+  if (page.length > 0) pages.push(page);
+  return pages;
+}
+
+function compactV2StartMetadata(
+  registryHint: string | undefined,
+  loginHint: string,
+  userEmail: string | null,
+): CompactV2StartMetadata {
+  const hint = [loginHint, registryHint]
+    .filter((part): part is string => part !== undefined && part.length > 0)
+    .join("\n");
+  const validEmail =
+    userEmail !== null &&
+    Buffer.byteLength(userEmail, "utf8") <= 254 &&
+    /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(userEmail)
+      ? userEmail
+      : undefined;
+  return {
+    ...(hint.length === 0 ? {} : { hintPages: splitUtf8Pages(hint, 384) }),
+    ...(validEmail === undefined ? {} : { userEmail: validEmail }),
+  };
+}
+
+function compactV2QueryCursorScope(
+  session: Session,
+  query: string,
+  role: SafeControlV2["role"] | undefined,
+): string {
+  return createHmac("sha256", session.compactV2Secret)
+    .update(JSON.stringify([query, role ?? null]))
+    .digest("base64url")
+    .slice(0, 10);
+}
+
+function compactV2HintCursorScope(session: Session): string {
+  return createHmac("sha256", session.compactV2Secret)
+    .update("start-metadata")
+    .digest("base64url")
+    .slice(0, 10);
+}
+
+function compactV2Cursor(session: Session, rev: number, offset: number, scope: string): string {
+  // The session-held index owns the five-minute expiry, so the cursor need not
+  // repeat a UUID/timestamp on every dense-page observation. A session-secret
+  // HMAC makes this compact in-MCP token unforgeable across sessions. Binding
+  // the epoch revision is what kills a page offset across a re-serialization.
+  const body = `${rev.toString(36)}:${offset.toString(36)}:${scope}`;
+  const signature = createHmac("sha256", session.compactV2Secret)
+    .update(body)
+    .digest("base64url")
+    .slice(0, 12);
+  return `${body}.${signature}`;
+}
+
+// A live checkout mints a per-checkout token INTO ITS PATH and re-writes it as
+// the checkout SPA re-renders a step. The token names the checkout, never the
+// document, so folding it into `doc` retires every ref between two fills of one
+// address block. This is the path-side twin of the query/fragment exclusion
+// PR #624 landed; it is deliberately a CLOSED list of known checkout shapes —
+// every other path keeps its full identity, so an SPA route change to a
+// different logical page still retires refs.
+const VOLATILE_CHECKOUT_PATH_RULES: readonly RegExp[] = [
+  // Shopify hosted checkout, current (`…/checkouts/cn/<token>[/<step>]`) and
+  // legacy (`…/checkouts/c|co/<token>[/<step>]`), under any locale/shop prefix.
+  // The marker must be a whole segment, so a token that merely starts with "c"
+  // cannot be split across the capture.
+  /^(.*\/checkouts\/c[no]?)\/([^/]+)(?:\/.*)?$/i,
+  // Older Shopify: `/<shop-id>/checkouts/<token>[/<step>]`.
+  /^(.*\/checkouts)\/([^/]+)(?:\/.*)?$/i,
+];
+
+/**
+ * Generated, not authored. An authored path slug under `/checkouts/` (a docs
+ * page, a marketing route) must keep its own identity, so the token has to look
+ * minted: long, in the URL-safe token alphabet, and carrying a digit.
+ */
+function looksLikeVolatileCheckoutToken(segment: string): boolean {
+  return segment.length >= 16 && /^[A-Za-z0-9_-]+$/.test(segment) && /\d/.test(segment);
+}
+
+/**
+ * Collapse a known-volatile checkout path onto one logical-page key. The step
+ * suffix collapses with the token: inside a single checkout the steps are
+ * same-document SPA routing, and a move to a DIFFERENT checkout replaces the
+ * document, which the primary document-identity signal catches.
+ */
+function normalizeVolatileCheckoutPath(pathname: string): string {
+  for (const rule of VOLATILE_CHECKOUT_PATH_RULES) {
+    const match = rule.exec(pathname);
+    if (match !== null && looksLikeVolatileCheckoutToken(match[2]!)) {
+      return `${match[1]}/:checkout`;
+    }
+  }
+  return pathname;
+}
+
+// The `doc` half of the observation epoch (docs/observation-model.md §4.1):
+// the browser's stable main-document identity, not the URL. The full URL is too
+// volatile to key on — live checkouts (e.g. Shopify) rotate a token in the
+// query string AND in the path on every step re-render, which would invalidate
+// every ref between two acts. A NORMALIZED origin+pathname is folded in as a
+// fail-closed backstop for a host whose document identity does not move on a
+// logical page change; query-string, fragment, and known-volatile checkout
+// token churn on the same logical page must not invalidate.
+function compactV2EpochDoc(session: Session): string {
+  let location = session.browser.currentUrl();
+  try {
+    const parsed = new URL(location);
+    if (parsed.origin !== "null" && parsed.origin !== "")
+      location = `${parsed.origin}${normalizeVolatileCheckoutPath(parsed.pathname)}`;
+  } catch {}
+  return createHmac("sha256", session.compactV2Secret)
+    .update(`${session.browser.mainDocumentIdentity()}\u0000${location}`)
+    .digest("base64url");
+}
+
+/**
+ * Mint the durable, document-scoped handle for every element in one inventory.
+ * The session HMAC makes a handle unforgeable and unlinkable across sessions;
+ * folding the epoch's `doc` into it is what makes a ref die on a real
+ * navigation without any snapshot bookkeeping — a handle simply stops being
+ * producible by any live element once the document is replaced.
+ */
+function compactV2Handles(
+  session: Session,
+  elements: readonly InteractiveElement[],
+): Map<InteractiveElement, string> {
+  const doc = compactV2EpochDoc(session);
+  const handles = new Map<InteractiveElement, string>();
+  for (const [element, fingerprint] of elementFingerprints(elements)) {
+    const digest = createHmac("sha256", session.compactV2Secret)
+      .update(`${doc}\u001f${fingerprint}`)
+      .digest("base64url")
+      .slice(0, COMPACT_V2_HANDLE_LENGTH);
+    handles.set(element, `@e:${digest}`);
+  }
+  return handles;
+}
+
+/** The live skeleton for an element inventory, under the session's epoch. */
+function compactV2LiveControls(
+  session: Session,
+  elements: readonly InteractiveElement[],
+): { rows: SafeControlV2[]; byRef: Map<string, string> } {
+  let pageOrigin = "";
+  try {
+    pageOrigin = new URL(session.browser.currentUrl()).origin;
+  } catch {}
+  return buildSafeControlsV2({
+    elements,
+    legacyRefs: provisionElementRefs(elements),
+    handles: compactV2Handles(session, elements),
+    pageOrigin,
+    pageUrl: session.browser.currentUrl(),
+    knownSecrets: [...session.secretSlots.values()],
+  });
+}
+
+function parseCompactV2Cursor(
+  session: Session,
+  cursor: string,
+  expectedScope: string,
+): { rev: number; offset: number } {
+  const [body, signature, extra] = cursor.split(".");
+  if (body === undefined || signature === undefined || extra !== undefined)
+    throw new Error("invalid_cursor");
+  const expected = createHmac("sha256", session.compactV2Secret)
+    .update(body)
+    .digest("base64url")
+    .slice(0, 12);
+  if (signature !== expected) throw new Error("invalid_cursor");
+  const [revRaw, offsetRaw, scope, extraPart] = body.split(":");
+  if (
+    revRaw === undefined ||
+    offsetRaw === undefined ||
+    scope === undefined ||
+    extraPart !== undefined ||
+    scope !== expectedScope
+  ) {
+    throw new Error("invalid_cursor");
+  }
+  const rev = Number.parseInt(revRaw, 36);
+  const offset = Number.parseInt(offsetRaw, 36);
+  if (
+    !Number.isSafeInteger(rev) ||
+    !Number.isSafeInteger(offset) ||
+    offset < 0 ||
+    rev.toString(36) !== revRaw ||
+    offset.toString(36) !== offsetRaw
+  ) {
+    throw new Error("stale_cursor");
+  }
+  return { rev, offset };
+}
+
+function compactV2HintPage(
+  session: Session,
+  index: SafeObservationIndexV2,
+  offset: number,
+): Record<string, unknown> {
+  const hint = session.compactV2HintPages[offset];
+  if (hint === undefined) throw new Error("invalid_cursor");
+  const nextOffset = offset + 1;
+  const remaining = session.compactV2HintPages.length - nextOffset;
+  const payload = {
+    format: "compact-v2",
+    url: "",
+    text: "",
+    session_id: session.id,
+    stage: index.stage,
+    hint,
+    ...(remaining > 0
+      ? {
+          hint_overflow: {
+            remaining,
+            next_cursor: compactV2Cursor(
+              session,
+              index.epoch.rev,
+              nextOffset,
+              compactV2HintCursorScope(session),
+            ),
+          },
+        }
+      : {}),
+  };
+  if (!compactV2PayloadWithinBudget(payload)) {
+    throw new Error("compact-v2 budget metadata exceeded");
+  }
+  return payload;
+}
+
+function compactV2PublicObservation(
+  session: Session,
+  legacy: () => Observation,
+  fields: {
+    stage: SafeStageV2;
+    guidance?: string;
+    oauth?: Observation["oauth"];
+    observed?: ObserveDetail;
+  },
+): Observation {
+  if (session.compactV2Mode !== "on") return legacy();
+  session.compactV2Active = true;
+  const payload: Observation = {
+    format: "compact-v2",
+    session_id: session.id,
+    // Keep the path/query private, but expose the screened origin so a
+    // successful navigation is distinguishable from an empty/about:blank view.
+    url: safeOriginV2(session.browser.currentUrl()) ?? "",
+    text: "",
+    stage: fields.stage,
+    ...(fields.guidance === undefined ? {} : { guidance: fields.guidance }),
+    ...(fields.oauth === undefined ? {} : { oauth: fields.oauth }),
+    ...(fields.observed === undefined ? {} : { observed: fields.observed }),
+  };
+  if (!compactV2PayloadWithinBudget(payload)) {
+    throw new Error("compact-v2 budget metadata exceeded");
+  }
+  return payload;
+}
+
+function compactV2Observation(
+  session: Session,
+  generation: number,
+  elements: readonly InteractiveElement[],
+  semanticSource: ObservationSemanticSourceV2,
+  startMetadata?: CompactV2StartMetadata,
+): Observation {
+  if (startMetadata?.hintPages !== undefined) {
+    session.compactV2HintPages = [...startMetadata.hintPages];
+  }
+  const stage = safeStageV2(session.browser.currentUrl(), elements);
+  const semantics = safePageSemanticsV2(semanticSource, [...session.secretSlots.values()]);
+  const epochDoc = compactV2EpochDoc(session);
+  const previous = session.compactV2Previous;
+  const sameDocument = previous !== null && previous.epoch.doc === epochDoc;
+  const safe = compactV2LiveControls(session, elements);
+  let delta = sameDocument ? diffSafeControlsV2(previous, stage, safe.rows) : null;
+  const privateBindingsChanged =
+    sameDocument &&
+    (session.compactV2Refs.size !== safe.byRef.size ||
+      [...safe.byRef].some(([ref, legacy]) => session.compactV2Refs.get(ref) !== legacy));
+  const requiresResync =
+    !sameDocument ||
+    delta === null ||
+    delta.stageChanged ||
+    privateBindingsChanged ||
+    delta.added.length > 0 ||
+    delta.changed.length > 0 ||
+    delta.removed.length > 0;
+  if (requiresResync) delta = null;
+  // The epoch's DOM-mutation counter advances only when the skeleton actually
+  // changed. Refs are fingerprint-derived and survive it; paging cursors are
+  // positional and bound to it, so a cursor minted before a re-render dies.
+  const epoch: ObservationEpochV2 = {
+    doc: epochDoc,
+    rev: sameDocument && !requiresResync ? previous.epoch.rev : generation,
+  };
+  const index: SafeObservationIndexV2 = {
+    epoch,
+    stage,
+    semantics,
+    rows: safe.rows,
+    byRef: safe.byRef,
+    expiresAt: Date.now() + 5 * 60_000,
+  };
+  // Raw DOM values fall out of scope here.
+  // Only this enum-only index survives to delta/query/action resolution.
+  session.compactV2Active = true;
+  session.compactV2Index = index;
+  session.compactV2Refs = safe.byRef;
+  session.compactV2Previous = {
+    epoch,
+    stage,
+    semantics,
+    byRef: new Map(safe.rows.map((row) => [row.ref, row])),
+  };
+  session.prevObserve = null;
+  if (previous !== null && !requiresResync && delta !== null) {
+    const encodedDelta = encodeV2Delta({
+      sessionId: session.id,
+      stage,
+      pageUrl: session.browser.currentUrl(),
+      // The first V2 page establishes semantic essentials. On a delta they
+      // are sticky, so resend only a sealed semantic change rather than the
+      // same title/heading on every harmless re-observe.
+      semantics: equalSafePageSemanticsV2(previous.semantics, semantics) ? undefined : semantics,
+      delta,
+    });
+    // A high-churn delta is less useful than a fresh paged map.  This also
+    // guarantees any overflow remains in the MCP cursor protocol.
+    if (encodedDelta !== null) return encodedDelta as unknown as Observation;
+  }
+  const page = encodeV2Page({
+    sessionId: session.id,
+    stage: index.stage,
+    pageUrl: session.browser.currentUrl(),
+    semantics,
+    rows: index.rows,
+    cursorFor: (offset) =>
+      compactV2Cursor(
+        session,
+        epoch.rev,
+        offset,
+        compactV2QueryCursorScope(session, "", undefined),
+      ),
+    ...(startMetadata === undefined
+      ? {}
+      : {
+          startMetadata: {
+            ...(session.compactV2HintPages[0] === undefined
+              ? {}
+              : { hint: session.compactV2HintPages[0] }),
+            ...(startMetadata.userEmail === undefined
+              ? {}
+              : { userEmail: startMetadata.userEmail }),
+            ...(session.compactV2HintPages.length <= 1
+              ? {}
+              : {
+                  hintOverflow: {
+                    remaining: session.compactV2HintPages.length - 1,
+                    next_cursor: compactV2Cursor(
+                      session,
+                      epoch.rev,
+                      1,
+                      compactV2HintCursorScope(session),
+                    ),
+                  },
+                }),
+          },
+        }),
+  });
+  return page.payload as unknown as Observation;
+}
+
+function exerciseCompactV2Shadow(
+  session: Session,
+  generation: number,
+  elements: readonly InteractiveElement[],
+  semanticSource: ObservationSemanticSourceV2,
+): void {
+  const saved = {
+    compactV2Active: session.compactV2Active,
+    compactV2Index: session.compactV2Index,
+    compactV2Refs: session.compactV2Refs,
+    compactV2Previous: session.compactV2Previous,
+    prevObserve: session.prevObserve,
+  };
+  try {
+    compactV2Observation(session, generation, elements, semanticSource);
+  } catch {
+  } finally {
+    session.compactV2Active = saved.compactV2Active;
+    session.compactV2Index = saved.compactV2Index;
+    session.compactV2Refs = saved.compactV2Refs;
+    session.compactV2Previous = saved.compactV2Previous;
+    session.prevObserve = saved.prevObserve;
+  }
+}
+
+export async function observeQuery(
+  sessionId: string,
+  query: string,
+  role?: SafeControlV2["role"],
+  cursor?: string,
+): Promise<Record<string, unknown>> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const index = session.compactV2Index;
+  if (index === null || index.expiresAt < Date.now()) throw new Error("stale_cursor");
+  // Query/paging is part of the same sealed action-map protocol: never return
+  // rows from a page whose private binding no longer matches the live page.
+  if (index.epoch.doc !== compactV2EpochDoc(session)) {
+    invalidateCompactV2Snapshot(session);
+    throw new Error("stale_cursor");
+  }
+  const needle = norm(query);
+  const cursorScope = compactV2QueryCursorScope(session, needle, role);
+  let offset = 0;
+  if (cursor !== undefined) {
+    if (needle.length === 0 && role === undefined && session.compactV2HintPages.length > 0) {
+      try {
+        const parsed = parseCompactV2Cursor(session, cursor, compactV2HintCursorScope(session));
+        if (parsed.rev !== index.epoch.rev) throw new Error("stale_cursor");
+        return compactV2HintPage(session, index, parsed.offset);
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== "invalid_cursor") throw error;
+      }
+    }
+    const parsed = parseCompactV2Cursor(session, cursor, cursorScope);
+    if (parsed.rev !== index.epoch.rev) throw new Error("stale_cursor");
+    offset = parsed.offset;
+  }
+  const liveElements = await session.browser.extractInteractiveElements();
+  const liveSafe = compactV2LiveControls(session, liveElements);
+  const liveUnchanged =
+    liveSafe.rows.length === index.rows.length &&
+    liveSafe.byRef.size === session.compactV2Refs.size &&
+    liveSafe.rows.every((row, rowIndex) => sameCompactV2Control(row, index.rows[rowIndex]!)) &&
+    [...liveSafe.byRef].every(([ref, legacy]) => session.compactV2Refs.get(ref) === legacy);
+  let snapshotRows = index.rows;
+  let pagingStage = index.stage;
+  let pagingRev = index.epoch.rev;
+  if (!liveUnchanged) {
+    // Benign live re-render (validation states appearing, dynamic fields
+    // toggling, rotating checkout query tokens): re-serialize the same
+    // document instead of failing the page. Refs are unaffected — they are
+    // fingerprint-derived — but the positional page offsets are not, so the
+    // epoch's revision advances and cursors minted here bind to the fresh map.
+    session.generation += 1;
+    pagingRev = session.generation;
+    pagingStage = safeStageV2(session.browser.currentUrl(), liveElements);
+    snapshotRows = liveSafe.rows;
+    const epoch: ObservationEpochV2 = { doc: index.epoch.doc, rev: pagingRev };
+    session.compactV2Index = {
+      epoch,
+      stage: pagingStage,
+      semantics: index.semantics,
+      rows: liveSafe.rows,
+      byRef: liveSafe.byRef,
+      expiresAt: Date.now() + 5 * 60_000,
+    };
+    session.compactV2Refs = liveSafe.byRef;
+    session.compactV2Previous = {
+      epoch,
+      stage: pagingStage,
+      semantics: index.semantics,
+      byRef: new Map(liveSafe.rows.map((row) => [row.ref, row])),
+    };
+  }
+  const liveByLegacy = new Map<string, InteractiveElement>();
+  for (const [element, legacy] of provisionElementRefs(liveElements)) {
+    liveByLegacy.set(legacy, element);
+  }
+  const privateMatches = new Set<string>();
+  if (needle.length > 0) {
+    for (const [ref, legacy] of session.compactV2Refs) {
+      const element = liveByLegacy.get(legacy);
+      if (
+        element !== undefined &&
+        controlMatchesPrivateQueryV2(element, query, [...session.secretSlots.values()])
+      ) {
+        privateMatches.add(ref);
+      }
+    }
+  }
+  const rows = snapshotRows.filter((row) => {
+    const searchable = [
+      row.label,
+      row.role,
+      row.state,
+      row.visibility,
+      row.action,
+      row.field,
+      row.choice,
+      row.frame,
+    ]
+      .filter((value): value is string => value !== undefined)
+      .map(norm);
+    return (
+      (needle.length === 0 ||
+        searchable.some((value) => value.includes(needle)) ||
+        privateMatches.has(row.ref)) &&
+      (role === undefined || row.role === role)
+    );
+  });
+  const page = encodeV2Page({
+    sessionId: session.id,
+    stage: pagingStage,
+    pageUrl: session.browser.currentUrl(),
+    semantics: index.semantics,
+    rows,
+    offset,
+    cursorFor: (next) => compactV2Cursor(session, pagingRev, next, cursorScope),
+  });
+  return page.payload;
+}
+
 async function observeSession(
   session: Session,
   detail: "compact" | "full" = "compact",
+  startMetadata?: CompactV2StartMetadata,
 ): Promise<Observation> {
   const oauthInProgress = (): Observation => {
     session.prevObserve = null;
+    invalidateCompactV2Snapshot(session);
     const oauth = session.browser.oauthTransitionStatus?.();
-    const observation: Observation = {
-      session_id: session.id,
-      url: oauth?.productUrl ?? session.startUrl,
-      text: "",
-      guidance:
-        "OAuth in progress: the provider detached or closed its page as expected. " +
-        "Do not switch login methods or close the session; call operate_observe again to read the retained product page.",
-      elements: [],
-      oauth: {
-        state: "in_progress",
-        provider_page: "closed_or_detached",
-        next_action: "operate_observe",
-      },
+    const guidance =
+      "OAuth in progress: the provider detached or closed its page as expected. " +
+      "Do not switch login methods or close the session; call operate_observe again to read the retained product page.";
+    const state: NonNullable<Observation["oauth"]> = {
+      state: "in_progress",
+      provider_page: "closed_or_detached",
+      next_action: "operate_observe",
     };
     session.browser.completeOAuthTransitionRecovery();
-    return observation;
+    return compactV2PublicObservation(
+      session,
+      () => ({
+        session_id: session.id,
+        url: oauth?.productUrl ?? session.startUrl,
+        text: "",
+        guidance,
+        elements: [],
+        oauth: state,
+      }),
+      { stage: "auth", guidance, oauth: state },
+    );
   };
   try {
     session.browser.recoverActivePage();
@@ -4206,12 +4698,30 @@ async function observeSession(
     session.generation += 1;
     const generation = session.generation;
     const elements = await session.browser.extractInteractiveElements();
-    session.lastElements = elements;
+    retainSessionElements(session, elements);
+    let semanticSource: ObservationSemanticSourceV2 = { title: "", headings: [] };
+    try {
+      semanticSource = await session.browser.extractObservationSemantics();
+    } catch {
+      // Semantic context is optional availability-wise; it is independently
+      // sealed below and never changes action-map safety.
+    }
+    // Native TypeScript compact serializer over TS's own CDP-derived DOM
+    // inventory. Its allowlist seal runs before any retained/emitted view; no
+    // Python subprocess or externally provisioned runtime participates.
+    const v2Mode = session.compactV2Mode;
+    if (v2Mode === "on") {
+      return compactV2Observation(session, generation, elements, semanticSource, startMetadata);
+    }
+    if (v2Mode === "shadow") exerciseCompactV2Shadow(session, generation, elements, semanticSource);
+    session.compactV2Active = false;
+    invalidateCompactV2Snapshot(session);
     const sealedFieldKeys = observationSealedFieldKeys(session, elements);
-    const text = redactPaymentObservationText(
+    const text = redactObservationText(
       await session.browser.extractVisibleText(),
       elements,
       session.paymentFieldSealActive,
+      [...session.secretSlots.values()],
     );
     const normalizedFull = text.replace(/\s+/g, " ").trim();
     const normalizedText = normalizedFull.slice(0, 4000);
@@ -4241,6 +4751,7 @@ async function observeSession(
         elements,
         sealed: sealedFieldKeys,
         paymentSealActive: session.paymentFieldSealActive,
+        knownSecrets: [...session.secretSlots.values()],
         prev: session.prevObserve,
       });
       // Persist the COMPLETE snapshot (path INCLUDED) — the safety net that makes
@@ -4278,6 +4789,7 @@ async function observeSession(
             delta: false,
             elements_total: elements.length,
             ...(textTruncated ? { text_truncated: true } : {}),
+            ...(built.observation.modal_active === true ? { modal_active: true } : {}),
           },
           checkoutState,
           currentCartMutation,
@@ -4316,6 +4828,7 @@ async function observeSession(
           true,
           false,
           session.paymentFieldSealActive,
+          [...session.secretSlots.values()],
         ),
       ),
     );
@@ -4324,12 +4837,14 @@ async function observeSession(
       normalizedText,
       sealedFieldKeys,
       session.paymentFieldSealActive,
+      [...session.secretSlots.values()],
     );
     const accessibility = buildAccessibilitySnapshot(
       elements,
       undefined,
       sealedFieldKeys,
       session.paymentFieldSealActive,
+      [...session.secretSlots.values()],
     );
     return withCheckoutState(
       {
@@ -4342,43 +4857,65 @@ async function observeSession(
         elements: elements.map((el) => {
           const observed: ObservedElement = {
             ref: refOf(el),
-            label: presentLabel(el, sealedFieldKeys, session.paymentFieldSealActive),
-            tag: presentPaymentSafeString(el.tag, session.paymentFieldSealActive),
+            label: presentLabel(el, sealedFieldKeys, session.paymentFieldSealActive, [
+              ...session.secretSlots.values(),
+            ]),
+            tag: presentPaymentSafeString(el.tag, session.paymentFieldSealActive, [
+              ...session.secretSlots.values(),
+            ]),
             role:
               el.role === null
                 ? null
-                : presentPaymentSafeString(el.role, session.paymentFieldSealActive),
+                : presentPaymentSafeString(el.role, session.paymentFieldSealActive, [
+                    ...session.secretSlots.values(),
+                  ]),
             type:
               el.type === null
                 ? null
-                : presentPaymentSafeString(el.type, session.paymentFieldSealActive),
-            value: presentFieldValue(el, sealedFieldKeys, session.paymentFieldSealActive),
+                : presentPaymentSafeString(el.type, session.paymentFieldSealActive, [
+                    ...session.secretSlots.values(),
+                  ]),
+            value: presentFieldValue(el, sealedFieldKeys, session.paymentFieldSealActive, [
+              ...session.secretSlots.values(),
+            ]),
             checked: el.checked ?? null,
             href:
               el.href === null || el.href === undefined
                 ? null
-                : presentPaymentSafeString(el.href, session.paymentFieldSealActive),
+                : presentPaymentSafeString(el.href, session.paymentFieldSealActive, [
+                    ...session.secretSlots.values(),
+                  ]),
             testId:
               el.testId === null || el.testId === undefined
                 ? null
-                : presentPaymentSafeString(el.testId, session.paymentFieldSealActive),
+                : presentPaymentSafeString(el.testId, session.paymentFieldSealActive, [
+                    ...session.secretSlots.values(),
+                  ]),
             path:
               el.screenPath === null || el.screenPath === undefined
                 ? null
-                : presentPaymentSafeString(el.screenPath, session.paymentFieldSealActive),
+                : presentPaymentSafeString(el.screenPath, session.paymentFieldSealActive, [
+                    ...session.secretSlots.values(),
+                  ]),
             container:
               el.container === null || el.container === undefined
                 ? null
-                : presentPaymentSafeString(el.container, session.paymentFieldSealActive),
+                : presentPaymentSafeString(el.container, session.paymentFieldSealActive, [
+                    ...session.secretSlots.values(),
+                  ]),
             topmost: el.topmost ?? null,
             occluded_by:
               el.occludedBy === null || el.occludedBy === undefined
                 ? null
-                : presentPaymentSafeString(el.occludedBy, session.paymentFieldSealActive),
+                : presentPaymentSafeString(el.occludedBy, session.paymentFieldSealActive, [
+                    ...session.secretSlots.values(),
+                  ]),
             frame_origin:
               el.frameOrigin === null || el.frameOrigin === undefined
                 ? null
-                : presentPaymentSafeString(el.frameOrigin, session.paymentFieldSealActive),
+                : presentPaymentSafeString(el.frameOrigin, session.paymentFieldSealActive, [
+                    ...session.secretSlots.values(),
+                  ]),
           };
           annotatePaymentControl(observed, el);
           return observed;
@@ -4431,7 +4968,14 @@ function enforcePlaceOrderGuard(
   session: Session,
   labels: readonly (string | null | undefined)[],
 ): Session["placeOrderApproval"] {
-  if (session.placeOrderApproval === null || !isCheckoutSubmitLabeled(labels)) return null;
+  if (!isCheckoutSubmitLabeled(labels)) return null;
+  if (getActivePendingThreeDs(session) !== null) {
+    throw new Error(
+      "operate_act refused: a prior charge has unresolved 3-D Secure state; call " +
+        "operate_payment_status first",
+    );
+  }
+  if (session.placeOrderApproval === null) return null;
   if (session.placeOrderAttempted) {
     throw new Error(
       "operate_act refused: a place-order attempt already fired for this approval " +
@@ -4500,12 +5044,87 @@ async function runClickWithPlaceOrderGuard(
   await recordPlaceOrderAttemptAudit(session, approval);
 }
 
+interface InternalActResult {
+  observation: Observation;
+  outcome: {
+    selectedOption?: string;
+    checkoutState?: CheckoutState;
+  };
+}
+
+async function actInternally(
+  sessionId: string,
+  action: ProvisionAction,
+  detail: ObserveDetail = "compact",
+  cartIdentity?: CartIdentityContext,
+  collectCheckoutState = false,
+  compactV2Authorization?: CompactV2TargetAuthorization,
+): Promise<InternalActResult> {
+  const session = sessionForCall(sessionId);
+  const oauthProvider =
+    action.kind === "oauth_login" || action.kind === "oauth_click" ? action.provider : undefined;
+  try {
+    const execute = async (deadline?: OAuthActionDeadline): Promise<InternalActResult> =>
+      await executeAct(
+        sessionId,
+        action,
+        detail,
+        cartIdentity,
+        true,
+        collectCheckoutState,
+        compactV2Authorization,
+        deadline,
+      );
+    return session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")
+      ? await withOAuthActionBoundary(session, oauthProvider, execute)
+      : await execute(undefined);
+  } catch (error) {
+    if (
+      session?.compactV2Active === true &&
+      !(error instanceof ManualCardEntryBlockedError) &&
+      !(error instanceof ProvisionTargetMissingError)
+    ) {
+      throw new CompactV2ActionFailureError(compactV2ActionFailureReason(error, action.kind));
+    }
+    throw error;
+  }
+}
+
 export async function act(
   sessionId: string,
   action: ProvisionAction,
   detail: ObserveDetail = "compact",
   cartIdentity?: CartIdentityContext,
 ): Promise<Observation> {
+  const session = sessionForCall(sessionId);
+  const oauthProvider =
+    action.kind === "oauth_login" || action.kind === "oauth_click" ? action.provider : undefined;
+  try {
+    const execute = async (deadline?: OAuthActionDeadline): Promise<InternalActResult> =>
+      await executeAct(sessionId, action, detail, cartIdentity, false, false, undefined, deadline);
+    const result =
+      session !== undefined && (action.kind === "oauth_login" || action.kind === "oauth_click")
+        ? await withOAuthActionBoundary(session, oauthProvider, execute)
+        : await execute(undefined);
+    return result.observation;
+  } catch (error) {
+    if (session?.compactV2Active === true) {
+      throw new Error(compactV2ActionFailureReason(error, action.kind));
+    }
+    throw error;
+  }
+}
+
+async function executeAct(
+  sessionId: string,
+  action: ProvisionAction,
+  detail: ObserveDetail,
+  cartIdentity: CartIdentityContext | undefined,
+  internalAccess: boolean,
+  collectCheckoutState: boolean,
+  internalAuthorization?: CompactV2TargetAuthorization,
+  oauthDeadline?: OAuthActionDeadline,
+): Promise<InternalActResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   if (
@@ -4523,7 +5142,7 @@ export async function act(
     const cardBlock = manualCardEntryBlockReason(action.text);
     if (cardBlock !== null) throw new ManualCardEntryBlockedError(cardBlock);
   }
-  const { browser } = session;
+  let browser = session.browser;
   let completedAction: ProvisionAction = action;
   let sensitiveSource: RecordedValueSource | undefined;
   let cartAffecting = false;
@@ -4535,16 +5154,35 @@ export async function act(
     cartAffecting = true;
     cartIdentity.onActionReady?.();
   };
-  const auditTarget =
-    "target" in action && parseLocatorTarget(action.target) !== null
-      ? "<mode>=<redacted>"
-      : "target" in action
-        ? action.target
-        : undefined;
+  let resolutionTarget: string | undefined;
+  let auditTarget: string | undefined;
+  let compactV2Authorization = internalAuthorization;
+  if ("target" in action) {
+    if (session.compactV2Active && !internalAccess) {
+      try {
+        compactV2Authorization = compactV2AuthorizationForTarget(session, action.target);
+        resolutionTarget = compactV2Authorization.legacyRef;
+        auditTarget = action.target;
+      } catch (error) {
+        audit(sessionId, "act", { kind: action.kind, target: "<rejected-v2-target>" });
+        throw error;
+      }
+    } else {
+      resolutionTarget = action.target;
+      auditTarget =
+        session.compactV2Active && internalAccess
+          ? "<internal-target>"
+          : parseLocatorTarget(action.target) !== null
+            ? "<mode>=<redacted>"
+            : action.target;
+    }
+  }
   audit(sessionId, "act", {
     kind: action.kind,
     ...(auditTarget !== undefined ? { target: auditTarget } : {}),
-    ...("url" in action ? { url: action.url } : {}),
+    ...("url" in action
+      ? { url: session.compactV2Active ? compactV2AuditUrl(action.url) : action.url }
+      : {}),
   });
 
   // The URL the action is taken ON — captured BEFORE the action navigates. The
@@ -4567,7 +5205,7 @@ export async function act(
       curHost = null;
     }
     if (curHost !== null && isSquireControlPlaneHost(curHost)) {
-      throw new Error(
+      throw new ProvisionTargetNotAllowedError(
         `action refused: the browser is on Squire's own control plane (${curHost}). ` +
           `The operator may not act on the Trusty Squire vault/app — navigate away with goto.`,
       );
@@ -4579,420 +5217,524 @@ export async function act(
   // Captured for the operator-recipe trace: the element a target action
   // resolved to, so we record the VISIBLE text it acted on (not the ref).
   let resolvedEl: InteractiveElement | null = null;
-  switch (action.kind) {
-    case "goto": {
-      if (!hostAllowed(action.url, hostStrings(session))) {
-        throw new Error(
-          `goto blocked by domain-scope: ${action.url} is outside the allowed hosts ` +
-            `[${hostStrings(session).join(", ")}] + auth providers. ` +
-            `Declare it first with an allow_host action if this task spans it.`,
-        );
-      }
-      await browser.goto(action.url);
-      break;
-    }
-    case "allow_host": {
-      const checked = validateAllowHost(action.host);
-      if ("error" in checked) {
-        throw new Error(`allow_host rejected "${action.host}": ${checked.error}`);
-      }
-      if (!session.allowedHosts.some((e) => e.host === checked.host)) {
-        session.allowedHosts.push({ host: checked.host, source: "mid_session" });
-        audit(sessionId, "allow_host", { host: checked.host, allowed_hosts: hostStrings(session) });
-      }
-      break;
-    }
-    case "press": {
-      await browser.pressKey(action.key);
-      break;
-    }
-    case "oauth_settle": {
-      await browser.settleAfterOAuth();
-      break;
-    }
-    case "scroll": {
-      await browser.scrollViewport(action.direction ?? "down");
-      break;
-    }
-    case "type_secret": {
-      const value = session.secretSlots.get(action.slot);
-      if (value === undefined) {
-        throw new Error(
-          `type_secret: no sealed slot named "${action.slot}". Capture it first with ` +
-            `operate_act { kind: "extract", into_slot: "${action.slot}" }. Known slots: ` +
-            `[${[...session.secretSlots.keys()].join(", ")}]`,
-        );
-      }
-      sensitiveSource = {
-        traceIndex: -1,
-        hole: `credential.${action.slot}`,
-        literal: value,
-      };
-      const locator = parseLocatorTarget(action.target);
-      if (locator !== null) {
-        const resolved = await browser.resolvePageTarget(locator.mode, locator.value, "type");
-        if (!resolved.ok) {
-          if (resolved.reason === "none") {
-            throw new Error(`type_secret: no element matched locator "${action.target}".`);
-          }
-          throw new AmbiguousProvisionTargetError(action.target, resolved.candidates);
+  try {
+    switch (action.kind) {
+      case "goto": {
+        if (!hostAllowed(action.url, hostStrings(session))) {
+          throw new ProvisionTargetNotAllowedError(
+            `goto blocked by domain-scope: ${action.url} is outside the allowed hosts ` +
+              `[${hostStrings(session).join(", ")}] + auth providers. ` +
+              `Declare it first with an allow_host action if this task spans it.`,
+          );
         }
-        try {
-          if (resolved.frameTarget !== null) {
-            assertSecretFrameTargetAllowed(session, resolved.frameTarget);
-          }
-          session.usedLocatorFallback = true;
-          await browser.typeHandle(resolved.handle, value, true);
-        } finally {
-          await resolved.handle.dispose().catch(() => undefined);
+        await browser.goto(action.url);
+        break;
+      }
+      case "allow_host": {
+        const checked = validateAllowHost(action.host);
+        if ("error" in checked) {
+          throw new ProvisionTargetNotAllowedError(
+            `allow_host rejected "${action.host}": ${checked.error}`,
+          );
         }
+        if (!session.allowedHosts.some((e) => e.host === checked.host)) {
+          session.allowedHosts.push({ host: checked.host, source: "mid_session" });
+          audit(sessionId, "allow_host", {
+            host: checked.host,
+            allowed_hosts: hostStrings(session),
+          });
+        }
+        break;
+      }
+      case "press": {
+        await browser.pressKey(action.key);
+        break;
+      }
+      case "oauth_settle": {
+        await browser.settleAfterOAuth();
+        break;
+      }
+      case "scroll": {
+        await browser.scrollViewport(action.direction ?? "down");
+        break;
+      }
+      case "type_secret": {
+        const value = session.secretSlots.get(action.slot);
+        if (value === undefined) {
+          throw new Error(
+            `type_secret: no sealed slot named "${action.slot}". Capture it first with ` +
+              `operate_act { kind: "extract", into_slot: "${action.slot}" }. Known slots: ` +
+              `[${[...session.secretSlots.keys()].join(", ")}]`,
+          );
+        }
+        sensitiveSource = {
+          traceIndex: -1,
+          hole: `credential.${action.slot}`,
+          literal: value,
+        };
+        const locator = parseLocatorTarget(resolutionTarget!);
+        if (locator !== null) {
+          const resolved = await browser.resolvePageTarget(locator.mode, locator.value, "type");
+          if (!resolved.ok) {
+            if (resolved.reason === "none") {
+              throw new Error(`type_secret: no element matched locator "${action.target}".`);
+            }
+            throw new AmbiguousProvisionTargetError(action.target, resolved.candidates);
+          }
+          try {
+            if (resolved.frameTarget !== null) {
+              assertSecretFrameTargetAllowed(session, resolved.frameTarget);
+            }
+            session.usedLocatorFallback = true;
+            const sealedFieldKeys = await browser.typeHandle(resolved.handle, value, true);
+            for (const key of sealedFieldKeys) session.sealedFieldKeys.add(key);
+          } finally {
+            await resolved.handle.dispose().catch(() => undefined);
+          }
+          audit(sessionId, "type_secret", {
+            slot: action.slot,
+            locator_mode: locator.mode,
+            host: registrableHost(browser.currentUrl()),
+          });
+          break;
+        }
+        const fresh = await browser.extractInteractiveElements();
+        retainSessionElements(session, fresh);
+        // resolveTarget recomputes identities (incl. volatile positional-group
+        // fingerprints) from these FRESH elements, so a ref whose group fingerprint
+        // changed since the last observe resolves to null, not a survivor (#399).
+        const el =
+          compactV2Authorization === undefined
+            ? resolveTarget(fresh, resolutionTarget!)
+            : resolveAuthorizedCompactV2Target(session, fresh, compactV2Authorization);
+        if (el === null) {
+          if (session.compactV2Active) {
+            if (!internalAccess) throwCompactV2StaleRef();
+            throw new Error("type_secret: internal live target changed");
+          }
+          const stale = staleTargetError(session, action.target, fresh);
+          if (stale !== null) throw stale;
+          throw new Error(`type_secret: no element matched target "${action.target}".`);
+        }
+        resolvedEl = el;
+        // Frame domain-lock (operator-frame-support) — never let a secret cross
+        // into a rogue/third-party (e.g. payment) iframe. See
+        // assertSecretFrameTargetAllowed; a main-frame or same-domain-frame
+        // target is unaffected.
+        assertSecretFrameTargetAllowed(session, el);
+        // Remember this field so the next observation masks its DOM value — the
+        // host sealed this secret into a slot and must never read it back.
+        for (const key of elementTargetKeys(el)) session.sealedFieldKeys.add(key);
+        // Type the REAL value into the page. It crosses only browser↔page; the
+        // value is never returned to the host and never logged.
+        const target = frameTargetFor(el);
+        const sealedFieldKeys =
+          target !== null
+            ? await browser.typeInFrame(target, el.selector, value, true)
+            : await browser.type(el.selector, value, true);
+        for (const key of sealedFieldKeys) session.sealedFieldKeys.add(key);
         audit(sessionId, "type_secret", {
           slot: action.slot,
-          locator_mode: locator.mode,
+          target: auditTarget,
           host: registrableHost(browser.currentUrl()),
         });
         break;
       }
-      const fresh = await browser.extractInteractiveElements();
-      session.lastElements = fresh;
-      // resolveTarget recomputes identities (incl. volatile positional-group
-      // fingerprints) from these FRESH elements, so a ref whose group fingerprint
-      // changed since the last observe resolves to null, not a survivor (#399).
-      const el = resolveTarget(fresh, action.target);
-      if (el === null) {
-        const stale = staleTargetError(session, action.target, fresh);
-        if (stale !== null) throw stale;
-        throw new Error(`type_secret: no element matched target "${action.target}".`);
-      }
-      resolvedEl = el;
-      // Frame domain-lock (operator-frame-support) — never let a secret cross
-      // into a rogue/third-party (e.g. payment) iframe. See
-      // assertSecretFrameTargetAllowed; a main-frame or same-domain-frame
-      // target is unaffected.
-      assertSecretFrameTargetAllowed(session, el);
-      // Remember this field so the next observation masks its DOM value — the
-      // host sealed this secret into a slot and must never read it back.
-      for (const key of elementTargetKeys(el)) session.sealedFieldKeys.add(key);
-      // Type the REAL value into the page. It crosses only browser↔page; the
-      // value is never returned to the host and never logged.
-      const target = frameTargetFor(el);
-      if (target !== null) await browser.typeInFrame(target, el.selector, value);
-      else await browser.type(el.selector, value);
-      audit(sessionId, "type_secret", {
-        slot: action.slot,
-        target: action.target,
-        host: registrableHost(browser.currentUrl()),
-      });
-      break;
-    }
-    case "select": {
-      // Re-resolve against FRESH elements — the target may be the <select> or
-      // its <label>. Main-frame execution uses selectOption; frame execution
-      // uses selectInFrame. text is the fuzzy option matcher in both paths.
-      const fresh = await browser.extractInteractiveElements();
-      session.lastElements = fresh;
-      const el = resolveTarget(fresh, action.target);
-      if (el === null) {
-        const stale = staleTargetError(session, action.target, fresh);
-        if (stale !== null) throw stale;
-        throw new Error(
-          `select: no element matched target "${action.target}". Visible: ` +
-            fresh
-              .map((e) => `"${e.screenPath ?? elementRef(e)}"`)
-              .slice(0, 20)
-              .join(", "),
-        );
-      }
-      resolvedEl = el;
-      // Frame domain-lock (operator-frame-support) — the SAME gate a frame
-      // click/type passes; see frameTargetAllowed. A native <select> is not a
-      // secret field, so the stricter type_secret cross-origin rule does not
-      // apply, but the ordinary domain lock does.
-      assertFrameTargetAllowed(session, el, "select");
-      bindCartIdentity(isCartAffectingAction(action, el));
-      const selectFrame = frameTargetFor(el);
-      const committedText =
-        selectFrame !== null
-          ? await browser.selectInFrame(selectFrame, el.selector, action.text)
-          : await browser.selectOption(el.selector, action.text);
-      session.committedSelectValues.set(el.selector, committedText);
-      completedAction = { ...action, text: committedText };
-      await settleAfterStateChange(browser);
-      break;
-    }
-    case "set_phone_country": {
-      // No captured element — the bot finds the phone-local native <select>.
-      // resolvedEl stays null; the step records without a captured-element
-      // trace (the country is host-replannable, not a replay recipe).
-      await browser.setPhoneCountry(action.country);
-      await settleAfterStateChange(browser);
-      break;
-    }
-    case "click":
-    case "js_click":
-    case "type":
-    case "upload":
-    case "oauth_click": {
-      const pageText = await browser.extractVisibleText();
-      const blockReason = shouldBlockUnsafeProvisionAction(pageText, action);
-      if (blockReason !== null) throw new Error(blockReason);
-      // Locator-form target (`text=…` / `css=…`): the host is pointing at a
-      // control that has NO `@e:` ref because the inventory never emitted it (a
-      // bare click-handler <div> with no role/label, e.g. a SPA "Add To Cart"
-      // that falls past the card-scan cap). Resolve it directly against the live
-      // page instead of the extracted-element list.
-      const locator = parseLocatorTarget(action.target);
-      if (locator !== null) {
-        if (action.kind !== "click" && action.kind !== "js_click" && action.kind !== "type") {
+      case "select": {
+        // Re-resolve against FRESH elements — the target may be the <select> or
+        // its <label>. Main-frame execution uses selectOption; frame execution
+        // uses selectInFrame. text is the fuzzy option matcher in both paths.
+        const fresh = await browser.extractInteractiveElements();
+        retainSessionElements(session, fresh);
+        const el =
+          compactV2Authorization === undefined
+            ? resolveTarget(fresh, resolutionTarget!)
+            : resolveAuthorizedCompactV2Target(session, fresh, compactV2Authorization);
+        if (el === null) {
+          if (session.compactV2Active) {
+            if (!internalAccess) throwCompactV2StaleRef();
+            throw new Error("select: internal live target changed");
+          }
+          const stale = staleTargetError(session, action.target, fresh);
+          if (stale !== null) throw stale;
           throw new Error(
-            `operate_act kind="${action.kind}" does not accept a text=/css= locator target; ` +
-              `use an @e: ref from operate_observe.`,
+            `select: no element matched target "${action.target}". Visible: ` +
+              fresh
+                .map((e) => `"${e.screenPath ?? elementRef(e)}"`)
+                .slice(0, 20)
+                .join(", "),
           );
         }
-        const resolved = await browser.resolvePageTarget(
-          locator.mode,
-          locator.value,
-          action.kind === "type" ? "type" : "click",
+        resolvedEl = el;
+        // Frame domain-lock (operator-frame-support) — the SAME gate a frame
+        // click/type passes; see frameTargetAllowed. A native <select> is not a
+        // secret field, so the stricter type_secret cross-origin rule does not
+        // apply, but the ordinary domain lock does.
+        assertFrameTargetAllowed(session, el, "select");
+        bindCartIdentity(isCartAffectingAction(action, el));
+        const selectFrame = frameTargetFor(el);
+        const committedText =
+          selectFrame !== null
+            ? await browser.selectInFrame(selectFrame, el.selector, action.text)
+            : await browser.selectOption(el.selector, action.text);
+        session.committedSelectValues.set(
+          compactV2CommittedSelectKey(session, el.selector),
+          compactV2CommittedSelectValue(session, committedText),
         );
-        if (!resolved.ok) {
-          if (resolved.reason === "none") {
+        completedAction = { ...action, text: committedText };
+        await settleAfterStateChange(browser);
+        break;
+      }
+      case "set_phone_country": {
+        // No captured element — the bot finds the phone-local native <select>.
+        // resolvedEl stays null; the step records without a captured-element
+        // trace (the country is host-replannable, not a replay recipe).
+        await browser.setPhoneCountry(action.country);
+        await settleAfterStateChange(browser);
+        break;
+      }
+      case "click":
+      case "js_click":
+      case "type":
+      case "upload":
+      case "oauth_click": {
+        const pageText = await browser.extractVisibleText();
+        const blockReason = shouldBlockUnsafeProvisionAction(pageText, action);
+        if (blockReason !== null) throw new Error(blockReason);
+        // Locator-form target (`text=…` / `css=…`): the host is pointing at a
+        // control that has NO `@e:` ref because the inventory never emitted it (a
+        // bare click-handler <div> with no role/label, e.g. a SPA "Add To Cart"
+        // that falls past the card-scan cap). Resolve it directly against the live
+        // page instead of the extracted-element list.
+        const locator = parseLocatorTarget(resolutionTarget!);
+        if (locator !== null) {
+          if (action.kind !== "click" && action.kind !== "js_click" && action.kind !== "type") {
             throw new Error(
-              `no element matched locator "${action.target}". If the control is visible, ` +
-                `try a shorter/exact text= label or a css=<selector>.`,
+              `operate_act kind="${action.kind}" does not accept a text=/css= locator target; ` +
+                `use an @e: ref from operate_observe.`,
             );
           }
-          throw new AmbiguousProvisionTargetError(action.target, resolved.candidates);
-        }
-        // The unsafe-action guard above inspected the RAW target, so an opaque
-        // `css=<selector>` (or any target whose string carries no verb/noun the
-        // guard matches) could resolve to a destructive billing/setup control the
-        // guard couldn't see through — clicking "Save product" in live mode via
-        // css=#submit. Re-run it against compact safety signals computed from the
-        // resolved control now that we know what the locator actually points at.
-        // Mark the session non-promotable BEFORE the action: a locator action can't
-        // be replayed from the inventory (the element was never in it), so a
-        // skill synthesized from this run would silently omit the step. Setting
-        // it up front means an action that lands but then throws still can't leave
-        // the session promotable (see captureAndPromoteSession) (codex).
-        try {
-          const resolvedBlock = shouldBlockUnsafeProvisionSignals(pageText, resolved.safetySignals);
-          if (resolvedBlock !== null) throw new Error(resolvedBlock);
-          if (resolved.frameTarget !== null) {
-            assertFrameTargetAllowed(session, resolved.frameTarget, action.kind);
+          const resolved = await browser.resolvePageTarget(
+            locator.mode,
+            locator.value,
+            action.kind === "type" ? "type" : "click",
+          );
+          if (!resolved.ok) {
+            if (resolved.reason === "none") {
+              throw new ProvisionTargetMissingError(
+                `no element matched locator "${action.target}". If the control is visible, ` +
+                  `try a shorter/exact text= label or a css=<selector>.`,
+              );
+            }
+            throw new AmbiguousProvisionTargetError(action.target, resolved.candidates);
           }
-          bindCartIdentity(isCartAffectingAction(action, null, resolved.labels));
-          session.usedLocatorFallback = true;
-          const isPlaceOrderCandidate = isCheckoutSubmitLabeled([
-            resolved.text,
-            ...resolved.labels,
-          ]);
+          // The unsafe-action guard above inspected the RAW target, so an opaque
+          // `css=<selector>` (or any target whose string carries no verb/noun the
+          // guard matches) could resolve to a destructive billing/setup control the
+          // guard couldn't see through — clicking "Save product" in live mode via
+          // css=#submit. Re-run it against compact safety signals computed from the
+          // resolved control now that we know what the locator actually points at.
+          // Mark the session non-promotable BEFORE the action: a locator action can't
+          // be replayed from the inventory (the element was never in it), so a
+          // skill synthesized from this run would silently omit the step. Setting
+          // it up front means an action that lands but then throws still can't leave
+          // the session promotable (see captureAndPromoteSession) (codex).
+          try {
+            const resolvedBlock = shouldBlockUnsafeProvisionSignals(
+              pageText,
+              resolved.safetySignals,
+            );
+            if (resolvedBlock !== null) throw new Error(resolvedBlock);
+            if (resolved.frameTarget !== null) {
+              assertFrameTargetAllowed(session, resolved.frameTarget, action.kind);
+            }
+            bindCartIdentity(isCartAffectingAction(action, null, resolved.labels));
+            session.usedLocatorFallback = true;
+            const isPlaceOrderCandidate = isCheckoutSubmitLabeled([
+              resolved.text,
+              ...resolved.labels,
+            ]);
+            if (
+              (session.placeOrderApproval !== null || getActivePendingThreeDs(session) !== null) &&
+              isPlaceOrderCandidate &&
+              (action.kind === "click" || action.kind === "js_click")
+            ) {
+              await runClickWithPlaceOrderGuard(session, (shouldTrack) =>
+                browser.clickWithDispatchTracking(
+                  {
+                    kind: "handle",
+                    handle: resolved.handle,
+                    method: action.kind,
+                  },
+                  shouldTrack,
+                ),
+              );
+            } else if (action.kind === "click" || action.kind === "js_click") {
+              const method = action.kind;
+              await adoptTabOpenedByClick(session, browser, async () => {
+                if (method === "click") await browser.clickHandle(resolved.handle);
+                else await browser.jsClickHandle(resolved.handle);
+              });
+            } else await browser.typeHandle(resolved.handle, action.text);
+          } finally {
+            await resolved.handle.dispose().catch(() => undefined);
+          }
+          audit(sessionId, action.kind, {
+            locator_mode: locator.mode,
+            host: registrableHost(browser.currentUrl()),
+          });
+          if (action.kind !== "type") {
+            await settleAfterStateChange(browser);
+            // A tab opened by JS a tick after the click lands during the
+            // settle above, not inside the click's own grace window. Drain it
+            // here — the queue is already populated, so this costs nothing.
+            await adoptOpenedTab(session, browser, 0);
+          }
+          break;
+        }
+        // Re-resolve against FRESH elements every act — never trust a stale index.
+        const fresh = await browser.extractInteractiveElements();
+        retainSessionElements(session, fresh);
+        // resolveTarget recomputes identities (incl. volatile positional-group
+        // fingerprints) from these FRESH elements, so a ref whose group fingerprint
+        // changed since the last observe resolves to null, not a survivor (#399).
+        const el =
+          compactV2Authorization === undefined
+            ? resolveTarget(fresh, resolutionTarget!)
+            : resolveAuthorizedCompactV2Target(session, fresh, compactV2Authorization);
+        if (el === null) {
+          if (session.compactV2Active) {
+            if (!internalAccess) throwCompactV2StaleRef();
+            throw new Error(`${action.kind}: internal live target changed`);
+          }
+          const stale = staleTargetError(session, action.target, fresh);
+          if (stale !== null) throw stale;
+          throw new Error(
+            `no element matched target "${action.target}". Visible: ` +
+              fresh
+                .map((e) => `"${e.screenPath ?? elementRef(e)}"`)
+                .slice(0, 20)
+                .join(", "),
+          );
+        }
+        resolvedEl = el;
+        // Frame domain-lock (operator-frame-support) — see frameTargetAllowed.
+        // A main-frame or same-domain-frame target is unaffected.
+        assertFrameTargetAllowed(session, el, action.kind);
+        bindCartIdentity(isCartAffectingAction(action, el));
+        if (action.kind === "click" || action.kind === "js_click") {
+          const target = frameTargetFor(el);
           if (
-            session.placeOrderApproval !== null &&
-            isPlaceOrderCandidate &&
-            (action.kind === "click" || action.kind === "js_click")
+            (session.placeOrderApproval !== null || getActivePendingThreeDs(session) !== null) &&
+            isPlaceOrderClickCandidate(el)
           ) {
             await runClickWithPlaceOrderGuard(session, (shouldTrack) =>
               browser.clickWithDispatchTracking(
-                {
-                  kind: "handle",
-                  handle: resolved.handle,
-                  method: action.kind,
-                },
+                target !== null
+                  ? { kind: "frame", frame: target, selector: el.selector, method: action.kind }
+                  : { kind: "selector", selector: el.selector, method: action.kind },
                 shouldTrack,
               ),
             );
-          } else if (action.kind === "click") await browser.clickHandle(resolved.handle);
-          else if (action.kind === "js_click") await browser.jsClickHandle(resolved.handle);
-          else await browser.typeHandle(resolved.handle, action.text);
-        } finally {
-          await resolved.handle.dispose().catch(() => undefined);
+          } else if (action.kind === "click") {
+            await adoptTabOpenedByClick(session, browser, async () => {
+              if (target !== null) await browser.clickInFrame(target, el.selector);
+              else await browser.click(el.selector);
+            });
+          } else {
+            await adoptTabOpenedByClick(session, browser, async () => {
+              if (target !== null) await browser.clickViaJsInFrame(target, el.selector);
+              else await browser.clickViaJs(el.selector);
+            });
+          }
+        } else if (action.kind === "type" && frameTargetFor(el) !== null) {
+          // Frame targets skip the autocomplete-popup-commit machinery below —
+          // it operates on the main page's DOM only (markPreexistingType
+          // SuggestionPopups / detectTypeSuggestionPopup / commitTypeSuggestion
+          // are page-scoped). Out of scope for the checkout-option case frame
+          // support exists for; a plain frame-scoped fill covers it.
+          clearCommittedSelectValue(session, el.selector);
+          await browser.typeInFrame(frameTargetFor(el)!, el.selector, action.text);
+        } else if (action.kind === "type") {
+          clearCommittedSelectValue(session, el.selector);
+          if (!isAutocompleteScopedTypeField(action.provenance, el)) {
+            // Free text only — e.g. a site-search/catalog-search box, which
+            // can legitimately open its own suggestion listbox too. 3.1 only
+            // applies to a form/recipe field where a committed value is
+            // actually required; forcing every incidental popup into
+            // commit-or-stop would break ordinary search typing.
+            await browser.type(el.selector, action.text);
+          } else {
+            // 3.1 — a Google-Places-style address field or a react-select/cmdk/
+            // Radix combobox can open a suggestion popup as a side effect of
+            // typing, not just of an explicit `select`. Snapshot pre-existing
+            // popups BEFORE typing (it can open mid-keystroke), then detect what
+            // opened afterward.
+            await browser.markPreexistingTypeSuggestionPopups();
+            await browser.type(el.selector, action.text);
+            // Cleanup (clear our tracking markers, and dismiss with Escape
+            // ONLY when a detected popup is plausibly still open) must run no
+            // matter how this resolves — no popup, an ambiguous stop, a
+            // failed commit, or success — mirroring selectFromCombobox's own
+            // try/finally. Scoping the try to only the
+            // suggestionTexts.length > 0 branch left the "preexisting"
+            // markers set by markPreexistingTypeSuggestionPopups uncleared on
+            // the no-popup path; markComboboxPreexistingElements only ADDS
+            // markers, so a stale one could exclude a genuine popup from
+            // detection on a LATER type/select into the same element. Escape
+            // fires on the ambiguous-stop and failed-commit paths (popup
+            // never interacted with / click may not have registered — still
+            // open either way) but NEVER after a confirmed commit: the widget
+            // already closed its popup on selection, so Escape would land on
+            // nothing and bubble to close an enclosing modal/dialog instead.
+            let dismissPopupWithEscape = false;
+            try {
+              const suggestionTexts = await browser.detectTypeSuggestionPopup(el.selector);
+              if (suggestionTexts.length > 0) {
+                dismissPopupWithEscape = true;
+                const candidates = matchAutocompleteSuggestions(action.text, suggestionTexts);
+                if (candidates.length !== 1) {
+                  // Pass the MATCHED subset, not the full popup — passing every
+                  // suggestion made candidates.length effectively the popup
+                  // size (always > 0 here), so the constructor's zero-match
+                  // branch was dead code and the multi-match message reported
+                  // the wrong count.
+                  throw new AutocompleteCommitRequiredError(
+                    action.text,
+                    candidates.map((i) => suggestionTexts[i]!),
+                  );
+                }
+                const pickedText = suggestionTexts[candidates[0]!]!;
+                await browser.commitTypeSuggestion(candidates[0]!);
+                // Never trust that a click "looked right" — POSITIVELY confirm
+                // the commit took (same hard constraint as the field-role
+                // guard, PR #447: a miss is a stop, never a silent
+                // pass-through). Checking only the typed-into selector's own
+                // `.value` false-fails on react-select/cmdk-style widgets,
+                // which clear their search input on selection and render the
+                // committed choice in a nearby element instead —
+                // confirmAutocompleteCommitted checks that too, bounded to the
+                // field's own neighborhood, and returns false (never a guess)
+                // when nothing confirms it.
+                const committed = await browser.confirmAutocompleteCommitted(
+                  el.selector,
+                  pickedText,
+                );
+                if (!committed) {
+                  throw new Error(
+                    `autocomplete commit for "${action.text}" did not take — nothing on the page ` +
+                      `confirms the field now holds "${pickedText}" after selecting it.`,
+                  );
+                }
+                dismissPopupWithEscape = false;
+                // Rewrite the completed action to the field's LIVE post-commit
+                // value (not the raw typed draft) before it reaches
+                // recordTrace/recordedValues, so the recorded trace reflects
+                // what actually ended up on the page. Recording pickedText
+                // would diverge from the live value exactly when the commit
+                // was confirmed via a NEARBY element (react-select/cmdk clear
+                // their search input on selection), and the cold-path
+                // transition attestation (attestRecordedFieldsBeforeTransition
+                // → verifyFilledFieldValues) re-reads the live value — a
+                // pickedText literal would flag every such commit as a
+                // mismatch and disqualify recipe recording. Reading the same
+                // live value here is attestation-consistent by construction.
+                // Known limitation: after a nearby-signal-only commit the
+                // field itself can be empty, so the recorded literal is "" —
+                // that field won't cleanly template into a saved recipe, but
+                // the live run is unaffected.
+                const refreshed = await browser.extractInteractiveElements();
+                retainSessionElements(session, refreshed);
+                const liveField = refreshed.find((field) => field.selector === el.selector);
+                const liveValue =
+                  typeof liveField?.value === "string" ? liveField.value : pickedText;
+                completedAction = { ...action, text: liveValue };
+              }
+            } finally {
+              await browser.discardTypeSuggestionPopup(dismissPopupWithEscape);
+            }
+            if (isRequiredShippingAddressLine1(el)) {
+              await browser.commitRequiredShippingAddressLine1(el.selector);
+            }
+          }
+        } else if (action.kind === "upload") {
+          assertNoFrameTarget(el, "upload");
+          await browser.uploadFile(el.selector, action.path);
+          audit(sessionId, "upload", {
+            target: auditTarget,
+            path: session.compactV2Active ? "<local-file>" : action.path,
+            host: registrableHost(browser.currentUrl()),
+          });
+        } else {
+          assertNoFrameTarget(el, "oauth_click");
+          if (oauthDeadline === undefined) {
+            throw new Error("OAuth action deadline was not established");
+          }
+          browser = await runSerializedOAuthBoundary(
+            session,
+            el,
+            fresh,
+            action.provider,
+            oauthDeadline,
+          );
         }
-        audit(sessionId, action.kind, {
-          locator_mode: locator.mode,
-          host: registrableHost(browser.currentUrl()),
-        });
         if (action.kind !== "type") await settleAfterStateChange(browser);
+        // Only a plain click follows a tab it opened. oauth_click owns its own
+        // provider-page lifecycle and upload never opens one.
+        if (action.kind === "click" || action.kind === "js_click") {
+          await adoptOpenedTab(session, browser, 0);
+        }
         break;
       }
-      // Re-resolve against FRESH elements every act — never trust a stale index.
-      const fresh = await browser.extractInteractiveElements();
-      session.lastElements = fresh;
-      // resolveTarget recomputes identities (incl. volatile positional-group
-      // fingerprints) from these FRESH elements, so a ref whose group fingerprint
-      // changed since the last observe resolves to null, not a survivor (#399).
-      const el = resolveTarget(fresh, action.target);
-      if (el === null) {
-        const stale = staleTargetError(session, action.target, fresh);
-        if (stale !== null) throw stale;
-        throw new Error(
-          `no element matched target "${action.target}". Visible: ` +
-            fresh
-              .map((e) => `"${e.screenPath ?? elementRef(e)}"`)
-              .slice(0, 20)
-              .join(", "),
-        );
-      }
-      resolvedEl = el;
-      // Frame domain-lock (operator-frame-support) — see frameTargetAllowed.
-      // A main-frame or same-domain-frame target is unaffected.
-      assertFrameTargetAllowed(session, el, action.kind);
-      bindCartIdentity(isCartAffectingAction(action, el));
-      if (action.kind === "click" || action.kind === "js_click") {
-        const target = frameTargetFor(el);
-        if (session.placeOrderApproval !== null && isPlaceOrderClickCandidate(el)) {
-          await runClickWithPlaceOrderGuard(session, (shouldTrack) =>
-            browser.clickWithDispatchTracking(
-              target !== null
-                ? { kind: "frame", frame: target, selector: el.selector, method: action.kind }
-                : { kind: "selector", selector: el.selector, method: action.kind },
-              shouldTrack,
-            ),
-          );
-        } else if (action.kind === "click") {
-          if (target !== null) await browser.clickInFrame(target, el.selector);
-          else await browser.click(el.selector);
-        } else {
-          if (target !== null) await browser.clickViaJsInFrame(target, el.selector);
-          else await browser.clickViaJs(el.selector);
-        }
-      } else if (action.kind === "type" && frameTargetFor(el) !== null) {
-        // Frame targets skip the autocomplete-popup-commit machinery below —
-        // it operates on the main page's DOM only (markPreexistingType
-        // SuggestionPopups / detectTypeSuggestionPopup / commitTypeSuggestion
-        // are page-scoped). Out of scope for the checkout-option case frame
-        // support exists for; a plain frame-scoped fill covers it.
-        session.committedSelectValues.delete(el.selector);
-        await browser.typeInFrame(frameTargetFor(el)!, el.selector, action.text);
-      } else if (action.kind === "type") {
-        session.committedSelectValues.delete(el.selector);
-        if (!isAutocompleteScopedTypeField(action.provenance, el)) {
-          // Free text only — e.g. a site-search/catalog-search box, which
-          // can legitimately open its own suggestion listbox too. 3.1 only
-          // applies to a form/recipe field where a committed value is
-          // actually required; forcing every incidental popup into
-          // commit-or-stop would break ordinary search typing.
-          await browser.type(el.selector, action.text);
-        } else {
-          // 3.1 — a Google-Places-style address field or a react-select/cmdk/
-          // Radix combobox can open a suggestion popup as a side effect of
-          // typing, not just of an explicit `select`. Snapshot pre-existing
-          // popups BEFORE typing (it can open mid-keystroke), then detect what
-          // opened afterward.
-          await browser.markPreexistingTypeSuggestionPopups();
-          await browser.type(el.selector, action.text);
-          // Cleanup (clear our tracking markers, and dismiss with Escape
-          // ONLY when a detected popup is plausibly still open) must run no
-          // matter how this resolves — no popup, an ambiguous stop, a
-          // failed commit, or success — mirroring selectFromCombobox's own
-          // try/finally. Scoping the try to only the
-          // suggestionTexts.length > 0 branch left the "preexisting"
-          // markers set by markPreexistingTypeSuggestionPopups uncleared on
-          // the no-popup path; markComboboxPreexistingElements only ADDS
-          // markers, so a stale one could exclude a genuine popup from
-          // detection on a LATER type/select into the same element. Escape
-          // fires on the ambiguous-stop and failed-commit paths (popup
-          // never interacted with / click may not have registered — still
-          // open either way) but NEVER after a confirmed commit: the widget
-          // already closed its popup on selection, so Escape would land on
-          // nothing and bubble to close an enclosing modal/dialog instead.
-          let dismissPopupWithEscape = false;
-          try {
-            const suggestionTexts = await browser.detectTypeSuggestionPopup(el.selector);
-            if (suggestionTexts.length > 0) {
-              dismissPopupWithEscape = true;
-              const candidates = matchAutocompleteSuggestions(action.text, suggestionTexts);
-              if (candidates.length !== 1) {
-                // Pass the MATCHED subset, not the full popup — passing every
-                // suggestion made candidates.length effectively the popup
-                // size (always > 0 here), so the constructor's zero-match
-                // branch was dead code and the multi-match message reported
-                // the wrong count.
-                throw new AutocompleteCommitRequiredError(
-                  action.text,
-                  candidates.map((i) => suggestionTexts[i]!),
-                );
-              }
-              const pickedText = suggestionTexts[candidates[0]!]!;
-              await browser.commitTypeSuggestion(candidates[0]!);
-              // Never trust that a click "looked right" — POSITIVELY confirm
-              // the commit took (same hard constraint as the field-role
-              // guard, PR #447: a miss is a stop, never a silent
-              // pass-through). Checking only the typed-into selector's own
-              // `.value` false-fails on react-select/cmdk-style widgets,
-              // which clear their search input on selection and render the
-              // committed choice in a nearby element instead —
-              // confirmAutocompleteCommitted checks that too, bounded to the
-              // field's own neighborhood, and returns false (never a guess)
-              // when nothing confirms it.
-              const committed = await browser.confirmAutocompleteCommitted(el.selector, pickedText);
-              if (!committed) {
-                throw new Error(
-                  `autocomplete commit for "${action.text}" did not take — nothing on the page ` +
-                    `confirms the field now holds "${pickedText}" after selecting it.`,
-                );
-              }
-              dismissPopupWithEscape = false;
-              // Rewrite the completed action to the field's LIVE post-commit
-              // value (not the raw typed draft) before it reaches
-              // recordTrace/recordedValues, so the recorded trace reflects
-              // what actually ended up on the page. Recording pickedText
-              // would diverge from the live value exactly when the commit
-              // was confirmed via a NEARBY element (react-select/cmdk clear
-              // their search input on selection), and the cold-path
-              // transition attestation (attestRecordedFieldsBeforeTransition
-              // → verifyFilledFieldValues) re-reads the live value — a
-              // pickedText literal would flag every such commit as a
-              // mismatch and disqualify recipe recording. Reading the same
-              // live value here is attestation-consistent by construction.
-              // Known limitation: after a nearby-signal-only commit the
-              // field itself can be empty, so the recorded literal is "" —
-              // that field won't cleanly template into a saved recipe, but
-              // the live run is unaffected.
-              const refreshed = await browser.extractInteractiveElements();
-              session.lastElements = refreshed;
-              const liveField = refreshed.find((field) => field.selector === el.selector);
-              const liveValue = typeof liveField?.value === "string" ? liveField.value : pickedText;
-              completedAction = { ...action, text: liveValue };
-            }
-          } finally {
-            await browser.discardTypeSuggestionPopup(dismissPopupWithEscape);
+      case "oauth_login": {
+        const pageText = await browser.extractVisibleText();
+        const blockReason = shouldBlockUnsafeProvisionAction(pageText, action);
+        if (blockReason !== null) throw new Error(blockReason);
+        // Atomic OAuth deliberately accepts only the observed stable ref. A raw
+        // locator would lose the same stale-reference guarantees as every other
+        // action before the provider transition begins.
+        const fresh = await browser.extractInteractiveElements();
+        retainSessionElements(session, fresh);
+        const el =
+          compactV2Authorization === undefined
+            ? resolveTarget(fresh, resolutionTarget!)
+            : resolveAuthorizedCompactV2Target(session, fresh, compactV2Authorization);
+        if (el === null) {
+          if (session.compactV2Active) {
+            if (!internalAccess) throwCompactV2StaleRef();
+            throw new Error("oauth_login: internal live target changed");
           }
+          throw new Error(
+            `oauth_login: no element matched target "${action.target}". Re-observe and use the OAuth button ref.`,
+          );
         }
-      } else if (action.kind === "upload") {
-        assertNoFrameTarget(el, "upload");
-        await browser.uploadFile(el.selector, action.path);
-        audit(sessionId, "upload", {
-          target: action.target,
-          path: action.path,
-          host: registrableHost(browser.currentUrl()),
-        });
-      } else {
-        assertNoFrameTarget(el, "oauth_click");
-        await browser.startOAuth(el.selector);
-      }
-      if (action.kind !== "type") await settleAfterStateChange(browser);
-      break;
-    }
-    case "oauth_login": {
-      const pageText = await browser.extractVisibleText();
-      const blockReason = shouldBlockUnsafeProvisionAction(pageText, action);
-      if (blockReason !== null) throw new Error(blockReason);
-      // Atomic OAuth deliberately accepts only the observed stable ref. A raw
-      // locator would lose the same stale-reference guarantees as every other
-      // action before the provider transition begins.
-      const fresh = await browser.extractInteractiveElements();
-      session.lastElements = fresh;
-      const el = resolveTarget(fresh, action.target);
-      if (el === null) {
-        throw new Error(
-          `oauth_login: no element matched target "${action.target}". Re-observe and use the OAuth button ref.`,
+        resolvedEl = el;
+        assertNoFrameTarget(el, "oauth_login");
+        if (oauthDeadline === undefined) {
+          throw new Error("OAuth action deadline was not established");
+        }
+        browser = await runSerializedOAuthBoundary(
+          session,
+          el,
+          fresh,
+          action.provider,
+          oauthDeadline,
         );
+        break;
       }
-      resolvedEl = el;
-      assertNoFrameTarget(el, "oauth_login");
-      await browser.loginWithOAuth(el.selector);
-      await settleAfterStateChange(browser);
-      break;
+    }
+  } finally {
+    // An act no longer retires the action map. Refs are fingerprint-derived and
+    // re-resolved live against the observed epoch on every act, so the agent can
+    // fill a whole form from one observation. Only LEAVING the observed document
+    // retires them — the same condition the authorization check enforces — so
+    // drop the snapshot exactly then, and fail closed if the epoch is unreadable.
+    if (action.kind !== "allow_host" && session.compactV2Index !== null) {
+      let stillObservedDocument = false;
+      try {
+        stillObservedDocument = session.compactV2Index.epoch.doc === compactV2EpochDoc(session);
+      } catch {}
+      if (!stillObservedDocument) invalidateCompactV2Snapshot(session);
     }
   }
   await verifyRecordedFieldsAfterTransition(session, action, recordingTransitionFields);
@@ -5000,8 +5742,9 @@ export async function act(
   // INBOX_READ_HOSTS): replay re-reads the code via awaitVerification, and a
   // recorded inbox click would bake the email's subject into a shared recipe.
   if (!isInboxReadHost(browser.currentUrl())) {
-    recordTrace(session, completedAction, resolvedEl, sensitiveSource);
-    recordCaptureRound(session, completedAction, resolvedEl, urlBeforeAction);
+    const replayElement = replaySafeElementForSession(session, resolvedEl);
+    recordTrace(session, completedAction, replayElement, sensitiveSource);
+    recordCaptureRound(session, completedAction, replayElement, urlBeforeAction);
   }
   if (cartAffecting) {
     session.lastCartMutation = {
@@ -5014,24 +5757,40 @@ export async function act(
   // `detail:"none"` returns a minimal ack (the action ran; no perception emitted)
   // so multi-field fills don't each echo the page. The host must call
   // operate_observe before its next ref-targeted act (refs aren't refreshed here).
+  const checkoutState =
+    internalAccess && collectCheckoutState ? await capturePrivateCheckoutState(session) : undefined;
   const observation =
     detail === "none" && !cartAffecting && action.kind !== "oauth_login"
-      ? {
-          session_id: session.id,
-          url: browser.currentUrl(),
-          text: "",
-          elements: [],
-          observed: "none" as const,
-        }
+      ? compactV2PublicObservation(
+          session,
+          () => ({
+            session_id: session.id,
+            url: browser.currentUrl(),
+            text: "",
+            elements: [],
+            observed: "none" as const,
+          }),
+          {
+            stage: safeStageV2(browser.currentUrl(), session.lastElements),
+            observed: "none",
+          },
+        )
       : await observeSession(session, detail === "none" ? "compact" : detail);
-  return completedAction.kind === "select"
-    ? { ...observation, selected_option: completedAction.text }
-    : observation;
+  return {
+    observation:
+      completedAction.kind === "select" && observation.format !== "compact-v2"
+        ? { ...observation, selected_option: completedAction.text }
+        : observation,
+    outcome: {
+      ...(completedAction.kind === "select" ? { selectedOption: completedAction.text } : {}),
+      ...(checkoutState === undefined ? {} : { checkoutState }),
+    },
+  };
 }
 
 export interface FormSelectManyFieldResult {
   label: string;
-  option: string;
+  option?: string;
   status: "selected" | "failed";
   selected_option?: string;
   reason?: string;
@@ -5043,47 +5802,83 @@ export async function formSelectMany(
   selections: Record<string, string>,
 ): Promise<{ session_id: string; fields: FormSelectManyFieldResult[]; observation: Observation }> {
   const fields: FormSelectManyFieldResult[] = [];
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const selectionEntries = Object.entries(selections);
 
-  // Keep variant changes in one host call. Each successful select is followed
-  // by a real observe before the next target resolves: variant widgets commonly
-  // replace all dependent selects, so continuing from an old inventory is worse
-  // than reporting a partial result.
-  for (const [label, option] of Object.entries(selections)) {
+  for (let index = 0; index < selectionEntries.length; index += 1) {
+    const [label, option] = selectionEntries[index]!;
+    const publicLabel =
+      session.compactV2Active && !isCompactV2Handle(label) && !isCompactV2Label(label)
+        ? "<rejected-v2-target>"
+        : label;
+    const publicSelection = session.compactV2Active
+      ? { label: publicLabel }
+      : { label: publicLabel, option };
+    let authorization: CompactV2TargetAuthorization | undefined;
+    if (session.compactV2Active) {
+      try {
+        authorization = compactV2AuthorizationForTarget(session, label);
+      } catch (error) {
+        audit(sessionId, "act", { kind: "select_many", target: "<rejected-v2-target>" });
+        if (index === 0) throw error;
+        fields.push({
+          ...publicSelection,
+          status: "failed",
+          reason: compactV2SelectionFailureReason(error),
+        });
+        if (index + 1 < selectionEntries.length) await observe(sessionId, "compact");
+        continue;
+      }
+    }
     try {
-      const actionResult = await act(
+      const target = authorization?.legacyRef ?? label;
+      const actionResult = await actInternally(
         sessionId,
-        { kind: "select", target: label, text: option },
+        { kind: "select", target, text: option },
         "none",
+        undefined,
+        false,
+        authorization,
       );
-      const selectedOption = actionResult.selected_option;
+      const selectedOption = actionResult.outcome.selectedOption;
       if (selectedOption === undefined) {
         throw new Error("select: successful action omitted the selected option");
       }
       // `detail:none` is intentionally a minimal ack. The explicit observe here
       // refreshes the DOM generation between every potentially mutating select.
       await observe(sessionId, "compact");
+      const publicSelectedOption = session.compactV2Active
+        ? safeDescriptionV2(selectedOption)
+        : selectedOption;
       fields.push({
-        label,
-        option,
+        ...publicSelection,
         status: "selected",
-        selected_option: selectedOption,
+        ...(publicSelectedOption === undefined ? {} : { selected_option: publicSelectedOption }),
       });
     } catch (err) {
-      if (err instanceof TargetStaleError) {
+      if (session.compactV2Active) {
         fields.push({
-          label,
-          option,
+          ...publicSelection,
+          status: "failed",
+          reason: compactV2SelectionFailureReason(err),
+        });
+      } else if (err instanceof TargetStaleError) {
+        fields.push({
+          ...publicSelection,
           status: "failed",
           reason: err.message,
           repair: err.result,
         });
       } else {
         fields.push({
-          label,
-          option,
+          ...publicSelection,
           status: "failed",
           reason: err instanceof Error ? err.message : String(err),
         });
+      }
+      if (session.compactV2Active && index + 1 < selectionEntries.length) {
+        await observe(sessionId, "compact");
       }
     }
   }
@@ -5093,6 +5888,23 @@ export async function formSelectMany(
     fields,
     observation: await observe(sessionId, "compact"),
   };
+}
+
+function compactV2SelectionFailureReason(error: unknown): string {
+  return compactV2ActionFailureReason(error, "select");
+}
+
+function compactV2ActionFailureReason(error: unknown, kind: ProvisionAction["kind"]): string {
+  if (error instanceof CompactV2ActionFailureError) return error.message;
+  if (error instanceof Error && (error as Error & { code?: unknown }).code === "google_session") {
+    return error.message;
+  }
+  if (error instanceof CompactV2StaleRefError) return "stale_ref";
+  if (error instanceof TargetStaleError) return "reobserve_required";
+  if (error instanceof ProvisionTargetNotAllowedError) {
+    return "target_not_allowed";
+  }
+  return kind === "select" ? "selection_failed" : "action_failed";
 }
 
 // PR3 privacy: in the operator model the host fills the USER's real email into
@@ -5186,6 +5998,119 @@ function emailTemplateForRepresentation(representation: string, email: string): 
 const REPLAY_VERIFIED_HOLE = /^(?:address|contact)(?:\.|$)|^quantity$/;
 function looksLikeEmailValue(v: string): boolean {
   return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v.trim());
+}
+
+const COMPACT_V2_REPLAY_ROUTE_SEGMENTS = new Set([
+  "account",
+  "accounts",
+  "api",
+  "app",
+  "apps",
+  "auth",
+  "basket",
+  "billing",
+  "callback",
+  "cart",
+  "checkout",
+  "complete",
+  "console",
+  "create",
+  "credential",
+  "credentials",
+  "dashboard",
+  "developer",
+  "developers",
+  "key",
+  "keys",
+  "login",
+  "new",
+  "oauth",
+  "payment",
+  "profile",
+  "project",
+  "projects",
+  "register",
+  "security",
+  "settings",
+  "sign-in",
+  "sign-up",
+  "signin",
+  "signup",
+  "success",
+  "token",
+  "tokens",
+  "verification",
+  "verify",
+  "workspace",
+  "workspaces",
+]);
+
+function compactV2ReplaySafeUrl(rawUrl: string): string | null {
+  try {
+    const parsed = new URL(rawUrl);
+    if (safeOriginV2(parsed.origin) === null) return null;
+    if (
+      parsed.username.length > 0 ||
+      parsed.password.length > 0 ||
+      parsed.search.length > 0 ||
+      parsed.hash.length > 0 ||
+      isSingleUseUrl(rawUrl)
+    ) {
+      return null;
+    }
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    if (
+      segments.some(
+        (segment) =>
+          segment !== segment.toLowerCase() || !COMPACT_V2_REPLAY_ROUTE_SEGMENTS.has(segment),
+      )
+    ) {
+      return null;
+    }
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function compactV2RecordedAction(
+  session: Session,
+  action: ProvisionAction,
+): ProvisionAction | null {
+  if (session.compactV2Mode !== "on") return action;
+  if (action.kind === "goto") {
+    const url = compactV2ReplaySafeUrl(action.url);
+    if (url !== null) return { ...action, url };
+    rejectRecipeRecording(session, "compact_v2_unrepresentable_goto");
+    return null;
+  }
+  if (action.kind === "allow_host") {
+    const origin = safeOriginV2(`https://${action.host}`);
+    if (origin !== null) return { ...action, host: new URL(origin).hostname };
+    rejectRecipeRecording(session, "compact_v2_unrepresentable_host");
+    return null;
+  }
+  if (action.kind === "type") {
+    if (looksLikeEmailValue(action.text)) return { ...action, text: EMAIL_SLOT_TEMPLATE };
+    rejectRecipeRecording(session, "compact_v2_unrepresentable_value_action");
+    return null;
+  }
+  if (action.kind === "select") {
+    // Registry-bound recipe value, not an observation: it must be recognizable
+    // code-owned vocabulary before it is published to the shared registry.
+    const text = recordableTokenV2(action.text);
+    if (text !== undefined) return { ...action, text };
+    rejectRecipeRecording(session, "compact_v2_unrepresentable_value_action");
+    return null;
+  }
+  if (action.kind === "set_phone_country") {
+    if (/^[a-z]{2}$/i.test(action.country)) {
+      return { ...action, country: action.country.toUpperCase() };
+    }
+    rejectRecipeRecording(session, "compact_v2_unrepresentable_value_action");
+    return null;
+  }
+  return action;
 }
 // Exported for unit tests.
 export function redactEmailForTrace(value: string): string {
@@ -5302,7 +6227,9 @@ export function recipeTargetFor(
       : {}),
     ...(nearText !== null ? { near_text_hint: scrub(nearText) } : {}),
     ...(hrefHint !== null && !isSingleUseUrl(el.href ?? "") ? { href_hint: scrub(hrefHint) } : {}),
-    ...(el.selector.length > 0 ? { css: scrub(el.selector) } : {}),
+    ...(el.selector.length > 0 && !el.selector.startsWith("@c:")
+      ? { css: scrub(el.selector) }
+      : {}),
     ...(el.visibleText !== null && el.visibleText.length > 0
       ? { visible_text: scrub(el.visibleText) }
       : {}),
@@ -5320,6 +6247,9 @@ function recordTrace(
   el: InteractiveElement | null,
   sensitiveSource?: RecordedValueSource,
 ): void {
+  const recordedAction = compactV2RecordedAction(session, action);
+  if (recordedAction === null) return;
+  action = recordedAction;
   // Never freeze a single-use link (email-verify / magic / reset token) into
   // the recipe — it's dead on the next replay. The host agent re-plans the
   // verification step live (operate_act { kind: "await_verification" } fetches a FRESH link)
@@ -5510,15 +6440,28 @@ function recordCaptureRound(
   el: InteractiveElement | null,
   urlAtObservation: string,
 ): void {
-  const observed = captureObserved(action, el);
+  const recordedAction = compactV2RecordedAction(session, action);
+  if (recordedAction === null) return;
+  const observed = captureObserved(recordedAction, el);
   if (observed === null) return;
+  const stateUrl =
+    session.compactV2Mode === "on" ? compactV2ReplaySafeUrl(urlAtObservation) : urlAtObservation;
+  if (stateUrl === null) {
+    rejectRecipeRecording(session, "compact_v2_unrepresentable_page_url");
+    return;
+  }
   session.captureRounds.push({
     service: captureService(session),
     round: session.captureRounds.length,
-    oauth: action.kind === "oauth_click" || action.kind === "oauth_login",
+    oauth: recordedAction.kind === "oauth_click" || recordedAction.kind === "oauth_login",
     // The URL the inventory + action belong to (pre-action), NOT the post-
     // navigation URL — see urlBeforeAction in act().
-    state: { url: urlAtObservation, title: "", html: "", screenshot: "" },
+    state: {
+      url: stateUrl,
+      title: "",
+      html: "",
+      screenshot: "",
+    },
     inventory: session.lastElements,
     observed,
   });
@@ -5526,21 +6469,37 @@ function recordCaptureRound(
 
 // The EXTRACT round is the one round that keeps raw html — the key-extraction
 // step is synthesized from the page where the credential is shown.
-async function recordExtractRound(session: Session): Promise<void> {
+async function recordExtractRound(session: Session): Promise<boolean> {
   let html = "";
-  try {
-    html = (await session.browser.getState()).html;
-  } catch {
-    /* best-effort — the copy-button/inventory extract path still works */
+  if (session.compactV2Mode !== "on") {
+    try {
+      html = (await session.browser.getState()).html;
+    } catch {
+      /* best-effort — the copy-button/inventory extract path still works */
+    }
+  }
+  const stateUrl =
+    session.compactV2Mode === "on"
+      ? compactV2ReplaySafeUrl(session.browser.currentUrl())
+      : session.browser.currentUrl();
+  if (stateUrl === null) {
+    rejectRecipeRecording(session, "compact_v2_unrepresentable_page_url");
+    return false;
   }
   session.captureRounds.push({
     service: captureService(session),
     round: session.captureRounds.length,
     oauth: false,
-    state: { url: session.browser.currentUrl(), title: "", html, screenshot: "" },
+    state: {
+      url: stateUrl,
+      title: "",
+      html,
+      screenshot: "",
+    },
     inventory: session.lastElements,
     observed: { kind: "extract", reason: "extract the credential shown on the page" },
   });
+  return true;
 }
 
 // Record the extract round from the live page, then write the accumulated medium
@@ -5558,10 +6517,16 @@ export async function captureAndPromoteSession(
   if (session.usedLocatorFallback) {
     return { kind: "skipped", reason: "locator_fallback_unrepresentable" };
   }
+  if (session.recipeRejectionReason !== null) {
+    return { kind: "skipped", reason: session.recipeRejectionReason };
+  }
   const dir = resolveCaptureDir();
   if (dir === null) return { kind: "skipped", reason: "capture_disabled" };
   if (!session.captureRounds.some((r) => r.observed.kind === "extract")) {
     await recordExtractRound(session);
+  }
+  if (session.recipeRejectionReason !== null) {
+    return { kind: "skipped", reason: session.recipeRejectionReason };
   }
   const hasExtract = session.captureRounds.some((r) => r.observed.kind === "extract");
   if (!hasExtract || session.captureRounds.length < 2) {
@@ -5627,18 +6592,76 @@ export function emitProvisionMeasurement(
     now: Date.now(),
     turns: session.actionTrace.length,
   });
-  process.stderr.write(`${JSON.stringify({ marker: "provision-measurement", ...m })}\n`);
+  const emitted =
+    session.compactV2Mode === "on"
+      ? { ...m, service: compactV2AuditValue("service", m.service) }
+      : m;
+  process.stderr.write(`${JSON.stringify({ marker: "provision-measurement", ...emitted })}\n`);
   return m;
 }
 
-async function settleAfterStateChange(browser: BrowserController): Promise<void> {
-  await settle(450);
-  await browser.waitForInteractiveDom(1, 2_000).catch(() => undefined);
-  for (let i = 0; i < 4; i += 1) {
-    const text = await browser.extractVisibleText().catch(() => "");
-    if (text.replace(/\s+/g, " ").trim().length > 0) return;
-    await settle(300);
+// ── new-tab adoption ──
+//
+// A click on a `target=_blank` link or a `window.open` control opens a NEW TAB,
+// and a real user lands on it. The operator has to do the same: an email
+// magic-link button in Gmail opens its login tab that way, and following the
+// tab is the ONLY safe way to reach it — the link carries a single-use login
+// token, so `extract` seals the href and must never hand it to the host as
+// text. Navigating the browser exposes nothing.
+//
+// Grace between the click returning and Playwright delivering the context
+// "page" event for the tab it opened. It cannot be zero: MEASURED 2026-09-03
+// (new-tab-adoption.test.ts, 3 runs) — at 0 the event has not landed yet and
+// every follow case fails, including the post-settle drain below. It is kept
+// short because a click that opens NO tab pays it in full, and a tab that
+// arrives later than this is still caught by that drain.
+const OPENED_TAB_GRACE_MS = 300;
+
+// Payment is deliberately out of scope. A sealed card fill and a live
+// place-order/3DS approval both own their page identity, so leave the operator
+// anchored where those flows put it rather than following a tab into them.
+function newTabAdoptionAllowed(session: Session): boolean {
+  return (
+    !session.paymentFieldSealActive &&
+    session.placeOrderApproval === null &&
+    getActivePendingThreeDs(session) === null
+  );
+}
+
+async function adoptOpenedTab(
+  session: Session,
+  browser: BrowserController,
+  graceMs: number,
+): Promise<void> {
+  if (!newTabAdoptionAllowed(session)) return;
+  const url = await browser.adoptOpenedTab(graceMs).catch(() => null);
+  if (url === null) return;
+  audit(session.id, "new_tab_adopted", { host: registrableHost(url) });
+}
+
+async function adoptTabOpenedByClick(
+  session: Session,
+  browser: BrowserController,
+  click: () => Promise<void>,
+): Promise<void> {
+  if (!newTabAdoptionAllowed(session)) {
+    await click();
+    return;
   }
+  browser.armOpenedTabAdoption();
+  try {
+    await click();
+  } finally {
+    await adoptOpenedTab(session, browser, OPENED_TAB_GRACE_MS);
+  }
+}
+
+async function settleAfterStateChange(browser: BrowserController): Promise<void> {
+  // A fixed dwell here used to consume the OAuth action's completion window
+  // after the provider had already returned. Wait for the page's actual
+  // interactive state instead; it resolves immediately when the redirect has
+  // rendered and remains bounded for slow SPAs.
+  await browser.waitForInteractiveDom(1, 2_000).catch(() => undefined);
 }
 
 // ── operator-recipe: remember a successful run, verify a postcondition ──
@@ -5955,16 +6978,47 @@ async function rememberCheckoutLeg(
 // Read a single page snapshot for postcondition checking. Field VALUES are
 // reduced to lengths here so a token/secret success-signal can't leak.
 async function snapshotForPostcondition(session: Session): Promise<PostconditionSnapshot> {
+  const privateFields =
+    session.compactV2Mode === "on"
+      ? (await session.browser.extractInteractiveElements())
+          .filter((element) => typeof element.value === "string" && element.value.length > 0)
+          .map((element) => {
+            const sealed = sealRetainedInteractiveElementsV2([element])[0]!;
+            const description = safeDescriptionV2(
+              sealed.labelText ??
+                sealed.ariaLabel ??
+                sealed.placeholder ??
+                sealed.title ??
+                sealed.name ??
+                sealed.id,
+            );
+            const fieldRole = localeStableFieldRole(sealed);
+            return {
+              label: [description, fieldRole]
+                .filter((value): value is string => value !== undefined && value !== null)
+                .join(" "),
+              value_len: element.value!.length,
+            };
+          })
+          .filter((field) => field.label.length > 0)
+      : null;
   const obs = await observeSession(session);
-  // Read lengths off the RAW elements (session.lastElements, set by
-  // observeSession). The compact wire carries only value_len and never the raw
-  // value; deriving from the live elements preserves the real length for a
-  // min_value_len success-signal. Lengths never expose the value, so this stays
-  // leak-free.
-  const fields = session.lastElements
-    .filter((e) => typeof e.value === "string" && e.value.length > 0)
-    .map((e) => ({ label: elementRef(e), value_len: (e.value ?? "").length }));
-  return { url: obs.url, text: session.prevObserve?.text ?? obs.text, fields };
+  const fields =
+    privateFields ??
+    session.lastElements
+      .filter((element) => typeof element.value === "string" && element.value.length > 0)
+      .map((element) => ({
+        label: elementRef(element),
+        value_len: element.value!.length,
+      }));
+  return {
+    url: obs.format === "compact-v2" ? session.browser.currentUrl() : obs.url,
+    text:
+      obs.format === "compact-v2"
+        ? await session.browser.extractVisibleText()
+        : (session.prevObserve?.text ?? obs.text),
+    fields,
+  };
 }
 
 // Verify a recipe's postcondition against the live session — the anti-false-
@@ -5981,6 +7035,7 @@ export async function verifyPostcondition(
     if (host !== null && !session.allowedHosts.some((e) => e.host === host)) {
       session.allowedHosts.push({ host, source: "mid_session" });
     }
+    invalidateCompactV2Snapshot(session);
     await session.browser.goto(postcondition.probe_url);
     await settle(1500);
   }
@@ -5998,7 +7053,7 @@ export async function verifySavedRecipePostcondition(
   sessionId: string,
   recipe: OperatorRecipe,
 ): Promise<PostconditionResult> {
-  const session = sessions.get(sessionId);
+  const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const state = session.replayState;
   if (state !== null && state.recipeHash === replayDigest(recipe)) {
@@ -6017,7 +7072,7 @@ export async function verifyActiveRecipePostcondition(
   sessionId: string,
   recipeName: string,
 ): Promise<PostconditionResult | null> {
-  const session = sessions.get(sessionId);
+  const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const state = session.replayState;
   if (state === null) return null;
@@ -6269,10 +7324,7 @@ function replayTargetWithinRecipeDomain(url: string, recipeDomain: string): bool
 }
 
 function markReplayDomainLockViolation(session: Session, host: string, recipeDomain: string): void {
-  rejectRecipeRecording(
-    session,
-    `replay refused: "${host}" is outside the recipe's own domain "${recipeDomain}"`,
-  );
+  rejectRecipeRecording(session, "replay_domain_lock_violation");
   audit(session.id, "replay_domain_lock_violation", { host, recipe_domain: recipeDomain });
 }
 
@@ -6297,20 +7349,22 @@ function verifyReplayFieldInElements(
   ]);
   if (guard.ok) {
     if (expected.kind === "select") {
-      session.committedSelectValues.delete(resolution.element.selector);
+      clearCommittedSelectValue(session, resolution.element.selector);
     }
     return { ok: true };
   }
   if (
     allowCommittedSelect &&
     expected.kind === "select" &&
-    session.committedSelectValues.get(resolution.element.selector) === expected.expected
+    session.committedSelectValues.get(
+      compactV2CommittedSelectKey(session, resolution.element.selector),
+    ) === compactV2CommittedSelectValue(session, expected.expected)
   ) {
-    session.committedSelectValues.delete(resolution.element.selector);
+    clearCommittedSelectValue(session, resolution.element.selector);
     return { ok: true };
   }
   if (expected.kind === "select") {
-    session.committedSelectValues.delete(resolution.element.selector);
+    clearCommittedSelectValue(session, resolution.element.selector);
   }
   return { ok: false, reason: guard.reason };
 }
@@ -6328,7 +7382,7 @@ async function verifyReplayField(
   const target = expected.target;
   if (target === null) return { ok: false, reason: "field_missing" };
   const fresh = await session.browser.extractInteractiveElements();
-  session.lastElements = fresh;
+  retainSessionElements(session, fresh);
   return verifyReplayFieldInElements(session, expected, fresh, allowCommittedSelect);
 }
 
@@ -6411,7 +7465,7 @@ async function attestRecordedFieldsBeforeTransition(
   const fields = recordedMoneyFields(session);
   if (fields.length === 0) return fields;
   const fresh = await session.browser.extractInteractiveElements();
-  session.lastElements = fresh;
+  retainSessionElements(session, fresh);
   for (const expected of fields) {
     const guard = await verifyReplayFieldWithElements(session, expected, fresh);
     if (!guard.ok) {
@@ -6434,7 +7488,7 @@ async function verifyRecordedFieldsAfterTransition(
     return;
   }
   const fresh = await session.browser.extractInteractiveElements();
-  session.lastElements = fresh;
+  retainSessionElements(session, fresh);
   for (const expected of fields) {
     if (!(await isReplayFieldMounted(session, expected, fresh))) {
       rejectRecipeRecording(
@@ -6469,7 +7523,7 @@ export async function replayOperatorRecipe(
     beforeAction?: (input: { step_index: number; action: ProvisionAction }) => Promise<void> | void;
   } = {},
 ): Promise<OperatorReplayResult> {
-  const session = sessions.get(sessionId);
+  const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const recipeHash = replayDigest(recipe);
   const bindingsHash = bindingDigest(bindings);
@@ -6581,12 +7635,16 @@ export async function replayOperatorRecipe(
     host: string,
   ): Promise<OperatorReplayResult> => {
     markReplayDomainLockViolation(session, host, recipeDomain);
+    const publicHost = session.compactV2Active ? compactV2AuditHost(host) : host;
+    const publicRecipeDomain = session.compactV2Active
+      ? compactV2AuditHost(recipeDomain)
+      : recipeDomain;
     return {
       status: "domain_lock_violation",
       observation: await observe(sessionId),
       step_index: stepIndex,
-      host,
-      recipe_domain: recipeDomain,
+      host: publicHost,
+      recipe_domain: publicRecipeDomain,
     };
   };
 
@@ -6686,7 +7744,7 @@ export async function replayOperatorRecipe(
       // Structural pre-check: resolve against the live inventory before every
       // deterministic act. This is especially load-bearing on money paths.
       const fresh = await session.browser.extractInteractiveElements();
-      session.lastElements = fresh;
+      retainSessionElements(session, fresh);
       const expectedForStep = state.expectedFields.get(i);
       const resolution =
         expectedForStep === undefined
@@ -6733,13 +7791,20 @@ export async function replayOperatorRecipe(
       } else if (recorded.kind === "js_click") {
         action = { kind: "js_click", target: ref };
       } else {
-        action = { kind: "oauth_click", target: ref };
+        const recipeProvider = (recipe as { oauth_provider?: unknown }).oauth_provider;
+        action = {
+          kind: "oauth_click",
+          target: ref,
+          ...(recipeProvider === "google" || recipeProvider === "github"
+            ? { provider: recipeProvider }
+            : {}),
+        };
       }
     }
 
     try {
       await options.beforeAction?.({ step_index: i, action });
-      await act(sessionId, action, "none");
+      await actInternally(sessionId, action, "none");
       replayed += 1;
       const expected = state.expectedFields.get(i);
       if (expected !== undefined) {
@@ -6749,7 +7814,15 @@ export async function replayOperatorRecipe(
       }
     } catch (error) {
       if (error instanceof ManualCardEntryBlockedError) throw error;
-      return await fallback(step, i, error instanceof Error ? error.message : String(error));
+      return await fallback(
+        step,
+        i,
+        session.compactV2Active
+          ? compactV2ActionFailureReason(error, action.kind)
+          : error instanceof Error
+            ? error.message
+            : String(error),
+      );
     }
   }
 
@@ -6890,6 +7963,7 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const { browser } = session;
+  invalidateCompactV2Snapshot(session);
 
   // The masked-display trap: click reveal/show toggles before reading.
   await browser.revealMaskedCredentials();
@@ -7168,6 +8242,7 @@ async function solveCaptchaWithTokenSolver(
 export async function captchaGate(sessionId: string): Promise<CaptchaGateResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  invalidateCompactV2Snapshot(session);
   const det = await session.browser.detectCaptchaVariant();
   const found = det.variant !== "unknown" || det.challengeRendered;
   if (!found) {
@@ -7243,8 +8318,7 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
               `A ${det.variant} captcha could not be solved automatically ` +
               "(usually IP/behavior scoring, which a solver can't bypass).",
             remedy:
-              "Route the bot through a residential proxy " +
-              "(`npx @trusty-squire/mcp settings` → advanced → proxy URL), or " +
+              "Retry operate_start with its proxy argument set to a residential proxy, or " +
               "complete this one signup manually.",
           };
   }
@@ -7311,11 +8385,8 @@ export interface AwaitVerificationOptions {
   // code is typed via type_secret and never crosses the MCP boundary to the
   // host (also dodges host-side payload truncation — see T3).
   intoSlot?: string;
-  // PR3b — JIT consent at the verification wall. The host sets this true ONLY
-  // after the user agrees, in-context, to let the operator read their inbox.
-  // Grants inbox-read for the rest of THIS session (the remembered cache, so we
-  // don't re-prompt on every await); it does NOT change the standing install
-  // flag. Headless/no-user → the host never sets it, so the gate still refuses.
+  // Overrides inbox reading for this session only. true grants (or restores)
+  // access and false opts out without changing the saved advanced preference.
   grantConsent?: boolean;
 }
 
@@ -7325,19 +8396,15 @@ export interface AwaitVerificationOptions {
 // number elsewhere in the mail doesn't win; falls back to the first standalone
 // 4-8 digit run. The link uses the bot's pickVerificationLink heuristic.
 const OTP_ANY_RE = /(?:^|[^0-9])(\d{4,8})(?:[^0-9]|$)/g;
-const OTP_KEYWORD_RE =
-  /(?:code|verification|verify|otp|passcode|one[- ]time)\D{0,40}?(\d{4,8})|(\d{4,8})\D{0,8}?(?:code|verification|verify|otp|passcode)/i;
 
 export function parseVerification(
   text: string,
-  links: readonly string[],
+  links: readonly (string | VerificationLinkCandidate)[],
+  expectedDomains?: readonly string[],
 ): { code: string | null; link: string | null } {
-  const link = pickVerificationLink([...links]);
-  const kw = OTP_KEYWORD_RE.exec(text);
-  let code: string | null = null;
-  if (kw !== null) {
-    code = kw[1] ?? kw[2] ?? null;
-  } else {
+  const link = pickVerificationLink([...links], expectedDomains);
+  let code = findOtpCredential(text);
+  if (code === null) {
     const m = OTP_ANY_RE.exec(text);
     code = m !== null ? (m[1] ?? null) : null;
   }
@@ -7352,6 +8419,21 @@ export function parseVerification(
 export function extractSenderEmail(text: string): string | null {
   const m = /<([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})>/.exec(text);
   return m !== null ? m[1]!.toLowerCase() : null;
+}
+
+// Derives the domain(s) pickVerificationLink should prefer: the caller's
+// `sender` search hint (an email address or a bare domain) and the sender
+// address read off the opened message, deduped and lowercased. Exported for
+// unit tests.
+export function expectedVerificationDomains(
+  sender: string | undefined,
+  sourceFrom: string | null,
+): string[] {
+  const domainOf = (s: string): string => (s.includes("@") ? s.split("@").pop()! : s).toLowerCase();
+  const domains = [sender, sourceFrom ?? undefined]
+    .filter((s): s is string => s !== undefined && s.length > 0)
+    .map(domainOf);
+  return [...new Set(domains)];
 }
 
 // Pure: assemble the verification result. When neither a code nor a link was
@@ -7380,22 +8462,20 @@ export function buildVerificationResult(
   return { session_id: sessionId, found, code, link, needs_user, ...src };
 }
 
-// PR2 — consent refusal. The user has not consented to the operator reading
-// their inbox, so we do NOT read it. The session stays live (resumable): the
-// host asks the user for the code and types it, or the user grants inbox consent
-// and retries. Distinct message from buildVerificationResult so the host can tell
-// "consent withheld" apart from "code not found in an inbox we DID read".
+// Inbox-read opt-out refusal. The session stays live (resumable): the host asks
+// the user for the code and types it, or restores inbox access and retries.
+// Distinct from buildVerificationResult so the host can tell "access disabled"
+// apart from "code not found in an inbox we DID read".
 // Exported for unit tests.
 export function buildConsentRefusal(sessionId: string): VerificationResult {
   const needs_user: NeedsUserCode = {
     wall: "verification_code",
     message:
-      "Inbox reading is not consented, so the operator did not read any mail. Ask " +
-      "the user, in context: may the operator read your inbox to fetch the code for " +
-      'this signup? If YES, retry operate_act { kind: "await_verification" } with ' +
-      "grant_inbox_consent:true (grants it for the rest of this session). If NO, " +
-      "ask them for the code and type it with operate_act — the session is still " +
-      "live either way. (To grant it permanently, re-run `connect` and allow inbox access.)",
+      "Inbox reading is disabled, so the operator did not read any mail. Ask " +
+      "the user for the code and type it with operate_act, or retry " +
+      'operate_act { kind: "await_verification" } with grant_inbox_consent:true ' +
+      "to restore inbox reading for this session. The session stays live either way. " +
+      "To change the default permanently, re-run `connect` and update advanced settings.",
     resume: "code",
   };
   return { session_id: sessionId, found: false, code: null, link: null, needs_user };
@@ -7412,10 +8492,73 @@ export function buildVerificationSearchQuery(sender?: string): string {
   return [
     sender !== undefined && sender.length > 0 ? `from:${sender}` : "",
     "newer_than:1d",
-    '(verify OR verification OR confirm OR confirmation OR code OR otp OR passcode OR password OR login OR "log in" OR "sign in" OR "sign-in" OR signin OR "magic link" OR activate OR activation OR welcome)',
+    '(verify OR verification OR confirm OR confirmation OR code OR otp OR passcode OR password OR login OR "log in" OR "sign in" OR "sign-in" OR signin OR "magic link" OR activate OR activation OR welcome OR "link account" OR "link your" OR continue)',
   ]
     .filter((s) => s.length > 0)
     .join(" ");
+}
+
+// Gmail's own search backend intermittently throws a transient error —
+// "Oops... the system encountered a problem (#2014) - Retrying in Ns" —
+// and while that banner is up a search like `from:xata.io` can spuriously
+// render "No messages matched your search" even though the message is
+// really there. Exported for unit tests.
+export function isGmailTransientErrorText(text: string): boolean {
+  return /#2014|encountered a problem|retrying in\s*\d+/i.test(text);
+}
+
+// Exported for unit tests.
+export function isEmptyGmailResultText(text: string): boolean {
+  return /no messages matched your search/i.test(text);
+}
+
+// Backoff schedule for the transient-error retry, in ms: 800, 1600, 3200,
+// capped at 4000. Exported for unit tests.
+export function gmailTransientBackoffMs(retryIndex: number): number {
+  return Math.min(800 * 2 ** retryIndex, 4000);
+}
+
+// Bounded — a genuinely empty inbox must still resolve to not-found in
+// finite time, not hang retrying forever.
+const GMAIL_TRANSIENT_MAX_RETRIES = 3;
+
+// Reads the Gmail search results list, retrying through Gmail's own transient
+// backend error with backoff before accepting a result as final. Detects
+// EITHER the error banner itself, or an empty-looking "No messages matched"
+// render with no result links (the shape the banner's spurious empty state
+// takes) — and only gives up on the bounded retries running out, never on
+// the first read. Exported for unit tests via the pure detectors above; this
+// wrapper needs a live browser so it isn't itself unit tested directly.
+async function readGmailSearchResultsResilient(
+  browser: BrowserController,
+  searchUrl: string,
+  linkCandidatesOf: (
+    els: readonly {
+      href?: string | null;
+      visibleText?: string | null;
+      labelText?: string | null;
+      ariaLabel?: string | null;
+    }[],
+  ) => VerificationLinkCandidate[],
+): Promise<{ text: string; links: VerificationLinkCandidate[] }> {
+  let text = "";
+  let links: VerificationLinkCandidate[] = [];
+  for (let retry = 0; retry <= GMAIL_TRANSIENT_MAX_RETRIES; retry++) {
+    if (retry > 0) {
+      await browser.waitForCaptchaChallengeToSettle(gmailTransientBackoffMs(retry - 1), 0).catch(() => false);
+      await browser.goto(searchUrl);
+    }
+    for (let i = 0; i < 6; i++) {
+      text = await browser.extractVisibleText();
+      if (text.length > 200) break;
+      await browser.waitForCaptchaChallengeToSettle(1200, 0).catch(() => false);
+    }
+    links = linkCandidatesOf(await browser.extractInteractiveElements());
+    const transientOrEmpty =
+      isGmailTransientErrorText(text) || (isEmptyGmailResultText(text) && links.length === 0);
+    if (!transientOrEmpty || retry === GMAIL_TRANSIENT_MAX_RETRIES) break;
+  }
+  return { text, links };
 }
 
 export async function awaitVerification(
@@ -7424,64 +8567,66 @@ export async function awaitVerification(
 ): Promise<VerificationResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const { browser } = session;
 
-  // PR3b — JIT consent grant: the host passes grantConsent ONLY after the user
-  // agreed in-context. Grant inbox-read for the rest of this session (remembered
-  // so we don't re-prompt each await); does not touch the standing install flag.
-  if (opts.grantConsent === true && !session.consentInboxRead) {
-    session.consentInboxRead = true;
-    audit(sessionId, "inbox_consent_granted", { scope: "session" });
+  // A caller can override the default for this session without changing the
+  // saved advanced preference. In particular, false must win over default-on.
+  if (opts.grantConsent !== undefined && opts.grantConsent !== session.consentInboxRead) {
+    session.consentInboxRead = opts.grantConsent;
+    audit(sessionId, opts.grantConsent ? "inbox_consent_granted" : "inbox_consent_revoked", {
+      scope: "session",
+    });
   }
-  // PR2 fail-closed gate: without inbox-read consent, do NOT read the user's
-  // mail. Hand the code request back to the user instead (resumable). The old
-  // behavior read mail.google.com unconditionally, silently breaking the
-  // default-off consent promise.
+  // Explicit opt-out gate: do NOT read mail while disabled. Hand the code
+  // request back to the user instead (resumable).
   if (!session.consentInboxRead) {
     audit(sessionId, "await_verification", { refused: "no_inbox_consent" });
     return buildConsentRefusal(sessionId);
   }
 
-  const query = buildVerificationSearchQuery(opts.sender);
-  const searchUrl = `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
-  const hrefsOf = (els: readonly { href?: string | null }[]): string[] =>
-    els.map((e) => e.href).filter((h): h is string => typeof h === "string" && h.length > 0);
+  invalidateCompactV2Snapshot(session);
 
-  // A verification email commonly lands 10–30s AFTER the trigger, so a single
-  // search misses it and hands back "not found" the agent has to re-issue. Re-run
-  // the search up to 3× with a short wait between attempts within this one call.
-  let code: string | null = null;
-  let link: string | null = null;
-  let sourceFrom: string | null = null;
-  for (let attempt = 0; attempt < 3 && code === null && link === null; attempt++) {
-    sourceFrom = null;
-    if (attempt > 0) await browser.waitForCaptchaChallengeToSettle(4000, 0).catch(() => false);
-    // Internal navigation (not an agent goto) — sanctioned read of the user's mail.
-    await browser.goto(searchUrl);
-    // Poll briefly for the result list to render.
-    let listText = "";
-    for (let i = 0; i < 6; i++) {
-      listText = await browser.extractVisibleText();
-      if (listText.length > 200) break;
-      await browser.waitForCaptchaChallengeToSettle(1200, 0).catch(() => false);
-    }
-    const listLinks = hrefsOf(await browser.extractInteractiveElements());
-    const opened = await browser.openFirstMailResult().catch(() => false);
-    if (opened) {
-      // Parse the OPENED email as the AUTHORITATIVE source. Merging the
-      // results-list snippets let an UNRELATED sender's code (a bank OTP shown in
-      // the list) override the target email's link — a real wrong-code grab
-      // (Brave signup 2026-07-04: a GO2bank "verification code is 580210" beat
-      // Brave's verify LINK). The list snippets stay a fallback only, for when the
-      // mail won't open (an OTP-in-snippet still works then).
-      const openedText = await browser.extractVisibleText();
-      const openedLinks = hrefsOf(await browser.extractInteractiveElements());
-      sourceFrom = extractSenderEmail(openedText);
-      ({ code, link } = parseVerification(openedText, [...openedLinks, ...listLinks]));
-    } else {
-      ({ code, link } = parseVerification(listText, listLinks));
-    }
-  }
+  const verification = await runDetachedGoogleIdentityOperation(session, async (browser) => {
+    return await browser.withTemporaryHostScopeAllowedHosts(["mail.google.com"], async () => {
+      const query = buildVerificationSearchQuery(opts.sender);
+      const searchUrl = `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
+      const linkCandidatesOf = (
+        els: readonly {
+          href?: string | null;
+          visibleText?: string | null;
+          labelText?: string | null;
+          ariaLabel?: string | null;
+        }[],
+      ): VerificationLinkCandidate[] =>
+        els
+          .filter((e): e is typeof e & { href: string } => typeof e.href === "string" && e.href.length > 0)
+          .map((e) => ({ url: e.href, text: e.visibleText ?? e.labelText ?? e.ariaLabel ?? null }));
+      let code: string | null = null;
+      let link: string | null = null;
+      let sourceFrom: string | null = null;
+      for (let attempt = 0; attempt < 3 && code === null && link === null; attempt++) {
+        sourceFrom = null;
+        if (attempt > 0) await browser.waitForCaptchaChallengeToSettle(4000, 0).catch(() => false);
+        await browser.goto(searchUrl);
+        const { text: listText, links: listLinks } = await readGmailSearchResultsResilient(
+          browser,
+          searchUrl,
+          linkCandidatesOf,
+        );
+        const opened = await browser.openFirstMailResult().catch(() => false);
+        if (opened) {
+          const openedText = await browser.extractVisibleText();
+          const openedLinks = linkCandidatesOf(await browser.extractInteractiveElements());
+          sourceFrom = extractSenderEmail(openedText);
+          const expectedDomains = expectedVerificationDomains(opts.sender, sourceFrom);
+          ({ code, link } = parseVerification(openedText, [...openedLinks, ...listLinks], expectedDomains));
+        } else {
+          ({ code, link } = parseVerification(listText, listLinks, expectedVerificationDomains(opts.sender, null)));
+        }
+      }
+      return { code, link, sourceFrom };
+    });
+  });
+  const { code, link, sourceFrom } = verification;
   const found = code !== null || link !== null;
   audit(sessionId, "await_verification", {
     sender: opts.sender ?? null,
@@ -7506,84 +8651,4 @@ export async function awaitVerification(
     };
   }
   return buildVerificationResult(sessionId, code, link, sourceFrom);
-}
-
-export interface FinishResult {
-  session_id: string;
-  url: string;
-  closed: true;
-}
-
-export interface PreparedFinishResult<T> {
-  finish: FinishResult;
-  prepared: T;
-}
-
-function profileRequiresDestroy(session: Session): boolean {
-  return session.activePayment !== null || session.paymentFieldSealActive;
-}
-
-async function closeFinishingProvisionSession(session: Session): Promise<FinishResult> {
-  const sessionId = session.id;
-  const url = session.browser.currentUrl();
-  audit(sessionId, "finish", { url });
-  const destroyProfile = profileRequiresDestroy(session);
-  session.activePayment = null;
-  session.paymentFieldSealActive = false;
-  sessions.delete(sessionId);
-  await releaseWarmBrowserPage(session.browser, !destroyProfile);
-  return { session_id: sessionId, url, closed: true };
-}
-
-export async function finishProvisionSessionWithPreparation<T>(
-  sessionId: string,
-  prepare: () => Promise<T>,
-): Promise<PreparedFinishResult<T>> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  if (session.closing) throw new Error(`provision session ${sessionId} is already closing`);
-  session.closing = true;
-  try {
-    await waitForSessionCallsToDrain(session);
-    const prepared = await prepare();
-    const finish = await closeFinishingProvisionSession(session);
-    return { finish, prepared };
-  } catch (error) {
-    if (sessions.get(sessionId) === session) session.closing = false;
-    throw error;
-  }
-}
-
-export async function finishProvisionSession(sessionId: string): Promise<FinishResult> {
-  return (await finishProvisionSessionWithPreparation(sessionId, async () => undefined)).finish;
-}
-
-// Test/teardown helper — close every live session (used by the dev shim on exit).
-export async function closeAllProvisionSessions(): Promise<void> {
-  shutdownGeneration += 1;
-  const waiters = [...capacityWaiters];
-  for (const waiter of waiters) {
-    waiter.cancelRequested = true;
-    waiter.abortController.abort();
-    waiter.wake();
-  }
-  await Promise.all(waiters.map((waiter) => waiter.settled));
-  for (const pending of [...startingBrowsers]) {
-    pending.cancelRequested = true;
-    await pending.controller.close({ cancelStart: true }).catch(() => undefined);
-    await pending.launch.catch(() => undefined);
-    await closeLeasedBrowser(pending.controller, pending.lease, false).catch(() => undefined);
-  }
-  for (const [id, session] of [...sessions.entries()]) {
-    sessions.delete(id);
-    await releaseWarmBrowserPage(session.browser, false).catch(() => undefined);
-  }
-  for (const slot of [...leasedBrowsers.values()]) {
-    leasedBrowsers.delete(slot.controller);
-    await closeLeasedBrowser(slot.controller, slot.lease, false).catch(() => undefined);
-  }
-}
-
-export function activeSessionCount(): number {
-  return sessions.size;
 }

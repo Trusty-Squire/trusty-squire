@@ -10,11 +10,21 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { constants, publicEncrypt } from "node:crypto";
 import type * as GoogleLoginModule from "../google-login.js";
+import type * as ProfileModule from "../profile.js";
 
 const h = vi.hoisted(() => ({
-  providers: ["google"] as string[],
+  providers: ["google"] as string[] | null,
   oauthStatus: "already_valid" as string,
   oauthLoginCalls: [] as string[],
+  oauthLoginTimeouts: [] as number[],
+  oauthLoginError: null as Error | null,
+  oauthConsentProviders: [] as Array<string | undefined>,
+  oauthExpectedGoogleAccountEmails: [] as Array<string | null | undefined>,
+  oauthLoginGates: new Map<number, Promise<void>>(),
+  waitForInteractiveDomCalls: [] as Array<{ minElements: number; timeoutMs: number }>,
+  oauthResultUrl: "https://app.example.com/dashboard",
+  restoredStorageStates: [] as Array<{ browserIndex: number; state: unknown }>,
+  restoreStorageStateGate: null as Promise<void> | null,
   oauthReadError: null as string | null,
   oauthTransition: null as null | {
     productUrl: string | null;
@@ -23,9 +33,10 @@ const h = vi.hoisted(() => ({
     browserConnected: boolean;
   },
   oauthRecoveryCalls: 0,
-  typed: [] as Array<{ selector: string; text: string }>,
+  typed: [] as Array<{ selector: string; text: string; sealed?: true }>,
   uploads: [] as Array<{ selector: string; filePath: string }>,
   selected: [] as Array<{ selector: string; matcher: string | undefined }>,
+  selectError: null as Error | null,
   selectMutation: null as unknown[] | null,
   phoneCountries: [] as string[],
   phoneCountry: null as string | null,
@@ -38,52 +49,80 @@ const h = vi.hoisted(() => ({
   },
   autocompleteSuggestions: [] as string[],
   autocompleteCommitMutation: null as { selector: string; value: string } | null,
+  shippingMethodsLoadOnAutocompleteCommit: false,
+  shippingMethodsLoaded: false,
+  requiredShippingAddressCommits: [] as string[],
   autocompleteCommitCalls: [] as number[],
   autocompleteConfirmOverride: null as boolean | null,
   autocompleteConfirmCalls: [] as Array<{ selector: string; pickedText: string }>,
   autocompleteDiscardCalls: 0,
   autocompleteDiscardEscapeCalls: [] as boolean[],
   clickCalls: 0,
+  clickError: null as Error | null,
   frameClicks: [] as string[],
   frameJsClicks: [] as string[],
-  frameTypes: [] as Array<{ frameUrl: string; selector: string; text: string }>,
+  frameTypes: [] as Array<{ frameUrl: string; selector: string; text: string; sealed?: true }>,
   frameSelects: [] as Array<{ frameUrl: string; selector: string; matcher: string | undefined }>,
   gotos: [] as string[],
   started: 0,
   startCalls: 0,
   startGate: null as Promise<void> | null,
+  startGates: new Map<number, Promise<void>>(),
   closeCalls: 0,
+  forceCloseCalls: 0,
   closeState: "closed" as "closed" | "force_closed_unproven" | "unknown",
-  resetCalls: 0,
-  resetFailuresRemaining: 0,
+  closeStates: new Map<number, "closed" | "force_closed_unproven" | "unknown">(),
+  closeGates: new Map<number, Promise<void>>(),
   profileProbeCalls: 0,
   controllerProviderProbeCalls: 0,
   workerEmail: null as string | null,
+  liveGoogleEmail: "default-google@example.com" as string | null,
+  identityProbeCalls: 0,
+  identityProbeExpectedGoogleAccountEmails: [] as Array<string | undefined>,
+  googleIdentityByExpectedEmail: new Map<string, string | null>(),
+  temporaryHostScopes: [] as Array<{ hosts: string[]; phase: "enter" | "exit" }>,
+  hostScopeProviders: [] as Array<{
+    allowedHosts: () => readonly string[];
+    siblingDomainHosts: () => readonly string[];
+  }>,
   connections: [] as boolean[],
   profileDirs: [] as Array<string | undefined>,
-  leaseSerial: 0,
-  warmLeaseProfileDir: null as string | null,
-  nextLeaseProfileDir: null as string | null,
-  profileAcquisitionInterruption: null as null | {
-    reason: "timeout" | "cancelled";
-    phase: "profile" | "seed_lock";
-  },
-  leaseAcquireCalls: 0,
-  activeLeaseCount: 0,
-  leaseReturnCalls: 0,
-  leaseDestroyCalls: 0,
-  leaseRetainCalls: 0,
-  leaseRetainDestroyRequired: [] as boolean[],
-  directIdentityAcquireCalls: 0,
-  directIdentityReleaseCalls: 0,
-  directIdentityProfileDir: "/tmp/trusty-squire-unit-canonical-profile",
+  proxyUrls: [] as Array<string | undefined>,
+  seededStorageStates: [] as unknown[],
+  storageStates: new Map<string, unknown>(),
+  identityMetadata: new Map<string, { googleAccountEmail: string }>(),
+  storageStateReads: [] as string[],
+  storageStateReadGate: null as Promise<void> | null,
+  storageStateWrites: [] as Array<{ profileDir: string; state: unknown }>,
+  pendingStorageStates: [] as Array<{ path: string; profileDir: string; state: unknown }>,
+  pendingStorageStateOversized: false,
+  storageStateWriteError: null as Error | null,
+  storageStateWriteGate: null as Promise<void> | null,
+  storageStateWriteAttempts: 0,
+  profileDestroyGate: null as Promise<void> | null,
+  profileOperationProbeGate: null as Promise<void> | null,
+  ephemeralSerial: 0,
+  createdProfiles: [] as string[],
+  destroyedProfiles: [] as string[],
+  captureStorageState: { cookies: [], origins: [] } as unknown,
+  captureStorageStates: new Map<number, unknown>(),
+  captureStorageStateSequences: new Map<number, unknown[]>(),
+  captureStorageStateCalls: 0,
+  captureStorageStateGate: null as Promise<void> | null,
+  captureStorageStateError: null as Error | null,
   currentUrl: "",
+  mainDocumentEpoch: 0,
   elements: [] as unknown[],
   extractInteractiveElementsCalls: 0,
   checkoutFieldNames: [] as string[],
   visibleText: "",
+  // When non-empty, extractVisibleText() shifts values off this queue in call
+  // order (falling back to `visibleText` once exhausted) — lets a test script
+  // a sequence of reads, e.g. a transient Gmail error banner then real content.
+  visibleTextQueue: [] as string[],
   visibleTextGate: null as Promise<void> | null,
   extractVisibleTextCalls: 0,
+  openFirstMailResult: false,
   // fill_card cart-total-carry-forward (Session.lastCartCheckout): null means
   // "no total on this page" (readCheckoutSummary rejects, the common case).
   checkoutSummary: null as {
@@ -108,6 +147,15 @@ const h = vi.hoisted(() => ({
   }> | null,
   cartLineReadFailuresRemaining: 0,
   failNextCartLineReadAfterClick: false,
+  clearCartResult: true,
+  clearCartCalls: 0,
+  clearCartItems: null as Array<{
+    title: string;
+    quantity: number;
+    details?: string;
+    product_identities: string[];
+    option_signatures: string[];
+  }> | null,
   readCheckoutSummaryCalls: 0,
   focusedLabels: [] as string[],
   pressedKeys: [] as string[],
@@ -148,8 +196,10 @@ const h = vi.hoisted(() => ({
         } | null;
       }
     | { ok: false; reason: "none" | "ambiguous"; candidates: string[] },
+  locatorResolveMissValues: [] as string[],
   locatorClickCalls: 0,
   locatorTypeCalls: [] as Array<{ text: string; sealed: boolean }>,
+  capturedSealedFieldKeys: [] as string[][],
   locatorResolveIntents: [] as string[],
   locatorDisposeCalls: 0,
   isPayPalHostedCheckout: false,
@@ -161,57 +211,97 @@ const h = vi.hoisted(() => ({
     challenge_url?: string;
   },
   clearSealedPaymentFieldsCalls: 0,
-  waitForThreeDsResult: "timeout" as "succeeded" | "failed" | "timeout",
+  waitForThreeDsResult: "timeout" as "succeeded" | "failed" | "challenge_pending" | "timeout",
+  waitForThreeDsCalls: [] as number[],
+  paymentInstrumentMismatch: null as null | {
+    kind: "payment_instrument_mismatch";
+    confidence: "high" | "low";
+    evidence_used: Array<"last4" | "issuer" | "network">;
+    expected: { last4: string };
+    observed: { last4: string };
+    provenance: {
+      expected: { last4: "released_card" };
+      observed: "3ds_challenge";
+    };
+  },
 }));
 
+// This suite is the V1 contract suite. Individual Compact V2 tests opt in
+// explicitly below, which keeps the feature-flagged V1 and V2 action
+// protocols independently testable while V2 is the production default.
+let compactV2ModeBeforeTest: string | undefined;
+
 vi.mock("../browser.js", () => ({
+  registerLocalBrowserLaunch: (
+    _profileDir: string,
+    baseEnv: NodeJS.ProcessEnv = process.env,
+    marker = "v1:1:test-browser",
+  ) => ({
+    marker,
+    env: { ...baseEnv, TRUSTY_SQUIRE_OPERATOR_BROWSER_MARKER: marker },
+  }),
   BrowserController: class {
     private readonly index: number;
-    private readonly opts: { profileDir?: string; proxyUrl?: string };
-    constructor(opts: { profileDir?: string; proxyUrl?: string } = {}) {
+    private readonly opts: { profileDir?: string; proxyUrl?: string; storageState?: unknown };
+    private readonly detached: boolean;
+    private detachedUrl = "about:blank";
+    constructor(opts: { profileDir?: string; proxyUrl?: string; storageState?: unknown } = {}) {
       this.index = h.connections.length;
       this.opts = opts;
+      this.detached =
+        this.index > 0 && opts.profileDir !== undefined && opts.profileDir !== h.profileDirs[0];
       h.connections.push(true);
       h.profileDirs.push(opts.profileDir);
+      h.proxyUrls.push(opts.proxyUrl);
+      h.seededStorageStates.push(opts.storageState);
     }
     async start(): Promise<void> {
       h.started += 1;
       h.startCalls += 1;
+      const gate = h.startGates.get(this.index);
+      if (gate !== undefined) await gate;
       if (h.startGate !== null) await h.startGate;
-    }
-    matchesLaunchOptions(opts: { profileDir?: string; proxyUrl?: string }): boolean {
-      const proxy = (value: string | undefined): string | null => value?.trim() || null;
-      return (
-        this.opts.profileDir === opts.profileDir &&
-        proxy(this.opts.proxyUrl) === proxy(opts.proxyUrl)
-      );
     }
     isConnected(): boolean {
       return h.connections[this.index] === true;
     }
-    async resetPageForReuse(): Promise<void> {
-      h.resetCalls += 1;
-      if (h.resetFailuresRemaining > 0) {
-        h.resetFailuresRemaining -= 1;
-        throw new Error("page reset failed");
-      }
-      h.currentUrl = "about:blank";
-    }
     async detectSessionProviders(): Promise<string[]> {
       h.controllerProviderProbeCalls += 1;
-      return h.providers;
+      if (h.providers !== null) return h.providers;
+      const cookies = (this.opts.storageState as { cookies?: Array<{ name: string }> } | undefined)
+        ?.cookies;
+      return cookies?.some((cookie) => cookie.name === "__Secure-1PSID") ? ["google"] : [];
     }
-    async detectGoogleAccountEmail(): Promise<string | null> {
-      return h.workerEmail;
+    async detectGoogleAccountEmail(expectedGoogleAccountEmail?: string): Promise<string | null> {
+      h.identityProbeCalls += 1;
+      h.identityProbeExpectedGoogleAccountEmails.push(expectedGoogleAccountEmail);
+      if (
+        expectedGoogleAccountEmail !== undefined &&
+        h.googleIdentityByExpectedEmail.has(expectedGoogleAccountEmail)
+      ) {
+        return h.googleIdentityByExpectedEmail.get(expectedGoogleAccountEmail) ?? null;
+      }
+      return h.workerEmail ?? h.liveGoogleEmail;
     }
     async goto(url: string): Promise<void> {
       h.gotos.push(url);
-      h.currentUrl = url;
+      if (this.detached) this.detachedUrl = url;
+      else {
+        h.currentUrl = url;
+        h.mainDocumentEpoch += 1;
+      }
     }
     currentUrl(): string {
-      return h.currentUrl;
+      return this.detached ? this.detachedUrl : h.currentUrl;
+    }
+    mainDocumentIdentity(): string {
+      return String(h.mainDocumentEpoch);
     }
     recoverActivePage(): void {}
+    armOpenedTabAdoption(): void {}
+    async adoptOpenedTab(): Promise<string | null> {
+      return null;
+    }
     async extractInteractiveElements(): Promise<unknown[]> {
       h.extractInteractiveElementsCalls += 1;
       if (h.oauthReadError !== null) throw new Error(h.oauthReadError);
@@ -224,6 +314,7 @@ vi.mock("../browser.js", () => ({
       h.extractVisibleTextCalls += 1;
       if (h.visibleTextGate !== null) await h.visibleTextGate;
       if (h.oauthReadError !== null) throw new Error(h.oauthReadError);
+      if (h.visibleTextQueue.length > 0) return h.visibleTextQueue.shift()!;
       return h.visibleText;
     }
     async revealMaskedCredentials(): Promise<void> {}
@@ -264,10 +355,19 @@ vi.mock("../browser.js", () => ({
       }
       return h.cartLineItems.map((line) => ({ ...line, details: line.details ?? line.title }));
     }
-    async openFirstMailResult(): Promise<boolean> {
-      return false;
+    async clearCart(): Promise<boolean> {
+      h.clearCartCalls += 1;
+      if (h.clearCartResult) {
+        h.cartLineItems = h.clearCartItems ?? [];
+      }
+      return h.clearCartResult;
     }
-    async waitForInteractiveDom(): Promise<void> {}
+    async openFirstMailResult(): Promise<boolean> {
+      return h.openFirstMailResult;
+    }
+    async waitForInteractiveDom(minElements = 5, timeoutMs = 20_000): Promise<void> {
+      h.waitForInteractiveDomCalls.push({ minElements, timeoutMs });
+    }
     async waitForCaptchaChallengeToSettle(): Promise<boolean> {
       return h.captchaSettled;
     }
@@ -326,11 +426,23 @@ vi.mock("../browser.js", () => ({
     async scrollViewport(direction: string): Promise<void> {
       h.scrolls.push(direction);
     }
-    async type(selector: string, text: string): Promise<void> {
-      h.typed.push({ selector, text });
+    async type(selector: string, text: string, sealed = false): Promise<string[]> {
+      h.typed.push({ selector, text, ...(sealed ? { sealed: true as const } : {}) });
       for (const element of h.elements as Array<Record<string, unknown>>) {
         if (element.selector === selector) element.value = text;
       }
+      const element = (h.elements as Array<Record<string, unknown>>).find(
+        (candidate) => candidate.selector === selector,
+      );
+      return sealed
+        ? [element?.screenPath, element?.testId, element?.visibleText].filter(
+            (key): key is string => typeof key === "string" && key.length > 0,
+          )
+        : [];
+    }
+    async commitRequiredShippingAddressLine1(selector: string): Promise<void> {
+      h.requiredShippingAddressCommits.push(selector);
+      if (h.shippingMethodsLoadOnAutocompleteCommit) h.shippingMethodsLoaded = true;
     }
     async markPreexistingTypeSuggestionPopups(): Promise<void> {}
     async detectTypeSuggestionPopup(_selector: string): Promise<string[]> {
@@ -345,6 +457,7 @@ vi.mock("../browser.js", () => ({
           }
         }
       }
+      if (h.shippingMethodsLoadOnAutocompleteCommit) h.shippingMethodsLoaded = true;
     }
     async discardTypeSuggestionPopup(dismissWithEscape: boolean): Promise<void> {
       h.autocompleteDiscardCalls += 1;
@@ -361,6 +474,7 @@ vi.mock("../browser.js", () => ({
     }
     async selectOption(selector: string, matcher?: string): Promise<string> {
       h.selected.push({ selector, matcher });
+      if (h.selectError !== null) throw h.selectError;
       let committed = matcher ?? "";
       for (const element of h.elements as Array<Record<string, unknown>>) {
         if (element.selector !== selector) continue;
@@ -414,6 +528,7 @@ vi.mock("../browser.js", () => ({
         h.phoneCountry = h.clickPhoneCountryMutation;
       }
       if (h.clearElementsOnClick) h.elements = [];
+      if (h.clickError !== null) throw h.clickError;
     }
     async clickViaJs(): Promise<void> {}
     async clickInFrame(target: { frameUrl: string }, selector: string): Promise<void> {
@@ -464,12 +579,30 @@ vi.mock("../browser.js", () => ({
       }
       return "dispatched";
     }
-    async typeInFrame(target: { frameUrl: string }, selector: string, text: string): Promise<void> {
-      h.frameTypes.push({ frameUrl: target.frameUrl, selector, text });
+    async typeInFrame(
+      target: { frameUrl: string },
+      selector: string,
+      text: string,
+      sealed = false,
+    ): Promise<string[]> {
+      h.frameTypes.push({
+        frameUrl: target.frameUrl,
+        selector,
+        text,
+        ...(sealed ? { sealed: true as const } : {}),
+      });
       for (const element of h.elements as Array<Record<string, unknown>>) {
         if (element.selector === selector && element.frameUrl === target.frameUrl)
           element.value = text;
       }
+      const element = (h.elements as Array<Record<string, unknown>>).find(
+        (candidate) => candidate.selector === selector && candidate.frameUrl === target.frameUrl,
+      );
+      return sealed
+        ? [element?.screenPath, element?.testId, element?.visibleText].filter(
+            (key): key is string => typeof key === "string" && key.length > 0,
+          )
+        : [];
     }
     async selectInFrame(
       target: { frameUrl: string },
@@ -492,7 +625,7 @@ vi.mock("../browser.js", () => ({
     }
     async resolvePageTarget(
       _mode: string,
-      _value: string,
+      value: string,
       intent = "click",
     ): Promise<
       | {
@@ -511,6 +644,9 @@ vi.mock("../browser.js", () => ({
       | { ok: false; reason: "none" | "ambiguous"; candidates: string[] }
     > {
       h.locatorResolveIntents.push(intent);
+      if (h.locatorResolveMissValues.includes(value)) {
+        return { ok: false, reason: "none", candidates: [] };
+      }
       if (h.locatorResolve.ok) {
         return {
           ok: true,
@@ -545,16 +681,36 @@ vi.mock("../browser.js", () => ({
     async jsClickHandle(): Promise<void> {
       h.locatorClickCalls += 1;
     }
-    async typeHandle(_handle: unknown, text: string, sealed = false): Promise<void> {
+    async typeHandle(_handle: unknown, text: string, sealed = false): Promise<string[]> {
       h.locatorTypeCalls.push({ text, sealed });
+      return sealed ? [h.locatorResolve.ok ? h.locatorResolve.text : ""] : [];
+    }
+    async captureOperatorScreenshot(
+      _opts: unknown,
+      sealedFieldKeys: readonly string[],
+      _knownSecrets: readonly string[] = [],
+    ): Promise<{ base64: string; frameUrl: null; frameCount: number; redactedCount: number }> {
+      h.capturedSealedFieldKeys.push([...sealedFieldKeys]);
+      return { base64: "jpeg", frameUrl: null, frameCount: 1, redactedCount: 0 };
     }
     async uploadFile(selector: string, filePath: string): Promise<void> {
       h.uploads.push({ selector, filePath });
     }
     async startOAuth(): Promise<void> {}
-    async loginWithOAuth(selector: string): Promise<void> {
+    async loginWithOAuth(
+      selector: string,
+      settleTimeoutMs?: number,
+      provider?: string,
+      expectedGoogleAccountEmail?: string | null,
+    ): Promise<void> {
       h.oauthLoginCalls.push(selector);
-      h.currentUrl = "https://app.example.com/dashboard";
+      h.oauthLoginTimeouts.push(settleTimeoutMs ?? 0);
+      h.oauthConsentProviders.push(provider);
+      h.oauthExpectedGoogleAccountEmails.push(expectedGoogleAccountEmail);
+      const gate = h.oauthLoginGates.get(this.index);
+      if (gate !== undefined) await gate;
+      if (h.oauthLoginError !== null) throw h.oauthLoginError;
+      h.currentUrl = h.oauthResultUrl;
       h.visibleText = "Signed in";
     }
     async settleAfterOAuth(): Promise<void> {}
@@ -610,14 +766,78 @@ vi.mock("../browser.js", () => ({
     async clearSealedPaymentFields(): Promise<void> {
       h.clearSealedPaymentFieldsCalls += 1;
     }
-    async waitForThreeDsResolution(): Promise<"succeeded" | "failed" | "timeout"> {
+    async waitForThreeDsResolution(
+      timeoutMs: number,
+    ): Promise<"succeeded" | "failed" | "challenge_pending" | "timeout"> {
+      h.waitForThreeDsCalls.push(timeoutMs);
       return h.waitForThreeDsResult;
     }
-    async close(): Promise<"closed" | "force_closed_unproven" | "unknown"> {
+    paymentInstrumentMismatch(): typeof h.paymentInstrumentMismatch {
+      return h.paymentInstrumentMismatch;
+    }
+    operatorBrowserMarker(): string {
+      return `v1:1:mock-${this.index}`;
+    }
+    async captureStorageState(): Promise<unknown> {
+      h.captureStorageStateCalls += 1;
+      if (h.captureStorageStateGate !== null) await h.captureStorageStateGate;
+      if (h.captureStorageStateError !== null) throw h.captureStorageStateError;
+      const sequence = h.captureStorageStateSequences.get(this.index);
+      if (sequence !== undefined && sequence.length > 0) {
+        const next = sequence.shift();
+        if (next instanceof Error) throw next;
+        return next;
+      }
+      return h.captureStorageStates.get(this.index) ?? h.captureStorageState;
+    }
+    async restoreStorageState(state: unknown): Promise<void> {
+      if (h.restoreStorageStateGate !== null) await h.restoreStorageStateGate;
+      h.restoredStorageStates.push({ browserIndex: this.index, state });
+    }
+    async setHostScopeAllowedHosts(
+      allowedHosts: () => readonly string[],
+      siblingDomainHosts: () => readonly string[] = allowedHosts,
+    ): Promise<void> {
+      h.hostScopeProviders.push({ allowedHosts, siblingDomainHosts });
+    }
+    async withTemporaryHostScopeAllowedHosts<T>(
+      hosts: readonly string[],
+      operation: () => Promise<T>,
+    ): Promise<T> {
+      h.temporaryHostScopes.push({ hosts: [...hosts], phase: "enter" });
+      try {
+        return await operation();
+      } finally {
+        h.temporaryHostScopes.push({ hosts: [...hosts], phase: "exit" });
+      }
+    }
+    async close(options?: {
+      cancelStart?: boolean;
+    }): Promise<"closed" | "force_closed_unproven" | "unknown"> {
       h.closeCalls += 1;
+      const closeGate = h.closeGates.get(this.index);
+      if (closeGate !== undefined) await closeGate;
+      if (options?.cancelStart === true) {
+        const gate = h.startGates.get(this.index);
+        if (gate !== undefined) await gate;
+        if (h.startGate !== null) await h.startGate;
+      }
       if (h.connections[this.index] === true) h.started -= 1;
       h.connections[this.index] = false;
-      return h.closeState;
+      return h.closeStates.get(this.index) ?? h.closeState;
+    }
+    async waitForCancelledStartQuiescence(): Promise<void> {
+      const gate = h.startGates.get(this.index);
+      if (gate !== undefined) await gate;
+      if (h.startGate !== null) await h.startGate;
+    }
+    async forceCloseOwnedProcessTree(): Promise<"closed" | "force_closed_unproven" | "unknown"> {
+      h.forceCloseCalls += 1;
+      const closeGate = h.closeGates.get(this.index);
+      if (closeGate !== undefined) await closeGate;
+      if (h.connections[this.index] === true) h.started -= 1;
+      h.connections[this.index] = false;
+      return h.closeStates.get(this.index) ?? h.closeState;
     }
   },
   // Mirrors the real export — the pending-card-fill charge guard reads it.
@@ -691,130 +911,54 @@ vi.mock("../google-login.js", async (importOriginal) => {
   };
 });
 
-vi.mock("../operator-profile-pool.js", () => {
-  class OperatorProfileAcquisitionInterruptedError extends Error {
-    readonly reason: "timeout" | "cancelled";
-    readonly phase: "profile" | "seed_lock";
-    constructor(reason: "timeout" | "cancelled", phase: "profile" | "seed_lock" = "profile") {
-      super(`operator profile acquisition ${reason}`);
-      this.reason = reason;
-      this.phase = phase;
-    }
-  }
+vi.mock("../profile.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof ProfileModule>();
   return {
-    OPERATOR_SEED_GOOGLE_COOKIE_NAMES: ["__Secure-1PSID", "SAPISID", "SID"],
-    OperatorProfileAcquisitionInterruptedError,
-    acquireOperatorProfile: async (
-      _sessionId: string,
-      opts: { sourceProfileDir?: string } = {},
+    ...actual,
+    acquireFreeProfileOperationGuard: async (
+      ...args: Parameters<typeof actual.acquireFreeProfileOperationGuard>
     ) => {
-      h.leaseAcquireCalls += 1;
-      if (h.profileAcquisitionInterruption !== null) {
-        throw new OperatorProfileAcquisitionInterruptedError(
-          h.profileAcquisitionInterruption.reason,
-          h.profileAcquisitionInterruption.phase,
-        );
-      }
-      if (h.activeLeaseCount >= 2) {
-        throw new Error(
-          "operate_start capacity reached: 2 operator sessions are active; finish one and retry",
-        );
-      }
-      h.activeLeaseCount += 1;
-      const warm = h.warmLeaseProfileDir;
-      h.warmLeaseProfileDir = null;
-      const profileDir =
-        h.nextLeaseProfileDir ??
-        opts.sourceProfileDir ??
-        warm ??
-        `/tmp/trusty-squire-unit-profile-${process.pid}-${++h.leaseSerial}`;
-      h.nextLeaseProfileDir = null;
-      let finished = false;
-      return {
-        profileDir,
-        profileId: `unit-${h.leaseSerial}`,
-        seedGeneration: "unit-seed",
-        bindWorker: () => undefined,
-        returnWarm: async () => {
-          if (finished) return;
-          finished = true;
-          h.activeLeaseCount -= 1;
-          h.leaseReturnCalls += 1;
-          h.warmLeaseProfileDir = profileDir;
-        },
-        destroy: async () => {
-          if (finished) return;
-          finished = true;
-          h.activeLeaseCount -= 1;
-          h.leaseDestroyCalls += 1;
-        },
-        retain: async (destroyRequired = false) => {
-          if (finished) return;
-          finished = true;
-          h.activeLeaseCount -= 1;
-          h.leaseRetainCalls += 1;
-          h.leaseRetainDestroyRequired.push(destroyRequired);
-        },
-      };
+      if (h.profileOperationProbeGate !== null) await h.profileOperationProbeGate;
+      return await actual.acquireFreeProfileOperationGuard(...args);
     },
   };
 });
 
-// The Google-identity path (require_live_identity) never touches the
-// isolated clone pool above — it acquires the canonical profile directly.
-// A distinct mock (and its own call counters) keeps that boundary visible in
-// tests: a requireLiveIdentity session must NOT bump h.leaseAcquireCalls.
-vi.mock("../operator-direct-identity.js", () => {
-  class OperatorDirectIdentityAcquisitionInterruptedError extends Error {
-    readonly reason: "timeout" | "cancelled";
-    constructor(reason: "timeout" | "cancelled") {
-      super(`operator direct-identity acquisition ${reason}`);
-      this.reason = reason;
-    }
-  }
-  return {
-    OperatorDirectIdentityAcquisitionInterruptedError,
-    acquireDirectIdentityProfile: async (opts: { profileDir?: string } = {}) => {
-      h.directIdentityAcquireCalls += 1;
-      const profileDir = opts.profileDir ?? h.directIdentityProfileDir;
-      let finished = false;
-      const finish = (): void => {
-        if (finished) return;
-        finished = true;
-        h.directIdentityReleaseCalls += 1;
-      };
-      return {
-        profileDir,
-        takeProfileOperationLease: () => ({ release: () => undefined }),
-        bindWorker: () => undefined,
-        returnWarm: async () => finish(),
-        destroy: async () => finish(),
-        retain: async () => finish(),
-      };
-    },
-  };
-});
-
-import { chmodSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  writeFileSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import canonicalize from "canonicalize";
 import { exportJWK, SignJWT } from "jose";
 import { sealToRecipient } from "../payment-hpke.js";
-import { operatePayTool } from "../../tools/operate-pay.js";
+import { operatePayTool, operatePaymentStatusTool } from "../../tools/operate-pay.js";
 import { ApiClient } from "../../api-client.js";
-import type { formSelectMany } from "../provision-session.js";
+import { dispatchOperatorBrowserProcessTermination } from "../operator-browser-watchdog.js";
+import { BrowserController } from "../browser.js";
+import { acquireProfileOperationGuard } from "../profile.js";
 import {
   startProvisionSession,
+  startHarnessProvisionSession,
   act,
   observe,
   observedHostsForSession,
   stashSecretSlot,
   awaitVerification,
+  isGmailTransientErrorText,
+  isEmptyGmailResultText,
+  gmailTransientBackoffMs,
   captchaGate,
   finishProvisionSession,
   finishProvisionSessionWithPreparation,
+  withPaymentSessionCall,
   withProvisionSessionCall,
   paymentSession,
   closeAllProvisionSessions,
@@ -824,13 +968,20 @@ import {
   replayOperatorRecipe,
   activeProvisionBrowserForPayment,
   activeCartCheckoutForOrigin,
+  armPaymentDispatchHandoff,
   cartAdd,
+  cartClear,
+  coordinatePaymentDispatchAudit,
+  finishPaymentDispatchHandoff,
+  formSelectMany,
   recordActivePaymentProvenance,
   setActivePendingCardFill,
   claimActivePaymentForOperatePay,
   completeActivePaymentLeaseWithPendingApproval,
   completeActivePaymentLeaseWithPendingFill,
+  completeActivePaymentLeaseWithTerminalApproval,
   getActivePendingApproval,
+  getTerminalPaymentApproval,
   getActivePendingCardFill,
   releaseActivePaymentLease,
   markActivePendingCardFillSubmitStarted,
@@ -839,7 +990,15 @@ import {
   clearActivePendingCardFill,
   recipeTargetFor,
   captureObserved,
+  getActivePendingThreeDs,
+  setActivePendingThreeDs,
+  clearActivePendingThreeDsIfCurrent,
+  captureScreenshot,
+  captureAndPromoteSession,
+  observeQuery,
+  verifyPostcondition,
 } from "../provision-session.js";
+import { OBSERVE_V2_MAX_TOKENS, OBSERVE_V2_MAX_WIRE_BYTES } from "../compact-observation-v2.js";
 import {
   isRecipeDomainLocked,
   isRecipeShareEligible,
@@ -862,6 +1021,7 @@ import {
   operateRecipeRunTool,
   operateRecipeSaveTool,
   provisionActTool,
+  provisionObserveTool,
   storedExtractResult,
   withSigninHost,
 } from "../../tools/provision-drive.js";
@@ -913,15 +1073,28 @@ function elem(partial: Record<string, unknown>): unknown {
 }
 
 beforeEach(() => {
+  compactV2ModeBeforeTest = process.env.TRUSTY_SQUIRE_OBSERVE_V2;
+  process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "off";
+  process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
   h.providers = ["google"];
   h.oauthStatus = "already_valid";
   h.oauthLoginCalls = [];
+  h.oauthLoginTimeouts = [];
+  h.oauthLoginError = null;
+  h.oauthConsentProviders = [];
+  h.oauthExpectedGoogleAccountEmails = [];
+  h.oauthLoginGates = new Map();
+  h.waitForInteractiveDomCalls = [];
+  h.oauthResultUrl = "https://app.example.com/dashboard";
+  h.restoredStorageStates = [];
+  h.restoreStorageStateGate = null;
   h.oauthReadError = null;
   h.oauthTransition = null;
   h.oauthRecoveryCalls = 0;
   h.typed = [];
   h.uploads = [];
   h.selected = [];
+  h.selectError = null;
   h.selectMutation = null;
   h.phoneCountries = [];
   h.phoneCountry = null;
@@ -931,12 +1104,16 @@ beforeEach(() => {
   h.trackedClickFailure = null;
   h.autocompleteSuggestions = [];
   h.autocompleteCommitMutation = null;
+  h.shippingMethodsLoadOnAutocompleteCommit = false;
+  h.shippingMethodsLoaded = false;
+  h.requiredShippingAddressCommits = [];
   h.autocompleteCommitCalls = [];
   h.autocompleteConfirmOverride = null;
   h.autocompleteConfirmCalls = [];
   h.autocompleteDiscardCalls = 0;
   h.autocompleteDiscardEscapeCalls = [];
   h.clickCalls = 0;
+  h.clickError = null;
   h.frameClicks = [];
   h.frameJsClicks = [];
   h.frameTypes = [];
@@ -947,40 +1124,64 @@ beforeEach(() => {
   h.started = 0;
   h.startCalls = 0;
   h.startGate = null;
+  h.startGates = new Map();
   h.closeCalls = 0;
+  h.forceCloseCalls = 0;
   h.closeState = "closed";
-  h.resetCalls = 0;
-  h.resetFailuresRemaining = 0;
+  h.closeStates = new Map();
+  h.closeGates = new Map();
   h.profileProbeCalls = 0;
   h.controllerProviderProbeCalls = 0;
   h.workerEmail = null;
+  h.liveGoogleEmail = "default-google@example.com";
+  h.identityProbeCalls = 0;
+  h.identityProbeExpectedGoogleAccountEmails = [];
+  h.googleIdentityByExpectedEmail = new Map();
+  h.temporaryHostScopes = [];
+  h.hostScopeProviders = [];
   h.connections = [];
   h.profileDirs = [];
-  h.leaseSerial = 0;
-  h.warmLeaseProfileDir = null;
-  h.nextLeaseProfileDir = null;
-  h.profileAcquisitionInterruption = null;
-  h.leaseAcquireCalls = 0;
-  h.activeLeaseCount = 0;
-  h.leaseReturnCalls = 0;
-  h.leaseDestroyCalls = 0;
-  h.leaseRetainCalls = 0;
-  h.leaseRetainDestroyRequired = [];
-  h.directIdentityAcquireCalls = 0;
-  h.directIdentityReleaseCalls = 0;
-  h.directIdentityProfileDir = "/tmp/trusty-squire-unit-canonical-profile";
+  h.proxyUrls = [];
+  h.seededStorageStates = [];
+  h.storageStates = new Map();
+  h.identityMetadata = new Map();
+  h.storageStateReads = [];
+  h.storageStateReadGate = null;
+  h.storageStateWrites = [];
+  h.pendingStorageStates = [];
+  h.pendingStorageStateOversized = false;
+  h.storageStateWriteError = null;
+  h.storageStateWriteGate = null;
+  h.storageStateWriteAttempts = 0;
+  h.profileDestroyGate = null;
+  h.profileOperationProbeGate = null;
+  h.ephemeralSerial = 0;
+  h.createdProfiles = [];
+  h.destroyedProfiles = [];
+  h.captureStorageState = { cookies: [], origins: [] };
+  h.captureStorageStates = new Map();
+  h.captureStorageStateSequences = new Map();
+  h.captureStorageStateCalls = 0;
+  h.captureStorageStateGate = null;
+  h.captureStorageStateError = null;
   h.currentUrl = "";
+  h.mainDocumentEpoch = 0;
   h.elements = [];
   h.extractInteractiveElementsCalls = 0;
   h.checkoutFieldNames = [];
   h.visibleText = "";
+  h.visibleTextQueue = [];
   h.visibleTextGate = null;
   h.extractVisibleTextCalls = 0;
+  h.openFirstMailResult = false;
   h.checkoutSummary = null;
   h.cartLineItems = [];
   h.cartLineItemsAfterClick = null;
   h.cartLineReadFailuresRemaining = 0;
   h.failNextCartLineReadAfterClick = false;
+  h.clearCartResult = true;
+  h.clearCartCalls = 0;
+  h.clearCartItems = null;
   h.readCheckoutSummaryCalls = 0;
   h.focusedLabels = [];
   h.pressedKeys = [];
@@ -1001,8 +1202,10 @@ beforeEach(() => {
     text: "Control",
     safetySignals: { billingObject: false, accountSetup: false },
   };
+  h.locatorResolveMissValues = [];
   h.locatorClickCalls = 0;
   h.locatorTypeCalls = [];
+  h.capturedSealedFieldKeys = [];
   h.locatorResolveIntents = [];
   h.locatorDisposeCalls = 0;
   h.isPayPalHostedCheckout = false;
@@ -1011,6 +1214,8 @@ beforeEach(() => {
   h.fillAndSubmitResult = { three_ds_required: false, order_confirmed: true };
   h.clearSealedPaymentFieldsCalls = 0;
   h.waitForThreeDsResult = "timeout";
+  h.waitForThreeDsCalls = [];
+  h.paymentInstrumentMismatch = null;
 });
 
 const replayRecipe = (overrides: Partial<OperatorRecipe> = {}): OperatorRecipe => ({
@@ -1033,6 +1238,7 @@ const replayRecipe = (overrides: Partial<OperatorRecipe> = {}): OperatorRecipe =
 
 describe("prepared-statement replay", () => {
   it("resolves, binds, and acts without putting the host in the hot path", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({
         testId: "shipping-city",
@@ -1096,6 +1302,46 @@ describe("prepared-statement replay", () => {
     expect(result.status).toBe("fallback_required");
     expect(result.status === "fallback_required" && result.step_index).toBe(0);
     expect(result.status === "fallback_required" && result.next_index).toBe(1);
+  });
+
+  it("normalizes private browser failures during V2 recipe replay", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        testId: "variant",
+        labelText: "Variant",
+        selector: "#private-variant-selector",
+        selectOptions: [{ value: "blue", text: "Ocean Blue" }],
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    h.selectError = new Error(
+      'select <select> #private-variant-selector: option "Private option" was not found',
+    );
+
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [
+          {
+            action: {
+              kind: "select",
+              target: { dom_hint: { testid: "variant" }, accessible_name: "Variant" },
+              value: "Blue",
+            },
+          },
+        ],
+      }),
+      {},
+    );
+
+    expect(result).toMatchObject({ status: "fallback_required", reason: "selection_failed" });
+    expect(JSON.stringify(result)).not.toContain("private-variant-selector");
+    expect(JSON.stringify(result)).not.toContain("Private option");
   });
 
   it("never replays operate_pay and hands the charge to the fresh approval flow", async () => {
@@ -1175,13 +1421,7 @@ describe("prepared-statement replay", () => {
       /invalid replay continuation/i,
     );
     await finishProvisionSession(started.session_id);
-    // Money rule simplification (2026-08-16): profile-destroy hygiene was
-    // previously tied to the deleted software field-verification guard
-    // (moneyPath && paymentGuard !== "verified"). The manual-card-entry
-    // refusal itself stays terminal; the profile is no longer force-destroyed
-    // as a side effect of it.
-    expect(h.leaseReturnCalls).toBe(1);
-    expect(h.leaseDestroyCalls).toBe(0);
+    expect(h.destroyedProfiles).toEqual([]);
   });
 
   it("rejects fresh, wrong-index, and changed-binding replay continuations", async () => {
@@ -1893,6 +2133,33 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
     },
   );
 
+  it("refuses process-watchdog ownership while operate_start is initializing", async () => {
+    let releaseObservation: (() => void) | undefined;
+    h.visibleTextGate = new Promise<void>((resolve) => {
+      releaseObservation = resolve;
+    });
+    const starting = startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    try {
+      await vi.waitFor(() => expect(activeSessionCount()).toBe(1));
+      await vi.waitFor(() => expect(h.extractVisibleTextCalls).toBeGreaterThan(0));
+
+      await expect(
+        dispatchOperatorBrowserProcessTermination("v1:1:mock-0", {
+          kind: "cpu_budget_exceeded",
+          cpu_percent: 800,
+          ceiling_percent: 200,
+          consecutive_samples: 3,
+        }),
+      ).resolves.toBe(false);
+      expect(h.closeCalls).toBe(0);
+      expect(activeSessionCount()).toBe(1);
+    } finally {
+      releaseObservation?.();
+      const started = await starting;
+      await finishProvisionSession(started.session_id);
+    }
+  });
+
   it("allows a goto step to a subdomain of the recipe's own domain", async () => {
     h.elements = [];
     const started = await startProvisionSession({
@@ -2002,6 +2269,19 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
     expect(provisionActTool.description).toContain(
       'operate_act { kind: "extract", into_slot: "<slot>" }',
     );
+    expect(provisionActTool.description).toContain("Under default compact-v2");
+    expect(provisionActTool.description).toContain("opaque `stale_ref`");
+    expect(provisionActTool.description).toContain("@label alias of exactly one of its rows");
+    expect(provisionActTool.description).toContain("In V1, stable target refs remain reusable");
+    expect(provisionObserveTool.description).toContain("default compact-v2 mode");
+    expect(provisionObserveTool.description).toContain("[ref,role,facts?]");
+    expect(provisionObserveTool.description).toContain("s=<state bitset>");
+    expect(provisionObserveTool.description).toContain(
+      "c=checked,u=unchecked,d=disabled,r=required",
+    );
+    expect(provisionObserveTool.description).toContain("x=s for a same-origin child");
+    expect(provisionObserveTool.description).toContain("Fact-only rows begin with a keyed segment");
+    expect(provisionObserveTool.description).toContain("In V1 only, pass detail");
 
     const dir = mkdtempSync(join(tmpdir(), "recipe-guidance-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
@@ -2775,10 +3055,80 @@ describe("verified recipe recording", () => {
 });
 afterEach(async () => {
   vi.useRealTimers();
+  // An unproven close deliberately retains the real-profile lease in the
+  // runtime. The mock has no process to prove dead, so restore its normal
+  // close result before cross-test cleanup.
+  h.closeState = "closed";
+  h.closeStates.clear();
   await closeAllProvisionSessions();
+  delete process.env.BOT_START_TIMEOUT_MS;
+  delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+  delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+  if (compactV2ModeBeforeTest === undefined) delete process.env.TRUSTY_SQUIRE_OBSERVE_V2;
+  else process.env.TRUSTY_SQUIRE_OBSERVE_V2 = compactV2ModeBeforeTest;
 });
 
 describe("3.1 — autocomplete-aware type fill", () => {
+  it("fills Shopify's required address combobox, commits its suggestion, and leaves apartment empty", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        role: "combobox",
+        labelText: "Address",
+        autocomplete: "shipping address-line1",
+        required: true,
+        selector: "#shipping-address",
+        value: "",
+      }),
+      elem({
+        index: 1,
+        tag: "input",
+        role: "textbox",
+        labelText: "Apartment, suite, etc. (optional)",
+        autocomplete: "shipping address-line2",
+        selector: "#shipping-apartment",
+        value: "",
+      }),
+    ];
+    h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
+    h.autocompleteCommitMutation = {
+      selector: "#shipping-address",
+      value: "350 5th Ave, New York, NY 10118, USA",
+    };
+    // Shopify only enables delivery-rate selection after the required address
+    // line is committed by blur/change, not merely after a Places selection.
+    h.shippingMethodsLoadOnAutocompleteCommit = true;
+
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table;
+    const addressRef = rows.find((row) => row[1] === "s" && row[2]?.includes("f=address"))?.[0];
+
+    // The old observation exposed both controls as f=address, allowing the
+    // textbox below the required line to receive this value and leaving
+    // shipping blocked. The only f=address ref now identifies line 1.
+    expect(addressRef).toBeDefined();
+    await act(started.session_id, { kind: "type", target: addressRef!, text: "350 5th Ave" });
+
+    expect(h.typed).toEqual([{ selector: "#shipping-address", text: "350 5th Ave" }]);
+    expect(h.autocompleteCommitCalls).toEqual([0]);
+    expect(h.requiredShippingAddressCommits).toEqual(["#shipping-address"]);
+    expect(h.shippingMethodsLoaded).toBe(true);
+    expect(h.autocompleteConfirmCalls).toEqual([
+      { selector: "#shipping-address", pickedText: "350 5th Ave, New York, NY 10118, USA" },
+    ]);
+    expect(h.elements).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          selector: "#shipping-address",
+          value: "350 5th Ave, New York, NY 10118, USA",
+        }),
+        expect.objectContaining({ selector: "#shipping-apartment", value: "" }),
+      ]),
+    );
+  });
+
   it("commits the single matching suggestion and verifies the underlying value actually committed", async () => {
     h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
     h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
@@ -3123,9 +3473,7 @@ describe("3.1 — autocomplete-aware type fill", () => {
 });
 
 describe("operate session — OAuth lifecycle", () => {
-  it("completes oauth_login in one action and returns the settled product observation", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-atomic-oauth-"));
-    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
+  it("preserves the authorized target and completes OAuth in the existing real-profile browser", async () => {
     h.visibleText = "Continue with Google";
     h.elements = [
       elem({
@@ -3136,72 +3484,86 @@ describe("operate session — OAuth lifecycle", () => {
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
-
     const result = await act(started.session_id, {
       kind: "oauth_login",
       target: "Continue with Google",
     });
-
     expect(h.oauthLoginCalls).toEqual(["#google-oauth"]);
-    expect(result.url).toBe("https://app.example.com/dashboard");
+    expect(h.startCalls).toBe(1);
+    expect(h.profileDirs).toHaveLength(1);
     expect(result.text).toBe("Signed in");
-    expect(result.oauth).toBeUndefined();
-    try {
-      await provisionRememberTool.handler(
-        {
-          session_id: started.session_id,
-          name: "atomic-oauth",
-          goal: "Sign in",
-          verb: "login",
-          inputs: {},
-          postcondition: {
-            kind: "execute_capability",
-            describe: "Signed in",
-            success_signal: { text_present: "Signed in" },
-          },
-        },
-        null as unknown as ApiClient,
-      );
-      const file = readdirSync(dir)[0];
-      expect(file).toBeDefined();
-      const recipe = OperatorRecipeSchema.parse(JSON.parse(readFileSync(join(dir, file!), "utf8")));
-      expect(recipe.trace.map((entry) => entry.action.kind)).toEqual([
-        "oauth_click",
-        "oauth_settle",
-      ]);
-    } finally {
-      delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
-      rmSync(dir, { recursive: true, force: true });
-    }
+    await finishProvisionSession(started.session_id);
   });
 
-  it("returns an actionable OAuth-in-progress observation when a provider page detaches mid-read", async () => {
+  it("waits for DOM readiness instead of spending the OAuth completion budget on a fixed dwell", async () => {
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "30";
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    h.oauthLoginGates.set(
+      0,
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, 10);
+      }),
+    );
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
-    h.oauthTransition = {
-      productUrl: "https://app.example.com/login",
-      providerPageClosed: true,
-      productPageViable: true,
-      browserConnected: true,
-    };
-    h.oauthReadError = "page.evaluate: Target page, context or browser has been closed";
 
-    const result = await observe(started.session_id);
+    await expect(
+      act(started.session_id, { kind: "oauth_login", target: "Continue with Google" }),
+    ).resolves.toMatchObject({ text: "Signed in" });
+    expect(h.waitForInteractiveDomCalls).toContainEqual({ minElements: 1, timeoutMs: 2_000 });
+    await finishProvisionSession(started.session_id);
+  });
 
-    expect(result).toMatchObject({
+  it("keeps the session alive and inspectable after an OAuth completion-wait timeout", async () => {
+    // Regression: an OAuth boundary timeout used to force-terminate the whole
+    // provision session ("oauth_action_terminalize"), so a pending
+    // chooser/consent screen became unreachable — observe/screenshot/oauth_settle
+    // all returned "unknown provision session" and the only recovery was a
+    // fresh session that lost all progress. A timeout must surface as a
+    // recoverable error while the session stays usable.
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "10";
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    let releaseOAuth!: () => void;
+    h.oauthLoginGates.set(
+      0,
+      new Promise<void>((resolve) => {
+        releaseOAuth = resolve;
+      }),
+    );
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+    await expect(
+      act(started.session_id, { kind: "oauth_login", target: "Continue with Google" }),
+    ).rejects.toMatchObject({ code: "google_session" });
+
+    // The timeout must NOT have deregistered the session: observe succeeds…
+    await expect(observe(started.session_id)).resolves.toMatchObject({
       session_id: started.session_id,
-      url: "https://app.example.com/login",
-      oauth: {
-        state: "in_progress",
-        provider_page: "closed_or_detached",
-        next_action: "operate_observe",
-      },
     });
-    expect(result.guidance).toMatch(/OAuth in progress/i);
-    expect(JSON.stringify(result)).not.toContain("Target page, context or browser has been closed");
-    expect(h.oauthRecoveryCalls).toBe(1);
+    // …oauth_settle is still callable on the same session…
+    await expect(act(started.session_id, { kind: "oauth_settle" })).resolves.toBeDefined();
+    releaseOAuth();
+    // …and operate_finish closes the still-registered session normally.
+    await expect(finishProvisionSession(started.session_id)).resolves.toMatchObject({
+      session_id: started.session_id,
+      closed: true,
+    });
   });
 });
-
 describe("operate_start — consent-overlay auto-dismiss", () => {
   // Regression: dismissConsentBanner() shipped as DEAD CODE (zero call sites), so
   // a cookie/consent overlay (Usercentrics/OneTrust) occluded the whole form and
@@ -3217,6 +3579,1832 @@ describe("operate_start — consent-overlay auto-dismiss", () => {
     await startProvisionSession({ serviceUrl: "https://faucet.example.com/" });
     // Dismissed on the first attempt → the second (retry) attempt is skipped.
     expect(h.consentDismissCalls).toBe(1);
+  });
+});
+
+describe("Compact V2 action-map boundary", () => {
+  it("publishes mode-correct selection and wire contracts", () => {
+    const properties = provisionActTool.jsonInputSchema.properties as Record<string, unknown>;
+    const selectionDescription = (properties.selections as { description: string }).description;
+
+    expect(selectionDescription).toBe(
+      "Map each current Compact V2 @e: ref or @label, or V1 observed label/ref, to its visible option text.",
+    );
+    expect(provisionActTool.description).toContain(
+      "Compact V2 keys are current safe_table @e: refs or @labels, while V1 keys may be observed labels or refs",
+    );
+    expect(provisionObserveTool.description).toContain(
+      "the row's @label alias, a slug of its screened short label",
+    );
+    expect(provisionObserveTool.description).toContain(
+      "matching actionable refs with screened labels and code-owned facts",
+    );
+  });
+
+  it("retains only sealed inventory after a V2 observation", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        role: "textbox",
+        selector: "#card-number",
+        autocomplete: "cc-number",
+        value: "4111111111111111",
+        visibleText: "correcthorsebattery",
+        sealed: true,
+      }),
+      elem({
+        index: 1,
+        tag: "input",
+        role: "textbox",
+        selector: "#security-code",
+        autocomplete: "cc-csc",
+        value: "123",
+        sealed: true,
+      }),
+    ];
+
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const retained = paymentSession(started.session_id).lastElements;
+    const serialized = JSON.stringify(retained);
+    expect(serialized).not.toContain("4111111111111111");
+    expect(serialized).not.toContain("correcthorsebattery");
+    expect(serialized).not.toContain("#card-number");
+    expect(retained[0]).toMatchObject({
+      value: null,
+      selector: expect.stringMatching(/^@c:/),
+      autocomplete: "cc-number",
+    });
+  });
+
+  it("uses opaque correlation for sealed trace capture and promotion", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const captureDir = mkdtempSync(join(tmpdir(), "compact-v2-promotion-"));
+    const previousCaptureDir = process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
+    process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE = captureDir;
+    try {
+      h.elements = [
+        elem({
+          tag: "button",
+          role: "button",
+          id: "correcthorsebattery",
+          name: "correcthorsebattery",
+          selector: "#private-action-selector",
+          visibleText: "Create account",
+        }),
+      ];
+      const started = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/signup",
+      });
+      const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+        .safe_table[0]![0];
+      await act(started.session_id, { kind: "click", target: handle });
+
+      const session = paymentSession(started.session_id);
+      const actionRound = session.captureRounds[0]!;
+      const observedSelector = (actionRound.observed as { selector: string }).selector;
+      expect(observedSelector).toMatch(/^@c:/);
+      expect(actionRound.inventory.some((element) => element.selector === observedSelector)).toBe(
+        true,
+      );
+      expect(JSON.stringify(session.actionTrace)).not.toContain("private-action-selector");
+      expect(JSON.stringify(session.actionTrace)).not.toContain("correcthorsebattery");
+      expect(session.actionTrace[0]?.action).not.toHaveProperty("target.css");
+
+      h.elements = [
+        elem({
+          tag: "button",
+          role: "button",
+          selector: "#private-copy-selector",
+          visibleText: "Copy API key",
+        }),
+      ];
+      await observe(started.session_id);
+      const promoted = await captureAndPromoteSession(started.session_id);
+      expect(promoted).toMatchObject({ kind: "ok" });
+      expect(JSON.stringify(session.captureRounds)).not.toContain("private-action-selector");
+      expect(JSON.stringify(session.captureRounds)).not.toContain("private-copy-selector");
+    } finally {
+      if (previousCaptureDir === undefined) {
+        delete process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
+      } else {
+        process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE = previousCaptureDir;
+      }
+      rmSync(captureDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails V2 recording closed when an action value cannot cross the seal", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        role: "textbox",
+        labelText: "Name",
+        selector: "#private-name",
+      }),
+    ];
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      const started = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/signup",
+      });
+      const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+        .safe_table[0]![0];
+      const rawValue = "correct horse battery staple";
+      await act(started.session_id, {
+        kind: "type",
+        target: handle,
+        text: rawValue,
+        provenance: { hole: "address.line1" },
+      });
+
+      const token = "ab12cd34ef56gh78ij90kl";
+      const magicUrl = `https://shop.example.com/magic?code=${token}`;
+      await act(started.session_id, { kind: "goto", url: magicUrl });
+
+      const session = paymentSession(started.session_id);
+      const retained = JSON.stringify({
+        trace: session.actionTrace,
+        capture: session.captureRounds,
+      });
+      expect(h.typed).toContainEqual({ selector: "#private-name", text: rawValue });
+      expect(h.gotos).toContain(magicUrl);
+      expect(retained).not.toContain(rawValue);
+      expect(retained).not.toContain(token);
+      expect(writes.join("")).not.toContain(token);
+      expect(session.recipeRejectionReason).toBe("compact_v2_unrepresentable_value_action");
+      await expect(captureAndPromoteSession(started.session_id)).resolves.toEqual({
+        kind: "skipped",
+        reason: "compact_v2_unrepresentable_value_action",
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("marks unsupported select and phone-country values non-recordable", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Country",
+        selector: "#country",
+        selectOptions: [{ value: "kr", text: "South Korea" }],
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const handle = (started as unknown as { safe_table: Array<[string]> }).safe_table[0]![0];
+
+    await act(started.session_id, {
+      kind: "select",
+      target: handle,
+      text: "South Korea",
+      provenance: { hole: "address.country" },
+    });
+    await act(started.session_id, {
+      kind: "set_phone_country",
+      country: "Japan",
+      provenance: { hole: "contact.phone_country" },
+    });
+
+    const session = paymentSession(started.session_id);
+    expect(h.selected).toContainEqual({ selector: "#country", matcher: "South Korea" });
+    expect(h.phoneCountries).toContain("Japan");
+    expect(JSON.stringify(session.actionTrace)).not.toContain("South Korea");
+    expect(JSON.stringify(session.actionTrace)).not.toContain("Japan");
+    expect(session.recipeRejectionReason).toBe("compact_v2_unrepresentable_value_action");
+    await expect(captureAndPromoteSession(started.session_id)).resolves.toEqual({
+      kind: "skipped",
+      reason: "compact_v2_unrepresentable_value_action",
+    });
+  });
+
+  it("refuses V2 replay recording for unsafe URL paths and query-dependent navigation", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      const pathSession = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/signup",
+      });
+      const secretPath = "https://shop.example.com/keys/sk_live_1234567890abcdef";
+      await act(pathSession.session_id, { kind: "goto", url: secretPath });
+      expect(h.gotos).toContain(secretPath);
+      expect(JSON.stringify(paymentSession(pathSession.session_id).actionTrace)).not.toContain(
+        "sk_live_1234567890abcdef",
+      );
+      await expect(captureAndPromoteSession(pathSession.session_id)).resolves.toEqual({
+        kind: "skipped",
+        reason: "compact_v2_unrepresentable_goto",
+      });
+      await finishProvisionSession(pathSession.session_id);
+
+      const querySession = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/signup",
+      });
+      const queryUrl = "https://shop.example.com/settings?tab=api-keys";
+      await act(querySession.session_id, { kind: "goto", url: queryUrl });
+      expect(h.gotos).toContain(queryUrl);
+      await expect(captureAndPromoteSession(querySession.session_id)).resolves.toEqual({
+        kind: "skipped",
+        reason: "compact_v2_unrepresentable_goto",
+      });
+      expect(writes.join("")).not.toContain("sk_live_1234567890abcdef");
+      expect(writes.join("")).not.toContain("tab=api-keys");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("screens host metadata before V2 audit and replay retention", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const secretHost = "4111-1111-1111-1111.attacker.test";
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      const started = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/signup",
+      });
+      await expect(
+        act(started.session_id, { kind: "goto", url: `https://${secretHost}/checkout` }),
+      ).rejects.toThrow("target_not_allowed");
+      await act(started.session_id, { kind: "allow_host", host: secretHost });
+
+      const session = paymentSession(started.session_id);
+      expect(session.recipeRejectionReason).toBe("compact_v2_unrepresentable_host");
+      expect(JSON.stringify(session.actionTrace)).not.toContain(secretHost);
+      expect(writes.join("")).not.toContain(secretHost);
+      expect(writes.join("")).toContain("<sealed-host>");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("keeps start metadata, rejects locators, and binds a handle to its current page snapshot", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.workerEmail = "operator@example.test";
+    h.elements = [
+      elem({
+        tag: "button",
+        type: "button",
+        role: "button",
+        selector: "#continue",
+        visibleText: "Continue",
+      }),
+    ];
+
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+      hint: "Complete the storefront form.",
+    });
+    expect(started).toMatchObject({
+      format: "compact-v2",
+      hint: expect.stringContaining("Complete the storefront form."),
+      user_email: "operator@example.test",
+    });
+    const firstRef = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]?.[0];
+    expect(firstRef).toMatch(/^@e:/);
+
+    // V2's sealed membership check runs before locator parsing, so a CSS/text
+    // fallback cannot escape the action map.
+    await expect(
+      act(started.session_id, { kind: "click", target: "css=#continue" }),
+    ).rejects.toThrow("stale_ref");
+    expect(h.locatorClickCalls).toBe(0);
+
+    // A page transition invalidates all handles issued from the old map.
+    const afterGoto = await act(started.session_id, {
+      kind: "goto",
+      url: "https://shop.example.com/next",
+    });
+    await expect(act(started.session_id, { kind: "click", target: firstRef! })).rejects.toThrow(
+      "stale_ref",
+    );
+    expect(h.clickCalls).toBe(0);
+
+    const freshRef = (afterGoto as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]?.[0];
+    expect(freshRef).toMatch(/^@e:/);
+    await act(started.session_id, { kind: "click", target: freshRef! });
+    expect(h.clickCalls).toBe(1);
+  });
+
+  it("audits forged targets opaquely before rejecting them", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      writes.push(String(chunk));
+      return true;
+    });
+    try {
+      const started = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/checkout",
+      });
+      const forged = "4111111111111111";
+      await expect(act(started.session_id, { kind: "click", target: forged })).rejects.toThrow(
+        "stale_ref",
+      );
+      const auditText = writes.join("");
+      expect(auditText).toContain('"target":"<sealed>"');
+      expect(auditText).not.toContain(forged);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("rejects a handle after its snapshot lifetime expires", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    let now = 1_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const started = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/checkout",
+      });
+      const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
+        .safe_table[0]![0];
+      now += 5 * 60_000 + 1;
+      await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+        "stale_ref",
+      );
+      expect(h.clickCalls).toBe(0);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it("binds paging cursors to the normalized query and role", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = Array.from({ length: 8 }, (_, index) =>
+      elem({
+        index,
+        tag: "button",
+        role: "button",
+        visibleText: `Item ${index}`,
+        selector: `#item-${index}`,
+      }),
+    );
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/products",
+    });
+    const pageCursor = (started.overflow as { next_cursor: string }).next_cursor;
+    await expect(observeQuery(started.session_id, "Item", undefined, pageCursor)).rejects.toThrow(
+      "invalid_cursor",
+    );
+    retainActivePaymentFieldSeal();
+    const nextPage = await observeQuery(started.session_id, "", undefined, pageCursor);
+    expect(nextPage.safe_table).toHaveLength(4);
+    const queryPage = await observeQuery(started.session_id, "Item");
+    const queryCursor = (queryPage.overflow as { next_cursor: string }).next_cursor;
+    await expect(observeQuery(started.session_id, "Other", undefined, queryCursor)).rejects.toThrow(
+      "invalid_cursor",
+    );
+    await expect(observeQuery(started.session_id, "Item", "link", queryCursor)).rejects.toThrow(
+      "invalid_cursor",
+    );
+  });
+
+  it("pages across a volatile query-token change on the same origin+path", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = Array.from({ length: 8 }, (_, index) =>
+      elem({
+        index,
+        tag: "button",
+        role: "button",
+        visibleText: `Item ${index}`,
+        selector: `#item-${index}`,
+      }),
+    );
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkouts/c/token",
+    });
+    const pageCursor = (started.overflow as { next_cursor: string }).next_cursor;
+    // Live checkouts (e.g. Shopify) rotate a query token on every step
+    // re-render without a real navigation; paging must survive it.
+    h.currentUrl = "https://shop.example.com/checkouts/c/token?_r=revalidated";
+    const nextPage = await observeQuery(started.session_id, "", undefined, pageCursor);
+    expect((nextPage.safe_table as unknown[]).length).toBeGreaterThan(0);
+    expect(nextPage.overflow).toBeUndefined();
+  });
+
+  it("pages across a benign form re-render, retiring cursors but not refs", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = Array.from({ length: 8 }, (_, index) =>
+      elem({
+        index,
+        tag: "button",
+        role: "button",
+        visibleText: `Item ${index}`,
+        selector: `#item-${index}`,
+      }),
+    );
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkouts/c/token",
+    });
+    const pageCursor = (started.overflow as { next_cursor: string }).next_cursor;
+    // A validation state appears on a live field between pages: the element
+    // set no longer byte-matches the frozen snapshot, but paging must
+    // re-serialize the same document instead of failing with stale_cursor.
+    (h.elements[3] as { required?: boolean }).required = true;
+    const nextPage = (await observeQuery(started.session_id, "", undefined, pageCursor)) as {
+      safe_table: Array<[string]>;
+      overflow?: { next_cursor: string };
+    };
+    expect(nextPage.safe_table.length).toBe(4);
+    // The pre-resync cursor is a positional offset into the OLD serialization
+    // and must be dead, never silently re-paged.
+    await expect(observeQuery(started.session_id, "", undefined, pageCursor)).rejects.toThrow(
+      "stale_cursor",
+    );
+    // A ref issued before the re-render is NOT positional and stays valid:
+    // the element it names is still there and unchanged.
+    const firstPageRef = (started as unknown as { safe_table: Array<[string]> }).safe_table[0]![0];
+    await act(started.session_id, { kind: "click", target: firstPageRef });
+    expect(h.clickCalls).toBe(1);
+  });
+
+  it("still invalidates overflow cursors on a cross-document or cross-path navigation", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = Array.from({ length: 8 }, (_, index) =>
+      elem({
+        index,
+        tag: "button",
+        role: "button",
+        visibleText: `Item ${index}`,
+        selector: `#item-${index}`,
+      }),
+    );
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkouts/c/token",
+    });
+    const pageCursor = (started.overflow as { next_cursor: string }).next_cursor;
+
+    // A replaced main document on the same URL still invalidates.
+    h.mainDocumentEpoch += 1;
+    await expect(observeQuery(started.session_id, "", undefined, pageCursor)).rejects.toThrow(
+      "stale_cursor",
+    );
+
+    // Re-establish the snapshot, then navigate to a different path (a real
+    // navigation also replaces the document): the normalized origin+pathname
+    // page key must change and the cursor must die — refs never leak across
+    // documents.
+    const reObserved = await observe(started.session_id);
+    const freshCursor = (reObserved.overflow as { next_cursor: string }).next_cursor;
+    h.currentUrl = "https://shop.example.com/checkouts/c/other?_r=x";
+    h.mainDocumentEpoch += 1;
+    await expect(observeQuery(started.session_id, "", undefined, freshCursor)).rejects.toThrow(
+      "stale_cursor",
+    );
+  });
+
+  it("searches only the sealed action map", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        role: "textbox",
+        value: "private-query-token",
+        selector: "#secret-bearing-field",
+      }),
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/products",
+    });
+
+    const secretGuess = await observeQuery(started.session_id, "private-query-token");
+    expect(secretGuess.safe_table).toEqual([]);
+    const safeLabel = await observeQuery(started.session_id, "continue");
+    expect(safeLabel.safe_table).toEqual([
+      expect.arrayContaining([
+        expect.stringMatching(/^@e:/),
+        "b",
+        expect.stringContaining("@continue"),
+      ]),
+    ]);
+  });
+
+  it("queries and re-resolves Resend's existing Google control", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "button",
+        role: "button",
+        visibleText: "Log in with Google",
+        selector: 'form[action="google"] button',
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://resend.com/signup" });
+
+    const query = await observeQuery(started.session_id, "Google");
+    const handle = (query.safe_table as Array<[string]>)[0]?.[0];
+    expect(handle).toMatch(/^@e:/);
+
+    await act(started.session_id, {
+      kind: "oauth_login",
+      target: handle!,
+      provider: "google",
+    });
+
+    expect(h.oauthLoginCalls).toEqual(['form[action="google"] button']);
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("matches private merchant labels while returning only sealed rows", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Buy Acme", selector: "#acme" }),
+      elem({
+        index: 1,
+        tag: "button",
+        role: "button",
+        visibleText: "Buy Beta",
+        selector: "#beta",
+      }),
+      elem({
+        index: 2,
+        tag: "button",
+        role: "button",
+        visibleText: "購入する",
+        selector: "#purchase-ja",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/products",
+    });
+
+    const acme = await observeQuery(started.session_id, "Acme");
+    const japanese = await observeQuery(started.session_id, "購入する");
+
+    expect(acme.safe_table).toHaveLength(1);
+    expect(japanese.safe_table).toHaveLength(1);
+    expect(JSON.stringify(acme)).not.toContain("Acme");
+    expect(JSON.stringify(japanese)).not.toContain("購入する");
+    expect((acme.safe_table as Array<[string]>)[0]![0]).not.toBe(
+      (japanese.safe_table as Array<[string]>)[0]![0],
+    );
+  });
+
+  it("requires every private query term to match one naming source", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Buy Acme Basic", selector: "#basic" }),
+      elem({
+        index: 1,
+        tag: "button",
+        role: "button",
+        visibleText: "Buy Acme Pro",
+        selector: "#pro",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/products",
+    });
+
+    const result = await observeQuery(started.session_id, "Acme Pro");
+
+    expect(result.safe_table).toHaveLength(1);
+    expect(JSON.stringify(result)).not.toContain("Acme");
+    expect(JSON.stringify(result)).not.toContain("Pro");
+  });
+
+  it("uses four-digit private query terms to distinguish sealed controls", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Buy Model 2023", selector: "#2023" }),
+      elem({
+        index: 1,
+        tag: "button",
+        role: "button",
+        visibleText: "Buy Model 2024",
+        selector: "#2024",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/products",
+    });
+
+    const result = await observeQuery(started.session_id, "Model 2024");
+
+    expect(result.safe_table).toHaveLength(1);
+    expect(JSON.stringify(result)).not.toContain("Model");
+  });
+
+  it("keeps a ref valid when other controls appear in the live action map", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const email = elem({
+      tag: "input",
+      type: "email",
+      role: "textbox",
+      labelText: "Email",
+      selector: "#email",
+    });
+    h.elements = [email];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    const handle = (started as unknown as { safe_table: Array<[string]> }).safe_table[0]![0];
+
+    // A live re-render adds a control. The observed field is untouched, so its
+    // ref must still act — that is the whole point of fingerprint identity.
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+      email,
+    ];
+
+    await act(started.session_id, { kind: "type", target: handle, text: "buyer@example.com" });
+    expect(h.typed).toEqual([{ selector: "#email", text: "buyer@example.com" }]);
+  });
+
+  it("rejects a handle after a same-URL main-document replacement", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    const handle = (started as unknown as { safe_table: Array<[string]> }).safe_table[0]![0];
+
+    h.mainDocumentEpoch += 1;
+
+    await expect(act(started.session_id, { kind: "click", target: handle })).rejects.toThrow(
+      "stale_ref",
+    );
+    expect(h.clickCalls).toBe(0);
+  });
+
+  // A live Shopify checkout re-renders the delivery block while the agent is
+  // still filling it: Places autocomplete reorders the address inputs (which
+  // shifts the positional slug baked into screenPath) and the checkout rewrites
+  // the volatile `/checkouts/cn/<token>/<step>` path segment. Neither replaces
+  // the document, so every ref from the opening observation must still act.
+  function deliveryBlock(order: readonly string[], suffix = ""): unknown[] {
+    const byName: Record<string, Record<string, unknown>> = {
+      firstName: { labelText: "First name", selector: "#first-name" },
+      lastName: { labelText: "Last name", selector: "#last-name" },
+      address1: { labelText: "Address", selector: "#address1" },
+      city: { labelText: "City", selector: "#city" },
+      zip: { labelText: "Postal code", selector: "#zip" },
+    };
+    return order.map((name, position) =>
+      elem({
+        ...byName[name],
+        index: position,
+        tag: "input",
+        type: "text",
+        role: "textbox",
+        name,
+        // Shopify's inputs carry framework-random ids, so identity falls to the
+        // structural branch — the branch the reorder used to break.
+        id: `:r${position + 4}:`,
+        container: `form:delivery-${suffix}`,
+        screenPath: `form:delivery-${suffix} > input:input-${position}`,
+      }),
+    );
+  }
+
+  it("fills a whole delivery block across an autocomplete re-render and a checkout token rewrite", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const fields = ["firstName", "lastName", "address1", "city", "zip"] as const;
+    h.elements = deliveryBlock(fields);
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkouts/cn/2iRZ0Tt8lYFMqW9sc9uCyR/information",
+    });
+    const page = started as unknown as {
+      safe_table: Array<[string, string, string?]>;
+      overflow: { next_cursor: string };
+    };
+    const rest = (await observeQuery(
+      started.session_id,
+      "",
+      undefined,
+      page.overflow.next_cursor,
+    )) as { safe_table: Array<[string, string, string?]> };
+    const refs = [...page.safe_table, ...rest.safe_table].map((row) => row[0]);
+    expect(refs).toHaveLength(fields.length);
+
+    // The re-render: siblings reordered, every screenPath ordinal shifted, and
+    // the container's text-derived slug changed. Same document throughout.
+    h.elements = deliveryBlock([...fields].reverse(), "suggestions-open");
+    h.currentUrl = "https://shop.example.com/checkouts/cn/8kQm4Xd1pWvB6nHy3LrTzE/shipping?_r=2";
+
+    for (const ref of refs) {
+      await act(started.session_id, { kind: "type", target: ref, text: "filled" });
+    }
+    expect(h.typed.map((entry: { selector: string }) => entry.selector).sort()).toEqual([
+      "#address1",
+      "#city",
+      "#first-name",
+      "#last-name",
+      "#zip",
+    ]);
+  });
+
+  it("still retires refs on a same-document route change to a different logical page", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkouts/cn/2iRZ0Tt8lYFMqW9sc9uCyR/information",
+    });
+    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+
+    // An SPA pushState off the checkout, with NO document replacement: the
+    // normalized origin+pathname backstop is the only thing standing between
+    // the ref and another logical page, and it must refuse.
+    h.currentUrl = "https://shop.example.com/account/addresses";
+
+    await expect(act(started.session_id, { kind: "click", target: handle })).rejects.toThrow(
+      "stale_ref",
+    );
+    expect(h.clickCalls).toBe(0);
+  });
+
+  it("does not collapse an authored path slug that merely sits under /checkouts/", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkouts/c/spring-sale-guide",
+    });
+    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+
+    // Only a MINTED-looking token is treated as volatile. A readable slug is a
+    // real page name, so a same-document route change between two of them must
+    // still retire the ref.
+    h.currentUrl = "https://shop.example.com/checkouts/c/summer-sale-guide";
+
+    await expect(act(started.session_id, { kind: "click", target: handle })).rejects.toThrow(
+      "stale_ref",
+    );
+    expect(h.clickCalls).toBe(0);
+  });
+
+  it("still retires refs when a different checkout replaces the document", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkouts/cn/2iRZ0Tt8lYFMqW9sc9uCyR/information",
+    });
+    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+
+    // Two different checkouts normalize onto the same page key on purpose, so
+    // the document-identity half of the epoch is what keeps them isolated.
+    h.currentUrl = "https://shop.example.com/checkouts/cn/5vNc9Jt2hQwR7bKx4MpZfD/information";
+    h.mainDocumentEpoch += 1;
+
+    await expect(act(started.session_id, { kind: "click", target: handle })).rejects.toThrow(
+      "stale_ref",
+    );
+    expect(h.clickCalls).toBe(0);
+  });
+
+  it("distinguishes destructive and affirmative controls with code-owned semantics", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Delete account", selector: "#delete" }),
+      elem({
+        index: 1,
+        tag: "button",
+        role: "button",
+        visibleText: "Keep account",
+        selector: "#keep",
+      }),
+    ];
+
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/account" });
+    const serialized = JSON.stringify(started);
+
+    expect(serialized).toContain("a=destructive");
+    expect(serialized).toContain("a=continue");
+    expect(serialized).not.toContain("Delete account");
+    expect(serialized).not.toContain("Keep account");
+  });
+
+  it("keeps a ref through a selector-only re-render of the same control", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#step-one" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    const oldHandle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+
+    // A framework re-render swaps the CSS-in-JS selector. The control's
+    // identity — frame, path, role, accessible name — is unchanged, so the
+    // fingerprint (and therefore the ref) is too.
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#step-two" }),
+    ];
+    const refreshed = await observe(started.session_id);
+    const newHandle = (refreshed as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+    expect(newHandle).toBe(oldHandle);
+    await act(started.session_id, { kind: "click", target: oldHandle });
+    expect(h.clickCalls).toBe(1);
+  });
+
+  it("rejects a handle when its live sealed semantics change before dispatch", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        type: "submit",
+        id: "action",
+        selector: "#action",
+        value: "Continue",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+
+    h.elements = [
+      elem({
+        tag: "input",
+        type: "submit",
+        id: "action",
+        selector: "#action",
+        value: "Delete account",
+      }),
+    ];
+    await expect(act(started.session_id, { kind: "click", target: handle })).rejects.toThrow(
+      "stale_ref",
+    );
+    expect(h.clickCalls).toBe(0);
+  });
+
+  it("shows OTP-shaped control descriptions — masking is payment-only", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "button",
+        role: "button",
+        selector: "#verification",
+        visibleText: "Your verification code is 481920",
+      }),
+      elem({
+        index: 1,
+        tag: "button",
+        role: "button",
+        selector: "#standalone-code",
+        visibleText: "735104",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    // A code rendered on the page is ordinary content the agent must be able to
+    // read; only card material is screened out.
+    expect(JSON.stringify(started)).toContain("481920");
+    expect(JSON.stringify(started)).toContain("735104");
+    const query = await observeQuery(started.session_id, "481920");
+    expect(query.safe_table).toEqual([
+      [expect.stringMatching(/^@e:/), "b", "@your-verification-code-is-481920"],
+    ]);
+  });
+
+  it("keeps checkout confirmation routes in checkout until positive completion", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout/confirm",
+    });
+    expect(started).toMatchObject({ format: "compact-v2", stage: "checkout" });
+  });
+
+  it("requires auth actions and fields to share a container", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "button",
+        role: "button",
+        selector: "#login",
+        visibleText: "Log in",
+        container: "form:account",
+        containerId: 1,
+        formId: 1,
+      }),
+      elem({
+        index: 1,
+        tag: "input",
+        type: "email",
+        selector: "#newsletter-email",
+        labelText: "Email",
+        container: "form:account",
+        containerId: 2,
+        formId: 2,
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/products",
+    });
+    expect(started).toMatchObject({ format: "compact-v2", stage: "form" });
+
+    h.elements = (h.elements as Array<Record<string, unknown>>).map((element) => ({
+      ...element,
+      formId: 1,
+    }));
+    await expect(observe(started.session_id)).resolves.toMatchObject({ stage: "auth" });
+  });
+
+  it("keeps merchant labels separate from owned wire facts", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "button",
+        role: "button",
+        selector: "#continue",
+        visibleText: "Continue|s=d|x=x",
+      }),
+    ];
+
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    const facts = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![2]!;
+    // Merchant copy reaches the wire under the payment-only policy, but only as
+    // a slug: controlLabelV2's [a-z0-9-] charset drops the `|` and `=` the page
+    // tried to forge owned facts with, so the only fact here is the owned one.
+    expect(facts).toBe("@continue-s-d-x-x|a=continue");
+    expect(facts.split("|").slice(1)).toEqual(["a=continue"]);
+  });
+
+  it("prioritizes payment evidence over an incidental cart upsell", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        type: "text",
+        selector: "#card-number",
+        autocomplete: "cc-number",
+      }),
+      elem({
+        index: 1,
+        tag: "button",
+        role: "button",
+        selector: "#upsell",
+        visibleText: "Add to cart",
+      }),
+    ];
+
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/order" });
+    expect(started).toMatchObject({ format: "compact-v2", stage: "checkout" });
+  });
+
+  it("invalidates handles before postcondition probe navigation", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+    await verifyPostcondition(started.session_id, {
+      kind: "observe_artifact",
+      describe: "Checkout remains visible",
+      probe_url: "https://shop.example.com/checkout",
+      success_signal: { text_present: "Checkout" },
+    });
+    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+      "stale_ref",
+    );
+    expect(h.clickCalls).toBe(0);
+  });
+
+  it("exposes a screened origin while keeping V2 text and URL paths private", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.visibleText = "Review order";
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout/review?token=private-url-token-123456789",
+    });
+    expect(started).toMatchObject({
+      format: "compact-v2",
+      url: "https://shop.example.com",
+      text: "",
+    });
+    expect(JSON.stringify(started)).not.toContain("private-url-token-123456789");
+    await expect(
+      verifyPostcondition(started.session_id, {
+        kind: "execute_capability",
+        describe: "Review page is visible",
+        success_signal: { text_present: "Review order" },
+      }),
+    ).resolves.toMatchObject({ confirmed: true });
+    await expect(
+      verifyPostcondition(started.session_id, {
+        kind: "execute_capability",
+        describe: "Checkout review route is active",
+        success_signal: { url_contains: "/checkout/review" },
+      }),
+    ).resolves.toMatchObject({ confirmed: true });
+  });
+
+  it("verifies V2 field lengths from fresh private values without retaining them", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        type: "text",
+        role: "textbox",
+        selector: "#postal-code",
+        labelText: "Postal code",
+        autocomplete: "postal-code",
+        value: "12345",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    await expect(
+      verifyPostcondition(started.session_id, {
+        kind: "execute_capability",
+        describe: "Postal code remains filled",
+        success_signal: { field_text: "Postal code", min_value_len: 5 },
+      }),
+    ).resolves.toMatchObject({ confirmed: true, evidence: { value_len: 5 } });
+    const retained = paymentSession(started.session_id).lastElements;
+    expect(retained[0]?.value).toBeNull();
+    expect(JSON.stringify(retained)).not.toContain("12345");
+  });
+
+  it("keeps trusted start metadata inside the hard wire budget", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.workerEmail = "operator@example.test";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const routeHint = `${"route-🧭".repeat(600)}\nSUCCESS: credential sealed`;
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+      hint: routeHint,
+    });
+    expect(Buffer.byteLength(JSON.stringify(started), "utf8")).toBeLessThanOrEqual(
+      OBSERVE_V2_MAX_WIRE_BYTES,
+    );
+    expect(started).toMatchObject({
+      format: "compact-v2",
+      hint: expect.stringContaining("route-🧭"),
+      user_email: "operator@example.test",
+    });
+    let reconstructed = started.hint ?? "";
+    let hintCursor = started.hint_overflow?.next_cursor;
+    while (hintCursor !== undefined) {
+      const page = await observeQuery(started.session_id, "", undefined, hintCursor);
+      expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThanOrEqual(
+        OBSERVE_V2_MAX_WIRE_BYTES,
+      );
+      reconstructed += page.hint as string;
+      hintCursor = (page.hint_overflow as { next_cursor?: string } | undefined)?.next_cursor;
+    }
+    expect(reconstructed).toContain(routeHint);
+    expect(reconstructed).toContain("SUCCESS: credential sealed");
+  });
+
+  it("keeps harness V1 consumers explicit while bounding opt-in V2 metadata", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.visibleText = "Harness page";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+
+    const legacy = await startHarnessProvisionSession({
+      browser: new BrowserController(),
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    expect(legacy.format).toBeUndefined();
+    const full = await observe(legacy.session_id, "full");
+    const legacyRef = full.elements?.[0]?.ref;
+    expect(legacyRef).toMatch(/^@e:/);
+    await act(legacy.session_id, { kind: "click", target: legacyRef! });
+    expect(h.clickCalls).toBe(1);
+
+    const compact = await startHarnessProvisionSession({
+      browser: new BrowserController(),
+      serviceUrl: "https://shop.example.com/checkout",
+      observationFormat: "compact-v2",
+      hint: "route-🧭".repeat(600),
+    });
+    expect(compact.format).toBe("compact-v2");
+    expect(compact.hint_overflow?.next_cursor).toBeDefined();
+    expect(Buffer.byteLength(JSON.stringify(compact), "utf8")).toBeLessThanOrEqual(
+      OBSERVE_V2_MAX_WIRE_BYTES,
+    );
+  });
+
+  it("seals OAuth and no-observation exits in the V2 envelope", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const secretUrl = "https://app.example.com/login?token=private-query-token";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: secretUrl });
+    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+
+    const ack = await act(started.session_id, { kind: "scroll", direction: "down" }, "none");
+    expect(ack).toMatchObject({
+      format: "compact-v2",
+      url: "https://app.example.com",
+      text: "",
+      observed: "none",
+    });
+    expect(ack.elements).toBeUndefined();
+    // A detail:"none" scroll returns no map, but it does not retire the one the
+    // agent already holds — the control it names has not moved.
+    await act(started.session_id, { kind: "click", target: ref }, "none");
+    // Nothing structural changed, so this is an unchanged delta and the ref the
+    // agent already holds is still the current one.
+    expect(await observe(started.session_id)).toMatchObject({ delta: true });
+    const refreshedRef = ref;
+
+    h.oauthTransition = {
+      productUrl: secretUrl,
+      providerPageClosed: true,
+      productPageViable: true,
+      browserConnected: true,
+    };
+    const transition = await observe(started.session_id);
+    expect(transition).toMatchObject({
+      format: "compact-v2",
+      url: "https://app.example.com",
+      text: "",
+      stage: "auth",
+      oauth: {
+        state: "in_progress",
+        provider_page: "closed_or_detached",
+        next_action: "operate_observe",
+      },
+    });
+    expect(transition.elements).toBeUndefined();
+    expect(JSON.stringify(transition)).not.toContain("private-query-token");
+    expect(h.oauthRecoveryCalls).toBe(1);
+    await expect(act(started.session_id, { kind: "click", target: refreshedRef })).rejects.toThrow(
+      "stale_ref",
+    );
+  });
+
+  it("keeps shadow observations on the V1 action contract", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "shadow";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    expect(started.format).toBeUndefined();
+    await act(started.session_id, { kind: "click", target: "Continue" });
+    expect(h.clickCalls).toBe(1);
+  });
+
+  it("keeps a ref usable after a dispatched action throws", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+    h.clickError = new Error("dispatch failed after click");
+    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+      "action_failed",
+    );
+    // The action failed; the control did not move. Retrying the same ref is
+    // legitimate — only leaving the document retires it.
+    h.clickError = null;
+    await act(started.session_id, { kind: "click", target: ref });
+    expect(h.clickCalls).toBe(2);
+  });
+
+  it("invalidates a handle before the captcha driver receives the browser", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+    await expect(captchaGate(started.session_id)).resolves.toMatchObject({ found: false });
+    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+      "stale_ref",
+    );
+  });
+
+  it("invalidates a handle before the payment driver receives the browser", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+    await activeProvisionBrowserForPayment(paymentSession(started.session_id));
+    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+      "stale_ref",
+    );
+  });
+
+  it("requires sealed V2 handles before bulk selection enters the private executor", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Country",
+        selector: "#country",
+        selectOptions: [{ value: "kr", text: "South Korea" }],
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+    await expect(formSelectMany(started.session_id, { Country: "Korea" })).rejects.toThrow(
+      "stale_ref",
+    );
+    expect(h.selected).toEqual([]);
+    await expect(
+      formSelectMany(started.session_id, { "@e:legacy_country_1": "Korea" }),
+    ).rejects.toThrow("stale_ref");
+    expect(h.selected).toEqual([]);
+    const result = await formSelectMany(started.session_id, { [handle]: "Korea" });
+    expect(result.fields).toEqual([
+      expect.objectContaining({ status: "selected", selected_option: "South Korea" }),
+    ]);
+    expect(
+      JSON.stringify([...paymentSession(started.session_id).committedSelectValues]),
+    ).not.toContain("#country");
+    expect(result.observation.format).toBe("compact-v2");
+  });
+
+  it("keeps a later bulk target actionable when the preceding mutation spares it", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Variant",
+        selector: "#variant",
+        selectOptions: [{ value: "blue", text: "Ocean Blue" }],
+      }),
+      elem({
+        index: 1,
+        tag: "select",
+        role: "combobox",
+        labelText: "Size",
+        selector: "#size",
+        selectOptions: [{ value: "large", text: "Large" }],
+      }),
+    ];
+    h.selectMutation = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Size",
+        selector: "#size",
+        selectOptions: [{ value: "large", text: "Large" }],
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table;
+    const variantHandle = rows.find(([, , description]) =>
+      description?.startsWith("@variant"),
+    )?.[0];
+    const sizeHandle = rows.find(([, , description]) => description?.startsWith("@size"))?.[0];
+    expect(variantHandle).toMatch(/^@e:/);
+    expect(sizeHandle).toMatch(/^@e:/);
+
+    const result = await formSelectMany(started.session_id, {
+      [variantHandle!]: "Blue",
+      [sizeHandle!]: "Large",
+    });
+
+    expect(h.selected).toEqual([
+      { selector: "#variant", matcher: "Blue" },
+      { selector: "#size", matcher: "Large" },
+    ]);
+    expect(result.fields).toEqual([
+      expect.objectContaining({ status: "selected" }),
+      expect.objectContaining({ status: "selected" }),
+    ]);
+    expect(result.fields[0]).toMatchObject({ selected_option: "Ocean Blue" });
+  });
+
+  it("rejects a bulk target the preceding mutation replaced", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Variant",
+        selector: "#variant",
+        selectOptions: [{ value: "blue", text: "Ocean Blue" }],
+      }),
+      elem({
+        index: 1,
+        tag: "select",
+        role: "combobox",
+        labelText: "Size",
+        selector: "#size",
+        selectOptions: [{ value: "large", text: "Large" }],
+      }),
+    ];
+    // The mutation swaps the second control for a DIFFERENT one. The observed
+    // Size ref names an element that no longer exists, so it must fail closed
+    // rather than slide onto the replacement.
+    h.selectMutation = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Shipping",
+        selector: "#shipping",
+        selectOptions: [{ value: "large", text: "Large" }],
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table;
+    const variantHandle = rows.find(([, , description]) =>
+      description?.startsWith("@variant"),
+    )?.[0];
+    const sizeHandle = rows.find(([, , description]) => description?.startsWith("@size"))?.[0];
+
+    const result = await formSelectMany(started.session_id, {
+      [variantHandle!]: "Blue",
+      [sizeHandle!]: "Large",
+    });
+
+    expect(h.selected).toEqual([{ selector: "#variant", matcher: "Blue" }]);
+    expect(result.fields).toEqual([
+      expect.objectContaining({ status: "selected" }),
+      expect.objectContaining({ status: "failed", reason: "stale_ref" }),
+    ]);
+  });
+
+  it("normalizes private browser selection failures in V2 results", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Variant",
+        selector: "#private-variant-selector",
+        selectOptions: [{ value: "blue", text: "Ocean Blue" }],
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+    h.selectError = new Error(
+      'select <select> #private-variant-selector: option "Private option" was not found',
+    );
+
+    const result = await formSelectMany(started.session_id, { [handle]: "Missing" });
+
+    expect(result.fields).toEqual([
+      expect.objectContaining({ status: "failed", reason: "selection_failed" }),
+    ]);
+    expect(JSON.stringify(result)).not.toContain("private-variant-selector");
+    expect(JSON.stringify(result)).not.toContain("Private option");
+  });
+
+  it("normalizes private browser selection failures from direct V2 actions", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "Variant",
+        selector: "#shipping-frame",
+        selectOptions: [{ value: "blue", text: "Ocean Blue" }],
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table[0]![0];
+    h.selectError = new Error(
+      'select <select> #shipping-frame: option "Private option" was not found',
+    );
+
+    const error = await act(started.session_id, {
+      kind: "select",
+      target: handle,
+      text: "Missing",
+    }).catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("selection_failed");
+    expect((error as Error).message).not.toContain("shipping-frame");
+    expect((error as Error).message).not.toContain("Private option");
+  });
+
+  it("refuses a cross-origin frame target without retiring the later ref", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "select",
+        role: "combobox",
+        labelText: "External variant",
+        selector: "#external-variant",
+        frameOrigin: "https://untrusted.example",
+        frameUrl: "https://untrusted.example/variant",
+        selectOptions: [{ value: "blue", text: "Ocean Blue" }],
+      }),
+      elem({
+        index: 1,
+        tag: "select",
+        role: "combobox",
+        labelText: "Size",
+        selector: "#size",
+        selectOptions: [{ value: "large", text: "Large" }],
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table;
+    const externalHandle = rows.find(([, , facts]) => facts?.startsWith("@external-variant"))?.[0];
+    const sizeHandle = rows.find(([, , facts]) => facts?.startsWith("@size"))?.[0];
+
+    const result = await formSelectMany(started.session_id, {
+      [externalHandle!]: "Blue",
+      [sizeHandle!]: "Large",
+    });
+
+    expect(h.selected).toEqual([{ selector: "#size", matcher: "Large" }]);
+    expect(result.fields).toEqual([
+      expect.objectContaining({
+        status: "failed",
+        reason: "target_not_allowed",
+      }),
+      expect.objectContaining({ status: "selected" }),
+    ]);
+  });
+});
+
+// Over-broad node redaction on live Shopify checkouts masked the shipping
+// block ("pin" substring-matched inside "shipping", and a broad vendor-token
+// heuristic matched checkout DOM slugs like checkout_shipping_address_address1),
+// which emptied operate_observe_query results for shipping-method radios and
+// magenta-masked addresses, prices, and radio labels. Node redaction must stay
+// exactly: injected vault values + tight secret-shape signatures.
+describe("Compact V2 checkout copy stays unredacted", () => {
+  const checkoutUrl = "https://shop.example.com/checkouts/c/token?_r=revalidated";
+
+  function shopifyCheckoutFixture(): unknown[] {
+    return [
+      elem({
+        tag: "input",
+        role: "textbox",
+        labelText: "Address",
+        name: "checkout[shipping_address][address1]",
+        id: "checkout_shipping_address_address1",
+        selector: "#checkout_shipping_address_address1",
+        autocomplete: "shipping address-line1",
+        required: true,
+        value: "",
+      }),
+      elem({
+        index: 1,
+        tag: "input",
+        role: "textbox",
+        labelText: "City",
+        name: "checkout[shipping_address][city]",
+        id: "checkout_shipping_address_city",
+        selector: "#checkout_shipping_address_city",
+        autocomplete: "shipping address-level2",
+        value: "",
+      }),
+      elem({
+        index: 2,
+        tag: "input",
+        type: "radio",
+        role: "radio",
+        labelText: "Standard $8.00",
+        name: "checkout[shipping_rate][id]",
+        id: "checkout_shipping_rate_standard",
+        selector: "#checkout_shipping_rate_standard",
+        checked: true,
+      }),
+      elem({
+        index: 3,
+        tag: "input",
+        type: "radio",
+        role: "radio",
+        labelText: "Express $15.00",
+        name: "checkout[shipping_rate][id]",
+        id: "checkout_shipping_rate_express",
+        selector: "#checkout_shipping_rate_express",
+        checked: false,
+      }),
+    ];
+  }
+
+  it("exposes shipping-method radios in the V2 map and their query results", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = shopifyCheckoutFixture();
+
+    const started = await startProvisionSession({ serviceUrl: checkoutUrl });
+    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table;
+
+    // Both shipping-rate options are in the map with role radio and their
+    // price-bearing labels; the standard option carries its checked state.
+    const radioRows = rows.filter(([, role]) => role === "r");
+    expect(radioRows).toHaveLength(2);
+    const facts = radioRows.map(([, , rowFacts]) => rowFacts ?? "");
+    expect(facts.some((value) => value.startsWith("@standard-8-00"))).toBe(true);
+    expect(facts.some((value) => value.startsWith("@express-15-00"))).toBe(true);
+    expect(facts.find((value) => value.startsWith("@standard-8-00"))).toContain("s=c");
+
+    // operate_observe_query resolves the shipping methods — previously EMPTY
+    // when the radios were redacted out of the map.
+    retainActivePaymentFieldSeal();
+    const queried = (await observeQuery(started.session_id, "shipping", "radio")) as {
+      safe_table: Array<[string, string, string?]>;
+    };
+    expect(queried.safe_table).toHaveLength(2);
+    const queriedLabels = queried.safe_table.map(([, , rowFacts]) => rowFacts ?? "");
+    expect(queriedLabels.some((value) => value.startsWith("@standard-8-00"))).toBe(true);
+    expect(queriedLabels.some((value) => value.startsWith("@express-15-00"))).toBe(true);
+
+    // The queried ref is selectable through the normal act path.
+    const expressRef = queried.safe_table.find(([, , rowFacts]) =>
+      rowFacts?.startsWith("@express-15-00"),
+    )![0]!;
+    await act(started.session_id, { kind: "click", target: expressRef });
+    expect(h.clickCalls).toBe(1);
+  });
+
+  it("keeps address and shipping copy visible in the legacy observation text", async () => {
+    // V2 off (forced by beforeEach): the legacy observation renders page text.
+    h.visibleText =
+      "Shipping address\n350 5th Ave, New York, NY 10118\nShipping method: Standard $8.00";
+    h.elements = [
+      elem({
+        tag: "input",
+        role: "textbox",
+        labelText: "Address",
+        name: "checkout[shipping_address][address1]",
+        id: "checkout_shipping_address_address1",
+        selector: "#checkout_shipping_address_address1",
+        autocomplete: "shipping address-line1",
+        value: "350 5th Ave",
+      }),
+      elem({
+        index: 1,
+        tag: "input",
+        type: "radio",
+        role: "radio",
+        labelText: "Standard $8.00",
+        name: "checkout[shipping_rate][id]",
+        id: "checkout_shipping_rate_standard",
+        selector: "#checkout_shipping_rate_standard",
+        checked: true,
+      }),
+    ];
+
+    const started = await startProvisionSession({ serviceUrl: checkoutUrl });
+    const observation = (await observe(started.session_id, "full")) as unknown as {
+      text: string;
+      elements: Array<{ role?: string; label?: string }>;
+    };
+    expect(observation.text).toContain("350 5th Ave, New York, NY 10118");
+    expect(observation.text).toContain("Standard $8.00");
+    // The radio row itself is present with its price label, not sealed out.
+    const radioElement = observation.elements.find((entry) => entry.role === "radio");
+    expect(radioElement?.label).toContain("Standard $8.00");
+  });
+
+  it("still redacts injected vault values and tight secret shapes from observation text", async () => {
+    const secret = "injected-1234567890abcdef";
+    h.visibleText =
+      "API key: sk-proj-1234567890abcdefghijklmnopqrstuv Recovery code: 814226 Your 2FA code is 553218";
+    h.elements = [
+      elem({
+        tag: "input",
+        role: "textbox",
+        labelText: "Address",
+        name: "checkout[shipping_address][address1]",
+        id: "checkout_shipping_address_address1",
+        selector: "#checkout_shipping_address_address1",
+        autocomplete: "shipping address-line1",
+        value: "",
+      }),
+    ];
+
+    const started = await startProvisionSession({ serviceUrl: checkoutUrl });
+    // An operator-injected vault value reflected onto the page copy.
+    stashSecretSlot(started.session_id, "login", secret);
+    h.visibleText = `${h.visibleText} ${secret}`;
+    const observed = await observe(started.session_id, "full");
+    expect(observed.text).not.toContain("sk-proj-1234567890abcdefghijklmnopqrstuv");
+    expect(observed.text).not.toContain("814226");
+    expect(observed.text).not.toContain("553218");
+    expect(observed.text).not.toContain(secret);
+  });
+});
+
+// docs/observation-model.md §4.1/§4.2 — the identity model's own contract.
+describe("Compact V2 durable ref identity", () => {
+  function field(index: number, overrides: Record<string, unknown>): unknown {
+    return elem({
+      index,
+      tag: "input",
+      type: "text",
+      role: "textbox",
+      inViewport: true,
+      screenPath: "form:checkout > input",
+      ...overrides,
+    });
+  }
+
+  it("fills a multi-field form from ONE observation while the page re-renders", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const fields = [
+      field(0, { id: "first-name", labelText: "First name", selector: "#first-name" }),
+      field(1, { id: "email", labelText: "Email", selector: "#email" }),
+      // No authored id: this one rides the structural fallback.
+      field(2, { labelText: "City", selector: "form > div:nth-child(3) > input" }),
+      field(3, { id: "postal", labelText: "Postal code", selector: "#postal" }),
+    ];
+    h.elements = fields;
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const refs = (
+      started as unknown as { safe_table: Array<[string, string, string?]> }
+    ).safe_table.map(([ref]) => ref);
+    expect(refs).toHaveLength(4);
+
+    const values = ["Ada", "ada@example.com", "Cambridge", "CB2 1TN"];
+    for (const [index, ref] of refs.entries()) {
+      // detail:"none" — no observation between acts at all, so every ref comes
+      // from the single observation the session started with.
+      await act(started.session_id, { kind: "type", target: ref, text: values[index]! }, "none");
+      // The form re-renders between every act: a validation flag flips and the
+      // framework hands out fresh selectors. Neither is an identity change.
+      h.elements = fields.map((entry, position) => ({
+        ...(entry as Record<string, unknown>),
+        required: position <= index,
+        selector: `${(entry as { selector: string }).selector}.render-${index}`,
+      }));
+    }
+
+    expect(h.typed.map((entry) => (entry as { text: string }).text)).toEqual(values);
+    expect(h.extractInteractiveElementsCalls).toBeGreaterThan(0);
+  });
+
+  it("survives a useId re-render, and dies on a real navigation", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", id: ":r3:", visibleText: "Continue", selector: "#a" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    const ref = (started as unknown as { safe_table: Array<[string]> }).safe_table[0]![0];
+
+    // React re-runs useId: the id is different every render, so it must not be
+    // part of the fingerprint.
+    h.elements = [
+      elem({ tag: "button", role: "button", id: ":r9:", visibleText: "Continue", selector: "#b" }),
+    ];
+    await act(started.session_id, { kind: "click", target: ref });
+    expect(h.clickCalls).toBe(1);
+
+    // A real navigation replaces the document and retires the ref.
+    h.mainDocumentEpoch += 1;
+    await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
+      "stale_ref",
+    );
+    expect(h.clickCalls).toBe(1);
+  });
+
+  it("refuses a label shared by two grid controls, and acts on either ref", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [0, 1].map((index) =>
+      elem({
+        index,
+        tag: "button",
+        role: "button",
+        visibleText: "Add to cart",
+        screenPath: "main > button:add",
+        selector: `.product:nth-child(${index + 1}) button`,
+      }),
+    );
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/products",
+    });
+    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table;
+    expect(rows.map(([, , facts]) => facts)).toEqual([
+      "@add-to-cart|a=add_to_cart",
+      "@add-to-cart|a=add_to_cart",
+    ]);
+    // Same label, different fingerprints.
+    expect(rows[0]![0]).not.toBe(rows[1]![0]);
+
+    const error = await act(started.session_id, {
+      kind: "click",
+      target: "@add-to-cart",
+    }).catch((cause: unknown) => cause);
+    expect((error as Error).message).toContain('ambiguous_target: "@add-to-cart" names 2 controls');
+    expect((error as Error).message).toContain(rows[0]![0]);
+    expect((error as Error).message).toContain(rows[1]![0]);
+    expect(h.clickCalls).toBe(0);
+
+    await act(started.session_id, { kind: "click", target: rows[1]![0] });
+    expect(h.clickCalls).toBe(1);
+  });
+
+  it("acts on a label that names exactly one control", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+      elem({ index: 1, tag: "button", role: "button", visibleText: "Cancel", selector: "#cancel" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
+    await act(started.session_id, { kind: "click", target: "@continue" });
+    expect(h.clickCalls).toBe(1);
+  });
+
+  it("keeps the default observation bounded on a large product grid", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    // 240 controls: a long storefront grid plus a full checkout form.
+    h.elements = Array.from({ length: 240 }, (_, index) =>
+      elem({
+        index,
+        tag: index % 3 === 0 ? "button" : "input",
+        type: index % 3 === 0 ? "button" : "text",
+        role: index % 3 === 0 ? "button" : "textbox",
+        id: `product-control-${index}-with-a-long-authored-identifier`,
+        labelText: `Add to cart ${index}`,
+        ariaLabel: `Add the ${index}th product to your shopping cart right now`,
+        selector: `.grid .product-${index} .control-${index}`,
+      }),
+    );
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/products",
+    });
+    const bytes = Buffer.byteLength(JSON.stringify(started), "utf8");
+    expect(bytes).toBeLessThanOrEqual(OBSERVE_V2_MAX_TOKENS);
+    // Bounded, not proportional to the page: the rest is behind overflow.
+    expect((started as unknown as { safe_table: unknown[] }).safe_table.length).toBeLessThanOrEqual(
+      4,
+    );
+    expect((started.overflow as { remaining: number }).remaining).toBeGreaterThan(200);
+
+    // Paging stays bounded too.
+    const page = await observeQuery(
+      started.session_id,
+      "",
+      undefined,
+      (started.overflow as { next_cursor: string }).next_cursor,
+    );
+    expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThanOrEqual(
+      OBSERVE_V2_MAX_TOKENS,
+    );
   });
 });
 
@@ -3385,6 +5573,80 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     await act(obs.session_id, { kind: "type_secret", target: "text=Password", slot: "login" });
     expect(h.locatorResolveIntents).toContain("type");
     expect(h.locatorTypeCalls).toEqual([{ text: "s3cr3t", sealed: true }]);
+    await captureScreenshot(obs.session_id);
+    expect(h.capturedSealedFieldKeys).toEqual([["Password"]]);
+  });
+
+  it("redacts a sealed slot reflected into observation text and control metadata", async () => {
+    const secret = "stored-credential-7f3d9a";
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
+    stashSecretSlot(started.session_id, "login", secret);
+    h.visibleText = `Saved credential preview: ${secret}`;
+    h.elements = [
+      elem({
+        selector: "#reflected",
+        labelText: `Autocomplete preview ${secret}`,
+        ariaLabel: `Saved value ${secret}`,
+        value: secret,
+      }),
+    ];
+
+    const full = await observe(started.session_id, "full");
+    expect(full.text).toContain("[sealed]");
+    expect(JSON.stringify(full)).not.toContain(secret);
+  });
+
+  it("keeps a reflected sealed slot out of the compact-v2 wire, label, and query", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const secret = "stored-credential-7f3d9a";
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
+    stashSecretSlot(started.session_id, "login", secret);
+    h.elements = [
+      elem({
+        tag: "button",
+        role: "button",
+        selector: "#reflected",
+        // The page reflects the injected value back OUTSIDE the field it was
+        // typed into. Under the payment-only policy nothing screens this by
+        // shape any more, so the exact-value screen has to carry it.
+        visibleText: `Saved value ${secret}`,
+        ariaLabel: `Saved value ${secret}`,
+      }),
+      elem({ index: 1, tag: "button", role: "button", selector: "#ok", visibleText: "Continue" }),
+    ];
+
+    const observation = await observe(started.session_id);
+    expect(observation.format).toBe("compact-v2");
+    expect(JSON.stringify(observation)).not.toContain(secret);
+    // The control is still THERE and actionable — only its reflected
+    // description is withheld.
+    const table = (observation as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table;
+    expect(table).toHaveLength(2);
+    // Only code-owned facts survive on that row — no `@label` alias derived
+    // from the reflected description.
+    expect(table[0]![2] ?? "").not.toContain("@");
+
+    const query = await observeQuery(started.session_id, "saved value");
+    expect(JSON.stringify(query)).not.toContain(secret);
+    expect(query.safe_table).toEqual([]);
+  });
+
+  it("uses one screenshot redaction path and redacts only the exact vault value", async () => {
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
+    await captureScreenshot(started.session_id);
+    expect(h.capturedSealedFieldKeys).toEqual([[]]);
+
+    const secret = "stored-credential-7f3d9a";
+    stashSecretSlot(started.session_id, "login", secret);
+    h.visibleText = `API key: sk-proj-1234567890abcdefghijklmnopqrstuv ${secret}`;
+    h.elements = [];
+    const full = await observe(started.session_id, "full");
+    // The injected vault value is masked by exact identity...
+    expect(full.text).toContain("[sealed]");
+    expect(full.text).not.toContain(secret);
+    // ...and a key the PAGE rendered is left alone: no secret-shape heuristic.
+    expect(full.text).toContain("sk-proj-1234567890abcdefghijklmnopqrstuv");
   });
 
   it("refuses to remember a session that used a locator fallback", async () => {
@@ -3421,6 +5683,14 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
 });
 
 describe("operate session — multi-host allow-set + allow_host", () => {
+  it("feeds only Neon's exact login route into the browser request scope", async () => {
+    await startProvisionSession({ serviceUrl: "https://neon.com/signup" });
+
+    expect(h.hostScopeProviders).toHaveLength(1);
+    expect(h.hostScopeProviders[0]!.allowedHosts()).toEqual(["neon.com", "console.neon.tech"]);
+    expect(h.hostScopeProviders[0]!.siblingDomainHosts()).toEqual(["neon.com"]);
+  });
+
   it("blocks a goto outside the start scope, then allow_host unblocks it", async () => {
     const obs = await startProvisionSession({
       serviceUrl: "https://console.cloud.google.com/start",
@@ -3524,7 +5794,7 @@ describe("operate session — manual card-entry guard", () => {
       slot: "sealed_card",
       target: "Sealed field",
     });
-    expect(h.typed).toEqual([{ selector: "#sealed", text: sealedPan }]);
+    expect(h.typed).toEqual([{ selector: "#sealed", text: sealedPan, sealed: true }]);
   });
 });
 
@@ -3740,619 +6010,135 @@ describe("operate_extract — vault-store response", () => {
     });
     expect(JSON.stringify(result)).not.toContain(rawSecret);
   });
+
+  it("seals raw Compact V2 extraction results at the public tool boundary", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const rawSecret = "sk-live-public-extract-secret-123456789";
+    const urlToken = "private-url-token-123456789";
+    h.visibleText = `API key ${rawSecret}`;
+    const started = await startProvisionSession({
+      serviceUrl: `https://app.example.com/api-keys?token=${urlToken}`,
+    });
+
+    const result = (await provisionActTool.handler(
+      provisionActTool.inputSchema.parse({
+        session_id: started.session_id,
+        kind: "extract",
+      }),
+      null,
+    )) as Record<string, unknown>;
+
+    expect(result).toMatchObject({
+      session_id: started.session_id,
+      url: "",
+      credentials: {},
+    });
+    expect(JSON.stringify(result)).not.toContain(rawSecret);
+    expect(JSON.stringify(result)).not.toContain(urlToken);
+  });
 });
 
-describe("operate session — Change 5 precondition gate", () => {
-  it("fails closed after probing the canonical profile when no live Google session exists", async () => {
+describe("operate session — live-profile precondition gate", () => {
+  it("fails closed after probing the real profile with no live Google session", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-empty";
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.providers = []; // no live session
-    h.oauthStatus = "failed"; // and we cannot establish one
+    h.liveGoogleEmail = null;
     const obs = await startProvisionSession({
       serviceUrl: "https://app.example.com/",
-      requireLiveIdentity: true,
+      profileDir: canonical,
     });
     expect(obs.needs_user).toBeDefined();
     expect(obs.needs_user?.wall).toBe("google_session");
-    expect(h.startCalls).toBe(1); // the canonical profile itself was probed
-    expect(h.started).toBe(0); // rejected before returning the handoff
+    expect(obs).toMatchObject({ format: "compact-v2", stage: "auth", url: "", text: "" });
+    expect(obs.elements).toBeUndefined();
+    expect(h.startCalls).toBe(1);
+    expect(h.started).toBe(0); // the rejected profile is closed before handoff
     expect(h.gotos).toHaveLength(0);
-  });
-
-  // Regression: a requireLiveIdentity session must reach Google's session via
-  // the canonical profile directly — never a per-session clone from the
-  // isolated pool, which carries the seed's cookies but not whatever Google
-  // actually keys the session on. See operator-direct-identity.ts.
-  it("drives the canonical profile directly, never the isolated clone pool", async () => {
-    h.providers = ["google"];
-    h.directIdentityProfileDir = "/tmp/trusty-squire-unit-canonical-profile-marker";
-    const obs = await startProvisionSession({
-      serviceUrl: "https://app.example.com/",
-      requireLiveIdentity: true,
+    expect(h.identityProbeCalls).toBe(1); // warm the real context before provider admission
+    expect(h.storageStateReads).toEqual([]);
+    expect(h.profileDirs).toEqual([canonical]);
+    expect(h.destroyedProfiles).toEqual([]);
+    expect(h.storageStateWrites).toEqual([]);
+    await expect(finishProvisionSession(obs.session_id)).resolves.toEqual({
+      session_id: obs.session_id,
+      url: "",
+      closed: true,
     });
-    expect(obs.needs_user).toBeUndefined();
-    expect(h.started).toBe(1);
-    expect(h.directIdentityAcquireCalls).toBe(1);
-    expect(h.leaseAcquireCalls).toBe(0); // the isolated pool was never touched
-    expect(h.profileDirs.at(-1)).toBe("/tmp/trusty-squire-unit-canonical-profile-marker");
-    await finishProvisionSession(obs.session_id);
-    expect(h.directIdentityReleaseCalls).toBe(1);
   });
 
-  it("proceeds normally when a live Google session exists", async () => {
+  it("uses the supplied real profile without a storage-state handoff", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-seeded";
     h.providers = ["google"];
     const obs = await startProvisionSession({
       serviceUrl: "https://app.example.com/",
-      requireLiveIdentity: true,
+      profileDir: canonical,
     });
     expect(obs.needs_user).toBeUndefined();
     expect(h.started).toBe(1);
+    expect(h.identityProbeCalls).toBe(2); // warm admission, then optional session metadata
+    expect(h.seededStorageStates).toEqual([undefined]);
+    expect(h.profileDirs).toEqual([canonical]);
     await finishProvisionSession(obs.session_id);
+    expect(h.destroyedProfiles).toEqual([]);
   });
 
-  it("leaves the isolated clone pool in charge of ordinary (non-identity) sessions", async () => {
+  it("admits a live Google provider probe without requiring account-email metadata", async () => {
+    h.providers = ["google"];
+    h.liveGoogleEmail = null;
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-    expect(h.leaseAcquireCalls).toBe(1);
-    expect(h.directIdentityAcquireCalls).toBe(0);
+    expect(obs.needs_user).toBeUndefined();
+    await expect(finishProvisionSession(obs.session_id)).resolves.toMatchObject({ closed: true });
+  });
+
+  it("accepts the live provider probe without consulting a snapshot", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-probe-only";
+    h.providers = ["google"];
+    const obs = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      profileDir: canonical,
+    });
+    expect(obs.needs_user).toBeUndefined();
+    expect(h.started).toBe(1);
     await finishProvisionSession(obs.session_id);
+  });
+
+  it("does not create or destroy an ephemeral profile", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    expect(h.createdProfiles).toEqual([]);
+    await finishProvisionSession(obs.session_id);
+    expect(h.destroyedProfiles).toEqual([]);
   });
 });
 
-describe("operate session — isolated profile-pool lifecycle", () => {
-  it("drains an entered session call and rejects new calls before pooling", async () => {
-    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
-    let releaseCall: (() => void) | undefined;
-    const entered = withProvisionSessionCall(
-      started.session_id,
-      async () =>
-        await new Promise<void>((resolve) => {
-          releaseCall = resolve;
-        }),
-    );
-    await vi.waitFor(() => expect(releaseCall).toBeTypeOf("function"));
-
-    let finishSettled = false;
-    const finishing = finishProvisionSession(started.session_id).then(() => {
-      finishSettled = true;
-    });
-    await Promise.resolve();
-    expect(finishSettled).toBe(false);
-    await expect(
-      withProvisionSessionCall(started.session_id, async () => undefined),
-    ).rejects.toThrow(/closing/);
-    expect(h.resetCalls).toBe(0);
-
-    releaseCall?.();
-    await entered;
-    await finishing;
-    expect(h.resetCalls).toBe(1);
-  });
-
-  it("closes after a submitted confirmation throws and leaves stale confirming state", async () => {
-    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
-    const originalSession = paymentSession(started.session_id);
-    const pending = {
-      approval_id: "appr_stale_confirming",
-      approval_url: "https://web.test/vault/pay/appr_stale_confirming",
-      checkout: {
-        merchant: "Shop",
-        checkout_origin: "https://app.example.com",
-        amount_cents: 100,
-        currency: "USD",
-      },
-      card_ref: "card_stale_confirming",
-      last4: "4242",
-    };
-    setActivePendingCardFill(pending, originalSession);
-    expect(claimActivePaymentForOperatePay("confirm", originalSession).kind).toBe("confirm");
-    markActivePendingCardFillSubmitStarted(originalSession);
-    expect(restoreActivePendingCardFillAfterConfirmThrow(pending, originalSession)).toBe(false);
-
-    await expect(
-      finishProvisionSessionWithPreparation(started.session_id, async () => "prepared"),
-    ).resolves.toMatchObject({ finish: { closed: true }, prepared: "prepared" });
-    expect(originalSession.activePayment).toBeNull();
-    expect(originalSession.paymentFieldSealActive).toBe(false);
-    expect(h.leaseDestroyCalls).toBe(1);
-  });
-
-  it("closes unconditionally with an approval or filled card still resumable, clearing payment state", async () => {
-    const approvalSession = await startProvisionSession({
-      serviceUrl: "https://shop.example.com/checkout",
-    });
-    const originalApprovalSession = paymentSession(approvalSession.session_id);
-    const approvalClaim = claimActivePaymentForOperatePay(undefined, originalApprovalSession);
-    if (approvalClaim.kind !== "lease") throw new Error("expected payment lease");
-    const approval = {
-      approval_id: "appr_finish_guard",
-      approval_url: "https://web.test/vault/pay/appr_finish_guard",
-      nonce: "nonce_finish_guard",
-      agent: "agent_finish_guard",
-      checkout: {
-        merchant: "Shop",
-        checkout_origin: "https://shop.example.com",
-        amount_cents: 100,
-        currency: "USD",
-      },
-      jit: false,
-      boundCardRef: "card_finish_guard",
-      deadline: Date.now() + 60_000,
-      rejectedCandidates: [],
-      keypair: { publicKey: "public", privateKey: "private" },
-      item: "Widget",
-      reason: "Synthetic purchase",
-      cardRef: "card_finish_guard",
-    };
-    completeActivePaymentLeaseWithPendingApproval(
-      approvalClaim.lease,
-      approval,
-      originalApprovalSession,
-    );
-
-    await expect(finishProvisionSession(approvalSession.session_id)).resolves.toMatchObject({
-      closed: true,
-    });
-    expect(originalApprovalSession.activePayment).toBeNull();
-    expect(originalApprovalSession.paymentFieldSealActive).toBe(false);
-    expect(h.leaseDestroyCalls).toBe(1);
-
-    const pendingSession = await startProvisionSession({
-      serviceUrl: "https://shop.example.com/checkout",
-    });
-    const originalPendingSession = paymentSession(pendingSession.session_id);
-    setActivePendingCardFill(
-      {
-        approval_id: "appr_pending_finish_guard",
-        approval_url: "https://web.test/vault/pay/appr_pending_finish_guard",
-        checkout: approval.checkout,
-        card_ref: "card_finish_guard",
-        last4: "4242",
-      },
-      originalPendingSession,
-    );
-
-    await expect(
-      provisionFinishTool.handler({ session_id: pendingSession.session_id }, null),
-    ).resolves.toMatchObject({
-      closed: true,
-    });
-    expect(originalPendingSession.activePayment).toBeNull();
-    expect(originalPendingSession.paymentFieldSealActive).toBe(false);
-    expect(h.leaseDestroyCalls).toBe(2);
-
-    const retried = await startProvisionSession({
-      serviceUrl: "https://shop.example.com/checkout",
-    });
-    expect(getActivePendingApproval()).toBeNull();
-    expect(getActivePendingCardFill()).toBeNull();
-    await expect(finishProvisionSession(retried.session_id)).resolves.toMatchObject({
-      closed: true,
-    });
-  });
-
-  it("reuses the warm isolated profile but cold-boots a fresh controller", async () => {
-    const first = await startProvisionSession({
+describe("operate session — real-profile lifecycle", () => {
+  it("holds the profile lease for the complete session and releases it on finish", async () => {
+    const profileDir = "/tmp/trusty-squire-unit-live-profile-lease";
+    const started = await startProvisionSession({
       serviceUrl: "https://app.example.com/one",
-      proxyUrl: "http://proxy-a.test:8080",
+      profileDir,
     });
-    await finishProvisionSession(first.session_id);
-
-    const second = await startProvisionSession({
-      serviceUrl: "https://app.example.com/two",
-      proxyUrl: "http://proxy-a.test:8080",
-    });
-
-    expect(h.startCalls).toBe(2);
-    expect(h.resetCalls).toBeGreaterThanOrEqual(1);
-    expect(h.profileProbeCalls).toBe(0);
-    expect(h.controllerProviderProbeCalls).toBe(2);
-    expect(h.profileDirs[1]).toBe(h.profileDirs[0]);
-    await finishProvisionSession(second.session_id);
-  });
-
-  it("cold-boots a new controller with the requested proxy", async () => {
-    const first = await startProvisionSession({
-      serviceUrl: "https://app.example.com/one",
-      proxyUrl: "http://proxy-a.test:8080",
-    });
-    await finishProvisionSession(first.session_id);
-
-    const next = await startProvisionSession({
-      serviceUrl: "https://app.example.com/two",
-      proxyUrl: "http://proxy-b.test:8080",
-    });
-
-    expect(h.startCalls).toBe(2);
-    expect(h.closeCalls).toBe(1);
-    await finishProvisionSession(next.session_id);
-  });
-
-  it("never reuses the prior closed controller", async () => {
-    const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
-    await finishProvisionSession(first.session_id);
-    h.connections[0] = false;
-
-    const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
-
-    expect(h.startCalls).toBe(2);
-    expect(h.closeCalls).toBe(1);
-    await finishProvisionSession(second.session_id);
-  });
-
-  it("discards the isolated profile when its pre-close reset fails", async () => {
-    const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
-    h.resetFailuresRemaining = 1;
-    await finishProvisionSession(first.session_id);
-
-    const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
-
-    expect(h.startCalls).toBe(2);
-    expect(h.closeCalls).toBe(1);
-    expect(h.profileDirs[1]).not.toBe(h.profileDirs[0]);
-    await finishProvisionSession(second.session_id);
-  });
-
-  it("never pools a profile whose payment fields remain sealed", async () => {
-    const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
-    retainActivePaymentFieldSeal();
-    await finishProvisionSession(first.session_id);
-
-    const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
-    expect(h.profileDirs[1]).not.toBe(h.profileDirs[0]);
-    expect(h.leaseDestroyCalls).toBe(1);
-    await finishProvisionSession(second.session_id);
-  });
-
-  it("durably marks a sealed-payment profile when closure is unproven", async () => {
-    h.closeState = "unknown";
-    const session = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
-    retainActivePaymentFieldSeal();
-    await finishProvisionSession(session.session_id);
-
-    expect(h.leaseReturnCalls).toBe(0);
-    expect(h.leaseDestroyCalls).toBe(0);
-    expect(h.leaseRetainDestroyRequired).toEqual([true]);
-  });
-
-  it("uses the claimed worker's live email instead of seed-derived profile metadata", async () => {
-    const canonical = mkdtempSync(join(tmpdir(), "operator-canonical-email-"));
-    const worker = mkdtempSync(join(tmpdir(), "operator-worker-email-"));
-    writeFileSync(
-      join(canonical, "provider-emails.json"),
-      JSON.stringify({ google: "canonical@example.com" }),
+    expect(() => acquireProfileOperationGuard(profileDir)).toThrow(
+      /another Trusty Squire session/i,
     );
-    writeFileSync(
-      join(worker, "provider-emails.json"),
-      JSON.stringify({ google: "seed@example.com" }),
-    );
-    h.nextLeaseProfileDir = worker;
-    h.workerEmail = "live-worker@example.com";
-    try {
-      const session = await startProvisionSession({
-        serviceUrl: "https://app.example.com/",
-        profileDir: canonical,
-      });
-      expect(getSessionUserEmail(session.session_id)).toBe("live-worker@example.com");
-      await finishProvisionSession(session.session_id);
-    } finally {
-      rmSync(canonical, { recursive: true, force: true });
-      rmSync(worker, { recursive: true, force: true });
-    }
+    await finishProvisionSession(started.session_id);
+    const lease = acquireProfileOperationGuard(profileDir);
+    lease.release();
   });
 
-  it("rejects remote CDP before acquiring an isolated profile", async () => {
-    vi.stubEnv("BOT_CDP_ENDPOINT", "http://remote.example.test:9222");
+  it("refuses a live profile holder before launching a browser", async () => {
+    const profileDir = "/tmp/trusty-squire-unit-live-profile-busy";
+    const lease = acquireProfileOperationGuard(profileDir);
     try {
       await expect(
-        startProvisionSession({ serviceUrl: "https://app.example.com/" }),
-      ).rejects.toThrow("does not support remote CDP");
-      expect(h.leaseAcquireCalls).toBe(0);
+        startProvisionSession({ serviceUrl: "https://app.example.com/one", profileDir }),
+      ).rejects.toThrow(/another Trusty Squire session/i);
+      expect(h.started).toBe(0);
     } finally {
-      vi.unstubAllEnvs();
+      lease.release();
     }
   });
-
-  it("runs two tasks concurrently on distinct isolated profile leases", async () => {
-    const [first, second] = await Promise.all([
-      startProvisionSession({ serviceUrl: "https://app.example.com/one" }),
-      startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
-    ]);
-
-    expect(h.startCalls).toBe(2);
-    expect(h.profileDirs).toHaveLength(2);
-    expect(h.profileDirs[0]).not.toBe(h.profileDirs[1]);
-    await finishProvisionSession(first.session_id);
-    await finishProvisionSession(second.session_id);
-  });
-
-  it("starts a second session while the first sits parked on a decoupled payment wait", async () => {
-    // Regression for a real user hitting "start deadline exceeded while
-    // waiting to acquire the shared seed lock" on @trusty-squire/mcp
-    // 1.1.9-rc.27: one agent held an operator session mid-payment (parked on
-    // a decoupled 3-D Secure approval wait) and a second agent's operate_start
-    // starved behind it. The seed lock is only held for the brief scavenge +
-    // clone steps inside acquireOperatorProfile, never for a session's
-    // lifetime, so a second start must succeed while the first is still open
-    // and awaiting approval.
-    const first = await startProvisionSession({ serviceUrl: "https://shop.example.com/first" });
-    const firstSession = paymentSession(first.session_id);
-    const parkedClaim = claimActivePaymentForOperatePay(undefined, firstSession);
-    if (parkedClaim.kind !== "lease") throw new Error("expected first payment lease");
-    completeActivePaymentLeaseWithPendingApproval(
-      parkedClaim.lease,
-      {
-        approval_id: "appr_parked_3ds",
-        approval_url: "https://web.test/vault/pay/appr_parked_3ds",
-        nonce: "nonce_parked_3ds",
-        agent: "agent_parked_3ds",
-        checkout: {
-          merchant: "First shop",
-          checkout_origin: "https://shop.example.com",
-          amount_cents: 100,
-          currency: "USD",
-        },
-        jit: false,
-        boundCardRef: "card_parked_3ds",
-        deadline: Date.now() + 60_000,
-        rejectedCandidates: [],
-        keypair: { publicKey: "public-parked", privateKey: "private-parked" },
-        item: "Widget",
-        reason: "Parked purchase",
-        cardRef: "card_parked_3ds",
-      },
-      firstSession,
-    );
-    expect(getActivePendingApproval(firstSession)).not.toBeNull();
-
-    const second = await startProvisionSession({ serviceUrl: "https://app.example.com/second" });
-
-    expect(h.startCalls).toBe(2);
-    expect(h.profileDirs).toHaveLength(2);
-    expect(h.profileDirs[0]).not.toBe(h.profileDirs[1]);
-    // The first session's parked approval survives the second session's start.
-    expect(getActivePendingApproval(firstSession)).not.toBeNull();
-
-    await finishProvisionSession(second.session_id);
-    await finishProvisionSession(first.session_id);
-  });
-
-  it("never lets one session's approval authorize another session's charge", async () => {
-    const [first, second] = await Promise.all([
-      startProvisionSession({ serviceUrl: "https://shop.example.com/first" }),
-      startProvisionSession({ serviceUrl: "https://shop.example.com/second" }),
-    ]);
-    const firstPaymentSession = paymentSession(first.session_id);
-    const secondPaymentSession = paymentSession(second.session_id);
-    const firstClaim = claimActivePaymentForOperatePay(undefined, firstPaymentSession);
-    if (firstClaim.kind !== "lease") throw new Error("expected first payment lease");
-    const firstApproval = {
-      approval_id: "appr_first_session_only",
-      approval_url: "https://web.test/vault/pay/appr_first_session_only",
-      nonce: "nonce_first_session_only",
-      agent: "agent_first_session_only",
-      checkout: {
-        merchant: "First shop",
-        checkout_origin: "https://shop.example.com",
-        amount_cents: 100,
-        currency: "USD",
-      },
-      jit: false,
-      boundCardRef: "card_first_session_only",
-      deadline: Date.now() + 60_000,
-      rejectedCandidates: [],
-      keypair: { publicKey: "public-first", privateKey: "private-first" },
-      item: "First widget",
-      reason: "First session purchase",
-      cardRef: "card_first_session_only",
-    };
-    completeActivePaymentLeaseWithPendingApproval(
-      firstClaim.lease,
-      firstApproval,
-      firstPaymentSession,
-    );
-
-    expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(/requires session_id/);
-    expect(getActivePendingApproval(firstPaymentSession)).toBe(firstApproval);
-    expect(getActivePendingApproval(secondPaymentSession)).toBeNull();
-
-    const secondClaim = claimActivePaymentForOperatePay(undefined, secondPaymentSession);
-    if (secondClaim.kind !== "lease") throw new Error("expected second payment lease");
-    expect(secondClaim.resumeApproval).toBeUndefined();
-    expect(() =>
-      completeActivePaymentLeaseWithPendingApproval(
-        firstClaim.lease,
-        firstApproval,
-        secondPaymentSession,
-      ),
-    ).toThrow(/without ownership/);
-    expect(releaseActivePaymentLease(secondClaim.lease, true, secondPaymentSession)).toBe(true);
-
-    const resumedFirst = claimActivePaymentForOperatePay(undefined, firstPaymentSession);
-    if (resumedFirst.kind !== "lease") throw new Error("expected resumed first payment lease");
-    expect(resumedFirst.resumeApproval).toBe(firstApproval);
-    expect(releaseActivePaymentLease(resumedFirst.lease, true, firstPaymentSession)).toBe(true);
-    await finishProvisionSession(first.session_id);
-    await finishProvisionSession(second.session_id);
-  });
-
-  it("starts the same pending third task after one active lease finishes", async () => {
-    vi.useFakeTimers();
-    try {
-      const [first, second] = await Promise.all([
-        startProvisionSession({ serviceUrl: "https://app.example.com/one" }),
-        startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
-      ]);
-      const thirdStart = startProvisionSession({ serviceUrl: "https://app.example.com/three" });
-      expect(h.leaseAcquireCalls).toBe(3);
-
-      expect(h.startCalls).toBe(2);
-      await finishProvisionSession(first.session_id);
-      await vi.advanceTimersByTimeAsync(50);
-
-      const third = await thirdStart;
-      expect(h.startCalls).toBe(3);
-      expect(h.profileDirs).toHaveLength(3);
-      await finishProvisionSession(second.session_id);
-      await finishProvisionSession(third.session_id);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("times out a third task without launching another browser", async () => {
-    vi.useFakeTimers();
-    try {
-      const [first, second] = await Promise.all([
-        startProvisionSession({ serviceUrl: "https://app.example.com/one" }),
-        startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
-      ]);
-      const thirdStart = startProvisionSession({ serviceUrl: "https://app.example.com/three" });
-      expect(h.leaseAcquireCalls).toBe(3);
-      const rejection = expect(thirdStart).rejects.toThrow("capacity wait timed out");
-
-      await vi.advanceTimersByTimeAsync(30_000);
-
-      await rejection;
-      expect(h.startCalls).toBe(2);
-      expect(h.profileDirs).toHaveLength(2);
-      await finishProvisionSession(first.session_id);
-      await finishProvisionSession(second.session_id);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("reports a shared seed-lock deadline without blaming active capacity", async () => {
-    h.profileAcquisitionInterruption = {
-      reason: "timeout",
-      phase: "seed_lock",
-    };
-
-    await expect(startProvisionSession({ serviceUrl: "https://app.example.com/" })).rejects.toThrow(
-      "operate_start failed: start deadline exceeded while waiting to acquire the shared seed lock",
-    );
-    expect(h.startCalls).toBe(0);
-    expect(h.activeLeaseCount).toBe(0);
-  });
-
-  it("cancels a capacity waiter before shutdown frees an active slot", async () => {
-    vi.useFakeTimers();
-    try {
-      await Promise.all([
-        startProvisionSession({ serviceUrl: "https://app.example.com/one" }),
-        startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
-      ]);
-      const thirdStart = startProvisionSession({ serviceUrl: "https://app.example.com/three" });
-      expect(h.leaseAcquireCalls).toBe(3);
-      const rejection = expect(thirdStart).rejects.toThrow("operator server is shutting down");
-
-      await closeAllProvisionSessions();
-
-      await rejection;
-      expect(h.startCalls).toBe(2);
-      expect(h.profileDirs).toHaveLength(2);
-      expect(activeSessionCount()).toBe(0);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("does not reap the shared browser while a session is in flight", async () => {
-    vi.useFakeTimers();
-    try {
-      const session = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-
-      await vi.advanceTimersByTimeAsync(6 * 60 * 60 * 1_000);
-
-      expect(h.closeCalls).toBe(0);
-      await finishProvisionSession(session.session_id);
-      await closeAllProvisionSessions();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("closes an active session and its warm browser during shutdown", async () => {
-    await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-    expect(activeSessionCount()).toBe(1);
-
-    await closeAllProvisionSessions();
-
-    expect(activeSessionCount()).toBe(0);
-    expect(h.closeCalls).toBe(1);
-  });
-
-  it("waits for an in-progress browser launch and closes its controller", async () => {
-    let releaseStart: (() => void) | undefined;
-    h.startGate = new Promise<void>((resolve) => {
-      releaseStart = resolve;
-    });
-    const startResult = startProvisionSession({ serviceUrl: "https://app.example.com/" }).then(
-      () => null,
-      (err: unknown) => err,
-    );
-    await vi.waitFor(() => expect(h.startCalls).toBe(1));
-
-    let shutdownSettled = false;
-    const shutdown = closeAllProvisionSessions().then(() => {
-      shutdownSettled = true;
-    });
-    await vi.waitFor(() => expect(h.closeCalls).toBe(1));
-    expect(shutdownSettled).toBe(false);
-
-    releaseStart?.();
-    await shutdown;
-
-    await expect(startResult).resolves.toEqual(
-      expect.objectContaining({
-        message: "operate_start cancelled: operator server is shutting down",
-      }),
-    );
-    expect(h.closeCalls).toBe(2);
-  });
-
-  it("does not age-reap an active task", async () => {
-    vi.useFakeTimers();
-    try {
-      const session = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-
-      await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1_000);
-      expect(h.closeCalls).toBe(0);
-
-      await finishProvisionSession(session.session_id);
-      expect(h.closeCalls).toBe(1);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("returns each clean closed profile through the lease boundary", async () => {
-    for (let index = 0; index < 3; index += 1) {
-      const session = await startProvisionSession({
-        serviceUrl: `https://app.example.com/task-${index}`,
-      });
-      await finishProvisionSession(session.session_id);
-    }
-
-    expect(h.leaseAcquireCalls).toBe(3);
-    expect(h.leaseReturnCalls).toBe(3);
-    expect(h.leaseDestroyCalls).toBe(0);
-  });
-
-  it.each(["force_closed_unproven", "unknown"] as const)(
-    "quarantines a %s profile instead of warming it",
-    async (closeState) => {
-      h.closeState = closeState;
-      const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
-      await finishProvisionSession(first.session_id);
-
-      const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
-      expect(h.profileDirs[1]).not.toBe(h.profileDirs[0]);
-      expect(h.leaseReturnCalls).toBe(0);
-      expect(h.leaseRetainCalls).toBe(1);
-      await finishProvisionSession(second.session_id);
-    },
-  );
 });
-
 describe("operate session — await_verification into_slot (T3 fix: OTP never round-trips)", () => {
   it("seals a found OTP into a slot (masked handle, no raw code) and type_secret enters it", async () => {
     const obs = await startProvisionSession({
@@ -4382,39 +6168,262 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
   });
 
   it("returns the code normally when into_slot is NOT requested", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-gmail-read";
+    const googleState = {
+      cookies: [
+        {
+          name: "SID",
+          value: "live-google-session-for-gmail",
+          domain: ".google.com",
+          path: "/",
+        },
+      ],
+      origins: [{ origin: "https://mail.google.com", localStorage: [] }],
+    };
+    h.storageStates.set(canonical, googleState);
     const obs = await startProvisionSession({
       serviceUrl: "https://app.example.com/",
       consentInboxRead: true,
+      profileDir: canonical,
     });
+    h.currentUrl = "https://app.example.com/verify-email";
     h.visibleText = "Your verification code is 481920.";
+    h.captureStorageStates.set(1, {
+      ...googleState,
+      origins: [
+        {
+          origin: "https://mail.google.com",
+          localStorage: [{ name: "state", value: "x".repeat(4 * 1024 * 1024) }],
+        },
+      ],
+    });
     const res = await awaitVerification(obs.session_id, {});
     expect(res.code).toBe("481920");
     expect(res.sealed).toBeUndefined();
+    expect(h.seededStorageStates).toEqual([undefined]);
+    expect(h.connections[0]).toBe(true);
+    expect(h.temporaryHostScopes).toEqual([
+      { hosts: ["mail.google.com"], phase: "enter" },
+      { hosts: ["mail.google.com"], phase: "exit" },
+    ]);
+    expect(h.currentUrl).toContain("mail.google.com");
+    expect(h.storageStateWrites).toEqual([]);
+    expect(h.storageStates.get(canonical)).toEqual(googleState);
   });
 
-  it("PR2: refuses the inbox read without consent and hands the code request back", async () => {
-    // No consentInboxRead → default OFF → must NOT read the (mocked) inbox.
+  it("recursively seals delegated verification results in Compact V2 only", async () => {
+    const rawCode = "481920";
+    const rawSender = "private.sender@example.com";
+    const rawLink = "https://app.example.com/verify?token=private-link-token-123456789";
+
+    const legacy = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      consentInboxRead: true,
+    });
+    h.visibleText = `From: Sender <${rawSender}>\nYour verification code is ${rawCode}.`;
+    h.elements = [elem({ tag: "a", role: "link", href: rawLink, visibleText: "Confirm" })];
+    h.openFirstMailResult = true;
+    const legacyResult = (await provisionActTool.handler(
+      provisionActTool.inputSchema.parse({
+        session_id: legacy.session_id,
+        kind: "await_verification",
+      }),
+      null,
+    )) as Record<string, unknown>;
+
+    expect(legacyResult).toMatchObject({
+      code: rawCode,
+      link: rawLink,
+      source_from: rawSender,
+    });
+    await finishProvisionSession(legacy.session_id);
+
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const compact = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      consentInboxRead: true,
+    });
+    h.visibleText = `From: Sender <${rawSender}>\nYour verification code is ${rawCode}.`;
+    h.elements = [elem({ tag: "a", role: "link", href: rawLink, visibleText: "Confirm" })];
+    h.openFirstMailResult = true;
+    const compactResult = (await provisionActTool.handler(
+      provisionActTool.inputSchema.parse({
+        session_id: compact.session_id,
+        kind: "await_verification",
+      }),
+      null,
+    )) as Record<string, unknown>;
+
+    expect(compactResult).toMatchObject({
+      found: true,
+      code: null,
+      link: null,
+      source_from: null,
+    });
+    expect(JSON.stringify(compactResult)).not.toContain(rawCode);
+    expect(JSON.stringify(compactResult)).not.toContain(rawSender);
+    expect(JSON.stringify(compactResult)).not.toContain("private-link-token");
+  });
+
+  it("reads the inbox by default when no consent option is supplied", async () => {
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
     h.visibleText = "Your verification code is 481920.";
     const res = await awaitVerification(obs.session_id, {});
-    expect(res.found).toBe(false);
-    expect(res.code).toBeNull();
-    expect(res.needs_user?.resume).toBe("code");
-    expect(res.needs_user?.message).toContain("not consented");
+    expect(res.found).toBe(true);
+    expect(res.code).toBe("481920");
   });
 
-  it("PR3b: grant_inbox_consent reads the inbox after an in-context yes, and is remembered", async () => {
+  it("allows an explicit opt-out and a later session-only opt-in", async () => {
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
     const sid = obs.session_id;
     h.visibleText = "Your verification code is 481920.";
-    // First call refuses (consent OFF).
-    expect((await awaitVerification(sid, {})).found).toBe(false);
-    // Host relays the user's yes → grant + read.
+    // Explicit false wins over the default-on preference.
+    const optedOut = await awaitVerification(sid, { grantConsent: false });
+    expect(optedOut.found).toBe(false);
+    expect(optedOut.needs_user?.message).toContain("disabled");
+    // A later explicit true restores access for this session.
     const granted = await awaitVerification(sid, { grantConsent: true });
     expect(granted.found).toBe(true);
     expect(granted.code).toBe("481920");
     // Remembered for the session: a later await needs no re-grant.
     expect((await awaitVerification(sid, {})).found).toBe(true);
+  });
+
+  it("seals sender text before writing a Compact V2 verification audit", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const privateSender = "private.sender@example.com";
+    const obs = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      consentInboxRead: true,
+    });
+    h.visibleText = `From: Sender <${privateSender}>\nYour verification code is 481920.`;
+    h.openFirstMailResult = true;
+    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    try {
+      const result = await awaitVerification(obs.session_id, {});
+      const auditLine = stderrWrite.mock.calls
+        .map(([line]) => String(line))
+        .find((line) => line.includes('"event":"await_verification"'));
+
+      expect(result.source_from).toBe(privateSender);
+      expect(auditLine).toBeDefined();
+      expect(auditLine).not.toContain(privateSender);
+      expect(auditLine).toContain('"source_from":"<sealed>"');
+    } finally {
+      stderrWrite.mockRestore();
+    }
+  });
+
+  it("populates link for a link-only verification email whose action button is text, not href, keyed (Xata Keycloak account-link)", async () => {
+    // The real Xata email: a Keycloak "Link Google account" email whose CTA
+    // href is an opaque per-recipient click-tracking URL (no verify/login/
+    // token vocabulary survives in it at all) — only the button's visible
+    // text carries the signal. #644 handled a bare href carrying that
+    // vocabulary; this covers the href carrying NONE of it.
+    const obs = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      consentInboxRead: true,
+    });
+    const trackingHref = "https://click.mailtrack.example.net/wf/click?upn=abc123opaque";
+    h.visibleText = "Xata wants to link your Google account. No code needed.";
+    h.elements = [
+      elem({ tag: "a", role: "link", href: "https://xata.io/unsubscribe?u=1", visibleText: "Unsubscribe" }),
+      elem({ tag: "a", role: "link", href: trackingHref, visibleText: "Link your Google account" }),
+    ];
+    h.openFirstMailResult = true;
+
+    const res = await awaitVerification(obs.session_id, {});
+
+    expect(res.found).toBe(true);
+    expect(res.code).toBeNull();
+    expect(res.link).toBe(trackingHref);
+  });
+
+  it("never returns an unsubscribe/footer link even when it is the only href present", async () => {
+    const obs = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      consentInboxRead: true,
+    });
+    h.visibleText = "Manage your email preferences below.";
+    h.elements = [
+      elem({
+        tag: "a",
+        role: "link",
+        href: "https://click.mailtrack.example.net/wf/click?upn=xyz",
+        visibleText: "Unsubscribe from marketing emails",
+      }),
+    ];
+    h.openFirstMailResult = true;
+
+    const res = await awaitVerification(obs.session_id, {});
+
+    expect(res.link).toBeNull();
+    expect(res.found).toBe(false);
+  });
+});
+
+describe("await_verification — Gmail transient #2014 backend error resilience", () => {
+  it("detects the #2014 banner and Gmail's 'encountered a problem' / 'Retrying' text", () => {
+    expect(
+      isGmailTransientErrorText(
+        "Oops... the system encountered a problem (#2014) - Retrying in 5s.",
+      ),
+    ).toBe(true);
+    expect(isGmailTransientErrorText("Retrying in 12 seconds")).toBe(true);
+    expect(isGmailTransientErrorText("Your inbox — 3 unread messages")).toBe(false);
+  });
+
+  it("detects Gmail's empty-search-result banner", () => {
+    expect(isEmptyGmailResultText("No messages matched your search.")).toBe(true);
+    expect(isEmptyGmailResultText("1 of 1 message shown")).toBe(false);
+  });
+
+  it("backs off with a bounded, increasing schedule", () => {
+    expect(gmailTransientBackoffMs(0)).toBe(800);
+    expect(gmailTransientBackoffMs(1)).toBe(1600);
+    expect(gmailTransientBackoffMs(2)).toBe(3200);
+    // Capped, not unbounded exponential growth.
+    expect(gmailTransientBackoffMs(5)).toBeLessThanOrEqual(4000);
+  });
+
+  it("retries past a transient #2014 banner instead of giving up, and still finds the code", async () => {
+    const obs = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      consentInboxRead: true,
+    });
+    const banner =
+      "Oops... the system encountered a problem (#2014) - Retrying in 5s. " + "pad".repeat(80);
+    const real = "Your verification code is 481920. " + "pad".repeat(80);
+    // First search read hits the transient banner; the retry-with-backoff
+    // re-issues the search and the second read is the real content.
+    h.visibleTextQueue = [banner, real];
+    h.visibleText = real; // fallback once the queue is drained (the opened-mail read)
+    h.openFirstMailResult = true;
+
+    const res = await awaitVerification(obs.session_id, {});
+
+    expect(res.found).toBe(true);
+    expect(res.code).toBe("481920");
+    // The search page was re-navigated to recover from the transient error.
+    expect(h.gotos.filter((u) => u.includes("mail.google.com")).length).toBeGreaterThan(1);
+  });
+
+  it("still concludes not-found after bounded retries on a genuinely empty, non-errored inbox", async () => {
+    const obs = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      consentInboxRead: true,
+    });
+    const empty = "No messages matched your search. " + "pad".repeat(80);
+    h.visibleText = empty;
+    h.openFirstMailResult = false;
+
+    const res = await awaitVerification(obs.session_id, {});
+
+    expect(res.found).toBe(false);
+    expect(res.code).toBeNull();
+    expect(res.link).toBeNull();
+    expect(res.needs_user).toBeDefined();
   });
 });
 
@@ -4499,6 +6508,7 @@ describe("operate session — captcha gate", () => {
     expect(res.settled).toBe(false);
     expect(res.needs_user?.gate).toBe("captcha_wall");
     expect(res.needs_user?.remedy).toMatch(/proxy|manual/i);
+    expect(res.needs_user?.remedy).toContain("operate_start");
   });
 
   it("executes invisible reCAPTCHA and waits for a response token", async () => {
@@ -4572,14 +6582,14 @@ describe("operate_finish lifecycle consolidation", () => {
       await expect(
         provisionFinishTool.handler({ session_id: started.session_id }, null),
       ).rejects.toThrow(/already closing/);
-      expect(h.resetCalls).toBe(0);
+      expect(h.closeCalls).toBe(0);
 
       releaseExtraction?.();
       await expect(finishing).resolves.toMatchObject({
         kind: "credentials",
         stored_credential: { reference: "vault://acct/finish-exclusive" },
       });
-      expect(h.resetCalls).toBe(1);
+      expect(h.closeCalls).toBe(1);
     } finally {
       releaseExtraction?.();
       if (previousAutoPromote === undefined) delete process.env.TRUSTY_SQUIRE_AUTO_PROMOTE;
@@ -4611,6 +6621,114 @@ describe("operate_finish lifecycle consolidation", () => {
       ...legacy,
       session_id: "normalized",
     });
+    expect(h.storageStateWrites).toEqual([]);
+    expect(h.destroyedProfiles).toEqual([]);
+  });
+
+  it("preserves prior state when an explicit credential outcome fails", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-failed-outcome";
+    const prior = { cookies: [{ name: "SID", value: "prior" }], origins: [] };
+    h.storageStates.set(canonical, prior);
+    h.visibleText = "No credential is present";
+    const storeCredential = vi.fn();
+    const session = await startProvisionSession({
+      serviceUrl: "https://app.example.com/done",
+      profileDir: canonical,
+    });
+
+    const result = await provisionFinishTool.handler(
+      {
+        session_id: session.session_id,
+        outcome: { kind: "credentials", store: { service: "example" } },
+      },
+      { storeCredential } as unknown as ApiClient,
+    );
+
+    expect(result).toMatchObject({ kind: "credentials", stored_credential: null });
+    expect(storeCredential).not.toHaveBeenCalled();
+    expect(h.storageStateWrites).toEqual([]);
+    expect(h.storageStates.get(canonical)).toBe(prior);
+  });
+
+  it("preserves prior state for failed or unconfirmed result outcomes", async () => {
+    const canonical = "/tmp/trusty-squire-unit-canonical-failed-result";
+    const prior = { cookies: [{ name: "SID", value: "prior" }], origins: [] };
+    h.storageStates.set(canonical, prior);
+
+    const failedSession = await startProvisionSession({
+      serviceUrl: "https://app.example.com/done",
+      profileDir: canonical,
+    });
+    const failed = await provisionFinishTool.handler(
+      provisionFinishTool.inputSchema.parse({
+        session_id: failedSession.session_id,
+        outcome: { kind: "result", data: { confirmed: false } },
+      }),
+      null,
+    );
+
+    const unconfirmedSession = await startProvisionSession({
+      serviceUrl: "https://app.example.com/done",
+      profileDir: canonical,
+    });
+    const unconfirmed = await provisionFinishTool.handler(
+      provisionFinishTool.inputSchema.parse({
+        session_id: unconfirmedSession.session_id,
+        outcome: { kind: "result", summary: "Task stopped before success" },
+      }),
+      null,
+    );
+
+    expect(failed).toMatchObject({ kind: "result", data: { confirmed: "false" } });
+    expect(unconfirmed).toMatchObject({ kind: "result", summary: "Task stopped before success" });
+    expect(h.storageStateWrites).toEqual([]);
+    expect(h.storageStates.get(canonical)).toBe(prior);
+  });
+
+  it("seals the current URL from Compact V2 finish results", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const urlToken = "private-finish-token-123456789";
+    const started = await startProvisionSession({
+      serviceUrl: `https://app.example.com/done?token=${urlToken}`,
+    });
+
+    const result = (await provisionFinishTool.handler(
+      { session_id: started.session_id },
+      null,
+    )) as Record<string, unknown>;
+
+    expect(result).toMatchObject({
+      session_id: started.session_id,
+      url: "",
+      closed: true,
+    });
+    expect(JSON.stringify(result)).not.toContain(urlToken);
+  });
+
+  it("seals Compact V2 measurement service labels before stderr emission", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const panHost = "4111-1111-1111-1111.com";
+    const started = await startProvisionSession({ serviceUrl: `https://${panHost}/done` });
+    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    try {
+      await provisionFinishTool.handler(
+        {
+          session_id: started.session_id,
+          outcome: { kind: "result", summary: "Done" },
+        },
+        null,
+      );
+      const measurement = stderrWrite.mock.calls
+        .map(([line]) => String(line))
+        .find((line) => line.includes('"marker":"provision-measurement"'));
+
+      expect(measurement).toBeDefined();
+      expect(measurement).not.toContain(panHost);
+      expect(measurement).toContain('"service":"<sealed>"');
+    } finally {
+      stderrWrite.mockRestore();
+    }
   });
 
   it("returns the legacy result shape from outcome=result, including scalar data coercion", async () => {
@@ -4733,6 +6851,7 @@ describe("operate session — PR3c username/password login (capture-at-login sou
 
   function withEmail(email: string): void {
     h.workerEmail = email;
+    h.liveGoogleEmail = email;
   }
 
   it("prepare_login seals the captured user email + a generated password (masked handles only)", async () => {
@@ -4783,7 +6902,10 @@ describe("operate session — PR3c username/password login (capture-at-login sou
   });
 
   it("prepare_login hands back when no user email was captured", async () => {
-    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/", profileDir });
+    const obs = await startHarnessProvisionSession({
+      browser: new BrowserController(),
+      serviceUrl: "https://app.example.com/",
+    });
     const res = (await provisionPrepareLoginTool.handler(
       { session_id: obs.session_id },
       null as unknown as ApiClient,
@@ -5214,7 +7336,12 @@ describe("frame targets — domain-lock (operator-frame-support)", () => {
     stashSecretSlot(started.session_id, "login", "s3cr3t-value");
     await act(started.session_id, { kind: "type_secret", slot: "login", target: "Password" });
     expect(h.frameTypes).toEqual([
-      { frameUrl: SAME_DOMAIN_FRAME_URL, selector: "#password", text: "s3cr3t-value" },
+      {
+        frameUrl: SAME_DOMAIN_FRAME_URL,
+        selector: "#password",
+        text: "s3cr3t-value",
+        sealed: true,
+      },
     ]);
   });
 
@@ -5393,12 +7520,56 @@ describe("pending card-fill charge guard", () => {
   });
 
   it("serializes fill-card behind every other payment lease", async () => {
-    await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
     const claim = claimActivePaymentForOperatePay(undefined);
     if (claim.kind !== "lease") throw new Error("expected payment lease");
 
     expect(() => claimActivePaymentForOperatePay("fill_card")).toThrow(/already in progress/);
+    await expect(captureScreenshot(started.session_id)).resolves.toBeDefined();
+    expect(h.capturedSealedFieldKeys).toEqual([[]]);
     expect(releaseActivePaymentLease(claim.lease)).toBe(true);
+  });
+
+  it("refuses charge clicks while a prior 3DS outcome is unresolved", async () => {
+    h.elements = [
+      elem({ tag: "button", type: null, visibleText: "Place order", selector: "#place-order" }),
+      elem({ tag: "button", type: null, visibleText: "Continue to review", selector: "#next" }),
+    ];
+    h.visibleText = "Checkout";
+    const auditPayment = vi.fn().mockResolvedValue({ id: "audit_close" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+      api: { auditPayment } as unknown as ApiClient,
+    });
+    setActivePendingThreeDs({
+      approval_id: "appr_pending_charge",
+      approval_url: "https://web.test/vault/pay/appr_pending_charge",
+      checkout: pending.checkout,
+      last4: pending.last4,
+      deadline: Date.now() + 60_000,
+      outcome: "three_ds",
+    });
+
+    await expect(act(started.session_id, { kind: "click", target: "Place order" })).rejects.toThrow(
+      /call operate_payment_status first/,
+    );
+    h.locatorResolve = {
+      ok: true,
+      text: "Place order",
+      labels: ["Place order"],
+      safetySignals: { billingObject: false, accountSetup: false },
+    };
+    await expect(
+      act(started.session_id, { kind: "js_click", target: "css=#place-order" }),
+    ).rejects.toThrow(/call operate_payment_status first/);
+    expect(h.clickCalls).toBe(0);
+    expect(h.locatorClickCalls).toBe(0);
+
+    await act(started.session_id, { kind: "click", target: "Continue to review" });
+    expect(h.clickCalls).toBe(1);
+    await finishProvisionSession(started.session_id);
   });
 
   it("transitions a successful fill-card lease to pending confirmation", async () => {
@@ -5818,9 +7989,8 @@ describe("pending card-fill charge guard", () => {
     expect(JSON.stringify(full)).not.toContain("4242×4242×4242×4242");
     expect(JSON.stringify(full)).not.toContain("4242∙4242∙4242∙4242");
     expect(JSON.stringify(full)).not.toContain('"123"');
-    expect(full.text).toBe(
-      "Card preview [sealed payment], [sealed payment], [sealed payment], [sealed payment], and [sealed payment] · CVV [sealed payment]",
-    );
+    expect(full.text).toContain("Card preview [sealed payment]");
+    expect(full.text).toContain("CVV [sealed");
     expect(full.elements?.map((element) => element.value)).toEqual(["[sealed]", "[sealed]"]);
   });
 
@@ -5983,18 +8153,41 @@ describe("awaiting-approval payment lease [P0]", () => {
     expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(/already in progress/);
     expect(releaseActivePaymentLease(resumed.lease, true)).toBe(true);
   });
+
+  it("keeps a denial observed by operate_pay terminal under the owned lease", async () => {
+    await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const terminalState = {
+      ...approvalState,
+      keypair: { ...approvalState.keypair, privateKey: "terminal-private" },
+    };
+    const claim = claimActivePaymentForOperatePay(undefined);
+    if (claim.kind !== "lease") throw new Error("expected a fresh lease");
+
+    completeActivePaymentLeaseWithTerminalApproval(claim.lease, terminalState, "denied");
+
+    expect(terminalState.keypair.privateKey).toBe("");
+    expect(getActivePendingApproval()).toBeNull();
+    expect(getTerminalPaymentApproval()).toEqual({
+      state: terminalState,
+      terminalStatus: "denied",
+    });
+    expect(claimActivePaymentForOperatePay(undefined)).toEqual({
+      kind: "terminal",
+      state: terminalState,
+      terminalStatus: "denied",
+    });
+  });
 });
 
-// ── operate_pay tool completion — resumes the SAME approval [P0] ───────────
+// ── operate_pay tool completion — system-owned approval wait [P0] ──────────
 //
 // The full operate_pay MCP tool (session lease + executeOperatePay), not just
 // the pure executeOperatePay unit. A single-page checkout whose card fields
-// live in a late-mounting cross-origin PCI iframe: the first call creates the
-// approval and hands back approval_pending; once the phone taps approve, a
-// SECOND operate_pay call with the SAME arguments must resume that exact
-// approval and fill+submit within it — never mint a fresh approval, never
-// re-arm approval_pending once the mandate is already signed.
-describe("operate_pay tool completion — resumes the SAME approval [P0]", () => {
+// live in a late-mounting cross-origin PCI iframe: the approval URL is surfaced
+// while the call remains open, the server detects the phone response, and the
+// same call fills/submits. A no-progress-transport fallback still resumes the
+// exact approval on one later call without minting another.
+describe("operate_pay tool completion — system-owned approval wait [P0]", () => {
   const CHECKOUT = {
     merchant: "Kobee Japan",
     checkout_origin: "https://store.kobeejapan.net",
@@ -6056,14 +8249,14 @@ describe("operate_pay tool completion — resumes the SAME approval [P0]", () =>
       }
       if (
         (url.endsWith("/v1/pay/approvals/appr_kobee") ||
-          url.endsWith("/v1/pay/approvals/appr_kobee?wait_for_submission=1") ||
+          url.includes("/v1/pay/approvals/appr_kobee?wait_for_submission=1") ||
           url.endsWith("/v1/pay/approvals/appr_kobee?read_submission=1")) &&
         init?.method === "GET"
       ) {
         const approval = approvalBodies[0]!;
         const operatorPublicKey = String(approval.operator_pubkey);
         const readsRelayCandidate =
-          url.endsWith("?wait_for_submission=1") || url.endsWith("?read_submission=1");
+          url.includes("?wait_for_submission=1") || url.endsWith("?read_submission=1");
         if (url.endsWith("?read_submission=1")) immediateApprovalReads.push(approved);
         if (!approved || !readsRelayCandidate) {
           return Response.json({
@@ -6168,7 +8361,7 @@ describe("operate_pay tool completion — resumes the SAME approval [P0]", () =>
     global.fetch = originalFetch;
   });
 
-  it("fills and submits within the SAME approval once the phone has responded — never re-arms approval_pending", async () => {
+  it("detects the phone approval and submits in the same operate_pay call", async () => {
     const env = buildPaymentEnv();
     // executeOperatePay's own JWKS fetch goes through the real global fetch
     // (the tool layer never overrides deps.fetch) — route it through the same
@@ -6177,55 +8370,524 @@ describe("operate_pay tool completion — resumes the SAME approval [P0]", () =>
 
     await startProvisionSession({ serviceUrl: "https://store.kobeejapan.net/checkout" });
 
-    const first = (await operatePayTool.handler(baseArgs, env.api)) as Record<string, unknown>;
-    expect(first.status).toBe("approval_pending");
-    expect(env.approvalBodies).toHaveLength(1);
-    expect(env.immediateApprovalReads).toEqual([false]);
-    expect(getActivePendingApproval()).not.toBeNull();
+    const notifyUser = vi.fn().mockImplementation(async () => {
+      // The notification is delivered before executeOperatePay enters its
+      // server-owned wait, so the human can respond while this call is open.
+      env.setApproved();
+    });
+    const result = (await operatePayTool.handler(baseArgs, env.api, { notifyUser })) as Record<
+      string,
+      unknown
+    >;
 
-    // The human taps approve on their phone.
-    env.setApproved();
-
-    // Completion call: same arguments, no phase — the single-page path. The
-    // card fields live in the (by now mounted) cross-origin PCI iframe; the
-    // mock's fillAndSubmitCheckout stands in for that fill.
-    const second = (await operatePayTool.handler(baseArgs, env.api)) as Record<string, unknown>;
-
-    expect(second.status).toBe("payment_submitted");
-    expect(env.immediateApprovalReads).toEqual([false, true]);
-    // Exactly ONE approval was ever minted across both calls — a re-arm would
-    // show up here as a second POST /v1/pay/approvals.
+    expect(result.status).toBe("payment_submitted");
+    expect(notifyUser).toHaveBeenCalledOnce();
+    // Exactly ONE approval was minted and spent in this call.
     expect(env.approvalBodies).toHaveLength(1);
     expect(h.filledCards).toEqual([SYNTHETIC_CARD]);
-    // The lease resolved to a terminal outcome — no dangling awaiting_approval
-    // state left behind for a THIRD call to loop on.
+    // The lease resolved to a terminal outcome — no dangling approval state
+    // for an agent-side polling loop.
     expect(getActivePendingApproval()).toBeNull();
   });
+});
 
-  it("never returns approval_pending a second time once the mandate is signed — terminal or a genuine handoff, not a re-arm", async () => {
-    const env = buildPaymentEnv();
-    global.fetch = env.fetch;
+// Regression coverage for the decoupled/out-of-band 3DS completion gap
+// (companion to pay-operator.test.ts's "a timed-out 3DS wait persists
+// resumable state" unit test): operate_payment_status must actually consume
+// that resumable state — re-checking the SAME live browser rather than
+// leaving it to rot once set.
+describe("operate_payment_status — resumable post-submit 3DS wait", () => {
+  const CHECKOUT = {
+    merchant: "Hibiya Kadan",
+    checkout_origin: "https://hibiyakadan.example.test",
+    amount_cents: 8_800,
+    currency: "JPY",
+  };
+  function buildThreeDsState(
+    deadline = Date.now() + 60_000,
+    payment_instrument_mismatch?: {
+      kind: "payment_instrument_mismatch";
+      confidence: "high" | "low";
+      evidence_used: Array<"last4" | "issuer" | "network">;
+      expected: { last4: string; issuer?: string; network?: string; label?: string };
+      observed: { last4?: string; issuer?: string; network?: string };
+      provenance: {
+        expected: {
+          last4: "released_card";
+          issuer?: "bin_metadata" | "vault_metadata" | "vault_label";
+          network?: "vault_metadata";
+          label?: "vault_label";
+        };
+        observed: "3ds_challenge";
+      };
+    },
+    outcome: "three_ds" | "unknown" = "three_ds",
+  ) {
+    return {
+      approval_id: "appr_3ds",
+      approval_url: "https://web.test/vault/pay/appr_3ds",
+      checkout: CHECKOUT,
+      last4: "9192",
+      mandate_id: "mandate_3ds",
+      deadline,
+      outcome,
+      ...(payment_instrument_mismatch !== undefined ? { payment_instrument_mismatch } : {}),
+    };
+  }
 
-    await startProvisionSession({ serviceUrl: "https://store.kobeejapan.net/checkout" });
+  function buildStatusEnv(): { api: ApiClient; auditBodies: Array<Record<string, unknown>> } {
+    const auditBodies: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/v1/vault/payments/audit") && init?.method === "POST") {
+        auditBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        return Response.json({ id: "audit_3ds" }, { status: 201 });
+      }
+      return Response.json({ error: "not_found" }, { status: 404 });
+    }) as typeof fetch;
+    const api = new ApiClient({
+      apiBaseUrl: "https://api.test",
+      registryBaseUrl: "https://registry.test",
+      agentSessionToken: "synthetic-session-token",
+      fetch: fetchMock,
+    });
+    return { api, auditBodies };
+  }
 
-    const first = (await operatePayTool.handler(baseArgs, env.api)) as Record<string, unknown>;
-    expect(first.status).toBe("approval_pending");
+  it("keeps checking the same live browser and clears state once the OOB challenge resolves", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: env.api,
+    });
+    const threeDsState = buildThreeDsState();
+    setActivePendingThreeDs(threeDsState);
+    expect(getActivePendingThreeDs()).toEqual(threeDsState);
 
-    env.setApproved();
-    const second = (await operatePayTool.handler(baseArgs, env.api)) as Record<string, unknown>;
+    h.waitForThreeDsResult = "timeout";
+    const pending = (await operatePaymentStatusTool.handler({}, env.api)) as Record<
+      string,
+      unknown
+    >;
+    expect(pending).toMatchObject({
+      status: "payment_3ds_pending",
+      next: { tool: "operate_payment_status", wait_seconds: 15 },
+    });
+    expect(getActivePendingThreeDs()).not.toBeNull();
+    expect(env.auditBodies).toHaveLength(0);
 
-    // Never a dead-end re-arm: the mandate is either spent on a terminal
-    // outcome or the host gets an explicit, non-looping status.
-    expect(second.status).not.toBe("approval_pending");
-    expect(["payment_submitted", "payment_3ds_required", "payment_declined"]).toContain(
-      second.status,
+    // The cardholder approves the OOB push between polls; a LATER
+    // operate_payment_status call must observe it via the SAME session's
+    // browser without operate_pay ever being called again.
+    h.waitForThreeDsResult = "succeeded";
+    const resolved = (await operatePaymentStatusTool.handler({}, env.api)) as Record<
+      string,
+      unknown
+    >;
+    expect(resolved).toMatchObject({
+      status: "payment_submitted",
+      audit_recorded: true,
+      merchant: CHECKOUT.merchant,
+      amount_cents: CHECKOUT.amount_cents,
+      currency: CHECKOUT.currency,
+    });
+    expect(getActivePendingThreeDs()).toBeNull();
+    expect(env.auditBodies).toEqual([
+      expect.objectContaining({
+        last4: "9192",
+        status: "payment_submitted",
+        approvalId: "appr_3ds",
+        mandateId: "mandate_3ds",
+      }),
+    ]);
+  });
+
+  it("preserves an unknown outcome while no 3DS or merchant evidence appears", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: env.api,
+    });
+    const unknownState = buildThreeDsState(Date.now() + 60_000, undefined, "unknown");
+    setActivePendingThreeDs(unknownState);
+    h.waitForThreeDsResult = "timeout";
+
+    await expect(operatePaymentStatusTool.handler({}, env.api)).resolves.toMatchObject({
+      status: "payment_outcome_unknown",
+      next: { tool: "operate_payment_status", wait_seconds: 15 },
+    });
+    expect(getActivePendingThreeDs()).toBe(unknownState);
+    expect(env.auditBodies).toHaveLength(0);
+  });
+
+  it("reports 3DS pending only after the browser observes a challenge", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: env.api,
+    });
+    const unknownState = buildThreeDsState(Date.now() + 60_000, undefined, "unknown");
+    setActivePendingThreeDs(unknownState);
+    h.waitForThreeDsResult = "challenge_pending";
+
+    await expect(operatePaymentStatusTool.handler({}, env.api)).resolves.toMatchObject({
+      status: "payment_3ds_pending",
+    });
+    expect(unknownState.outcome).toBe("three_ds");
+  });
+
+  it("keeps an ACS instrument-mismatch warning visible across 3DS status waits", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+    });
+    setActivePendingThreeDs(
+      buildThreeDsState(Date.now() + 60_000, {
+        kind: "payment_instrument_mismatch",
+        confidence: "high",
+        evidence_used: ["issuer"],
+        expected: { last4: "9192", issuer: "DBS" },
+        observed: { issuer: "ENBDX" },
+        provenance: {
+          expected: { last4: "released_card", issuer: "bin_metadata" },
+          observed: "3ds_challenge",
+        },
+      }),
     );
-    expect(env.immediateApprovalReads).toEqual([false, true]);
+    h.waitForThreeDsResult = "timeout";
+
+    await expect(operatePaymentStatusTool.handler({}, env.api)).resolves.toMatchObject({
+      status: "payment_3ds_pending",
+      warning: {
+        kind: "payment_instrument_mismatch",
+        expected: { last4: "9192", issuer: "DBS" },
+        observed: { issuer: "ENBDX" },
+        provenance: {
+          expected: { last4: "released_card", issuer: "bin_metadata" },
+          observed: "3ds_challenge",
+        },
+      },
+    });
+    h.waitForThreeDsResult = "failed";
+    await operatePaymentStatusTool.handler({}, env.api);
+  });
+
+  it("persists mismatch evidence first observed by a resumable status poll", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: env.api,
+    });
+    setActivePendingThreeDs(buildThreeDsState());
+    h.paymentInstrumentMismatch = {
+      kind: "payment_instrument_mismatch",
+      confidence: "high",
+      evidence_used: ["last4"],
+      expected: { last4: "9192" },
+      observed: { last4: "0005" },
+      provenance: {
+        expected: { last4: "released_card" },
+        observed: "3ds_challenge",
+      },
+    };
+
+    await expect(operatePaymentStatusTool.handler({}, env.api)).resolves.toMatchObject({
+      status: "payment_3ds_pending",
+      warning: h.paymentInstrumentMismatch,
+    });
+    expect(getActivePendingThreeDs()).toMatchObject({
+      payment_instrument_mismatch: h.paymentInstrumentMismatch,
+    });
+  });
+
+  it("records a declined outcome and clears state when the OOB challenge fails", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+    });
+    setActivePendingThreeDs(buildThreeDsState());
+
+    h.waitForThreeDsResult = "failed";
+    const result = (await operatePaymentStatusTool.handler(
+      { wait_seconds: 15 },
+      env.api,
+    )) as Record<string, unknown>;
+
+    expect(result).toMatchObject({ status: "payment_declined", audit_recorded: true });
+    expect(getActivePendingThreeDs()).toBeNull();
+    expect(env.auditBodies).toEqual([expect.objectContaining({ status: "payment_declined" })]);
+  });
+
+  it("hands back an accurate unresolved status once the resumable deadline passes — never fabricates success", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+    });
+    setActivePendingThreeDs(buildThreeDsState(Date.now() - 1));
+
+    h.waitForThreeDsResult = "timeout";
+    const result = (await operatePaymentStatusTool.handler(
+      { wait_seconds: 15 },
+      env.api,
+    )) as Record<string, unknown>;
+
+    expect(result).toMatchObject({
+      status: "payment_3ds_unresolved",
+      audit_recorded: true,
+      needs_user: { wall: "3ds", resume: "checkout" },
+    });
+    expect(getActivePendingThreeDs()).toBeNull();
+    expect(env.auditBodies).toEqual([
+      expect.objectContaining({ status: "payment_3ds_unresolved" }),
+    ]);
+    expect(h.waitForThreeDsCalls).toEqual([0]);
+  });
+
+  it("retains an expired unknown attempt for merchant reconciliation", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: env.api,
+    });
+    const unknownState = buildThreeDsState(Date.now() - 1, undefined, "unknown");
+    setActivePendingThreeDs(unknownState);
+    h.waitForThreeDsResult = "timeout";
+
+    await expect(operatePaymentStatusTool.handler({}, env.api)).resolves.toMatchObject({
+      status: "payment_outcome_unknown",
+      audit_recorded: true,
+      needs_user: { wall: "merchant_reconciliation", resume: "checkout" },
+    });
+    expect(getActivePendingThreeDs()).toBe(unknownState);
+    expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(
+      /prior charge has unresolved 3-D Secure state/,
+    );
+    expect(env.auditBodies).toEqual([
+      expect.objectContaining({ status: "payment_outcome_unknown" }),
+    ]);
+  });
+
+  it("retains reconciliation custody when an unknown-outcome audit fails", async () => {
+    const closeAuditPayment = vi.fn().mockResolvedValue({ id: "audit_close" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: { auditPayment: closeAuditPayment } as unknown as ApiClient,
+    });
+    const unknownState = buildThreeDsState(Date.now() - 1, undefined, "unknown");
+    setActivePendingThreeDs(unknownState);
+    const auditPayment = vi.fn().mockRejectedValue(new Error("audit unavailable"));
+    h.waitForThreeDsResult = "timeout";
+
+    await expect(
+      operatePaymentStatusTool.handler({}, { auditPayment } as unknown as ApiClient),
+    ).resolves.toMatchObject({
+      status: "payment_outcome_unknown",
+      audit_recorded: false,
+      needs_user: { wall: "merchant_reconciliation", resume: "checkout" },
+    });
+    expect(auditPayment).toHaveBeenCalledTimes(1);
+    expect(getActivePendingThreeDs()).toBe(unknownState);
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("retains expired 3DS state when its required terminal audit cannot be written", async () => {
+    const closeAuditPayment = vi.fn().mockResolvedValue({ id: "audit_close" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: { auditPayment: closeAuditPayment } as unknown as ApiClient,
+    });
+    const threeDsState = buildThreeDsState(Date.now() - 1);
+    setActivePendingThreeDs(threeDsState);
+    const auditPayment = vi.fn().mockRejectedValue(new Error("audit unavailable"));
+    h.waitForThreeDsResult = "timeout";
+
+    await expect(
+      operatePaymentStatusTool.handler({}, { auditPayment } as unknown as ApiClient),
+    ).rejects.toThrow("audit unavailable");
+    expect(auditPayment).toHaveBeenCalledTimes(1);
+    expect(getActivePendingThreeDs()).toEqual(threeDsState);
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("does not let a stale status call clear newer pending 3DS state", async () => {
+    const finishAuditPayment = vi.fn().mockResolvedValue({ id: "audit_finish" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: { auditPayment: finishAuditPayment } as unknown as ApiClient,
+    });
+    const oldState = buildThreeDsState(Date.now() - 1);
+    setActivePendingThreeDs(oldState);
+    h.waitForThreeDsResult = "timeout";
+
+    let signalFirstAuditStarted: (() => void) | undefined;
+    const firstAuditStarted = new Promise<void>((resolve) => {
+      signalFirstAuditStarted = resolve;
+    });
+    let releaseFirstAudit: (() => void) | undefined;
+    const firstAuditGate = new Promise<void>((resolve) => {
+      releaseFirstAudit = resolve;
+    });
+    const firstAuditPayment = vi.fn(async () => {
+      signalFirstAuditStarted?.();
+      await firstAuditGate;
+      return { id: "audit_first" };
+    });
+    const firstStatus = operatePaymentStatusTool.handler({}, {
+      auditPayment: firstAuditPayment,
+    } as unknown as ApiClient);
+    await firstAuditStarted;
+
+    const secondAuditPayment = vi.fn().mockResolvedValue({ id: "audit_second" });
+    await operatePaymentStatusTool.handler({}, {
+      auditPayment: secondAuditPayment,
+    } as unknown as ApiClient);
+    expect(getActivePendingThreeDs()).toBeNull();
+
+    const newerState = {
+      ...buildThreeDsState(),
+      approval_id: "appr_newer_3ds",
+      approval_url: "https://web.test/vault/pay/appr_newer_3ds",
+    };
+    setActivePendingThreeDs(newerState);
+    releaseFirstAudit?.();
+    await firstStatus;
+
+    expect(getActivePendingThreeDs()).toBe(newerState);
+    expect(firstAuditPayment).toHaveBeenCalledTimes(1);
+    expect(secondAuditPayment).toHaveBeenCalledTimes(1);
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("refuses a new operate_pay lease while a prior 3DS outcome is unresolved", async () => {
+    const auditPayment = vi.fn().mockResolvedValue({ id: "audit_finish" });
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: { auditPayment } as unknown as ApiClient,
+    });
+    const threeDsState = buildThreeDsState();
+    setActivePendingThreeDs(threeDsState);
+
+    expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(
+      /call operate_payment_status first/,
+    );
+    expect(getActivePendingThreeDs()).toEqual(threeDsState);
+    await finishProvisionSession(paymentSession().id);
+  });
+
+  it("checks and audits an unresolved 3DS charge before operate_finish closes the browser", async () => {
+    const auditPayment = vi.fn().mockResolvedValue({ id: "audit_finish" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: { auditPayment } as unknown as ApiClient,
+    });
+    setActivePendingThreeDs(buildThreeDsState());
+    h.waitForThreeDsResult = "timeout";
+
+    await expect(
+      provisionFinishTool.handler(
+        provisionFinishTool.inputSchema.parse({
+          session_id: started.session_id,
+          outcome: { kind: "result", data: { confirmed: true } },
+        }),
+        null,
+      ),
+    ).resolves.toMatchObject({ kind: "result" });
+    expect(h.waitForThreeDsCalls).toEqual([0]);
+    expect(auditPayment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approval_id: "appr_3ds",
+        mandate_id: "mandate_3ds",
+        last4: "9192",
+        status: "payment_3ds_unresolved",
+      }),
+    );
+    expect(h.captureStorageStateCalls).toBe(0);
+    expect(h.storageStateWrites).toEqual([]);
+  });
+
+  it("retains the pending 3DS fence when finish preparation fails", async () => {
+    const auditPayment = vi.fn().mockResolvedValue({ id: "audit_finish" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+      api: { auditPayment } as unknown as ApiClient,
+    });
+    const threeDsState = buildThreeDsState();
+    setActivePendingThreeDs(threeDsState);
+
+    await expect(
+      finishProvisionSessionWithPreparation(started.session_id, async () => {
+        throw new Error("preparation failed");
+      }),
+    ).rejects.toThrow("preparation failed");
+    expect(getActivePendingThreeDs()).toEqual(threeDsState);
+    expect(h.waitForThreeDsCalls).toEqual([]);
+    expect(auditPayment).not.toHaveBeenCalled();
+
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("checks and audits the pending 3DS charge during bulk session shutdown", async () => {
+    const auditPayment = vi.fn().mockResolvedValue({ id: "audit" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/checkout",
+      api: { auditPayment } as unknown as ApiClient,
+    });
+    setActivePendingThreeDs(buildThreeDsState(), paymentSession(started.session_id));
+    h.waitForThreeDsResult = "timeout";
+
+    await closeAllProvisionSessions();
+
+    expect(h.waitForThreeDsCalls).toEqual([0]);
+    expect(auditPayment).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "payment_3ds_unresolved" }),
+    );
+    expect(activeSessionCount()).toBe(0);
+  });
+
+  it("reports no_pending_payment once nothing is outstanding", async () => {
+    const env = buildStatusEnv();
+    await startProvisionSession({
+      serviceUrl: "https://hibiyakadan.example.test/cart_seisan.html",
+    });
+
+    const result = (await operatePaymentStatusTool.handler({}, env.api)) as Record<string, unknown>;
+
+    expect(result).toMatchObject({ status: "no_pending_payment" });
   });
 });
 
 describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => {
+  it("tries the next code-owned cart locator after a V2 target miss", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.currentUrl = "https://shop.example.com/cart";
+    h.visibleText = "Cart Quantity: 0 Total 968円";
+    h.elements = [elem({ name: "quantity", labelText: "Quantity", selector: "#qty", value: "0" })];
+    h.checkoutSummary = {
+      merchant: "Synthetic Shop",
+      checkout_origin: "https://shop.example.com",
+      amount_cents: 968,
+      currency: "JPY",
+    };
+    h.locatorResolveMissValues = ["Add to Cart"];
+    h.cartLineItemsAfterClick = [
+      {
+        title: "Tiara",
+        quantity: 1,
+        product_identities: ["sku:tiara"],
+        option_signatures: ["size=M"],
+      },
+    ];
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    await expect(
+      cartAdd(started.session_id, "sku:tiara", "size=M", "cart-add-bag-fallback"),
+    ).resolves.toMatchObject({ status: "added", cart_delta: "+1" });
+    expect(h.locatorResolveIntents).toEqual(["click", "click"]);
+    expect(h.locatorClickCalls).toBe(1);
+  });
+
   it("returns legible post-add cart state and suppresses a retry for the same line", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.currentUrl = "https://shop.example.com/cart";
     h.visibleText = "Cart Quantity: 0 Subtotal 968円 Shipping Free Total 968円";
     h.elements = [elem({ name: "quantity", labelText: "Quantity", selector: "#qty", value: "0" })];
@@ -6260,21 +8922,30 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
     expect(added).toMatchObject({
       status: "added",
       cart_delta: "+1",
-      cart_url: "https://shop.example.com/cart",
+      cart_url: "",
       checkout_state: {
         authority: "informational_only",
         completeness: "best_effort",
         authoritative_for_payment: false,
         stage: "cart",
-        product_identity: "sku:tiara",
-        options_hash: "size=M",
+        product_identity: "<requested>",
+        options_hash: "<requested>",
         quantity: 1,
         subtotal: { amount_cents: 968, currency: "JPY" },
         shipping: { amount_cents: 0, currency: "JPY" },
         payable_total: { amount_cents: 968, currency: "JPY" },
+        cart_url: "",
         next_action: { tool: "operate_act", kind: "click", intent: "proceed_to_checkout" },
       },
+      postcondition: {
+        product_identity: "<requested>",
+        options_hash: "<requested>",
+        quantity: 1,
+      },
     });
+    expect(JSON.stringify(added)).not.toContain("https://shop.example.com/cart");
+    expect(JSON.stringify(added)).not.toContain("sku:tiara");
+    expect(JSON.stringify(added)).not.toContain("size=M");
     expect(h.locatorClickCalls).toBe(1);
 
     const retried = (await provisionActTool.handler(
@@ -6349,6 +9020,120 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
       cartAdd(started.session_id, "sku:tiara", "size=M", "cart-add-reconcile"),
     ).resolves.toMatchObject({ status: "already_in_cart", cart_delta: "0" });
     expect(h.locatorClickCalls).toBe(1);
+  });
+
+  it("cart_clear reaches a known (empty) quantity regardless of prior accumulated cart state", async () => {
+    h.currentUrl = "https://shop.example.com/cart";
+    h.visibleText = "Cart Quantity: 3 Subtotal 2904円 Total 2904円";
+    h.checkoutSummary = {
+      merchant: "Synthetic Shop",
+      checkout_origin: "https://shop.example.com",
+      amount_cents: 2904,
+      currency: "JPY",
+    };
+    // Simulates a persistent-profile cart that accumulated quantity 3 across
+    // earlier operate_start sessions (the whitejade.xyz $57-instead-of-$19 case).
+    h.cartLineItems = [
+      {
+        title: "Tiara",
+        quantity: 3,
+        product_identities: ["sku:tiara"],
+        option_signatures: ["size=M"],
+      },
+    ];
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    const cleared = await cartClear(started.session_id);
+
+    expect(h.clearCartCalls).toBe(1);
+    expect(cleared.status).toBe("cleared");
+    expect(h.cartLineItems).toEqual([]);
+
+    h.clickValueMutation = { selector: "#qty", value: "1" };
+    h.cartLineItemsAfterClick = [
+      {
+        title: "Tiara",
+        quantity: 1,
+        product_identities: ["sku:tiara"],
+        option_signatures: ["size=M"],
+      },
+    ];
+
+    const added = (await provisionActTool.handler(
+      provisionActTool.inputSchema.parse({
+        session_id: started.session_id,
+        kind: "cart_add",
+        product_identity: "sku:tiara",
+        options_hash: "size=M",
+        idempotency_key: "cart-add-after-clear",
+      }),
+      null,
+    )) as Awaited<ReturnType<typeof cartAdd>>;
+
+    expect(added).toMatchObject({
+      status: "added",
+      cart_delta: "+1",
+      checkout_state: { quantity: 1 },
+    });
+  });
+
+  it("cart_clear drops a stale reservation so a same-key retry after clearing still adds", async () => {
+    h.currentUrl = "https://shop.example.com/cart";
+    h.visibleText = "Cart Quantity: 1 Total 968円";
+    h.checkoutSummary = {
+      merchant: "Synthetic Shop",
+      checkout_origin: "https://shop.example.com",
+      amount_cents: 968,
+      currency: "JPY",
+    };
+    h.cartLineItems = [
+      {
+        title: "Tiara",
+        quantity: 1,
+        product_identities: ["sku:tiara"],
+        option_signatures: ["size=M"],
+      },
+    ];
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    await cartAdd(started.session_id, "sku:tiara", "size=M", "reused-key");
+    expect(h.locatorClickCalls).toBe(0); // already in cart before any click
+
+    await cartClear(started.session_id);
+    expect(h.cartLineItems).toEqual([]);
+
+    h.clickValueMutation = { selector: "#qty", value: "1" };
+    h.cartLineItemsAfterClick = [
+      {
+        title: "Tiara",
+        quantity: 1,
+        product_identities: ["sku:tiara"],
+        option_signatures: ["size=M"],
+      },
+    ];
+    const readded = await cartAdd(started.session_id, "sku:tiara", "size=M", "reused-key");
+    expect(readded.status).toBe("added");
+    expect(h.locatorClickCalls).toBe(1);
+  });
+
+  it("cart_clear throws when the clear endpoint fails, leaving cart state untouched", async () => {
+    h.currentUrl = "https://shop.example.com/cart";
+    h.visibleText = "Cart Quantity: 2 Total 1936円";
+    h.cartLineItems = [
+      {
+        title: "Tiara",
+        quantity: 2,
+        product_identities: ["sku:tiara"],
+        option_signatures: ["size=M"],
+      },
+    ];
+    h.clearCartResult = false;
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    await expect(cartClear(started.session_id)).rejects.toThrow(
+      "cart_clear failed to reach the cart-clear endpoint",
+    );
+    expect(h.cartLineItems).toHaveLength(1);
   });
 
   it("does not infer checkout stage from ordinary body copy", async () => {

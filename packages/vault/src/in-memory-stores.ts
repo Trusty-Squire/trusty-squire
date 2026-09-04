@@ -12,6 +12,7 @@ import type {
   VaultAuditRecord,
   VaultAuditStore,
 } from "./types.js";
+import { CredentialSlotConflictError } from "./types.js";
 
 const AUDIT_LIST_MAX = 200;
 
@@ -22,6 +23,9 @@ export class InMemoryCredentialStore implements CredentialStore {
     if (this.byReference.has(record.reference)) {
       throw new Error(`credential already exists at ${record.reference}`);
     }
+    if (hasSlotConflict(this.byReference.values(), record)) {
+      throw new CredentialSlotConflictError();
+    }
     this.byReference.set(record.reference, clone(record));
   }
 
@@ -29,6 +33,11 @@ export class InMemoryCredentialStore implements CredentialStore {
     const r = this.byReference.get(reference);
     if (r === undefined || r.deleted_at !== null) return null;
     return clone(r);
+  }
+
+  async isActive(reference: string, accountId: string): Promise<boolean> {
+    const r = this.byReference.get(reference);
+    return r !== undefined && r.account_id === accountId && r.deleted_at === null;
   }
 
   async findActiveByServiceLabel(
@@ -70,9 +79,6 @@ export class InMemoryCredentialStore implements CredentialStore {
       account_kek_blob: Buffer;
       field_names: string[];
       rotatedAt: Date;
-      type?: string | null;
-      env_var_suggestion?: string | null;
-      metadata?: Record<string, unknown>;
     },
   ): Promise<void> {
     const r = this.byReference.get(reference);
@@ -82,9 +88,6 @@ export class InMemoryCredentialStore implements CredentialStore {
     r.account_kek_blob = Buffer.from(payload.account_kek_blob);
     r.field_names = [...payload.field_names];
     r.rotated_at = payload.rotatedAt;
-    if ("type" in payload) r.type = payload.type ?? null;
-    if ("env_var_suggestion" in payload) r.env_var_suggestion = payload.env_var_suggestion ?? null;
-    if (payload.metadata !== undefined) r.metadata = { ...payload.metadata };
   }
 
   async listByAccount(accountId: string): Promise<CredentialRecord[]> {
@@ -101,10 +104,7 @@ export class InMemoryCredentialStore implements CredentialStore {
       .map((r) => clone(r));
   }
 
-  async findByIdForAccount(
-    id: string,
-    accountId: string,
-  ): Promise<CredentialRecord | null> {
+  async findByIdForAccount(id: string, accountId: string): Promise<CredentialRecord | null> {
     const r = [...this.byReference.values()].find(
       (c) => c.id === id && c.account_id === accountId && c.deleted_at === null,
     );
@@ -115,9 +115,7 @@ export class InMemoryCredentialStore implements CredentialStore {
     id: string,
     accountId: string,
   ): Promise<CredentialRecord | null> {
-    const r = [...this.byReference.values()].find(
-      (c) => c.id === id && c.account_id === accountId,
-    );
+    const r = [...this.byReference.values()].find((c) => c.id === id && c.account_id === accountId);
     return r === undefined ? null : clone(r);
   }
 
@@ -129,26 +127,45 @@ export class InMemoryCredentialStore implements CredentialStore {
   async restore(reference: string): Promise<void> {
     const r = this.byReference.get(reference);
     if (r === undefined) return;
+    if (hasSlotConflict(this.byReference.values(), { ...r, deleted_at: null })) {
+      throw new CredentialSlotConflictError();
+    }
     r.deleted_at = null;
   }
 
-  async setAllowedHosts(reference: string, hosts: string[]): Promise<void> {
+  async updateMetadata(
+    reference: string,
+    expected: {
+      label: string;
+      allowed_hosts: string[];
+      metadata: Record<string, unknown>;
+    },
+    input: {
+      label?: string;
+      allowed_hosts?: string[];
+      metadata?: Record<string, unknown>;
+    },
+  ): Promise<"updated" | "changed" | "conflict"> {
     const r = this.byReference.get(reference);
-    if (r === undefined) return;
-    r.allowed_hosts = [...hosts];
-  }
-
-  async setLoginHosts(reference: string, hosts: string[]): Promise<void> {
-    const r = this.byReference.get(reference);
-    if (r === undefined) return;
-    // login_hosts + auth_strategy live in metadata; merge, don't clobber.
-    r.metadata = { ...r.metadata, login_hosts: [...hosts], auth_strategy: "username_password" };
-  }
-
-  async setLabel(reference: string, label: string): Promise<void> {
-    const r = this.byReference.get(reference);
-    if (r === undefined) return;
-    r.label = label;
+    if (
+      r === undefined ||
+      r.deleted_at !== null ||
+      r.label !== expected.label ||
+      !sameArray(r.allowed_hosts, expected.allowed_hosts) ||
+      JSON.stringify(r.metadata) !== JSON.stringify(expected.metadata)
+    ) {
+      return "changed";
+    }
+    const replacement = {
+      ...r,
+      ...(input.label !== undefined ? { label: input.label } : {}),
+      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+    };
+    if (hasSlotConflict(this.byReference.values(), replacement)) return "conflict";
+    if (input.label !== undefined) r.label = input.label;
+    if (input.allowed_hosts !== undefined) r.allowed_hosts = [...input.allowed_hosts];
+    if (input.metadata !== undefined) r.metadata = { ...input.metadata };
+    return "updated";
   }
 
   async purgeAccount(accountId: string): Promise<number> {
@@ -161,6 +178,20 @@ export class InMemoryCredentialStore implements CredentialStore {
     }
     return removed;
   }
+}
+
+function hasSlotConflict(records: Iterable<CredentialRecord>, target: CredentialRecord): boolean {
+  if (target.deleted_at !== null || typeof target.metadata.service !== "string") return false;
+  const service = target.metadata.service.toLowerCase();
+  return [...records].some(
+    (candidate) =>
+      candidate.reference !== target.reference &&
+      candidate.account_id === target.account_id &&
+      candidate.deleted_at === null &&
+      candidate.label === target.label &&
+      typeof candidate.metadata.service === "string" &&
+      candidate.metadata.service.toLowerCase() === service,
+  );
 }
 
 export interface InMemoryAuditEvent extends VaultAuditEventInput {
@@ -242,6 +273,10 @@ export class InMemoryVaultAuditStore implements VaultAuditStore {
 
 function clonePayload(p: VaultAuditPayload): VaultAuditPayload {
   return { ...p };
+}
+
+function sameArray(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function clone<T extends CredentialRecord>(r: T): T {

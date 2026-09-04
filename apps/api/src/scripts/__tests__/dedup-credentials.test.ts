@@ -79,54 +79,71 @@ describe("planAccountDedup", () => {
   });
 });
 
-// A faked store/audit that records calls — enough to prove the dry-run
+// A faked store that records atomic collapses — enough to prove the dry-run
 // path mutates nothing and the apply path soft-deletes + audits exactly
 // the planned references. We don't construct full CredentialRecords; the
 // store fake returns the candidates the planner consumes, narrowed to the
 // shape runDedup reads off each record (reference/account_id/label/
 // created_at/metadata).
 type StoreLike = Parameters<typeof runDedup>[0];
-type AuditLike = Parameters<typeof runDedup>[1];
 
 function fakeStore(records: DedupCandidate[]): {
   store: StoreLike;
   softDeletes: { reference: string; deletedAt: Date }[];
+  events: {
+    account_id: string;
+    type: string;
+    reference: string;
+    collapsed_into: string;
+  }[];
 } {
   const softDeletes: { reference: string; deletedAt: Date }[] = [];
+  const events: {
+    account_id: string;
+    type: string;
+    reference: string;
+    collapsed_into: string;
+  }[] = [];
   const accountIds = [...new Set(records.map((r) => r.account_id))];
   const store = {
     listAllAccountIds: async () => accountIds,
-    listByAccount: async (accountId: string) =>
-      records.filter((r) => r.account_id === accountId),
-    softDelete: async (reference: string, deletedAt: Date) => {
-      softDeletes.push({ reference, deletedAt });
+    listByAccount: async (accountId: string) => records.filter((r) => r.account_id === accountId),
+    collapseDuplicateSlot: async (
+      accountId: string,
+      service: string,
+      label: string,
+      deletedAt: Date,
+    ) => {
+      const slot = records
+        .filter(
+          (record) =>
+            record.account_id === accountId &&
+            record.label === label &&
+            typeof record.metadata.service === "string" &&
+            record.metadata.service.toLowerCase() === service.toLowerCase() &&
+            !softDeletes.some((entry) => entry.reference === record.reference),
+        )
+        .sort((left, right) => right.created_at.getTime() - left.created_at.getTime());
+      const [survivor, ...collapsed] = slot;
+      if (survivor === undefined || collapsed.length === 0) return null;
+      for (const candidate of collapsed) {
+        softDeletes.push({ reference: candidate.reference, deletedAt });
+        events.push({
+          account_id: accountId,
+          type: "vault.credential_collapsed",
+          reference: candidate.reference,
+          collapsed_into: survivor.reference,
+        });
+      }
+      return {
+        survivor: survivor.reference,
+        collapsed: collapsed.map((candidate) => candidate.reference),
+      };
     },
     // runDedup only calls the three methods above; the rest of the
     // PrismaCredentialStore surface is never reached on this path.
   } as unknown as StoreLike;
-  return { store, softDeletes };
-}
-
-function fakeAudit(): {
-  audit: AuditLike;
-  events: { account_id: string; type: string; reference: string; collapsed_into: string | undefined }[];
-} {
-  const events: { account_id: string; type: string; reference: string; collapsed_into: string | undefined }[] = [];
-  const audit = {
-    record: async (event: {
-      account_id: string;
-      type: string;
-      payload: { reference: string; collapsed_into?: string };
-    }) => {
-      events.push({
-        account_id: event.account_id,
-        type: event.type,
-        reference: event.payload.reference,
-        collapsed_into: event.payload.collapsed_into,
-      });
-    },
-  } as unknown as AuditLike;
-  return { audit, events };
+  return { store, softDeletes, events };
 }
 
 describe("runDedup", () => {
@@ -137,11 +154,10 @@ describe("runDedup", () => {
   ];
 
   it("dry-run mutates nothing (no soft-deletes, no audit events)", async () => {
-    const { store, softDeletes } = fakeStore(records);
-    const { audit, events } = fakeAudit();
+    const { store, softDeletes, events } = fakeStore(records);
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
-    const result = await runDedup(store, audit, /* apply */ false);
+    const result = await runDedup(store, /* apply */ false);
 
     expect(softDeletes).toHaveLength(0);
     expect(events).toHaveLength(0);
@@ -151,11 +167,10 @@ describe("runDedup", () => {
   });
 
   it("apply soft-deletes exactly the collapsed refs and records a collapsed audit event each", async () => {
-    const { store, softDeletes } = fakeStore(records);
-    const { audit, events } = fakeAudit();
+    const { store, softDeletes, events } = fakeStore(records);
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
-    await runDedup(store, audit, /* apply */ true);
+    await runDedup(store, /* apply */ true);
 
     expect(softDeletes.map((s) => s.reference).sort()).toEqual(["cred_mid", "cred_old"]);
     expect(events).toHaveLength(2);
@@ -166,6 +181,52 @@ describe("runDedup", () => {
     }
     // The survivor is never touched.
     expect(softDeletes.map((s) => s.reference)).not.toContain("cred_new");
+    vi.restoreAllMocks();
+  });
+
+  it("does not delete a row that left the duplicate slot after planning", async () => {
+    const moving = records.map((record) => ({ ...record, metadata: { ...record.metadata } }));
+    const { store, softDeletes, events } = fakeStore(moving);
+    const originalList = store.listByAccount.bind(store);
+    store.listByAccount = async (accountId: string) => {
+      const snapshot = (await originalList(accountId)).map((record) => ({
+        ...record,
+        metadata: { ...record.metadata },
+      }));
+      moving.find((record) => record.reference === "cred_old")!.label = "moved";
+      return snapshot;
+    };
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const result = await runDedup(store, true);
+
+    expect(result.rowsCollapsed).toBe(1);
+    expect(softDeletes.map((entry) => entry.reference)).toEqual(["cred_mid"]);
+    expect(events.map((event) => event.reference)).toEqual(["cred_mid"]);
+    vi.restoreAllMocks();
+  });
+
+  it("keeps the current newest row when the planned survivor leaves the slot", async () => {
+    const moving = records.map((record) => ({ ...record, metadata: { ...record.metadata } }));
+    const { store, softDeletes, events } = fakeStore(moving);
+    const originalList = store.listByAccount.bind(store);
+    store.listByAccount = async (accountId: string) => {
+      const snapshot = (await originalList(accountId)).map((record) => ({
+        ...record,
+        metadata: { ...record.metadata },
+      }));
+      moving.find((record) => record.reference === "cred_new")!.label = "moved";
+      return snapshot;
+    };
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const result = await runDedup(store, true);
+
+    expect(result.rowsCollapsed).toBe(1);
+    expect(softDeletes.map((entry) => entry.reference)).toEqual(["cred_old"]);
+    expect(events).toMatchObject([
+      { reference: "cred_old", collapsed_into: "cred_mid" },
+    ]);
     vi.restoreAllMocks();
   });
 });

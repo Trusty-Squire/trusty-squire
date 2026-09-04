@@ -72,31 +72,58 @@ precision (for example, whole yen for JPY and two decimals for USD). The anonymo
 approval page shows the merchant, checkout origin, amount and currency, item, and
 reason directly from the short-lived server record before one passkey ceremony
 authorizes those canonical payment values. You also see the requesting MCP client
-(for example, Hermes) and that a saved card will be used before clicking **Approve
-payment** to relay the operator-sealed final authorization. When the pre-submission
+(for example, Hermes) and the bound card's label plus last four digits (or its label
+alone for a legacy card) before clicking **Approve payment** to relay the
+operator-sealed final authorization. Before submitting that authorization, you
+can instead choose **Deny payment**; a denial closes that approval attempt and
+prevents any later operator confirmation. When the pre-submission
 checkout can be machine-read, the payment is refused if its merchant, origin, amount,
 or currency has changed since approval. If that resume read cannot recover a total,
 Trusty Squire reuses the original mandate-bound checkout values. Card entry requires the PAN,
 expiry, and CVV fields; cardholder name and other explicitly labeled billing fields
 are filled best-effort, so a missing name field does not abort the payment. Sealing
 and cleanup touch only those selected payment controls; merchant shipping address and
-country controls remain untouched. A submit is reported as `payment_submitted` only
+country controls remain untouched. If the checkout has a selected merchant-saved card
+alongside the newly filled card, Trusty Squire selects the sole unambiguous new-card
+radio and verifies both that choice and the filled fields again immediately before
+submission; ambiguous choices, selected saved-card options, and failed verification
+are refused with `payment_card_selection_ambiguous`. A charge is treated as
+dispatched only after the browser observes a concrete charge/order request, a
+terminal merchant outcome, or genuine 3-D Secure evidence; native form validation
+alone does not claim a dispatch. A submit is reported as `payment_submitted` only
 after the checkout reaches a new merchant order-confirmation URL with a substantive
 order or receipt identity. The browser completes 3-D Secure natively, including
 out-of-band bank-app challenges — Trusty Squire never manipulates or intercepts the
 challenge; it uses read-only checks while polling for that same order-confirmation
-signal. A bare click that produces no confirmation and no detected challenge returns
-`payment_outcome_unknown` instead of guessing that the charge succeeded. A detected
-challenge that remains unresolved on timeout stays
-`payment_3ds_required` with `needs_user.wall: "3ds"`, handing control back for user
-completion. Neither status is success or permits blind resubmission: manually check
-the merchant's order state before any retry.
+signal. At that last observable boundary, a mismatch between the released card and
+issuer, network, or last-four evidence rendered by the 3-D Secure issuer/app is
+returned as a structured `warning` with `kind: "payment_instrument_mismatch"` and
+expected-versus-observed evidence. The warning persists through resumable
+`operate_payment_status` calls; it neither changes the payment status nor cancels,
+approves, or modifies the challenge, so the cardholder retains the decision whether
+to continue. A dispatched attempt with no confirmed merchant outcome and no genuine
+3-D Secure evidence remains `payment_outcome_unknown`, including across resumable
+status checks; Trusty Squire never relabels that uncertainty as 3-D Secure. A detected
+challenge that remains unresolved on timeout stays `payment_3ds_required` with
+`needs_user.wall: "3ds"`, handing control back for user completion. Neither status is
+success or permits blind resubmission: manually check the merchant's order state
+before any retry.
+
+`operate_pay` surfaces the approval link before its bounded server-side wait. It
+may wait up to one minute for approval, denial, or expiry; if it returns
+`approval_pending` first, call `operate_pay` again with the same arguments. That
+call resumes the same approval and one-passkey boundary instead of creating a new
+link. `operate_payment_status` is a non-charging alternative for inspecting the
+pre-charge approval and is the continuation tool for an already-submitted unknown
+or 3-D Secure outcome. Its `wait_seconds` accepts 0-60 (default 0) to bound-wait
+instead of taking an instant peek. Denial or expiry is terminal for that session's
+attempt: repeated calls return the same result and never mint a replacement
+approval. Close the session and start a fresh one before making a genuinely new
+payment attempt.
 
 Every payment response includes its `session_id`. Pass that same ID to every
-follow-up `operate_pay` and canonical `operate_payment_status` call. Pass
-`wait_seconds` (0-15, default 0) to bound-wait for a change instead of an instant
-peek. Omitting `session_id` remains compatible only while this MCP process has
-exactly one session; it never selects a newest or arbitrary checkout.
+follow-up payment call. Omitting `session_id` remains compatible only while this
+MCP process has exactly one session; it never selects a newest or arbitrary checkout.
 
 Some split checkouts collect the card before the final order-confirmation step. On the
 card-entry page, `operate_pay { phase: "fill_card" }` first reads the live total. A
@@ -136,8 +163,7 @@ or Shopify PCI card fields. Trusty Squire does not sign in to PayPal or use vaul
 PayPal credentials. After any submit that has not yet reached a confirmed order,
 Trusty Squire waits 180 seconds by default for native completion, including
 out-of-band bank-app approval. A linked Telegram chat receives a challenge-specific
-nudge when 3-D Secure is detected, or cautious bank-app guidance when no on-page
-challenge appeared. Standard cross-processor 3-D Secure signals and recognized
+nudge only after 3-D Secure is detected. Standard cross-processor 3-D Secure signals and recognized
 CardinalCommerce or Stripe challenge frames classify the first case only when the
 containing frame is visibly rendered. Hidden 3-D Secure Method pre-authentication and
 captcha-hosted frames never count as 3-D Secure, and an ordinary Shopify PCI card-field
@@ -158,7 +184,7 @@ request.
 npx @trusty-squire/mcp connect
 ```
 
-`connect` signs you in with Google or GitHub, detects your coding agent, and merges the `squire` MCP server into its existing configuration. Restart the agent and ask for the finished website outcome. Trusty Squire is free to start.
+`connect` signs you in with Google or GitHub, detects your coding agent, and merges the `squire` MCP server into its existing configuration. On a machine with a user-visible desktop, sign-in opens a local Chrome window. On a headless Linux server, including an SSH/TTY session with an inherited virtual display, interactive login starts a login-scoped Xvfb and noVNC stack and prints a URL you can open on another device. The default quick tunnel and every local helper are torn down when that login completes, times out, fails, or is interrupted. Operators may instead set both `TS_LOGIN_PUBLIC_HOSTNAME` and `TS_LOGIN_LOCAL_PORT` to reuse an externally managed named tunnel; Trusty Squire still tears down its per-login display and local listener, but never creates or stops that external tunnel. If that tunnel's fixed local port is busy, login reports it and uses a one-off quick tunnel for that sign-in instead. Restart the agent and ask for the finished website outcome. Trusty Squire is free to start.
 
 To choose a target explicitly:
 
@@ -175,7 +201,12 @@ remote CDP, macOS, and Windows operator sessions are not supported in this migra
 
 1. Your coding agent names the website and the outcome it needs: an account,
    authenticated setup, app publishing, a purchase, a gift, or a booking.
-2. Trusty Squire works through the service flow one step at a time. Ordinary tasks open an isolated browser profile; tasks that must act as your connected Google identity use the signed-in profile directly and run one at a time.
+2. Trusty Squire works through the service flow one step at a time. Every task
+   opens its own fresh browser profile and restores the snapshot's non-Google
+   signed-in state, so independent sessions can run concurrently without opening
+   the canonical login profile. Google state is restored inside the serialized
+   `oauth_login` or legacy `oauth_click` boundary; sanctioned Gmail verification
+   uses a separate temporary identity browser.
 3. If the flow produces an API key or client secret, Trusty Squire captures it
    into the vault without returning the raw value through its credential tools.
 4. The agent can make an authenticated request, create a host-scoped app grant,
@@ -252,58 +283,107 @@ for the system and data flows.
 
 ## MCP tools
 
-The default MCP registry exposes 16 tools. The essential operator surface
-is `operate_start`, `operate_observe`, `operate_act`, `operate_pay`,
-`operate_payment_status`, `operate_finish`, `operate_recipe_run`, and
-`operate_recipe_save` — every former standalone workflow/lifecycle/login tool
-name was dropped and its behavior folded into `operate_act` as a `kind` (or into
-`operate_finish`'s `outcome`); no delegating aliases remain. Poll payment status
-via `operate_payment_status(wait_seconds)`.
+The default MCP registry exposes 20 tools. The essential operator surface is
+`operate_start`, `operate_observe`, `operate_observe_query`, `operate_act`,
+`operate_pay`, `operate_payment_status`, `operate_finish`,
+`operate_recipe_run`, and `operate_recipe_save` — every former standalone
+workflow/lifecycle/login tool name was dropped and its behavior folded into
+`operate_act` as a `kind` (or into `operate_finish`'s `outcome`); no delegating
+aliases remain. Continue a pending pre-charge approval by re-calling
+`operate_pay` with the same arguments; use
+`operate_payment_status(wait_seconds)` as a non-charging alternative and for
+post-submit outcome checks. `operate_screenshot(session_id,
+frame_index?, frame_url_contains?, full_page?)` is a read-only debugging capture
+(page or one isolated frame, e.g. a cross-origin 3-D Secure/captcha challenge)
+returned as an actual MCP image. It refuses during an active card fill, when the
+requested capture still contains a sealed or card-shaped value, or when any
+included frame cannot be checked; capture-time pixel redaction remains a second
+safety fence.
 The maintainer-only `list_extract_failures` → `get_extract_failure`
 DOM-diagnostics pair is excluded from that surface; set
 `TRUSTY_SQUIRE_DIAGNOSTICS=1` in the MCP server environment to opt into the
-18-tool diagnostics profile.
+22-tool diagnostics profile.
+
+Operate sessions default to Compact V2 observations: a screened
+`format:"compact-v2"` response with a finite stage, safe title/heading
+semantics, and opaque generation-bound controls in `safe_table`. Raw page text,
+URLs, DOM values, and snapshot files are not part of that format. Use
+`operate_observe_query` with task words or `overflow.next_cursor` to retrieve a
+named or paged control while matching stays inside the live browser. A browser
+action invalidates the current handles; on `reobserve_required`, observe again
+and select a new handle. Exact cursorless `Google` and `GitHub` queries briefly
+refresh controls that hydrate or gain labels after the initial observation, but
+still return only a current sealed handle. `detail:"full"` remains inside the V2
+seal. Maintainers can select the legacy V1 `el_table`/snapshot contract with
+`TRUSTY_SQUIRE_OBSERVE_V2=off`, or exercise V2 without emitting it with
+`shadow`; the detailed wire and migration contract lives in
+[DESIGN-observe-compact.md](docs/DESIGN-observe-compact.md).
 
 - Rejected tool calls return a JSON `error` envelope with a stable `code` and
   message. Malformed and unknown calls fail only that request; they do not stop
   the shared stdio process or discard its active in-memory operator session.
   `server_unavailable` includes `retry.max_attempts: 1`: retry once, and never
   kill or restart the shared operator process.
-- `operate_start`, `operate_observe`, and `operate_act` open a website, inspect
-  the current state, and perform one browser action at a time. Ordinary controls
-  inside same- and cross-origin frames are included in observations with a
-  `frame_origin`; known captcha challenge frames stay behind the dedicated
-  captcha flow. Frame refs and live `text=…`/`css=…` locators preserve that
-  boundary: same-registrable-domain frames are reachable, cross-domain frames
+- `operate_start`, `operate_observe`, `operate_observe_query`, and `operate_act`
+  open a website, inspect the current state, and perform one browser action at a time. Ordinary controls
+  inside same- and cross-origin frames are included in observations (as finite
+  frame facts in Compact V2 and `frame_origin` in V1); known captcha challenge
+  frames stay behind the dedicated captcha flow. Same-registrable-domain frames
+  are reachable, cross-domain frames
   must pass the same domain scope as `goto`/`allow_host`, opaque frames are
   refused, and `type_secret` never targets any cross-domain frame. Frame refs
   currently support `click`, `js_click`, `type`, `type_secret`, and `select`;
   `upload`, `oauth_click`, and `oauth_login` fail closed. If a visible control
-  has no observed ref, the four locator-capable actions (`click`, `js_click`,
-  `type`, and `type_secret`) can use a live locator; that one-off fallback is not
-  replayable.
+  has no observed ref, explicitly selected V1 sessions let the four
+  locator-capable actions (`click`, `js_click`, `type`, and `type_secret`) use a
+  live `text=…`/`css=…` locator; that one-off fallback is not replayable.
+  Compact V2 accepts only a handle from its current sealed action map.
+  When a `click` or `js_click` opens a new tab or popup (`target=_blank`, a
+  `window.open` control), the operator follows it the way a person would: the
+  newly opened page becomes the active page, so the next `operate_observe` or
+  `operate_act` reads it. This is how an emailed verification or magic link is
+  followed. Do not try to `extract` the link's href instead — a single-use login
+  token is sealed and is never returned as text; following the tab navigates the
+  browser without exposing it. Payment is excluded: during a sealed card fill or
+  a live place-order/3-D Secure approval the active page never changes.
   In a live operator session, in-page XHR/fetch calls to merchant API sibling
   subdomains are automatically in scope only when they share the registrable
   domain of a host trusted at session start. Calls outside the session scope fail
   promptly instead of hanging; page-load resources continue normally, and a
-  mid-session `allow_host` does not seed sibling-domain widening.
-  For a task gated by the user's connected Google account, pass
-  `require_live_identity: true` to `operate_start`. The start fails closed with
-  a connect handoff if that Google session is unavailable; otherwise it uses the
-  signed-in profile directly, with one such session active at a time.
-  When DOM churn invalidates an `@e:` ref, `operate_act` returns `target_stale`
-  with the last observation generation, `reobserve_required: true`, best-effort
-  label-keyed `replacement_candidates`, and
-  `retry_policy: "do_not_retry_old_ref"`; re-observe and choose a current ref.
+  mid-session `allow_host` does not seed sibling-domain widening. A small set of
+  always-in-scope hosts (recognized payment-provider frames, OAuth/captcha
+  providers, and 3-D Secure ACS/directory-server hosts) is exempt from that
+  session-start-trust requirement — otherwise a checkout's own out-of-band 3DS
+  challenge could never complete its own status poll.
+  Every operator task uses the user's Chrome profile directly. Before it starts,
+  the operator checks the live Google My Account identity; if the profile is
+  signed out, it returns a clear login handoff before navigating to the service.
+  To route only that browser session through a proxy, pass `proxy` to
+  `operate_start` as an HTTP or HTTPS URL (credentials are optional), or as an
+  unauthenticated SOCKS5 URL. The value is launch-only and sensitive: it is not
+  returned in session status, action traces, or saved recipes. Omitting it uses
+  direct egress.
+  Under Compact V2, an expired, forged, wrong-generation, cross-page, or drifted
+  `@e:` handle fails opaquely with `reobserve_required`; re-observe and choose a
+  current handle. Under V1, DOM churn returns `target_stale` with the last
+  observation generation, `reobserve_required: true`, best-effort label-keyed
+  `replacement_candidates`, and `retry_policy: "do_not_retry_old_ref"`.
   Malformed `operate_act` calls return `error.code: "invalid_arguments"` and an
   `error.guidance` repair object with the allowed kinds, missing fields, a valid
   example, and a safe alternative instead of only a validation string.
   For a provider login, pass the observed provider-button ref to the atomic
   `oauth_login` action. It retains the product tab across provider-owned popup
   redirects and closes, then returns the post-login product observation even if
-  `detail` is `none`. `oauth_click` and `oauth_settle` remain for legacy replay
-  compatibility. If an observation races that legacy transition, the response
-  reports `oauth.state: "in_progress"` and directs the host to observe again.
+  `detail` is `none`. Every `oauth_login` and legacy `oauth_click` is serialized
+  from action start through completion and a short release cooldown; other
+  session work remains parallel. The whole serialized action has a 30-second
+  deadline. If Google does not complete in time, the call returns
+  `google_session` re-login guidance and closes that operator session without
+  replacing the saved identity; start a fresh session after reconnecting.
+  `oauth_click` and `oauth_settle` remain for
+  legacy replay compatibility. If an observation races that legacy transition,
+  the response reports `oauth.state: "in_progress"` and directs the host to
+  observe again.
 - `operate_act` also owns eight consolidated workflow/lifecycle kinds — the
   entire operator surface beyond navigation, payment, finish, and recipe
   replay is reached through `operate_act`'s `kind`:
@@ -328,8 +408,9 @@ DOM-diagnostics pair is excluded from that surface; set
   - `solve_captcha` drives the in-session captcha gate and returns the
     fail-fast `needs_user` handoff when it cannot be cleared.
   - `await_verification` reads the user's own inbox for an email verification
-    code/link, with sender-scoped search, explicit inbox consent, and
-    sealed-OTP transfer through `into_slot`.
+    code/link by default, with sender-scoped search and sealed-OTP transfer
+    through `into_slot`. Advanced configuration or
+    `grant_inbox_consent:false` can opt out.
   - `login_prepare_signup`, `login_store_signup`, and `login_load_saved` own
     the sealed username/password lifecycle. `login_prepare_signup` seals the
     user's captured email and a generated password, `login_store_signup`
@@ -344,10 +425,16 @@ DOM-diagnostics pair is excluded from that surface; set
 - `operate_finish` closes the session and optionally accepts a nested `outcome`.
   `none` only closes; `credentials` requires `store` and preserves credential
   extraction, vault storage, and auto-promotion; `result` requires `summary` or
-  `data` and can run `verify_recipe` before closing. Finish first stops new
-  calls and drains calls already using that session. Payment state never blocks
-  teardown: finish clears any remaining payment state and destroys, rather than
-  pools, a payment-sensitive browser profile.
+  `data`. A result is eligible to save portable login state only when
+  `verify_recipe` confirms it or `data.confirmed` is `true`; credential outcomes
+  qualify only after unblocked extraction and vault storage. `none`, failed or
+  unconfirmed outcomes, and payment-sensitive sessions preserve the prior saved
+  snapshot. Finish first stops new calls and drains calls already using that
+  session within a bounded terminal transition, then closes its browser and
+  schedules private-profile removal. Sessions also close automatically after 10 minutes without an
+  operation and begin terminal teardown at 30 minutes; only an active payment
+  receives the short bounded close grace. Callers should finish promptly instead
+  of treating an open browser as durable background state.
 - `operate_recipe_save` saves a postcondition-verified local recipe under a
   closed task verb plus the service's registrable domain. It records stable target
   attributes and exact provenance for Squire-supplied values, not observed refs
@@ -369,14 +456,26 @@ DOM-diagnostics pair is excluded from that surface; set
   post-submit outcome wait described above before handing back unresolved
   outcomes. Split checkouts use the `fill_card` then `confirm` flow described
   above.
-  `operate_payment_status` follows the [payment guide](#one-prompt) polling
+  `operate_payment_status` follows the [payment guide](#one-prompt) bounded-wait
   contract. It returns the session ID and includes it in every follow-up tool
-  hint, so an approval is always resumed in its originating browser. Malformed calls return the same
+  hint, so an approval or submitted outcome is always observed in its originating
+  browser. Malformed calls return the same
   `error.guidance` repair fields as `operate_act`, including a safe resolution
   when `card_ref` and `card_label` conflict.
 - `list_credentials` and `use_credential` find saved credentials and make authenticated API calls without returning raw values.
+- `edit_credential` changes only an existing credential's non-secret name,
+  `allowed_hosts`, or `login_hosts`; `delete_credential` soft-deletes one. Each
+  first returns a Telegram/passkey approval link bound to the operation, exact
+  credential reference, and edit before→after. Resume with only the returned
+  `approval_id`. Neither tool can read or alter the secret value; use
+  `store_credential` to rotate a secret.
 - `grant_app_access` and `revoke_app_access` create and remove scoped backend access.
-- `audit_log` reports credential activity without exposing credential values.
+- `audit_log` reports credential activity without exposing credential values. It
+  defaults to a shaped security ledger: lifecycle events and anomalies (non-2xx,
+  429, rejected calls) as rows, routine proxied egress collapsed into per
+  credential/host/burst rollups with per-grant running totals. Pass a rollup's
+  `id` as `expand` for its individual calls, or `view: "raw"` for the flat
+  per-request stream.
 
 ## One README for GitHub and npm
 

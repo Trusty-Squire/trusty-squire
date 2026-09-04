@@ -1,10 +1,14 @@
-// Covers residential-proxy support (TODOS.md S1): parseProxyUrl turns a
-// UNIVERSAL_BOT_PROXY_URL into Playwright's proxy shape, and
-// shouldRouteThroughProxy is the datacenter gate that keeps the ~80% of
-// residential users on a direct connection (zero proxy cost).
+// Covers explicit per-session proxy behavior: it is deliberate operator
+// routing, never subject to host ASN classification or a direct fallback.
 
 import { describe, expect, it } from "vitest";
-import { parseProxyUrl, shouldRouteThroughProxy } from "../browser.js";
+import {
+  canSelfLaunchWithProxy,
+  parseProxyUrl,
+  persistentProxyOptions,
+  proxyHasCredentials,
+  resolveExplicitProxy,
+} from "../browser.js";
 
 describe("parseProxyUrl", () => {
   it("splits credentials out of an http proxy URL", () => {
@@ -30,9 +34,7 @@ describe("parseProxyUrl", () => {
   it("percent-decodes credentials", () => {
     // Residential providers embed session IDs with reserved characters
     // in the username — they arrive percent-encoded in the URL.
-    expect(
-      parseProxyUrl("http://user%40acct:p%3Ass@proxy.example.com:8080"),
-    ).toEqual({
+    expect(parseProxyUrl("http://user%40acct:p%3Ass@proxy.example.com:8080")).toEqual({
       server: "http://proxy.example.com:8080",
       username: "user@acct",
       password: "p:ss",
@@ -50,24 +52,48 @@ describe("parseProxyUrl", () => {
     expect(() => parseProxyUrl("proxy.example.com:8080")).toThrow();
     expect(() => parseProxyUrl("not a proxy url")).toThrow();
   });
+
+  it("does not expose malformed proxy credentials in errors", () => {
+    const credential = "secret-proxy-password";
+    let thrown: unknown;
+    try {
+      parseProxyUrl(`http://${credential}@`);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect(String(thrown)).not.toContain(credential);
+  });
 });
 
-describe("shouldRouteThroughProxy", () => {
-  it("routes datacenter egress through the proxy", () => {
-    expect(shouldRouteThroughProxy("datacenter", false)).toBe(true);
+describe("explicit per-session proxy", () => {
+  it("honors a proxy despite unknown host ASN and routes credentials to Playwright", async () => {
+    // No ASN input exists in this resolution path: an explicit session proxy
+    // must work even when host classification is unknown.
+    const proxy = await resolveExplicitProxy(
+      "http://country-us:user-secret@proxy.example.com:8080",
+      async () => true,
+    );
+
+    expect(proxy).toEqual({
+      server: "http://proxy.example.com:8080",
+      username: "country-us",
+      password: "user-secret",
+    });
+    expect(proxyHasCredentials(proxy)).toBe(true);
+    expect(canSelfLaunchWithProxy(proxy)).toBe(false);
+    expect(persistentProxyOptions(proxy)).toEqual({ proxy });
   });
 
-  it("leaves residential egress direct (no proxy cost)", () => {
-    expect(shouldRouteThroughProxy("residential", false)).toBe(false);
+  it("fails loudly for a malformed explicit proxy instead of choosing direct egress", async () => {
+    await expect(resolveExplicitProxy("not a proxy url", async () => true)).rejects.toThrow(
+      "refusing direct egress",
+    );
   });
 
-  it("leaves unknown egress direct unless forced", () => {
-    expect(shouldRouteThroughProxy("unknown", false)).toBe(false);
-    expect(shouldRouteThroughProxy("unknown", true)).toBe(true);
-  });
-
-  it("force-always overrides the gate for every ASN class", () => {
-    expect(shouldRouteThroughProxy("residential", true)).toBe(true);
-    expect(shouldRouteThroughProxy("datacenter", true)).toBe(true);
+  it("fails loudly when the explicit proxy is unreachable instead of choosing direct egress", async () => {
+    await expect(
+      resolveExplicitProxy("socks5://proxy.example.com:1080", async () => false),
+    ).rejects.toThrow("unreachable; refusing direct egress");
   });
 });
