@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { createServer } from "node:net";
 import type { ChildProcess } from "node:child_process";
 import {
   chmodSync,
@@ -14,8 +15,12 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   assertRemoteLoginRigLive,
+  describeLoginPortHolder,
   fallbackCloudflaredArgs,
+  findFreeLoginPort,
   generateVncPassword,
+  loginPortAvailable,
+  planLoginTunnel,
   registerRemoteLoginRigCleanup,
   remoteLoginEnvironment,
   remoteLoginInstallHint,
@@ -281,6 +286,85 @@ setInterval(() => undefined, 1000);
     try {
       await expect(startRemoteLoginDisplay(rig)).rejects.toThrow(
         "Xvfb exited before becoming ready (code 23)",
+      );
+    } finally {
+      executable.remove();
+    }
+  });
+
+  it("detects a login port already held by another listener", async () => {
+    const free = await findFreeLoginPort();
+    expect(await loginPortAvailable(free)).toBe(true);
+
+    const squatter = createServer();
+    await new Promise<void>((resolve) => squatter.listen(free, "127.0.0.1", resolve));
+    try {
+      expect(await loginPortAvailable(free)).toBe(false);
+    } finally {
+      await new Promise<void>((resolve) => squatter.close(() => resolve()));
+    }
+  });
+
+  it("names the process holding a busy login port", () => {
+    const ss = [
+      "State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process",
+      'LISTEN 0      4096       127.0.0.1:47823        0.0.0.0:*     users:(("docker-proxy",pid=1234,fd=4))',
+      'LISTEN 0      4096       127.0.0.1:8080         0.0.0.0:*     users:(("node",pid=99,fd=20))',
+    ].join("\n");
+
+    expect(describeLoginPortHolder(47823, () => ss)).toBe('"docker-proxy",pid=1234,fd=4');
+    expect(describeLoginPortHolder(47000, () => ss)).toBeNull();
+    expect(describeLoginPortHolder(47823, () => null)).toBeNull();
+  });
+
+  it("keeps the named tunnel when its fixed local port is free", () => {
+    const resolveCloudflared = vi.fn(() => "/usr/bin/cloudflared");
+    expect(
+      planLoginTunnel({
+        namedTunnel: { hostname: "vnc.example.test", port: 47823 },
+        namedPortAvailable: true,
+        resolveCloudflared,
+        describePortHolder: () => null,
+      }),
+    ).toEqual({ mode: "named", hostname: "vnc.example.test", port: 47823 });
+    expect(resolveCloudflared).not.toHaveBeenCalled();
+  });
+
+  it("falls back to a quick tunnel when the fixed login port is taken", () => {
+    const plan = planLoginTunnel({
+      namedTunnel: { hostname: "vnc.example.test", port: 47823 },
+      namedPortAvailable: false,
+      resolveCloudflared: () => "/usr/bin/cloudflared",
+      describePortHolder: () => '"docker-proxy",pid=1234,fd=4',
+    });
+
+    expect(plan.mode).toBe("quick");
+    expect(plan).toMatchObject({ cloudflared: "/usr/bin/cloudflared" });
+    expect(plan.mode === "quick" ? plan.fallbackNotice : "").toContain("127.0.0.1:47823");
+    expect(plan.mode === "quick" ? plan.fallbackNotice : "").toContain("docker-proxy");
+    expect(plan.mode === "quick" ? plan.fallbackNotice : "").toContain("one-off Cloudflare tunnel");
+  });
+
+  it("names the busy port and its holder when no quick-tunnel fallback exists", () => {
+    expect(() =>
+      planLoginTunnel({
+        namedTunnel: { hostname: "vnc.example.test", port: 47823 },
+        namedPortAvailable: false,
+        resolveCloudflared: () => null,
+        describePortHolder: () => '"docker-proxy",pid=1234,fd=4',
+      }),
+    ).toThrow(/127\.0\.0\.1:47823 \(TS_LOGIN_LOCAL_PORT\) is already in use by "docker-proxy"/);
+  });
+
+  it("surfaces a helper's own stderr when it dies", async () => {
+    const executable = fakeExecutable(`
+process.stderr.write("OSError: [Errno 98] Address already in use\\n");
+process.exit(1);
+`);
+    const rig = emptyRig(executable.path);
+    try {
+      await expect(startRemoteLoginDisplay(rig)).rejects.toThrow(
+        /Xvfb exited before becoming ready \(code 1\)[\s\S]*Errno 98/,
       );
     } finally {
       executable.remove();
