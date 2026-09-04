@@ -1,50 +1,53 @@
 // MCP session storage.
 //
-// ONE store, ONE pathway: a 0600 JSON file at
-// $XDG_CONFIG_HOME/trusty-squire/session.json (or ~/.config/trusty-squire/
-// session.json). The OS-keychain (keytar) path is gone. It selected itself on
-// headless Linux — the write/delete probe PASSES there — while the per-login
-// gnome-keyring "session" collection is wiped between SSH logins, so the saved
-// session silently vanished and `connect` re-paired on every run. The
-// TRUSTY_SQUIRE_SESSION_FILE escape hatch existed only to opt out of that, so
-// it goes with it: two pathways WAS the ambiguity about where state lives.
+// ONE store, ONE pathway: 0600 JSON files under
+// $XDG_CONFIG_HOME/trusty-squire/ (or ~/.config/trusty-squire/). The
+// OS-keychain (keytar) path is gone. It selected itself on headless Linux — the
+// write/delete probe PASSES there — while the per-login gnome-keyring "session"
+// collection is wiped between SSH logins, so the saved session silently
+// vanished and `connect` re-paired on every run. The TRUSTY_SQUIRE_SESSION_FILE
+// escape hatch existed only to opt out of that, so it goes with it: two
+// pathways WAS the ambiguity about where state lives.
 //
-// The file holds ONE ENTRY PER ACCOUNT, keyed by `account_id`, in an
-// `accounts` map.
+// ONE FILE PER ACCOUNT: `sessions/<account_id>.json`.
 //
-// It used to hold a single flat object, and that is the bug this closes. On a
+// The bug this closes: state used to live in a single flat `session.json`. On a
 // live box `account_id` moved from 01KS0BKRYTVE9T9FAQQ31A4MK3 to
 // 01M1N0CBVSCX7GGR94S0JYQW1G when the operator connected under a SECOND Trusty
-// Squire account: the second connect overwrote the first account's binding, so
+// Squire account. The second connect overwrote the first account's binding, so
 // servers still serving the first account read the second account's scope and
 // produced a real `credential_not_found` for a credential that exists in the
-// first account's vault. Keyed by account, a connect under a new account ADDS
-// an entry and destroys nothing; the first account's servers keep working.
+// first account's vault.
+//
+// Per-account files make "adding an account NEVER destroys another's"
+// STRUCTURAL rather than enforced. Writing account B touches only B's file, so
+// there is no shared document to read-modify-write and therefore no race to
+// lose an update in. An earlier revision kept the single-file map and added a
+// cross-process lock to serialize writers; that lock then had to solve stale
+// reclaim, PID reuse, crash-wedged holders, and self-stale payloads — three
+// failure modes (lost update, permanent wedge, stale-reclaim-while-live) that
+// simply do not exist here. Do not reintroduce it: if you find yourself needing
+// a lock, something has gone back to sharing one document.
 //
 // Keying by ACCOUNT is namespacing, not the per-process fragmentation that
 // session-simplify removed: an account is a real, stable identity — the same
 // one the vault is scoped to — while a process is not.
 //
-// TWO RULES KEEP THIS SAFE FOR SERVERS THAT ARE ALREADY RUNNING. Those cannot
-// be upgraded in place: a live box carries several `mcp server` processes that
-// each loaded their build weeks ago and read this same file.
+// `session.json` SURVIVES as the current-account pointer AND the compatibility
+// mirror. It holds the current account's entry in the ORIGINAL flat shape, so
+// the `mcp server` processes already running on this box — which loaded a
+// pre-per-account build weeks ago, read that flat file, and cannot be upgraded
+// in place — keep seeing a binding they understand, including after a new
+// connect. It is last-write-wins by design and needs no lock: the most recent
+// connect IS the current account, so the last writer holding the pointer is the
+// correct answer. It is a POINTER AND A MIRROR, never the source of truth for
+// any account other than the current one.
 //
-//  1. READS NEVER WRITE. An earlier revision migrated the file on read, so
-//     merely reading it from a new build reshaped the file under four running
-//     older servers, which could then no longer read it. Reading accepts both
-//     shapes and rewrites nothing; the shape is upgraded only by an explicit
-//     write.
-//  2. A WRITE STAYS READABLE BY AN OLD BUILD. The document written is a
-//     SUPERSET: the current account's entry stays at the TOP LEVEL exactly
-//     where a pre-v2 build looks for it, and the `accounts` map sits beside it
-//     as an extra key that an old build parses and ignores. So a v2 write is
-//     never what breaks an old reader.
-//
-// The residual mixed-build cost is bounded and one-directional: an OLD build's
-// write emits only the flat shape, dropping `accounts`, so other accounts'
-// entries are lost and the file falls back to exactly its pre-v2 behaviour for
-// the account that old build serves. Nothing is corrupted, and the next write
-// from a v2 build re-establishes the map.
+// READS NEVER WRITE. An earlier revision migrated the file on read, so merely
+// reading it from a new build reshaped the file under four running older
+// servers, which could then no longer read it. Reads accept the legacy flat
+// file as its own account's entry and rewrite nothing; migration to
+// `sessions/<id>.json` happens only on an explicit write.
 
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -58,11 +61,10 @@ import { VERSION } from "./version.js";
 // test-fixture session.json to the user's actual home, destroying live
 // credentials. Resolve per-call so the env override in effect at write-time
 // wins.
-function resolveSessionFile(): string {
+function resolveConfigDir(): string {
   return path.join(
     process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"),
     "trusty-squire",
-    "session.json",
   );
 }
 
@@ -102,21 +104,6 @@ export interface SessionData {
  */
 export const UNBOUND_ACCOUNT_KEY = "__unbound__";
 
-/**
- * The on-disk document: the current account's entry at the top level — where a
- * pre-v2 build reads it, unchanged — plus every account's entry under
- * `accounts`, which an old build parses as an unknown key and ignores.
- */
-export type SessionFile = SessionData & { accounts?: Record<string, SessionData> };
-
-/** The parsed view: which accounts exist, and which one is current. */
-export interface SessionAccounts {
-  currentAccountId: string | null;
-  accounts: Record<string, SessionData>;
-  /** True when the document had no `accounts` map — a pre-v2 flat file. */
-  flatOnly: boolean;
-}
-
 export function accountKey(data: SessionData): string {
   const id = data.account_id;
   return id !== undefined && id.length > 0 ? id : UNBOUND_ACCOUNT_KEY;
@@ -155,90 +142,68 @@ function withoutLegacyProxy(data: SessionData): SessionData {
   return clean;
 }
 
-/**
- * Read both shapes without touching the file. A pre-v2 document has no
- * `accounts` map: it IS one account's entry, so it reads as that account's
- * entry — which is exactly what it always meant.
- */
-export function parseSessionAccounts(raw: unknown): SessionAccounts {
-  if (raw === null || typeof raw !== "object") {
-    return { currentAccountId: null, accounts: {}, flatOnly: true };
-  }
-  const document = raw as SessionFile;
-  const top = withoutLegacyProxy(document as SessionData);
-  const currentKey = accountKey(top);
-  const map = document.accounts;
-  if (map === undefined || map === null || typeof map !== "object") {
-    return { currentAccountId: currentKey, accounts: { [currentKey]: stripMap(top) }, flatOnly: true };
-  }
-  const accounts: Record<string, SessionData> = {};
-  for (const [key, entry] of Object.entries(map)) {
-    if (entry !== null && typeof entry === "object") accounts[key] = withoutLegacyProxy(entry);
-  }
-  // The top level is the current account's copy of an entry the map also
-  // holds. Keep it authoritative for that account so a write by an OLD build —
-  // which updates only the top level — is not shadowed by its stale map entry.
-  accounts[currentKey] = stripMap(top);
-  return { currentAccountId: currentKey, accounts, flatOnly: false };
+/** A stored entry, or null when the file is absent or not an object. */
+function parseEntry(raw: unknown): SessionData | null {
+  if (raw === null || typeof raw !== "object") return null;
+  return withoutLegacyProxy(raw as SessionData);
 }
 
-/** The top-level document minus the map, i.e. just the account's own fields. */
-function stripMap(document: SessionData): SessionData {
-  const entry = { ...(document as SessionFile) };
-  delete entry.accounts;
-  return entry;
-}
-
-/**
- * The document to write: the current account flat at the top level (a pre-v2
- * build reads it there, unchanged) with every account under `accounts`.
- */
-export function composeSessionFile(
-  accounts: Record<string, SessionData>,
-  currentAccountId: string,
-): SessionFile {
-  const current = accounts[currentAccountId];
-  if (current === undefined) throw new Error(`no session entry for account ${currentAccountId}`);
-  return { ...current, accounts };
+/** Account ids are ULIDs; refuse anything that could escape the directory. */
+function isSafeAccountKey(key: string): boolean {
+  return /^[A-Za-z0-9_-]{1,128}$/.test(key) || key === UNBOUND_ACCOUNT_KEY;
 }
 
 export class SessionStore {
+  /** The current-account pointer and pre-per-account compatibility mirror. */
   readonly path: string;
-  // Allow tests to override the default file path. When no override is
-  // supplied, resolve the path NOW (constructor invocation) instead of
-  // capturing a value cached at module-import time — see resolveSessionFile.
+  private readonly dir: string;
+
+  // Allow tests to override the location. When no override is supplied, resolve
+  // the path NOW (constructor invocation) instead of capturing a value cached
+  // at module-import time — see resolveConfigDir.
   constructor(filePath?: string) {
-    this.path = filePath ?? resolveSessionFile();
+    this.path = filePath ?? path.join(resolveConfigDir(), "session.json");
+    this.dir = path.dirname(this.path);
   }
 
-  /**
-   * The parsed accounts view. READ-ONLY on purpose: nothing on the read path
-   * may reshape a file that already-running older servers are reading too.
-   */
-  private async load(): Promise<SessionAccounts | null> {
-    let raw: string;
+  private get sessionsDir(): string {
+    return path.join(this.dir, "sessions");
+  }
+
+  private accountFile(accountId: string): string {
+    return path.join(this.sessionsDir, `${accountId}.json`);
+  }
+
+  private async readJson(file: string): Promise<unknown | null> {
     try {
-      raw = await fs.readFile(this.path, "utf8");
+      return JSON.parse(await fs.readFile(file, "utf8")) as unknown;
     } catch (err) {
       if ((err as { code?: string }).code === "ENOENT") return null;
       throw err;
     }
-    return parseSessionAccounts(JSON.parse(raw) as unknown);
   }
 
-  private async persist(file: SessionFile): Promise<void> {
-    await fs.mkdir(path.dirname(this.path), { recursive: true, mode: 0o700 });
-    // Write-then-rename: several `mcp server` instances and a concurrent
-    // `connect` do write this file, and a partially-written session.json is
-    // unreadable to every one of them. rename within the directory is atomic,
-    // so a racing reader sees either the old file or the new one.
-    const temporary = `${this.path}.tmp-${randomUUID()}`;
+  /**
+   * The legacy flat pointer/mirror. Also the pre-per-account file, which is
+   * why a read falls back to it: an install that predates `sessions/` has its
+   * only copy here, and reading must not require migrating it first.
+   */
+  private async readPointer(): Promise<SessionData | null> {
+    return parseEntry(await this.readJson(this.path));
+  }
+
+  private async writeAtomic(file: string, value: unknown): Promise<void> {
+    await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+    // Write-then-rename so a reader — including an older server reading the
+    // pointer — never observes a partially written file. rename within the
+    // same directory is atomic.
+    const temporary = `${file}.tmp-${randomUUID()}`;
     try {
-      await fs.writeFile(temporary, `${JSON.stringify(file, null, 2)}\n`, {
+      await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, {
         mode: 0o600,
         flag: "wx",
       });
-      await fs.rename(temporary, this.path);
+      await fs.rename(temporary, file);
     } finally {
       await fs.rm(temporary, { force: true });
     }
@@ -246,55 +211,85 @@ export class SessionStore {
 
   /** Every account installed on this machine. */
   async listAccounts(): Promise<string[]> {
-    return Object.keys((await this.load())?.accounts ?? {});
+    let names: string[];
+    try {
+      names = await fs.readdir(this.sessionsDir);
+    } catch (err) {
+      if ((err as { code?: string }).code !== "ENOENT") throw err;
+      names = [];
+    }
+    const accounts = names
+      .filter((name) => name.endsWith(".json") && !name.includes(".tmp-"))
+      .map((name) => name.slice(0, -".json".length))
+      .filter(isSafeAccountKey);
+    // An install that predates `sessions/` lives only in the pointer file.
+    if (accounts.length === 0) {
+      const legacy = await this.readPointer();
+      if (legacy !== null) return [accountKey(legacy)];
+    }
+    return accounts.sort();
   }
 
   /** The account the most recent connect bound, for a reader that has no own. */
   async currentAccountId(): Promise<string | null> {
-    return (await this.load())?.currentAccountId ?? null;
+    const pointer = await this.readPointer();
+    if (pointer !== null) return accountKey(pointer);
+    const accounts = await this.listAccounts();
+    return accounts.length === 1 ? accounts[0]! : null;
   }
 
   /**
-   * One account's entry. With `accountId`, ONLY that account's — a caller bound
-   * to an account never silently reads another's. Without it, the account the
-   * most recent connect bound.
+   * One account's entry. With `accountId`, ONLY that account's file — a caller
+   * bound to an account never silently reads another's. Without it, the account
+   * the most recent connect bound.
    */
   async read(accountId?: string): Promise<SessionData | null> {
-    const view = await this.load();
-    if (view === null) return null;
-    const key = accountId ?? view.currentAccountId;
-    return key === null ? null : (view.accounts[key] ?? null);
-  }
-
-  /** Upsert ONE account's entry. Never touches another account's. */
-  async write(data: SessionData): Promise<void> {
-    const view = (await this.load()) ?? {
-      currentAccountId: null,
-      accounts: {},
-      flatOnly: true,
-    };
-    const key = accountKey(data);
-    const accounts = { ...view.accounts, [key]: stripMap(withoutLegacyProxy(data)) };
-    // A claim that finally names an account supersedes the transient pre-claim
-    // entry rather than leaving it behind forever.
-    if (key !== UNBOUND_ACCOUNT_KEY) delete accounts[UNBOUND_ACCOUNT_KEY];
-    await this.persist(composeSessionFile(accounts, key));
+    if (accountId === undefined) {
+      const current = await this.currentAccountId();
+      return current === null ? null : await this.read(current);
+    }
+    if (!isSafeAccountKey(accountId)) return null;
+    const own = parseEntry(await this.readJson(this.accountFile(accountId)));
+    if (own !== null) return own;
+    // Pre-per-account install: this account's only copy is still the flat
+    // pointer file. Read it in place — never migrate on a read path.
+    const pointer = await this.readPointer();
+    return pointer !== null && accountKey(pointer) === accountId ? pointer : null;
   }
 
   /**
-   * Remove ONE account's entry (the current one by default). Other accounts
-   * survive; the file is deleted only when nothing is left.
+   * Upsert ONE account's entry. Structurally cannot touch another account's:
+   * it writes that account's own file, then refreshes the pointer/mirror.
+   */
+  async write(data: SessionData): Promise<void> {
+    const key = accountKey(data);
+    const entry = withoutLegacyProxy(data);
+    await this.writeAtomic(this.accountFile(key), entry);
+    // A claim that finally names an account supersedes the transient pre-claim
+    // entry rather than leaving it behind forever.
+    if (key !== UNBOUND_ACCOUNT_KEY) {
+      await fs.rm(this.accountFile(UNBOUND_ACCOUNT_KEY), { force: true });
+    }
+    // The pointer, in the ORIGINAL flat shape, so servers already running an
+    // older build keep reading a binding they understand. Last-write-wins is
+    // the correct semantics: the most recent connect IS the current account.
+    await this.writeAtomic(this.path, entry);
+  }
+
+  /**
+   * Remove ONE account's entry (the current one by default). Other accounts'
+   * files are untouched; the pointer moves to a survivor, or is deleted when
+   * nothing is left.
    */
   async clear(accountId?: string): Promise<void> {
-    const view = await this.load();
-    if (view === null) return;
-    const key = accountId ?? view.currentAccountId;
-    if (key === null || key === undefined) return;
-    // Nothing to remove: don't rewrite a file other servers are reading.
-    if (!Object.prototype.hasOwnProperty.call(view.accounts, key)) return;
-    const accounts = { ...view.accounts };
-    delete accounts[key];
-    const remaining = Object.keys(accounts);
+    const key = accountId ?? (await this.currentAccountId());
+    if (key === null || key === undefined || !isSafeAccountKey(key)) return;
+    await fs.rm(this.accountFile(key), { force: true });
+    const pointer = await this.readPointer();
+    // The pointer still names the account we just removed (or is the legacy
+    // flat copy of it), so it has to move off it.
+    if (pointer !== null && accountKey(pointer) !== key) return;
+    const remaining = (await this.listAccounts()).filter((id) => id !== key);
     if (remaining.length === 0) {
       try {
         await fs.unlink(this.path);
@@ -303,10 +298,9 @@ export class SessionStore {
       }
       return;
     }
-    const current = view.currentAccountId;
-    await this.persist(
-      composeSessionFile(accounts, current !== null && current !== key ? current : remaining[0]!),
-    );
+    const survivor = await this.read(remaining[0]!);
+    if (survivor === null) return;
+    await this.writeAtomic(this.path, survivor);
   }
 }
 

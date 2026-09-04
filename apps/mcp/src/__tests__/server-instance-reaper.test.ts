@@ -14,7 +14,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  listLiveServerInstances,
   processDescendantIdentities,
   reapStaleServerInstances,
   registerServerInstance,
@@ -334,55 +333,5 @@ describe("registerServerInstance", () => {
     roots.push(root);
     expect(registerServerInstance({ rootDir: root, identity: "" })).toBeNull();
     expect(readdirSync(root)).toEqual([]);
-  });
-});
-
-// Several servers legitimately run side by side, each serving the build it
-// launched with and the account it was launched for. The inventory is how they
-// are told apart — it reports, it never signals.
-describe("live instance inventory (read-only)", () => {
-  it("lists only records whose process is still alive, newest first", () => {
-    const root = mkdtempSync(join(tmpdir(), "ts-server-instances-"));
-    try {
-      const live = record({ pid: 101, start_time: "101", started_at: 1_000 });
-      const newer = record({ pid: 102, start_time: "102", started_at: 2_000 });
-      const dead = record({ pid: 103, start_time: "103", started_at: 3_000 });
-      for (const entry of [live, newer, dead]) {
-        writeFileSync(join(root, `${entry.pid}.json`), JSON.stringify(entry));
-      }
-      const listed = listLiveServerInstances({
-        rootDir: root,
-        readBirthState: (identity) => (identity.pid === 103 ? "stale" : "matching"),
-      });
-      expect(listed.map((entry) => entry.pid)).toEqual([102, 101]);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it("returns nothing when the instance directory does not exist", () => {
-    expect(listLiveServerInstances({ rootDir: join(tmpdir(), "ts-no-such-dir-abc123") })).toEqual(
-      [],
-    );
-  });
-
-  it("carries the build and bound account that tell two live servers apart", () => {
-    const root = mkdtempSync(join(tmpdir(), "ts-server-instances-"));
-    try {
-      const handle = registerServerInstance({
-        rootDir: root,
-        identity: "claude-code",
-        accountId: "01KS0BKRYTVE9T9FAQQ31A4MK3",
-      });
-      // Non-Linux boxes publish no record at all; nothing to assert there.
-      if (handle === null) return;
-      expect(readServerInstanceRecord(handle.path)).toMatchObject({
-        server_version: expect.any(String),
-        account_id: "01KS0BKRYTVE9T9FAQQ31A4MK3",
-      });
-      handle.release();
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
   });
 });

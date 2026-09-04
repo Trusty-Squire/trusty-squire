@@ -182,7 +182,15 @@ function parseArgs(argv: string[]): Argv {
         "`--provider` has been removed with `login`. Use `connect --force-relogin=google|github`.",
       );
     } else if (arg.startsWith("--account=")) {
-      account = arg.slice("--account=".length).trim();
+      // An empty value must not fall through to "the most recent account":
+      // silently clearing a different account than the one named is the
+      // silent-destruction class this whole change removes.
+      const value = arg.slice("--account=".length).trim();
+      if (value.length === 0) {
+        console.error("--account requires an account id (e.g. --account=01ABC...)");
+        process.exit(64);
+      }
+      account = value;
     } else if (arg.startsWith("--profile-dir=")) {
       rejectDeprecatedCli(
         "`--profile-dir` has been removed with `login`. `connect` always uses the bot's Chrome profile.",

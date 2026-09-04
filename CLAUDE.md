@@ -817,46 +817,55 @@ housekeeper repo.
 | `VAULT_AUDIT_RETENTION_DAYS`    | `365`                     | VaultAuditEvent row sweep (the who-touched-my-keys trail). Kept a year — long enough for a compromise investigation, bounded so it doesn't grow forever.                                                                                                                                                                                                                                                                                                          |
 | `VAULT_ROTATION_STALE_DAYS`     | `90`                      | Age (since last change) past which a credential is flagged `stale` in the list response. Advisory nudge, not enforced.                                                                                                                                                                                                                                                                                                                                            |
 
-### Session storage (one file, one entry per ACCOUNT)
+### Session storage (one file per ACCOUNT)
 
-`apps/mcp/src/session.ts` owns the only local session store: a 0600
-`$XDG_CONFIG_HOME/trusty-squire/session.json` (or `~/.config/...`). There is
-**one pathway** — the keytar/OS-keychain backend and its
-`TRUSTY_SQUIRE_SESSION_FILE` escape hatch were removed, because on headless
-Linux keytar's probe PASSES (so it got selected) while the per-login keyring is
-wiped between SSH logins, silently losing the session.
+`apps/mcp/src/session.ts` owns the only local session store: 0600 JSON files
+under `$XDG_CONFIG_HOME/trusty-squire/` (or `~/.config/...`). There is **one
+pathway** — the keytar/OS-keychain backend and its `TRUSTY_SQUIRE_SESSION_FILE`
+escape hatch were removed, because on headless Linux keytar's probe PASSES (so
+it got selected) while the per-login keyring is wiped between SSH logins,
+silently losing the session.
 
-The file holds **one entry per `account_id`** under an `accounts` map, not a
-single flat object. That is the fix for the measured defect: connecting a SECOND
-account used to overwrite the first account's binding, so servers still serving
+State is **one file per account**: `sessions/<account_id>.json`. That is the
+fix for the measured defect — a single flat `session.json` meant connecting a
+SECOND account overwrote the first account's binding, so servers still serving
 the first read the second's scope and produced a real `credential_not_found`
-for a credential that exists in the first account's vault. Keyed by account, a
-connect ADDS an entry and destroys nothing. Keying by ACCOUNT is namespacing —
-keying by PROCESS was the fragmentation session-simplify removed; do not
-reintroduce it.
+for a credential that exists in the first account's vault.
 
-**Two rules make this safe for servers that are already running** (a live box
-carries several `mcp server` processes that loaded their build weeks ago and
-cannot be upgraded in place — an earlier revision broke four of them):
+Per-account files make "adding an account never destroys another's"
+**structural**, not enforced: writing account B touches only B's file, so there
+is no shared document to read-modify-write and no race to lose an update in. An
+earlier revision kept one document and added a cross-process lock to serialize
+writers; that lock then had to solve stale reclaim, PID reuse, crash-wedged
+holders, and self-stale payloads. **Do not reintroduce it** — needing a lock
+here means something went back to sharing one document.
 
-1. **Reads never write.** Both shapes are read; nothing on the read path
-   reshapes a file other servers are reading too.
-2. **A write stays readable by an old build.** The document is a SUPERSET —
-   the current account's entry stays flat at the top level where a pre-v2 build
-   looks, with `accounts` beside it as a key an old build ignores.
+`session.json` survives as the **current-account pointer and compatibility
+mirror**: the current account's entry in the ORIGINAL flat shape, so `mcp
+server` processes already running a pre-per-account build keep reading a
+binding they understand. Last-write-wins is correct there (the most recent
+connect IS current) so it needs no lock. **Reads never write** — an earlier
+revision migrated on read and broke four live servers; the legacy flat file is
+read in place, and migration into `sessions/` happens only on an explicit write.
 
 A server binds one account (`TRUSTY_SQUIRE_ACCOUNT_ID`, which `connect` pins
 into the host agent's MCP config env; else the most recently connected) and
-reads only that entry. `session-guard.ts` turns a missing own entry into a loud
-`account_session_missing` rather than a silent fallback. Several servers on one
-box are correct and expected — each serves the build it launched with and the
-account it was launched for, both reported in its startup line and its
-`server-instances/` record. Never self-upgrade or reap over that.
+reads only that entry. The adopted account is published once via
+`setServingAccountId`; tools read it with `servingAccountId()` and must **never**
+re-resolve from the env or the pointer, or a fallback-bound server ends up
+acting as whichever account connected most recently. `session-guard.ts` turns a
+missing own entry into a loud `account_session_missing`, reported only once the
+server has actually bound and served that account so an install still in flight
+keeps the existing reconnect message.
+
+Several servers on one box are correct and expected — each serves the build it
+launched with and the account it was launched for. Never self-upgrade or reap
+over that.
 
 **Tests must never resolve a real home.** `src/__tests__/setup/isolate-config-home.ts`
 (wired via `vitest.shared.ts`) points `HOME`/`XDG_CONFIG_HOME`/
 `TRUSTY_SQUIRE_PROFILE_DIR` at a throwaway directory for every test file,
-because the dev box's home holds the live servers' `session.json`, Chrome
+because the dev box's home holds the live servers' session state, Chrome
 profile, and instance records.
 
 ### Vault security + lifecycle surface

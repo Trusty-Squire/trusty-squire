@@ -32,7 +32,7 @@ import {
   registerServerInstance,
 } from "./server-instance-registry.js";
 import { buildToolRegistry, findTool } from "./tools/index.js";
-import { createSessionGuard, type SessionGuard } from "./session-guard.js";
+import { createSessionGuard, setServingAccountId, type SessionGuard } from "./session-guard.js";
 import { VERSION } from "./version.js";
 
 const SERVER_NAME = "trusty-squire";
@@ -375,22 +375,18 @@ export async function runServer(): Promise<void> {
       }\n`,
     );
   }
+  // Startup breadcrumb on stderr (which lands in the host agent's MCP
+  // log). A silent no-op was the worst part of the entrypoint-guard
+  // bug — this line makes "did the server actually start?" answerable
+  // at a glance.
+  process.stderr.write(`[trusty-squire] server v${VERSION} starting\n`);
+
   // Owns this server's answer to "which account am I serving?".
   const sessionGuard = createSessionGuard();
-  // Startup breadcrumb on stderr (which lands in the host agent's MCP log). A
-  // silent no-op was the worst part of the entrypoint-guard bug — this line
-  // makes "did the server actually start?" answerable at a glance. Several
-  // servers legitimately run side by side on one box, so it also carries what
-  // tells them apart: pid, the build this process launched with (a server
-  // serves that build for its whole life — it cannot be hot-swapped), and the
-  // account it is bound to.
-  process.stderr.write(
-    `[trusty-squire] server v${VERSION} pid=${process.pid} ` +
-      `account=${sessionGuard.boundAccountId() ?? "(unbound)"} starting\n`,
-  );
   const loadPublishedAccountSession = async (): Promise<ApiClient | null> => {
     try {
       const session = await sessionGuard.bind();
+      setServingAccountId(sessionGuard.boundAccountId());
       // Single-tier: every session is account-bound. A session with just a
       // machine_token (pre-collapse install) yields api=null, and every
       // tool call returns the re-install instruction.
@@ -416,9 +412,7 @@ export async function runServer(): Promise<void> {
   // Publishes what a later launch of this identity needs to tell "still
   // serving a client" from "wedged": last inbound message, open sessions,
   // in-flight calls. Without it every prior instance looks equally idle.
-  const instance = registerServerInstance({
-    accountId: sessionGuard.boundAccountId() ?? undefined,
-  });
+  const instance = registerServerInstance();
 
   // A stdio client can disappear without sending a signal (for example when
   // its parent agent exits). Chrome keeps Node's event loop alive in that

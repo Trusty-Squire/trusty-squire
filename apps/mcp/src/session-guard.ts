@@ -39,6 +39,26 @@ export interface SessionGuard {
   boundAccountId(): string | null;
 }
 
+// The account THIS process is acting for, published by whoever owns the guard.
+//
+// Tools must read it from here and must NEVER fall back to the store's
+// current-account pointer: a server launched from a pre-pin config binds by
+// fallback, and re-resolving later would hand it whichever account connected
+// most recently — the original "acting as an account it never bound to"
+// defect. The launch env is a different thing and is a legitimate source: it
+// is the pinned value the guard itself starts from, and operator/CI paths
+// (skill CLI, direct registry publishes) run with no guard at all.
+let servingAccount: string | null = null;
+
+export function setServingAccountId(accountId: string | null): void {
+  servingAccount = accountId;
+}
+
+export function servingAccountId(): string | undefined {
+  if (servingAccount !== null) return servingAccount;
+  return accountFromEnv();
+}
+
 function accountFromEnv(): string | undefined {
   const id = (process.env.TRUSTY_SQUIRE_ACCOUNT_ID ?? "").trim();
   return id.length > 0 ? id : undefined;

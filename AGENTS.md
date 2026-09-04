@@ -686,8 +686,10 @@ So:
   `vitest.shared.ts`) gives every test file a throwaway `HOME`. Don't remove it,
   and don't add a code path that resolves the default session path in a test.
 - Any change to the on-disk session shape must be **backward-safe by design**:
-  reads never rewrite the file, and a write stays readable by a build that is
-  already running. `apps/mcp/src/session.ts`'s header owns that contract.
+  reads never rewrite the file, and `session.json` stays readable by a build
+  that is already running. `apps/mcp/src/session.ts`'s header owns that
+  contract, including why session state is one file per account and why the
+  cross-process lock that briefly replaced it was the wrong fix.
 
 ## Maintaining this file
 

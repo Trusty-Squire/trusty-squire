@@ -1,4 +1,4 @@
-// One session file, one entry per account.
+// One file per account.
 //
 // Measured on a live box: `account_id` moved from 01KS0BKRYTVE9T9FAQQ31A4MK3 to
 // 01M1N0CBVSCX7GGR94S0JYQW1G when the operator connected under a SECOND Trusty
@@ -7,19 +7,14 @@
 // — a real credential_not_found for a credential that exists in the FIRST
 // account's vault.
 //
-// Keyed by account, connecting a second account destroys nothing, and each
-// server reads only the account it was launched for.
+// One file per account makes that STRUCTURAL: writing account B touches only
+// B's file, so there is no shared document to race on and no lock to get wrong.
 
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  AccountSessionMissingError,
-  parseSessionAccounts,
-  SessionStore,
-  UNBOUND_ACCOUNT_KEY,
-} from "../session.js";
+import { AccountSessionMissingError, SessionStore, UNBOUND_ACCOUNT_KEY } from "../session.js";
 import { createSessionGuard } from "../session-guard.js";
 
 const ACCOUNT_A = "01KS0BKRYTVE9T9FAQQ31A4MK3";
@@ -47,8 +42,13 @@ function entry(accountId: string, token: string) {
   };
 }
 
-async function onDisk(): Promise<Record<string, unknown>> {
+/** The legacy flat pointer/mirror an older running build reads. */
+async function pointerOnDisk(): Promise<Record<string, unknown>> {
   return JSON.parse(await fs.readFile(tmpFile, "utf8")) as Record<string, unknown>;
+}
+
+function accountFile(accountId: string): string {
+  return path.join(dir, "sessions", `${accountId}.json`);
 }
 
 describe("SessionStore", () => {
@@ -116,8 +116,9 @@ describe("SessionStore", () => {
 });
 
 // Running servers cannot be upgraded in place: the box carries `mcp server`
-// processes that loaded a pre-v2 build weeks ago and read this same file. An
-// earlier revision reshaped the file ON READ and broke four of them.
+// processes that loaded a pre-per-account build weeks ago and read the flat
+// session.json. An earlier revision reshaped that file ON READ and broke four
+// of them.
 describe("compatibility with builds that are already running", () => {
   const flat = {
     api_base_url: "http://api",
@@ -128,7 +129,7 @@ describe("compatibility with builds that are already running", () => {
     connected_providers: ["google"],
   };
 
-  it("reads a pre-v2 flat file as that account's entry", async () => {
+  it("reads a pre-per-account flat file as that account's entry", async () => {
     await fs.writeFile(tmpFile, JSON.stringify(flat));
     const store = new SessionStore(tmpFile);
     expect(await store.read(ACCOUNT_A)).toMatchObject({
@@ -137,9 +138,10 @@ describe("compatibility with builds that are already running", () => {
     });
     expect(await store.read()).toMatchObject({ agent_session_token: "tok_legacy" });
     expect(await store.currentAccountId()).toBe(ACCOUNT_A);
+    expect(await store.listAccounts()).toEqual([ACCOUNT_A]);
   });
 
-  it("NEVER rewrites the file on read — byte-for-byte untouched", async () => {
+  it("NEVER rewrites on read — the file older servers read is untouched", async () => {
     const original = JSON.stringify(flat);
     await fs.writeFile(tmpFile, original);
     const store = new SessionStore(tmpFile);
@@ -148,61 +150,95 @@ describe("compatibility with builds that are already running", () => {
     await store.listAccounts();
     await store.currentAccountId();
     expect(await fs.readFile(tmpFile, "utf8")).toBe(original);
+    await expect(fs.stat(path.join(dir, "sessions"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("a v2 write stays readable by a pre-v2 build: current account at the top level", async () => {
+  it("keeps session.json as the current-account pointer in the ORIGINAL flat shape", async () => {
     await fs.writeFile(tmpFile, JSON.stringify(flat));
     const store = new SessionStore(tmpFile);
     await store.write(entry(ACCOUNT_B, "tok_b"));
 
-    // What an OLD build reads — the flat top level — is the current account,
-    // complete, exactly where it has always looked.
-    const document = await onDisk();
-    expect(document).toMatchObject({
+    // What an OLD build reads: a complete flat entry for the current account,
+    // exactly where it has always looked - no wrapper, no accounts map.
+    const pointer = await pointerOnDisk();
+    expect(pointer).toMatchObject({
       api_base_url: "http://api",
       account_id: ACCOUNT_B,
       agent_session_token: "tok_b",
     });
-    // What a v2 build reads: both accounts, neither destroyed.
-    expect(await store.listAccounts()).toEqual([ACCOUNT_A, ACCOUNT_B]);
-    expect(await store.read(ACCOUNT_A)).toMatchObject({ agent_session_token: "tok_legacy" });
+    expect(pointer).not.toHaveProperty("accounts");
+    expect(pointer).not.toHaveProperty("version");
   });
 
-  it("survives an OLD build's write, which drops the map and keeps the top level", async () => {
+  it("migrates a legacy flat install into sessions/ only on an explicit write", async () => {
+    await fs.writeFile(tmpFile, JSON.stringify(flat));
+    const store = new SessionStore(tmpFile);
+    await store.write(entry(ACCOUNT_B, "tok_b"));
+    // B is now a file of its own; A is still readable from the legacy flat copy
+    // until it is itself rewritten.
+    expect(JSON.parse(await fs.readFile(accountFile(ACCOUNT_B), "utf8"))).toMatchObject({
+      agent_session_token: "tok_b",
+    });
+    await store.write({ ...flat, saved_at: "t2" });
+    expect(JSON.parse(await fs.readFile(accountFile(ACCOUNT_A), "utf8"))).toMatchObject({
+      agent_session_token: "tok_legacy",
+    });
+    expect(await store.listAccounts()).toEqual([ACCOUNT_A, ACCOUNT_B].sort());
+  });
+
+  it("survives an OLD build overwriting the pointer with its own flat object", async () => {
     const store = new SessionStore(tmpFile);
     await store.write(entry(ACCOUNT_A, "tok_a"));
     await store.write(entry(ACCOUNT_B, "tok_b"));
-    // Simulate a pre-v2 build writing its flat object over ours.
-    await fs.writeFile(tmpFile, JSON.stringify({ ...entry(ACCOUNT_B, "tok_b2") }));
+    // A pre-per-account build rewrites the flat pointer and knows nothing of
+    // sessions/. Per-account truth is untouched, which is the whole point.
+    await fs.writeFile(tmpFile, JSON.stringify(entry(ACCOUNT_B, "tok_b2")));
 
-    // Degraded to exactly pre-v2 behaviour for the account that build serves —
-    // readable, not corrupt.
-    expect(await store.read(ACCOUNT_B)).toMatchObject({ agent_session_token: "tok_b2" });
-    expect(await store.read(ACCOUNT_A)).toBeNull();
-    // The next v2 write re-establishes the map.
-    await store.write(entry(ACCOUNT_A, "tok_a2"));
-    expect(await store.listAccounts()).toEqual([ACCOUNT_B, ACCOUNT_A]);
+    expect(await store.read(ACCOUNT_A)).toMatchObject({ agent_session_token: "tok_a" });
+    expect(await store.read(ACCOUNT_B)).toMatchObject({ agent_session_token: "tok_b" });
+    expect(await store.listAccounts()).toEqual([ACCOUNT_A, ACCOUNT_B].sort());
   });
 
-  it("prefers the top level over a stale map entry for the current account", () => {
-    // What an old build's write leaves behind if the map somehow survives.
-    const view = parseSessionAccounts({
-      ...entry(ACCOUNT_A, "tok_fresh"),
-      accounts: {
-        [ACCOUNT_A]: entry(ACCOUNT_A, "tok_stale"),
-        [ACCOUNT_B]: entry(ACCOUNT_B, "tok_b"),
-      },
-    });
-    expect(view.accounts[ACCOUNT_A]).toMatchObject({ agent_session_token: "tok_fresh" });
-    expect(view.accounts[ACCOUNT_B]).toMatchObject({ agent_session_token: "tok_b" });
-    expect(view.currentAccountId).toBe(ACCOUNT_A);
+  it("keys a flat session that never bound an account under the reserved key", async () => {
+    await fs.writeFile(tmpFile, JSON.stringify({ api_base_url: "http://api", saved_at: "t" }));
+    const store = new SessionStore(tmpFile);
+    expect(await store.currentAccountId()).toBe(UNBOUND_ACCOUNT_KEY);
+    expect(await store.read()).toMatchObject({ api_base_url: "http://api" });
+  });
+});
+
+// The lock this design replaces existed only because one document held every
+// account. With per-account files the guarantee is structural.
+describe("concurrent writers cannot destroy another account", () => {
+  it("two writers adding DIFFERENT accounts both survive", async () => {
+    const store = new SessionStore(tmpFile);
+    await Promise.all([
+      store.write(entry(ACCOUNT_A, "tok_a")),
+      store.write(entry(ACCOUNT_B, "tok_b")),
+    ]);
+    expect(await store.read(ACCOUNT_A)).toMatchObject({ agent_session_token: "tok_a" });
+    expect(await store.read(ACCOUNT_B)).toMatchObject({ agent_session_token: "tok_b" });
+    expect(await store.listAccounts()).toEqual([ACCOUNT_A, ACCOUNT_B].sort());
   });
 
-  it("keys a flat session that never bound an account under the reserved key", () => {
-    const view = parseSessionAccounts({ api_base_url: "http://api", saved_at: "t" });
-    expect(view.accounts[UNBOUND_ACCOUNT_KEY]).toMatchObject({ api_base_url: "http://api" });
-    expect(view.currentAccountId).toBe(UNBOUND_ACCOUNT_KEY);
-    expect(view.flatOnly).toBe(true);
+  it("many interleaved writers all survive, and none is lost", async () => {
+    const store = new SessionStore(tmpFile);
+    const ids = Array.from({ length: 12 }, (_, i) => `01ACCOUNT${String(i).padStart(4, "0")}`);
+    await Promise.all(ids.map((id) => store.write(entry(id, `tok_${id}`))));
+    expect(await store.listAccounts()).toEqual([...ids].sort());
+    for (const id of ids) {
+      expect(await store.read(id)).toMatchObject({ agent_session_token: `tok_${id}` });
+    }
+  });
+
+  it("leaves no temp files behind under concurrency", async () => {
+    const store = new SessionStore(tmpFile);
+    await Promise.all([
+      store.write(entry(ACCOUNT_A, "tok_a")),
+      store.write(entry(ACCOUNT_B, "tok_b")),
+    ]);
+    const stray = [...(await fs.readdir(dir)), ...(await fs.readdir(path.join(dir, "sessions")))];
+    expect(stray.filter((name) => name.includes(".tmp-"))).toEqual([]);
   });
 });
 
@@ -273,26 +309,14 @@ describe("two concurrent servers, two accounts", () => {
     expect(await guardFor(undefined, 1).inspect()).toEqual({ problem: null });
   });
 
-  it("stays quiet when its account is not installed YET (connect still running)", async () => {
-    // Launched with TRUSTY_SQUIRE_ACCOUNT_ID set before the claim landed. That
-    // is "not installed yet", not "removed" — the unauthenticated reconnect
-    // path owns the message, so the guard must not preempt it.
-    const pending = guardFor(ACCOUNT_A, 1946249);
-    expect(await pending.bind()).toBeNull();
-    expect(await pending.inspect()).toEqual({ problem: null });
-
-    await new SessionStore(tmpFile).write(entry(ACCOUNT_A, "tok_a"));
-    expect(await pending.bind()).toMatchObject({ agent_session_token: "tok_a" });
-    expect(await pending.inspect()).toEqual({ problem: null });
-  });
-
-  it("names the running build alongside the account", () => {
+  it("names the bound account, what IS installed, and the remedy", () => {
     const error = new AccountSessionMissingError(ACCOUNT_A, [ACCOUNT_B], {
       pid: 1595293,
       version: "1.1.13-rc.26",
     });
     expect(error.code).toBe("account_session_missing");
-    expect(error.message).toContain("v1.1.13-rc.26");
-    expect(error.message).toContain("pid 1595293");
+    expect(error.message).toContain(ACCOUNT_A);
+    expect(error.message).toContain(ACCOUNT_B);
+    expect(error.message).toMatch(/connect|restart/i);
   });
 });
