@@ -55,7 +55,7 @@ import {
   openInstallConfirmInBotChrome,
   type InstallClaimPollResult,
 } from "../bot/google-login.js";
-import { isOAuthProviderId, type OAuthProviderId } from "../bot/oauth-providers.js";
+import { type OAuthProviderId } from "../bot/oauth-providers.js";
 import { clearBrowserProfile, clearProviderCookies } from "../bot/login-state.js";
 import {
   CHROME_PROFILE_DIR,
@@ -99,7 +99,7 @@ type Argv = {
   // --skip-browser:
   // don't launch the bot's Chrome at the confirm URL. Print the URL
   // for the user to open in their own browser, then poll for claim.
-  // The bot's Chrome profile won't gain a provider session that way, so
+  // If that ceremony leaves no live provider session in the bot's Chrome,
   // connect reports the install as incomplete (see decideConnectComplete)
   // rather than pretending an OAuth-capable install exists.
   skipBrowser: boolean;
@@ -511,10 +511,20 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
   // browser confirm. Pass --force-relogin to bypass (e.g. to switch Google).
   if (!args.forceRelogin) {
     const preflight = await checkAlreadyProvisioned();
-    if (preflight !== null) {
+    if (preflight.kind !== "ceremony") {
       ui.divider();
       await hydrateArgsFromStoredPreferences(args);
       await ensureConsentRecorded(consentFromArgs(args), args.advancedConfigured === true);
+      if (preflight.kind === "unverified") {
+        await writeAgentConfig(target, agent, args);
+        await maybeStoreTwoCaptchaKey(args);
+        ui.warn(preflightUnverifiedMessage(preflight.detail));
+        ui.hint(
+          `Close any other Trusty Squire session and re-run ` +
+            `${ui.code("npx @trusty-squire/mcp connect --force-relogin")} to verify it.`,
+        );
+        return;
+      }
       // Backfill connected_providers from the bot-side marker on
       // pre-rc.5 sessions, so the preflight cache is current.
       for (const p of preflight.providers) await recordConnectedProvider(p);
@@ -725,10 +735,10 @@ function printProviderState(providers: OAuthProviderId[]): void {
 //
 // Fallback (`skipBrowser=true`): prints the URL, attempts a best-
 // effort `open()` to the user's default browser, polls the API for
-// claim. The bot's Chrome never starts, so the bot won't have a provider
-// session afterwards — connect's success gate then reports the install as
-// incomplete rather than claiming an OAuth-capable install. This path is for
-// CI / scripted installs that only need the config written.
+// claim. If that ceremony leaves no live provider session in the bot's Chrome,
+// connect's success gate reports the install as incomplete rather than claiming
+// an OAuth-capable install. This path is for CI / scripted installs that only
+// need the config written.
 // True when the local session + bot profile already carry everything
 // connect would establish. Returns the list of confirmed provider sessions, or
 // null when anything's missing. Best-effort: any read/probe error returns null
@@ -783,6 +793,32 @@ export function decideProvisioned(
   if (!tokenValid) return null;
   if (!providers.includes("google")) return null;
   return { providers };
+}
+
+export type ConnectPreflight =
+  | { kind: "ceremony" }
+  | { kind: "provisioned"; providers: OAuthProviderId[] }
+  | { kind: "unverified" };
+
+export function decideConnectPreflight(
+  session: SessionData | null,
+  tokenValid: boolean,
+  providers: OAuthProviderId[] | null,
+): ConnectPreflight {
+  if (
+    session === null ||
+    session.machine_token === undefined ||
+    session.agent_session_token === undefined ||
+    session.account_id === undefined ||
+    !tokenValid
+  ) {
+    return { kind: "ceremony" };
+  }
+  if (providers === null) return { kind: "unverified" };
+  const provisioned = decideProvisioned(session, tokenValid, providers);
+  return provisioned === null
+    ? { kind: "ceremony" }
+    : { kind: "provisioned", providers: provisioned.providers };
 }
 
 export type ConnectIncompleteReason =
@@ -842,7 +878,20 @@ export function connectIncompleteMessage(
   }
 }
 
-async function checkAlreadyProvisioned(): Promise<{ providers: OAuthProviderId[] } | null> {
+export function preflightUnverifiedMessage(detail: string): string {
+  return (
+    `This machine is bound to your account, but I couldn't verify a live provider session ` +
+    `in the bot's Chrome profile (${detail}), so I won't call this connected. ` +
+    `Your agent config was refreshed.`
+  );
+}
+
+type CheckedConnectPreflight =
+  | { kind: "ceremony" }
+  | { kind: "provisioned"; providers: OAuthProviderId[] }
+  | { kind: "unverified"; detail: string };
+
+async function checkAlreadyProvisioned(): Promise<CheckedConnectPreflight> {
   try {
     const storage = await openSessionStorage();
     const session = await storage.read();
@@ -854,7 +903,7 @@ async function checkAlreadyProvisioned(): Promise<{ providers: OAuthProviderId[]
       session.agent_session_token === undefined ||
       session.account_id === undefined
     ) {
-      return null;
+      return { kind: "ceremony" };
     }
     // Don't short-circuit on a present-but-expired token — re-pair.
     const stillValid = await agentTokenStillValid(
@@ -867,22 +916,27 @@ async function checkAlreadyProvisioned(): Promise<{ providers: OAuthProviderId[]
     // ability to wear the user's Google identity. validate=true so a dead-but-
     // present GitHub session isn't persisted into connected_providers.
     //
-    // BUT a BUSY profile (another Chromium already using it — a live operate
-    // session, a background heal run, an orphaned Chrome) makes the probe throw.
-    // That must NOT read as "not provisioned": forcing a re-pair on a
-    // transient lock is the connect-loops-forever bug. Fall back to
-    // the session's cached connected_providers instead — a busy profile, if
-    // anything, means the bot IS wearing its browser session.
-    let providers: OAuthProviderId[];
+    // A busy profile or any other probe failure must not force a re-pair: that
+    // is the connect-loops-forever bug. It also must not become a connected
+    // claim based on cached markers, because only a live probe proves the
+    // provider session. Refresh config with an explicit unverified warning.
+    let providers: OAuthProviderId[] | null;
     try {
       providers = await detectActiveProviderSessions();
       await syncConnectedProviders(providers);
-    } catch {
-      providers = (session.connected_providers ?? []).filter(isOAuthProviderId);
+    } catch (err) {
+      const preflight = decideConnectPreflight(session, stillValid, null);
+      if (preflight.kind === "unverified") {
+        return {
+          kind: "unverified",
+          detail: err instanceof Error ? err.message : String(err),
+        };
+      }
+      return preflight;
     }
-    return decideProvisioned(session, stillValid, providers);
+    return decideConnectPreflight(session, stillValid, providers);
   } catch {
-    return null;
+    return { kind: "ceremony" };
   }
 }
 

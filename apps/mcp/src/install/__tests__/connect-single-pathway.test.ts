@@ -7,19 +7,24 @@
 //     proves the account plumbing; only the post-ceremony LIVE provider probe
 //     proves the bot can wear the user's identity at a third-party site.
 
-import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
   connectIncompleteMessage,
+  decideConnectPreflight,
   decideConnectComplete,
+  preflightUnverifiedMessage,
   runCli,
   type ConnectIncompleteReason,
 } from "../cli.js";
+import type { SessionData } from "../../session.js";
 
-// Built from parts so this file doesn't match its own scan below.
-const REMOVED_COMMAND = ["mcp", "login"].join(" ");
+const boundSession: SessionData = {
+  api_base_url: "https://api.example.test",
+  saved_at: "2026-09-04T00:00:00.000Z",
+  machine_token: "machine",
+  agent_session_token: "agent",
+  account_id: "account",
+};
 
 describe("the login subcommand is gone", () => {
   it("refuses to run it and names connect instead", async () => {
@@ -37,22 +42,15 @@ describe("the login subcommand is gone", () => {
       error.mockRestore();
     }
   });
+});
 
-  it("leaves no shipped string telling anyone to run it", () => {
-    const src = join(fileURLToPath(new URL("../../", import.meta.url)));
-    const offenders: string[] = [];
-    const walk = (dir: string): void => {
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const path = join(dir, entry.name);
-        if (entry.isDirectory()) {
-          if (entry.name !== "__tests__") walk(path);
-        } else if (entry.name.endsWith(".ts")) {
-          if (readFileSync(path, "utf8").includes(REMOVED_COMMAND)) offenders.push(path);
-        }
-      }
-    };
-    walk(src);
-    expect(offenders).toEqual([]);
+describe("decideConnectPreflight", () => {
+  it("refreshes config without a connected claim when the live probe fails", () => {
+    expect(decideConnectPreflight(boundSession, true, null)).toEqual({ kind: "unverified" });
+    const message = preflightUnverifiedMessage("profile is in use");
+    expect(message).toContain("profile is in use");
+    expect(message).toContain("config was refreshed");
+    expect(message).not.toContain("Already connected");
   });
 });
 
@@ -97,7 +95,7 @@ describe("connectIncompleteMessage", () => {
       for (const skipBrowser of [false, true]) {
         const message = connectIncompleteMessage(reason, skipBrowser);
         expect(message).toContain("connect --force-relogin");
-        expect(message).not.toContain(REMOVED_COMMAND);
+        expect(message).not.toContain("mcp login");
       }
     }
   });

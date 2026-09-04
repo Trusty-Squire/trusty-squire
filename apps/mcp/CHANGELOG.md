@@ -16,8 +16,9 @@
   you. Connect now gates its success on the post-ceremony live provider probe:
   no session — or an unverifiable one — fails loudly with the reconnect command
   instead of printing "Squire on duty". A scoped `--force-relogin=github` that
-  doesn't land GitHub also fails. `--skip-browser` writes the config but reports
-  the install as incomplete, since the bot's Chrome never observes the sign-in.
+  doesn't land GitHub also fails. A `--skip-browser` ceremony that leaves no
+  live provider session in the bot's Chrome writes the config but reports the
+  install as incomplete, because the bot never observed that sign-in.
 
 - **`audit_log` now defaults to a readable security ledger.** Routine proxied
   egress collapses into per credential/host/burst rollups (count, status
