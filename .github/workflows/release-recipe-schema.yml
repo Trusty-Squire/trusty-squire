@@ -1,11 +1,13 @@
 name: Release recipe-schema
 
 # Publishes @trusty-squire/recipe-schema to npm whenever the version in
-# packages/recipe-schema/package.json is bumped on `main` (stable) or `staging` (rc).
+# packages/recipe-schema/package.json is bumped on `main`.
 #
 # Source of truth: packages/recipe-schema/package.json `version` field.
-#   - main:    must be a stable semver. Publishes `latest` tag.
-#   - staging: must be a prerelease. Publishes `next` tag.
+#   - main: must be a stable semver. Publishes `latest` tag.
+#
+# Single-branch model: `main` is the only release branch, so there is no rc
+# channel for the schema packages — bump straight to the next stable version.
 #
 # Tag scheme: `recipe-schema@<version>` (avoids collision with mcp's `v<version>` tags).
 # If the tag already exists OR npm already has that version, the job is a no-op.
@@ -15,7 +17,7 @@ name: Release recipe-schema
 
 on:
   push:
-    branches: [main, staging]
+    branches: [main]
     paths:
       - "packages/recipe-schema/package.json"
       - "pnpm-lock.yaml"
@@ -90,10 +92,6 @@ jobs:
 
           if [[ "$BRANCH" == "main" && "$IS_PRE" == "true" ]]; then
             echo "::error::main branch requires a stable version, got prerelease: $VERSION"
-            exit 1
-          fi
-          if [[ "$BRANCH" == "staging" && "$IS_PRE" == "false" ]]; then
-            echo "::error::staging branch requires a prerelease version, got stable: $VERSION"
             exit 1
           fi
 

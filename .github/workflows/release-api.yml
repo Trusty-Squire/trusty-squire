@@ -4,10 +4,9 @@ name: Release api
 #
 # The API has no version semantics — it's a service, not a library.
 # Lifecycle (mirrors release-registry.yml):
-#   - push to main:    run tests, then `flyctl deploy` to
-#                      `trusty-squire-api` on Fly (release_command runs
-#                      `prisma db push` for the api schema).
-#   - push to staging: run tests only (no deploy).
+#   - push to main: run tests, then `flyctl deploy` to
+#                   `trusty-squire-api` on Fly (release_command runs
+#                   `prisma db push` for the api schema).
 #
 # WHY THIS EXISTS: the API deploy used to be a MANUAL `flyctl deploy` from
 # a laptop, decoupled from the npm release. So the mcp client could ship a
@@ -21,7 +20,7 @@ name: Release api
 
 on:
   push:
-    branches: [main, staging]
+    branches: [main]
     paths:
       - "apps/api/**"
       - "packages/vault/**"

@@ -387,6 +387,14 @@ Or in CI:
 
 ### 5. Staging branch requires prerelease versions
 
+> **Superseded by the single-`main` migration.** The release workflows now
+> trigger on `main` only: a push to `main` publishes a PRERELEASE to npm `next`,
+> and a stable `latest` release is an explicit `workflow_dispatch` on **Release
+> mcp**. The rest of this section describes the pre-migration dual-branch model
+> and stops applying once `staging` is deleted — see
+> [`docs/single-main-migration.md`](docs/single-main-migration.md) for the
+> current contract and the maintainer's cutover steps.
+
 The `staging` branch is for testing. Releases from `staging` MUST have a prerelease identifier:
 
 - ✅ `0.6.13-staging.1`

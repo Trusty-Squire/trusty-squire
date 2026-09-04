@@ -1,6 +1,6 @@
 name: CI
 
-# Pragmatic CI: runs only what actually passes locally on `staging`.
+# Pragmatic CI: runs only what actually passes locally on `main`.
 #
 # The previous workspace-wide `pnpm lint / typecheck / test` had been
 # broken for weeks (31 lint errors, typecheck failures in api +
@@ -18,9 +18,9 @@ name: CI
 
 on:
   push:
-    branches: [main, staging]
+    branches: [main]
   pull_request:
-    branches: [main, staging]
+    branches: [main]
 
 # A newer commit makes an in-flight PR validation obsolete. Cancelling it avoids
 # paying for the old test/build jobs while preserving the latest merge-ref gate.
@@ -174,7 +174,7 @@ jobs:
 
   typecheck:
     # Pull requests already run against GitHub's synthetic merge ref. On the
-    # resulting main/staging push, package release workflows provide any
+    # resulting main push, package release workflows provide any
     # component-specific gate; rerunning this workspace check is duplicate cost.
     needs: secret-scan
     if: >-
