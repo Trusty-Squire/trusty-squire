@@ -13,12 +13,13 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AccountSessionMissingError, SessionStore, UNBOUND_ACCOUNT_KEY } from "../session.js";
 import { createSessionGuard } from "../session-guard.js";
 
 const ACCOUNT_A = "01KS0BKRYTVE9T9FAQQ31A4MK3";
 const ACCOUNT_B = "01M1N0CBVSCX7GGR94S0JYQW1G";
+const ACCOUNT_C = "01M1Q76XAHA5MFM6FYHTZ4C7T3";
 
 let dir: string;
 let tmpFile: string;
@@ -49,6 +50,11 @@ async function pointerOnDisk(): Promise<Record<string, unknown>> {
 
 function accountFile(accountId: string): string {
   return path.join(dir, "sessions", `${accountId}.json`);
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  return { promise: new Promise<void>((done) => (resolve = done)), resolve };
 }
 
 describe("SessionStore", () => {
@@ -97,6 +103,42 @@ describe("SessionStore", () => {
     expect(await store.listAccounts()).toEqual([ACCOUNT_A]);
     expect(await store.read(ACCOUNT_A)).toMatchObject({ agent_session_token: "tok_a" });
     expect(await store.currentAccountId()).toBe(ACCOUNT_A);
+  });
+
+  it("does not resurrect a logged-out account during a concurrent connect", async () => {
+    const store = new SessionStore(tmpFile);
+    await store.write(entry(ACCOUNT_A, "tok_a"));
+    await store.write(entry(ACCOUNT_B, "tok_b"));
+    const pointerReadStarted = deferred();
+    const releasePointerRead = deferred();
+    const originalReadFile = fs.readFile.bind(fs);
+    let delayPointerRead = true;
+    const readFile = vi.spyOn(fs, "readFile").mockImplementation(async (...args) => {
+      if (delayPointerRead && args[0] === tmpFile) {
+        delayPointerRead = false;
+        const result = originalReadFile(...args);
+        pointerReadStarted.resolve();
+        await releasePointerRead.promise;
+        return await result;
+      }
+      return await originalReadFile(...args);
+    });
+
+    try {
+      const clear = store.clear(ACCOUNT_B);
+      await pointerReadStarted.promise;
+      await store.write(entry(ACCOUNT_C, "tok_c"));
+      releasePointerRead.resolve();
+      await clear;
+    } finally {
+      releasePointerRead.resolve();
+      readFile.mockRestore();
+    }
+
+    expect(await store.read(ACCOUNT_B)).toBeNull();
+    await expect(fs.stat(accountFile(ACCOUNT_B))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await store.listAccounts()).not.toContain(ACCOUNT_B);
+    expect(await store.read(ACCOUNT_C)).toMatchObject({ agent_session_token: "tok_c" });
   });
 
   it("clear deletes the file once the last account is gone, idempotently", async () => {

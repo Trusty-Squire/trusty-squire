@@ -315,23 +315,29 @@ export class SessionStore {
     if (!isSafeAccountKey(key)) {
       throw new Error(`Invalid session account ID: ${key}`);
     }
-    await fs.rm(this.accountFile(key), { force: true });
     const pointer = await this.readPointer();
-    // The pointer still names the account we just removed (or is the legacy
-    // flat copy of it), so it has to move off it.
-    if (pointer !== null && accountKey(pointer) !== key) return;
-    const remaining = (await this.listAccounts()).filter((id) => id !== key);
-    if (remaining.length === 0) {
-      try {
-        await fs.unlink(this.path);
-      } catch (err) {
-        if ((err as { code?: string }).code !== "ENOENT") throw err;
+    if (pointer !== null && accountKey(pointer) === key) {
+      const remaining = (await this.listAccounts()).filter((id) => id !== key);
+      if (remaining.length > 0) {
+        const survivor = await this.read(remaining[0]!);
+        if (survivor !== null) {
+          await this.writeAtomic(this.path, survivor);
+        } else {
+          try {
+            await fs.unlink(this.path);
+          } catch (err) {
+            if ((err as { code?: string }).code !== "ENOENT") throw err;
+          }
+        }
+      } else {
+        try {
+          await fs.unlink(this.path);
+        } catch (err) {
+          if ((err as { code?: string }).code !== "ENOENT") throw err;
+        }
       }
-      return;
     }
-    const survivor = await this.read(remaining[0]!);
-    if (survivor === null) return;
-    await this.writeAtomic(this.path, survivor);
+    await fs.rm(this.accountFile(key), { force: true });
   }
 }
 
