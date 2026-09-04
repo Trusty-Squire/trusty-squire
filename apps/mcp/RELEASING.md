@@ -16,6 +16,9 @@ CI cannot complete an OAuth login. **Run both login paths once per release**:
       headless login reuses the operator-managed named tunnel while teardown
       removes the per-login display and local listener without stopping that
       external tunnel.
+- [ ] With that same named tunnel configured but its local port already held
+      by another listener, login prints one notice naming the busy port and
+      completes over a one-off quick tunnel instead.
 - [ ] A normal automated `operate_start` session launches Chrome new-headless
       and starts no Xvfb, x11vnc, websockify, or login tunnel.
 - [ ] Starting a concurrent `connect` or `login` exits non-zero without
