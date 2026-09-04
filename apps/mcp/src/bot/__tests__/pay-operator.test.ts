@@ -10,6 +10,7 @@ import {
   type PaymentBrowser,
   type PendingApprovalWait,
   type PendingCardFill,
+  type PendingThreeDsWait,
 } from "../pay-operator.js";
 import { generateOperatorKeypair, sealToRecipient } from "../payment-hpke.js";
 import { manualCardEntryBlockReason } from "../provision-session.js";
@@ -51,13 +52,15 @@ type Mode =
   | "review_then_happy"
   | "review_wrong_issuer"
   | "confirm_response_lost"
-  | "confirm_response_lost_changed"
+  | "confirm_denied"
   | "junk_then_happy"
   | "tampered_amount"
   | "tampered_origin"
   | "wrong_recipient"
   | "wrong_issuer"
   | "wrong_audience"
+  | "expired_relay"
+  | "stale_expired_relay"
   | "audit_failure"
   | "low_confidence";
 
@@ -66,7 +69,7 @@ async function harness(
   expectedAudience: string | null = "customer_test",
   apiAudience?: string,
   threeDs?: {
-    resolution: "succeeded" | "failed" | "timeout";
+    resolution: "succeeded" | "failed" | "challenge_pending" | "timeout";
     waitSeconds?: number;
     notifyNeverResolves?: boolean;
     notifySent?: boolean;
@@ -74,7 +77,14 @@ async function harness(
   checkoutOptions: {
     checkout?: CheckoutSummary;
     readCheckoutSummary?: () => Promise<CheckoutSummary>;
-    fillAndSubmitCheckout?: (card: CheckoutCard) => Promise<CheckoutSubmitResult>;
+    fillAndSubmitCheckout?: (
+      card: CheckoutCard,
+      options?: { onSubmitDispatched?: () => void; beforeSubmitDispatch?: () => void | number },
+    ) => Promise<CheckoutSubmitResult>;
+    paymentInstrumentMismatch?: () => CheckoutSubmitResult["payment_instrument_mismatch"];
+    now?: () => number;
+    approvalExpiresAt?: () => string;
+    onJwksFetch?: () => void;
   } = {},
 ) {
   const checkout = checkoutOptions.checkout ?? CHECKOUT;
@@ -90,14 +100,20 @@ async function harness(
   const resolvedCardRefs: string[] = [];
   const confirmationBodies: Array<Record<string, unknown>> = [];
   const pendingStates: PendingApprovalWait[] = [];
+  const pendingThreeDsStates: PendingThreeDsWait[] = [];
+  const pendingAtDispatchCounts: number[] = [];
+  let activePendingThreeDs: PendingThreeDsWait | null = null;
   const nonce = "synthetic-nonce";
   const agent = "synthetic-payment-test-agent";
   let approvalPolls = 0;
   let confirmedCandidate: Record<string, unknown> | undefined;
+  const approvalExpiresAt = (): string =>
+    checkoutOptions.approvalExpiresAt?.() ?? new Date(Date.now() + 60_000).toISOString();
 
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     if (url === "https://vouchflow.test/.well-known/jwks.json") {
+      checkoutOptions.onJwksFetch?.();
       return Response.json({ keys: [{ ...jwk, alg: "RS256", use: "sig", kid: "test-key" }] });
     }
     if (url.endsWith("/v1/pay/config") && init?.method === "GET") {
@@ -111,14 +127,14 @@ async function harness(
           id: "approval_test",
           nonce,
           agent,
-          expires_at: new Date(Date.now() + 60_000).toISOString(),
+          expires_at: approvalExpiresAt(),
         },
         { status: 201 },
       );
     }
     if (
       (url.endsWith("/v1/pay/approvals/approval_test") ||
-        url.endsWith("/v1/pay/approvals/approval_test?wait_for_submission=1")) &&
+        url.includes("/v1/pay/approvals/approval_test?wait_for_submission=1")) &&
       init?.method === "GET"
     ) {
       approvalPolls += 1;
@@ -134,7 +150,7 @@ async function harness(
           operator_pubkey: operatorPublicKey,
           jws: confirmedCandidate.jws,
           sealed_card: confirmedCandidate.sealed_card,
-          expires_at: new Date(Date.now() + 60_000).toISOString(),
+          expires_at: approvalExpiresAt(),
         });
       }
       const recipientHash = createHash("sha256")
@@ -167,7 +183,7 @@ async function harness(
       })!;
       const reviewAad = createHash("sha256").update(reviewCanonical, "utf8").digest();
       const candidateAad = reviewCandidate ? reviewAad : aad;
-      const assertion = await new SignJWT({
+      let assertionBuilder = new SignJWT({
         payload_sha256: candidateAad.toString("base64url"),
         context: "purchase",
         confidence: mode === "low_confidence" ? "low" : "high",
@@ -179,8 +195,17 @@ async function harness(
             ? "https://other-issuer.example"
             : "https://vouchflow.dev",
         )
-        .setAudience(mode === "wrong_audience" ? "other-customer" : "customer_test")
-        .sign(privateKey);
+        .setAudience(mode === "wrong_audience" ? "other-customer" : "customer_test");
+      if (mode === "expired_relay" || mode === "stale_expired_relay") {
+        assertionBuilder = assertionBuilder
+          .setIssuedAt(
+            Math.floor(Date.now() / 1_000) - (mode === "stale_expired_relay" ? 1_260 : 120),
+          )
+          .setExpirationTime(
+            Math.floor(Date.now() / 1_000) - (mode === "stale_expired_relay" ? 1_140 : 60),
+          );
+      }
+      const assertion = await assertionBuilder.sign(privateKey);
       const recipient =
         mode === "wrong_recipient"
           ? (await generateOperatorKeypair()).publicKey
@@ -196,8 +221,10 @@ async function harness(
           mode === "happy" ||
           mode === "review_then_happy" ||
           mode === "confirm_response_lost" ||
-          mode === "confirm_response_lost_changed" ||
-          mode === "junk_then_happy"
+          mode === "confirm_denied" ||
+          mode === "junk_then_happy" ||
+          mode === "expired_relay" ||
+          mode === "stale_expired_relay"
             ? "pending"
             : "approved",
         ...checkout,
@@ -206,7 +233,7 @@ async function harness(
         operator_pubkey: operatorPublicKey,
         jws: assertion,
         sealed_card: mode === "junk_then_happy" && approvalPolls === 1 ? "junk" : sealedCard,
-        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        expires_at: approvalExpiresAt(),
       });
     }
     if (url.endsWith("/v1/pay/approvals/approval_test/confirm") && init?.method === "POST") {
@@ -215,18 +242,12 @@ async function harness(
       if (mode === "review_then_happy" && confirmationBodies.length === 1) {
         return Response.json({ status: "verified" });
       }
-      if (
-        (mode === "confirm_response_lost" || mode === "confirm_response_lost_changed") &&
-        confirmationBodies.length === 1
-      ) {
-        confirmedCandidate =
-          mode === "confirm_response_lost_changed"
-            ? { ...body, sealed_card: "different-candidate" }
-            : body;
+      if (mode === "confirm_response_lost" && confirmationBodies.length === 1) {
+        confirmedCandidate = body;
         throw new TypeError("confirm response lost");
       }
-      if (mode === "confirm_response_lost_changed") {
-        return Response.json({ error: "payment_approval_candidate_changed" }, { status: 409 });
+      if (mode === "confirm_denied") {
+        return Response.json({ error: "payment_approval_denied" }, { status: 409 });
       }
       confirmedCandidate = body;
       return Response.json({ status: "approved" });
@@ -259,8 +280,17 @@ async function harness(
     clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
     fillAndSubmitCheckout: vi.fn(
       checkoutOptions.fillAndSubmitCheckout ??
-        (async (card: CheckoutCard) => {
+        (async (
+          card: CheckoutCard,
+          options?: {
+            onSubmitDispatched?: () => void;
+            beforeSubmitDispatch?: () => void | number;
+          },
+        ) => {
           filledCards.push(card);
+          options?.beforeSubmitDispatch?.();
+          options?.onSubmitDispatched?.();
+          pendingAtDispatchCounts.push(pendingThreeDsStates.length);
           return threeDs === undefined
             ? { three_ds_required: false, order_confirmed: true }
             : {
@@ -271,6 +301,9 @@ async function harness(
         }),
     ),
     waitForThreeDsResolution: vi.fn().mockResolvedValue(threeDs?.resolution ?? "timeout"),
+    ...(checkoutOptions.paymentInstrumentMismatch !== undefined
+      ? { paymentInstrumentMismatch: checkoutOptions.paymentInstrumentMismatch }
+      : {}),
   };
   const api = new ApiClient({
     apiBaseUrl: "https://api.test",
@@ -293,6 +326,7 @@ async function harness(
     browser,
     {
       fetch: fetchMock,
+      ...(checkoutOptions.now === undefined ? {} : { now: checkoutOptions.now }),
       sleep: async () => undefined,
       vouchflowApiBase: "https://vouchflow.test",
       vouchflowExpectedAudience: expectedAudience ?? undefined,
@@ -300,6 +334,13 @@ async function harness(
       surfaceApprovalUrl: vi.fn(),
       onCardResolved: (cardRef) => resolvedCardRefs.push(cardRef),
       onApprovalPending: (state) => pendingStates.push(state),
+      onThreeDsPending: (state) => {
+        activePendingThreeDs = state;
+        pendingThreeDsStates.push(state);
+      },
+      onThreeDsCleared: (state) => {
+        if (activePendingThreeDs === state) activePendingThreeDs = null;
+      },
     },
   );
 
@@ -313,6 +354,11 @@ async function harness(
     resolvedCardRefs,
     confirmationBodies,
     pendingStates,
+    pendingThreeDsStates,
+    pendingAtDispatchCounts,
+    get activePendingThreeDs() {
+      return activePendingThreeDs;
+    },
     browser,
   };
 }
@@ -423,7 +469,7 @@ describe("operate_pay", () => {
       }
       if (
         (url.endsWith("/v1/pay/approvals/approval_fallback") ||
-          url.endsWith("/v1/pay/approvals/approval_fallback?wait_for_submission=1")) &&
+          url.includes("/v1/pay/approvals/approval_fallback?wait_for_submission=1")) &&
         init?.method === "GET"
       ) {
         const operatorPublicKey = String(approvalBodies[0]!.operator_pubkey);
@@ -655,30 +701,30 @@ describe("operate_pay", () => {
     expect(confirmationBodies).toHaveLength(0);
   });
 
-  it("reconciles a lost confirm response before submitting payment", async () => {
-    const { result, filledCards, confirmationBodies } = await harness("confirm_response_lost");
+  it("does not retry an ambiguous final confirmation", async () => {
+    const { result, filledCards, auditBodies, pendingStates, confirmationBodies } =
+      await harness("confirm_response_lost");
 
-    expect(result).toMatchObject({ status: "payment_submitted" });
-    expect(filledCards).toEqual([SYNTHETIC_CARD]);
-    expect(confirmationBodies).toHaveLength(2);
-    expect(confirmationBodies[1]).toEqual(confirmationBodies[0]);
-  });
-
-  it("fails closed instead of resurrecting the candidate when reconciliation can't confirm it", async () => {
-    const { result, filledCards, auditBodies, pendingStates } = await harness(
-      "confirm_response_lost_changed",
-    );
-
-    // The confirm may have actually succeeded server-side (its response was
-    // merely lost); reconciliation coming back "candidate_changed" means we
-    // can't prove that either way. This must be a clean terminal failure —
-    // never a resurrected still-awaiting approval that a later call could
-    // re-confirm and re-charge.
     expect(result).toMatchObject({
       status: "payment_confirmation_failed",
       reason: "confirm_failed",
       candidate_kind: "approval",
     });
+    expect(confirmationBodies).toHaveLength(1);
+    expect(pendingStates).toHaveLength(0);
+    expect(filledCards).toHaveLength(0);
+    expect(auditBodies).toHaveLength(0);
+  });
+
+  it("returns terminal denial when denial wins final candidate confirmation", async () => {
+    const { result, filledCards, auditBodies, pendingStates, confirmationBodies } =
+      await harness("confirm_denied");
+
+    expect(result).toMatchObject({
+      status: "payment_approval_denied",
+      approval_id: "approval_test",
+    });
+    expect(confirmationBodies).toHaveLength(1);
     expect(pendingStates).toHaveLength(0);
     expect(filledCards).toHaveLength(0);
     expect(auditBodies).toHaveLength(0);
@@ -746,6 +792,46 @@ describe("operate_pay", () => {
     expect(auditBodies).toHaveLength(0);
   });
 
+  it("accepts a recently expired assertion already verified by the approval relay", async () => {
+    const { result, filledCards } = await harness("expired_relay");
+
+    expect(result).toMatchObject({ status: "payment_submitted" });
+    expect(filledCards).toEqual([SYNTHETIC_CARD]);
+  });
+
+  it("rejects an expired relayed assertion outside the approval lifetime", async () => {
+    const { result, auditBodies, filledCards } = await harness("stale_expired_relay");
+
+    expect(result).toMatchObject({
+      status: "payment_mandate_verification_failed",
+      reason: "mandate_assertion_expired",
+    });
+    expect(filledCards).toHaveLength(0);
+    expect(auditBodies).toHaveLength(0);
+  });
+
+  it("refuses card release when mandate verification crosses approval expiry", async () => {
+    let clock = 0;
+    const deadline = 1_000;
+    const { result, filledCards, resolvedCardRefs } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      undefined,
+      {
+        now: () => clock,
+        approvalExpiresAt: () => new Date(deadline).toISOString(),
+        onJwksFetch: () => {
+          clock = deadline;
+        },
+      },
+    );
+
+    expect(result).toMatchObject({ status: "payment_approval_timeout" });
+    expect(resolvedCardRefs).toHaveLength(0);
+    expect(filledCards).toHaveLength(0);
+  });
+
   it("fails closed when the expected Vouchflow audience is not configured", async () => {
     const { result, auditBodies, filledCards } = await harness("happy", null);
 
@@ -773,7 +859,7 @@ describe("operate_pay", () => {
   });
 
   it("notifies and records submitted when the 3DS challenge succeeds", async () => {
-    const { result, auditBodies, notifyCalls, browser } = await harness(
+    const { result, auditBodies, notifyCalls, browser, pendingAtDispatchCounts } = await harness(
       "happy",
       "customer_test",
       undefined,
@@ -784,6 +870,7 @@ describe("operate_pay", () => {
     expect(notifyCalls).toHaveLength(1);
     expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
     expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_submitted" })]);
+    expect(pendingAtDispatchCounts).toEqual([1]);
   });
 
   it("does not wait for notification delivery before resolving 3DS", async () => {
@@ -819,7 +906,105 @@ describe("operate_pay", () => {
     expect(notifyBodies).toEqual([{ mode: "detected_challenge" }]);
   });
 
-  it("waits and hands back an app-push message without an on-page challenge", async () => {
+  // Regression coverage for the decoupled/out-of-band 3DS completion gap: a
+  // timed-out wait (genuinely still pending — the cardholder may approve
+  // just after this call's own bounded wait ends) must leave resumable
+  // state for operate_payment_status to keep checking the SAME already-
+  // submitted charge, and must tell the host to use that tool rather than
+  // silently stranding the browser on the challenge with nothing watching.
+  it("REGRESSION: a timed-out 3DS wait persists resumable state and points to operate_payment_status", async () => {
+    const { result, pendingThreeDsStates } = await harness("happy", "customer_test", undefined, {
+      resolution: "timeout",
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_3ds_required",
+      next: {
+        tool: "operate_payment_status",
+        wait_seconds: 15,
+        hint: expect.stringContaining("not re-release"),
+      },
+    });
+    expect(pendingThreeDsStates).toHaveLength(1);
+    expect(pendingThreeDsStates[0]).toMatchObject({
+      checkout: CHECKOUT,
+      last4: "4242",
+      deadline: expect.any(Number),
+    });
+    expect(pendingThreeDsStates[0]!.deadline).toBeGreaterThan(Date.now());
+  });
+
+  it("surfaces ACS instrument evidence as a warning without blocking the 3DS handoff", async () => {
+    const { result, browser, pendingThreeDsStates } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      { resolution: "timeout" },
+      {
+        fillAndSubmitCheckout: async () => ({
+          three_ds_required: true,
+          order_confirmed: false,
+          payment_instrument_mismatch: {
+            kind: "payment_instrument_mismatch",
+            confidence: "high",
+            evidence_used: ["issuer"],
+            expected: { last4: "9192", issuer: "DBS" },
+            observed: { issuer: "ENBDX" },
+            provenance: {
+              expected: { last4: "released_card", issuer: "bin_metadata" },
+              observed: "3ds_challenge",
+            },
+          },
+        }),
+      },
+    );
+
+    expect(result).toMatchObject({
+      status: "payment_3ds_required",
+      warning: {
+        kind: "payment_instrument_mismatch",
+        expected: { last4: "9192", issuer: "DBS" },
+        observed: { issuer: "ENBDX" },
+      },
+      needs_user: { wall: "3ds", resume: "checkout" },
+    });
+    expect(browser.waitForThreeDsResolution).not.toHaveBeenCalled();
+    expect(pendingThreeDsStates).toMatchObject([
+      { payment_instrument_mismatch: { observed: { issuer: "ENBDX" } } },
+    ]);
+  });
+
+  it("persists mismatch evidence first observed during the existing 3DS wait", async () => {
+    const mismatch: NonNullable<CheckoutSubmitResult["payment_instrument_mismatch"]> = {
+      kind: "payment_instrument_mismatch",
+      confidence: "high",
+      evidence_used: ["last4"],
+      expected: { last4: "9192" },
+      observed: { last4: "0005" },
+      provenance: {
+        expected: { last4: "released_card" },
+        observed: "3ds_challenge",
+      },
+    };
+    const { result, pendingThreeDsStates } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      { resolution: "timeout" },
+      {
+        fillAndSubmitCheckout: async () => ({
+          three_ds_required: true,
+          order_confirmed: false,
+        }),
+        paymentInstrumentMismatch: () => mismatch,
+      },
+    );
+
+    expect(result).toMatchObject({ warning: mismatch });
+    expect(pendingThreeDsStates).toMatchObject([{ payment_instrument_mismatch: mismatch }]);
+  });
+
+  it("keeps an outcome unknown without inventing an app-push challenge", async () => {
     const { result, notifyCalls, notifyBodies, browser } = await harness(
       "happy",
       "customer_test",
@@ -835,14 +1020,11 @@ describe("operate_pay", () => {
 
     expect(result).toMatchObject({
       status: "payment_outcome_unknown",
-      needs_user: {
-        wall: "3ds",
-        resume: "checkout",
-        message: expect.stringMatching(/No order confirmation.*bank app/),
-      },
+      next: { tool: "operate_payment_status", wait_seconds: 15 },
     });
-    expect(notifyCalls).toHaveLength(1);
-    expect(notifyBodies).toEqual([{ mode: "possible_out_of_band" }]);
+    expect(result).not.toHaveProperty("needs_user");
+    expect(notifyCalls).toHaveLength(0);
+    expect(notifyBodies).toEqual([]);
     expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
   });
 
@@ -864,41 +1046,125 @@ describe("operate_pay", () => {
   });
 
   it("records declined when the 3DS challenge fails", async () => {
-    const { result, auditBodies, notifyCalls } = await harness(
+    const outcome = await harness("happy", "customer_test", undefined, { resolution: "failed" });
+
+    expect(outcome.result).toMatchObject({ status: "payment_declined" });
+    expect(outcome.result).not.toHaveProperty("merchant");
+    expect(outcome.notifyCalls).toHaveLength(1);
+    expect(outcome.auditBodies).toEqual([expect.objectContaining({ status: "payment_declined" })]);
+    expect(outcome.pendingThreeDsStates).toHaveLength(1);
+    expect(outcome.activePendingThreeDs).toBeNull();
+  });
+
+  it("records and tracks unknown when single-page submission fails after dispatch", async () => {
+    const mismatch: NonNullable<CheckoutSubmitResult["payment_instrument_mismatch"]> = {
+      kind: "payment_instrument_mismatch",
+      confidence: "low",
+      evidence_used: ["issuer"],
+      expected: { last4: "4242", issuer: "DBS", label: "DBS Mastercard" },
+      observed: { issuer: "ENBDX" },
+      provenance: {
+        expected: {
+          last4: "released_card",
+          issuer: "vault_label",
+          label: "vault_label",
+        },
+        observed: "3ds_challenge",
+      },
+    };
+    const { result, auditBodies, browser, pendingThreeDsStates } = await harness(
       "happy",
       "customer_test",
       undefined,
-      { resolution: "failed" },
-    );
-
-    expect(result).toMatchObject({ status: "payment_declined" });
-    expect(result).not.toHaveProperty("merchant");
-    expect(notifyCalls).toHaveLength(1);
-    expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_declined" })]);
-  });
-
-  it("records unknown when single-page submission fails after dispatch", async () => {
-    const { result, auditBodies } = await harness("happy", "customer_test", undefined, undefined, {
-      fillAndSubmitCheckout: async () => {
-        throw new PaymentSubmitOutcomeUnknownError();
+      undefined,
+      {
+        fillAndSubmitCheckout: async (_card, options) => {
+          options?.onSubmitDispatched?.();
+          throw new PaymentSubmitOutcomeUnknownError();
+        },
+        paymentInstrumentMismatch: () => mismatch,
       },
-    });
+    );
 
     expect(result).toMatchObject({
       status: "payment_outcome_unknown",
       reason: "payment_submit_outcome_unknown",
+      next: { tool: "operate_payment_status", wait_seconds: 15 },
+      warning: mismatch,
     });
     expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_outcome_unknown" })]);
+    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(0);
+    expect(pendingThreeDsStates).toHaveLength(1);
+    expect(pendingThreeDsStates[0]).toMatchObject({
+      outcome: "unknown",
+      payment_instrument_mismatch: mismatch,
+    });
+  });
+
+  it.each([
+    ["succeeded", "payment_submitted"],
+    ["failed", "payment_declined"],
+  ] as const)(
+    "maps an immediate %s outcome after a dispatched submit error",
+    async (resolution, expectedStatus) => {
+      const outcome = await harness(
+        "happy",
+        "customer_test",
+        undefined,
+        { resolution },
+        {
+          fillAndSubmitCheckout: async (_card, options) => {
+            options?.onSubmitDispatched?.();
+            throw new PaymentSubmitOutcomeUnknownError();
+          },
+        },
+      );
+
+      expect(outcome.result).toMatchObject({ status: expectedStatus });
+      expect(outcome.result).not.toHaveProperty("reason");
+      expect(outcome.result).not.toHaveProperty("next");
+      expect(outcome.auditBodies).toEqual([expect.objectContaining({ status: expectedStatus })]);
+      expect(outcome.activePendingThreeDs).toBeNull();
+    },
+  );
+
+  it("does not retain pending 3DS when checkout fails before charge dispatch", async () => {
+    const { result, auditBodies, browser, pendingThreeDsStates } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      undefined,
+      {
+        fillAndSubmitCheckout: async () => {
+          throw new Error("payment_submit_not_found");
+        },
+      },
+    );
+
+    expect(result).toMatchObject({
+      status: "payment_checkout_failed",
+      reason: "payment_submit_not_found",
+    });
+    expect(result).not.toHaveProperty("next");
+    expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_checkout_failed" })]);
+    expect(browser.waitForThreeDsResolution).not.toHaveBeenCalled();
+    expect(pendingThreeDsStates).toHaveLength(0);
   });
 
   it("hands back immediately without notifying when the 3DS wait is disabled", async () => {
-    const { result, notifyCalls, browser } = await harness("happy", "customer_test", undefined, {
-      resolution: "timeout",
-      waitSeconds: 0,
-    });
+    const { result, notifyCalls, browser, pendingThreeDsStates } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      {
+        resolution: "timeout",
+        waitSeconds: 0,
+      },
+    );
 
     expect(result).toMatchObject({
       status: "payment_3ds_required",
+      next: { tool: "operate_payment_status", wait_seconds: 15 },
       needs_user: {
         wall: "3ds",
         resume: "checkout",
@@ -907,6 +1173,7 @@ describe("operate_pay", () => {
     });
     expect(notifyCalls).toHaveLength(0);
     expect(browser.waitForThreeDsResolution).not.toHaveBeenCalled();
+    expect(pendingThreeDsStates).toHaveLength(1);
   });
 
   // IRON-RULE regression: the has-card path must be byte-for-byte the same
@@ -1015,7 +1282,7 @@ async function runJit(cfg: {
   let clock = 0;
   let summaryReads = 0;
   const serverExpiresAt = new Date(
-    (cfg.cardRefArg === undefined ? cfg.jitApprovalTimeoutMs : cfg.approvalTimeoutMs) ?? 8.64e15,
+    (cfg.cardRefArg === undefined ? cfg.jitApprovalTimeoutMs : cfg.approvalTimeoutMs) ?? 86_400_000,
   ).toISOString();
 
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -1032,7 +1299,7 @@ async function runJit(cfg: {
     }
     if (
       (url.endsWith("/v1/pay/approvals/appr_jit") ||
-        url.endsWith("/v1/pay/approvals/appr_jit?wait_for_submission=1")) &&
+        url.includes("/v1/pay/approvals/appr_jit?wait_for_submission=1")) &&
       init?.method === "GET"
     ) {
       const state = cfg.poll(clock);
@@ -1389,7 +1656,7 @@ async function runSplitFill(
     }
     if (
       (url.endsWith("/v1/pay/approvals/appr_split") ||
-        url.endsWith("/v1/pay/approvals/appr_split?wait_for_submission=1")) &&
+        url.includes("/v1/pay/approvals/appr_split?wait_for_submission=1")) &&
       init?.method === "GET"
     ) {
       // Sign the mandate over whatever checkout the operator MINTED the
@@ -1693,7 +1960,7 @@ describe("operate_pay split checkout — confirm", () => {
 // Friction-audit finding #1: operate_pay used to block the MCP call for up
 // to five (or eighteen, JIT) minutes polling for a human's phone tap. These
 // exercise the fix: a bounded per-call poll budget that returns
-// approval_pending instead of blocking, and idempotent resume — a later
+// approval_pending at an explicit zero bound, and idempotent resume — a later
 // call reuses the SAME approval/operator keypair rather than minting a
 // duplicate approval.
 
@@ -1706,6 +1973,7 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
   expiresAt: string;
   setReview: () => void;
   setApproved: () => void;
+  setDenied: () => void;
   setPendingApproved: () => void;
   setInvalidFinalJws: () => void;
   setInvalidFinalCard: () => void;
@@ -1715,6 +1983,7 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
     | "none"
     | "review"
     | "approval"
+    | "denied"
     | "approval_pending"
     | "invalid_jws"
     | "invalid_card" = "none";
@@ -1740,22 +2009,23 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
     }
     if (
       (url.endsWith("/v1/pay/approvals/appr_resume") ||
-        url.endsWith("/v1/pay/approvals/appr_resume?wait_for_submission=1") ||
+        url.includes("/v1/pay/approvals/appr_resume?wait_for_submission=1") ||
         url.endsWith("/v1/pay/approvals/appr_resume?read_submission=1")) &&
       init?.method === "GET"
     ) {
       const approval = approvalBodies[0]!;
       const operatorPublicKey = String(approval.operator_pubkey);
       const readsRelayCandidate =
-        url.endsWith("?wait_for_submission=1") || url.endsWith("?read_submission=1");
+        url.includes("?wait_for_submission=1") || url.endsWith("?read_submission=1");
       if (
         !readsRelayCandidate ||
         candidateState === "none" ||
+        candidateState === "denied" ||
         (candidateState === "review" && reviewConfirmed)
       ) {
         return Response.json({
           id: "appr_resume",
-          status: "pending",
+          status: candidateState === "denied" ? "denied" : "pending",
           ...checkout,
           nonce,
           card_ref: "card_resume",
@@ -1870,6 +2140,10 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
       candidateState = "approval";
       reviewConfirmed = false;
     },
+    setDenied: () => {
+      candidateState = "denied";
+      reviewConfirmed = false;
+    },
     setPendingApproved: () => {
       candidateState = "approval_pending";
       reviewConfirmed = false;
@@ -1883,7 +2157,7 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
   };
 }
 
-describe("operate_pay non-blocking approval [P0]", () => {
+describe("operate_pay bounded approval continuation [P0]", () => {
   const baseArgs = {
     card_ref: "card_resume",
     merchant: CHECKOUT.merchant,
@@ -1893,7 +2167,7 @@ describe("operate_pay non-blocking approval [P0]", () => {
     reason: "office restock",
   };
 
-  it("returns approval_pending immediately instead of blocking when nobody has approved yet", async () => {
+  it("returns a clean same-approval continuation when an explicit zero wait ends", async () => {
     const env = buildResumableEnv();
     const sleepCalls: number[] = [];
     const pendingStates: PendingApprovalWait[] = [];
@@ -1918,7 +2192,7 @@ describe("operate_pay non-blocking approval [P0]", () => {
       approved_amount_cents: CHECKOUT.amount_cents,
       currency: CHECKOUT.currency,
       phase: null,
-      next: { tool: "operate_payment_status", wait_seconds: 15 },
+      next: { tool: "operate_pay" },
     });
     expect(result.approval_url).toContain("appr_resume");
     expect(result.expires_at).toBe(env.expiresAt);
@@ -2012,6 +2286,54 @@ describe("operate_pay non-blocking approval [P0]", () => {
     expect(result).toMatchObject({ status: "payment_submitted" });
     expect(env.browser.fillAndSubmitCheckout).toHaveBeenCalledOnce();
     expect(env.filledCards).toEqual([SYNTHETIC_CARD]);
+  });
+
+  it("refuses the charge when approval expires at the final browser dispatch fence", async () => {
+    const env = buildResumableEnv();
+    let now = Date.now();
+    let pending: PendingApprovalWait | null = null;
+    await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      onApprovalPending: (state) => {
+        pending = state;
+      },
+      pollBudgetMs: 0,
+      now: () => now,
+    });
+    if (pending === null) throw new Error("expected initial resumable approval");
+    env.setPendingApproved();
+    const deadline = Date.parse(env.expiresAt);
+    now = deadline - 1;
+    const onApprovalTerminal = vi.fn();
+    vi.mocked(env.browser.fillAndSubmitCheckout).mockImplementation(async (_card, options) => {
+      now = deadline;
+      options?.beforeSubmitDispatch?.();
+      throw new Error("charge dispatch should have been refused");
+    });
+
+    const result = await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      resumeFrom: pending,
+      pollBudgetMs: 0,
+      onApprovalTerminal,
+      now: () => now,
+    });
+
+    expect(result).toMatchObject({ status: "payment_approval_timeout" });
+    expect(onApprovalTerminal).toHaveBeenCalledWith(
+      expect.objectContaining({ approval_id: "appr_resume" }),
+      "expired",
+    );
+    expect(env.browser.fillAndSubmitCheckout).toHaveBeenCalledOnce();
+    expect(env.filledCards).toEqual([]);
   });
 
   it("keeps a zero-budget review candidate distinct, then charges a subsequent final candidate on the same approval", async () => {
@@ -2311,5 +2633,62 @@ describe("operate_pay non-blocking approval [P0]", () => {
     expect(sleepCalls.length).toBeGreaterThan(0);
     expect(sleepCalls.every((ms) => ms === 3_000)).toBe(true);
     expect(clock).toBeLessThan(13_000);
+  });
+
+  it("returns a resumable approval when the long-poll transport times out", async () => {
+    const env = buildResumableEnv();
+    const getPaymentApproval = vi
+      .spyOn(env.api, "getPaymentApproval")
+      .mockImplementation(async (_id, candidateRead) => {
+        if (candidateRead === true) {
+          const error = new Error("approval transport timed out");
+          error.name = "TimeoutError";
+          throw error;
+        }
+        throw new Error("unexpected immediate approval read");
+      });
+    const onApprovalPending = vi.fn();
+
+    const result = await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      onApprovalPending,
+      pollBudgetMs: 1_000,
+    });
+
+    expect(result).toMatchObject({ status: "approval_pending", approval_id: "appr_resume" });
+    expect(onApprovalPending).toHaveBeenCalledOnce();
+    expect(getPaymentApproval).toHaveBeenCalledWith(
+      "appr_resume",
+      true,
+      expect.any(Number),
+      expect.any(Number),
+    );
+  });
+
+  it("aborts a stalled payment-approval transport at its request bound", async () => {
+    let observedSignal: AbortSignal | undefined;
+    const api = new ApiClient({
+      apiBaseUrl: "https://api.test",
+      registryBaseUrl: "https://registry.test",
+      agentSessionToken: "synthetic-session",
+      fetch: (async (_input, init) => {
+        observedSignal = init?.signal ?? undefined;
+        return await new Promise<Response>((_resolve, reject) => {
+          observedSignal?.addEventListener("abort", () => reject(observedSignal?.reason), {
+            once: true,
+          });
+        });
+      }) as typeof fetch,
+    });
+
+    await expect(api.getPaymentApproval("appr_stalled", true, 5_000, 25)).rejects.toMatchObject({
+      name: "TimeoutError",
+    });
+    expect(observedSignal).toBeDefined();
+    expect(observedSignal?.aborted).toBe(true);
   });
 });

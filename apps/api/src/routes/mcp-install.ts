@@ -17,30 +17,10 @@
 // surface.
 
 import { z } from "zod";
-import type {
-  FastifyPluginAsync,
-  FastifyReply,
-  FastifyRequest,
-} from "fastify";
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { issueAgentSession } from "../auth/agent.js";
 import { issuePairingToken } from "../auth/pairing-token.js";
 import type { ApiDeps } from "../services/deps.js";
-
-const ALLOWED_PROXY_PROTOCOLS = new Set(["http:", "https:", "socks5:"]);
-
-function normalizeProxyUrl(value: string): string | undefined {
-  const trimmed = value.trim();
-  if (trimmed.length === 0) return undefined;
-  if (/[\s\u0000-\u001f\u007f]/.test(trimmed)) return undefined;
-  try {
-    const parsed = new URL(trimmed);
-    if (!ALLOWED_PROXY_PROTOCOLS.has(parsed.protocol)) return undefined;
-    if (parsed.hostname.length === 0) return undefined;
-    return trimmed;
-  } catch {
-    return undefined;
-  }
-}
 
 const initiateBody = z
   .object({
@@ -59,27 +39,16 @@ const claimBody = z
     agent_version: z.string().min(1).max(60).optional(),
     registry_enabled: z.boolean().optional(),
     consent_operator_inbox_otp: z.boolean().optional(),
-    proxy_url: z
-      .string()
-      .max(500)
-      .transform((value) => normalizeProxyUrl(value))
-      .refine((value): value is string => value !== undefined, {
-        message: "proxy_url must be http://, https://, or socks5:// without whitespace",
-      })
-      .optional()
-      .or(z.literal("").transform(() => undefined)),
   })
   .optional();
 
 function installPreferences(record: {
   registry_enabled: boolean | null;
   consent_operator_inbox_otp: boolean | null;
-  proxy_url: string | null;
 }) {
   return {
     registry_enabled: record.registry_enabled === true,
     consent_operator_inbox_otp: record.consent_operator_inbox_otp === true,
-    ...(record.proxy_url !== null ? { proxy_url: record.proxy_url } : {}),
   };
 }
 
@@ -112,70 +81,64 @@ export const registerMcpInstallRoute: FastifyPluginAsync<{
     });
   });
 
-  fastify.get<{ Params: { code: string } }>(
-    "/v1/mcp/install/:code/status",
-    async (req, reply) => {
-      const now = opts.deps.now?.() ?? new Date();
-      const record = await opts.deps.pairingTokenStore.find(req.params.code);
-      if (record === null) {
-        reply.code(404).send({ error: "not_found" });
-        return;
-      }
-      if (now > record.expires_at && record.status !== "delivered") {
+  fastify.get<{ Params: { code: string } }>("/v1/mcp/install/:code/status", async (req, reply) => {
+    const now = opts.deps.now?.() ?? new Date();
+    const record = await opts.deps.pairingTokenStore.find(req.params.code);
+    if (record === null) {
+      reply.code(404).send({ error: "not_found" });
+      return;
+    }
+    if (now > record.expires_at && record.status !== "delivered") {
+      reply.code(410).send({ status: "expired" });
+      return;
+    }
+    if (record.status === "pending") {
+      return reply.code(200).send({
+        status: "pending",
+        agent_identity: record.agent_identity,
+      });
+    }
+    if (record.status === "claimed") {
+      // First poll after claim — deliver the raw token (exactly once).
+      const raw = await opts.deps.pairingTokenStore.deliverAndMarkUsed(req.params.code, now);
+      if (raw === null) {
         reply.code(410).send({ status: "expired" });
         return;
       }
-      if (record.status === "pending") {
-        return reply.code(200).send({
-          status: "pending",
-          agent_identity: record.agent_identity,
-        });
-      }
-      if (record.status === "claimed") {
-        // First poll after claim — deliver the raw token (exactly once).
-        const raw = await opts.deps.pairingTokenStore.deliverAndMarkUsed(req.params.code, now);
-        if (raw === null) {
-          reply.code(410).send({ status: "expired" });
-          return;
-        }
-        return reply.code(200).send({
-          status: "claimed",
-          agent_session_token: raw,
-          account_id: record.account_id,
-          install_preferences: installPreferences(record),
-        });
-      }
-      // delivered / expired
-      reply.code(410).send({ status: "expired" });
-    },
-  );
+      return reply.code(200).send({
+        status: "claimed",
+        agent_session_token: raw,
+        account_id: record.account_id,
+        install_preferences: installPreferences(record),
+      });
+    }
+    // delivered / expired
+    reply.code(410).send({ status: "expired" });
+  });
 
   // Browser-side status check — used by the /install web page. Unlike
   // /status, this NEVER delivers the one-time agent token: that
   // delivery is reserved exclusively for the CLI's /status poll, so a
   // page load can't consume the token out from under the CLI.
-  fastify.get<{ Params: { code: string } }>(
-    "/v1/mcp/install/:code/state",
-    async (req, reply) => {
-      const now = opts.deps.now?.() ?? new Date();
-      const record = await opts.deps.pairingTokenStore.find(req.params.code);
-      if (record === null) {
-        reply.code(404).send({ error: "not_found" });
-        return;
-      }
-      if (now > record.expires_at && record.status !== "delivered") {
-        return reply.code(200).send({ status: "expired" });
-      }
-      if (record.status === "pending") {
-        return reply.code(200).send({
-          status: "pending",
-          agent_identity: record.agent_identity,
-        });
-      }
-      // claimed or delivered — install is confirmed from the browser's POV.
-      return reply.code(200).send({ status: record.status });
-    },
-  );
+  fastify.get<{ Params: { code: string } }>("/v1/mcp/install/:code/state", async (req, reply) => {
+    const now = opts.deps.now?.() ?? new Date();
+    const record = await opts.deps.pairingTokenStore.find(req.params.code);
+    if (record === null) {
+      reply.code(404).send({ error: "not_found" });
+      return;
+    }
+    if (now > record.expires_at && record.status !== "delivered") {
+      return reply.code(200).send({ status: "expired" });
+    }
+    if (record.status === "pending") {
+      return reply.code(200).send({
+        status: "pending",
+        agent_identity: record.agent_identity,
+      });
+    }
+    // claimed or delivered — install is confirmed from the browser's POV.
+    return reply.code(200).send({ status: record.status });
+  });
 
   fastify.post<{ Params: { code: string } }>(
     "/v1/mcp/install/:code/claim",
@@ -218,9 +181,7 @@ export const registerMcpInstallRoute: FastifyPluginAsync<{
         now,
         {
           registry_enabled: parsed.data?.registry_enabled === true,
-          consent_operator_inbox_otp:
-            parsed.data?.consent_operator_inbox_otp === true,
-          proxy_url: parsed.data?.proxy_url ?? null,
+          consent_operator_inbox_otp: parsed.data?.consent_operator_inbox_otp === true,
         },
       );
       if (!claimed) {
@@ -234,10 +195,7 @@ export const registerMcpInstallRoute: FastifyPluginAsync<{
       // machine_token) credit the right account.
       if (record.machine_token !== null) {
         try {
-          await opts.deps.machineTokenStore.markPaired(
-            record.machine_token,
-            auth.account_id,
-          );
+          await opts.deps.machineTokenStore.markPaired(record.machine_token, auth.account_id);
         } catch (err) {
           // Non-fatal: claim already succeeded. Log and continue. Never log any
           // slice of the token — a prefix is still a partial credential; the err

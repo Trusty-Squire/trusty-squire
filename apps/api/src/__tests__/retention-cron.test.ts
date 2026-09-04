@@ -45,6 +45,16 @@ function makeFakes(): {
           return { count: 4 };
         },
       } as unknown as never,
+      credentialMutationApproval: {
+        deleteMany: async (args: { where: Record<string, unknown> }) => {
+          calls.push({
+            table: "CredentialMutationApproval",
+            op: "deleteMany",
+            where: args.where,
+          });
+          return { count: 6 };
+        },
+      } as unknown as never,
       telegramLinkToken: {
         deleteMany: async (args: { where: Record<string, unknown> }) => {
           calls.push({ table: "TelegramLinkToken", op: "deleteMany", where: args.where });
@@ -72,6 +82,7 @@ describe("RetentionCron", () => {
     expect(stats.vault_audit_deleted).toBe(5);
     expect(stats.payment_audit_deleted).toBe(3);
     expect(stats.payment_approvals_deleted).toBe(4);
+    expect(stats.credential_mutation_approvals_deleted).toBe(6);
     expect(stats.telegram_link_tokens_deleted).toBe(1);
     expect(stats.errors).toEqual([]);
 
@@ -92,6 +103,15 @@ describe("RetentionCron", () => {
     expect(paymentApprovalDelete).toBeDefined();
     const paymentApprovalWhere = paymentApprovalDelete!.where["expires_at"] as { lt: Date };
     expect(paymentApprovalWhere.lt).toEqual(now);
+
+    const credentialMutationApprovalDelete = calls.find(
+      (c) => c.table === "CredentialMutationApproval",
+    );
+    expect(credentialMutationApprovalDelete).toBeDefined();
+    const credentialMutationApprovalWhere = credentialMutationApprovalDelete!.where[
+      "expires_at"
+    ] as { lt: Date };
+    expect(credentialMutationApprovalWhere.lt).toEqual(now);
 
     const telegramLinkTokenDelete = calls.find((c) => c.table === "TelegramLinkToken");
     expect(telegramLinkTokenDelete).toBeDefined();
@@ -130,6 +150,11 @@ describe("RetentionCron", () => {
             throw new Error("payment approval boom");
           },
         } as unknown as never,
+        credentialMutationApproval: {
+          deleteMany: async () => {
+            throw new Error("credential mutation approval boom");
+          },
+        } as unknown as never,
         telegramLinkToken: {
           deleteMany: async () => {
             throw new Error("telegram link token boom");
@@ -140,12 +165,13 @@ describe("RetentionCron", () => {
     });
 
     const stats = await cron.runOnce();
-    expect(stats.errors).toHaveLength(5);
+    expect(stats.errors).toHaveLength(6);
     expect(stats.errors[0]).toMatch(/pairing/);
     expect(stats.errors[1]).toMatch(/vault audit/);
     expect(stats.errors[2]).toMatch(/payment audit/);
     expect(stats.errors[3]).toMatch(/payment approval/);
-    expect(stats.errors[4]).toMatch(/telegram link token/);
+    expect(stats.errors[4]).toMatch(/credential mutation approval/);
+    expect(stats.errors[5]).toMatch(/telegram link token/);
   });
 
   it("status() exposes last-run state", async () => {
@@ -169,6 +195,7 @@ describe("RetentionCron", () => {
     expect(stats.vault_audit_deleted).toBe(0);
     expect(stats.payment_audit_deleted).toBe(0);
     expect(stats.payment_approvals_deleted).toBe(0);
+    expect(stats.credential_mutation_approvals_deleted).toBe(0);
     expect(stats.telegram_link_tokens_deleted).toBe(0);
     expect(stats.errors).toEqual([]);
   });

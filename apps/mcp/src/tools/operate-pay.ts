@@ -1,16 +1,25 @@
 import { z } from "zod";
 import {
+  armPaymentDispatchHandoff,
   activeCartCheckoutForOrigin,
   activeProvisionBrowserForPayment,
   claimActivePaymentForOperatePay,
   clearActivePendingCardFill,
+  clearActivePendingThreeDsIfCurrent,
+  completeActivePendingApprovalWithTerminalStatus,
   completeActivePaymentLeaseWithPendingApproval,
   completeActivePaymentLeaseWithPendingFill,
+  completeActivePaymentLeaseWithTerminalApproval,
+  coordinatePaymentDispatchAudit,
+  finishPaymentDispatchHandoff,
   getActivePendingApproval,
+  getActivePendingThreeDs,
+  getTerminalPaymentApproval,
   recordActivePaymentProvenance,
   releaseActivePaymentLease,
   retainActivePaymentFieldSeal,
   restoreActivePendingCardFillAfterConfirmThrow,
+  setActivePendingThreeDs,
   withPaymentSessionCall,
   type Session,
 } from "../bot/provision-session.js";
@@ -20,9 +29,19 @@ import {
   executeOperatePayConfirm,
   type PendingApprovalWait,
   type PendingCardFill,
+  type PendingThreeDsWait,
 } from "../bot/pay-operator.js";
+import type { ThreeDsResolution } from "../bot/browser.js";
 import type { ApiClient } from "../api-client.js";
+import { isPaymentApprovalTransportTimeout } from "../api-client.js";
 import { assertApi, type Tool } from "./index.js";
+
+// Long enough for a ready human to approve without making the MCP request as
+// long-lived as the approval itself (five minutes for saved-card ceremonies,
+// longer for JIT). If this bound expires, session state retains the same
+// approval and the next operate_pay call continues waiting on it.
+const OPERATE_PAY_APPROVAL_WAIT_MS = 60_000;
+const PAYMENT_APPROVAL_RESPONSE_RESERVE_MS = 500;
 
 const inputSchema = z
   .object({
@@ -70,6 +89,11 @@ function shouldRecordPaymentProvenance(status: unknown): boolean {
   return status === "payment_submitted" || status === "payment_3ds_required";
 }
 
+function approvalCardIdentity(card: { label: string; last4: string | null } | undefined): string {
+  if (card === undefined) return "this payment's card";
+  return card.last4 == null ? card.label : `${card.label} •••• ${card.last4}`;
+}
+
 function paymentSchemaRepair(
   _args: unknown,
   issues: readonly { path: (string | number)[]; message: string }[],
@@ -108,40 +132,26 @@ export const listPaymentCardsTool: Tool = {
   annotations: { readOnlyHint: true },
   async handler(_args, api) {
     assertApi(api);
-    return { cards: await api.listPaymentCards() };
+    const cards = await api.listPaymentCards();
+    return { cards: cards.map(({ id, label }) => ({ id, label })) };
   },
 };
 
 export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
   name: "operate_pay",
   description:
-    "Pay the checkout in the addressed operate_start browser session. session_id is required " +
-    "when multiple operator sessions are active (and optional only for a sole local session). " +
-    'phase="single" (the default, also implied by omitting phase) is an ordinary one-step checkout. ' +
-    "Reads the live merchant and checkout total independently of informational checkout_state. " +
-    "When the live total cannot be machine-read, caller-supplied amount_cents and currency become " +
-    "the authoritative approval amount and take precedence over a prior cart observation. " +
-    "creates a phone approval link, waits for approval, " +
-    "verifies the passkey-signed purchase mandate, opens the card only in this process, " +
-    "fills common checkout fields, submits, and audits only the last four digits. Never " +
-    "solves 3-D Secure; waits for user completion, then returns a needs_user handoff if unresolved. " +
-    "With no card_ref/card_label and no card on file, the approval link becomes a first-time " +
-    "add-card ceremony and the card is bound server-side before the mandate is signed. " +
-    "On approval resume, an unreadable live checkout reuses the original mandate-bound checkout; " +
-    "a successfully-read checkout with a different amount, currency, merchant, or origin returns " +
-    "payment_amount_mismatch without filling the card. " +
-    "For a SPLIT checkout (a card-entry step with no visible total, e.g. Rakuten): call with " +
-    'phase="fill_card" on that step — the approval amount is sourced from the most recent real ' +
-    "total this session observed (e.g. the cart page) only when the card-entry page itself shows " +
-    "none and amount_cents plus currency were not supplied, and releases the card into recognized " +
-    "payment-provider fields without charging. Then drive the checkout to the order-confirmation " +
-    "step, VERIFY the live final total there matches the returned approved amount_cents and " +
-    "currency, and place the order yourself via operate_act, handling any 3-D Secure challenge " +
-    "directly — Trusty Squire never re-reads the total or clicks the pay/place-order control. Call " +
-    'phase="confirm" any time after the fill to close out the approval; it is not a prerequisite ' +
-    "to placing the order. Exactly one human approval per purchase. If the payment gets stuck or " +
-    "the card is declined, recover with operate_finish and start a fresh session — operate_pay " +
-    "does not support refilling a different card mid-session.",
+    "Pay the live checkout in an operate_start session (session_id is required when more than one " +
+    "session exists). The default single phase reads the merchant and total, surfaces one phone " +
+    "approval, and waits server-side for up to one minute; re-calling after a pending result resumes " +
+    "that same approval. It verifies the signed mandate, opens the card only in this process, " +
+    "rechecks approval immediately before the charge click, and reports submitted, 3-D Secure, or " +
+    "unknown outcomes truthfully. Use operate_payment_status for an unresolved submitted charge. " +
+    "Without a stored card, the approval link performs first-time card binding. A resumed approval " +
+    "keeps its original terms and fails closed if a readable live checkout differs. For split " +
+    'checkouts, phase="fill_card" fills recognized provider fields without charging; verify the ' +
+    'final total and place the order with operate_act, then phase="confirm" closes the approval. ' +
+    "Exactly one human approval is valid per purchase attempt; finish the session before retrying " +
+    "a stuck, denied, expired, or ambiguous attempt.",
   inputSchema,
   jsonInputSchema: {
     type: "object",
@@ -196,6 +206,25 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
     const phase = args.phase === "single" ? undefined : args.phase;
     return await withPaymentSessionCall(args.session_id, async (session) => {
       const paymentClaim = claimActivePaymentForOperatePay(phase, session);
+      if (paymentClaim.kind === "terminal") {
+        const state = paymentClaim.state;
+        return paymentResult(session, {
+          status:
+            paymentClaim.terminalStatus === "denied"
+              ? "payment_approval_denied"
+              : paymentClaim.terminalStatus === "expired"
+                ? "payment_approval_timeout"
+                : "payment_confirmation_failed",
+          approval_id: state.approval_id,
+          approval_url: state.approval_url,
+          merchant: state.checkout.merchant,
+          amount_cents: state.checkout.amount_cents,
+          currency: state.checkout.currency,
+          ...(paymentClaim.terminalStatus === "expired" && state.jit && state.boundCardRef !== null
+            ? { card_persisted: true }
+            : {}),
+        });
+      }
       // Confirm step of a split checkout: the card is already filled (and the
       // mandate already signed), so no card resolution and no PayPal gate.
       // confirm no longer touches the browser or charges anything — it only
@@ -233,6 +262,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
       let paymentLeaseCompleted = false;
       let paymentFieldsCleared = true;
       let approvalPending: PendingApprovalWait | null = null;
+      let paymentDispatchHandoff: PendingThreeDsWait | null = null;
       let operatorStarted = false;
       try {
         const browser = await activeProvisionBrowserForPayment(session);
@@ -263,8 +293,24 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         //      1 card   → use it
         //      >1 cards → error listing the labels (never silently guess)
         let cardRef = args.card_ref;
+        let selectedCardLabel = args.card_label;
+        let selectedCardNetwork: string | undefined;
+        let cards: Array<{
+          id: string;
+          label: string;
+          last4: string | null;
+          brand?: string;
+        }>;
         if (cardRef === undefined) {
-          const cards = await api.listPaymentCards();
+          cards = await api.listPaymentCards();
+        } else {
+          try {
+            cards = await api.listPaymentCards();
+          } catch {
+            cards = [];
+          }
+        }
+        if (cardRef === undefined) {
           if (args.card_label !== undefined) {
             const matches = cards.filter((card) => card.label === args.card_label);
             if (matches.length === 0) {
@@ -276,8 +322,12 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
               );
             }
             cardRef = matches[0]!.id;
+            selectedCardLabel = matches[0]!.label;
+            selectedCardNetwork = matches[0]!.brand;
           } else if (cards.length === 1) {
             cardRef = cards[0]!.id;
+            selectedCardLabel = cards[0]!.label;
+            selectedCardNetwork = cards[0]!.brand;
           } else if (cards.length > 1) {
             const labels = cards.map((card) => `"${card.label}"`).join(", ");
             throw new Error(
@@ -286,6 +336,21 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
           }
           // cards.length === 0 → leave cardRef undefined; executeOperatePay runs
           // the JIT add-card ceremony.
+        }
+        const approvalCardRef =
+          paymentClaim.resumeApproval === undefined
+            ? (cardRef ?? null)
+            : paymentClaim.resumeApproval.boundCardRef;
+        const cardIdentity = approvalCardIdentity(
+          approvalCardRef === null ? undefined : cards.find((card) => card.id === approvalCardRef),
+        );
+        // An explicit ref normally avoids another vault metadata read. Best
+        // effort here enriches only the passive post-submit ACS comparison;
+        // its failure must never alter a charge path.
+        if (cardRef !== undefined && selectedCardNetwork === undefined) {
+          const selectedCard = cards.find((candidate) => candidate.id === cardRef);
+          selectedCardLabel ??= selectedCard?.label;
+          selectedCardNetwork = selectedCard?.brand;
         }
         let resolvedCardRef: string | null = null;
         let filledPending: PendingCardFill | null = null;
@@ -306,6 +371,8 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         const result = await executeOperatePay(
           {
             ...(cardRef !== undefined ? { card_ref: cardRef } : {}),
+            ...(selectedCardLabel !== undefined ? { card_label: selectedCardLabel } : {}),
+            ...(selectedCardNetwork !== undefined ? { card_network: selectedCardNetwork } : {}),
             ...(args.merchant !== undefined ? { merchant: args.merchant } : {}),
             ...(args.amount_cents !== undefined ? { amount_cents: args.amount_cents } : {}),
             ...(args.currency !== undefined ? { currency: args.currency } : {}),
@@ -322,9 +389,10 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
             ...(context !== undefined
               ? {
                   surfaceApprovalUrl: async (url: string) => {
-                    await context.notifyUser(`Approve this payment on your phone: ${url}`, {
-                      approval_url: url,
-                    });
+                    await context.notifyUser(
+                      `Approve payment using ${cardIdentity} on your phone: ${url}`,
+                      { approval_url: url },
+                    );
                   },
                 }
               : {}),
@@ -342,15 +410,44 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
             onApprovalPending: (state) => {
               approvalPending = state;
             },
+            onApprovalTerminal: (state, terminalStatus) => {
+              completeActivePaymentLeaseWithTerminalApproval(
+                paymentLease,
+                state,
+                terminalStatus,
+                session,
+              );
+              paymentLeaseCompleted = true;
+            },
+            onThreeDsHandoffArmed: (state) => {
+              paymentDispatchHandoff = state;
+              armPaymentDispatchHandoff(state, session);
+            },
+            coordinateThreeDsAudit: async (state, recordAudit) =>
+              await coordinatePaymentDispatchAudit(state, recordAudit, session),
+            onThreeDsPending: (state) => {
+              setActivePendingThreeDs(state, session);
+            },
+            onThreeDsCleared: (state) => {
+              clearActivePendingThreeDsIfCurrent(state, session);
+            },
             ...(cartFallbackCheckout !== undefined ? { cartFallbackCheckout } : {}),
             ...(paymentClaim.resumeApproval !== undefined
               ? { resumeFrom: paymentClaim.resumeApproval }
               : {}),
-            // [P0] Never block the RPC waiting on the human — one live check,
-            // then hand back approval_pending. operate_payment_status (or
-            // simply calling operate_pay again, which resumes this SAME
-            // approval) is how the host finds out when the phone responds.
-            pollBudgetMs: 0,
+            // Approval detection belongs here, not in an agent polling loop.
+            // The URL is surfaced before executeOperatePay enters this bounded
+            // wait. On exhaustion, onApprovalPending persists the SAME approval
+            // so a later operate_pay call continues without another passkey gate.
+            // A client without progress notifications must receive the newly
+            // minted URL before it can ask a human to act. Its first call may
+            // therefore return immediately; the resumed call already has the
+            // URL and uses the normal system-owned wait.
+            pollBudgetMs:
+              context?.paymentApprovalWaitMs ??
+              (context?.notifyUser !== undefined || paymentClaim.resumeApproval !== undefined
+                ? OPERATE_PAY_APPROVAL_WAIT_MS
+                : 0),
           },
         );
         if (result.payment_fields_cleared === false) paymentFieldsCleared = false;
@@ -404,6 +501,9 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         }
         throw error;
       } finally {
+        if (paymentDispatchHandoff !== null) {
+          finishPaymentDispatchHandoff(paymentDispatchHandoff, session);
+        }
         if (!paymentLeaseCompleted) {
           releaseActivePaymentLease(paymentLease, paymentFieldsCleared, session);
         }
@@ -415,27 +515,30 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
 // [P0] Used by operate_payment_status: maps the LIVE server record
 // (never the locally-cached approval terms) to a status the host can act on.
 // Never opens the sealed card or calls confirm — read-only, no side effects.
-// `boundMs`, when given, races the server call so this can never outlast the
-// caller's own bound even though the server's wait_for_submission window is
-// a fixed ~15s.
+// `serverWaitMs`, when given, uses one server wait plus one transport grace.
 async function readApprovalStatus(
   api: ApiClient,
   state: PendingApprovalWait,
   sessionId: string,
   waitForSubmission: boolean,
-  boundMs?: number,
+  serverWaitMs?: number,
 ): Promise<Record<string, unknown>> {
-  const fetchApproval = api.getPaymentApproval(
-    state.approval_id,
-    waitForSubmission ? "wait-peek" : "peek",
-  );
-  const approval =
-    boundMs === undefined
-      ? await fetchApproval
-      : await Promise.race([
-          fetchApproval,
-          new Promise<null>((resolve) => setTimeout(() => resolve(null), boundMs)),
-        ]);
+  const fetchApproval = waitForSubmission
+    ? api
+        .getPaymentApproval(
+          state.approval_id,
+          "wait-peek",
+          serverWaitMs,
+          serverWaitMs === undefined
+            ? undefined
+            : serverWaitMs + PAYMENT_APPROVAL_RESPONSE_RESERVE_MS,
+        )
+        .catch((error: unknown) => {
+          if (isPaymentApprovalTransportTimeout(error)) return null;
+          throw error;
+        })
+    : api.getPaymentApproval(state.approval_id, "peek");
+  const approval = await fetchApproval;
   if (approval === null) {
     return {
       status: "pending",
@@ -448,7 +551,14 @@ async function readApprovalStatus(
       candidate_submitted: false,
       candidate_kind: state.reviewVerified === true ? "review" : "none",
       ready_to_charge: false,
-      next: { tool: "operate_payment_status", session_id: sessionId, wait_seconds: 15 },
+      next: {
+        tool: "operate_pay",
+        session_id: sessionId,
+        hint:
+          "The bounded status wait ended before the human responded. Call operate_pay again " +
+          "with the same arguments; it resumes this approval, waits server-side, and proceeds " +
+          "to charge after approval.",
+      },
     };
   }
   const candidateSubmitted =
@@ -460,6 +570,7 @@ async function readApprovalStatus(
       : observedCandidateKind;
   const readyToCharge = observedCandidateKind === "approval";
   const expired = approval.status === "expired";
+  const terminalWithoutCharge = expired || approval.status === "denied";
   return {
     status: expired ? "expired" : approval.status,
     approval_id: state.approval_id,
@@ -472,7 +583,7 @@ async function readApprovalStatus(
     candidate_submitted: candidateSubmitted,
     candidate_kind: candidateKind,
     ready_to_charge: readyToCharge,
-    ...(expired
+    ...(terminalWithoutCharge
       ? {}
       : readyToCharge
         ? {
@@ -500,12 +611,12 @@ async function readApprovalStatus(
           : candidateKind === "review"
             ? {
                 next: {
-                  tool: "operate_payment_status",
+                  tool: "operate_pay",
                   session_id: sessionId,
-                  wait_seconds: 15,
                   hint:
                     "The review signature was verified. Final payment approval is still required; " +
-                    "refresh the approval page if the final prompt is not visible.",
+                    "refresh the approval page if the final prompt is not visible, then call " +
+                    "operate_pay once to wait and continue this same approval.",
                 },
               }
             : candidateKind === "invalid"
@@ -519,9 +630,11 @@ async function readApprovalStatus(
                 }
               : {
                   next: {
-                    tool: "operate_payment_status",
+                    tool: "operate_pay",
                     session_id: sessionId,
-                    wait_seconds: 15,
+                    hint:
+                      "Call operate_pay again with the same arguments. It resumes this approval " +
+                      "and waits server-side instead of requiring an agent polling loop.",
                   },
                 }),
   };
@@ -535,37 +648,175 @@ function noPendingPaymentResult(session: Session): Record<string, unknown> {
   };
 }
 
-// Backs operate_payment_status: an immediate peek (waitSeconds <= 0) never
-// blocks, a positive waitSeconds bound-waits (clamped to [1s, 15s] — the
-// server's wait-peek window is a fixed ~15s regardless of what's requested).
+function threeDsResolutionStatus(
+  resolution: ThreeDsResolution,
+): "payment_submitted" | "payment_declined" | null {
+  if (resolution === "succeeded") return "payment_submitted";
+  if (resolution === "failed") return "payment_declined";
+  return null;
+}
+
+async function threeDsStatusResult(
+  api: ApiClient,
+  session: Session,
+  state: PendingThreeDsWait,
+  waitSeconds: number,
+): Promise<Record<string, unknown>> {
+  const browser = await activeProvisionBrowserForPayment(session);
+  const expiredAtEntry = Date.now() >= state.deadline;
+  const boundMs =
+    expiredAtEntry || waitSeconds <= 0 ? 0 : Math.min(Math.max(waitSeconds * 1000, 1_000), 15_000);
+  const resolution = await browser.waitForThreeDsResolution(boundMs);
+  if (resolution === "challenge_pending") state.outcome = "three_ds";
+  const mismatch = browser.paymentInstrumentMismatch?.();
+  if (mismatch !== undefined) state.payment_instrument_mismatch ??= mismatch;
+  const terminalStatus = threeDsResolutionStatus(resolution);
+  const unresolvedPastDeadline =
+    terminalStatus === null && (expiredAtEntry || Date.now() >= state.deadline);
+  if (terminalStatus === null && !unresolvedPastDeadline) {
+    return {
+      status: state.outcome === "three_ds" ? "payment_3ds_pending" : "payment_outcome_unknown",
+      approval_url: state.approval_url,
+      merchant: state.checkout.merchant,
+      amount_cents: state.checkout.amount_cents,
+      currency: state.checkout.currency,
+      ...(state.payment_instrument_mismatch !== undefined
+        ? { warning: state.payment_instrument_mismatch }
+        : {}),
+      next: { tool: "operate_payment_status", session_id: session.id, wait_seconds: 15 },
+    };
+  }
+  const finalStatus =
+    terminalStatus ??
+    (state.outcome === "three_ds" ? "payment_3ds_unresolved" : "payment_outcome_unknown");
+  let auditRecorded = true;
+  if (terminalStatus === null) {
+    try {
+      await api.auditPayment({
+        ...state.checkout,
+        last4: state.last4,
+        status: finalStatus,
+        approval_id: state.approval_id,
+        ...(state.mandate_id !== undefined ? { mandate_id: state.mandate_id } : {}),
+      });
+    } catch (error) {
+      if (state.outcome === "three_ds") throw error;
+      auditRecorded = false;
+    }
+  } else {
+    try {
+      await api.auditPayment({
+        ...state.checkout,
+        last4: state.last4,
+        status: finalStatus,
+        approval_id: state.approval_id,
+        ...(state.mandate_id !== undefined ? { mandate_id: state.mandate_id } : {}),
+      });
+    } catch {
+      auditRecorded = false;
+    }
+  }
+  const merchantReconciliationRequired = terminalStatus === null && state.outcome === "unknown";
+  if (!merchantReconciliationRequired) {
+    clearActivePendingThreeDsIfCurrent(state, session);
+  }
+  return {
+    status: finalStatus,
+    audit_recorded: auditRecorded,
+    approval_url: state.approval_url,
+    merchant: state.checkout.merchant,
+    amount_cents: state.checkout.amount_cents,
+    currency: state.checkout.currency,
+    ...(state.payment_instrument_mismatch !== undefined
+      ? { warning: state.payment_instrument_mismatch }
+      : {}),
+    ...(terminalStatus === null
+      ? {
+          needs_user: {
+            wall: state.outcome === "three_ds" ? "3ds" : "merchant_reconciliation",
+            message:
+              state.outcome === "three_ds"
+                ? "The 3-D Secure challenge never reached a confirmed outcome within the resumable " +
+                  "window. Check the merchant account directly for whether the order was placed " +
+                  "before retrying — Trusty Squire will not re-release this card without a fresh " +
+                  "approval."
+                : "The merchant outcome remains unknown. Check the merchant account directly for " +
+                  "whether the order was placed before retrying; this payment attempt remains " +
+                  "reserved until the session is closed.",
+            resume: "checkout",
+          },
+        }
+      : {}),
+  };
+}
+
+// Backs operate_payment_status with an immediate peek or one server wait.
 async function paymentStatusResult(
   api: ApiClient,
   session: Session,
   waitSeconds: number,
 ): Promise<Record<string, unknown>> {
   const state = getActivePendingApproval(session);
-  if (state === null) return noPendingPaymentResult(session);
-  if (waitSeconds <= 0) {
-    return paymentResult(session, await readApprovalStatus(api, state, session.id, false));
+  if (state !== null) {
+    if (waitSeconds <= 0) {
+      const result = await readApprovalStatus(api, state, session.id, false);
+      if (result.status === "denied" || result.status === "expired") {
+        completeActivePendingApprovalWithTerminalStatus(state, result.status, session);
+      }
+      return paymentResult(session, result);
+    }
+    const result = await readApprovalStatus(
+      api,
+      state,
+      session.id,
+      true,
+      Math.min(Math.max(waitSeconds * 1000, 1_000), 15_000),
+    );
+    if (result.status === "denied" || result.status === "expired") {
+      completeActivePendingApprovalWithTerminalStatus(state, result.status, session);
+    }
+    return paymentResult(session, result);
   }
-  const boundMs = Math.min(Math.max(waitSeconds * 1000, 1_000), 15_000);
-  return paymentResult(session, await readApprovalStatus(api, state, session.id, true, boundMs));
+  const terminalApproval = getTerminalPaymentApproval(session);
+  if (terminalApproval !== null) {
+    const state = terminalApproval.state;
+    return paymentResult(session, {
+      status: terminalApproval.terminalStatus,
+      approval_id: state.approval_id,
+      approval_url: state.approval_url,
+      expires_at: new Date(state.deadline).toISOString(),
+      phase: state.phase ?? null,
+      merchant: state.checkout.merchant,
+      amount_cents: state.checkout.amount_cents,
+      currency: state.checkout.currency,
+      candidate_submitted: false,
+      candidate_kind: state.reviewVerified === true ? "review" : "none",
+      ready_to_charge: false,
+    });
+  }
+  const threeDsState = getActivePendingThreeDs(session);
+  if (threeDsState !== null) {
+    return paymentResult(
+      session,
+      await threeDsStatusResult(api, session, threeDsState, waitSeconds),
+    );
+  }
+  return noPendingPaymentResult(session);
 }
 
 const paymentStatusInputSchema = z.object({
   session_id: z.string().uuid().optional(),
-  wait_seconds: z.number().int().min(0).max(15).optional(),
+  wait_seconds: z.number().int().min(0).max(60).optional(),
 });
 
 export const operatePaymentStatusTool: Tool<z.infer<typeof paymentStatusInputSchema>> = {
   name: "operate_payment_status",
   description:
-    "Read-only: report the status of the addressed session's payment approval currently awaiting " +
-    "the human's phone tap, if any — started by an operate_pay call that returned approval_pending. " +
-    "Pass `wait_seconds` (0-15, default 0) to bound-wait for a change instead of an instant peek; " +
-    "never blocks longer than that. Never verifies a mandate or opens a card. Only " +
-    "candidate_kind=approval with ready_to_charge=true is a final authorization; a review candidate " +
-    "still requires final approval.",
+    "Read the addressed session's pending approval or already-submitted outcome without opening a " +
+    "card, confirming a mandate, or creating another approval. Prefer re-calling operate_pay for a " +
+    "pending approval; this tool performs only one server wait. Use it repeatedly only for a " +
+    "submitted 3-D Secure or unknown outcome. It reports 3DS only from observed evidence, preserves " +
+    "instrument-mismatch warnings, and retains custody until a terminal audit or reconciliation.",
   inputSchema: paymentStatusInputSchema,
   jsonInputSchema: {
     type: "object",
@@ -578,13 +829,13 @@ export const operatePaymentStatusTool: Tool<z.infer<typeof paymentStatusInputSch
       wait_seconds: {
         type: "integer",
         minimum: 0,
-        maximum: 15,
+        maximum: 60,
         description:
-          "Upper bound on this call's wait. 0 (default) is an instant peek; 1-15 bound-waits for a change.",
+          "Upper bound in seconds. Approval status uses one wait of at most 15 seconds; 0 is an instant peek.",
       },
     },
   },
-  annotations: { readOnlyHint: true },
+  annotations: { readOnlyHint: false },
   async handler(args, api) {
     assertApi(api);
     return await withPaymentSessionCall(args.session_id, (session) =>

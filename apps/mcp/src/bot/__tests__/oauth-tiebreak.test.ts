@@ -3,7 +3,7 @@
 // "default to Google when both work — its OAuth flow is simpler".
 //
 // We test through the public surface (the agent's reaction to a
-// shared `logged-in-providers.json`) rather than against the private
+// shared live provider probe) rather than against the private
 // method, because the call site is what cares about ordering — but
 // we use a tiny replica of the sort here too as a focused unit test
 // of the policy.

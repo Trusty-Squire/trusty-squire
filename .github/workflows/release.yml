@@ -1,14 +1,22 @@
 name: Release mcp
 
-# Publishes @trusty-squire/mcp to npm and creates a GitHub release whenever the
-# version in apps/mcp/package.json is bumped on `main` (stable) or `staging` (rc).
+# Publishes @trusty-squire/mcp to npm and creates a GitHub release.
 #
-# Source of truth: apps/mcp/package.json `version` field.
-#   - main:    must be a stable semver (e.g. 0.6.13). Publishes `latest` tag.
-#   - staging: must be a prerelease (e.g. 0.6.14-rc.1). Publishes `next` tag.
+# Single-branch model: `main` is the only release branch.
+#   - push to main:      apps/mcp/package.json must hold a PRERELEASE
+#                        (e.g. 1.1.14-rc.1). Publishes the `next` tag.
+#   - workflow_dispatch: an explicit, on-demand STABLE promotion of main HEAD.
+#                        The operator supplies the stable X.Y.Z; it must equal
+#                        the package.json version with its prerelease suffix
+#                        stripped. Publishes the `latest` tag.
 #
-# If a git tag v<version> already exists, the job is a no-op (idempotent).
-# This means re-pushing main without bumping the version does NOT republish.
+# Source of truth for an rc is apps/mcp/package.json `version`. A stable
+# promotion publishes the same tree under the operator-supplied stable version
+# (package.json is rewritten in the runner only — nothing is committed back).
+#
+# If a git tag v<version> already exists, or npm already serves that version,
+# the job is a no-op (idempotent). Re-pushing main without bumping the version
+# does NOT republish, and a promotion can never overwrite a live version.
 #
 # Publishing is version-driven, so source-only changes do not need a release
 # runner. A release commit must bump apps/mcp/package.json; lockfile/workflow
@@ -16,11 +24,17 @@ name: Release mcp
 
 on:
   push:
-    branches: [main, staging]
+    branches: [main]
     paths:
       - "apps/mcp/package.json"
       - "pnpm-lock.yaml"
       - ".github/workflows/release.yml"
+  workflow_dispatch:
+    inputs:
+      stable_version:
+        description: "Stable X.Y.Z to publish from main HEAD to npm `latest`. Must equal apps/mcp/package.json's version with its -rc suffix stripped."
+        required: true
+        type: string
 
 # Only one release run per branch at a time. Don't cancel in-flight: a publish
 # that's mid-way through registering on npm should be allowed to finish.
@@ -29,8 +43,8 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write   # create tags + releases
-  id-token: write   # npm provenance (sigstore)
+  contents: write # create tags + releases
+  id-token: write # npm provenance (sigstore)
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -40,25 +54,72 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     outputs:
-      version:        ${{ steps.read.outputs.version }}
-      is_prerelease:  ${{ steps.read.outputs.is_prerelease }}
-      tag_exists:     ${{ steps.read.outputs.tag_exists }}
-      npm_dist_tag:   ${{ steps.read.outputs.npm_dist_tag }}
-      gh_prerelease:  ${{ steps.read.outputs.gh_prerelease }}
+      version: ${{ steps.read.outputs.version }}
+      is_prerelease: ${{ steps.read.outputs.is_prerelease }}
+      tag_exists: ${{ steps.read.outputs.tag_exists }}
+      npm_dist_tag: ${{ steps.read.outputs.npm_dist_tag }}
+      gh_prerelease: ${{ steps.read.outputs.gh_prerelease }}
       should_publish: ${{ steps.read.outputs.should_publish }}
+      is_promotion: ${{ steps.resolve.outputs.is_promotion }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # need full history to see existing tags
+          fetch-depth: 0 # need full history to see existing tags
+
+      # One place decides WHICH version this run publishes, before anything
+      # expensive happens. A push publishes the rc in apps/mcp/package.json;
+      # a workflow_dispatch publishes main HEAD under the operator-supplied
+      # stable version.
+      - name: Resolve release version
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          # Never interpolate the raw input into the script body — it reaches
+          # the shell as data, not as code.
+          INPUT_STABLE_VERSION: ${{ inputs.stable_version }}
+        run: |
+          set -euo pipefail
+          PKG_VERSION=$(node -p "require('./apps/mcp/package.json').version")
+          echo "apps/mcp/package.json version: $PKG_VERSION"
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+              echo "::error::A stable promotion must be dispatched from refs/heads/main, got: ${GITHUB_REF}"
+              exit 1
+            fi
+            VERSION="$INPUT_STABLE_VERSION"
+            if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::stable_version must be a bare stable semver (X.Y.Z), got: $INPUT_STABLE_VERSION"
+              exit 1
+            fi
+            # The promoted number is not free-form: it must be the rc line main
+            # is already on, minus the prerelease suffix. That makes a typo
+            # ('1.11.3' for '1.1.13') a failed run instead of a burned version
+            # number sitting permanently on `latest`. To promote a different
+            # number, bump apps/mcp/package.json on main first.
+            if [[ "$VERSION" != "${PKG_VERSION%%-*}" ]]; then
+              echo "::error::stable_version '$VERSION' does not match apps/mcp/package.json ($PKG_VERSION) with its prerelease suffix stripped ('${PKG_VERSION%%-*}'). Bump apps/mcp/package.json on main first."
+              exit 1
+            fi
+            IS_PROMOTION=true
+          else
+            VERSION="$PKG_VERSION"
+            IS_PROMOTION=false
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "is_promotion=$IS_PROMOTION" >> "$GITHUB_OUTPUT"
+          echo "Resolved release version: $VERSION (promotion=$IS_PROMOTION)"
 
       # Most matching pushes are lockfile/workflow edits or retries of a version
       # that is already live. Decide before installs, builds, or Chromium setup;
       # the final read step still runs and supplies the normal publish outputs.
       - name: Fast-path already released versions
         id: fast_path
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
         run: |
           set -euo pipefail
-          VERSION=$(node -p "require('./apps/mcp/package.json').version")
           if git rev-parse --quiet --verify "refs/tags/v$VERSION" >/dev/null \
             || npm view "@trusty-squire/mcp@$VERSION" version >/dev/null 2>&1; then
             echo "already_released=true" >> "$GITHUB_OUTPUT"
@@ -67,25 +128,10 @@ jobs:
             echo "already_released=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # The monorepo contains a Next.js app (apps/web) whose
-      # node_modules and .next caches blow past the default runner disk
-      # quota (14GB free of 75GB). pnpm install + tests fail with ENOSPC.
-      # Free ~25GB by removing preinstalled toolchains we don't use.
-      - name: Free disk space on runner
-        if: steps.fast_path.outputs.already_released != 'true'
-        run: |
-          set -euo pipefail
-          echo "Disk before cleanup:"
-          df -h /
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/PyPy /usr/local/share/boost /usr/local/share/powershell || true
-          sudo docker system prune -af --volumes || true
-          echo "Disk after cleanup:"
-          df -h /
-
       - uses: pnpm/action-setup@v4
         if: steps.fast_path.outputs.already_released != 'true'
         with:
-          version: 8.15.0   # match packageManager in root package.json
+          version: 8.15.0 # match packageManager in root package.json
       - uses: actions/setup-node@v4
         if: steps.fast_path.outputs.already_released != 'true'
         with:
@@ -130,14 +176,14 @@ jobs:
       # has pre-existing replay-skill test flakiness that doesn't affect the
       # MCP we're publishing here. Workspace-wide tests still run in ci.yml
       # for signal — they just don't block publishes.
-      - name: Test (MCP package only)
+      - name: Test (MCP fast required tier)
         if: steps.fast_path.outputs.already_released != 'true'
         # Skip the pnpm-pack smoke test — it exhausts inodes on GH runners,
         # and the publish job's own tarball-content verification covers the
         # same ground from real registry bytes.
         env:
           MCP_SKIP_PACK_SMOKE: "1"
-        run: pnpm --filter @trusty-squire/mcp test
+        run: pnpm --filter @trusty-squire/mcp test:fast
 
       # Preflight: refuse to publish mcp unless the exact skill-schema version
       # its tarball will use exists on npm and exports every runtime symbol MCP
@@ -184,13 +230,15 @@ jobs:
 
       - name: Read package version + decide
         id: read
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+          IS_PROMOTION: ${{ steps.resolve.outputs.is_promotion }}
         run: |
           set -euo pipefail
-          VERSION=$(node -p "require('./apps/mcp/package.json').version")
-          BRANCH="${GITHUB_REF_NAME}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Branch:  $BRANCH"
-          echo "Version: $VERSION"
+          echo "Branch:    ${GITHUB_REF_NAME}"
+          echo "Version:   $VERSION"
+          echo "Promotion: $IS_PROMOTION"
 
           # Detect prerelease per semver: anything after a `-`
           if [[ "$VERSION" == *"-"* ]]; then
@@ -200,13 +248,15 @@ jobs:
           fi
           echo "is_prerelease=$IS_PRE" >> "$GITHUB_OUTPUT"
 
-          # Branch ↔ version-shape contract
-          if [[ "$BRANCH" == "main" && "$IS_PRE" == "true" ]]; then
-            echo "::error::main branch requires a stable version, got prerelease: $VERSION"
+          # Event ↔ version-shape contract. Single-branch model: pushes to main
+          # publish rcs to `next`; a stable `latest` release is only ever the
+          # explicit workflow_dispatch promotion.
+          if [[ "$IS_PROMOTION" == "false" && "$IS_PRE" == "false" ]]; then
+            echo "::error::A push to main requires a prerelease version (e.g. $VERSION-rc.1), got stable: $VERSION. Cut a stable release with the 'Release mcp' workflow_dispatch instead."
             exit 1
           fi
-          if [[ "$BRANCH" == "staging" && "$IS_PRE" == "false" ]]; then
-            echo "::error::staging branch requires a prerelease version (e.g. $VERSION-rc.1), got stable: $VERSION"
+          if [[ "$IS_PROMOTION" == "true" && "$IS_PRE" == "true" ]]; then
+            echo "::error::A stable promotion requires a stable version, got prerelease: $VERSION"
             exit 1
           fi
 
@@ -250,8 +300,7 @@ jobs:
     needs: verify
     if: needs.verify.outputs.should_publish == 'true'
     runs-on: ubuntu-latest
-    # NPM_TOKEN lives in the `npm-publish` GitHub Environment (not repo
-    # secrets), so we need this `environment:` block to access it. The
+    # The npm trusted publisher is scoped to this environment. The
     # environment's required-reviewers protection rule has been removed
     # (it was silently blocking rc.4/rc.5). If you re-add reviewers, make
     # sure they're actually monitored — a stuck-pending publish job is
@@ -262,19 +311,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Free disk space on runner
-        run: |
-          set -euo pipefail
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/PyPy /usr/local/share/boost /usr/local/share/powershell || true
-          sudo docker system prune -af --volumes || true
-
       - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
         with:
-          version: 8.15.0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20.11.0
+          # Node 24 includes an npm CLI new enough for npm OIDC publishing.
+          node-version: 24.14.0
           cache: pnpm
+          # setup-node v6 configures npm's OIDC trusted-publishing handshake
+          # without a token-based .npmrc auth line.
           registry-url: https://registry.npmjs.org
 
       # Install ONLY mcp's dep tree (mcp + transitive workspace deps), not
@@ -291,6 +335,33 @@ jobs:
         # apps/web (Next.js) which rebuilds @prisma/client in parallel.
         # Keep in sync with apps/mcp/package.json workspace deps.
         run: pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/recipe-schema' build
+
+      # A stable promotion publishes the CURRENT main tree (an rc line) under
+      # the operator-supplied stable version. Rewrite it in the runner only —
+      # nothing is committed back to main, so main stays on its rc line and the
+      # next `release:mcp` rc bump continues from there. src/version.ts reads
+      # package.json at runtime, so rewriting before the build is enough for the
+      # shipped server to report the stable version too.
+      - name: Apply promoted stable version
+        if: needs.verify.outputs.is_promotion == 'true'
+        working-directory: apps/mcp
+        env:
+          V: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("fs");
+            const v = process.argv[1];
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.version = v;
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+          ' "$V"
+          ACTUAL=$(node -p "require('./package.json').version")
+          if [[ "$ACTUAL" != "$V" ]]; then
+            echo "::error::Failed to apply promoted version: package.json says $ACTUAL, expected $V"
+            exit 1
+          fi
+          echo "✓ apps/mcp/package.json set to $V for this publish."
 
       # Force a clean rebuild of the MCP package right before publish.
       # Without this, TypeScript's incremental build can reuse stale dist
@@ -311,24 +382,32 @@ jobs:
           fi
 
       # ---- npm publish -----------------------------------------------------
-      # Use `pnpm publish`, NOT `npm publish`. pnpm rewrites `workspace:`
-      # specifiers (e.g. `"@trusty-squire/skill-schema": "workspace:^"`) to
-      # real semver (`^0.1.0`) before tarball assembly. `npm publish`
-      # ships them through literally, producing an unusable package.
-      # `--no-git-checks` because the working tree may differ from the
-      # commit SHA (we just rebuilt dist/).
-      - name: Publish to npm
-        working-directory: apps/mcp
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # pnpm 8 rewrites workspace: specifiers only while packing. Publish that
+      # rewritten tarball with npm so the npm CLI performs OIDC authentication
+      # and provenance generation without an npm token.
+      - name: Ensure npm supports OIDC trusted publishing
         run: |
           set -euo pipefail
-          echo "Publishing @trusty-squire/mcp@${{ needs.verify.outputs.version }} with dist-tag ${{ needs.verify.outputs.npm_dist_tag }}"
-          pnpm publish \
+          NPM_VERSION="$(npm --version)"
+          echo "Using npm $NPM_VERSION for trusted publishing"
+          node -e '
+            const [major, minor, patch = 0] = process.argv[1].split(".").map(Number);
+            if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) {
+              throw new Error(`npm ${process.argv[1]} is below the OIDC minimum of 11.5.1`);
+            }
+          ' "$NPM_VERSION"
+      - name: Publish to npm
+        run: |
+          set -euo pipefail
+          PACK_DIR="$(mktemp -d)"
+          ( cd apps/mcp && pnpm pack --pack-destination "$PACK_DIR" )
+          TARBALL="$(find "$PACK_DIR" -maxdepth 1 -type f -name '*.tgz' -print -quit)"
+          test -n "$TARBALL"
+          echo "Publishing $TARBALL as @trusty-squire/mcp@${{ needs.verify.outputs.version }} with dist-tag ${{ needs.verify.outputs.npm_dist_tag }}"
+          npm publish "$TARBALL" \
             --access=public \
             --tag="${{ needs.verify.outputs.npm_dist_tag }}" \
-            --provenance \
-            --no-git-checks
+            --provenance
 
       # ---- Ground-truth verification: NEVER trust npm's success output -----
       # The previous agent burned three version numbers because they trusted
@@ -438,17 +517,16 @@ jobs:
           fi
           echo "✓ Tarball contains case \"connect\""
 
-      - name: Verify dist-tag points at this version (and fix if pnpm lied)
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Verify dist-tag points at this version
         run: |
           set -euo pipefail
           V="${{ needs.verify.outputs.version }}"
           TAG="${{ needs.verify.outputs.npm_dist_tag }}"
           echo "Asserting dist-tag '$TAG' → $V"
-          # pnpm publish has a known quirk in workspace mode where --tag is
-          # silently ignored. Read the registry's dist-tags blob and fix it
-          # explicitly if it's wrong. Idempotent.
+          # Read the registry's dist-tags blob. Trusted publishing authorizes
+          # `npm publish`, not a separate `npm dist-tag add`, so fail loudly
+          # rather than falling back to a legacy publish token if --tag is
+          # ever ignored.
           for i in $(seq 1 18); do
             CURRENT=$(npm view "@trusty-squire/mcp" dist-tags --json 2>/dev/null \
               | python3 -c "import json,sys; print(json.load(sys.stdin).get('$TAG',''))")
@@ -469,30 +547,7 @@ jobs:
             fi
             sleep 10
           done
-          echo "::warning::dist-tag $TAG = '$CURRENT', expected '$V'. Forcing it via npm dist-tag add."
-          npm dist-tag add "@trusty-squire/mcp@$V" "$TAG"
-          # Re-verify after the fix.
-          for i in $(seq 1 12); do
-            CURRENT=$(npm view "@trusty-squire/mcp" dist-tags --json 2>/dev/null \
-              | python3 -c "import json,sys; print(json.load(sys.stdin).get('$TAG',''))")
-            echo "  post-fix attempt $i — $TAG = '$CURRENT'"
-            if [[ "$CURRENT" == "$V" ]]; then
-              echo "✓ dist-tag $TAG now points at $V (after explicit fix)."
-              # Cross-check: the full package doc must agree. If it disagrees with
-              # npm view, something is wrong at the registry level (do not declare
-              # success — fail loud, surface the inconsistency).
-              DOC_TAG=$(curl -sS "https://registry.npmjs.org/@trusty-squire/mcp" \
-                | python3 -c "import json,sys; print(json.load(sys.stdin).get('dist-tags',{}).get('$TAG',''))")
-              if [[ "$DOC_TAG" != "$V" ]]; then
-                echo "::error::Registry inconsistency: npm view says $TAG=$CURRENT but package doc says $TAG=$DOC_TAG"
-                exit 1
-              fi
-              echo "✓ Cross-check: package doc also confirms $TAG=$V"
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "::error::dist-tag $TAG still wrong after fix attempt. Manual intervention required."
+          echo "::error::dist-tag $TAG = '$CURRENT', expected '$V'."
           exit 1
 
       - name: Canonical install verification

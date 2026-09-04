@@ -17,11 +17,20 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { ApiClient } from "./api-client.js";
 import { setSelfManagedChromeTerminationSignalExitEnabled } from "./bot/browser.js";
 import { cancelActiveLoginBrowsers } from "./bot/google-login.js";
+import { startOwnerProcessReaper } from "./bot/owner-process-reaper.js";
 import {
   activeSessionCount,
   closeAllProvisionSessions,
   withProvisionSessionCall,
 } from "./bot/provision-session.js";
+import {
+  heartbeatIntervalMs,
+  idleCheckIntervalMs,
+  idleTimeoutMs,
+  idleTimeoutWithSessionMs,
+  reapStaleServerInstances,
+  registerServerInstance,
+} from "./server-instance-registry.js";
 import { buildToolRegistry, findTool } from "./tools/index.js";
 import { openSessionStorage } from "./session.js";
 import { VERSION } from "./version.js";
@@ -39,45 +48,18 @@ const DEFAULT_REGISTRY_BASE =
 // from a host like that will ever arrive, so this is a time bound, not an
 // event.
 //
-// It also has to cover a server that still holds an open provision session:
-// the operator-profile-pool ACTIVE-slot reclaim (operator-profile-pool.ts,
-// scavengeActiveSlots) only ever reclaims a slot once its *owning process* is
-// provably dead — a live-but-abandoned zombie server is, by that design, a
-// "genuine concurrent run" the pool must never touch. So a background
-// pool-level reaper cannot free an active session's Chrome on its own; only
-// the owning server exiting (which runs closeAllProvisionSessions, which
-// calls browser.close() on the leased Chrome — already timeout-capped down
-// to a SIGKILL reap, see browser.ts's closeWithProfileGuard) can. Hence two
+// It also has to cover a server that still holds an open provision session.
+// Its browser is owned by that server, so only the owning server's bounded
+// terminal teardown can close Chrome and destroy its private profile. Hence two
 // bounds: a short one when idle with no session (routine), and a longer one
 // when a session is still open — wide enough that no real in-flight flow
-// (operate_pay no longer blocks a call for approval; verification polling is
-// bounded in the minutes) should ever cross it, so crossing it is a reliable
+// (operate_pay's approval wait is bounded to one minute; post-submit outcome
+// checks are bounded in the minutes) should ever cross it, so crossing it is a reliable
 // abandoned-session signal, not a false kill of live work.
-const DEFAULT_IDLE_TIMEOUT_MS = 20 * 60 * 1_000; // 20m, no open session
-const DEFAULT_IDLE_TIMEOUT_WITH_SESSION_MS = 12 * 60 * 60 * 1_000; // 12h, session open
-const DEFAULT_IDLE_CHECK_INTERVAL_MS = 5 * 60 * 1_000; // 5m — must stay well under the 20m bound above
-
-function envMs(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (raw === undefined) return fallback;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function idleTimeoutMs(): number {
-  return envMs("TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_MS", DEFAULT_IDLE_TIMEOUT_MS);
-}
-
-function idleTimeoutWithSessionMs(): number {
-  return envMs(
-    "TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_WITH_SESSION_MS",
-    DEFAULT_IDLE_TIMEOUT_WITH_SESSION_MS,
-  );
-}
-
-function idleCheckIntervalMs(): number {
-  return envMs("TRUSTY_SQUIRE_SERVER_IDLE_CHECK_INTERVAL_MS", DEFAULT_IDLE_CHECK_INTERVAL_MS);
-}
+//
+// The bounds themselves live in server-instance-registry.ts, because the
+// startup reaper there applies the same policy from the outside to a prior
+// instance that failed to apply it to itself.
 
 // Exported for unit testing; kept pure so the branches (recent activity,
 // no-session idle, session-open idle) don't need a live process/interval.
@@ -112,14 +94,68 @@ Routing rules for THIS server's vault tools:
   or \${SECRET.<field>} (multi-field) placeholders. The server injects
   the secret and returns only the upstream response; you never see the
   value. The target host must be on the credential's allowed_hosts.
-- Rotating a key = call store_credential again with the new value (it
-  overwrites). You cannot rotate or delete credentials directly — delete
-  is done by the user in the web vault.
+- User wants to change allowed_hosts/login_hosts/name without changing the
+  secret → call edit_credential. User wants a saved credential removed → call
+  delete_credential. Both return a Telegram/passkey approval link first; resume
+  with the returned approval_id only after the user signs the exact mutation.
+- Rotating a secret value = call store_credential again with the new value (it
+  overwrites). edit_credential cannot read or change secret fields.
 - There is NO way to extract a raw secret value to you — by design. If a
   user wants the plaintext (e.g. for a .env file), they read it from the
   Trusty Squire web vault themselves.`;
 
-export async function buildServer(api: ApiClient | null): Promise<Server> {
+export interface ServerCallLifecycle {
+  started(): boolean;
+  finished(): void;
+}
+
+export interface ServerCallAdmission extends ServerCallLifecycle {
+  closeAndDrain(): Promise<void>;
+  inFlightCount(): number;
+}
+
+// `connect` may complete while the host's stdio server is already running.
+// Keep the post-install read behind an injected loader so the call boundary can
+// pick up the account-bound session that Finish just published without making
+// an unauthenticated startup snapshot permanent for the server lifetime.
+export type AccountSessionLoader = () => Promise<ApiClient | null>;
+
+export function createServerCallAdmission(): ServerCallAdmission {
+  let accepting = true;
+  let inFlight = 0;
+  let drain: Promise<void> | undefined;
+  let finishDrain: (() => void) | undefined;
+  return {
+    started: () => {
+      if (!accepting) return false;
+      inFlight += 1;
+      return true;
+    },
+    finished: () => {
+      inFlight -= 1;
+      if (inFlight === 0) {
+        finishDrain?.();
+        finishDrain = undefined;
+      }
+    },
+    closeAndDrain: () => {
+      accepting = false;
+      if (inFlight === 0) return Promise.resolve();
+      drain ??= new Promise<void>((resolveDrain) => {
+        finishDrain = resolveDrain;
+      });
+      return drain;
+    },
+    inFlightCount: () => inFlight,
+  };
+}
+
+export async function buildServer(
+  api: ApiClient | null,
+  callLifecycle?: ServerCallLifecycle,
+  loadPublishedAccountSession?: AccountSessionLoader,
+): Promise<Server> {
+  let activeApi = api;
   const tools = buildToolRegistry();
   const server = new Server(
     { name: SERVER_NAME, version: VERSION },
@@ -158,17 +194,27 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
           .join("; ")}`,
       );
     }
-    if (api === null) {
+    // The install ceremony publishes the agent token after the operator may
+    // already have launched this stdio server. Retry the canonical session
+    // read only while unauthenticated; once bound, keep the in-memory client
+    // for the rest of this server lifetime.
+    if (activeApi === null && loadPublishedAccountSession !== undefined) {
+      activeApi = await loadPublishedAccountSession();
+    }
+    if (activeApi === null) {
       return errorContent(
         "reconnect_required",
         `This install is from before single-tier auth and isn't bound to an account. ` +
           `Run \`npx @trusty-squire/mcp connect\` to reconnect.`,
       );
     }
+    if (callLifecycle !== undefined && !callLifecycle.started()) {
+      return errorContent("server_unavailable", "server is shutting down");
+    }
     try {
-      api.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
+      activeApi.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
       const invoke = async () =>
-        await tool.handler(parsed.data, api, {
+        await tool.handler(parsed.data, activeApi, {
           notifyUser: async (message, data) => {
             await server.sendLoggingMessage({
               level: "notice",
@@ -178,17 +224,15 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
           },
         });
       // Tool handlers await independently.  A finish must therefore close the
-      // admission gate and drain calls that already entered before it resets or
-      // pools a browser.  `operate_finish*` owns that transition itself.
+      // admission gate and drain calls that already entered before it snapshots
+      // eligible state and closes the browser. `operate_finish*` owns that transition.
       const sessionId =
         typeof parsed.data.session_id === "string" ? parsed.data.session_id : undefined;
       const result =
         sessionId !== undefined && !/^operate_finish(?:_task)?$/.test(tool.name)
           ? await withProvisionSessionCall(sessionId, async () => await invoke())
           : await invoke();
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      };
+      return toolResultContent(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const serverUnavailable =
@@ -205,10 +249,56 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
             },
           )
         : errorContent(malformedAction ? "invalid_arguments" : "tool_execution_failed", message);
+    } finally {
+      callLifecycle?.finished();
     }
   });
 
   return server;
+}
+
+// A tool result carrying `image: { mime_type, data_base64 }` (operate_screenshot
+// today; any future tool could opt in the same way) gets an actual MCP image
+// content block alongside its JSON text, so the host agent can SEE it rather
+// than just read a base64 blob it has to know to decode. The image field is
+// dropped from the text block — it would otherwise duplicate the same base64
+// payload twice in the response for no reason.
+function hasImagePayload(
+  value: unknown,
+): value is Record<string, unknown> & { image: { mime_type: string; data_base64: string } } {
+  if (typeof value !== "object" || value === null) return false;
+  const image = (value as Record<string, unknown>).image;
+  if (typeof image !== "object" || image === null) return false;
+  const rec = image as Record<string, unknown>;
+  return typeof rec.mime_type === "string" && typeof rec.data_base64 === "string";
+}
+
+function toolResultContent(result: unknown) {
+  if (hasImagePayload(result)) {
+    const { image, ...meta } = result;
+    return {
+      content: [
+        { type: "text" as const, text: compactToolResultText(meta) },
+        { type: "image" as const, data: image.data_base64, mimeType: image.mime_type },
+      ],
+    };
+  }
+  return {
+    content: [{ type: "text" as const, text: compactToolResultText(result) }],
+  };
+}
+
+/** Compact V2 is a model wire protocol; indentation adds no information. */
+export function compactToolResultText(result: unknown): string {
+  if (
+    typeof result === "object" &&
+    result !== null &&
+    "format" in result &&
+    (result as { format?: unknown }).format === "compact-v2"
+  ) {
+    return JSON.stringify(result);
+  }
+  return JSON.stringify(result, null, 2);
 }
 
 function errorContent(code: string, message: string, guidance?: Record<string, unknown>) {
@@ -231,8 +321,8 @@ function errorContent(code: string, message: string, guidance?: Record<string, u
 // kill the process, which turns one bad operate_* call into "MCP server
 // unreachable" for the host agent. Log the escape and keep serving: the
 // in-flight call fails on its own (its awaited promise threw or timed out),
-// session/browser state is self-contained and recycled by the warm-browser
-// health checks, and no security gate depends on process death — a crash
+// session/browser state is self-contained and bounded by its watchdog and
+// terminal teardown, and no security gate depends on process death — a crash
 // leaves any half-done page action in exactly the same state, minus the
 // transport. Installed only for `mcp server`; the CLI keeps fail-fast.
 export function installServerProcessGuards(): void {
@@ -255,31 +345,60 @@ export function installServerProcessGuards(): void {
 export async function runServer(): Promise<void> {
   installServerProcessGuards();
   setSelfManagedChromeTerminationSignalExitEnabled(false);
+  // The detached Linux watchdog survives SIGKILL/parent death. It asynchronously
+  // sweeps strict process-only manifests, then tracks exact local browser and
+  // session-helper identities for launches owned by this server.
+  startOwnerProcessReaper();
+  // Reconnects leave the superseded instance behind: a live box carried a
+  // superseded server beside its replacement plus two orphaned to init for
+  // ~31 hours, each keeping a browser tree resident. Reap prior instances of
+  // OUR agent identity that are orphaned or past their own idle bound, before
+  // serving — never by process name, never one still serving a client. Purely
+  // housekeeping, so a failure here must not stop the server from starting.
+  try {
+    await reapStaleServerInstances();
+  } catch (err) {
+    process.stderr.write(
+      `[trusty-squire] stale server reap failed: ${
+        err instanceof Error ? err.message : String(err)
+      }\n`,
+    );
+  }
   // Startup breadcrumb on stderr (which lands in the host agent's MCP
   // log). A silent no-op was the worst part of the entrypoint-guard
   // bug — this line makes "did the server actually start?" answerable
   // at a glance.
   process.stderr.write(`[trusty-squire] server v${VERSION} starting\n`);
 
-  const storage = await openSessionStorage();
-  const session = await storage.read();
+  const loadPublishedAccountSession = async (): Promise<ApiClient | null> => {
+    try {
+      const session = await (await openSessionStorage()).read();
+      // Single-tier: every session is account-bound. A session with just a
+      // machine_token (pre-collapse install) yields api=null, and every
+      // tool call returns the re-install instruction.
+      if (session === null || session.agent_session_token === undefined) return null;
+      return new ApiClient({
+        apiBaseUrl: session.api_base_url,
+        registryBaseUrl: DEFAULT_REGISTRY_BASE,
+        agentSessionToken: session.agent_session_token,
+        agentIdentity: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "unknown",
+        ...(session.account_id !== undefined ? { accountId: session.account_id } : {}),
+      });
+    } catch {
+      // A failed session read must remain fail-closed; the next tool call can
+      // retry after a transient keychain/file backend problem clears.
+      return null;
+    }
+  };
+  const api = await loadPublishedAccountSession();
 
-  // Single-tier: every session is account-bound. A session with just a
-  // machine_token (pre-collapse install) yields api=null, and every
-  // tool call returns the re-install instruction.
-  const api =
-    session !== null && session.agent_session_token !== undefined
-      ? new ApiClient({
-          apiBaseUrl: session.api_base_url,
-          registryBaseUrl: DEFAULT_REGISTRY_BASE,
-          agentSessionToken: session.agent_session_token,
-          agentIdentity: process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "unknown",
-          ...(session.account_id !== undefined ? { accountId: session.account_id } : {}),
-        })
-      : null;
-
-  const server = await buildServer(api);
+  const callAdmission = createServerCallAdmission();
+  const server = await buildServer(api, callAdmission, loadPublishedAccountSession);
   const transport = new StdioServerTransport();
+  // Publishes what a later launch of this identity needs to tell "still
+  // serving a client" from "wedged": last inbound message, open sessions,
+  // in-flight calls. Without it every prior instance looks equally idle.
+  const instance = registerServerInstance();
 
   // A stdio client can disappear without sending a signal (for example when
   // its parent agent exits). Chrome keeps Node's event loop alive in that
@@ -288,15 +407,20 @@ export async function runServer(): Promise<void> {
   // idle backstop below racing together cannot run teardown twice.
   let shutdown: Promise<void> | undefined;
   let idleTimer: NodeJS.Timeout | undefined;
+  let heartbeatTimer: NodeJS.Timeout | undefined;
   const requestShutdown = (): void => {
     if (shutdown !== undefined) return;
+    const admittedCallsDrained = callAdmission.closeAndDrain();
 
     shutdown = (async () => {
       process.stdin.removeListener("end", requestShutdown);
       process.stdin.removeListener("close", requestShutdown);
+      process.removeListener("SIGHUP", requestShutdown);
       process.removeListener("SIGTERM", requestShutdown);
       process.removeListener("SIGINT", requestShutdown);
       if (idleTimer !== undefined) clearInterval(idleTimer);
+      if (heartbeatTimer !== undefined) clearInterval(heartbeatTimer);
+      instance?.release();
 
       try {
         // The OAuth-bootstrap login Chrome (google-login) is tracked apart
@@ -304,6 +428,7 @@ export async function runServer(): Promise<void> {
         // server. Its own signal handlers stand down in server mode (see
         // registerHeadlessRigCleanup), leaving this coordinator as the one
         // exit owner.
+        await admittedCallsDrained;
         await cancelActiveLoginBrowsers();
         await closeAllProvisionSessions();
         await server.close();
@@ -329,6 +454,7 @@ export async function runServer(): Promise<void> {
   transport.onclose = requestShutdown;
   process.stdin.once("end", requestShutdown);
   process.stdin.once("close", requestShutdown);
+  process.once("SIGHUP", requestShutdown);
   process.once("SIGTERM", requestShutdown);
   process.once("SIGINT", requestShutdown);
 
@@ -362,6 +488,18 @@ export async function runServer(): Promise<void> {
     requestShutdown();
   }, idleCheckIntervalMs());
   idleTimer.unref();
+
+  if (instance !== null) {
+    heartbeatTimer = setInterval(() => {
+      if (shutdown !== undefined) return;
+      instance.heartbeat({
+        lastActivityAt,
+        activeSessions: activeSessionCount(),
+        inFlightCalls: callAdmission.inFlightCount(),
+      });
+    }, heartbeatIntervalMs());
+    heartbeatTimer.unref();
+  }
 
   await server.connect(transport);
 }

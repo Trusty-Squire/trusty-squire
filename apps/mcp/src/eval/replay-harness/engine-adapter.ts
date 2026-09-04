@@ -208,6 +208,7 @@ export async function replayRecipeOnHarnessPage(args: {
     browser: controller,
     serviceUrl: filledEntry.url,
     extraAllowedHosts: args.recipe.allowed_hosts,
+    observationFormat: "v1",
   });
   try {
     let nextIndex = 0;

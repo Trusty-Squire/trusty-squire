@@ -5,6 +5,13 @@ import type { Buffer } from "node:buffer";
 
 export type CredentialType = string;
 
+export class CredentialSlotConflictError extends Error {
+  constructor() {
+    super("active credential service/label slot already occupied");
+    this.name = "CredentialSlotConflictError";
+  }
+}
+
 export interface CredentialRecord {
   id: string;
   reference: string;
@@ -38,6 +45,7 @@ export interface CredentialRecord {
 export interface CredentialStore {
   insert(record: CredentialRecord): Promise<void>;
   findActive(reference: string): Promise<CredentialRecord | null>;
+  isActive(reference: string, accountId: string): Promise<boolean>;
   // Upsert lookup: the active entry for (account, service, label), or
   // null. `service` is matched case-insensitively against metadata.service.
   findActiveByServiceLabel(
@@ -58,9 +66,6 @@ export interface CredentialStore {
       account_kek_blob: Buffer;
       field_names: string[];
       rotatedAt: Date;
-      type?: CredentialType | null;
-      env_var_suggestion?: string | null;
-      metadata?: Record<string, unknown>;
     },
   ): Promise<void>;
   listByAccount(accountId: string): Promise<CredentialRecord[]>;
@@ -76,16 +81,22 @@ export interface CredentialStore {
   findByReferenceIncludingDeleted(reference: string): Promise<CredentialRecord | null>;
   // Clear deleted_at, bringing a soft-deleted credential back to active.
   restore(reference: string): Promise<void>;
-  setAllowedHosts(reference: string, hosts: string[]): Promise<void>;
-  // Set the sign-in hosts of a username/password (browser-fill) credential —
-  // metadata.login_hosts. Also stamps metadata.auth_strategy =
-  // "username_password", so setting sign-in hosts on a plain multi-field entry
-  // converts it into a proper login credential. Distinct from setAllowedHosts:
-  // login_hosts gate browser-fill sealing, allowed_hosts gate the proxy.
-  setLoginHosts(reference: string, hosts: string[]): Promise<void>;
-  // Rename an entry — updates the (non-secret) label only. Leaves the
-  // encrypted payload + allowed_hosts untouched.
-  setLabel(reference: string, label: string): Promise<void>;
+  // Atomically replace only the explicitly supplied non-secret metadata.
+  // The encrypted envelope and field names are intentionally absent from
+  // this surface so an agent metadata edit cannot become a secret mutation.
+  updateMetadata(
+    reference: string,
+    expected: {
+      label: string;
+      allowed_hosts: string[];
+      metadata: Record<string, unknown>;
+    },
+    input: {
+      label?: string;
+      allowed_hosts?: string[];
+      metadata?: Record<string, unknown>;
+    },
+  ): Promise<"updated" | "changed" | "conflict">;
   // Hard-delete every credential row (active + soft-deleted) for the
   // account — the irreversible offboarding purge. Returns rows removed.
   purgeAccount(accountId: string): Promise<number>;
@@ -153,6 +164,7 @@ export const VAULT_AUDIT_TYPES = {
   // Entry label changed (web rename). Non-secret metadata edit — distinct
   // from `rotated` (which re-encrypts the payload).
   renamed: "vault.credential_renamed",
+  metadataEdited: "vault.credential_metadata_edited",
   // A new field added to an existing entry's encrypted blob (web). The
   // payload is re-encrypted to merge the field; distinct from `rotated`
   // (full replace) so an additive edit is queryable on its own.

@@ -34,33 +34,120 @@ Inside `elements`:
    `elements` already carries (same 75 / 88 refs). Pure duplication.
 2. ~30% of the `elements` block is serialized `null`/`""`/`false`.
 3. `container` is 100% redundant with `path` (`path` = `<container> > <kind>:<label>`).
-4. The planner normally drives off `text` (read state) + the element inventory
-   (pick `ref`). If a visible clickable or typeable control has no inventory
+4. In legacy V1, the planner normally drives off `text` (read state) + the
+   element inventory (pick `ref`). If a visible clickable or typeable control has no inventory
    row, `operate_act` has a live `text=…`/`css=…` fallback for `click`,
    `js_click`, `type`, and `type_secret`. The `screen` region-tree and
    `accessibility` flat-tree are not needed to choose an action.
    `occluded_by`/`topmost`/`href` ARE load-bearing — keep them (per-element).
 
-## The one knob — `detail`
+## Observation mode and detail
 
-There is a single ordered control, set **per call**, no env/global flag:
+The session observation format is selected once at start by
+`TRUSTY_SQUIRE_OBSERVE_V2=on|shadow|off` and defaults to `on`:
+
+- `on` emits Compact V2. Every detail level remains inside the V2 seal;
+  `detail:"full"` does not expose the V1 inventory.
+- `shadow` runs the native Compact V2 serializer without retaining or emitting
+  its result, while callers continue to receive and target V1 observations.
+- `off` keeps the V1 observation and action contract.
+
+Within V1, `detail` is the ordered per-call payload control:
 
 ```
 detail:  none  <  compact  <  full
-         ack       default     legacy (compact + screen + accessibility + raw fields)
+         ack       default     rich V1 (compact + screen + accessibility + raw fields)
 ```
 
 `operate_observe({ detail })` accepts `compact|full`; `operate_act({ detail })`
-also accepts `none` (a bare ack). Default everywhere is **compact**. There is no
-deploy-time override: unlike the server kill-switches (signups/egress/billing),
-`detail` only shapes the payload returned to the host on the user's own machine —
-it has no server-side blast radius, so there's nothing for an operator to revert.
-If a step is genuinely ambiguous the planner escalates to `detail:"full"` for
-that one call.
+also accepts `none` (a bare ack). Default everywhere is **compact**. In V1, a
+genuinely ambiguous step can escalate to `detail:"full"` for that one call. In
+V2, ambiguity is resolved through its sealed paging/query protocol instead of
+restoring legacy fields.
 
-## Phase 1 — compact encoder ✅ shipped, DEFAULT
+## Compact V2 — current default contract
 
-When `detail` is `compact` (the default), `observeSession`:
+Compact V2 is a native TypeScript serializer over the interactive DOM/AX data
+already extracted through `BrowserController`'s CDP path. It ports only the
+compact tuple formatting; it does not launch Python or depend on browser-use at
+runtime.
+
+The serializer constructs a screened view before any V2 audit, delta,
+retention, recipe-capture, or public-result sink. Page URLs and visible text are
+empty on the wire. Page-derived hostnames, origins, titles, headings, labels,
+options, errors, and nested action results cross the card seal before they can
+leave the session. That seal is **payment-only** (captain, 2026-09-03): only a
+Luhn-valid PAN, a labeled CVV, and the exact value the operator injected from
+the vault are screened out — see
+[observation-model.md §4.5](observation-model.md). Ordinary page copy, including
+a rendered API key or one-time code, reaches the wire. The audit trail and the
+registry-bound recipe trace keep the older closed-vocabulary screen
+(`recordableTokenV2`). This is output screening only: V2 does not add a payment
+validation or approval gate.
+
+The public observation contains:
+
+- `format:"compact-v2"`, the opaque `session_id`, and a code-owned `stage` enum.
+- At most one screened title and primary visible heading in `semantic`.
+- A `safe_table` of visible, topmost controls. Each row is
+  `[ref,role,facts?]`; roles are finite one- or two-character codes and `facts`
+  can contain only a screened short name plus code-owned state, action, field,
+  choice-position, and frame facts.
+- At most four prioritized rows on the first page. The complete encoded payload
+  must satisfy both the 4,096-byte wire ceiling and the conservative 1,024-unit
+  byte-count gate. `overflow.next_cursor` pages the remaining action map through
+  the MCP, never through a persisted snapshot file.
+
+`operate_observe_query` performs named-control lookup privately against the live
+browser. The query, optional role filter, and HMAC-bound cursor stay inside the
+session; results remain screened `safe_table` tuples. An empty query consumes an
+`overflow.next_cursor`, and also consumes `hint_overflow.next_cursor` when the
+trusted start hint spans more than one page. Card-shaped query material (a Luhn PAN or a
+labeled CVV) is rejected from matching rather than echoed; other query material
+is matched normally under the payment-only policy.
+
+An exact, cursorless `Google` or `GitHub` lookup has a narrow bounded hydration
+repair for auth shells that mount or label their provider controls after the
+initial observation. Each refresh rebuilds and revalidates the complete sealed
+action map. A privately matched, initially unlabeled control may receive only the
+queried provider name in the screened result; its returned ref is still the
+current indexed safe handle. Explicit cursors remain immutable and stale on DOM
+change, arbitrary queries do not receive this wait, and the repair never clicks
+or falls back to a generic locator.
+
+Action refs are opaque snapshot indexes of the form
+`@e:<base36-generation>.<base36-position>`. Authorization requires every one of
+these checks before the private legacy target is resolved:
+
+1. canonical syntax and the current observation generation;
+2. membership in the session-held sealed action map;
+3. an unexpired index bound to both the browser's main-document identity and
+   current URL;
+4. an exact live match for the complete indexed control map and its private
+   bindings.
+
+Forged, stale, out-of-range, wrong-generation, cross-document, or drifted refs
+all fail with the same opaque `reobserve_required`. Browser-driving actions
+invalidate the map. The caller must observe again and select a new handle; V2
+never falls through to label, `text=`, CSS, or V1 replacement-candidate
+resolution.
+
+When the page identity and complete sealed control map are unchanged, a repeat
+observe may return `delta:true`; omitted `safe_table` and semantic fields retain
+their preceding V2 values. Any structural action-map or stage change remints a
+generation and sends a fresh paged map. The tuple delta decoder still treats
+present rows as upserts and `removed` refs as deletions, so the wire contract
+remains forward-compatible without weakening snapshot membership.
+
+`apps/mcp/src/bot/__tests__/compact-observation-v2.test.ts` owns serializer,
+screening, query, stage, semantics, budget, and tuple-format gates.
+`operate-session-flow.test.ts` owns session-mode rollout, start metadata,
+cursor/page/document identity, live-map membership, action invalidation, V2
+audit/public-result sealing, and V1 compatibility gates.
+
+## Legacy V1 — Phase 1 compact encoder ✅ shipped
+
+When V1 is selected and `detail` is `compact` (the V1 default), `observeSession`:
 
 - **Omit `screen` + `accessibility`** (the two re-encodings). Also skip computing
   them (CPU win).
@@ -77,11 +164,15 @@ When `detail` is `compact` (the default), `observeSession`:
   in compact they become `value_len` of the placeholder.)
 - **Metadata** so omission is explicit, never silent:
   `elements_total` (the complete current count, including delta/collapsed
-  omissions) and `text_truncated` (the 4000-char text cap tripped).
+  omissions), `text_truncated` (the 4000-char text cap tripped), and
+  `modal_active:true` when a dialog/modal region (`role="dialog"`, `<dialog>`, or
+  `aria-modal="true"`) has at least one topmost element. `modal_active` is omitted
+  when no modal is interactable and is computed from the complete element set,
+  so it remains accurate on delta emits.
 
-**Full mode remains the byte-equivalent escape hatch:** it returns every element
-and field plus `screen` and `accessibility`, with no delta markers, link collapse,
-or snapshot pointer.
+**V1 full mode remains the byte-equivalent escape hatch:** it returns every
+element and field plus `screen` and `accessibility`, with no delta markers, link
+collapse, or snapshot pointer.
 
 Measured on a real six-observe Casetify sequence, compact deltas cut context by
 78%; dropping `path` from the wire payload raised the cut to 85%. The
@@ -89,11 +180,11 @@ token-weighted aggregate over the real corpus is approximately 66%. Across
 approximately 58,000 same-selector re-observe pairs, mutable path-region data
 re-minted 0.00% of refs.
 
-## Phase 2 — the `detail` ladder ✅ shipped
+## Legacy V1 — Phase 2 `detail` ladder ✅ shipped
 
-- `operate_observe({ detail: "compact" | "full" })` — `full` restores the legacy
-  screen+accessibility+raw-field payload for an ambiguous step.
-- `operate_act({ detail: "none" | "compact" | "full" })` — `none` returns a
+- In V1, `operate_observe({ detail: "compact" | "full" })` — `full` restores the
+  legacy screen+accessibility+raw-field payload for an ambiguous step.
+- In V1, `operate_act({ detail: "none" | "compact" | "full" })` — `none` returns a
   minimal ack (action ran; no page dump) so chained fills don't each echo the
   page (call `operate_observe` before the next ref-targeted act). Same vocabulary
   as `operate_observe`, plus the bottom rung.
@@ -103,9 +194,9 @@ deferred (Phase 2.5, only if evidence demands): an `include` partial-escalation
 ladder and `full` already covers the rare escalation. `scope:{ref}`/`depth`
 sub-tree reads remain unbuilt.
 
-## Phase 3 — stable refs and per-session deltas ✅ shipped
+## Legacy V1 — Phase 3 stable refs and per-session deltas ✅ shipped
 
-Compact observations minimize repeated context without making the stream lossy:
+V1 compact observations minimize repeated context without making the stream lossy:
 
 - **Stable refs.** Refs are `@e:<identity>_<ordinal>`. For a normal control the
   `<identity>` is its generation-independent `stableElementId`, so an unchanged
@@ -176,12 +267,12 @@ Compact observations minimize repeated context without making the stream lossy:
   preferences actions are never collapsed. `chrome_links_collapsed` reports the
   omitted count; the file still contains them.
 
-`detail:"full"` bypasses all delta and collapse behavior and preserves the rich
-payload shape byte-for-byte. As an unsurfaced side effect it replaces the
+In V1, `detail:"full"` bypasses all delta and collapse behavior and preserves
+the rich payload shape byte-for-byte. As an unsurfaced side effect it replaces the
 persisted snapshot, invalidates the compact baseline so the next compact observe
 is a full resync, and removes the stale snapshot if persistence fails.
 
-## Phase 4 — columnar element encoding + type-elision ✅ shipped
+## Legacy V1 — Phase 4 columnar element encoding + type-elision ✅ shipped
 
 Two per-element encoding transforms applied on TOP of the Phase-3 delta. Both
 change only the COMPACT wire; the persisted snapshot file and `detail:"full"`
@@ -250,10 +341,18 @@ frame guards. `browser-frame-support.test.ts` owns ordinary same-/cross-origin
 frame extraction, origin tagging, frame-scoped clicking, captcha-frame
 exclusion, and the no-frame negative control.
 
-## Non-goals / explicitly avoided
+`apps/mcp/src/bot/__tests__/modal-overlay-inert.test.ts` owns the real-browser
+inert-ancestor modal gates: dialog controls remain topmost and clickable while
+background controls remain protected; inert state and temporary markers are
+restored across close, replacement, open-shadow, and child-frame paths; true
+sibling portals remain unaffected; and `modal_active` stays correct on full and
+delta emits.
 
-- Pagination as the primary model (it requires host-managed page boundaries and
-  cannot represent small in-place changes as directly as ref-keyed deltas).
+## Legacy V1 non-goals / explicitly avoided
+
+- Pagination as V1's primary model (it requires host-managed page boundaries and
+  cannot represent small in-place changes as directly as ref-keyed deltas). V2
+  intentionally uses bounded, session-owned cursor pages instead.
 - Replacing perception with screenshots.
 - Hard element caps without ranking + truncation metadata.
 - Dropping `accessibility`/`href`/`occluded_by` as a blanket default (they are

@@ -21,10 +21,7 @@ import { issueSession, signSessionJwt, SESSION_COOKIE_NAME } from "../auth/sessi
 const JSON_HEADERS = { "content-type": "application/json" };
 const SESSION_SECRET = "test-secret-not-used";
 
-async function makeWebSession(
-  deps: ApiDeps,
-  accountId: string,
-): Promise<string> {
+async function makeWebSession(deps: ApiDeps, accountId: string): Promise<string> {
   const { record, jwt } = issueSession({
     account_id: accountId,
     ip: null,
@@ -73,17 +70,10 @@ describe("single-tier install handshake", () => {
     });
     const { setup_code } = initiate.json() as { setup_code: string };
 
-    await deps.pairingTokenStore.claim(
-      setup_code,
-      "acct-pref",
-      "agent_raw",
-      new Date(),
-      {
-        registry_enabled: true,
-        consent_operator_inbox_otp: true,
-        proxy_url: "socks5://proxy.test:1080",
-      },
-    );
+    await deps.pairingTokenStore.claim(setup_code, "acct-pref", "agent_raw", new Date(), {
+      registry_enabled: true,
+      consent_operator_inbox_otp: true,
+    });
 
     const status = await app.inject({
       method: "GET",
@@ -97,12 +87,12 @@ describe("single-tier install handshake", () => {
       install_preferences: {
         registry_enabled: true,
         consent_operator_inbox_otp: true,
-        proxy_url: "socks5://proxy.test:1080",
       },
     });
+    expect(status.json().install_preferences).not.toHaveProperty("proxy_url");
   });
 
-  it("rejects malformed proxy preferences at the browser claim boundary", async () => {
+  it("ignores legacy proxy preferences at the browser claim boundary", async () => {
     const initiate = await app.inject({
       method: "POST",
       url: "/v1/mcp/install/initiate",
@@ -119,12 +109,16 @@ describe("single-tier install handshake", () => {
       payload: {
         registry_enabled: true,
         consent_operator_inbox_otp: true,
-        proxy_url: "http://proxy.test:8080\nBAD=1",
+        proxy_url: "http://user:secret@proxy.test:8080",
       },
     });
 
-    expect(claim.statusCode).toBe(400);
-    expect(claim.json()).toMatchObject({ error: "invalid_request" });
+    expect(claim.statusCode).toBe(200);
+    const status = await app.inject({
+      method: "GET",
+      url: `/v1/mcp/install/${setup_code}/status`,
+    });
+    expect(status.json().install_preferences).not.toHaveProperty("proxy_url");
   });
 
   it("install/status returns the bound account_id", async () => {

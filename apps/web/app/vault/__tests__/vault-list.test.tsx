@@ -17,6 +17,10 @@ const api = vi.hoisted(() => ({
   apiDelete: vi.fn(),
 }));
 const router = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn() }));
+const mandate = vi.hoisted(() => ({
+  getPairingState: vi.fn(),
+  signPayload: vi.fn(),
+}));
 
 vi.mock("next/navigation", () => ({
   useRouter: () => router,
@@ -31,6 +35,11 @@ vi.mock("../../lib/api", () => ({
   apiPatch: api.apiPatch,
   apiDelete: api.apiDelete,
   timeAgo: () => "1d ago",
+}));
+
+vi.mock("../../lib/pairing", () => ({ getPairingState: mandate.getPairingState }));
+vi.mock("../../lib/vouchflow", () => ({
+  getVouchflow: () => ({ signPayload: mandate.signPayload }),
 }));
 
 import VaultPage from "../page";
@@ -61,6 +70,8 @@ function mockLists(cards: unknown[], creds: unknown[] = []) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mandate.getPairingState.mockResolvedValue({ enrolled: true });
+  mandate.signPayload.mockResolvedValue({ assertion: "signed-mandate" });
 });
 afterEach(() => {
   cleanup();
@@ -173,5 +184,83 @@ describe("vault list — Wallet section", () => {
 
     await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/login?next=/vault"));
     expect(screen.queryByText("unauthorized")).toBeNull();
+  });
+
+  it("signs credential metadata edits through the mutation approval route", async () => {
+    const credential = {
+      id: "cred_a",
+      reference: "vault://acct/sub/cred_a",
+      service: "OpenAI",
+      label: "default",
+      field_names: ["value"],
+      key_name: null,
+      type: "api_key",
+      allowed_hosts: ["api.openai.com"],
+      auth_strategy: null,
+      login_hosts: [],
+      favicon_domain: "openai.com",
+      created_at: "2026-07-01T00:00:00.000Z",
+      last_retrieved_at: null,
+      retrieval_count: 0,
+      rotated_at: null,
+      last_changed_at: "2026-07-01T00:00:00.000Z",
+      age_days: 1,
+      stale: false,
+    };
+    api.apiGet.mockImplementation((path: string) => {
+      if (path === "/v1/status") return Promise.resolve({ billing_enabled: false });
+      if (path === "/v1/vault/credentials") {
+        return Promise.resolve({ credentials: [credential] });
+      }
+      if (path === "/v1/vault/e2e") return Promise.resolve([]);
+      if (path === "/v1/vault/mutation-approvals/approval_a/ceremony") {
+        return Promise.resolve({ payload: { operation: "edit" } });
+      }
+      return Promise.reject(new Error(`unexpected GET ${path}`));
+    });
+    api.apiPost.mockImplementation((path: string) => {
+      if (path === "/v1/vault/credentials/cred_a/reveal") {
+        return Promise.resolve({ fields: { value: "secret" } });
+      }
+      if (path === "/v1/vault/mutation-approvals") {
+        return Promise.resolve({ approval_id: "approval_a" });
+      }
+      if (path === "/v1/vault/mutation-approvals/approval_a/approve") {
+        return Promise.resolve({ status: "approved" });
+      }
+      return Promise.reject(new Error(`unexpected POST ${path}`));
+    });
+    render(<VaultPage />);
+    await waitFor(() => expect(screen.getByText("OpenAI")).toBeTruthy());
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Actions for OpenAI" }));
+    await user.click(screen.getByRole("menuitem", { name: "Edit" }));
+    await waitFor(() => expect(screen.getByDisplayValue("secret")).toBeTruthy());
+    await user.click(screen.getByRole("button", { name: /Advanced/ }));
+    const label = screen.getByLabelText("Label");
+    await user.clear(label);
+    await user.type(label, "prod");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() =>
+      expect(api.apiPost).toHaveBeenCalledWith("/v1/vault/mutation-approvals", {
+        operation: "edit",
+        reference: credential.reference,
+        changes: { label: "prod" },
+      }),
+    );
+    expect(mandate.signPayload).toHaveBeenCalledWith({
+      context: "vault_credential_mutation",
+      payload: { operation: "edit" },
+      minConfidence: "low",
+    });
+    expect(api.apiPost).toHaveBeenCalledWith("/v1/vault/mutation-approvals/approval_a/approve", {
+      jws: "signed-mandate",
+    });
+    expect(api.apiPatch).not.toHaveBeenCalledWith(
+      expect.stringContaining("/allowed-hosts"),
+      expect.anything(),
+    );
   });
 });

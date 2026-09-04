@@ -24,14 +24,15 @@ import { registerVaultE2ERoute } from "./routes/vault-e2e.js";
 import { registerPayApprovalsRoute } from "./routes/pay-approvals.js";
 import { registerTelegramRoute } from "./routes/telegram.js";
 import { registerVaultAccessRoute } from "./routes/vault-access.js";
+import { registerCredentialMutationRoutes } from "./routes/credential-mutations.js";
 import { registerEgressRoutes } from "./routes/egress.js";
 import type { EgressGrantStore } from "./services/egress-grant.js";
 import type { EmailForwarder } from "./services/email-forwarder.js";
 import type { HttpProxyExecutor } from "./services/http-proxy.js";
 import type { StripeClient } from "./services/stripe-client.js";
+import type { VouchMandateVerifier } from "./services/vouch-mandate.js";
 import { registerMcpInstallRoute } from "./routes/mcp-install.js";
 import { registerMcpSessionsRoute } from "./routes/mcp-sessions.js";
-import { registerShortRoute } from "./routes/short.js";
 import { registerNotifyRoute } from "./routes/notify.js";
 import { registerOperatorOtpRoute } from "./routes/operator-otp.js";
 import { registerWorkspaceInboxRoute } from "./routes/workspace-inbox.js";
@@ -55,6 +56,9 @@ export interface BuildServerOpts {
   // routes (no live Stripe calls, no real signature). Production leaves
   // this undefined → built from STRIPE_SECRET_KEY env (null when unset).
   stripeClient?: StripeClient;
+  // Test seam for signed approval flows. Production leaves this undefined and
+  // both payment and vault mutations use the shared JWKS-backed verifier.
+  vouchVerifier?: VouchMandateVerifier;
   // Test seam for asserting structured logs. Supplying a stream enables the
   // same redacted Pino logger production uses, at debug level.
   logStream?: Writable;
@@ -284,6 +288,12 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     requireWeb: auth.requireWeb,
     requireAgent: auth.requireAgent,
     requireAny: auth.requireAny,
+    ...(opts.vouchVerifier !== undefined ? { vouchVerifier: opts.vouchVerifier } : {}),
+  });
+  await fastify.register(registerCredentialMutationRoutes, {
+    deps,
+    requireAny: auth.requireAny,
+    ...(opts.vouchVerifier !== undefined ? { vouchVerifier: opts.vouchVerifier } : {}),
   });
   await fastify.register(registerTelegramRoute, {
     deps,
@@ -318,15 +328,6 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     deps,
     requireWeb: auth.requireWeb,
   });
-  // G15: tiny noVNC-tunnel URL shortener. webBaseUrl is the host
-  // that will serve the /g/:slug redirect — the web app, not the API.
-  await fastify.register(registerShortRoute, {
-    deps: {
-      webBaseUrl: defaultPwaBaseUrl(),
-      ...(deps.now !== undefined ? { now: deps.now } : {}),
-    },
-  });
-
   // Liveness — shallow + DB-independent. Fly's http_service check hits this; it
   // must NOT depend on the DB, or a DB wedge would trigger an API restart loop
   // that can't fix the DB.

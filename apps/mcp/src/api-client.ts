@@ -25,6 +25,10 @@ export class ApiCallError extends Error {
   }
 }
 
+export function isPaymentApprovalTransportTimeout(error: unknown): boolean {
+  return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
+}
+
 export interface ApiClientConfig {
   apiBaseUrl: string;
   registryBaseUrl: string;
@@ -90,6 +94,28 @@ export interface VaultCredentialSummary {
   retrieval_count: number;
 }
 
+export interface CredentialMutationApproval {
+  approval_id: string;
+  approval_url: string;
+  status: "pending" | "approved" | "failed" | "expired";
+  operation: "edit" | "delete";
+  credential: { reference: string; service: string | null; name: string };
+  before: {
+    label: string;
+    allowed_hosts: string[];
+    login_hosts: string[];
+    auth_strategy: string | null;
+  };
+  after: {
+    label: string;
+    allowed_hosts: string[];
+    login_hosts: string[];
+    auth_strategy: string | null;
+  } | null;
+  expires_at: string;
+  error?: string;
+}
+
 export interface DirectoryEntry {
   service: string;
   latest_version: string;
@@ -107,7 +133,7 @@ export interface UsageResponse {
 
 export interface PaymentApproval {
   id: string;
-  status: "pending" | "approved" | "expired";
+  status: "pending" | "approved" | "denied" | "expired";
   merchant: string;
   checkout_origin: string;
   amount_cents: number;
@@ -163,6 +189,8 @@ export class ApiClient {
   async getPaymentApproval(
     id: string,
     candidateRead: boolean | "immediate" | "peek" | "wait-peek" = false,
+    waitMs?: number,
+    transportTimeoutMs?: number,
   ): Promise<PaymentApproval> {
     const query =
       candidateRead === true
@@ -174,7 +202,15 @@ export class ApiClient {
             : candidateRead === "wait-peek"
               ? "?wait_for_submission=1&peek_submission=1"
               : "";
-    return this.get(`/v1/pay/approvals/${encodeURIComponent(id)}${query}`);
+    const boundedWait =
+      waitMs === undefined
+        ? ""
+        : `${query.length === 0 ? "?" : "&"}wait_ms=${Math.max(0, Math.floor(waitMs))}`;
+    const signal =
+      transportTimeoutMs === undefined
+        ? undefined
+        : AbortSignal.timeout(Math.max(1, Math.floor(transportTimeoutMs)));
+    return this.get(`/v1/pay/approvals/${encodeURIComponent(id)}${query}${boundedWait}`, signal);
   }
 
   async confirmPaymentApproval(
@@ -194,9 +230,19 @@ export class ApiClient {
     return this.get("/v1/pay/config");
   }
 
-  async listPaymentCards(): Promise<Array<{ id: string; label: string }>> {
-    const records = await this.get<Array<{ id: string; label: string }>>("/v1/vault/e2e");
-    return records.map(({ id, label }) => ({ id, label }));
+  async listPaymentCards(): Promise<
+    Array<{ id: string; label: string; last4: string | null; brand?: string }>
+  > {
+    const records =
+      await this.get<
+        Array<{ id: string; label: string; last4: string | null; brand?: string | null }>
+      >("/v1/vault/e2e");
+    return records.map(({ id, label, last4, brand }) => ({
+      id,
+      label,
+      last4: last4 ?? null,
+      ...(brand != null ? { brand } : {}),
+    }));
   }
 
   async notifyThreeDs(
@@ -266,11 +312,30 @@ export class ApiClient {
     return this.post("/v1/vault/credentials", input);
   }
 
+  async createCredentialMutationApproval(input: {
+    operation: "edit" | "delete";
+    reference?: string;
+    service?: string;
+    name?: string;
+    changes?: {
+      label?: string;
+      allowed_hosts?: { mode: "add" | "remove" | "replace"; hosts: string[] };
+      login_hosts?: { mode: "add" | "remove" | "replace"; hosts: string[] };
+    };
+  }): Promise<CredentialMutationApproval> {
+    return this.post("/v1/vault/mutation-approvals", input);
+  }
+
+  async getCredentialMutationApproval(id: string): Promise<CredentialMutationApproval> {
+    return this.get(`/v1/vault/mutation-approvals/${encodeURIComponent(id)}`);
+  }
+
   // ── use_credential: write-only-sink proxy ─────────────────
 
   async useCredential(input: {
     reference?: string;
     service?: string;
+    name?: string;
     http: {
       method: string;
       url: string;
@@ -517,10 +582,11 @@ export class ApiClient {
     return h;
   }
 
-  private async get<T>(path: string): Promise<T> {
+  private async get<T>(path: string, signal?: AbortSignal): Promise<T> {
     const res = await this.fetchImpl(`${this.config.apiBaseUrl}${path}`, {
       method: "GET",
       headers: this.headers(),
+      ...(signal !== undefined ? { signal } : {}),
     });
     return (await this.handleResponse(res, "GET", path)) as T;
   }
@@ -599,7 +665,6 @@ export interface InstallStatusResponse {
   install_preferences?: {
     registry_enabled?: boolean;
     consent_operator_inbox_otp?: boolean;
-    proxy_url?: string;
   };
 }
 
@@ -671,35 +736,5 @@ export async function issueMachineToken(
     throw err;
   } finally {
     clearTimeout(timer);
-  }
-}
-
-// G15: shorten the headless install's cloudflared tunnel URL to a
-// `trustysquire.ai/g/<slug>` redirect. The API stores the long URL
-// (fragment included) with a 15-min TTL; the web app's /g/[slug]
-// route resolves it and 302s the browser to the long URL — preserving
-// the password fragment.
-//
-// Failure path: any error returns the original URL unchanged. The
-// caller prints whatever it gets back; users on a flaky network just
-// see the original cloudflared URL, which still works.
-export async function shortenVncUrl(
-  apiBaseUrl: string,
-  longUrl: string,
-  fetchImpl: typeof fetch = fetch,
-): Promise<string> {
-  try {
-    const res = await fetchImpl(`${apiBaseUrl}/v1/short`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: longUrl }),
-      signal: AbortSignal.timeout(5_000),
-    });
-    if (!res.ok) return longUrl;
-    const body = (await res.json()) as { short_url?: unknown };
-    if (typeof body.short_url !== "string") return longUrl;
-    return body.short_url;
-  } catch {
-    return longUrl;
   }
 }

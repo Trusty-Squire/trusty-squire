@@ -53,6 +53,9 @@ importers:
       bullmq:
         specifier: ^5.21.1
         version: 5.76.6
+      canonicalize:
+        specifier: ^2.0.0
+        version: 2.1.0
       fastify:
         specifier: ^4.28.0
         version: 4.29.1
@@ -118,8 +121,8 @@ importers:
         specifier: workspace:0.1.6
         version: link:../../packages/skill-schema
       better-sqlite3:
-        specifier: 12.8.0
-        version: 12.8.0
+        specifier: ^12.10.0
+        version: 12.11.1
       boxen:
         specifier: ^8.0.1
         version: 8.0.1
@@ -145,7 +148,7 @@ importers:
         specifier: ^1.60.2
         version: 1.60.2
       playwright:
-        specifier: ^1.49.0
+        specifier: ^1.59.0
         version: 1.59.1
       playwright-extra:
         specifier: ^4.3.6
@@ -156,6 +159,9 @@ importers:
       rebrowser-playwright-core:
         specifier: ^1.52.0
         version: 1.52.0
+      sharp:
+        specifier: ^0.34.5
+        version: 0.34.5
       smol-toml:
         specifier: ^1.6.1
         version: 1.6.1
@@ -1177,7 +1183,6 @@ packages:
     engines: {node: '>=18'}
     requiresBuild: true
     dev: false
-    optional: true
 
   /@img/sharp-darwin-arm64@0.34.5:
     resolution: {integrity: sha512-imtQ3WMJXbMY4fxb/Ndp6HBTNVtWCUI0WdobyheGf5+ad6xX8VIDO8u2xE4qc/fr08CKG/7dDseFtn6M6g/r3w==}
@@ -3016,9 +3021,9 @@ packages:
     engines: {node: '>=6.0.0'}
     hasBin: true
 
-  /better-sqlite3@12.8.0:
-    resolution: {integrity: sha512-RxD2Vd96sQDjQr20kdP+F+dK/1OUNiVOl200vKBZY8u0vTwysfolF6Hq+3ZK2+h8My9YvZhHsF+RSGZW2VYrPQ==}
-    engines: {node: 20.x || 22.x || 23.x || 24.x || 25.x}
+  /better-sqlite3@12.11.1:
+    resolution: {integrity: sha512-dq9AtApgg5PGFtBzPFSBl3HZQjHok5gaQCM6zh2Yk0aSmDCs1CbnVI8/HgASQkNKsWFpseIO9beg5xxpYhbIfA==}
+    engines: {node: 20.x || 22.x || 23.x || 24.x || 25.x || 26.x}
     requiresBuild: true
     dependencies:
       bindings: 1.5.0
@@ -6771,7 +6776,6 @@ packages:
       '@img/sharp-win32-ia32': 0.34.5
       '@img/sharp-win32-x64': 0.34.5
     dev: false
-    optional: true
 
   /shebang-command@2.0.0:
     resolution: {integrity: sha512-kHxr2zZpYtdmrN1qDjrrX/Z1rR1kG8Dx+gkpK1G4eXmvXswmcE1hTWBWYUzlraYw1/yZp6YuDY77YtvbN0dmDA==}

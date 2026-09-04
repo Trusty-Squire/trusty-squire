@@ -1,11 +1,12 @@
 import { z } from "zod";
 import { assertApi, type Tool } from "./index.js";
 import { ALWAYS_LOAD_META } from "./always-load.js";
+import { credentialLabelSchema } from "./credential-label.js";
 
 const inputSchema = z
   .object({
     service: z.string().min(1).max(120),
-    label: z.string().min(1).max(60).optional(),
+    label: credentialLabelSchema.optional(),
     value: z.string().min(1).max(8192).optional(),
     fields: z.record(z.string().min(1).max(8192)).optional(),
     env_var_suggestion: z.string().min(1).max(120).optional(),
@@ -17,18 +18,25 @@ const inputSchema = z
     auth_shape: z
       .string()
       .max(120)
-      .regex(/^(bearer|header:.+|query:.+)$/, "auth_shape must be bearer|header:<name>|query:<param>")
+      .regex(
+        /^(bearer|header:.+|query:.+)$/,
+        "auth_shape must be bearer|header:<name>|query:<param>",
+      )
       .optional(),
   })
-  .refine((b) => b.value !== undefined || (b.fields !== undefined && Object.keys(b.fields).length > 0), {
-    message: "one of value or fields is required",
-  });
+  .refine(
+    (b) => b.value !== undefined || (b.fields !== undefined && Object.keys(b.fields).length > 0),
+    {
+      message: "one of value or fields is required",
+    },
+  );
 
 const DESCRIPTION = `Save a secret the user just shared into the encrypted vault. CALL THIS
 AUTOMATICALLY whenever the user pastes a secret-shaped value (sk-, ghp_,
 AKIA, eyJ; password/token/connection-string patterns) — don't ask first.
-One entry per (service, label) — re-storing the same service OVERWRITES
-it (that's how you rotate a key: just store the new value). For
+One entry per (service, label) — re-storing the same service rotates only
+its secret fields and preserves existing metadata. Use edit_credential for
+metadata changes. For
 multi-part credentials (AWS access key + secret, DB user+password) pass
 \`fields\` (e.g. {access_key_id, secret_access_key}); for a lone key pass
 \`value\`. Optional \`label\` (default "default") keeps prod/dev keys for
@@ -74,7 +82,9 @@ export const storeCredentialTool: Tool<z.infer<typeof inputSchema>> = {
       ...(args.label !== undefined ? { label: args.label } : {}),
       ...(args.value !== undefined ? { value: args.value } : {}),
       ...(args.fields !== undefined ? { fields: args.fields } : {}),
-      ...(args.env_var_suggestion !== undefined ? { env_var_suggestion: args.env_var_suggestion } : {}),
+      ...(args.env_var_suggestion !== undefined
+        ? { env_var_suggestion: args.env_var_suggestion }
+        : {}),
       ...(args.type !== undefined ? { type: args.type } : {}),
       ...(args.auth_strategy !== undefined ? { auth_strategy: args.auth_strategy } : {}),
       ...(args.signin_url !== undefined ? { signin_url: args.signin_url } : {}),

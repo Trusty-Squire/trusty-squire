@@ -70,9 +70,10 @@ the holder of the short-lived approval link. That capability-link response also
 returns the exact server-recorded merchant, checkout origin, amount, currency,
 nonce, item, reason, requesting-agent label, and expiry that the user must review
 and authorize. It includes the approval ID and status, opaque card reference,
-operator public key, purchase-payload digest, and encrypted blob, but omits card
-display metadata and does not grant account navigation. List responses omit the
-blob and expose only the record ID, label,
+operator public key, purchase-payload digest, encrypted blob, and the bound card's
+non-secret label and `last4` display metadata so the holder can identify the card
+being released. It does not grant account navigation. List responses omit the blob
+and expose only the record ID, label,
 creation time, and optional plaintext card display metadata: a no-digit network
 name (`brand`) and exactly four digits (`last4`). These fields cannot carry a
 full PAN; legacy rows return `null`. Losing the enrolled passkey makes the card
@@ -98,6 +99,12 @@ reference, operator-key hash, item description, purchase reason, and server-deri
 requesting-agent label while deriving the card-decryption key. The API uses the
 install's authenticated agent identity when present and otherwise signs
 `unknown-agent`; the client cannot supply the label.
+
+Before submitting that approval, the holder of the capability link may instead
+choose **Deny payment**. The API atomically changes only an unexpired `pending`
+record to `denied` and clears every staged JWS and sealed-card candidate. Operator
+confirmation rechecks the terminal state, so no card is released after denial
+has committed.
 
 Just-in-time add-card approvals may be created without a card reference, while
 still binding the operator's ephemeral public key at creation. The API permits
@@ -198,21 +205,51 @@ a stuck, declined, or abandoned payment is closing the session with `operate_fin
 and starting a fresh one, not an in-place refill. Every payment entry is still
 claimed before asynchronous work begins, and a pending confirmation is claimed
 atomically, so overlapping `operate_pay` calls cannot race toward the same
-close-out. The single-page (`phase="single"`) checkout is unaffected by any of
-this: it still reads the live total, fills, and submits in one call exactly as
-before, including its own 3-D Secure wait and `payment_outcome_unknown` /
-`payment_3ds_required` handling.
+close-out. The single-page (`phase="single"`) checkout still reads the live total,
+fills, and submits in one call. Before dispatch it may select only the sole
+unambiguous new-card radio competing with a merchant-saved card, then re-verifies
+that choice and every sealed value at the final pre-click boundary; any ambiguity or
+state change fails closed. The approval lifetime is checked after mandate
+verification and again immediately before that explicit charge click. Expiry before
+the click returns `payment_approval_expired` without dispatch; once input dispatch
+may have begun, the deadline cannot abort the merchant's charge or legitimate 3-D
+Secure follow-up, and uncertain completion remains `payment_outcome_unknown`. After
+dispatch, the native 3-D Secure wait passively
+compares issuer/network/last-four evidence rendered by the issuer/app with the
+released card. A discrepancy is returned and retained across resumable status polls
+as a structured `payment_instrument_mismatch` warning; it never mutates or cancels
+the challenge, creates a charge path, or introduces another approval. Once the trusted
+click reaches the input-dispatch boundary, a rejected click completion or missing page
+observer is conservatively retained as an unknown submitted payment with resumable
+post-submit state. That state remains `payment_outcome_unknown` until concrete
+merchant-terminal or genuine 3-D Secure evidence appears; status checks cannot
+promote uncertainty into a 3-D Secure handoff. Only a failure known to precede the
+input-dispatch boundary is classified as a checkout failure and allowed to clear the
+pending-submit state.
 
 Payment state, the approval keypair, and the verified mandate remain attached to the
-addressed operate session. `operate_pay` and `operate_payment_status`
+addressed operate session. `operate_pay` surfaces the approval link before a bounded
+server-side wait of up to one minute. If that call returns `approval_pending`, another
+`operate_pay` call with the same arguments resumes the same approval and keypair rather
+than creating another human authorization. `operate_payment_status` is an optional
+non-charging view before charge and the continuation after an unresolved submitted attempt;
+its bounded waits never verify a mandate or open a card. When either path observes
+denial or expiry, it clears the private operator key and keeps that session's attempt
+terminal. Repeated calls return the same terminal result and cannot automatically mint
+a replacement approval; a new charge attempt requires a fresh session and a fresh
+explicit human approval action. `operate_pay` and `operate_payment_status`
 resolve `session_id` once at tool entry and return that ID in
 their results and follow-up hints. Omitting the ID is accepted only when exactly one
-process-local session exists; no path selects a newest or arbitrary session. Closing a
-session first rejects new calls and drains calls that already entered. Remaining payment
-state never blocks teardown: close records that the profile is payment-sensitive, clears
-the active payment and payment-field seal, and destroys or quarantines the profile instead
-of returning it to the warm pool. No payment state or card-bearing browser profile can
-therefore carry into a later session.
+process-local session exists; no path selects a newest or arbitrary session. Ordinary finish
+first rejects new calls and drains calls that already entered within the bounded terminal
+transition. Watchdog and disconnect teardown also close admission; maximum-lifetime and CPU
+termination defer only an active payment, and only until that same hard deadline. Existing
+captured dispatch evidence shares one metadata-only audit, and teardown performs the bounded
+pending-3DS live check before clearing payment state. Remaining payment state never makes the
+browser immortal: close records that the profile is payment-sensitive, clears the active payment
+and payment-field seal, and destroys or quarantines that session's unique ephemeral profile without
+publishing its browser state. No payment state or card-bearing browser profile can therefore update
+the saved login snapshot or carry into a later session.
 
 The phone decrypts the saved card locally, then HPKE-seals it directly to that
 ephemeral X25519 key using HKDF-SHA256 and AES-256-GCM. Each signed payload hash
@@ -240,15 +277,22 @@ values.
 
 The MCP operator fetches Vouchflow's JWKS and fails closed unless signature,
 issuer, audience, purchase context, payload hash, and user presence all verify.
-It confirms the exact verified submission before retaining the card to fill the
-checkout. Browser passkeys are capped at low confidence in Vouchflow regardless
+First acceptance at `POST /approve` also requires a currently valid assertion.
+An exact, nonce-bound candidate already verified there may outlive the assertion
+while waiting in the authenticated relay: only `/confirm` and the MCP relay consumer
+may revalidate it at a point inside its signed validity interval, and only within the
+18-minute maximum approval lifetime. Signature, issuer, audience, context, payload
+binding, confidence, and the approval record's own expiry remain mandatory. The
+operator confirms the exact verified submission before retaining the card to fill
+the checkout. Browser passkeys are capped at low confidence in Vouchflow regardless
 of biometric, so mandate assurance rests on user presence, the single-use nonce,
 and amount, recipient, origin, and item binding rather than a high confidence
 tier. Plaintext PAN and CVV are not returned through MCP to the coding-agent
 model, sent to the Trusty Squire API, logged, or stored in payment audit events.
 Issuer 3-D Secure is handed back to the user rather than automated; the operator
 may wait for the user to resolve the challenge, but it never completes the
-challenge itself.
+challenge itself. Its mismatch comparison reads only rendered ACS evidence and
+leaves the cardholder's approval decision unchanged.
 
 Payment audit events are deliberately metadata-only: merchant, amount,
 currency, card last four digits, status, and optional mandate, opaque card, and
@@ -298,6 +342,12 @@ back at all.
 - OAuth sign-in (Google / GitHub) happens in the **user's own real browser
   session** that they explicitly connect. Trusty Squire does not ask the agent to
   type those passwords.
+- A context-backed login and an explicitly confirmed, non-payment operator result
+  may save a private (`0600`) Playwright storage-state snapshot containing all
+  cookies, local storage, and IndexedDB in the canonical profile namespace. Each
+  operator session restores that sensitive auth material into a fresh private
+  profile instead of opening the canonical profile. Plain-Chrome login, failed or
+  unconfirmed results, and payment-sensitive sessions preserve the prior snapshot.
 - Learned automation ("skills") are **Ed25519-signed** replayable recipes.
   Captures used to synthesize them record post-verify state with **secrets
   redacted**, and skill promotion is deterministic — it must not depend on clocks,

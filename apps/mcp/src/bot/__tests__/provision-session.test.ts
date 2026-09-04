@@ -14,6 +14,7 @@ import {
   isInboxReadHost,
   parseVerification,
   extractSenderEmail,
+  expectedVerificationDomains,
   buildVerificationResult,
   buildConsentRefusal,
   redactEmailForTrace,
@@ -319,6 +320,21 @@ describe("resolveTarget", () => {
     expect(stableElementId(modal)).not.toBe(stableElementId(background));
   });
 
+  it("keeps unlabeled field identities stable when their values change", () => {
+    const before = [
+      el({ tag: "input", type: "text", value: "alpha", selector: "#first" }),
+      el({ tag: "input", type: "text", value: "beta", selector: "#second" }),
+    ];
+    const after = [
+      el({ tag: "input", type: "text", value: "beta", selector: "#first" }),
+      el({ tag: "input", type: "text", value: "alpha", selector: "#second" }),
+    ];
+    const beforeRefs = provisionElementRefs(before);
+    const afterRefs = provisionElementRefs(after);
+    expect(afterRefs.get(after[0]!)).toBe(beforeRefs.get(before[0]!));
+    expect(afterRefs.get(after[1]!)).toBe(beforeRefs.get(before[1]!));
+  });
+
   it("distinguishes same-label siblings by their selector (no ordinal collision)", () => {
     // A realistic list: two "Remove" buttons, same label/path/role but DIFFERENT
     // selectors. The selector is folded into stableElementId, so they get distinct
@@ -539,6 +555,71 @@ describe("parseVerification (email OTP + link extraction)", () => {
     expect(r.code).toBe("778201");
     expect(r.link).toContain("confirm");
   });
+
+  it("extracts a magic-link login CTA with no code (Resend 'Log in to Resend')", () => {
+    const links = [
+      "https://resend.com/unsubscribe?u=1",
+      "https://resend.com/login?token=abc123def456",
+    ];
+    const r = parseVerification("Log in to Resend. Click the button below to log in.", links);
+    expect(r.code).toBeNull();
+    expect(r.link).toBe("https://resend.com/login?token=abc123def456");
+  });
+
+  it("extracts a Keycloak account-link CTA (Xata 'link your Google account')", () => {
+    const links = [
+      "https://auth.xata.io/realms/xata/login-actions/action-token?key=eyJhbGciOiJIUzI1NiJ9.abc",
+      "https://xata.io/unsubscribe?u=2",
+    ];
+    const r = parseVerification(
+      "Someone tried to link your account with a Google account. Click to confirm this action.",
+      links,
+    );
+    expect(r.link).toBe(
+      "https://auth.xata.io/realms/xata/login-actions/action-token?key=eyJhbGciOiJIUzI1NiJ9.abc",
+    );
+  });
+
+  it("does not return an unsubscribe/footer link when a verify CTA is also present", () => {
+    const links = [
+      "https://example.com/unsubscribe?u=123",
+      "https://example.com/email/preferences",
+      "https://example.com/verify?token=abc123",
+    ];
+    const r = parseVerification("Please verify your email", links);
+    expect(r.link).toBe("https://example.com/verify?token=abc123");
+  });
+
+  it("prefers a link on the expected (sender/source) domain when candidates tie otherwise", () => {
+    const links = [
+      "https://tracker.example.net/login?token=abc",
+      "https://app.realservice.com/login?token=abc",
+    ];
+    const r = parseVerification("Log in to continue", links, ["realservice.com"]);
+    expect(r.link).toBe("https://app.realservice.com/login?token=abc");
+  });
+});
+
+describe("expectedVerificationDomains (host-preference hint for link picking)", () => {
+  it("derives a domain from a bare-domain sender hint", () => {
+    expect(expectedVerificationDomains("resend.com", null)).toEqual(["resend.com"]);
+  });
+
+  it("derives a domain from an email-address sender hint", () => {
+    expect(expectedVerificationDomains("noreply@xata.io", null)).toEqual(["xata.io"]);
+  });
+
+  it("includes the opened message's sender domain", () => {
+    expect(expectedVerificationDomains(undefined, "search-api@brave.com")).toEqual(["brave.com"]);
+  });
+
+  it("dedupes when both hints resolve to the same domain", () => {
+    expect(expectedVerificationDomains("xata.io", "noreply@xata.io")).toEqual(["xata.io"]);
+  });
+
+  it("returns an empty array when neither hint is present", () => {
+    expect(expectedVerificationDomains(undefined, null)).toEqual([]);
+  });
 });
 
 describe("buildVerificationResult (Flow A — code-wall hand-back)", () => {
@@ -592,7 +673,7 @@ describe("buildConsentRefusal (PR2 — inbox-read consent withheld)", () => {
     expect(r).toMatchObject({ session_id: "sk_2", found: false, code: null, link: null });
     expect(r.needs_user).toEqual({
       wall: "verification_code",
-      message: expect.stringContaining("not consented"),
+      message: expect.stringContaining("Inbox reading is disabled"),
       resume: "code",
     });
   });
@@ -800,6 +881,12 @@ describe("hostAllowed (gates only agent-initiated goto)", () => {
   it("allows the target host and its subdomains", () => {
     expect(hostAllowed("https://langwatch.ai/onboarding", allowed)).toBe(true);
     expect(hostAllowed("https://app.langwatch.ai/x", allowed)).toBe(true);
+  });
+
+  it("allows only Neon's exact cross-domain login route for a Neon signup", () => {
+    expect(hostAllowed("https://console.neon.tech", ["neon.com"])).toBe(true);
+    expect(hostAllowed("https://attacker.neon.tech", ["neon.com"])).toBe(false);
+    expect(hostAllowed("https://console.neon.tech", ["example.com"])).toBe(false);
   });
 
   it("allows default identity-provider hosts", () => {
@@ -1294,16 +1381,15 @@ describe("googleSessionGate (Change 5 — fail-closed precondition gate)", () =>
     expect(googleSessionGate(["google"])).toEqual({ ok: true });
     expect(googleSessionGate(["github", "google"])).toEqual({ ok: true });
   });
-  it("fails closed to a connect hand-back when Google is absent", () => {
+  it("fails closed to a context-backed login hand-back when Google is absent", () => {
     const r = googleSessionGate([]);
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.needs_user.wall).toBe("google_session");
-      expect(r.needs_user.resume).toBe("connect");
+      expect(r.needs_user.resume).toBe("login");
       expect(r.needs_user.message).toMatch(/has NOT started/i);
-      // Must steer to --force-relogin: plain `connect` short-circuits on the
-      // cached "connected" marker and won't refresh a stale session.
-      expect(r.needs_user.message).toMatch(/--force-relogin/);
+      expect(r.needs_user.message).toContain("login --provider=google --force-relogin");
+      expect(r.needs_user.message).not.toContain("connect --force-relogin");
     }
   });
   it("fails closed when only a non-Google provider is live (no autonomous login)", () => {

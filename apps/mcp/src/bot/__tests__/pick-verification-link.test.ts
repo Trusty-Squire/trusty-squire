@@ -99,6 +99,51 @@ describe("pickVerificationLink", () => {
     expect(pickVerificationLink(links)).toBeNull();
   });
 
+  it("picks a bare 'login' magic-link CTA (Resend 'Log in to Resend')", () => {
+    const links = ["https://resend.com/unsubscribe?u=1", "https://resend.com/login?token=abc"];
+    expect(pickVerificationLink(links)).toBe("https://resend.com/login?token=abc");
+  });
+
+  it("picks a Keycloak account-link action-token URL (Xata 'link your Google account')", () => {
+    const links = [
+      "https://xata.io/unsubscribe?u=2",
+      "https://auth.xata.io/realms/xata/login-actions/action-token?key=eyJ.abc",
+    ];
+    expect(pickVerificationLink(links)).toBe(
+      "https://auth.xata.io/realms/xata/login-actions/action-token?key=eyJ.abc",
+    );
+  });
+
+  it("picks an identity-broker /link path even without an explicit keyword match", () => {
+    const links = ["https://accounts.example.com/unsubscribe", "https://auth.example.com/realms/x/broker/google/link?nonce=1"];
+    expect(pickVerificationLink(links)).toBe(
+      "https://auth.example.com/realms/x/broker/google/link?nonce=1",
+    );
+  });
+
+  it("prefers a link on an expected domain over an equally-scored one on another host", () => {
+    const links = [
+      "https://tracker.example.net/login?token=abc",
+      "https://app.realservice.com/login?token=abc",
+    ];
+    expect(pickVerificationLink(links, ["realservice.com"])).toBe(
+      "https://app.realservice.com/login?token=abc",
+    );
+  });
+
+  it("accepts a subdomain of the expected domain (auth host under the service's registrable domain)", () => {
+    const links = [
+      "https://tracker.example.net/login?token=abc",
+      "https://auth.xata.io/login?token=abc",
+    ];
+    expect(pickVerificationLink(links, ["xata.io"])).toBe("https://auth.xata.io/login?token=abc");
+  });
+
+  it("does not let an expected-domain bonus alone turn a zero/negative score positive", () => {
+    const links = ["https://realservice.com/unsubscribe?u=1"];
+    expect(pickVerificationLink(links, ["realservice.com"])).toBeNull();
+  });
+
   it("picks the NEWEST link when a thread has several (avoids an expired token)", () => {
     // Gmail renders a thread oldest→newest; the last matching link is the fresh
     // re-send. Both score equally, so the tie must break to the later one.

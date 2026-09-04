@@ -38,6 +38,8 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
     const browser = {
       goto: vi.fn().mockResolvedValue(undefined),
       recoverActivePage: vi.fn(),
+      armOpenedTabAdoption: vi.fn(),
+      adoptOpenedTab: vi.fn(async () => null),
       extractInteractiveElements: vi.fn().mockResolvedValue([]),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout session still active"),
       currentUrl: vi.fn().mockReturnValue(url),
@@ -169,7 +171,7 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
         example: {
           session_id: "<session_id>",
           kind: "select_many",
-          selections: { "Observed field label": "Visible option label" },
+          selections: { "@e:<current-handle>": "Visible option label" },
         },
         guidance: [/intended order/i, /re-observes after each success/i, /partial results/i],
       },
@@ -195,9 +197,9 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
           kind: "await_verification",
           sender: "service.example",
           into_slot: "otp",
-          grant_inbox_consent: false,
+          grant_inbox_consent: true,
         },
-        guidance: [/OTP stays sealed/i, /explicitly agrees/i, /grant_inbox_consent:true/i],
+        guidance: [/OTP stays sealed/i, /Inbox reading is on by default/i, /grant_inbox_consent:false/i],
       },
     ];
 

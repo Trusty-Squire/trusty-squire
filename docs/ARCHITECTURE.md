@@ -57,11 +57,20 @@ A live browser session held by the MCP server. The host agent observes pages and
 chooses actions, while the MCP process owns the browser, sealed secret slots,
 captcha handling, and extraction.
 
+The default observation boundary is Compact V2. The MCP builds a screened,
+finite action map before any audit, retention, delta, or public result; raw page
+text, URLs, values, and snapshot files stay private. Its opaque controls are
+bound to one observation generation, main-document identity, page, and exact
+live map. The detailed wire format, private query/paging protocol, and V1
+rollout switch are owned by
+[`DESIGN-observe-compact.md`](DESIGN-observe-compact.md).
+
 **Payment approval**
 
 A short-lived handoff from an active operate session to the user's phone. The
 phone can add and bind a card when needed. The anonymous approval shell displays
-the exact server-recorded purchase details for an amount-bound approval. One
+the exact server-recorded purchase details and identifies the bound card by its
+non-secret label and last four digits for an amount-bound approval. One
 payment-context passkey authorization signs that approval. The API relays the
 signed mandate and operator-sealed card through an account-scoped, short-TTL
 database record and mutates approval state only after operator verification. The
@@ -196,16 +205,27 @@ agent starts operate_pay in the addressed checkout session
      no saved cards starts add-card, and multiple cards require a user choice
   -> operator creates an ephemeral key; API creates a short-lived approval relay
      and attaches the requesting MCP host's initialize clientInfo.name
+  -> operate_pay surfaces that approval link, then waits server-side for up to
+     one minute; an approval_pending result is resumed by calling operate_pay
+     again with the same arguments, never by minting another approval
   -> if the approval has no card, the user adds one and the API binds that saved
      card to the still-pending approval
   -> the anonymous approval shell displays merchant, checkout origin, item, reason,
      requesting agent, amount, and currency from the short-lived server record
   -> the user reviews that intent and one passkey ceremony signs the canonical
      payload, unlocks the card, and seals it to the ephemeral operator
+  -> before submitting approval, the user may instead deny the pending request;
+     denial atomically clears staged candidates, and later confirmation fails
   -> the API stages that opaque candidate in an account-scoped Postgres relay with
      a 15-second TTL so another API worker can deliver it to the waiting operator
-  -> payment status and bounded-wait calls resolve the same session once at tool
-     entry and return its session_id in their result and every follow-up hint
+  -> operate_payment_status is an optional non-charging pre-charge status view and
+     the required continuation for a post-submit outcome; its 0-60-second bound
+     is implemented as repeated short server waits within one tool call
+  -> payment calls resolve the same session once at tool entry and return its
+     session_id in their result and every follow-up hint
+  -> observed denial or expiry scrubs the operator private key and keeps that
+     session attempt terminal, so repeated calls cannot mint a replacement
+     approval without a fresh session and explicit human action
   -> the operator verifies the final JWS, opens the card, and confirms the exact
      candidate fingerprint; successful confirmation clears the JWS and ciphertext
   -> single-page add-card attempts to re-read every signed checkout field; a
@@ -217,6 +237,9 @@ agent starts operate_pay in the addressed checkout session
      can receive card data
   -> PAN, expiry, and CVV are required; cardholder name and other billing fields
      are filled best-effort, so a missing name field does not abort the payment
+  -> before a single-page submit, a competing merchant-saved card radio is switched
+     only when there is one unambiguous new-card choice; the choice and sealed values
+     are rechecked immediately before dispatch, and every ambiguous state fails closed
   -> the raw card is zeroed; sealed, observation-masked page fields remain, while
      session state retains only approval/mandate and card-reference metadata
   -> the caller verifies the live final total against the approved amount itself
@@ -243,13 +266,15 @@ agent starts operate_pay in the addressed checkout session
      in SECURITY.md)
   -> only the single-page (phase="single") flow still submits and enters the
      bounded authentication/outcome wait below; the API sends a challenge-specific
-     Telegram nudge for detected 3-D Secure or
-     cautious bank-app guidance when authentication may be out of band
-  -> the browser completes authentication natively while the operator polls only for
-     a new merchant terminal route with a substantive order or receipt identity;
+     Telegram nudge only after genuine 3-D Secure evidence appears
+  -> the browser completes authentication natively while the operator polls for a new
+     merchant terminal route with a substantive order or receipt identity and passively
+     compares ACS issuer/network/last-four evidence with the released card. A mismatch
+     is a persistent structured warning, not a challenge mutation or second approval;
      captcha-hosted frames are excluded from challenge and failure-text classification
-  -> a visible decline is payment_declined; timeout, or a disabled wait, hands
-     the unresolved outcome to the user instead of guessing success
+  -> a visible decline is payment_declined; a genuine unresolved challenge is
+     payment_3ds_required, while an attempt without merchant-terminal or 3-D
+     Secure evidence remains payment_outcome_unknown across status checks
   -> the post-wait metadata-only payment status is audited
   -> operate_finish closes that session's admission gate, drains calls that already
      entered, clears any remaining payment state, and closes without a payment-state veto;
@@ -278,8 +303,9 @@ capture -> synthesize -> sign -> publish -> verify -> active
 
 DOM-target actions are promotable into registry Skills only when they are
 main-frame and inventory-backed; modeled navigation retains its existing domain
-lock. A session can still complete by using `operate_act` with a live `text=…`
-or `css=…` locator when a visible control has no observed ref, but an
+lock. An explicitly selected V1 session can still complete by using
+`operate_act` with a live `text=…` or `css=…` locator when a visible control has
+no observed ref, but an
 off-inventory action cannot be synthesized into a portable step. Such a session
 is skipped by auto-promotion and cannot be saved as an operator recipe.
 Inventory-backed frame actions can be saved in an operator recipe with their
