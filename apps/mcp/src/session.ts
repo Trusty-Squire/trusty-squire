@@ -209,6 +209,24 @@ export class SessionStore {
     }
   }
 
+  private async writeAtomicIfMissing(file: string, value: unknown): Promise<void> {
+    await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+    const temporary = `${file}.tmp-${randomUUID()}`;
+    try {
+      await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, {
+        mode: 0o600,
+        flag: "wx",
+      });
+      try {
+        await fs.link(temporary, file);
+      } catch (err) {
+        if ((err as { code?: string }).code !== "EEXIST") throw err;
+      }
+    } finally {
+      await fs.rm(temporary, { force: true });
+    }
+  }
+
   /** Every account installed on this machine. */
   async listAccounts(): Promise<string[]> {
     let names: string[];
@@ -263,12 +281,22 @@ export class SessionStore {
    */
   async write(data: SessionData): Promise<void> {
     const key = accountKey(data);
+    if (!isSafeAccountKey(key)) {
+      throw new Error(`Invalid session account ID: ${key}`);
+    }
     const entry = withoutLegacyProxy(data);
     await this.writeAtomic(this.accountFile(key), entry);
     // A claim that finally names an account supersedes the transient pre-claim
     // entry rather than leaving it behind forever.
     if (key !== UNBOUND_ACCOUNT_KEY) {
       await fs.rm(this.accountFile(UNBOUND_ACCOUNT_KEY), { force: true });
+    }
+    const pointer = await this.readPointer();
+    if (pointer !== null) {
+      const pointerKey = accountKey(pointer);
+      if (pointerKey !== key && isSafeAccountKey(pointerKey)) {
+        await this.writeAtomicIfMissing(this.accountFile(pointerKey), pointer);
+      }
     }
     // The pointer, in the ORIGINAL flat shape, so servers already running an
     // older build keep reading a binding they understand. Last-write-wins is
@@ -283,7 +311,10 @@ export class SessionStore {
    */
   async clear(accountId?: string): Promise<void> {
     const key = accountId ?? (await this.currentAccountId());
-    if (key === null || key === undefined || !isSafeAccountKey(key)) return;
+    if (key === null || key === undefined) return;
+    if (!isSafeAccountKey(key)) {
+      throw new Error(`Invalid session account ID: ${key}`);
+    }
     await fs.rm(this.accountFile(key), { force: true });
     const pointer = await this.readPointer();
     // The pointer still names the account we just removed (or is the legacy

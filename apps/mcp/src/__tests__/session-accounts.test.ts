@@ -113,6 +113,17 @@ describe("SessionStore", () => {
     expect((await fs.readdir(dir)).filter((name) => name.includes(".tmp-"))).toEqual([]);
   });
 
+  it("rejects account IDs that could escape the account directory", async () => {
+    const store = new SessionStore(tmpFile);
+
+    await expect(store.write(entry("../session", "tok"))).rejects.toThrow(
+      "Invalid session account ID",
+    );
+    await expect(store.clear("../session")).rejects.toThrow("Invalid session account ID");
+    await expect(fs.stat(tmpFile)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.stat(path.join(dir, "sessions"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
 });
 
 // Running servers cannot be upgraded in place: the box carries `mcp server`
@@ -170,20 +181,35 @@ describe("compatibility with builds that are already running", () => {
     expect(pointer).not.toHaveProperty("version");
   });
 
-  it("migrates a legacy flat install into sessions/ only on an explicit write", async () => {
+  it("preserves a legacy pointer account when another account connects", async () => {
     await fs.writeFile(tmpFile, JSON.stringify(flat));
     const store = new SessionStore(tmpFile);
     await store.write(entry(ACCOUNT_B, "tok_b"));
-    // B is now a file of its own; A is still readable from the legacy flat copy
-    // until it is itself rewritten.
+
+    expect(await store.read(ACCOUNT_A)).toMatchObject({ agent_session_token: "tok_legacy" });
     expect(JSON.parse(await fs.readFile(accountFile(ACCOUNT_B), "utf8"))).toMatchObject({
       agent_session_token: "tok_b",
     });
-    await store.write({ ...flat, saved_at: "t2" });
     expect(JSON.parse(await fs.readFile(accountFile(ACCOUNT_A), "utf8"))).toMatchObject({
       agent_session_token: "tok_legacy",
     });
     expect(await store.listAccounts()).toEqual([ACCOUNT_A, ACCOUNT_B].sort());
+  });
+
+  it("keeps an existing account file authoritative over the pointer mirror", async () => {
+    await fs.mkdir(path.join(dir, "sessions"), { recursive: true });
+    await fs.writeFile(tmpFile, JSON.stringify(flat));
+    await fs.writeFile(
+      accountFile(ACCOUNT_A),
+      JSON.stringify({ ...flat, agent_session_token: "tok_authoritative" }),
+    );
+    const store = new SessionStore(tmpFile);
+
+    await store.write(entry(ACCOUNT_B, "tok_b"));
+
+    expect(await store.read(ACCOUNT_A)).toMatchObject({
+      agent_session_token: "tok_authoritative",
+    });
   });
 
   it("survives an OLD build overwriting the pointer with its own flat object", async () => {

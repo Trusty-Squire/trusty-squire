@@ -5,7 +5,7 @@
 //
 // Usage (typically via freeze):
 //   FORCE_COLOR=3 pnpm tsx scripts/render-connect-walkthrough.ts > /tmp/walk.ansi
-//   freeze /tmp/walk.ansi --output apps/mcp/assets/connect-walkthrough.svg \
+//   freeze /tmp/walk.ansi --output apps/mcp/assets/screencaps/connect-walkthrough.svg \
 //     --background "#0d0d10" --window --theme "monokai"
 
 import * as ui from "../src/install/ui.js";
