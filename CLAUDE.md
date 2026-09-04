@@ -166,9 +166,11 @@ silent failures.
   2. Opens a browser so the user signs in (Google/GitHub) and confirms
      the machine — binds the install to the account, writes the
      account-bound `agent_session_token` to the local session file.
-  3. Runs the one-time OAuth login (the `mcp login` flow folded in —
-     Google/GitHub session into the bot's Chrome profile; non-fatal,
-     `--skip-browser` opts out for CI). The [README install section](README.md#install)
+  3. Establishes the provider session in the bot's Chrome profile as part of
+     that same sign-in, and reports success ONLY after re-probing the profile
+     and seeing it live (`--skip-browser` therefore reports the install as
+     incomplete: the bot's Chrome never observed the sign-in). The
+     [README install section](README.md#install)
      owns the supported interactive-login environments; automated operator launch
      constraints live in [`AGENTS.md`](AGENTS.md#browser-launch-posture).
      Every install is account-bound — there is no anonymous tier.

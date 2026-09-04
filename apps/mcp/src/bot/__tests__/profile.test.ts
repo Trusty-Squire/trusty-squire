@@ -3,7 +3,7 @@
 // A bot Chrome that was SIGKILLed (or torn down hard) leaves a
 // SingletonLock symlink behind. Without recovery, the next
 // launchPersistentContext aborts with "Failed to create a
-// ProcessSingleton" and bricks every signup AND `mcp login` — the
+// ProcessSingleton" and bricks every signup AND `mcp connect` — the
 // "relogin prompted, still failed" bug. clearStaleSingletonLock
 // removes the lock iff its holder pid is provably dead on this host, and
 // NEVER yanks a lock held by a live process.

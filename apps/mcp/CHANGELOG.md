@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **BREAKING: the `login` subcommand is removed — `connect` is the one
+  onboarding and re-auth pathway.** `npx @trusty-squire/mcp login` (and its
+  `--provider` / `--profile-dir` flags) now exits 64 pointing at
+  `connect --force-relogin=google|github`. Two defects go with it: `login` ran
+  Google's OAuth through a CDP-attached Chrome, which Google's secure-browser
+  check rejects, and it could seed a provider session independently of the
+  account claim. The operator's `google_session` wall now hands back
+  `resume: "connect"` and names `connect --force-relogin=google`, so a host
+  agent can no longer recommend the removed command.
+- **`connect` will not report success without a verified live Google session.**
+  The machine claim proves the account plumbing, not that the bot can act as
+  you. Connect now gates its success on the post-ceremony live provider probe:
+  no session — or an unverifiable one — fails loudly with the reconnect command
+  instead of printing "Squire on duty". A scoped `--force-relogin=github` that
+  doesn't land GitHub also fails. `--skip-browser` writes the config but reports
+  the install as incomplete, since the bot's Chrome never observes the sign-in.
+
 - **`audit_log` now defaults to a readable security ledger.** Routine proxied
   egress collapses into per credential/host/burst rollups (count, status
   breakdown, bytes, window, covering grants) instead of one row per call, with

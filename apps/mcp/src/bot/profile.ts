@@ -782,7 +782,7 @@ export interface WaitForProfileOptions {
 
 // Cross-process serialization gate for the shared Chrome profile.
 //
-// The signup bot (in the MCP server) and a separate `mcp login` process
+// The signup bot (in the MCP server) and a separate `mcp connect` process
 // both open the one profile, and Chrome single-instances it. Rather than
 // run a parallel lock system, this waits on Chrome's OWN SingletonLock as
 // the semaphore:

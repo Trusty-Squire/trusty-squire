@@ -583,7 +583,8 @@ function oauthActionDeadlineError(deadline: OAuthActionDeadline): Error {
     return Object.assign(
       new Error(
         `google_session: OAuth did not complete within ${Math.ceil(deadline.timeoutMs / 1000)} seconds; ` +
-          "the saved session may have expired, so re-login before retrying",
+          "the saved session may have expired, so reconnect with " +
+          "`npx @trusty-squire/mcp connect --force-relogin=google` before retrying",
       ),
       { code: "google_session" },
     );

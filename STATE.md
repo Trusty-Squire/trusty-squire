@@ -119,6 +119,14 @@ Shipped `BOT_GOOGLE_PROFILE_DIR` (+ `mcp login --profile-dir`) to pin a personal
 Google identity for Google-OAuth discover, bypassing the robot pool (commit
 `35323cb`). A personal Gmail creates projects under "No organization" freely.
 
+**HISTORICAL (2026-09-04): both halves of that escape hatch are gone.**
+`BOT_GOOGLE_PROFILE_DIR` stopped being read some time before the single-pathway
+work, and `--profile-dir` was removed with the `login` command itself. There is
+no supported way to seed a secondary Google identity into an isolated profile
+today — `connect` always uses the bot's own Chrome profile. Re-deriving this
+capability means designing it against `connect`, and it must not re-bind the
+machine's account to whatever identity signs in.
+
 ### ✓ CLEARED (2026-06-23): MFA + org + project-creation, with personal Gmail + 2SV
 
 With a fresh personal Gmail (no 2SV), `console.firebase.google.com` first
@@ -550,8 +558,8 @@ connect's exact launch with AND without `--disable-blink-features=
 AutomationControlled`; both report `webdriver:false` (patchright manages it), so
 dropping that flag does NOT help. The tell is the CDP attachment itself.
 
-**THE FIX (validated in principle by the plain-OAuth+claimed run):** the connect /
-`mcp login` browser must run as PLAIN Chrome — NO `--remote-debugging-port`, NO
+**THE FIX (validated in principle by the plain-OAuth+claimed run):** the login
+browser must run as PLAIN Chrome — NO `--remote-debugging-port`, NO
 `connectOverCDP` — and detect login/seed completion by querying the profile's
 on-disk Cookies SQLite for live provider auth-cookie rows. This makes the login
 browser byte-identical to the plain Chrome that passes Google's OAuth check.
@@ -578,9 +586,17 @@ mcp-login CDP path). Plain-login path for the connect claim:
   bytes or accept deleted-cookie remnants.
 - `RunInBotChromeOpts.plainProfileLogin` + `plainPollUntilDone(profileDir)` +
   `plainOnSuccess(profileDir)` — additive; `runHeadlessChrome`/`runDisplayedChrome`
-  branch to the plain launcher and pass profileDir (no context). `mcp login`
-  (GitHub liveness needs CDP + it's a DIRECT login, CDP-safe) is UNTOUCHED on the
-  CDP path.
+  branch to the plain launcher and pass profileDir (no context). The `login`
+  subcommand (GitHub liveness needs CDP + it's a DIRECT login, CDP-safe) was
+  left UNTOUCHED on the CDP path.
+
+  **SUPERSEDED (2026-09-04).** Leaving one command on the CDP path kept the bug
+  alive: `login --provider=google` ran Google's OAuth through CDP and Google's
+  secure-browser check reloaded/rejected the page (reproduced live). The `login`
+  subcommand and the whole CDP login branch are DELETED — plain Chrome is now
+  the only login launcher, and `connect` is the only pathway. Don't reintroduce
+  a second sign-in command: it was also how an install could report success with
+  no live Google session (connect now gates its success on the live probe).
 - `openInstallConfirmInBotChrome` sets `plainProfileLogin`; connect `pollOnce`
   (cli.ts) now takes profileDir and checks only the requested provider via
   `profileHasProviderCookies`. Normal onboarding completes only from its
