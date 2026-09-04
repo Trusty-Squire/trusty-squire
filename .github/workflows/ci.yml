@@ -311,7 +311,7 @@ jobs:
       - name: Test release verifier failure handling
         if: needs.secret-scan.outputs.shell_tests == 'true'
         run: bash scripts/__tests__/verify-install.test.sh
-      - name: Test release-mcp stable-cut dependent-pin repin
+      - name: Test release-mcp single-main next-rc + stable refusal
         if: needs.secret-scan.outputs.shell_tests == 'true'
         run: bash tools/__tests__/release-mcp.test.sh
       - uses: pnpm/action-setup@v4

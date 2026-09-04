@@ -34,7 +34,7 @@ release SOP. The normal RC cut is one command plus one merge:
 pnpm release:mcp next-rc
 ```
 
-The command derives the next RC from `origin/staging`, bumps it, commits, pushes,
+The command derives the next RC from `origin/main`, bumps it, commits, pushes,
 and opens the release PR. Merge after the required checks pass; `release.yml`
 publishes npm `next` automatically. Pass an explicit version only for stable or
 nonstandard cuts. Follow the emergency fallback only when CI cannot publish.

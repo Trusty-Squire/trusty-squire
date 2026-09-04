@@ -338,8 +338,7 @@ pnpm -F @trusty-squire/api prisma:generate
 **CI-AUTOMATED — the API deploys on push to `main` when `apps/api/**`(or the
 workspace packages it bundles: vault/skill-schema, or the lockfile)
 changes.**`.github/workflows/release-api.yml`runs typecheck+test as a gate,
-then`flyctl deploy --remote-only`to`trusty-squire-api`(the`release_command`runs`prisma db push`for the api schema). Pushes to`staging` run tests only,
-no deploy. This exists because a manual-only API deploy let the mcp client ship
+then`flyctl deploy --remote-only`to`trusty-squire-api`(the`release_command`runs`prisma db push`for the api schema). This exists because a manual-only API deploy let the mcp client ship
 a feature whose server route was never deployed (egress grants 404'd in prod,
 0.9.15). Server + client now ship together.
 
@@ -374,44 +373,42 @@ longer published — do not recreate it.
 **RELEASING IS CI-AUTOMATED — DO NOT publish from a laptop, and never ask
 for the npm token (it lives in GitHub Actions secrets, not locally).**
 `.github/workflows/release.yml` is the publisher. It fires on **push to
-`main` or `staging`** whenever `apps/mcp/package.json`'s `version` changes
-(path-filtered to the mcp tarball's inputs), re-runs lint+typecheck+test as
-a gate, then `npm publish`es `@trusty-squire/mcp@<version>` with provenance
-and cuts a GitHub release `v<version>`. It is idempotent: if tag `v<version>`
-already exists it's a no-op, so re-pushing `main` without a version bump does
-NOT republish.
+`main`** whenever `apps/mcp/package.json`'s `version` changes (path-filtered
+to the mcp tarball's inputs). A push to `main` requires a **prerelease**
+version and publishes npm `next`. A separate `workflow_dispatch` on the same
+workflow (**Release mcp** in the Actions UI, run against `main` HEAD with a
+`stable_version` input) publishes a stable `X.Y.Z` to npm `latest` without a
+commit. Both paths re-run lint+typecheck+test as a gate, publish with
+provenance, and cut a GitHub release `v<version>`; both are idempotent — if
+tag `v<version>` already exists it's a no-op, so re-pushing `main` without a
+version bump does NOT republish. Full runbook and rationale:
+[`docs/single-main-migration.md`](docs/single-main-migration.md).
 
-**Branch routing (enforced) — feature/fix PRs target `staging`, NOT `main`.**
-`staging` is the integration branch where all work accumulates; **`main`
-receives work ONLY via the stable release promotion** (a `release:mcp <stable>`
-cut off staging → PR to main → npm `latest`). Merging feature PRs straight to
-`main` while `staging` holds unpromoted RC work is what forked the two branches
-(38 commits diverged, a 27-file payment-auth merge conflict) and forced a full
-reconciliation before the `1.1.7` release — do not repeat it. When dispatching
-crews or opening PRs for feature work, branch off `origin/staging` and target
-`staging`. Only `release:mcp` stable cuts touch `main`.
+**Branch routing — everything targets `main`.** `main` is the single
+integration and release branch: feature/fix PRs and release PRs all target
+`main`, gated by branch protection (required checks `secret-scan` +
+`typecheck` + `test`, 0 approvals required, no direct pushes). There is no
+second branch to keep in sync.
 
-The release SOP — `pnpm release:mcp <version>` automates steps 1-2 (bump +
-CHANGELOG seed + branch + PR to the right channel):
+The release SOP — `pnpm release:mcp <version>` automates the RC path (bump +
+CHANGELOG seed + branch + PR to `main`):
 
-1. Bump `apps/mcp/package.json` `version` (the **source of truth**).
-   - `main` → a **stable** semver (e.g. `0.8.17`) → publishes the `latest` tag.
-   - `staging` → a **prerelease** (e.g. `0.8.18-rc.1`) → publishes the `next` tag.
-     (A branch↔shape mismatch fails the workflow loudly.)
-2. Open a `release-<version>` PR → `main` (stable) or `staging` (prerelease).
-   **`main` is branch-protected** — no direct pushes; the PR must pass CI
-   (`secret-scan` + `typecheck` + `test`) before it can merge (0 approvals
-   required, so a solo maintainer is never blocked). `staging` is unprotected,
-   so RC bumps may still be pushed straight to it.
-3. Merge it. **For a stable cut (PR → `main`), use "Create a merge commit," never
-   squash.** Preserving `staging` ancestry prevents false conflicts on the next
-   stable cut and lets GitHub evaluate the release PR for CI normally.
-   `tools/release-mcp.mjs` repeats this rule in the PR body. Merge commits were
-   the established convention before the `1.1.9`/`1.1.10` regression (PRs
-   #442, #382, and #378); prerelease PRs into `staging` may still squash.
-   The release workflow then publishes to npm and creates the GitHub release.
-   Run `scripts/verify-install.sh @trusty-squire/mcp <version>` before claiming
+1. Bump `apps/mcp/package.json` `version` to a **prerelease** (e.g.
+   `0.8.18-rc.1`) — the script refuses a stable version; that path is the
+   `workflow_dispatch` promotion instead.
+2. Open a `release-<version>` PR → `main`. **`main` is branch-protected** —
+   no direct pushes; the PR must pass CI (`secret-scan` + `typecheck` +
+   `test`) before it can merge (0 approvals required, so a solo maintainer is
+   never blocked).
+3. Merge it (squash is fine for a prerelease PR). The release workflow then
+   publishes npm `next` and creates the GitHub release. Run
+   `scripts/verify-install.sh @trusty-squire/mcp <version>` before claiming
    the new package is available.
+4. To promote the current `main` HEAD to stable: Actions → **Release mcp** →
+   **Run workflow**, branch `main`, enter the stable version (the rc version
+   with its `-rc.N` suffix stripped). See
+   [`docs/single-main-migration.md`](docs/single-main-migration.md#how-to-cut-a-stable-release-now)
+   for the full promotion contract (refusals, idempotency, post-promotion bump).
 
 **Manual publish = EMERGENCY FALLBACK ONLY** (CI down, registry outage —
 needs the operator's Automation token, which a normal release never touches):
