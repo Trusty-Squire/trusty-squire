@@ -87,6 +87,9 @@ type Argv = {
   command: string;
   target?: AgentTarget;
   apiBase: string;
+  // --account=<id>: sessions are stored one per account, so `logout` needs to
+  // say WHICH account it is clearing. Defaults to the most recently connected.
+  account?: string;
   // Optional 2Captcha API key from advanced setup. Stored ENCRYPTED in the
   // vault (never written to the MCP config) by maybeStoreTwoCaptchaKey once the
   // session is paired; the bot spends it through the injecting proxy.
@@ -149,6 +152,7 @@ function parseArgs(argv: string[]): Argv {
   let forceRelogin = false;
   let forceReloginProvider: ProviderArg | undefined;
   let noInteractive = false;
+  let account: string | undefined;
   for (const arg of argv) {
     if (arg.startsWith("--target=")) {
       const t = arg.slice("--target=".length);
@@ -177,6 +181,16 @@ function parseArgs(argv: string[]): Argv {
       rejectDeprecatedCli(
         "`--provider` has been removed with `login`. Use `connect --force-relogin=google|github`.",
       );
+    } else if (arg.startsWith("--account=")) {
+      // An empty value must not fall through to "the most recent account":
+      // silently clearing a different account than the one named is the
+      // silent-destruction class this whole change removes.
+      const value = arg.slice("--account=".length).trim();
+      if (value.length === 0) {
+        console.error("--account requires an account id (e.g. --account=01ABC...)");
+        process.exit(64);
+      }
+      account = value;
     } else if (arg.startsWith("--profile-dir=")) {
       rejectDeprecatedCli(
         "`--profile-dir` has been removed with `login`. `connect` always uses the bot's Chrome profile.",
@@ -208,6 +222,12 @@ function parseArgs(argv: string[]): Argv {
     noInteractive,
   };
   if (target !== undefined) args.target = target;
+  if (account !== undefined) {
+    if (account.length === 0) {
+      rejectDeprecatedCli("`--account` requires a non-empty account ID.");
+    }
+    args.account = account;
+  }
   return args;
 }
 
@@ -336,7 +356,7 @@ export async function runCli(argv: string[]): Promise<void> {
       await connect(args);
       return;
     case "logout":
-      await logout();
+      await logout(args);
       return;
     case "settings":
       await settings(args);
@@ -356,12 +376,10 @@ export async function runCli(argv: string[]): Promise<void> {
 // the install — the bot just won't have the Tier-3 solver. Runs after pairing,
 // so the session carries a usable agent_session_token. Clears args.twoCaptchaKey
 // on success so the secret doesn't linger in memory longer than needed.
-async function maybeStoreTwoCaptchaKey(args: Argv): Promise<void> {
+async function maybeStoreTwoCaptchaKey(args: Argv, session: SessionData): Promise<void> {
   const key = args.twoCaptchaKey?.trim();
   if (key === undefined || key.length === 0) return;
-  const storage = await openSessionStorage();
-  const session = await storage.read();
-  if (session?.agent_session_token === undefined) {
+  if (session.agent_session_token === undefined) {
     ui.warn("Couldn't vault the 2Captcha key — no active session yet. Re-run connect to retry.");
     return;
   }
@@ -441,8 +459,8 @@ async function settings(args: Argv): Promise<void> {
     consent_operator_inbox_otp: args.consentOperatorInboxOtp !== false,
   };
   await storage.write(updated);
-  await writeAgentConfig(target, agent, args);
-  await maybeStoreTwoCaptchaKey(args);
+  await writeAgentConfig(target, agent, args, updated);
+  await maybeStoreTwoCaptchaKey(args, updated);
   ui.success(`${agent.display_name} settings saved.`);
 }
 
@@ -516,8 +534,8 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
       await hydrateArgsFromStoredPreferences(args);
       await ensureConsentRecorded(consentFromArgs(args), args.advancedConfigured === true);
       if (preflight.kind === "unverified") {
-        await writeAgentConfig(target, agent, args);
-        await maybeStoreTwoCaptchaKey(args);
+        await writeAgentConfig(target, agent, args, preflight.session);
+        await maybeStoreTwoCaptchaKey(args, preflight.session);
         ui.warn(preflightUnverifiedMessage(preflight.detail));
         ui.hint(
           `Close any other Trusty Squire session and re-run ` +
@@ -537,8 +555,8 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
       const reconnectGithub =
         !preflight.providers.includes("github") && (await offerGithubReloginIfDead(args));
       if (!reconnectGithub) {
-        await writeAgentConfig(target, agent, args);
-        await maybeStoreTwoCaptchaKey(args);
+        await writeAgentConfig(target, agent, args, preflight.session);
+        await maybeStoreTwoCaptchaKey(args, preflight.session);
         ui.success(
           `Already connected (${preflight.providers.join(" + ")}). ` +
             `${agent.display_name} config refreshed.`,
@@ -561,17 +579,6 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
     "Opening the Trusty Squire install page in a browser. " +
       "The page walks you through signing in with Google and (optionally) GitHub.",
   );
-  // If the preflight keeps missing a valid session, connect re-opens this page
-  // every run. The usual cause on a headless box is an ephemeral OS keychain
-  // that doesn't persist the session between logins — point people at the
-  // durable file backend so they don't loop.
-  if ((await openSessionStorage()).backendName() === "keytar") {
-    ui.hint(
-      `If ${ui.code("connect")} re-opens this page on every run, your OS keychain may not be ` +
-        `persisting the session. Set ${ui.code("TRUSTY_SQUIRE_SESSION_FILE=1")} (globally) to use a durable session file.`,
-    );
-  }
-
   // --force-relogin means "redo the OAuth dance from scratch". The scoped
   // form clears only one provider; bare --force-relogin is the full-profile
   // account-switch escape hatch.
@@ -649,7 +656,7 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
 
   const storage = await openSessionStorage();
   await storage.write(session);
-  ui.success(`Session saved (${storage.backendName()})`);
+  ui.success(`Session saved (${storage.path})`);
   args.noRegistry = session.consent_skillify_telemetry !== true;
   args.consentOperatorInboxOtp = session.consent_operator_inbox_otp !== false;
 
@@ -680,8 +687,8 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
 
   // Config + key land either way: the session is real and re-running connect
   // must be able to pick up from here. Only the SUCCESS claim is gated.
-  await writeAgentConfig(target, agent, args);
-  await maybeStoreTwoCaptchaKey(args);
+  await writeAgentConfig(target, agent, args, session);
+  await maybeStoreTwoCaptchaKey(args, session);
 
   const complete = decideConnectComplete(providers, args.forceReloginProvider);
   if (!complete.ok) {
@@ -903,8 +910,8 @@ export function preflightUnverifiedMessage(detail: string): string {
 
 type CheckedConnectPreflight =
   | { kind: "ceremony" }
-  | { kind: "provisioned"; providers: OAuthProviderId[] }
-  | { kind: "unverified"; detail: string };
+  | { kind: "provisioned"; providers: OAuthProviderId[]; session: SessionData }
+  | { kind: "unverified"; detail: string; session: SessionData };
 
 async function checkAlreadyProvisioned(): Promise<CheckedConnectPreflight> {
   try {
@@ -945,11 +952,13 @@ async function checkAlreadyProvisioned(): Promise<CheckedConnectPreflight> {
         return {
           kind: "unverified",
           detail: err instanceof Error ? err.message : String(err),
+          session,
         };
       }
       return preflight;
     }
-    return decideConnectPreflight(session, stillValid, providers);
+    const preflight = decideConnectPreflight(session, stillValid, providers);
+    return preflight.kind === "provisioned" ? { ...preflight, session } : preflight;
   } catch {
     return { kind: "ceremony" };
   }
@@ -1059,14 +1068,23 @@ async function writeAgentConfig(
   target: AgentTarget,
   agent: (typeof AGENTS)[AgentTarget],
   args: Argv,
+  session: SessionData,
 ): Promise<void> {
   // Tokens themselves are NOT in the env — the MCP server reads them
-  // from session storage (keychain / file), which keeps them out of
+  // from the account's 0600 JSON session file, which keeps them out of
   // any child-process listing or shell history.
   const launch = resolveServerLaunch();
   const env: Record<string, string> = {
     TRUSTY_SQUIRE_AGENT_IDENTITY: target,
   };
+  // Which account this host agent's server serves. Sessions are stored one per
+  // account, so pinning it here is what keeps an ALREADY-RUNNING server on the
+  // account it was launched for after someone connects a different one: the old
+  // process keeps its launch env, the new config names the new account.
+  const boundAccount = session.account_id;
+  if (boundAccount !== undefined && boundAccount.length > 0) {
+    env.TRUSTY_SQUIRE_ACCOUNT_ID = boundAccount;
+  }
   // Skill registry URL. The endpoint is not user-configurable; Advanced setup
   // controls whether it is written at all. Registry participation is also the
   // user's consent to contribute successful non-personal signup recipes.
@@ -1266,10 +1284,22 @@ async function resolveTarget(explicit: AgentTarget | undefined): Promise<AgentTa
   process.exit(2);
 }
 
-async function logout(): Promise<void> {
+// Logs out ONE account — the one most recently connected, or `--account=<id>`.
+// Other accounts installed on this machine keep their sessions, and the servers
+// serving them keep working.
+async function logout(args: Argv): Promise<void> {
   const storage = await openSessionStorage();
-  await storage.clear();
-  console.warn(`✓ Cleared local session (${storage.backendName()}).`);
+  const target = args.account ?? (await storage.currentAccountId());
+  if (target === null || (args.account !== undefined && (await storage.read(target)) === null)) {
+    console.warn("✓ No local session to clear.");
+    return;
+  }
+  await storage.clear(target);
+  const remaining = await storage.listAccounts();
+  console.warn(
+    `✓ Cleared local session for account ${target} (${storage.path}).` +
+      (remaining.length > 0 ? ` Still installed: ${remaining.join(", ")}.` : ""),
+  );
 }
 
 function printHelp(): void {
@@ -1279,7 +1309,7 @@ function printHelp(): void {
   console.warn(`${chalk.bold("Commands")}`);
   console.warn(`  ${ui.code("connect")}                       set up this machine (default)`);
   console.warn(`  ${ui.code("settings")}                      edit registry and OTP choices`);
-  console.warn(`  ${ui.code("logout")}                        clear the local session`);
+  console.warn(`  ${ui.code("logout [--account=<id>]")}       clear ONE account's local session`);
   console.warn("");
   console.warn(`${chalk.bold("Flags for connect")}`);
   console.warn(`  --target=<${Object.keys(AGENTS).join("|")}>`);

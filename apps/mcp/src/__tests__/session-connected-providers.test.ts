@@ -1,11 +1,12 @@
-// rc.5 — SessionData.connected_providers round-trip + backwards
-// compatibility with pre-rc.5 session files that lack the field.
+// rc.5 — SessionData.connected_providers round-trip + backwards compatibility
+// with pre-rc.5 session files that lack the field. The probe snapshot belongs
+// to ONE account's entry, so it is written and read per account.
 
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { FileStorage } from "../session.js";
+import { SessionStore } from "../session.js";
 
 let tmpFile: string;
 
@@ -20,7 +21,7 @@ afterEach(async () => {
 
 describe("SessionData.connected_providers (rc.5)", () => {
   it("round-trips an empty list", async () => {
-    const store = new FileStorage(tmpFile);
+    const store = new SessionStore(tmpFile);
     await store.write({
       api_base_url: "https://api.test",
       saved_at: "2026-05-25T00:00:00Z",
@@ -31,7 +32,7 @@ describe("SessionData.connected_providers (rc.5)", () => {
   });
 
   it("round-trips both google and github in order", async () => {
-    const store = new FileStorage(tmpFile);
+    const store = new SessionStore(tmpFile);
     await store.write({
       api_base_url: "https://api.test",
       saved_at: "2026-05-25T00:00:00Z",
@@ -57,14 +58,14 @@ describe("SessionData.connected_providers (rc.5)", () => {
       }),
       "utf8",
     );
-    const back = await new FileStorage(tmpFile).read();
+    const back = await new SessionStore(tmpFile).read();
     expect(back).not.toBeNull();
     expect(back?.machine_token).toBe("tsm_old_token");
     expect(back?.connected_providers).toBeUndefined();
   });
 
   it("round-trips install privacy consent flags", async () => {
-    const store = new FileStorage(tmpFile);
+    const store = new SessionStore(tmpFile);
     await store.write({
       api_base_url: "https://api.test",
       saved_at: "2026-06-25T00:00:00.000Z",

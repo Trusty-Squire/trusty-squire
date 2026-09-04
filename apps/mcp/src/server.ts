@@ -1,4 +1,4 @@
-// MCP server: reads the session from keytar/file, sets up an ApiClient
+// MCP server: reads its account's session from the session file, sets up an ApiClient
 // against the configured API base URL, and exposes the registered tools
 // over stdio.
 //
@@ -32,7 +32,7 @@ import {
   registerServerInstance,
 } from "./server-instance-registry.js";
 import { buildToolRegistry, findTool } from "./tools/index.js";
-import { openSessionStorage } from "./session.js";
+import { createSessionGuard, setServingAccountId, type SessionGuard } from "./session-guard.js";
 import { VERSION } from "./version.js";
 
 const SERVER_NAME = "trusty-squire";
@@ -154,6 +154,7 @@ export async function buildServer(
   api: ApiClient | null,
   callLifecycle?: ServerCallLifecycle,
   loadPublishedAccountSession?: AccountSessionLoader,
+  sessionGuard?: SessionGuard,
 ): Promise<Server> {
   let activeApi = api;
   const tools = buildToolRegistry();
@@ -193,6 +194,16 @@ export async function buildServer(
           .map((i) => (i.path.length > 0 ? `${i.path.join(".")}: ${i.message}` : i.message))
           .join("; ")}`,
       );
+    }
+    // Which account is this server serving? Sessions are stored per account, so
+    // a `connect` under a different account no longer overwrites this one — but
+    // this server must still refuse rather than fall back to another account's
+    // scope if its own entry is gone.
+    if (sessionGuard !== undefined) {
+      const report = await sessionGuard.inspect();
+      if (report.problem !== null) {
+        return errorContent(report.problem.code, report.problem.message);
+      }
     }
     // The install ceremony publishes the agent token after the operator may
     // already have launched this stdio server. Retry the canonical session
@@ -370,9 +381,12 @@ export async function runServer(): Promise<void> {
   // at a glance.
   process.stderr.write(`[trusty-squire] server v${VERSION} starting\n`);
 
+  // Owns this server's answer to "which account am I serving?".
+  const sessionGuard = createSessionGuard();
   const loadPublishedAccountSession = async (): Promise<ApiClient | null> => {
     try {
-      const session = await (await openSessionStorage()).read();
+      const session = await sessionGuard.bind();
+      setServingAccountId(sessionGuard.boundAccountId());
       // Single-tier: every session is account-bound. A session with just a
       // machine_token (pre-collapse install) yields api=null, and every
       // tool call returns the re-install instruction.
@@ -386,14 +400,14 @@ export async function runServer(): Promise<void> {
       });
     } catch {
       // A failed session read must remain fail-closed; the next tool call can
-      // retry after a transient keychain/file backend problem clears.
+      // retry after a transient session-storage problem clears.
       return null;
     }
   };
   const api = await loadPublishedAccountSession();
 
   const callAdmission = createServerCallAdmission();
-  const server = await buildServer(api, callAdmission, loadPublishedAccountSession);
+  const server = await buildServer(api, callAdmission, loadPublishedAccountSession, sessionGuard);
   const transport = new StdioServerTransport();
   // Publishes what a later launch of this identity needs to tell "still
   // serving a client" from "wedged": last inbound message, open sessions,

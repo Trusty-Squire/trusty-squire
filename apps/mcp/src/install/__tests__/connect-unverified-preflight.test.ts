@@ -5,10 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as GoogleLoginModule from "../../bot/google-login.js";
 import type * as ProfileModule from "../../bot/profile.js";
 
-vi.mock("keytar", () => {
-  throw new Error("keytar disabled in tests");
-});
-
 vi.mock("../../bot/google-login.js", async (importOriginal) => {
   const actual = await importOriginal<typeof GoogleLoginModule>();
   return {

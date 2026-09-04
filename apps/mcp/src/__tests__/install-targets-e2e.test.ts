@@ -3,7 +3,7 @@
 // this test:
 //   1. Runs the same connect() entrypoint runCli dispatches to.
 //   2. Mocks the external dependencies (API handshake + ASN detection
-//      + OAuth login + keytar) so the test is hermetic.
+//      + OAuth login) so the test is hermetic.
 //   3. Sandboxes HOME to a tmpdir so the writeConfig step lands in
 //      a throwaway directory and never touches the user's real config.
 //   4. Asserts the agent's config file is created at the agent's
@@ -18,6 +18,9 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { parse as parseJsonc } from "jsonc-parser";
+import { parse as parseToml } from "smol-toml";
+import { parse as parseYaml } from "yaml";
 import type * as BotModule from "../bot/index.js";
 import type * as GoogleLoginModule from "../bot/google-login.js";
 import type * as ProfileModule from "../bot/profile.js";
@@ -54,13 +57,6 @@ vi.mock("../bot/index.js", async () => {
   };
 });
 
-// keytar's native binding does real keychain writes on macOS / a real
-// libsecret call on Linux. Force the test through the file storage
-// fallback by making the dynamic import reject.
-vi.mock("keytar", () => {
-  throw new Error("keytar disabled in tests");
-});
-
 // Stub the network-hitting `ensureOAuthSession` but preserve every
 // other export (the wider bot module re-imports things like
 // `scopesAreBasic` from this file).
@@ -92,8 +88,10 @@ vi.mock("../bot/profile.js", async (importOriginal) => {
 // Imported after the vi.mock calls so connect() sees the mocks. The
 // install/cli.ts module pulls in api-client + bot at top level, so
 // this ordering is load-bearing.
-import { connect } from "../install/cli.js";
+import { detectActiveProviderSessions } from "../bot/google-login.js";
+import { connect, resolveServerLaunch } from "../install/cli.js";
 import { AGENTS } from "../install/agents.js";
+import { openSessionStorage } from "../session.js";
 
 const TARGETS = ["claude-code", "codex", "goose", "cursor", "opencode"] as const;
 
@@ -101,6 +99,69 @@ let originalHome: string | undefined;
 let originalXdg: string | undefined;
 let originalOpenCodeConfig: string | undefined;
 let tmpHome: string;
+
+type ParsedSquireConfig = {
+  command: unknown;
+  args: unknown;
+  env: unknown;
+};
+
+function asRecord(value: unknown, label: string): Record<string, unknown> {
+  expect(value, `${label} should be an object`).toSatisfy(
+    (candidate) => candidate !== null && typeof candidate === "object" && !Array.isArray(candidate),
+  );
+  return value as Record<string, unknown>;
+}
+
+async function readSquireConfig(target: (typeof TARGETS)[number]): Promise<ParsedSquireConfig> {
+  const raw = await fs.readFile(AGENTS[target].config_path(), "utf8");
+  switch (target) {
+    case "claude-code":
+    case "cursor": {
+      const root = asRecord(JSON.parse(raw), `${target} config`);
+      const squire = asRecord(asRecord(root.mcpServers, `${target} mcpServers`).squire, "squire");
+      return { command: squire.command, args: squire.args, env: squire.env };
+    }
+    case "codex": {
+      const root = asRecord(parseToml(raw), "codex config");
+      const squire = asRecord(asRecord(root.mcp_servers, "codex mcp_servers").squire, "squire");
+      return { command: squire.command, args: squire.args, env: squire.env };
+    }
+    case "goose": {
+      const root = asRecord(parseYaml(raw), "goose config");
+      const squire = asRecord(asRecord(root.extensions, "goose extensions").squire, "squire");
+      return { command: squire.cmd, args: squire.args, env: squire.envs };
+    }
+    case "opencode": {
+      const root = asRecord(parseJsonc(raw), "opencode config");
+      const squire = asRecord(asRecord(root.mcp, "opencode mcp").squire, "squire");
+      expect(squire.command, "opencode squire command should be an array").toSatisfy(Array.isArray);
+      const [command, ...args] = squire.command as unknown[];
+      return { command, args, env: squire.environment };
+    }
+  }
+}
+
+function expectSquireConfig(
+  config: ParsedSquireConfig,
+  target: (typeof TARGETS)[number],
+  registryEnabled: boolean,
+  accountId = "acct_test",
+): void {
+  const launch = resolveServerLaunch();
+  expect(config.command).toBe(launch.command);
+  expect(config.args).toEqual(launch.args);
+  const env = asRecord(config.env, `${target} squire environment`);
+  expect(env).toMatchObject({
+    TRUSTY_SQUIRE_AGENT_IDENTITY: target,
+    TRUSTY_SQUIRE_ACCOUNT_ID: accountId,
+  });
+  if (registryEnabled) {
+    expect(env).toMatchObject({ TRUSTY_SQUIRE_REGISTRY_URL: "https://registry.trustysquire.ai" });
+  } else {
+    expect(env).not.toHaveProperty("TRUSTY_SQUIRE_REGISTRY_URL");
+  }
+}
 
 beforeEach(async () => {
   originalHome = process.env.HOME;
@@ -150,17 +211,7 @@ describe("connect --target=<agent> writes a valid config", () => {
         .catch(() => false);
       expect(exists, `${target}: config file should exist at ${configPath}`).toBe(true);
 
-      // Sanity: the file mentions "squire" — any of JSON / YAML / TOML
-      // outputs include the entry key by that name.
-      const raw = await fs.readFile(configPath, "utf8");
-      expect(raw, `${target}: config should reference the squire entry`).toMatch(
-        /squire|trusty-squire/,
-      );
-      // Skill-registry URL is written when registry participation is enabled.
-      // That same choice is also the user's skillification consent.
-      expect(raw, `${target}: config should set TRUSTY_SQUIRE_REGISTRY_URL when enabled`).toMatch(
-        /TRUSTY_SQUIRE_REGISTRY_URL/,
-      );
+      expectSquireConfig(await readSquireConfig(target), target, true);
     });
   }
 
@@ -174,8 +225,7 @@ describe("connect --target=<agent> writes a valid config", () => {
       noRegistry: true,
       noInteractive: false,
     });
-    const raw = await fs.readFile(AGENTS[TARGETS[0]!].config_path(), "utf8");
-    expect(raw).not.toMatch(/TRUSTY_SQUIRE_REGISTRY_URL/);
+    expectSquireConfig(await readSquireConfig(TARGETS[0]!), TARGETS[0]!, false);
   });
 
   it("keeps registry and skillification consent off when registry is disabled", async () => {
@@ -188,8 +238,7 @@ describe("connect --target=<agent> writes a valid config", () => {
       noRegistry: true,
       noInteractive: false,
     });
-    const raw = await fs.readFile(AGENTS[TARGETS[0]!].config_path(), "utf8");
-    expect(raw).not.toMatch(/TRUSTY_SQUIRE_REGISTRY_URL/);
+    expectSquireConfig(await readSquireConfig(TARGETS[0]!), TARGETS[0]!, false);
     const sessionPath = path.join(process.env.XDG_CONFIG_HOME!, "trusty-squire", "session.json");
     const session = JSON.parse(await fs.readFile(sessionPath, "utf8")) as {
       consent_skillify_telemetry?: boolean;
@@ -212,9 +261,7 @@ describe("connect --target=<agent> writes a valid config", () => {
         noRegistry: false,
         noInteractive: false,
       });
-      const raw = await fs.readFile(AGENTS[TARGETS[0]!].config_path(), "utf8");
-      expect(raw).toMatch(/registry\.trustysquire\.ai/);
-      expect(raw).not.toMatch(/staging\.registry\.test/);
+      expectSquireConfig(await readSquireConfig(TARGETS[0]!), TARGETS[0]!, true);
       const sessionPath = path.join(process.env.XDG_CONFIG_HOME!, "trusty-squire", "session.json");
       const session = JSON.parse(await fs.readFile(sessionPath, "utf8")) as {
         consent_skillify_telemetry?: boolean;
@@ -225,6 +272,49 @@ describe("connect --target=<agent> writes a valid config", () => {
     } finally {
       if (prev === undefined) delete process.env.TRUSTY_SQUIRE_REGISTRY_URL;
       else process.env.TRUSTY_SQUIRE_REGISTRY_URL = prev;
+    }
+  });
+
+  it("uses the claimed account after another connect moves the pointer", async () => {
+    vi.mocked(detectActiveProviderSessions).mockImplementationOnce(async () => {
+      const storage = await openSessionStorage();
+      await storage.write({
+        api_base_url: "https://other-account.invalid",
+        saved_at: new Date().toISOString(),
+        machine_token: "other-machine-token",
+        agent_session_token: "other-agent-token",
+        account_id: "acct_other",
+      });
+      return ["google"];
+    });
+    const vaultFetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 201 }));
+
+    try {
+      await connect({
+        command: "connect",
+        target: "claude-code",
+        apiBase: "https://test.invalid",
+        skipBrowser: true,
+        forceRelogin: false,
+        noRegistry: false,
+        noInteractive: false,
+        twoCaptchaKey: "captcha-key",
+      });
+
+      expectSquireConfig(await readSquireConfig("claude-code"), "claude-code", true);
+      const vaultCall = vaultFetch.mock.calls.find(([url]) =>
+        String(url).endsWith("/v1/vault/credentials"),
+      );
+      expect(vaultCall).toBeDefined();
+      expect(vaultCall![0]).toBe("https://test.invalid/v1/vault/credentials");
+      expect(vaultCall![1]).toMatchObject({
+        headers: { authorization: "Bearer ts_agent_test_token" },
+      });
+      expect((await (await openSessionStorage()).read())?.account_id).toBe("acct_other");
+    } finally {
+      vaultFetch.mockRestore();
     }
   });
 });

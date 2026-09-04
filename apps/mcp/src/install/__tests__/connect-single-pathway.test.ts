@@ -17,6 +17,7 @@ import {
   type ConnectIncompleteReason,
 } from "../cli.js";
 import type { SessionData } from "../../session.js";
+import { openSessionStorage } from "../../session.js";
 
 const boundSession: SessionData = {
   api_base_url: "https://api.example.test",
@@ -40,6 +41,22 @@ describe("the login subcommand is gone", () => {
     } finally {
       exit.mockRestore();
       error.mockRestore();
+    }
+  });
+});
+
+describe("logout", () => {
+  it("does not report clearing an account that is not installed", async () => {
+    const storage = await openSessionStorage();
+    await storage.write(boundSession);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      await runCli(["logout", "--account=not-installed"]);
+      expect(warn).toHaveBeenCalledWith("✓ No local session to clear.");
+      expect(await storage.read("account")).toMatchObject({ agent_session_token: "agent" });
+    } finally {
+      warn.mockRestore();
     }
   });
 });

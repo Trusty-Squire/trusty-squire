@@ -66,34 +66,30 @@ import { isMaskedDisplay } from "../bot/credential-shape.js";
 import { renderSkillHint, serviceSlugFromUrl } from "../bot/skill-hint.js";
 import { clientFromEnv, generateProvisionId } from "../skill-registry-client.js";
 import { openSessionStorage } from "../session.js";
+import { servingAccountId } from "../session-guard.js";
 
 // Read the install-time inbox-read preference. Inbox reads default on; an
 // explicit false in the saved advanced configuration remains an opt-out.
 async function readInboxConsent(): Promise<boolean> {
   try {
-    const storage = await openSessionStorage();
-    const data = await storage.read();
+    const accountId = resolveAccountId();
+    if (accountId === undefined) return true;
+    const data = await (await openSessionStorage()).read(accountId);
     return data?.consent_operator_inbox_otp !== false;
   } catch {
     return true;
   }
 }
 
-// The account the install is bound to. Operator/CI runs set it in the env;
-// end-user installs bind it in session.json (connect writes it there, NOT to the
-// MCP config env). Reading env-only silently disabled BOTH the hint read and the
-// auto-promote write for every end-user install — resolve from the session file
-// as the fallback so the registry loop works off a normal `connect`.
-async function resolveAccountId(): Promise<string | undefined> {
-  const fromEnv = process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
-  if (fromEnv !== undefined && fromEnv.length > 0) return fromEnv;
-  try {
-    const data = await (await openSessionStorage()).read();
-    const id = data?.account_id;
-    return id !== undefined && id.length > 0 ? id : undefined;
-  } catch {
-    return undefined;
-  }
+// The account THIS server adopted, as published by its SessionGuard. Never
+// re-resolve it here from TRUSTY_SQUIRE_ACCOUNT_ID or the store's
+// current-account pointer: a server launched from a pre-pin config binds by
+// fallback, and re-resolving after another account connects would hand this
+// tool the wrong account — applying that account's consent setting and
+// attributing registry reads/publishes to it. That is exactly the "acting as
+// an account it never bound to" defect this work exists to remove.
+function resolveAccountId(): string | undefined {
+  return servingAccountId();
 }
 
 // Best-effort: ask the registry for a known route for this service so the agent
@@ -101,7 +97,7 @@ async function resolveAccountId(): Promise<string | undefined> {
 // no registry configured, network error) — the agent just drives without it.
 async function resolveRouteHint(serviceUrl: string): Promise<string | undefined> {
   try {
-    const accountId = await resolveAccountId();
+    const accountId = resolveAccountId();
     if (accountId === undefined || accountId.length === 0) return undefined;
     const client = clientFromEnv(accountId);
     if (client === null) return undefined;
@@ -138,7 +134,7 @@ async function autoPromoteProvision(sessionId: string): Promise<string> {
           : "";
       return `rejected:${promoted.error_kind ?? "unknown"}${detail}`;
     }
-    const accountId = await resolveAccountId();
+    const accountId = resolveAccountId();
     if (accountId === undefined || accountId.length === 0) return "produced:no_account";
     const client = clientFromEnv(accountId);
     if (client === null) return "produced:no_registry";
@@ -171,7 +167,7 @@ async function autoPromoteProvision(sessionId: string): Promise<string> {
 export async function publishRecipeToRegistry(file: string): Promise<string> {
   try {
     const recipe = await readRecipeFromFile(file);
-    const accountId = await resolveAccountId();
+    const accountId = resolveAccountId();
     if (accountId === undefined || accountId.length === 0) return "skipped:no_account";
     const client = clientFromEnv(accountId);
     if (client === null) return "skipped:no_registry";
@@ -203,7 +199,7 @@ export async function resolveRecipeForTask(
   try {
     return await readRecipeForTask(verb, serviceUrl);
   } catch (localErr) {
-    const accountId = await resolveAccountId();
+    const accountId = resolveAccountId();
     if (accountId === undefined || accountId.length === 0) throw localErr;
     const client = clientFromEnv(accountId);
     if (client === null) throw localErr;
@@ -227,7 +223,7 @@ export async function resolveCheckoutLegRecipe(
   try {
     return await readRecipeForCheckoutShape(verb, signature);
   } catch {
-    const accountId = await resolveAccountId();
+    const accountId = resolveAccountId();
     if (accountId === undefined || accountId.length === 0) return null;
     const client = clientFromEnv(accountId);
     if (client === null) return null;

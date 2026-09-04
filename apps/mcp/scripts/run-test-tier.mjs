@@ -28,12 +28,19 @@ function runVitest(name, config) {
 
 const groups =
   tier === "slow"
-    ? [runVitest("slow post-merge tier", "vitest.slow.config.ts")]
+    ? [["slow post-merge tier", "vitest.slow.config.ts"]]
     : [
-        runVitest("fast core", "vitest.fast-core.config.ts"),
-        runVitest("required behavior", "vitest.behavior-required.config.ts"),
-        runVitest("required payment safety", "vitest.payment-required.config.ts"),
+        ["fast core", "vitest.fast-core.config.ts"],
+        ["required behavior", "vitest.behavior-required.config.ts"],
+        ["required payment safety", "vitest.payment-required.config.ts"],
       ];
 
-const results = await Promise.all(groups);
+// These suites include real-browser and process-lifecycle tests whose bounded
+// timers must be able to run. Starting all three Vitest processes together can
+// starve those timers on constrained CI runners, turning correct timeout
+// behavior into intermittent test failures. Run every group, one at a time.
+const results = [];
+for (const [name, config] of groups) {
+  results.push(await runVitest(name, config));
+}
 process.exitCode = results.some((code) => code !== 0) ? 1 : 0;

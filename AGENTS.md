@@ -665,6 +665,15 @@ workspace dependencies are built before the server starts.
 
 ---
 
+## Never touch the operator's live local state from a test or a check
+
+Manual checks must use an isolated `HOME` and `XDG_CONFIG_HOME`, never the
+developer's real state. The test suite enforces this through
+`apps/mcp/src/__tests__/setup/isolate-config-home.ts`, wired in
+`vitest.shared.ts`; preserve that setup and do not resolve the default session
+or profile path from a test. The session-storage compatibility contract lives
+in `apps/mcp/src/session.ts`.
+
 ## Maintaining this file
 
 This file is a living contract, not a historical record. Keep it for durable,
