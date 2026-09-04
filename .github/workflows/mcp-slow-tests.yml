@@ -8,7 +8,7 @@ name: MCP slow tests
 # partition-drift backstop.
 on:
   push:
-    branches: [main, staging]
+    branches: [main]
     paths:
       - "apps/mcp/**"
       - "packages/recipe-schema/**"

@@ -1,14 +1,22 @@
 name: Release mcp
 
-# Publishes @trusty-squire/mcp to npm and creates a GitHub release whenever the
-# version in apps/mcp/package.json is bumped on `main` (stable) or `staging` (rc).
+# Publishes @trusty-squire/mcp to npm and creates a GitHub release.
 #
-# Source of truth: apps/mcp/package.json `version` field.
-#   - main:    must be a stable semver (e.g. 0.6.13). Publishes `latest` tag.
-#   - staging: must be a prerelease (e.g. 0.6.14-rc.1). Publishes `next` tag.
+# Single-branch model: `main` is the only release branch.
+#   - push to main:      apps/mcp/package.json must hold a PRERELEASE
+#                        (e.g. 1.1.14-rc.1). Publishes the `next` tag.
+#   - workflow_dispatch: an explicit, on-demand STABLE promotion of main HEAD.
+#                        The operator supplies the stable X.Y.Z; it must equal
+#                        the package.json version with its prerelease suffix
+#                        stripped. Publishes the `latest` tag.
 #
-# If a git tag v<version> already exists, the job is a no-op (idempotent).
-# This means re-pushing main without bumping the version does NOT republish.
+# Source of truth for an rc is apps/mcp/package.json `version`. A stable
+# promotion publishes the same tree under the operator-supplied stable version
+# (package.json is rewritten in the runner only — nothing is committed back).
+#
+# If a git tag v<version> already exists, or npm already serves that version,
+# the job is a no-op (idempotent). Re-pushing main without bumping the version
+# does NOT republish, and a promotion can never overwrite a live version.
 #
 # Publishing is version-driven, so source-only changes do not need a release
 # runner. A release commit must bump apps/mcp/package.json; lockfile/workflow
@@ -16,11 +24,17 @@ name: Release mcp
 
 on:
   push:
-    branches: [main, staging]
+    branches: [main]
     paths:
       - "apps/mcp/package.json"
       - "pnpm-lock.yaml"
       - ".github/workflows/release.yml"
+  workflow_dispatch:
+    inputs:
+      stable_version:
+        description: "Stable X.Y.Z to publish from main HEAD to npm `latest`. Must equal apps/mcp/package.json's version with its -rc suffix stripped."
+        required: true
+        type: string
 
 # Only one release run per branch at a time. Don't cancel in-flight: a publish
 # that's mid-way through registering on npm should be allowed to finish.
@@ -46,19 +60,66 @@ jobs:
       npm_dist_tag: ${{ steps.read.outputs.npm_dist_tag }}
       gh_prerelease: ${{ steps.read.outputs.gh_prerelease }}
       should_publish: ${{ steps.read.outputs.should_publish }}
+      is_promotion: ${{ steps.resolve.outputs.is_promotion }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # need full history to see existing tags
+
+      # One place decides WHICH version this run publishes, before anything
+      # expensive happens. A push publishes the rc in apps/mcp/package.json;
+      # a workflow_dispatch publishes main HEAD under the operator-supplied
+      # stable version.
+      - name: Resolve release version
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          # Never interpolate the raw input into the script body — it reaches
+          # the shell as data, not as code.
+          INPUT_STABLE_VERSION: ${{ inputs.stable_version }}
+        run: |
+          set -euo pipefail
+          PKG_VERSION=$(node -p "require('./apps/mcp/package.json').version")
+          echo "apps/mcp/package.json version: $PKG_VERSION"
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+              echo "::error::A stable promotion must be dispatched from refs/heads/main, got: ${GITHUB_REF}"
+              exit 1
+            fi
+            VERSION="$INPUT_STABLE_VERSION"
+            if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::stable_version must be a bare stable semver (X.Y.Z), got: $INPUT_STABLE_VERSION"
+              exit 1
+            fi
+            # The promoted number is not free-form: it must be the rc line main
+            # is already on, minus the prerelease suffix. That makes a typo
+            # ('1.11.3' for '1.1.13') a failed run instead of a burned version
+            # number sitting permanently on `latest`. To promote a different
+            # number, bump apps/mcp/package.json on main first.
+            if [[ "$VERSION" != "${PKG_VERSION%%-*}" ]]; then
+              echo "::error::stable_version '$VERSION' does not match apps/mcp/package.json ($PKG_VERSION) with its prerelease suffix stripped ('${PKG_VERSION%%-*}'). Bump apps/mcp/package.json on main first."
+              exit 1
+            fi
+            IS_PROMOTION=true
+          else
+            VERSION="$PKG_VERSION"
+            IS_PROMOTION=false
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "is_promotion=$IS_PROMOTION" >> "$GITHUB_OUTPUT"
+          echo "Resolved release version: $VERSION (promotion=$IS_PROMOTION)"
 
       # Most matching pushes are lockfile/workflow edits or retries of a version
       # that is already live. Decide before installs, builds, or Chromium setup;
       # the final read step still runs and supplies the normal publish outputs.
       - name: Fast-path already released versions
         id: fast_path
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
         run: |
           set -euo pipefail
-          VERSION=$(node -p "require('./apps/mcp/package.json').version")
           if git rev-parse --quiet --verify "refs/tags/v$VERSION" >/dev/null \
             || npm view "@trusty-squire/mcp@$VERSION" version >/dev/null 2>&1; then
             echo "already_released=true" >> "$GITHUB_OUTPUT"
@@ -169,13 +230,15 @@ jobs:
 
       - name: Read package version + decide
         id: read
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+          IS_PROMOTION: ${{ steps.resolve.outputs.is_promotion }}
         run: |
           set -euo pipefail
-          VERSION=$(node -p "require('./apps/mcp/package.json').version")
-          BRANCH="${GITHUB_REF_NAME}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Branch:  $BRANCH"
-          echo "Version: $VERSION"
+          echo "Branch:    ${GITHUB_REF_NAME}"
+          echo "Version:   $VERSION"
+          echo "Promotion: $IS_PROMOTION"
 
           # Detect prerelease per semver: anything after a `-`
           if [[ "$VERSION" == *"-"* ]]; then
@@ -185,13 +248,15 @@ jobs:
           fi
           echo "is_prerelease=$IS_PRE" >> "$GITHUB_OUTPUT"
 
-          # Branch ↔ version-shape contract
-          if [[ "$BRANCH" == "main" && "$IS_PRE" == "true" ]]; then
-            echo "::error::main branch requires a stable version, got prerelease: $VERSION"
+          # Event ↔ version-shape contract. Single-branch model: pushes to main
+          # publish rcs to `next`; a stable `latest` release is only ever the
+          # explicit workflow_dispatch promotion.
+          if [[ "$IS_PROMOTION" == "false" && "$IS_PRE" == "false" ]]; then
+            echo "::error::A push to main requires a prerelease version (e.g. $VERSION-rc.1), got stable: $VERSION. Cut a stable release with the 'Release mcp' workflow_dispatch instead."
             exit 1
           fi
-          if [[ "$BRANCH" == "staging" && "$IS_PRE" == "false" ]]; then
-            echo "::error::staging branch requires a prerelease version (e.g. $VERSION-rc.1), got stable: $VERSION"
+          if [[ "$IS_PROMOTION" == "true" && "$IS_PRE" == "true" ]]; then
+            echo "::error::A stable promotion requires a stable version, got prerelease: $VERSION"
             exit 1
           fi
 
@@ -270,6 +335,33 @@ jobs:
         # apps/web (Next.js) which rebuilds @prisma/client in parallel.
         # Keep in sync with apps/mcp/package.json workspace deps.
         run: pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/recipe-schema' build
+
+      # A stable promotion publishes the CURRENT main tree (an rc line) under
+      # the operator-supplied stable version. Rewrite it in the runner only —
+      # nothing is committed back to main, so main stays on its rc line and the
+      # next `release:mcp` rc bump continues from there. src/version.ts reads
+      # package.json at runtime, so rewriting before the build is enough for the
+      # shipped server to report the stable version too.
+      - name: Apply promoted stable version
+        if: needs.verify.outputs.is_promotion == 'true'
+        working-directory: apps/mcp
+        env:
+          V: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("fs");
+            const v = process.argv[1];
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.version = v;
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+          ' "$V"
+          ACTUAL=$(node -p "require('./package.json').version")
+          if [[ "$ACTUAL" != "$V" ]]; then
+            echo "::error::Failed to apply promoted version: package.json says $ACTUAL, expected $V"
+            exit 1
+          fi
+          echo "✓ apps/mcp/package.json set to $V for this publish."
 
       # Force a clean rebuild of the MCP package right before publish.
       # Without this, TypeScript's incremental build can reuse stale dist
