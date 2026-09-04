@@ -21,6 +21,9 @@ on:
       # the registry or it runs a stale parser (mirrors release-api.yml). This
       # is the fix for the skew that made click_oauth_button.available[] 400.
       - "packages/skill-schema/**"
+      # Same reasoning applies to @trusty-squire/recipe-schema (workspace:*),
+      # also built from source in the image.
+      - "packages/recipe-schema/**"
       - "pnpm-lock.yaml"
       - ".github/workflows/release-registry.yml"
 
@@ -71,12 +74,13 @@ jobs:
         working-directory: apps/registry
         run: pnpm exec prisma generate
 
-      # Registry's tsc resolves @trusty-squire/skill-schema via its
-      # `types` → dist/index.d.ts, so the shared schema package must be
-      # built first. The filtered install above only brings in registry +
-      # skill-schema, so a blanket packages/** build isn't safe here.
-      - name: Build workspace dep (skill-schema dist)
-        run: pnpm --filter '@trusty-squire/skill-schema' build
+      # Registry's tsc resolves @trusty-squire/skill-schema and
+      # @trusty-squire/recipe-schema via their `types` → dist/index.d.ts, so
+      # both shared schema packages must be built first. The filtered install
+      # above only brings in registry + its workspace deps, so a blanket
+      # packages/** build isn't safe here.
+      - name: Build workspace deps (skill-schema, recipe-schema dist)
+        run: pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/recipe-schema' build
 
       - name: Build
         run: pnpm --filter '@trusty-squire/registry' build
