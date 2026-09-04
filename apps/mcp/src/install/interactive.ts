@@ -178,7 +178,7 @@ async function pickAdvancedOptionsWithDefaults(opts: {
   };
 }
 
-function summarize(config: InteractiveConfig): void {
+export function summarize(config: InteractiveConfig): void {
   const lines: string[] = [];
   const agentLabel = AGENTS[config.target].display_name;
   lines.push(`${chalk.dim("Agent:        ")}${chalk.bold(agentLabel)}`);
@@ -187,10 +187,16 @@ function summarize(config: InteractiveConfig): void {
   lines.push(
     `${chalk.dim("Registry:     ")}${config.registryEnabled ? "managed" : chalk.yellow("disabled")}`,
   );
-  if (config.advancedConfigured) {
-    lines.push(
-      `${chalk.dim("Email OTP:    ")}${config.consentOperatorInboxOtp === true ? "allowed" : "off"}`,
-    );
+  // Shown unconditionally (not gated on advancedConfigured) — this consent
+  // defaults ON internally (readInboxConsent() in provision-drive.ts) whether
+  // or not the user opens advanced setup, so the summary must say so even
+  // when they never touch the advanced prompts.
+  if (config.consentOperatorInboxOtp === false) {
+    lines.push(`${chalk.dim("Email OTP:    ")}off`);
+  } else if (config.consentOperatorInboxOtp === true) {
+    lines.push(`${chalk.dim("Email OTP:    ")}allowed`);
+  } else {
+    lines.push(`${chalk.dim("Email OTP:    ")}${chalk.dim("allowed (default)")}`);
   }
   if (config.twoCaptchaKey !== undefined) {
     lines.push(
