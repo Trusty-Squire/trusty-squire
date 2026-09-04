@@ -376,12 +376,10 @@ export async function runCli(argv: string[]): Promise<void> {
 // the install — the bot just won't have the Tier-3 solver. Runs after pairing,
 // so the session carries a usable agent_session_token. Clears args.twoCaptchaKey
 // on success so the secret doesn't linger in memory longer than needed.
-async function maybeStoreTwoCaptchaKey(args: Argv): Promise<void> {
+async function maybeStoreTwoCaptchaKey(args: Argv, session: SessionData): Promise<void> {
   const key = args.twoCaptchaKey?.trim();
   if (key === undefined || key.length === 0) return;
-  const storage = await openSessionStorage();
-  const session = await storage.read();
-  if (session?.agent_session_token === undefined) {
+  if (session.agent_session_token === undefined) {
     ui.warn("Couldn't vault the 2Captcha key — no active session yet. Re-run connect to retry.");
     return;
   }
@@ -461,8 +459,8 @@ async function settings(args: Argv): Promise<void> {
     consent_operator_inbox_otp: args.consentOperatorInboxOtp !== false,
   };
   await storage.write(updated);
-  await writeAgentConfig(target, agent, args);
-  await maybeStoreTwoCaptchaKey(args);
+  await writeAgentConfig(target, agent, args, updated);
+  await maybeStoreTwoCaptchaKey(args, updated);
   ui.success(`${agent.display_name} settings saved.`);
 }
 
@@ -536,8 +534,8 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
       await hydrateArgsFromStoredPreferences(args);
       await ensureConsentRecorded(consentFromArgs(args), args.advancedConfigured === true);
       if (preflight.kind === "unverified") {
-        await writeAgentConfig(target, agent, args);
-        await maybeStoreTwoCaptchaKey(args);
+        await writeAgentConfig(target, agent, args, preflight.session);
+        await maybeStoreTwoCaptchaKey(args, preflight.session);
         ui.warn(preflightUnverifiedMessage(preflight.detail));
         ui.hint(
           `Close any other Trusty Squire session and re-run ` +
@@ -557,8 +555,8 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
       const reconnectGithub =
         !preflight.providers.includes("github") && (await offerGithubReloginIfDead(args));
       if (!reconnectGithub) {
-        await writeAgentConfig(target, agent, args);
-        await maybeStoreTwoCaptchaKey(args);
+        await writeAgentConfig(target, agent, args, preflight.session);
+        await maybeStoreTwoCaptchaKey(args, preflight.session);
         ui.success(
           `Already connected (${preflight.providers.join(" + ")}). ` +
             `${agent.display_name} config refreshed.`,
@@ -689,8 +687,8 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
 
   // Config + key land either way: the session is real and re-running connect
   // must be able to pick up from here. Only the SUCCESS claim is gated.
-  await writeAgentConfig(target, agent, args);
-  await maybeStoreTwoCaptchaKey(args);
+  await writeAgentConfig(target, agent, args, session);
+  await maybeStoreTwoCaptchaKey(args, session);
 
   const complete = decideConnectComplete(providers, args.forceReloginProvider);
   if (!complete.ok) {
@@ -912,8 +910,8 @@ export function preflightUnverifiedMessage(detail: string): string {
 
 type CheckedConnectPreflight =
   | { kind: "ceremony" }
-  | { kind: "provisioned"; providers: OAuthProviderId[] }
-  | { kind: "unverified"; detail: string };
+  | { kind: "provisioned"; providers: OAuthProviderId[]; session: SessionData }
+  | { kind: "unverified"; detail: string; session: SessionData };
 
 async function checkAlreadyProvisioned(): Promise<CheckedConnectPreflight> {
   try {
@@ -954,11 +952,13 @@ async function checkAlreadyProvisioned(): Promise<CheckedConnectPreflight> {
         return {
           kind: "unverified",
           detail: err instanceof Error ? err.message : String(err),
+          session,
         };
       }
       return preflight;
     }
-    return decideConnectPreflight(session, stillValid, providers);
+    const preflight = decideConnectPreflight(session, stillValid, providers);
+    return preflight.kind === "provisioned" ? { ...preflight, session } : preflight;
   } catch {
     return { kind: "ceremony" };
   }
@@ -1068,6 +1068,7 @@ async function writeAgentConfig(
   target: AgentTarget,
   agent: (typeof AGENTS)[AgentTarget],
   args: Argv,
+  session: SessionData,
 ): Promise<void> {
   // Tokens themselves are NOT in the env — the MCP server reads them
   // from session storage (keychain / file), which keeps them out of
@@ -1080,7 +1081,7 @@ async function writeAgentConfig(
   // account, so pinning it here is what keeps an ALREADY-RUNNING server on the
   // account it was launched for after someone connects a different one: the old
   // process keeps its launch env, the new config names the new account.
-  const boundAccount = (await (await openSessionStorage()).read())?.account_id;
+  const boundAccount = session.account_id;
   if (boundAccount !== undefined && boundAccount.length > 0) {
     env.TRUSTY_SQUIRE_ACCOUNT_ID = boundAccount;
   }
