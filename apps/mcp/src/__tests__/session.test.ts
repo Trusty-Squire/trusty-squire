@@ -1,12 +1,13 @@
-// Session storage tests. We force the file backend (keytar fallback)
-// by passing preferFile: true so they run cleanly in CI / containers
-// without libsecret.
+// Session store mechanics. One store, one pathway: the 0600 file. The keytar
+// backend (and the TRUSTY_SQUIRE_SESSION_FILE hatch that existed to opt out of
+// it) is gone — on headless Linux keytar's probe passed, so it got selected,
+// then the per-login keyring wiped the session between SSH logins.
 
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { FileStorage, openSessionStorage } from "../session.js";
+import { openSessionStorage, SessionStore } from "../session.js";
 
 let tmpFile: string;
 
@@ -19,17 +20,16 @@ afterEach(async () => {
   await fs.rm(path.dirname(tmpFile), { recursive: true, force: true });
 });
 
-describe("FileStorage", () => {
+describe("SessionStore", () => {
   it("round-trips session data with restrictive permissions", async () => {
-    const store = new FileStorage(tmpFile);
+    const store = new SessionStore(tmpFile);
     await store.write({
       agent_session_token: "tok",
       account_id: "acc_1",
       api_base_url: "http://api",
       saved_at: "2026-05-11T00:00:00Z",
     });
-    const back = await store.read();
-    expect(back?.agent_session_token).toBe("tok");
+    expect((await store.read())?.agent_session_token).toBe("tok");
     const stat = await fs.stat(tmpFile);
     // 0o600 (-rw-------) on posix. Skip the strict check on non-posix.
     if (process.platform !== "win32") {
@@ -38,8 +38,7 @@ describe("FileStorage", () => {
   });
 
   it("read returns null when the file is absent", async () => {
-    const store = new FileStorage(tmpFile);
-    expect(await store.read()).toBeNull();
+    expect(await new SessionStore(tmpFile).read()).toBeNull();
   });
 
   it("loads legacy sessions while pruning the retired proxy credential", async () => {
@@ -49,41 +48,48 @@ describe("FileStorage", () => {
       JSON.stringify({
         api_base_url: "http://api",
         saved_at: "x",
+        account_id: "acc_1",
         agent_session_token: "tok",
         proxy_url: "http://user:secret@proxy.example:8080",
       }),
     );
 
-    const session = await new FileStorage(tmpFile).read();
+    const store = new SessionStore(tmpFile);
+    const session = await store.read();
     expect(session).toMatchObject({ agent_session_token: "tok" });
     expect(session).not.toHaveProperty("proxy_url");
-    expect(JSON.parse(await fs.readFile(tmpFile, "utf8"))).not.toHaveProperty("proxy_url");
+    // Pruning is in-memory: the read leaves the file alone (other, older
+    // servers read it too). The next write is what persists the pruning.
+    expect(await fs.readFile(tmpFile, "utf8")).toContain("proxy_url");
+    await store.write({ ...session!, saved_at: "y" });
+    expect(await fs.readFile(tmpFile, "utf8")).not.toContain("proxy_url");
   });
 
-  it("loads a cleaned legacy session when migration persistence fails", async () => {
+  it("reads without writing, even where a write would fail", async () => {
     await fs.mkdir(path.dirname(tmpFile), { recursive: true });
     await fs.writeFile(
       tmpFile,
       JSON.stringify({
         api_base_url: "http://api",
         saved_at: "x",
+        account_id: "acc_1",
         agent_session_token: "tok",
         proxy_url: "http://user:secret@proxy.example:8080",
       }),
     );
-    const store = new FileStorage(tmpFile);
-    store.write = async () => {
-      throw new Error("temporary write failure");
-    };
-
-    const session = await store.read();
-
-    expect(session).toMatchObject({ agent_session_token: "tok" });
-    expect(session).not.toHaveProperty("proxy_url");
+    // Read-only directory: any attempt to persist on the read path would throw.
+    await fs.chmod(path.dirname(tmpFile), 0o500);
+    try {
+      const session = await new SessionStore(tmpFile).read();
+      expect(session).toMatchObject({ agent_session_token: "tok" });
+      expect(session).not.toHaveProperty("proxy_url");
+    } finally {
+      await fs.chmod(path.dirname(tmpFile), 0o700);
+    }
   });
 
   it("clear removes the file, idempotent", async () => {
-    const store = new FileStorage(tmpFile);
+    const store = new SessionStore(tmpFile);
     await store.write({
       agent_session_token: "tok",
       account_id: "acc",
@@ -96,36 +102,23 @@ describe("FileStorage", () => {
   });
 });
 
+describe("test containment", () => {
+  it("the DEFAULT session path never resolves to a real home", async () => {
+    // Guards the incident this suite caused once: a test reached the live
+    // ~/.config/trusty-squire/session.json and reshaped it under the running
+    // servers sharing it. See src/__tests__/setup/isolate-config-home.ts.
+    const { path: resolved } = new SessionStore();
+    expect(resolved.startsWith(os.tmpdir())).toBe(true);
+    expect(resolved).not.toContain(path.join(os.userInfo().homedir, ".config"));
+  });
+});
+
 describe("openSessionStorage", () => {
-  it("preferFile=true returns the file backend even when keytar is available", async () => {
-    const store = await openSessionStorage({ preferFile: true });
-    expect(store.backendName()).toBe("file");
+  it("always resolves the file store", async () => {
+    expect(await openSessionStorage({ filePath: tmpFile })).toBeInstanceOf(SessionStore);
   });
 
-  it("TRUSTY_SQUIRE_SESSION_FILE=1 forces the file backend", async () => {
-    const prev = process.env.TRUSTY_SQUIRE_SESSION_FILE;
-    process.env.TRUSTY_SQUIRE_SESSION_FILE = "1";
-    try {
-      const store = await openSessionStorage();
-      expect(store.backendName()).toBe("file");
-    } finally {
-      if (prev === undefined) delete process.env.TRUSTY_SQUIRE_SESSION_FILE;
-      else process.env.TRUSTY_SQUIRE_SESSION_FILE = prev;
-    }
-  });
-
-  it("ignores a falsey TRUSTY_SQUIRE_SESSION_FILE", async () => {
-    const prev = process.env.TRUSTY_SQUIRE_SESSION_FILE;
-    process.env.TRUSTY_SQUIRE_SESSION_FILE = "0";
-    try {
-      // Falls through to keytar-or-file; in CI/containers keytar is absent so
-      // this still resolves to file — assert it doesn't THROW and returns a
-      // valid backend rather than asserting a specific one.
-      const store = await openSessionStorage();
-      expect(["file", "keytar"]).toContain(store.backendName());
-    } finally {
-      if (prev === undefined) delete process.env.TRUSTY_SQUIRE_SESSION_FILE;
-      else process.env.TRUSTY_SQUIRE_SESSION_FILE = prev;
-    }
+  it("honours the caller's file path", async () => {
+    expect((await openSessionStorage({ filePath: tmpFile })).path).toBe(tmpFile);
   });
 });

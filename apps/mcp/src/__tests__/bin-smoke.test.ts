@@ -207,7 +207,6 @@ describe("launched through a bin symlink", () => {
         ...process.env,
         HOME: tmpDir,
         XDG_CONFIG_HOME: path.join(tmpDir, "server-idle-config"),
-        TRUSTY_SQUIRE_SESSION_FILE: "1",
         TRUSTY_SQUIRE_SERVER_IDLE_TIMEOUT_MS: "200",
         TRUSTY_SQUIRE_SERVER_IDLE_CHECK_INTERVAL_MS: "50",
       },
@@ -456,7 +455,6 @@ function mcpConversation(
         ...process.env,
         HOME: home,
         XDG_CONFIG_HOME: path.join(home, ".config"),
-        TRUSTY_SQUIRE_SESSION_FILE: "1",
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -511,7 +509,6 @@ async function startMcpServer(scriptPath: string): Promise<ChildProcess> {
       ...process.env,
       HOME: tmpDir,
       XDG_CONFIG_HOME: path.join(tmpDir, "server-shutdown-config"),
-      TRUSTY_SQUIRE_SESSION_FILE: "1",
     },
     stdio: ["pipe", "pipe", "pipe"],
   });

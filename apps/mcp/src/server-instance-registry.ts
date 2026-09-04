@@ -106,7 +106,12 @@ export interface ServerInstanceRecord extends ServerBirthIdentity {
   last_activity_at: number;
   active_sessions: number;
   in_flight_calls: number;
+  /** The build this instance launched with — a server serves it for its whole
+   * life, so this is how two live servers are told apart. */
   server_version: string;
+  /** The account it is bound to. Absent on records written before this field,
+   * and on an instance whose install never bound one. */
+  account_id?: string;
 }
 
 export interface ServerReapBounds {
@@ -311,7 +316,12 @@ export interface ServerInstanceHandle {
  * nothing to publish (non-Linux, no agent identity, unreadable birth identity).
  */
 export function registerServerInstance(
-  options: { rootDir?: string; identity?: string; now?: () => number } = {},
+  options: {
+    rootDir?: string;
+    identity?: string;
+    accountId?: string | undefined;
+    now?: () => number;
+  } = {},
 ): ServerInstanceHandle | null {
   if (process.platform !== "linux") return null;
   const identity = options.identity ?? agentIdentity();
@@ -334,6 +344,9 @@ export function registerServerInstance(
     active_sessions: 0,
     in_flight_calls: 0,
     server_version: VERSION,
+    ...(options.accountId !== undefined && options.accountId.length > 0
+      ? { account_id: options.accountId }
+      : {}),
   };
   const path = join(rootDir, `${birth.pid}-${randomUUID()}.json`);
   try {
@@ -366,6 +379,36 @@ export function registerServerInstance(
       rmSync(path, { force: true });
     },
   };
+}
+
+/**
+ * Live instances of ANY agent identity, newest first. Read-only — the "what is
+ * actually running right now" inventory, so several legitimately concurrent
+ * servers can be told apart by pid, build, and bound account. It signals
+ * nothing and reaps nothing.
+ */
+export function listLiveServerInstances(
+  options: {
+    rootDir?: string;
+    readBirthState?: (identity: ServerBirthIdentity) => ProcessIdentityState;
+  } = {},
+): ServerInstanceRecord[] {
+  const rootDir = resolve(options.rootDir ?? serverInstanceRootDir());
+  const readBirthState = options.readBirthState ?? processBirthIdentityState;
+  let entries: string[];
+  try {
+    entries = readdirSync(rootDir).filter((entry) => entry.endsWith(".json"));
+  } catch {
+    return [];
+  }
+  const live: ServerInstanceRecord[] = [];
+  for (const entry of entries) {
+    const record = readServerInstanceRecord(join(rootDir, entry));
+    if (record === null) continue;
+    if (readBirthState(record) !== "matching") continue;
+    live.push(record);
+  }
+  return live.sort((a, b) => b.started_at - a.started_at);
 }
 
 export interface ServerInstanceReapSummary {

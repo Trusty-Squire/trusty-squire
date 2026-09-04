@@ -46,7 +46,7 @@ ui.panel(
   { color: "wine", title: "sign in" },
 );
 
-ui.success("Session saved (keytar)");
+ui.success("Session saved (~/.config/trusty-squire/session.json)");
 ui.success("Wrote Cursor MCP config at ~/Library/.../mcp.json");
 pause();
 

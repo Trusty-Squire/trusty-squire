@@ -1,5 +1,9 @@
 // Runtime/pool settings shared by the complete, required, and slow configs.
 export const MCP_TEST_RUNTIME = {
+  // Containment: no test may resolve the developer's real home, which on the
+  // dev box holds the live servers' session.json, Chrome profile, and instance
+  // records. See src/__tests__/setup/isolate-config-home.ts.
+  setupFiles: ["./src/__tests__/setup/isolate-config-home.ts"],
   // Real Chromium fixtures compete for the same CPU/CDP resources when Vitest
   // fans them out across workers. Keep them serial inside each tier process.
   poolMatchGlobs: [

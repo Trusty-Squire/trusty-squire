@@ -4,7 +4,7 @@
   "license": "MIT",
   "mcpName": "ai.trustysquire/trusty-squire",
   "type": "module",
-  "description": "Trusty Squire gives coding agents the ability to provision, ship, and pay — without your keys or card ever leaving the vault.",
+  "description": "Trusty Squire gives coding agents the ability to provision, ship, and pay \u2014 without your keys or card ever leaving the vault.",
   "keywords": [
     "mcp",
     "model-context-protocol",
@@ -85,9 +85,6 @@
     "tldts": "^7.0.30",
     "yaml": "^2.6.1",
     "zod": "^3.23.8"
-  },
-  "optionalDependencies": {
-    "keytar": "^7.9.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "7.6.13",

@@ -72,11 +72,19 @@ import { openSessionStorage } from "../session.js";
 async function readInboxConsent(): Promise<boolean> {
   try {
     const storage = await openSessionStorage();
-    const data = await storage.read();
+    const data = await storage.read(boundAccountId());
     return data?.consent_operator_inbox_otp !== false;
   } catch {
     return true;
   }
+}
+
+// The account this server was launched for. `connect` pins it into the host
+// agent's MCP config env; sessions are stored one per account, so reading
+// without it would pick up whichever account connected most recently.
+function boundAccountId(): string | undefined {
+  const id = (process.env.TRUSTY_SQUIRE_ACCOUNT_ID ?? "").trim();
+  return id.length > 0 ? id : undefined;
 }
 
 // The account the install is bound to. Operator/CI runs set it in the env;
@@ -85,8 +93,8 @@ async function readInboxConsent(): Promise<boolean> {
 // auto-promote write for every end-user install — resolve from the session file
 // as the fallback so the registry loop works off a normal `connect`.
 async function resolveAccountId(): Promise<string | undefined> {
-  const fromEnv = process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
-  if (fromEnv !== undefined && fromEnv.length > 0) return fromEnv;
+  const fromEnv = boundAccountId();
+  if (fromEnv !== undefined) return fromEnv;
   try {
     const data = await (await openSessionStorage()).read();
     const id = data?.account_id;

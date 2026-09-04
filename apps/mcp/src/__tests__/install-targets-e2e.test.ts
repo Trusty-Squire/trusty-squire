@@ -3,7 +3,7 @@
 // this test:
 //   1. Runs the same connect() entrypoint runCli dispatches to.
 //   2. Mocks the external dependencies (API handshake + ASN detection
-//      + OAuth login + keytar) so the test is hermetic.
+//      + OAuth login) so the test is hermetic.
 //   3. Sandboxes HOME to a tmpdir so the writeConfig step lands in
 //      a throwaway directory and never touches the user's real config.
 //   4. Asserts the agent's config file is created at the agent's
@@ -52,13 +52,6 @@ vi.mock("../bot/index.js", async () => {
     ...actual,
     detectAsn: vi.fn(async () => null),
   };
-});
-
-// keytar's native binding does real keychain writes on macOS / a real
-// libsecret call on Linux. Force the test through the file storage
-// fallback by making the dynamic import reject.
-vi.mock("keytar", () => {
-  throw new Error("keytar disabled in tests");
 });
 
 // Stub the network-hitting `ensureOAuthSession` but preserve every

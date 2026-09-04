@@ -751,9 +751,8 @@ extension state on launch and won't reload mid-session.
 | `TWOCAPTCHA_API_KEY` | — | Optional Tier 3 captcha solver — fallback after the Tier 2 click-and-wait times out on a reCAPTCHA v2 image challenge. ~$0.003/solve. Skipped for Turnstile + reCAPTCHA v3 (those score at the IP layer; solver tokens get rejected). **Preferred path is the VAULT, not this env var:** `connect`/`settings` advanced setup prompts for the key and stores it encrypted as the `2captcha` credential; the captcha gate spends it through the injecting proxy (`use_credential`, `${SECRET}` in the `key` query / `clientKey` body) so the raw key never lives in the bot process or the MCP config. `buildTwoCaptchaSolver` prefers the vaulted cred and falls back to this env var for back-compat. The 2Captcha solve is a back-channel token fetch (the v2 token is injected into the user's real browser session and isn't IP-bound), so routing it through the vault adds no target-side fingerprinting. |
 | `UNIVERSAL_BOT_PROXY_ALWAYS` | `false` | Force a supplied per-session proxy on regardless of detected ASN class — for networks that misclassify as `unknown`. It has no effect when `operate_start.proxy` is omitted. |
 | `TRUSTY_SQUIRE_MACHINE_TOKEN` | (from session) | Machine token for the operator inbox-OTP service |
-| `TRUSTY_SQUIRE_ACCOUNT_ID` | (from session) | Operator account ID (auto-promote attribution on provisions). End-user installs read this from session.json. |
+| `TRUSTY_SQUIRE_ACCOUNT_ID` | (from session) | The account this server serves. `connect` pins it into the host agent's MCP config env, so an already-running server keeps the account it was launched for after a different account is connected. Also the auto-promote attribution on provisions. Falls back to the most recently connected account in `session.json` when the config predates the field. |
 | `TRUSTY_SQUIRE_API_BASE` | `https://trusty-squire-api.fly.dev` | API base URL |
-| `TRUSTY_SQUIRE_SESSION_FILE` | — | `1`/`true`/`yes` forces the durable file session backend (`~/.config/trusty-squire/session.json`) over the OS keychain. Set it **globally** (so `connect` and the spawned server agree) on headless boxes where the keychain is present-but-ephemeral (gnome-keyring "session" collection) — otherwise the session isn't persisted across runs. |
 | `TRUSTY_SQUIRE_OPERATOR_SESSION_IDLE_TIMEOUT_MS` | `600000` (10m) | Closes an operator session that has no active call and has received no operation within this bound. The lifecycle contract lives in `docs/DESIGN-warm-browser-reuse.md`. |
 | `TRUSTY_SQUIRE_OPERATOR_BROWSER_MAX_LIFETIME_MS` | `1800000` (30m) | Cross-platform maximum operator-session lifetime, checked before the active-call guard. An active payment receives only the bounded terminal-transition grace. |
 | `TRUSTY_SQUIRE_OPERATOR_BROWSER_CPU_CEILING_PERCENT` | `200` | Linux marked-Chromium aggregate CPU ceiling. The process watchdog terminates after `TRUSTY_SQUIRE_OPERATOR_BROWSER_CPU_CONSECUTIVE_SAMPLES` (default `3`) consecutive over-budget samples. |
@@ -817,6 +816,48 @@ housekeeper repo.
 | `PAIRING_TOKEN_RETENTION_HOURS` | `1`                       | PairingToken row sweep                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `VAULT_AUDIT_RETENTION_DAYS`    | `365`                     | VaultAuditEvent row sweep (the who-touched-my-keys trail). Kept a year — long enough for a compromise investigation, bounded so it doesn't grow forever.                                                                                                                                                                                                                                                                                                          |
 | `VAULT_ROTATION_STALE_DAYS`     | `90`                      | Age (since last change) past which a credential is flagged `stale` in the list response. Advisory nudge, not enforced.                                                                                                                                                                                                                                                                                                                                            |
+
+### Session storage (one file, one entry per ACCOUNT)
+
+`apps/mcp/src/session.ts` owns the only local session store: a 0600
+`$XDG_CONFIG_HOME/trusty-squire/session.json` (or `~/.config/...`). There is
+**one pathway** — the keytar/OS-keychain backend and its
+`TRUSTY_SQUIRE_SESSION_FILE` escape hatch were removed, because on headless
+Linux keytar's probe PASSES (so it got selected) while the per-login keyring is
+wiped between SSH logins, silently losing the session.
+
+The file holds **one entry per `account_id`** under an `accounts` map, not a
+single flat object. That is the fix for the measured defect: connecting a SECOND
+account used to overwrite the first account's binding, so servers still serving
+the first read the second's scope and produced a real `credential_not_found`
+for a credential that exists in the first account's vault. Keyed by account, a
+connect ADDS an entry and destroys nothing. Keying by ACCOUNT is namespacing —
+keying by PROCESS was the fragmentation session-simplify removed; do not
+reintroduce it.
+
+**Two rules make this safe for servers that are already running** (a live box
+carries several `mcp server` processes that loaded their build weeks ago and
+cannot be upgraded in place — an earlier revision broke four of them):
+
+1. **Reads never write.** Both shapes are read; nothing on the read path
+   reshapes a file other servers are reading too.
+2. **A write stays readable by an old build.** The document is a SUPERSET —
+   the current account's entry stays flat at the top level where a pre-v2 build
+   looks, with `accounts` beside it as a key an old build ignores.
+
+A server binds one account (`TRUSTY_SQUIRE_ACCOUNT_ID`, which `connect` pins
+into the host agent's MCP config env; else the most recently connected) and
+reads only that entry. `session-guard.ts` turns a missing own entry into a loud
+`account_session_missing` rather than a silent fallback. Several servers on one
+box are correct and expected — each serves the build it launched with and the
+account it was launched for, both reported in its startup line and its
+`server-instances/` record. Never self-upgrade or reap over that.
+
+**Tests must never resolve a real home.** `src/__tests__/setup/isolate-config-home.ts`
+(wired via `vitest.shared.ts`) points `HOME`/`XDG_CONFIG_HOME`/
+`TRUSTY_SQUIRE_PROFILE_DIR` at a throwaway directory for every test file,
+because the dev box's home holds the live servers' `session.json`, Chrome
+profile, and instance records.
 
 ### Vault security + lifecycle surface
 
