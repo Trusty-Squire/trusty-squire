@@ -333,7 +333,12 @@ describe("profile operation guard", () => {
     mkdirSync(lockDir);
     writeFileSync(
       join(lockDir, "owner.json"),
-      JSON.stringify({ host: "another-host", pid: process.pid, start_time: "unknown", token: "remote" }),
+      JSON.stringify({
+        host: "another-host",
+        pid: process.pid,
+        start_time: "unknown",
+        token: "remote",
+      }),
     );
 
     expect(() => acquireProfileOperationGuard(dir, lockRoot)).toThrow(ProfileBusyError);

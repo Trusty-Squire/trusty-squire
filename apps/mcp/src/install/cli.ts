@@ -992,14 +992,14 @@ async function syncConnectedProviders(providers: OAuthProviderId[]): Promise<voi
     });
   } catch {
     // Best-effort — marker/session drift only affects fast-path UX. The next
-    // connect/login/provision probe can repair it.
+    // connect or provision probe can repair it.
   }
 }
 
 // Persist `provider` into session.connected_providers (idempotent).
-// Called after a successful ensureOAuthSession so the install
-// preflight on the next run can read both providers off the session
-// file without having to load the bot's profile-dir marker.
+// Called after a successful live provider probe so the install preflight on the
+// next run can read both providers from the session file without loading a
+// profile-dir marker.
 async function recordConnectedProvider(provider: OAuthProviderId): Promise<void> {
   try {
     const storage = await openSessionStorage();

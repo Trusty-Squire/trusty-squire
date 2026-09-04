@@ -43,7 +43,10 @@ beforeEach(async () => {
   tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "ts-unverified-preflight-"));
   process.env.HOME = tmpHome;
   process.env.XDG_CONFIG_HOME = path.join(tmpHome, ".config");
-  vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 200 })));
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => new Response(null, { status: 200 })),
+  );
   await fs.mkdir(path.join(process.env.XDG_CONFIG_HOME, "trusty-squire"), { recursive: true });
   await fs.writeFile(
     path.join(process.env.XDG_CONFIG_HOME, "trusty-squire", "session.json"),
