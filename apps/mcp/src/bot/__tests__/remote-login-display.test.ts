@@ -16,6 +16,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   assertRemoteLoginRigLive,
   describeLoginPortHolder,
+  exposeRemoteLoginDisplay,
   fallbackCloudflaredArgs,
   findFreeLoginPort,
   generateVncPassword,
@@ -345,6 +346,80 @@ setInterval(() => undefined, 1000);
     expect(plan.mode === "quick" ? plan.fallbackNotice : "").toContain("one-off Cloudflare tunnel");
   });
 
+  it("serves a one-off tunnel and tears down its helpers when the named port is occupied", async () => {
+    const namedPort = await findFreeLoginPort();
+    const squatter = createServer();
+    const secrets = mkdtempSync(join(tmpdir(), "ts-remote-login-fallback-"));
+    const x11vnc = fakeExecutable(`
+const { createServer } = require("node:net");
+const port = Number(process.argv[process.argv.indexOf("-rfbport") + 1]);
+const server = createServer();
+server.listen(port, "127.0.0.1");
+process.on("SIGTERM", () => server.close(() => process.exit(0)));
+`);
+    const websockify = fakeExecutable(`
+const { createServer } = require("node:net");
+const target = process.argv.find((arg) => /^127\\.0\\.0\\.1:\\d+$/.test(arg));
+const port = Number(target.slice(target.lastIndexOf(":") + 1));
+const server = createServer();
+server.listen(port, "127.0.0.1");
+process.on("SIGTERM", () => server.close(() => process.exit(0)));
+`);
+    const cloudflared = fakeExecutable(`
+process.stdout.write("https://fallback-proof.trycloudflare.com\\n");
+setInterval(() => undefined, 1000);
+`);
+    const oldHostname = process.env.TS_LOGIN_PUBLIC_HOSTNAME;
+    const oldPort = process.env.TS_LOGIN_LOCAL_PORT;
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const rig: RemoteLoginRig = {
+      display: ":99",
+      width: 720,
+      height: 1280,
+      privateDir: secrets,
+      authFile: join(secrets, "Xauthority"),
+      passFile: join(secrets, "vnc-password"),
+      vncPassword: "test-password",
+      procs: [],
+      binaries: {
+        xvfb: "/unused/Xvfb",
+        x11vnc: x11vnc.path,
+        websockify: websockify.path,
+        cloudflared: cloudflared.path,
+      },
+    };
+    writeFileSync(rig.authFile!, "test-xauthority", { mode: 0o600 });
+    writeFileSync(rig.passFile!, rig.vncPassword, { mode: 0o600 });
+    try {
+      await new Promise<void>((resolve) => squatter.listen(namedPort, "127.0.0.1", resolve));
+      process.env.TS_LOGIN_PUBLIC_HOSTNAME = "vnc.example.test";
+      process.env.TS_LOGIN_LOCAL_PORT = String(namedPort);
+
+      await expect(exposeRemoteLoginDisplay(rig, "fallback proof")).resolves.toBe(
+        "https://fallback-proof.trycloudflare.com/#p=test-password",
+      );
+      expect(log.mock.calls.flat().join("\n")).toContain("one-off Cloudflare tunnel");
+      expect(rig.procs).toHaveLength(3);
+      const helperPids = rig.procs.map((child) => child.pid).filter((pid): pid is number => pid !== undefined);
+
+      await teardownRemoteLoginRig(rig, 50);
+      expect(rig.webDir).toBeUndefined();
+      await waitUntil(() => helperPids.every((pid) => !processIsLive(pid)));
+      expect(helperPids.every((pid) => !processIsLive(pid))).toBe(true);
+    } finally {
+      await teardownRemoteLoginRig(rig, 50);
+      await new Promise<void>((resolve) => squatter.close(() => resolve()));
+      if (oldHostname === undefined) delete process.env.TS_LOGIN_PUBLIC_HOSTNAME;
+      else process.env.TS_LOGIN_PUBLIC_HOSTNAME = oldHostname;
+      if (oldPort === undefined) delete process.env.TS_LOGIN_LOCAL_PORT;
+      else process.env.TS_LOGIN_LOCAL_PORT = oldPort;
+      log.mockRestore();
+      x11vnc.remove();
+      websockify.remove();
+      cloudflared.remove();
+    }
+  });
+
   it("names the busy port and its holder when no quick-tunnel fallback exists", () => {
     expect(() =>
       planLoginTunnel({
@@ -368,6 +443,65 @@ process.exit(1);
       );
     } finally {
       executable.remove();
+    }
+  });
+
+  it("reaps started login helpers and noVNC files after websockify reports its bind failure", async () => {
+    const secrets = mkdtempSync(join(tmpdir(), "ts-remote-login-websockify-failure-"));
+    const x11vncPidFile = join(secrets, "x11vnc.pid");
+    const x11vnc = fakeExecutable(`
+const { createServer } = require("node:net"); const { writeFileSync } = require("node:fs");
+const port = Number(process.argv[process.argv.indexOf("-rfbport") + 1]);
+const server = createServer();
+server.listen(port, "127.0.0.1", () => writeFileSync(${JSON.stringify(x11vncPidFile)}, String(process.pid)));
+process.on("SIGTERM", () => server.close(() => process.exit(0)));
+`);
+    const websockify = fakeExecutable(`
+process.stderr.write("OSError: [Errno 98] Address already in use\\n");
+process.exit(1);
+`);
+    const cloudflared = fakeExecutable("setInterval(() => undefined, 1000);");
+    const oldHostname = process.env.TS_LOGIN_PUBLIC_HOSTNAME;
+    const oldPort = process.env.TS_LOGIN_LOCAL_PORT;
+    const rig: RemoteLoginRig = {
+      display: ":99",
+      width: 720,
+      height: 1280,
+      privateDir: secrets,
+      authFile: join(secrets, "Xauthority"),
+      passFile: join(secrets, "vnc-password"),
+      vncPassword: "test-password",
+      procs: [],
+      binaries: {
+        xvfb: "/unused/Xvfb",
+        x11vnc: x11vnc.path,
+        websockify: websockify.path,
+        cloudflared: cloudflared.path,
+      },
+    };
+    writeFileSync(rig.authFile!, "test-xauthority", { mode: 0o600 });
+    writeFileSync(rig.passFile!, rig.vncPassword, { mode: 0o600 });
+    try {
+      delete process.env.TS_LOGIN_PUBLIC_HOSTNAME;
+      delete process.env.TS_LOGIN_LOCAL_PORT;
+
+      await expect(exposeRemoteLoginDisplay(rig, "failure proof")).rejects.toThrow(
+        /websockify exited before becoming ready \(code 1\)[\s\S]*Errno 98/,
+      );
+      const x11vncPid = Number(readFileSync(x11vncPidFile, "utf8"));
+      await waitUntil(() => !processIsLive(x11vncPid));
+      expect(rig.procs).toHaveLength(0);
+      expect(rig.webDir).toBeUndefined();
+      expect(processIsLive(x11vncPid)).toBe(false);
+    } finally {
+      await teardownRemoteLoginRig(rig, 50);
+      if (oldHostname === undefined) delete process.env.TS_LOGIN_PUBLIC_HOSTNAME;
+      else process.env.TS_LOGIN_PUBLIC_HOSTNAME = oldHostname;
+      if (oldPort === undefined) delete process.env.TS_LOGIN_LOCAL_PORT;
+      else process.env.TS_LOGIN_LOCAL_PORT = oldPort;
+      x11vnc.remove();
+      websockify.remove();
+      cloudflared.remove();
     }
   });
 
