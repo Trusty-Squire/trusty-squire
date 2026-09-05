@@ -4931,9 +4931,7 @@ export class BrowserController {
 
   async type(selector: string, text: string, sealed = false): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
-    await this.withModalInertNeutralized(selector, () =>
-      this.typeInner(selector, text, sealed),
-    );
+    await this.withModalInertNeutralized(selector, () => this.typeInner(selector, text, sealed));
   }
 
   /**
@@ -8976,7 +8974,6 @@ export class BrowserController {
       await cdp.detach().catch(() => undefined);
     }
   }
-
 
   async getState(): Promise<BrowserState> {
     if (!this.page) throw new Error("Browser not started");

@@ -349,13 +349,16 @@ still return only a current handle. `detail:"full"` keeps the V2 format. Maintai
   live `text=…`/`css=…` locator; that one-off fallback is not replayable.
   Compact V2 accepts only a handle from its current sealed action map.
   When a `click` or `js_click` opens a new tab or popup (`target=_blank`, a
-  `window.open` control), the operator follows it the way a person would: the
-  newly opened page becomes the active page, so the next `operate_observe` or
-  `operate_act` reads it. This is how an emailed verification or magic link is
-  followed. Do not try to `extract` the link's href instead — a single-use login
-  token is sealed and is never returned as text; following the tab navigates the
-  browser without exposing it. Payment is excluded: during a sealed card fill or
-  a live place-order/3-D Secure approval the active page never changes.
+  `window.open` control), the operator follows it the way a person would only
+  when the browser attributes its creation to the session's active page. That
+  owned popup becomes the active page, so the next `operate_observe` or
+  `operate_act` reads it. An unrelated or no-opener page in the browser context
+  stays unassigned and cannot become the working page. This is how an emailed
+  verification or magic link is followed. Do not try to `extract` the link's href
+  instead — a single-use login token is sealed and is never returned as text;
+  following the tab navigates the browser without exposing it. Payment is
+  excluded: during a sealed card fill or a live place-order/3-D Secure approval
+  the active page never changes.
   In a live operator session, in-page XHR/fetch calls to merchant API sibling
   subdomains are automatically in scope only when they share the registrable
   domain of a host trusted at session start. Calls outside the session scope fail
