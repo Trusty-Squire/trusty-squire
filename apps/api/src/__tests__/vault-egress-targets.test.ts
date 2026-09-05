@@ -5,7 +5,10 @@
 //   POST /v1/vault/egress-outcome   client-reported: what actually got the key
 //
 // The gate is the same pre-decrypt `allowed_hosts` check the proxy uses, so an
-// egress destination is exactly as user-authorised as a proxied call. The
+// egress destination is exactly as user-authorised as a proxied call — and the
+// host it checks is DERIVED from the destination kind, never read off the
+// request, because the client that names the destination is the one that
+// receives the decryptable payload. The
 // pre-decrypt property itself is proven directly (with a counting KMS) in
 // packages/vault/src/__tests__/credential-vault-egress.test.ts; here it shows
 // up as "403, and no retrieval row was ever written".
@@ -126,7 +129,7 @@ describe("POST /v1/vault/egress-fetch", () => {
         reference: "vault://nope",
         fields: ["api_key"],
         encrypted_response_public_key: egressKeyPair().publicKey,
-        destination: { kind: "github_repo_secret", host: "api.github.com" },
+        destination: { kind: "github_repo_secret", owner: "octo", repo: "demo" },
       },
     });
     expect(res.statusCode).toBe(401);
@@ -142,7 +145,7 @@ describe("POST /v1/vault/egress-fetch", () => {
         reference: "vault://acct/does-not-exist",
         fields: ["api_key"],
         encrypted_response_public_key: egressKeyPair().publicKey,
-        destination: { kind: "github_repo_secret", host: "api.github.com" },
+        destination: { kind: "github_repo_secret", owner: "octo", repo: "demo" },
       },
     });
     expect(res.statusCode).toBe(404);
@@ -162,7 +165,7 @@ describe("POST /v1/vault/egress-fetch", () => {
         reference,
         fields: ["api_key"],
         encrypted_response_public_key: keys.publicKey,
-        destination: { kind: "github_repo_secret", host: "api.github.com" },
+        destination: { kind: "github_repo_secret", owner: "octo", repo: "demo" },
       },
     });
 
@@ -186,7 +189,7 @@ describe("POST /v1/vault/egress-fetch", () => {
         reference,
         fields: ["api_key"],
         encrypted_response_public_key: egressKeyPair().publicKey,
-        destination: { kind: "github_repo_secret", host: "api.github.com" },
+        destination: { kind: "github_repo_secret", owner: "octo", repo: "demo" },
       },
     });
 
@@ -216,7 +219,7 @@ describe("POST /v1/vault/egress-fetch", () => {
         reference,
         fields: ["api_key"],
         encrypted_response_public_key: egressKeyPair().publicKey,
-        destination: { kind: "github_repo_secret", host: "api.github.com" },
+        destination: { kind: "github_repo_secret", owner: "octo", repo: "demo" },
       },
     });
 
@@ -234,8 +237,88 @@ describe("POST /v1/vault/egress-fetch", () => {
     expect(events.some((e) => e.type === VAULT_AUDIT_TYPES.retrieved)).toBe(false);
   });
 
-  it("normalises the destination host the same way the proxy does", async () => {
-    const a = await actor(h, "normalise@example.test");
+  it("IGNORES a host the client asserts and gates on the derived one", async () => {
+    // The attack finding 1 named: assert a host you ARE allowed for, to get the
+    // credential decrypted for a destination you are NOT allowed for.
+    const a = await actor(h, "assert-host@example.test");
+    const reference = await storeCred(h, a.cookie, { observed_hosts: ["api.example.com"] });
+
+    const res = await h.server.inject({
+      method: "POST",
+      url: "/v1/vault/egress-fetch",
+      headers: { authorization: `Bearer ${a.token}`, "content-type": "application/json" },
+      payload: {
+        reference,
+        fields: ["api_key"],
+        encrypted_response_public_key: egressKeyPair().publicKey,
+        destination: {
+          kind: "github_repo_secret",
+          owner: "octo",
+          repo: "demo",
+          // Not part of the contract; must be ignored, not honoured.
+          host: "api.example.com",
+        },
+      },
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toMatchObject({ error: "host_not_allowed", host: "api.github.com" });
+    const events = await h.deps.vaultAuditStore.list(a.accountId);
+    expect(events.some((e) => e.type === VAULT_AUDIT_TYPES.retrieved)).toBe(false);
+  });
+
+  it("records the exact repository on the retrieval audit row", async () => {
+    const a = await actor(h, "repo-audit@example.test");
+    const reference = await storeCred(h, a.cookie);
+
+    await h.server.inject({
+      method: "POST",
+      url: "/v1/vault/egress-fetch",
+      headers: { authorization: `Bearer ${a.token}`, "content-type": "application/json" },
+      payload: {
+        reference,
+        fields: ["api_key"],
+        encrypted_response_public_key: egressKeyPair().publicKey,
+        destination: {
+          kind: "github_repo_secret",
+          owner: "octo",
+          repo: "demo",
+          environment: "production",
+        },
+      },
+    });
+
+    const retrieved = (await h.deps.vaultAuditStore.list(a.accountId)).filter(
+      (e) => e.type === VAULT_AUDIT_TYPES.retrieved,
+    );
+    expect(retrieved[0]!.payload).toMatchObject({
+      target_host: "api.github.com",
+      egress_kind: "github_repo_secret",
+      egress_destination: "octo/demo:production",
+    });
+  });
+
+  it("requires `fields` — it never seals the whole credential by default", async () => {
+    const a = await actor(h, "fields-required@example.test");
+    const reference = await storeCred(h, a.cookie);
+
+    const res = await h.server.inject({
+      method: "POST",
+      url: "/v1/vault/egress-fetch",
+      headers: { authorization: `Bearer ${a.token}`, "content-type": "application/json" },
+      payload: {
+        reference,
+        encrypted_response_public_key: egressKeyPair().publicKey,
+        destination: { kind: "github_repo_secret", owner: "octo", repo: "demo" },
+      },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect((res.json() as { error: string }).error).toBe("invalid_request");
+  });
+
+  it("seals ONLY the requested field out of a multi-field credential", async () => {
+    const a = await actor(h, "one-field@example.test");
     const reference = await storeCred(h, a.cookie);
 
     const res = await h.server.inject({
@@ -246,11 +329,12 @@ describe("POST /v1/vault/egress-fetch", () => {
         reference,
         fields: ["api_key"],
         encrypted_response_public_key: egressKeyPair().publicKey,
-        destination: { kind: "github_repo_secret", host: "https://API.github.com:443/repos" },
+        destination: { kind: "github_repo_secret", owner: "octo", repo: "demo" },
       },
     });
 
-    expect(res.statusCode).toBe(200);
+    const body = res.json() as { encrypted_fields: Record<string, string> };
+    expect(Object.keys(body.encrypted_fields)).toEqual(["api_key"]);
   });
 
   it("400s a public key the server cannot seal to", async () => {
@@ -266,7 +350,7 @@ describe("POST /v1/vault/egress-fetch", () => {
         fields: ["api_key"],
         encrypted_response_public_key:
           "-----BEGIN PUBLIC KEY-----\nnot-a-key\n-----END PUBLIC KEY-----",
-        destination: { kind: "github_repo_secret", host: "api.github.com" },
+        destination: { kind: "github_repo_secret", owner: "octo", repo: "demo" },
       },
     });
 
@@ -286,7 +370,7 @@ describe("POST /v1/vault/egress-fetch", () => {
         reference,
         fields: ["nope"],
         encrypted_response_public_key: egressKeyPair().publicKey,
-        destination: { kind: "github_repo_secret", host: "api.github.com" },
+        destination: { kind: "github_repo_secret", owner: "octo", repo: "demo" },
       },
     });
 
@@ -294,10 +378,39 @@ describe("POST /v1/vault/egress-fetch", () => {
     expect(res.json()).toMatchObject({ error: "missing_fields", fields: ["nope"] });
   });
 
-  it("serves a dotenv_write destination on the local-file sentinel without a host entry", async () => {
-    const a = await actor(h, "dotenv@example.test");
-    // No network host in common — the .env gate is the mcp-side project-root check.
+  it("REFUSES dotenv_write when `local-file` is not on allowed_hosts", async () => {
+    // The bypass finding 1 named: asserting the .env kind used to skip
+    // allowed_hosts entirely, turning this route into a raw credential read for
+    // anyone holding an agent token. `.env` is authorised like any destination.
+    const a = await actor(h, "dotenv-unauthorised@example.test");
     const reference = await storeCred(h, a.cookie, { observed_hosts: ["api.example.com"] });
+
+    const res = await h.server.inject({
+      method: "POST",
+      url: "/v1/vault/egress-fetch",
+      headers: { authorization: `Bearer ${a.token}`, "content-type": "application/json" },
+      payload: {
+        reference,
+        fields: ["api_key"],
+        encrypted_response_public_key: egressKeyPair().publicKey,
+        destination: { kind: "dotenv_write" },
+      },
+    });
+
+    expect(res.statusCode).toBe(403);
+    const body = res.json() as { error: string; host: string; hint: string };
+    expect(body.error).toBe("host_not_allowed");
+    expect(body.host).toBe("local-file");
+    expect(body.hint).toContain("allowed_hosts");
+    const events = await h.deps.vaultAuditStore.list(a.accountId);
+    expect(events.some((e) => e.type === VAULT_AUDIT_TYPES.retrieved)).toBe(false);
+  });
+
+  it("serves dotenv_write once the user has added `local-file` to allowed_hosts", async () => {
+    const a = await actor(h, "dotenv@example.test");
+    const reference = await storeCred(h, a.cookie, {
+      observed_hosts: ["api.example.com", "local-file"],
+    });
     const keys = egressKeyPair();
 
     const res = await h.server.inject({
@@ -308,7 +421,7 @@ describe("POST /v1/vault/egress-fetch", () => {
         reference,
         fields: ["api_key"],
         encrypted_response_public_key: keys.publicKey,
-        destination: { kind: "dotenv_write", host: "local-file" },
+        destination: { kind: "dotenv_write" },
       },
     });
 
@@ -318,27 +431,10 @@ describe("POST /v1/vault/egress-fetch", () => {
 
     const events = await h.deps.vaultAuditStore.list(a.accountId);
     const retrieved = events.filter((e) => e.type === VAULT_AUDIT_TYPES.retrieved);
-    expect(retrieved[0]!.payload.target_host).toBe("local-file");
-  });
-
-  it("400s a dotenv_write destination that claims a network host", async () => {
-    const a = await actor(h, "dotenv-host@example.test");
-    const reference = await storeCred(h, a.cookie);
-
-    const res = await h.server.inject({
-      method: "POST",
-      url: "/v1/vault/egress-fetch",
-      headers: { authorization: `Bearer ${a.token}`, "content-type": "application/json" },
-      payload: {
-        reference,
-        fields: ["api_key"],
-        encrypted_response_public_key: egressKeyPair().publicKey,
-        destination: { kind: "dotenv_write", host: "api.github.com" },
-      },
+    expect(retrieved[0]!.payload).toMatchObject({
+      target_host: "local-file",
+      egress_kind: "dotenv_write",
     });
-
-    expect(res.statusCode).toBe(400);
-    expect((res.json() as { error: string }).error).toBe("invalid_request");
   });
 
   it("404s another account's credential", async () => {
@@ -354,7 +450,7 @@ describe("POST /v1/vault/egress-fetch", () => {
         reference,
         fields: ["api_key"],
         encrypted_response_public_key: egressKeyPair().publicKey,
-        destination: { kind: "github_repo_secret", host: "api.github.com" },
+        destination: { kind: "github_repo_secret", owner: "octo", repo: "demo" },
       },
     });
 
@@ -379,7 +475,7 @@ describe("POST /v1/vault/egress-fetch", () => {
         reference,
         fields: ["password"],
         encrypted_response_public_key: egressKeyPair().publicKey,
-        destination: { kind: "github_repo_secret", host: "api.github.com" },
+        destination: { kind: "github_repo_secret", owner: "octo", repo: "demo" },
       },
     });
 

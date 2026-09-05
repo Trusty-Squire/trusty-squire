@@ -62,6 +62,9 @@ and it is how you finish a provisioning task. Kinds:
     Requires \`api.github.com\` on the credential's allowed_hosts.
   • \`{kind:"dotenv_write", path, name}\` — write \`NAME="…"\` into a .env file
     under the project root (0600, atomic, other lines preserved byte for byte).
+    Requires the literal marker \`local-file\` on the credential's allowed_hosts:
+    .env egress is authorised the same way a network destination is, so add it
+    with edit_credential first if it is missing.
 The value is sealed to this MCP process, written to the destination, and never
 returned to you: you get {ok:true,…} or {written:true,…}.
 

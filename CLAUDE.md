@@ -841,12 +841,20 @@ keep it that way); the server halves are `POST /v1/vault/egress-fetch` and
 `retrieveForEgress` / `recordEgressDelivery` in
 `packages/vault/src/credential-vault.ts`.
 
-Two authorization boundaries, both reused rather than invented: a network
-destination must be on the credential's `allowed_hosts` (the SAME pre-decrypt
-gate the proxy uses — an off-allowlist destination never produces plaintext),
-and a `.env` path must resolve under the project root the MCP server was
-launched in. There is deliberately **no** destination-grants approval subsystem;
-do not add one. Deferred targets (Fly/Vercel/Cloudflare) are in `TODOS.md`.
+Authorization reuses `allowed_hosts` rather than inventing a subsystem, and the
+load-bearing detail is **who decides the host**: the server derives it from the
+destination KIND (`github_repo_secret` → `api.github.com`, `dotenv_write` →
+the literal marker `local-file`) and ignores any host the client asserts. The
+client that names the destination is the one that receives the decryptable
+payload, so a self-declared host authorises nothing — do not add a
+client-supplied host back. `local-file` is an ordinary `allowed_hosts` entry the
+user adds with `edit_credential`, **not an exemption**; there is no destination
+kind that skips the allowlist. `.env` additionally requires the path to resolve
+under the project root (a second gate, never a substitute). Only the one field a
+destination needs is decrypted — the field is chosen from `list_credentials`'
+non-secret `field_names` before the fetch. There is deliberately **no**
+destination-grants approval subsystem; do not add one. Deferred targets
+(Fly/Vercel/Cloudflare) are in `TODOS.md`.
 
 ### Vault security + lifecycle surface
 

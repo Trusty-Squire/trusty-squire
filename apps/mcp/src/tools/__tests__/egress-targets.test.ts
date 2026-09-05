@@ -19,9 +19,11 @@ import {
   executeEgressTarget,
   fetchVaultFieldsSealed,
   resolveDotenvPath,
-  resolveEgressField,
+  selectEgressFieldName,
+  writeDotenv,
   serializeDotenvValue,
   unsafeProjectRoot,
+  DEFAULT_EGRESS_TARGET_DEPS,
   type EgressTargetDeps,
 } from "../egress-targets.js";
 import { useCredentialTool } from "../use-credential.js";
@@ -32,27 +34,52 @@ const SECRET = "sk-live-must-never-reach-the-model-42";
 
 interface FakeApi {
   api: ApiClient;
+  listCalls: number;
   fetchCalls: Array<Record<string, unknown>>;
   outcomes: Array<Record<string, unknown>>;
   outcomeError: Error | null;
+  // A reporter that never settles — the network black hole finding 3 named.
+  outcomeHangs: boolean;
+  fetchError: Error | null;
 }
+
+const REFERENCE = "vault://acct/cred-1";
 
 function fakeApi(fields: Record<string, string> = { api_key: SECRET }): FakeApi {
   const state: FakeApi = {
+    listCalls: 0,
     fetchCalls: [],
     outcomes: [],
     outcomeError: null,
+    outcomeHangs: false,
+    fetchError: null,
     api: null as unknown as ApiClient,
   };
   state.api = {
+    // Metadata only — this is how the field is chosen before anything is
+    // decrypted, so the fake must expose names without values.
+    async listCredentials() {
+      state.listCalls += 1;
+      return {
+        credentials: [
+          {
+            reference: REFERENCE,
+            service: "browserstack",
+            label: "default",
+            field_names: Object.keys(fields),
+            allowed_hosts: ["api.github.com", "local-file"],
+          },
+        ],
+      };
+    },
     async egressFetchCredential(input: {
-      fields?: string[];
+      fields: string[];
       encrypted_response_public_key: string;
     }) {
       state.fetchCalls.push(input as unknown as Record<string, unknown>);
-      const requested = input.fields ?? Object.keys(fields);
+      if (state.fetchError !== null) throw state.fetchError;
       const encrypted_fields: Record<string, string> = {};
-      for (const name of requested) {
+      for (const name of input.fields) {
         const value = fields[name];
         if (value === undefined) throw new Error(`missing_fields: ${name}`);
         encrypted_fields[name] = publicEncrypt(
@@ -64,9 +91,16 @@ function fakeApi(fields: Record<string, string> = { api_key: SECRET }): FakeApi 
           Buffer.from(value, "utf8"),
         ).toString("base64");
       }
-      return { reference: "vault://acct/cred-1", encrypted_fields };
+      return { reference: REFERENCE, encrypted_fields };
     },
-    async reportEgressOutcome(input: Record<string, unknown>) {
+    async reportEgressOutcome(input: Record<string, unknown>, signal?: AbortSignal) {
+      if (state.outcomeHangs) {
+        return await new Promise<never>((_resolve, reject) => {
+          signal?.addEventListener("abort", () =>
+            reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+          );
+        });
+      }
       if (state.outcomeError !== null) throw state.outcomeError;
       state.outcomes.push(input);
       return { recorded: true };
@@ -89,6 +123,7 @@ function fakeGithub(
     publicKey?: { status: number; body: string };
     put?: { status: number; body: string };
     putDelayMs?: number;
+    publicKeyDelayMs?: number;
   } = {},
 ): FakeGithub {
   const keypair = sodium.crypto_box_keypair();
@@ -112,6 +147,9 @@ function fakeGithub(
         ...(init.body !== undefined ? { body: init.body } : {}),
       });
       if (init.method === "GET") {
+        if (responses.publicKeyDelayMs !== undefined) {
+          await hangUntilAborted(responses.publicKeyDelayMs, init.signal);
+        }
         const r =
           responses.publicKey ??
           ({
@@ -121,13 +159,7 @@ function fakeGithub(
         return { status: r.status, text: async () => r.body };
       }
       if (responses.putDelayMs !== undefined) {
-        await new Promise((resolve, reject) => {
-          const timer = setTimeout(resolve, responses.putDelayMs);
-          init.signal?.addEventListener("abort", () => {
-            clearTimeout(timer);
-            reject(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }));
-          });
-        });
+        await hangUntilAborted(responses.putDelayMs, init.signal);
       }
       const r = responses.put ?? ({ status: 201, body: "" } as const);
       return { status: r.status, text: async () => r.body };
@@ -146,6 +178,18 @@ function fakeGithub(
         ),
       ).toString("utf8"),
   };
+}
+
+// A request that takes longer than any bound we set, and honours the abort the
+// way a real fetch does.
+function hangUntilAborted(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, delayMs);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }));
+    });
+  });
 }
 
 const GITHUB_TARGET = {
@@ -167,7 +211,7 @@ describe("fetchVaultFieldsSealed", () => {
     const result = await fetchVaultFieldsSealed(async (publicKey) => {
       seen.push(publicKey);
       return {
-        reference: "vault://acct/cred-1",
+        reference: REFERENCE,
         encrypted_fields: {
           api_key: publicEncrypt(
             { key: publicKey, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },
@@ -176,7 +220,7 @@ describe("fetchVaultFieldsSealed", () => {
         },
       };
     });
-    expect(result.reference).toBe("vault://acct/cred-1");
+    expect(result.reference).toBe(REFERENCE);
     expect(result.fields.api_key).toBe(SECRET);
 
     await fetchVaultFieldsSealed(async (publicKey) => {
@@ -189,37 +233,115 @@ describe("fetchVaultFieldsSealed", () => {
 
 // ── field selection ──────────────────────────────────────────────────────
 
-describe("resolveEgressField", () => {
+describe("selectEgressFieldName", () => {
+  // Operates on NON-SECRET names from list_credentials, before any decrypt:
+  // only the field a destination actually receives is ever fetched.
   it("picks a named field", () => {
-    expect(resolveEgressField({ a: "1", b: "2" }, "b")).toBe("2");
+    expect(selectEgressFieldName(["a", "b"], "b")).toBe("b");
   });
 
   it("prefers `value` when no field is named", () => {
-    expect(resolveEgressField({ value: "v", username: "u" }, undefined)).toBe("v");
+    expect(selectEgressFieldName(["value", "username"], undefined)).toBe("value");
   });
 
   it("takes the sole field", () => {
-    expect(resolveEgressField({ api_key: SECRET }, undefined)).toBe(SECRET);
+    expect(selectEgressFieldName(["api_key"], undefined)).toBe("api_key");
   });
 
   it("takes the one secret-ish field among metadata fields", () => {
-    expect(resolveEgressField({ username: "ada", access_key: SECRET }, undefined)).toBe(SECRET);
+    expect(selectEgressFieldName(["username", "access_key"], undefined)).toBe("access_key");
   });
 
-  it("refuses an ambiguous multi-field credential", () => {
-    expect(() => resolveEgressField({ api_key: "1", client_secret: "2" }, undefined)).toThrow(
-      /pass `field`/,
+  it("refuses an ambiguous multi-field credential, listing the names", () => {
+    expect(() => selectEgressFieldName(["api_key", "client_secret"], undefined)).toThrow(
+      /api_key, client_secret.*pass `field`/s,
     );
   });
 
   it("names the missing field rather than falling back", () => {
     try {
-      resolveEgressField({ api_key: "1" }, "nope");
+      selectEgressFieldName(["api_key"], "nope");
       expect.unreachable();
     } catch (err) {
       expect(err).toBeInstanceOf(EgressTargetError);
       expect((err as EgressTargetError).code).toBe("credential_field_missing");
     }
+  });
+});
+
+describe("least privilege: only one field is ever decrypted", () => {
+  it("resolves the field from list_credentials metadata, then fetches only it", async () => {
+    const api = fakeApi({ username: "ada", access_key: SECRET });
+
+    await executeEgressTarget(
+      api.api,
+      { selector: { service: "browserstack" }, target: { ...GITHUB_TARGET } },
+      fakeGithub().deps,
+    );
+
+    expect(api.listCalls).toBe(1);
+    expect(api.fetchCalls[0]!.fields).toEqual(["access_key"]);
+  });
+
+  it("keeps the server's ${SECRET} rule exactly — an unmatched name needs `field`", async () => {
+    // `automate_key` does not match the secret-ish pattern (`_` is a word
+    // character, so \bkey\b never fires inside it). That is the SERVER's rule
+    // in http-proxy.ts resolveField, mirrored here on purpose: one rule, one
+    // behaviour, and an explicit `field` when it cannot decide.
+    const api = fakeApi({ username: "ada", automate_key: SECRET });
+
+    await expect(
+      executeEgressTarget(
+        api.api,
+        { selector: { service: "browserstack" }, target: { ...GITHUB_TARGET } },
+        fakeGithub().deps,
+      ),
+    ).rejects.toThrow(/pass `field`/);
+    expect(api.fetchCalls).toHaveLength(0);
+
+    await executeEgressTarget(
+      api.api,
+      {
+        selector: { service: "browserstack" },
+        field: "automate_key",
+        target: { ...GITHUB_TARGET },
+      },
+      fakeGithub().deps,
+    );
+    expect(api.fetchCalls[0]!.fields).toEqual(["automate_key"]);
+  });
+
+  it("refuses an ambiguous credential WITHOUT fetching anything", async () => {
+    const api = fakeApi({ api_key: SECRET, client_secret: "also-secret" });
+
+    await expect(
+      executeEgressTarget(
+        api.api,
+        { selector: { service: "browserstack" }, target: { ...GITHUB_TARGET } },
+        fakeGithub().deps,
+      ),
+    ).rejects.toThrow(/pass `field`/);
+
+    expect(api.fetchCalls).toHaveLength(0);
+  });
+
+  it("sends the destination KIND and repo identity, never a host", async () => {
+    const api = fakeApi();
+    await executeEgressTarget(
+      api.api,
+      {
+        selector: { reference: REFERENCE },
+        target: { ...GITHUB_TARGET, environment: "production" },
+      },
+      fakeGithub().deps,
+    );
+    expect(api.fetchCalls[0]!.destination).toEqual({
+      kind: "github_repo_secret",
+      owner: "octo",
+      repo: "demo",
+      environment: "production",
+    });
+    expect(JSON.stringify(api.fetchCalls[0])).not.toContain("host");
   });
 });
 
@@ -259,25 +381,12 @@ describe("github_repo_secret target", () => {
     expect(JSON.stringify(result)).not.toContain(SECRET);
   });
 
-  it("declares the destination host so the server can gate it", async () => {
-    const api = fakeApi();
-    await executeEgressTarget(
-      api.api,
-      { selector: { service: "browserstack" }, target: { ...GITHUB_TARGET } },
-      fakeGithub().deps,
-    );
-    expect(api.fetchCalls[0]).toMatchObject({
-      service: "browserstack",
-      destination: { kind: "github_repo_secret", host: "api.github.com" },
-    });
-  });
-
   it("accepts a 204 PUT", async () => {
     const api = fakeApi();
     const gh = fakeGithub({ put: { status: 204, body: "" } });
     const result = (await executeEgressTarget(
       api.api,
-      { selector: { reference: "r" }, target: { ...GITHUB_TARGET } },
+      { selector: { reference: REFERENCE }, target: { ...GITHUB_TARGET } },
       gh.deps,
     )) as Record<string, unknown>;
     expect(result).toMatchObject({ ok: true, status: 204 });
@@ -289,7 +398,7 @@ describe("github_repo_secret target", () => {
     const result = (await executeEgressTarget(
       api.api,
       {
-        selector: { reference: "r" },
+        selector: { reference: REFERENCE },
         target: { ...GITHUB_TARGET, environment: "production" },
       },
       gh.deps,
@@ -317,7 +426,7 @@ describe("github_repo_secret target", () => {
     await expect(
       executeEgressTarget(
         api.api,
-        { selector: { reference: "r" }, target: { ...GITHUB_TARGET } },
+        { selector: { reference: REFERENCE }, target: { ...GITHUB_TARGET } },
         gh.deps,
       ),
     ).rejects.toThrow(/403.*Resource not accessible by integration/s);
@@ -334,7 +443,7 @@ describe("github_repo_secret target", () => {
     await expect(
       executeEgressTarget(
         api.api,
-        { selector: { reference: "r" }, target: { ...GITHUB_TARGET } },
+        { selector: { reference: REFERENCE }, target: { ...GITHUB_TARGET } },
         gh.deps,
       ),
     ).rejects.toThrow(/404.*Not Found/s);
@@ -347,10 +456,32 @@ describe("github_repo_secret target", () => {
     await expect(
       executeEgressTarget(
         api.api,
-        { selector: { reference: "r" }, target: { ...GITHUB_TARGET } },
+        { selector: { reference: REFERENCE }, target: { ...GITHUB_TARGET } },
         gh.deps,
       ),
     ).rejects.toThrow(/no key\/key_id/);
+  });
+
+  it("aborts a hung PUBLIC-KEY GET at the 15s bound, not just the PUT", async () => {
+    // Finding 12: the AbortController helper is shared, but only the PUT was
+    // ever exercised. A hung GET is the more likely of the two.
+    vi.useFakeTimers();
+    try {
+      const api = fakeApi();
+      const gh = fakeGithub({ publicKeyDelayMs: 60_000 });
+      const pending = executeEgressTarget(
+        api.api,
+        { selector: { reference: REFERENCE }, target: { ...GITHUB_TARGET } },
+        gh.deps,
+      );
+      const assertion = expect(pending).rejects.toThrow(/timed out after 15000ms/);
+      await vi.advanceTimersByTimeAsync(20_000);
+      await assertion;
+      // It never got as far as the PUT.
+      expect(gh.requests.filter((r) => r.method === "PUT")).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("aborts a hung call at the 15s bound instead of hanging", async () => {
@@ -361,7 +492,7 @@ describe("github_repo_secret target", () => {
       const gh = fakeGithub({ putDelayMs: 60_000 });
       const pending = executeEgressTarget(
         api.api,
-        { selector: { reference: "r" }, target: { ...GITHUB_TARGET } },
+        { selector: { reference: REFERENCE }, target: { ...GITHUB_TARGET } },
         gh.deps,
       );
       const assertion = expect(pending).rejects.toThrow(/timed out after 15000ms/);
@@ -377,12 +508,12 @@ describe("github_repo_secret target", () => {
     const api = fakeApi();
     await executeEgressTarget(
       api.api,
-      { selector: { reference: "r" }, target: { ...GITHUB_TARGET } },
+      { selector: { reference: REFERENCE }, target: { ...GITHUB_TARGET } },
       fakeGithub().deps,
     );
     expect(api.outcomes).toHaveLength(1);
     expect(api.outcomes[0]).toMatchObject({
-      reference: "vault://acct/cred-1",
+      reference: REFERENCE,
       destination: { kind: "github_repo_secret", repo: "octo/demo" },
       status: "ok",
     });
@@ -394,7 +525,7 @@ describe("github_repo_secret target", () => {
     api.outcomeError = new Error("registry unreachable");
     const result = (await executeEgressTarget(
       api.api,
-      { selector: { reference: "r" }, target: { ...GITHUB_TARGET } },
+      { selector: { reference: REFERENCE }, target: { ...GITHUB_TARGET } },
       fakeGithub().deps,
     )) as Record<string, unknown>;
     expect(result).toMatchObject({ ok: true });
@@ -415,7 +546,7 @@ describe("github_repo_secret target", () => {
     await expect(
       executeEgressTarget(
         api.api,
-        { selector: { reference: "r" }, target: { ...GITHUB_TARGET } },
+        { selector: { reference: REFERENCE }, target: { ...GITHUB_TARGET } },
         deps,
       ),
     ).rejects.toThrow(/gh auth login.*GITHUB_TOKEN/s);
@@ -426,13 +557,195 @@ describe("github_repo_secret target", () => {
     const gh = fakeGithub();
     await executeEgressTarget(
       api.api,
-      { selector: { reference: "r" }, field: "automate_key", target: { ...GITHUB_TARGET } },
+      { selector: { reference: REFERENCE }, field: "automate_key", target: { ...GITHUB_TARGET } },
       gh.deps,
     );
     // Only the named field is asked for, so only it is ever decrypted here.
     expect(api.fetchCalls[0]!.fields).toEqual(["automate_key"]);
     const body = JSON.parse(gh.requests[1]!.body!) as { encrypted_value: string };
     expect(gh.open(body.encrypted_value)).toBe(SECRET);
+  });
+});
+
+// ── the outcome report is best-effort AND bounded ────────────────────────
+
+describe("egress-outcome reporting", () => {
+  it("returns the completed result even when the reporter never settles", async () => {
+    // Finding 3: an already-delivered secret must not be held hostage by the
+    // audit call. Real timers would make this a 5s test; fake ones prove the
+    // bound is the AbortController, not luck.
+    vi.useFakeTimers();
+    try {
+      const api = fakeApi();
+      api.outcomeHangs = true;
+      const gh = fakeGithub();
+
+      const pending = executeEgressTarget(
+        api.api,
+        { selector: { reference: REFERENCE }, target: { ...GITHUB_TARGET } },
+        gh.deps,
+      );
+      let settled = false;
+      void pending.then(() => {
+        settled = true;
+      });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      // Resolves, does not reject: the PUT succeeded, only the audit hung.
+      await expect(pending).resolves.toMatchObject({ ok: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports an outcome when the .env path is refused before any fetch", async () => {
+    // Finding 6: preflight refusals used to vanish from the trail entirely.
+    const cwd = process.cwd();
+    const root = await fs.realpath(mkdtempSync(path.join(tmpdir(), "ts-egress-preflight-")));
+    process.chdir(root);
+    try {
+      const api = fakeApi();
+      await expect(
+        executeEgressTarget(
+          api.api,
+          {
+            selector: { reference: REFERENCE },
+            target: { kind: "dotenv_write", path: "../escaped.env", name: "KEY" },
+          },
+          fakeGithub().deps,
+        ),
+      ).rejects.toMatchObject({ code: "path_outside_project" });
+
+      expect(api.fetchCalls).toHaveLength(0);
+      expect(api.outcomes[0]).toMatchObject({
+        reference: REFERENCE,
+        destination: { kind: "dotenv_write", path: "../escaped.env" },
+        status: "error",
+      });
+      expect(String(api.outcomes[0]!.error)).toContain("path_outside_project");
+    } finally {
+      process.chdir(cwd);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports an outcome when the vault refuses the fetch (403 off-allowlist)", async () => {
+    const api = fakeApi();
+    api.fetchError = Object.assign(
+      new Error("POST /v1/vault/egress-fetch → 403 host_not_allowed"),
+      {
+        code: "host_not_allowed",
+      },
+    );
+
+    await expect(
+      executeEgressTarget(
+        api.api,
+        { selector: { reference: REFERENCE }, target: { ...GITHUB_TARGET } },
+        fakeGithub().deps,
+      ),
+    ).rejects.toThrow(/host_not_allowed/);
+
+    expect(api.outcomes[0]).toMatchObject({
+      reference: REFERENCE,
+      destination: { kind: "github_repo_secret", repo: "octo/demo" },
+      status: "error",
+    });
+    expect(String(api.outcomes[0]!.error)).toContain("host_not_allowed");
+  });
+
+  it("reports an outcome when the field cannot be resolved", async () => {
+    const api = fakeApi({ api_key: SECRET, client_secret: "also-secret" });
+
+    await expect(
+      executeEgressTarget(
+        api.api,
+        { selector: { reference: REFERENCE }, target: { ...GITHUB_TARGET } },
+        fakeGithub().deps,
+      ),
+    ).rejects.toThrow(/pass `field`/);
+
+    expect(api.outcomes[0]).toMatchObject({ status: "error" });
+    expect(String(api.outcomes[0]!.error)).toContain("credential_field_ambiguous");
+    expect(JSON.stringify(api.outcomes)).not.toContain(SECRET);
+  });
+
+  it("carries the error CODE, never a field value, on every failure family", async () => {
+    const cases: Array<() => Promise<FakeApi>> = [
+      async () => {
+        const api = fakeApi();
+        const gh = fakeGithub({ put: { status: 403, body: '{"message":"nope"}' } });
+        await executeEgressTarget(
+          api.api,
+          { selector: { reference: REFERENCE }, target: { ...GITHUB_TARGET } },
+          gh.deps,
+        ).catch(() => {});
+        return api;
+      },
+      async () => {
+        const api = fakeApi();
+        const gh = fakeGithub({ publicKey: { status: 404, body: '{"message":"Not Found"}' } });
+        await executeEgressTarget(
+          api.api,
+          { selector: { reference: REFERENCE }, target: { ...GITHUB_TARGET } },
+          gh.deps,
+        ).catch(() => {});
+        return api;
+      },
+      async () => {
+        const api = fakeApi();
+        api.fetchError = new Error("network down");
+        await executeEgressTarget(
+          api.api,
+          { selector: { reference: REFERENCE }, target: { ...GITHUB_TARGET } },
+          fakeGithub().deps,
+        ).catch(() => {});
+        return api;
+      },
+    ];
+    for (const run of cases) {
+      const api = await run();
+      expect(api.outcomes).toHaveLength(1);
+      expect(api.outcomes[0]).toMatchObject({ status: "error" });
+      expect(JSON.stringify(api.outcomes[0])).not.toContain(SECRET);
+    }
+  });
+});
+
+// ── the production sodium loader, not a stand-in ─────────────────────────
+
+describe("DEFAULT_EGRESS_TARGET_DEPS.sealForGithub", () => {
+  it("roundtrips through the real lazy-loaded libsodium", async () => {
+    // Finding 9: the injected implementation in these tests proves sealed-box
+    // semantics but not the production dynamic import. This exercises that.
+    const keypair = sodium.crypto_box_keypair();
+    const publicKeyBase64 = sodium.to_base64(keypair.publicKey, sodium.base64_variants.ORIGINAL);
+
+    const sealedBase64 = await DEFAULT_EGRESS_TARGET_DEPS.sealForGithub(
+      Buffer.from(SECRET, "utf8"),
+      publicKeyBase64,
+    );
+
+    expect(sealedBase64).not.toContain(SECRET);
+    const opened = Buffer.from(
+      sodium.crypto_box_seal_open(
+        sodium.from_base64(sealedBase64, sodium.base64_variants.ORIGINAL),
+        keypair.publicKey,
+        keypair.privateKey,
+      ),
+    ).toString("utf8");
+    expect(opened).toBe(SECRET);
+  });
+
+  it("is reused across calls without re-initialising", async () => {
+    const keypair = sodium.crypto_box_keypair();
+    const key = sodium.to_base64(keypair.publicKey, sodium.base64_variants.ORIGINAL);
+    const a = await DEFAULT_EGRESS_TARGET_DEPS.sealForGithub(Buffer.from("one", "utf8"), key);
+    const b = await DEFAULT_EGRESS_TARGET_DEPS.sealForGithub(Buffer.from("two", "utf8"), key);
+    expect(a).not.toBe(b);
   });
 });
 
@@ -469,6 +782,31 @@ describe("resolveGithubToken", () => {
     process.env.GITHUB_TOKEN = "gho_from_env";
     expect(await resolveGithubToken()).toBe("gho_from_env");
   });
+
+  it("kills a hung `gh auth token` at the 10s bound and falls back to the env", async () => {
+    // Finding 11: a locked keyring makes `gh` hang, not fail. Real timers here
+    // on purpose — the bound is execFile's own `timeout`, which fake timers do
+    // not drive; the assertion is that it terminates and falls through.
+    const { resolveGithubToken } = await import("../egress-targets.js");
+    await fs.writeFile(path.join(bin, "gh"), "#!/bin/sh\nsleep 60\n", { mode: 0o755 });
+    process.env.GITHUB_TOKEN = "gho_from_env";
+
+    const started = Date.now();
+    const token = await resolveGithubToken(150);
+
+    expect(token).toBe("gho_from_env");
+    // It did not wait for the 60s sleep.
+    expect(Date.now() - started).toBeLessThan(10_000);
+  }, 20_000);
+
+  it("errors rather than hanging when `gh` hangs and there is no env token", async () => {
+    const { resolveGithubToken } = await import("../egress-targets.js");
+    await fs.writeFile(path.join(bin, "gh"), "#!/bin/sh\nsleep 60\n", { mode: 0o755 });
+
+    await expect(resolveGithubToken(150)).rejects.toMatchObject({
+      code: "github_auth_missing",
+    });
+  }, 20_000);
 
   it("throws github_auth_missing naming both fixes when neither is present", async () => {
     const { resolveGithubToken } = await import("../egress-targets.js");
@@ -566,6 +904,40 @@ describe("applyDotenvAssignment", () => {
     expect(applyDotenvAssignment('KEY="abc def"\n', "KEY", "v")).toBe('KEY="v"\n');
   });
 
+  it("appends using the file's own CRLF convention", () => {
+    // Finding 5: a CRLF .env that gains one LF-terminated line is a diff the
+    // user did not ask for.
+    expect(applyDotenvAssignment("# keep\r\nOTHER=keep\r\n", "KEY", "v")).toBe(
+      '# keep\r\nOTHER=keep\r\nKEY="v"\r\n',
+    );
+  });
+
+  it("appends LF to an LF file and adds the missing terminator in the file's EOL", () => {
+    expect(applyDotenvAssignment("OTHER=keep\n", "KEY", "v")).toBe('OTHER=keep\nKEY="v"\n');
+    expect(applyDotenvAssignment("OTHER=keep\r\n#x\r\nA=1", "KEY", "v")).toBe(
+      'OTHER=keep\r\n#x\r\nA=1\r\nKEY="v"\r\n',
+    );
+  });
+
+  it("accepts a quoted value ending in an EVEN backslash run", () => {
+    // Finding 5: `KEY="abc\\"` is a complete one-line value — the closing quote
+    // is real because the backslash run before it is even. Refusing it was a
+    // false positive.
+    expect(applyDotenvAssignment('KEY="abc\\\\"\n', "KEY", "v")).toBe('KEY="v"\n');
+    expect(applyDotenvAssignment("KEY=abc\\\\\n", "KEY", "v")).toBe('KEY="v"\n');
+  });
+
+  it("still refuses an ODD backslash run, which really does continue", () => {
+    for (const before of ['KEY="abc\\\\\\"\ndef"\n', "KEY=abc\\\ndef\n"]) {
+      try {
+        applyDotenvAssignment(before, "KEY", "v");
+        expect.unreachable();
+      } catch (err) {
+        expect((err as EgressTargetError).code).toBe("dotenv_unsupported_format");
+      }
+    }
+  });
+
   it("does not match a different key with the same prefix", () => {
     expect(applyDotenvAssignment("KEY_TWO=keep\n", "KEY", "v")).toBe('KEY_TWO=keep\nKEY="v"\n');
   });
@@ -591,7 +963,7 @@ describe("dotenv_write target", () => {
     const api = fakeApi(fields);
     const result = (await executeEgressTarget(
       api.api,
-      { selector: { reference: "r" }, target: { kind: "dotenv_write", ...target } },
+      { selector: { reference: REFERENCE }, target: { kind: "dotenv_write", ...target } },
       fakeGithub().deps,
     )) as Record<string, unknown>;
     return { result, api };
@@ -618,11 +990,9 @@ describe("dotenv_write target", () => {
     });
   });
 
-  it("declares the local-file sentinel host so the server audits it", async () => {
+  it("declares only the dotenv_write kind — the server derives the gated host", async () => {
     const { api } = await run({ path: ".env", name: "K" });
-    expect(api.fetchCalls[0]).toMatchObject({
-      destination: { kind: "dotenv_write", host: "local-file" },
-    });
+    expect(api.fetchCalls[0]!.destination).toEqual({ kind: "dotenv_write" });
   });
 
   it("replaces an existing assignment and preserves the surrounding file", async () => {
@@ -699,7 +1069,7 @@ describe("dotenv_write target", () => {
       executeEgressTarget(
         api.api,
         {
-          selector: { reference: "r" },
+          selector: { reference: REFERENCE },
           target: { kind: "dotenv_write", path: ".env", name: "KEY" },
         },
         fakeGithub().deps,
@@ -726,6 +1096,79 @@ describe("dotenv_write target", () => {
     } finally {
       await fs.chmod(dir, 0o700);
     }
+  });
+
+  it("preserves BOTH updates when two writers race the same file", async () => {
+    // Finding 2: atomic rename makes each replacement whole; it does NOT make
+    // read-modify-write atomic. Without the lock, one of these silently wins.
+    await fs.writeFile(path.join(root, ".env"), "BASE=1\n");
+
+    await Promise.all([
+      run({ path: ".env", name: "FIRST" }, { api_key: "one" }),
+      run({ path: ".env", name: "SECOND" }, { api_key: "two" }),
+    ]);
+
+    const written = await fs.readFile(path.join(root, ".env"), "utf8");
+    expect(written).toContain("BASE=1");
+    expect(written).toContain('FIRST="one"');
+    expect(written).toContain('SECOND="two"');
+    // And no lock file survived.
+    expect(await fs.readdir(root)).toEqual([".env"]);
+  });
+
+  it("keeps every writer's key when many race at once", async () => {
+    await fs.writeFile(path.join(root, ".env"), "BASE=1\n");
+    const names = ["K0", "K1", "K2", "K3", "K4", "K5"];
+
+    await Promise.all(names.map((name) => run({ path: ".env", name }, { api_key: name })));
+
+    const written = await fs.readFile(path.join(root, ".env"), "utf8");
+    for (const name of names) expect(written).toContain(`${name}="${name}"`);
+    expect(written).toContain("BASE=1");
+  });
+
+  it("re-tightens the mode to 0600 when REPLACING a looser existing file", async () => {
+    const target = path.join(root, ".env");
+    await fs.writeFile(target, "KEY=old\n");
+    await fs.chmod(target, 0o644);
+
+    await run({ path: ".env", name: "KEY" });
+
+    expect((await fs.stat(target)).mode & 0o777).toBe(0o600);
+  });
+
+  it("refuses when the validated directory is swapped for a symlink before the write", async () => {
+    // Finding 7: path validation is check-then-use. dev/ino identity is what
+    // makes the recheck at write time mean something.
+    const outside = await fs.realpath(mkdtempSync(path.join(tmpdir(), "ts-egress-swap-")));
+    try {
+      await fs.mkdir(path.join(root, "config"));
+      const destination = await resolveDotenvPath("config/.env");
+
+      // The swap an attacker with in-project write access can perform between
+      // validation and use.
+      await fs.rename(path.join(root, "config"), path.join(root, "config.moved"));
+      await fs.symlink(outside, path.join(root, "config"));
+
+      await expect(writeDotenv(destination, "KEY", SECRET)).rejects.toMatchObject({
+        code: "path_outside_project",
+      });
+
+      // Nothing landed on the escape target.
+      expect(await fs.readdir(outside)).toEqual([]);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses when the validated directory is deleted before the write", async () => {
+    await fs.mkdir(path.join(root, "gone"));
+    const destination = await resolveDotenvPath("gone/.env");
+    await fs.rm(path.join(root, "gone"), { recursive: true, force: true });
+
+    await expect(writeDotenv(destination, "KEY", SECRET)).rejects.toMatchObject({
+      code: "path_outside_project",
+    });
   });
 
   it("refuses a value that cannot be represented on one line", async () => {
@@ -759,7 +1202,16 @@ describe("resolveDotenvPath", () => {
   });
 
   it("resolves a relative path against the project root", async () => {
-    expect(await resolveDotenvPath(".env")).toBe(path.join(root, ".env"));
+    const destination = await resolveDotenvPath(".env");
+    expect(destination.path).toBe(path.join(root, ".env"));
+    expect(destination.dir).toBe(root);
+  });
+
+  it("captures the directory identity the write will re-assert", async () => {
+    const destination = await resolveDotenvPath(".env");
+    const stat = await fs.stat(root);
+    expect(destination.dev).toBe(stat.dev);
+    expect(destination.ino).toBe(stat.ino);
   });
 
   it("refuses to treat a filesystem root or $HOME as a project root", async () => {
@@ -789,7 +1241,9 @@ describe("resolveDotenvPath", () => {
     await fs.mkdir(path.join(root, "config"));
     await fs.writeFile(path.join(root, "config", "real.env"), "");
     await fs.symlink(path.join(root, "config", "real.env"), path.join(root, ".env"));
-    expect(await resolveDotenvPath(".env")).toBe(path.join(root, "config", "real.env"));
+    const destination = await resolveDotenvPath(".env");
+    expect(destination.path).toBe(path.join(root, "config", "real.env"));
+    expect(destination.dir).toBe(path.join(root, "config"));
   });
 });
 

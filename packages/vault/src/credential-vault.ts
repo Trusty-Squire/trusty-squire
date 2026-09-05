@@ -245,9 +245,12 @@ export interface VaultClient {
 // this key go" is one filter on the timeline.
 export const EGRESS_PURPOSE = "egress";
 
-// The sentinel `target_host` for the one egress destination that is not a
-// network host: a .env file on the user's own machine. Authorised by the
-// mcp-side project-root check, not by allowed_hosts.
+// The `allowed_hosts` marker standing in for the one egress destination that
+// is not a network host: a .env file on the user's own machine. It is an
+// ORDINARY allowlist entry the user adds through edit_credential (passkey
+// signed) — not an exemption. `.env` egress is refused until they add it,
+// exactly like any other destination host. The mcp-side project-root check is
+// a SECOND gate on top of it, never a substitute.
 export const EGRESS_LOCAL_FILE_HOST = "local-file";
 
 const ASSERTION_MAX_AGE_MS = 60 * 60 * 1000;
@@ -559,28 +562,40 @@ export class CredentialVault implements VaultClient {
   // Vault-first egress: decrypt a credential so the LOCAL mcp process can put
   // it where it is needed (a GitHub Actions secret, a .env file). Same
   // pre-decrypt host gate as `proxy` — `targetHost` must be on the
-  // credential's allowed_hosts, so an egress destination is exactly as
-  // user-authorised as a proxied call. EGRESS_LOCAL_FILE_HOST is the one
-  // destination with no network host at all; its authorisation is the
-  // mcp-side project-root check, so the server records it rather than
-  // host-checking it. Goes through retrieveInternal, which is what keeps
-  // egress under the same per-account retrieval ceiling as every other
-  // decrypt path.
+  // credential's allowed_hosts, with NO exemption for any destination kind
+  // (`local-file` is an allowlist entry the user adds, not a bypass), so an
+  // egress destination is exactly as user-authorised as a proxied call.
+  //
+  // `targetHost` is derived by the caller from the destination KIND, never
+  // read off the agent's request: the client that names the destination is the
+  // one that receives the decryptable payload, so a self-declared host would
+  // authorise nothing.
+  //
+  // Goes through retrieveInternal, which is what keeps egress under the same
+  // per-account retrieval ceiling as every other decrypt path.
   async retrieveForEgress(
     reference: string,
     accountId: string,
     targetHost: string,
+    destination?: { kind: string; destination?: string },
   ): Promise<Record<string, string>> {
     const record = await this.deps.store.findActive(reference);
     if (record === null || record.account_id !== accountId) {
       throw new CredentialNotFoundError(reference);
     }
-    if (targetHost !== EGRESS_LOCAL_FILE_HOST && !record.allowed_hosts.includes(targetHost)) {
+    const destinationPayload = {
+      ...(destination !== undefined ? { egress_kind: destination.kind } : {}),
+      ...(destination?.destination !== undefined
+        ? { egress_destination: destination.destination }
+        : {}),
+    };
+    if (!record.allowed_hosts.includes(targetHost)) {
       await this.recordAudit(accountId, VAULT_AUDIT_TYPES.proxyRejected, {
         reference,
         requester: "agent",
         purpose: EGRESS_PURPOSE,
         target_host: targetHost,
+        ...destinationPayload,
       });
       throw new AllowlistViolationError(reference, targetHost);
     }
@@ -591,6 +606,7 @@ export class CredentialVault implements VaultClient {
       signingDeviceId: null,
       assertion: null,
       targetHost,
+      extraPayload: destinationPayload,
     });
   }
 
@@ -888,9 +904,13 @@ export class CredentialVault implements VaultClient {
     // Egress only: the destination this decrypt is FOR, recorded on every
     // audit row this retrieval emits so the trail says where the key went.
     targetHost?: string;
+    extraPayload?: Partial<VaultAuditPayload>;
   }): Promise<Record<string, string>> {
     const { reference, purpose, requester, signingDeviceId, assertion } = args;
-    const targetHostPayload = args.targetHost !== undefined ? { target_host: args.targetHost } : {};
+    const targetHostPayload = {
+      ...(args.targetHost !== undefined ? { target_host: args.targetHost } : {}),
+      ...(args.extraPayload ?? {}),
+    };
     const record = await this.deps.store.findActive(reference);
     const accountId = record?.account_id ?? "";
 

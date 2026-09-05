@@ -45,35 +45,68 @@ const useBody = z
     message: "one of reference, service, or name is required",
   });
 
-// Vault-first egress. The agent names a credential and a DESTINATION it is
+// Vault-first egress. The agent names a credential and a DESTINATION KIND it is
 // about to write the key into from its own machine; the server gates, decrypts,
 // and seals the fields to the caller's ephemeral public key. Deliberately not
 // `browser-fill`: that route gates on `login_hosts` (browser-fill semantics),
 // while an egress destination is a proxy-semantics `allowed_hosts` question.
+//
+// The client does NOT get to say which host is checked. It says what KIND of
+// destination it is; the server derives the host from the kind and checks THAT
+// against allowed_hosts. Anything else would make the gate a formality: the
+// same client that asserts the destination is the one that receives the
+// decryptable payload, so a self-declared host authorises nothing.
 const egressDestination = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("github_repo_secret"), host: z.string().min(1).max(253) }),
-  // `.env` has no network host: the literal sentinel keeps the audit row
-  // honest about where the key went, and the project-root gate lives on the
-  // mcp side where the filesystem actually is.
-  z.object({ kind: z.literal("dotenv_write"), host: z.literal(EGRESS_LOCAL_FILE_HOST) }),
+  z.object({
+    kind: z.literal("github_repo_secret"),
+    // Recorded on the audit row so the trail names the exact repository the
+    // key went to. NOT used for the gate — the gate is the derived host.
+    owner: z.string().min(1).max(200),
+    repo: z.string().min(1).max(200),
+    environment: z.string().min(1).max(200).optional(),
+  }),
+  z.object({ kind: z.literal("dotenv_write") }),
 ]);
+
+// The host each destination kind is gated on. `.env` has no network host, so
+// it gets a literal marker — but that marker is an ordinary `allowed_hosts`
+// ENTRY the user adds through edit_credential (passkey-signed), not an
+// exemption. There is no destination kind that skips the allowlist.
+const EGRESS_DESTINATION_HOSTS = {
+  github_repo_secret: "api.github.com",
+  dotenv_write: EGRESS_LOCAL_FILE_HOST,
+} as const;
 
 const egressFetchBody = z
   .object({
     reference: z.string().min(1).max(400).optional(),
     service: z.string().min(1).max(120).optional(),
     name: z.string().min(1).max(60).optional(),
-    // Omitted = seal every field the credential has. The client needs the
-    // whole map to apply use_credential's ${SECRET} field-selection rule
-    // (named field / `value` / sole field / the one secret-ish name); it
-    // names an explicit subset when the caller passed `field`.
-    fields: z.array(z.string().min(1).max(120)).min(1).max(20).optional(),
+    // Required, and in practice exactly one: the client resolves which field
+    // it needs from the non-secret `field_names` in list_credentials BEFORE
+    // calling here, so only the field a destination actually receives is ever
+    // decrypted. Omitting it and sealing everything would widen plaintext
+    // residency for no gain.
+    fields: z.array(z.string().min(1).max(120)).min(1).max(20),
     encrypted_response_public_key: z.string().min(1).max(4096),
     destination: egressDestination,
   })
   .refine((b) => b.reference !== undefined || b.service !== undefined || b.name !== undefined, {
     message: "one of reference, service, or name is required",
   });
+
+// The destination identity recorded alongside the retrieval — who received the
+// key, never its value. For `.env` the server cannot know the path (the
+// filesystem is on the client), so the retrieval row names the kind and the
+// client-reported egress-outcome row carries the path.
+function egressFetchDestinationLabel(
+  destination: z.infer<typeof egressDestination>,
+): string | undefined {
+  if (destination.kind === "dotenv_write") return undefined;
+  return destination.environment !== undefined
+    ? `${destination.owner}/${destination.repo}:${destination.environment}`
+    : `${destination.owner}/${destination.repo}`;
+}
 
 const egressOutcomeBody = z.object({
   reference: z.string().min(1).max(400),
@@ -411,16 +444,10 @@ export const registerVaultAccessRoute: FastifyPluginAsync<{
       });
       return;
     }
-    // Normalise exactly like the proxy does before the allowlist compare, so a
-    // scheme/port/trailing-path spelling can't slip past the same-named gate.
-    const targetHost =
-      data.destination.kind === "dotenv_write"
-        ? EGRESS_LOCAL_FILE_HOST
-        : normaliseHost(data.destination.host);
-    if (targetHost === null) {
-      reply.code(400).send({ error: "invalid_destination_host" });
-      return;
-    }
+    // Derived from the KIND, never read off the request. A client that claims
+    // `api.example.com` or omits a host entirely gets the same check.
+    const targetHost = EGRESS_DESTINATION_HOSTS[data.destination.kind];
+    const destinationLabel = egressFetchDestinationLabel(data.destination);
     try {
       // The gate lives inside retrieveForEgress and runs BEFORE any decrypt —
       // an off-allowlist destination never causes plaintext to exist.
@@ -428,8 +455,12 @@ export const registerVaultAccessRoute: FastifyPluginAsync<{
         selected.reference,
         auth.account_id,
         targetHost,
+        {
+          kind: data.destination.kind,
+          ...(destinationLabel !== undefined ? { destination: destinationLabel } : {}),
+        },
       );
-      const requested = data.fields ?? Object.keys(fields);
+      const requested = data.fields;
       const missing = requested.filter((field) => fields[field] === undefined);
       if (missing.length > 0) {
         reply.code(400).send({ error: "missing_fields", fields: missing });

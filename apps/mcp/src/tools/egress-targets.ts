@@ -22,6 +22,8 @@
 import { execFile } from "node:child_process";
 import { constants, generateKeyPairSync, privateDecrypt, randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
+import type { Stats } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
@@ -39,17 +41,22 @@ const GH_TOKEN_TIMEOUT_MS = 10_000;
 // user with GitHub's own words, not silently attempted again.
 const GITHUB_CALL_TIMEOUT_MS = 15_000;
 
+// The one host this target ever talks to — and the host the SERVER
+// independently derives and gates on. Kept as a constant here only to build
+// the URL; the client does not get to tell the server where the key is going.
 const GITHUB_API_HOST = "api.github.com";
-// Mirrors the vault's EGRESS_LOCAL_FILE_HOST: `.env` has no network host, so
-// the server records this sentinel instead of host-checking it.
-const LOCAL_FILE_HOST = "local-file";
 
+// The code is part of the MESSAGE on purpose. The MCP boundary serializes only
+// `Error.message` into the tool result (`server.ts`), so a code kept in a
+// separate field would never reach the agent — and the codes are exactly what
+// the tool description tells it to act on (`path_outside_project`,
+// `dotenv_unsupported_format`, `github_auth_missing`, …).
 export class EgressTargetError extends Error {
   constructor(
     readonly code: string,
-    message: string,
+    detail: string,
   ) {
-    super(message);
+    super(`${code}: ${detail}`);
     this.name = "EgressTargetError";
   }
 }
@@ -78,14 +85,21 @@ export async function fetchVaultFieldsSealed(
   const response = await requestSealed(publicKey);
   const fields: Record<string, string> = {};
   for (const [field, encrypted] of Object.entries(response.encrypted_fields)) {
-    fields[field] = privateDecrypt(
+    const plaintext = privateDecrypt(
       {
         key: privateKey,
         padding: constants.RSA_PKCS1_OAEP_PADDING,
         oaepHash: "sha256",
       },
       Buffer.from(encrypted, "base64"),
-    ).toString("utf8");
+    );
+    try {
+      fields[field] = plaintext.toString("utf8");
+    } finally {
+      // The string is GC-owned and unscrubbable; this Buffer is not, so zero
+      // the one copy we can actually reach.
+      plaintext.fill(0);
+    }
   }
   return { reference: response.reference, fields };
 }
@@ -93,37 +107,42 @@ export async function fetchVaultFieldsSealed(
 // ── field selection ──────────────────────────────────────────────────────
 //
 // The same rule `${SECRET}` follows server-side (http-proxy.ts resolveField),
-// mirrored here because the destination call is made locally: named field →
-// `value` → the sole field → the one secret-ish name.
+// mirrored here — but applied to the NON-SECRET field NAMES from
+// list_credentials, before anything is decrypted: named field → `value` → the
+// sole field → the one secret-ish name. Only the field a destination actually
+// receives is ever fetched, so plaintext residency is one value, not the whole
+// credential.
 
 const SECRETISH =
   /(?:secret|api[_-]?key|access[_-]?key|auth[_-]?token|\btoken\b|password|private[_-]?key|\bkey\b)/i;
 const NON_SECRET =
   /^(?:id|name|label|username|user|email|public[_-]?key|client[_-]?id|account[_-]?id)$/i;
 
-export function resolveEgressField(
-  fields: Record<string, string>,
-  name: string | undefined,
+export function selectEgressFieldName(
+  fieldNames: readonly string[],
+  requested: string | undefined,
 ): string {
-  if (name !== undefined) {
-    const value = fields[name];
-    if (value === undefined) {
+  if (requested !== undefined) {
+    if (!fieldNames.includes(requested)) {
       throw new EgressTargetError(
         "credential_field_missing",
-        `credential has no field '${name}' — call list_credentials to see its field names`,
+        `credential has no field '${requested}' — it has ${describeFieldNames(fieldNames)}`,
       );
     }
-    return value;
+    return requested;
   }
-  if (fields.value !== undefined) return fields.value;
-  const keys = Object.keys(fields);
-  if (keys.length === 1) return fields[keys[0]!]!;
-  const secretish = keys.filter((k) => SECRETISH.test(k) && !NON_SECRET.test(k));
-  if (secretish.length === 1) return fields[secretish[0]!]!;
+  if (fieldNames.includes("value")) return "value";
+  if (fieldNames.length === 1) return fieldNames[0]!;
+  const secretish = fieldNames.filter((k) => SECRETISH.test(k) && !NON_SECRET.test(k));
+  if (secretish.length === 1) return secretish[0]!;
   throw new EgressTargetError(
     "credential_field_ambiguous",
-    `credential has multiple fields (${keys.join(", ")}) — pass \`field\` to pick one`,
+    `credential has ${describeFieldNames(fieldNames)} — pass \`field\` to pick one`,
   );
+}
+
+function describeFieldNames(fieldNames: readonly string[]): string {
+  return fieldNames.length === 0 ? "no named fields" : `fields: ${fieldNames.join(", ")}`;
 }
 
 // ── .env grammar ─────────────────────────────────────────────────────────
@@ -153,22 +172,46 @@ function assignmentPatterns(name: string): { strict: RegExp; loose: RegExp } {
   };
 }
 
+// How many backslashes immediately precede position `index`. Parity is what
+// decides whether the character AT `index` is escaped: `\\"` ends a value with
+// a literal backslash and a real closing quote, while `\"` is an escaped
+// quote and the value continues. Counting, not "is the previous char a
+// backslash", is the difference between accepting `KEY="abc\\"` and falsely
+// refusing it.
+function precedingBackslashRun(value: string, index: number): number {
+  let run = 0;
+  for (let i = index - 1; i >= 0 && value[i] === "\\"; i -= 1) run += 1;
+  return run;
+}
+
 // True when the value on a matched line continues past the end of the line —
-// a trailing backslash, or an unterminated quote. We cannot rewrite one line
-// of a multi-line value without understanding the rest of it, so we refuse.
+// a trailing (unescaped) backslash, or an unterminated quote. We cannot
+// rewrite one line of a multi-line value without understanding the rest of it,
+// so we refuse.
 function valueContinues(rawValue: string): boolean {
   const value = rawValue.replace(/\r?\n$/, "");
-  if (/(^|[^\\])\\$/.test(value) || value === "\\") return true;
+  if (value.endsWith("\\") && precedingBackslashRun(value, value.length - 1) % 2 === 0) {
+    return true;
+  }
   const quote = value.startsWith('"') ? '"' : value.startsWith("'") ? "'" : null;
   if (quote === null) return false;
-  const body = value.slice(1);
-  const closer = new RegExp(`(?:^|[^\\\\])${quote}`);
-  return !closer.test(body) && !body.startsWith(quote);
+  for (let i = 1; i < value.length; i += 1) {
+    if (value[i] === quote && precedingBackslashRun(value, i) % 2 === 0) return false;
+  }
+  return true;
 }
 
 // Replace exactly the one `NAME=` line, preserving every other byte — CRLF
 // endings, comments, blank lines, and the `export ` prefix if it was there.
 // Creates the assignment at the end when the key is absent.
+// The line ending an append should use: whatever the file already uses. A CRLF
+// .env that gains one LF-terminated line is a diff the user did not ask for.
+function dominantEol(text: string): string {
+  const crlf = (text.match(/\r\n/g) ?? []).length;
+  const lf = (text.match(/(^|[^\r])\n/g) ?? []).length;
+  return crlf > 0 && crlf >= lf ? "\r\n" : "\n";
+}
+
 export function applyDotenvAssignment(
   existing: string | null,
   name: string,
@@ -178,6 +221,7 @@ export function applyDotenvAssignment(
   if (existing === null || existing.length === 0) {
     return `${name}=${serialized}\n`;
   }
+  const eol = dominantEol(existing);
   const { strict, loose } = assignmentPatterns(name);
   // Split keeping each line's terminator, so CRLF survives a rewrite.
   const lines = existing.split(/(?<=\n)/);
@@ -201,8 +245,8 @@ export function applyDotenvAssignment(
     );
   }
   if (strictHits.length === 0) {
-    const separator = existing.endsWith("\n") ? "" : "\n";
-    return `${existing}${separator}${name}=${serialized}\n`;
+    const separator = existing.endsWith("\n") ? "" : eol;
+    return `${existing}${separator}${name}=${serialized}${eol}`;
   }
 
   const index = strictHits[0]!;
@@ -238,7 +282,18 @@ export function unsafeProjectRoot(root: string, home: string | undefined): boole
 // MCP server was launched in, with symlinks resolved. This is the whole reason
 // `dotenv_write` needs no separate approval — the agent cannot aim it at
 // ~/.ssh or another project.
-export async function resolveDotenvPath(rawPath: string): Promise<string> {
+// A validated .env destination: the resolved path plus the IDENTITY of the
+// directory it was validated against. The identity is what makes the check
+// survive mutation — a rename/symlink swap of that directory between
+// validation and write changes its dev/ino, and the write refuses.
+export interface DotenvDestination {
+  path: string;
+  dir: string;
+  dev: number;
+  ino: number;
+}
+
+export async function resolveDotenvPath(rawPath: string): Promise<DotenvDestination> {
   const projectRoot = await fs.realpath(process.cwd());
   if (unsafeProjectRoot(projectRoot, process.env.HOME ?? process.env.USERPROFILE)) {
     throw new EgressTargetError(
@@ -276,6 +331,7 @@ export async function resolveDotenvPath(rawPath: string): Promise<string> {
     );
   }
   // An existing file may itself be a symlink out of the project.
+  let target = resolved;
   try {
     const realFile = await fs.realpath(resolved);
     if (!isInside(projectRoot, realFile)) {
@@ -284,26 +340,116 @@ export async function resolveDotenvPath(rawPath: string): Promise<string> {
         `${rawPath} is a symlink pointing outside the project root (${projectRoot})`,
       );
     }
-    return realFile;
+    target = realFile;
   } catch (err) {
     if (err instanceof EgressTargetError) throw err;
-    return resolved;
+  }
+  const dir = path.dirname(target);
+  const dirStat = await fs.stat(dir);
+  return { path: target, dir, dev: dirStat.dev, ino: dirStat.ino };
+}
+
+// Re-assert, at the moment of use, that the directory validated above is still
+// the SAME directory — not a symlink swapped in behind us. Path-based checks
+// alone are check-then-use; dev/ino identity is what makes the recheck mean
+// something.
+async function assertDirectoryUnchanged(destination: DotenvDestination): Promise<void> {
+  let current: Stats;
+  try {
+    current = await fs.stat(destination.dir);
+  } catch {
+    throw new EgressTargetError(
+      "path_outside_project",
+      `${destination.dir} disappeared between validation and write — nothing was written`,
+    );
+  }
+  if (current.dev !== destination.dev || current.ino !== destination.ino) {
+    throw new EgressTargetError(
+      "path_outside_project",
+      `${destination.dir} was replaced between validation and write — nothing was written`,
+    );
+  }
+}
+
+// Serialize .env writers on the same file. Atomic rename makes each individual
+// replacement whole; it does NOT make read-modify-write atomic, so two
+// concurrent writers of different keys would each write over the other's
+// snapshot. O_EXCL on a sibling lockfile is the cheapest thing that actually
+// serializes across processes as well as within one.
+const DOTENV_LOCK_TIMEOUT_MS = 5_000;
+const DOTENV_LOCK_POLL_MS = 25;
+// A lock older than this belonged to a process that died holding it.
+const DOTENV_LOCK_STALE_MS = 30_000;
+
+async function withDotenvLock<T>(target: string, fn: () => Promise<T>): Promise<T> {
+  const lockPath = `${target}.lock`;
+  const deadline = Date.now() + DOTENV_LOCK_TIMEOUT_MS;
+  let handle: FileHandle | null = null;
+  for (;;) {
+    try {
+      handle = await fs.open(lockPath, "wx", 0o600);
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      // Stale-lock recovery: a holder that died leaves the file behind, and
+      // its mtime is the only evidence of when that happened.
+      const age = await fs
+        .stat(lockPath)
+        .then((stat) => Date.now() - stat.mtimeMs)
+        .catch(() => 0);
+      if (age > DOTENV_LOCK_STALE_MS) {
+        await fs.rm(lockPath, { force: true }).catch(() => {});
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new EgressTargetError(
+          "dotenv_locked",
+          `another writer has held ${lockPath} for more than ${DOTENV_LOCK_TIMEOUT_MS}ms — retry, or remove the stale lock`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, DOTENV_LOCK_POLL_MS));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    await handle.close().catch(() => {});
+    await fs.rm(lockPath, { force: true }).catch(() => {});
   }
 }
 
 // Atomic + 0600. The temp file is created in the destination directory so the
 // rename cannot cross a filesystem, and it carries 0600 from birth so the
-// secret is never briefly world-readable.
-async function writeFileAtomic0600(target: string, content: string): Promise<void> {
+// secret is never briefly world-readable — including when it REPLACES an
+// existing file, whose looser mode must not be inherited.
+//
+// The directory identity is re-asserted twice: once before the temp file is
+// created, and again immediately before the rename, with an fstat on our own
+// fd confirming the temp file really landed on the validated device.
+async function writeFileAtomic0600(destination: DotenvDestination, content: string): Promise<void> {
+  await assertDirectoryUnchanged(destination);
   const tmp = path.join(
-    path.dirname(target),
-    `.${path.basename(target)}.${randomBytes(6).toString("hex")}.tmp`,
+    destination.dir,
+    `.${path.basename(destination.path)}.${randomBytes(6).toString("hex")}.tmp`,
   );
+  let handle: FileHandle | null = null;
   try {
-    await fs.writeFile(tmp, content, { encoding: "utf8", mode: 0o600 });
-    await fs.chmod(tmp, 0o600);
-    await fs.rename(tmp, target);
+    handle = await fs.open(tmp, "wx", 0o600);
+    await handle.writeFile(content, { encoding: "utf8" });
+    const written = await handle.stat();
+    if (written.dev !== destination.dev) {
+      throw new EgressTargetError(
+        "path_outside_project",
+        `${destination.dir} now resolves to a different filesystem — nothing was written`,
+      );
+    }
+    await handle.chmod(0o600);
+    await handle.close();
+    handle = null;
+    await assertDirectoryUnchanged(destination);
+    await fs.rename(tmp, destination.path);
   } catch (err) {
+    if (handle !== null) await handle.close().catch(() => {});
     await fs.rm(tmp, { force: true }).catch(() => {});
     throw err;
   }
@@ -323,10 +469,15 @@ export interface EgressTargetDeps {
 // Resolve the GitHub token exactly the way a developer expects: whatever `gh`
 // is already logged in as, else GITHUB_TOKEN. Names both fixes when neither
 // is there — a missing token is the single most likely failure here.
-export async function resolveGithubToken(): Promise<string> {
+export async function resolveGithubToken(
+  // Overridable ONLY so the hung-`gh` test does not have to burn ten real
+  // seconds; production always uses the constant.
+  timeoutMs: number = GH_TOKEN_TIMEOUT_MS,
+): Promise<string> {
   try {
     const { stdout } = await execFileAsync("gh", ["auth", "token"], {
-      timeout: GH_TOKEN_TIMEOUT_MS,
+      timeout: timeoutMs,
+      killSignal: "SIGKILL",
       encoding: "utf8",
     });
     const token = stdout.trim();
@@ -473,6 +624,12 @@ function outcomeDestination(
       };
 }
 
+// The delivery has already happened (or already failed) by the time this runs.
+// A missing audit row must never turn a completed egress into a reported
+// failure — and a network black hole must never stop the result from
+// returning at all, which is why the wait is bounded rather than open-ended.
+const OUTCOME_REPORT_TIMEOUT_MS = 5_000;
+
 async function reportOutcome(
   api: ApiClient,
   reference: string,
@@ -480,20 +637,74 @@ async function reportOutcome(
   status: "ok" | "error",
   error?: string,
 ): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), OUTCOME_REPORT_TIMEOUT_MS);
   try {
-    await api.reportEgressOutcome({
-      reference,
-      destination: outcomeDestination(target),
-      status,
-      ...(error !== undefined ? { error } : {}),
-    });
+    await api.reportEgressOutcome(
+      {
+        reference,
+        destination: outcomeDestination(target),
+        status,
+        ...(error !== undefined ? { error } : {}),
+      },
+      controller.signal,
+    );
   } catch (err) {
-    // The delivery already happened (or already failed). A missing audit row
-    // must never turn a successful egress into a reported failure.
     process.stderr.write(
-      `[trusty-squire] egress outcome report failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      `[trusty-squire] egress outcome report failed: ${
+        controller.signal.aborted
+          ? `timed out after ${OUTCOME_REPORT_TIMEOUT_MS}ms`
+          : err instanceof Error
+            ? err.message
+            : String(err)
+      }\n`,
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// What an outcome row records as the failure: the named code when we have one,
+// otherwise the message. Never a field value — no code path interpolates one,
+// and the tests assert it.
+function outcomeError(err: unknown): string {
+  // EgressTargetError already carries its code in the message.
+  return err instanceof Error ? err.message : String(err);
+}
+
+// Resolve the credential to an exact reference plus its NON-SECRET field
+// names. Nothing here decrypts: list_credentials returns metadata only. Doing
+// it first buys two things — the field to fetch is chosen before any plaintext
+// exists, and every later failure has a reference to report an outcome against.
+async function resolveEgressCredential(
+  api: ApiClient,
+  selector: EgressCredentialSelector,
+): Promise<{ reference: string; fieldNames: string[] }> {
+  const { credentials } = await api.listCredentials();
+  const matches = credentials.filter((credential) => {
+    if (selector.reference !== undefined) return credential.reference === selector.reference;
+    if (selector.service !== undefined) {
+      return (credential.service ?? "").toLowerCase() === selector.service.toLowerCase();
+    }
+    if (selector.name !== undefined) {
+      return credential.label.toLowerCase() === selector.name.toLowerCase();
+    }
+    return false;
+  });
+  if (matches.length === 0) {
+    throw new EgressTargetError(
+      "credential_not_found",
+      "no stored credential matches that reference/service/name — call list_credentials to see what is vaulted",
     );
   }
+  if (matches.length > 1) {
+    throw new EgressTargetError(
+      "ambiguous_service",
+      `several stored credentials match: ${matches.map((c) => c.reference).join(", ")} — retry with an exact \`reference\``,
+    );
+  }
+  const credential = matches[0]!;
+  return { reference: credential.reference, fieldNames: credential.field_names };
 }
 
 export async function executeEgressTarget(
@@ -502,56 +713,83 @@ export async function executeEgressTarget(
   deps: EgressTargetDeps = DEFAULT_EGRESS_TARGET_DEPS,
 ): Promise<Record<string, unknown>> {
   const { target } = args;
-  const destinationHost = target.kind === "dotenv_write" ? LOCAL_FILE_HOST : GITHUB_API_HOST;
 
-  // The `.env` path gate runs BEFORE the fetch: a path outside the project is
-  // a refusal, not a decrypt followed by a refusal.
-  const dotenvPath = target.kind === "dotenv_write" ? await resolveDotenvPath(target.path) : null;
-  const audited: EgressTarget =
-    target.kind === "dotenv_write" ? { ...target, path: dotenvPath! } : target;
+  // Resolution happens before anything can fail against a destination, so
+  // every subsequent failure — path refusal, off-allowlist fetch, GitHub 403,
+  // a .env grammar refusal — reports an egress-outcome row rather than
+  // vanishing.
+  const { reference, fieldNames } = await resolveEgressCredential(api, args.selector);
 
-  const { reference, fields } = await fetchVaultFieldsSealed((publicKey) =>
-    api.egressFetchCredential({
-      ...args.selector,
-      ...(args.field !== undefined ? { fields: [args.field] } : {}),
-      encrypted_response_public_key: publicKey,
-      destination: { kind: target.kind, host: destinationHost },
-    }),
-  );
-
-  let secret: string | null = null;
+  let audited: EgressTarget = target;
   try {
-    secret = resolveEgressField(fields, args.field);
-    let result: Record<string, unknown>;
-    if (target.kind === "github_repo_secret") {
-      const put = await putGithubSecret(deps, target, secret);
-      secret = null;
-      result = {
-        ok: true,
-        destination: {
-          kind: "github_repo_secret",
-          repo: `${target.owner}/${target.repo}`,
-          name: target.name,
-          ...(target.environment !== undefined ? { environment: target.environment } : {}),
-        },
-        status: put.status,
-      };
-    } else {
-      const written = await writeDotenv(dotenvPath!, target.name, secret);
-      secret = null;
-      result = { written: true, path: written.path, name: target.name, created: written.created };
+    const fieldName = selectEgressFieldName(fieldNames, args.field);
+
+    // The `.env` path gate runs BEFORE the fetch: a path outside the project
+    // is a refusal, not a decrypt followed by a refusal.
+    const dotenv = target.kind === "dotenv_write" ? await resolveDotenvPath(target.path) : null;
+    if (dotenv !== null && target.kind === "dotenv_write") {
+      audited = { ...target, path: dotenv.path };
     }
-    await reportOutcome(api, reference, audited, "ok");
-    return result;
+
+    const fetched = await fetchVaultFieldsSealed((publicKey) =>
+      api.egressFetchCredential({
+        ...args.selector,
+        fields: [fieldName],
+        encrypted_response_public_key: publicKey,
+        // No host: the server derives the gated host from the kind. `owner`
+        // and `repo` travel only so the retrieval audit row names the exact
+        // repository the key went to.
+        destination:
+          target.kind === "github_repo_secret"
+            ? {
+                kind: "github_repo_secret",
+                owner: target.owner,
+                repo: target.repo,
+                ...(target.environment !== undefined ? { environment: target.environment } : {}),
+              }
+            : { kind: "dotenv_write" },
+      }),
+    );
+
+    const fields = fetched.fields;
+    let secret: string | null = fields[fieldName] ?? null;
+    try {
+      if (secret === null) {
+        throw new EgressTargetError(
+          "credential_field_missing",
+          `the vault returned no value for field '${fieldName}'`,
+        );
+      }
+      let result: Record<string, unknown>;
+      if (target.kind === "github_repo_secret") {
+        const put = await putGithubSecret(deps, target, secret);
+        secret = null;
+        result = {
+          ok: true,
+          destination: {
+            kind: "github_repo_secret",
+            repo: `${target.owner}/${target.repo}`,
+            name: target.name,
+            ...(target.environment !== undefined ? { environment: target.environment } : {}),
+          },
+          status: put.status,
+        };
+      } else {
+        const written = await writeDotenv(dotenv!, target.name, secret);
+        secret = null;
+        result = { written: true, path: written.path, name: target.name, created: written.created };
+      }
+      await reportOutcome(api, fetched.reference, audited, "ok");
+      return result;
+    } finally {
+      // Best effort: JS strings are immutable and GC-owned, so the most we can
+      // do is drop every reference we hold as soon as the destination has it.
+      secret = null;
+      for (const key of Object.keys(fields)) delete fields[key];
+    }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    await reportOutcome(api, reference, audited, "error", message);
+    await reportOutcome(api, reference, audited, "error", outcomeError(err));
     throw err;
-  } finally {
-    // Best effort: JS strings are immutable and GC-owned, so the most we can
-    // do is drop every reference we hold as soon as the destination has it.
-    secret = null;
-    for (const key of Object.keys(fields)) delete fields[key];
   }
 }
 
@@ -601,19 +839,57 @@ async function putGithubSecret(
   return { status: put.status };
 }
 
-async function writeDotenv(
-  resolvedPath: string,
+// One read-modify-write transaction. The lock serializes writers; the
+// size/mtime/ino recheck catches a writer that slipped in anyway (an editor,
+// a process that does not take our lock) and re-reads rather than clobbering
+// its update with a stale snapshot.
+const DOTENV_WRITE_ATTEMPTS = 3;
+
+async function readDotenv(
+  target: string,
+): Promise<{ content: string | null; stamp: string | null }> {
+  try {
+    const handle = await fs.open(target, "r");
+    try {
+      const stat = await handle.stat();
+      const content = await handle.readFile("utf8");
+      return { content, stamp: `${stat.size}:${stat.mtimeMs}:${stat.ino}` };
+    } finally {
+      await handle.close();
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    return { content: null, stamp: null };
+  }
+}
+
+// Exported so the check/use race in finding 7 can be driven deterministically:
+// a test resolves a destination, swaps the directory underneath it, and calls
+// this — which is exactly the window the identity re-check exists to close.
+export async function writeDotenv(
+  destination: DotenvDestination,
   name: string,
   secret: string,
 ): Promise<{ path: string; created: boolean }> {
-  let existing: string | null = null;
-  try {
-    existing = await fs.readFile(resolvedPath, "utf8");
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT") throw err;
-  }
-  const next = applyDotenvAssignment(existing, name, secret);
-  await writeFileAtomic0600(resolvedPath, next);
-  return { path: resolvedPath, created: existing === null };
+  // Before the lockfile, not after: a directory that is no longer the one we
+  // validated must not even receive our lock.
+  await assertDirectoryUnchanged(destination);
+  return withDotenvLock(destination.path, async () => {
+    for (let attempt = 1; ; attempt += 1) {
+      const before = await readDotenv(destination.path);
+      const next = applyDotenvAssignment(before.content, name, secret);
+      const still = await readDotenv(destination.path);
+      if (still.stamp !== before.stamp) {
+        if (attempt >= DOTENV_WRITE_ATTEMPTS) {
+          throw new EgressTargetError(
+            "dotenv_write_conflict",
+            `${destination.path} kept changing underneath this write — nothing was written; retry when it settles`,
+          );
+        }
+        continue;
+      }
+      await writeFileAtomic0600(destination, next);
+      return { path: destination.path, created: before.content === null };
+    }
+  });
 }

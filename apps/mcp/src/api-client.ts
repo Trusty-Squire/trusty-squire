@@ -370,11 +370,17 @@ export class ApiClient {
     reference?: string;
     service?: string;
     name?: string;
-    // Omitted = every field the credential has, so the ${SECRET} selection
-    // rule can be applied locally.
-    fields?: string[];
+    // Required, and in practice exactly one: the field this destination needs,
+    // resolved from the non-secret `field_names` in list_credentials before
+    // calling. Nothing else is ever decrypted.
+    fields: string[];
     encrypted_response_public_key: string;
-    destination: { kind: "github_repo_secret" | "dotenv_write"; host: string };
+    // The destination KIND plus (for GitHub) the repository identity for the
+    // audit row. Deliberately NO host: the server derives the gated host from
+    // the kind, because this same client receives the decryptable payload.
+    destination:
+      | { kind: "github_repo_secret"; owner: string; repo: string; environment?: string }
+      | { kind: "dotenv_write" };
   }): Promise<{ reference: string; encrypted_fields: Record<string, string> }> {
     return this.post("/v1/vault/egress-fetch", input);
   }
@@ -382,15 +388,18 @@ export class ApiClient {
   // Client-reported: what actually received the key and whether it landed.
   // Same shape of trust as /v1/vault/payments/audit — the server cannot
   // observe a GitHub PUT or a local file write, so the client reports it.
-  async reportEgressOutcome(input: {
-    reference: string;
-    destination:
-      | { kind: "github_repo_secret"; repo: string; environment?: string }
-      | { kind: "dotenv_write"; path: string };
-    status: "ok" | "error";
-    error?: string;
-  }): Promise<{ recorded: boolean }> {
-    return this.post("/v1/vault/egress-outcome", input);
+  async reportEgressOutcome(
+    input: {
+      reference: string;
+      destination:
+        | { kind: "github_repo_secret"; repo: string; environment?: string }
+        | { kind: "dotenv_write"; path: string };
+      status: "ok" | "error";
+      error?: string;
+    },
+    signal?: AbortSignal,
+  ): Promise<{ recorded: boolean }> {
+    return this.post("/v1/vault/egress-outcome", input, signal);
   }
 
   // ── Egress grants: a deployed app uses a vaulted credential via the proxy ──
@@ -625,11 +634,12 @@ export class ApiClient {
     return (await this.handleResponse(res, "GET", path)) as T;
   }
 
-  private async post<T>(path: string, body: unknown): Promise<T> {
+  private async post<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
     const res = await this.fetchImpl(`${this.config.apiBaseUrl}${path}`, {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify(body),
+      ...(signal !== undefined ? { signal } : {}),
     });
     return (await this.handleResponse(res, "POST", path)) as T;
   }

@@ -482,9 +482,17 @@ still return only a current handle. `detail:"full"` keeps the V2 format. Maintai
   `{kind:"dotenv_write", path, name}` writes `NAME="…"` into a `.env` resolved
   under the project root the MCP server was launched in (0600, atomic, every
   other byte preserved; a duplicate or multi-line assignment is refused rather
-  than guessed at). A server launched at a filesystem root or at `$HOME` has no
-  project root to confine writes to, so `dotenv_write` refuses there — relaunch
-  it from the project. Add `field` when the credential has several fields. Either
+  than guessed at) and requires the literal marker `local-file` on the
+  credential's `allowed_hosts` — `.env` egress is authorised exactly like a
+  network destination, not exempt from the allowlist. A server launched at a
+  filesystem root or at `$HOME` has no project root to confine writes to, so
+  `dotenv_write` refuses there — relaunch it from the project. Add `field` when
+  the credential has several fields.
+
+  The **server derives the gated host from the destination kind** and ignores
+  any host the client asserts: the same client that names a destination is the
+  one that would receive the plaintext, so a self-declared host would authorise
+  nothing. Only the single field the destination needs is decrypted. Either
   way the value never reaches the agent: a target returns `{ok:true,…}` or
   `{written:true,…}`.
 - `edit_credential` changes only an existing credential's non-secret name,

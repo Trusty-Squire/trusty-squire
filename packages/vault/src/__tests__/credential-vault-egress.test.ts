@@ -111,19 +111,69 @@ describe("retrieveForEgress", () => {
     });
   });
 
-  it("lets the local-file sentinel through without an allowed_hosts entry", async () => {
-    // `.env` has no network host — its authorisation is the mcp-side
-    // project-root check. The server still records where the key went.
-    const { vault, audit } = makeVault();
+  it("refuses the local-file marker unless the USER put it on allowed_hosts", async () => {
+    // `.env` is not exempt. The marker is an ordinary allowlist entry added
+    // through edit_credential; without it, a client asserting the .env kind
+    // gets exactly nothing — which is the bypass this replaces.
+    const { vault, kms, audit } = makeVault();
     const entry = await vault.store(storeInput({ observed_hosts: ["api.example.com"] }));
 
-    const fields = await vault.retrieveForEgress(entry.reference, ACCOUNT, EGRESS_LOCAL_FILE_HOST);
+    await expect(
+      vault.retrieveForEgress(entry.reference, ACCOUNT, EGRESS_LOCAL_FILE_HOST),
+    ).rejects.toBeInstanceOf(AllowlistViolationError);
+
+    expect(kms.decryptCalls).toBe(0);
+    const events = await audit.list(ACCOUNT);
+    expect(events.some((e) => e.type === VAULT_AUDIT_TYPES.retrieved)).toBe(false);
+  });
+
+  it("serves local-file once it IS on allowed_hosts, like any other host", async () => {
+    const { vault, audit } = makeVault();
+    const entry = await vault.store(
+      storeInput({ observed_hosts: ["api.example.com", EGRESS_LOCAL_FILE_HOST] }),
+    );
+
+    const fields = await vault.retrieveForEgress(entry.reference, ACCOUNT, EGRESS_LOCAL_FILE_HOST, {
+      kind: "dotenv_write",
+    });
 
     expect(fields.api_key).toBe("sk-live-egress-secret");
     const retrieved = (await audit.list(ACCOUNT)).filter(
       (e) => e.type === VAULT_AUDIT_TYPES.retrieved,
     );
-    expect(retrieved[0]!.payload.target_host).toBe(EGRESS_LOCAL_FILE_HOST);
+    expect(retrieved[0]!.payload).toMatchObject({
+      target_host: EGRESS_LOCAL_FILE_HOST,
+      egress_kind: "dotenv_write",
+    });
+  });
+
+  it("records the destination identity the caller derived, on success and on refusal", async () => {
+    const { vault, audit, kms } = makeVault();
+    const entry = await vault.store(storeInput());
+
+    await vault.retrieveForEgress(entry.reference, ACCOUNT, "api.github.com", {
+      kind: "github_repo_secret",
+      destination: "octo/demo:production",
+    });
+    await expect(
+      vault.retrieveForEgress(entry.reference, ACCOUNT, "evil.example.com", {
+        kind: "github_repo_secret",
+        destination: "octo/demo",
+      }),
+    ).rejects.toBeInstanceOf(AllowlistViolationError);
+
+    const events = await audit.list(ACCOUNT);
+    expect(events.find((e) => e.type === VAULT_AUDIT_TYPES.retrieved)!.payload).toMatchObject({
+      egress_kind: "github_repo_secret",
+      egress_destination: "octo/demo:production",
+    });
+    expect(events.find((e) => e.type === VAULT_AUDIT_TYPES.proxyRejected)!.payload).toMatchObject({
+      target_host: "evil.example.com",
+      egress_kind: "github_repo_secret",
+      egress_destination: "octo/demo",
+    });
+    // The refusal added no second decrypt.
+    expect(kms.decryptCalls).toBe(1);
   });
 
   it("refuses a credential belonging to another account", async () => {
