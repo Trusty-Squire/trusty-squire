@@ -9,6 +9,12 @@ import {
 } from "../services/credential-metadata.js";
 import { resolveCredentialForAccount } from "../services/credential-resolution.js";
 import {
+  approvalPageUrl,
+  approvalWebBaseUrl,
+  sendResolutionFailure,
+  verifyApprovalMandate,
+} from "../services/approval-ceremony.js";
+import {
   mutationAuditEvent,
   type CredentialMutationApprovalRecord,
 } from "../services/credential-mutation-approval-store.js";
@@ -17,7 +23,6 @@ import { notifyVaultAuditAfterCommit } from "../services/vault-notify.js";
 import { authenticatedRequester } from "../services/requesting-agent.js";
 import {
   CREDENTIAL_MUTATION_VOUCH_CONTEXT,
-  VouchMandateVerificationError,
   createVouchMandateVerifier,
   hashVouchPayload,
   type VouchMandateVerifier,
@@ -84,12 +89,6 @@ const approveBody = z.object({ jws: z.string().min(1).max(8192) }).strict();
 const TELEGRAM_TEXT_LIMIT = 4096;
 const TELEGRAM_METADATA_LIST_LIMIT = 600;
 
-function webBaseUrl(): string {
-  return (
-    process.env.PWA_BASE_URL ?? process.env.TRUSTY_SQUIRE_WEB_BASE ?? "https://trustysquire.ai"
-  );
-}
-
 export function credentialMutationPayload(record: CredentialMutationApprovalRecord): unknown {
   return {
     agent: record.agent,
@@ -116,7 +115,7 @@ function mutationStatus(record: CredentialMutationApprovalRecord, now: Date): st
 function approvalResponse(record: CredentialMutationApprovalRecord, now: Date) {
   return {
     approval_id: record.id,
-    approval_url: `${webBaseUrl().replace(/\/+$/, "")}/vault/mutate/${encodeURIComponent(record.id)}`,
+    approval_url: approvalPageUrl("mutate", record.id),
     status: mutationStatus(record, now),
     operation: record.operation,
     credential: {
@@ -166,7 +165,7 @@ function withTelegramReviewLink(body: string, link: string): string {
 
 function telegramPrompt(record: CredentialMutationApprovalRecord): string {
   const credential = `${record.credentialService ?? "credential"}/${record.credentialLabel}`;
-  const link = `${webBaseUrl().replace(/\/+$/, "")}/vault/mutate/${record.id}`;
+  const link = `${approvalWebBaseUrl().replace(/\/+$/, "")}/vault/mutate/${record.id}`;
   if (record.operation === "delete") {
     return withTelegramReviewLink(
       `Trusty Squire — approve credential deletion\n` +
@@ -189,26 +188,6 @@ async function sendMutationTelegram(deps: ApiDeps, record: CredentialMutationApp
   const account = await deps.accountStore.findAccountById(record.accountId);
   if (account?.telegram_chat_id === null || account?.telegram_chat_id === undefined) return;
   void sendTelegramMessage(account.telegram_chat_id, telegramPrompt(record)).catch(() => {});
-}
-
-function sendResolutionFailure(
-  resolution: Awaited<ReturnType<typeof resolveCredentialForAccount>>,
-  reply: FastifyReply,
-): boolean {
-  if (resolution.kind === "found") return false;
-  if (resolution.kind === "missing") {
-    reply.code(404).send({ error: "credential_not_found" });
-    return true;
-  }
-  reply.code(409).send({
-    error: "ambiguous_credential",
-    candidates: resolution.candidates.map((credential) => ({
-      reference: credential.reference,
-      service: typeof credential.metadata.service === "string" ? credential.metadata.service : null,
-      name: credential.label,
-    })),
-  });
-  return true;
 }
 
 export const registerCredentialMutationRoutes: FastifyPluginAsync<{
@@ -359,24 +338,17 @@ export const registerCredentialMutationRoutes: FastifyPluginAsync<{
         return;
       }
 
-      let claims;
-      try {
-        claims = await verifyVouch({
+      const claims = await verifyApprovalMandate(
+        verifyVouch,
+        {
           jws: parsed.data.jws,
           expectedPayloadHash: hashVouchPayload(credentialMutationPayload(record)),
           expectedContext: CREDENTIAL_MUTATION_VOUCH_CONTEXT,
           expectedAudience: vouchflowAudience,
-        });
-      } catch (error) {
-        const code =
-          error instanceof VouchMandateVerificationError
-            ? error.code
-            : "mandate_verification_failed";
-        reply.code(code === "vouchflow_expected_audience_unset" ? 503 : 403).send({
-          error: code,
-        });
-        return;
-      }
+        },
+        reply,
+      );
+      if (claims === null) return;
 
       // Idempotent retries still prove possession of a valid mandate. The
       // mutation is not repeated, but an arbitrary string must never be
