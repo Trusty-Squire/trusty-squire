@@ -43,14 +43,20 @@ export default function CredentialFetchApprovalPage() {
         if (!cancelled) setCeremony(value);
       })
       .catch((caught: unknown) => {
-        if (!cancelled) {
-          setError(caught instanceof Error ? caught.message : "Failed to load approval.");
+        if (cancelled) return;
+        // The ceremony is owner-authenticated now: an approval link opened in a
+        // signed-out browser is a login, not an error. `next` brings the human
+        // straight back to the approval they were sent.
+        if (caught instanceof ApiError && caught.status === 401) {
+          redirectToLogin();
+          return;
         }
+        setError(caught instanceof Error ? caught.message : "Failed to load approval.");
       });
     return () => {
       cancelled = true;
     };
-  }, [fetchCeremony]);
+  }, [fetchCeremony, redirectToLogin]);
 
   const approve = useCallback(async () => {
     if (ceremony === null || ceremony.status !== "pending") return;
@@ -73,11 +79,15 @@ export default function CredentialFetchApprovalPage() {
       setCeremony(await fetchCeremony());
       setNeedsPasskeySetup(false);
     } catch (caught) {
+      if (caught instanceof ApiError && caught.status === 401) {
+        redirectToLogin();
+        return;
+      }
       setError(caught instanceof Error ? caught.message : "Approval failed.");
     } finally {
       setBusy(false);
     }
-  }, [ceremony, fetchCeremony]);
+  }, [ceremony, fetchCeremony, redirectToLogin]);
 
   const deny = useCallback(async () => {
     if (ceremony === null || ceremony.status !== "pending") return;
@@ -87,11 +97,15 @@ export default function CredentialFetchApprovalPage() {
       await apiPost(`/v1/vault/fetch-approvals/${encodeURIComponent(ceremony.approval_id)}/deny`, {});
       setCeremony(await fetchCeremony());
     } catch (caught) {
+      if (caught instanceof ApiError && caught.status === 401) {
+        redirectToLogin();
+        return;
+      }
       setError(caught instanceof Error ? caught.message : "Denial failed.");
     } finally {
       setBusy(false);
     }
-  }, [ceremony, fetchCeremony]);
+  }, [ceremony, fetchCeremony, redirectToLogin]);
 
   const setUpPasskey = useCallback(async () => {
     setBusy(true);
@@ -125,7 +139,7 @@ export default function CredentialFetchApprovalPage() {
               : null;
 
   return (
-    <AppShell anonymous>
+    <AppShell>
       <div className="app-head">
         <div>
           <h1 className="app-title">Approve revealing a secret</h1>

@@ -563,6 +563,13 @@ Three things about it are load-bearing; do not "simplify" any of them:
   update is the fence; the decrypt happens only on that transition. Making the
   resume idempotent "for convenience" would turn one approval into unlimited
   reveals.
+- **The human half is owner-authenticated.** `ceremony`, `approve`, and `deny`
+  require the credential owner's web session, and a foreign attempt is refused
+  as `not_found` and written to the owner's ledger. Possession of the approval
+  link is not authority: the requesting agent necessarily holds that link, so
+  an unauthenticated approve endpoint lets anyone it reaches release the
+  owner's secret with their own genuine passkey. That was a real hole in the
+  first cut of this feature; do not reopen it for a "frictionless" link.
 - **Its description is a security control.** It has to keep steering agents to
   `use_credential` first and keep saying that the value lands in the transcript.
   A shorter, friendlier description measurably makes the model reach for the

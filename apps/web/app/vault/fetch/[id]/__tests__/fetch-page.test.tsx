@@ -3,7 +3,17 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const api = vi.hoisted(() => ({ apiGet: vi.fn(), apiPost: vi.fn() }));
+const api = vi.hoisted(() => {
+  class ApiError extends Error {
+    constructor(
+      message: string,
+      public readonly status: number,
+    ) {
+      super(message);
+    }
+  }
+  return { apiGet: vi.fn(), apiPost: vi.fn(), ApiError };
+});
 const router = vi.hoisted(() => ({ replace: vi.fn() }));
 const vouchflow = vi.hoisted(() => ({ signPayload: vi.fn() }));
 const pairing = vi.hoisted(() => ({ getPairingState: vi.fn(), pairDevice: vi.fn() }));
@@ -14,14 +24,7 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/vault/fetch/fetch_1",
 }));
 vi.mock("../../../../lib/api", () => ({
-  ApiError: class ApiError extends Error {
-    constructor(
-      message: string,
-      public readonly status: number,
-    ) {
-      super(message);
-    }
-  },
+  ApiError: api.ApiError,
   apiGet: api.apiGet,
   apiPost: api.apiPost,
 }));
@@ -120,6 +123,35 @@ describe("credential fetch approval page", () => {
     await waitFor(() => expect(screen.getByText(/no value was released/i)).toBeTruthy());
     expect(vouchflow.signPayload).not.toHaveBeenCalled();
     expect(api.apiPost).toHaveBeenCalledWith("/v1/vault/fetch-approvals/fetch_1/deny", {});
+  });
+
+  // The ceremony is owner-authenticated server-side; the page's job is to send
+  // a signed-out visitor to log in and bring them back to the SAME approval,
+  // instead of showing them an error for a link that is theirs.
+  it("sends a signed-out visitor to log in, keeping the approval link", async () => {
+    api.apiGet.mockImplementation((path: string) => {
+      if (path === "/v1/vault/fetch-approvals/fetch_1/ceremony") {
+        return Promise.reject(new api.ApiError("web_session_required", 401));
+      }
+      return Promise.resolve({ billing_enabled: false });
+    });
+
+    render(<CredentialFetchApprovalPage />);
+    await waitFor(() =>
+      expect(router.replace).toHaveBeenCalledWith("/login?next=/vault/fetch/fetch_1"),
+    );
+    expect(api.apiPost).not.toHaveBeenCalled();
+    expect(vouchflow.signPayload).not.toHaveBeenCalled();
+  });
+
+  it("sends the human to log in when the session lapses mid-ceremony", async () => {
+    api.apiPost.mockRejectedValue(new api.ApiError("web_session_required", 401));
+    render(<CredentialFetchApprovalPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Approve reveal" }));
+    await waitFor(() =>
+      expect(router.replace).toHaveBeenCalledWith("/login?next=/vault/fetch/fetch_1"),
+    );
   });
 
   it("does not submit when no passkey is enrolled", async () => {

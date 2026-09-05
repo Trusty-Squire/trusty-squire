@@ -846,11 +846,19 @@ it cannot be replayed into a reveal. Do NOT collapse it into
 
 Invariants, all covered by `apps/api/src/__tests__/credential-fetch.test.ts` —
 treat a failure there as a security regression, not a test to update:
-approval-bound to (account, credential, field); single-use delivery (the store's
+approval-bound to (account, credential, field); the human half
+(`ceremony`/`approve`/`deny`) is OWNER-authenticated (`requireWeb` + the record
+loaded for that account — a link-holder from another account gets 404 and an
+`approver_rejected` row in the owner's ledger); single-use delivery (the store's
 `approved → consumed` conditional update IS the fence); expiry closes both the
-unsigned and the signed-but-unclaimed halves; denial and expiry release nothing;
-every outcome audited under `purpose: "reveal"` (`VAULT_REVEAL_PURPOSE`), never
-the value. `use_credential` and `extract { store }` are unchanged and remain the
+unsigned and the signed-but-unclaimed halves, and fences denial too (a lapsed
+approval settles as `expired`, never as a refusal the human never made); every
+outcome audited under `purpose: "reveal"` (`VAULT_REVEAL_PURPOSE`), never the
+value — post-decrypt outcomes by the vault, the rest through
+`services/credential-fetch-audit.ts`, which the retention cron shares so a swept
+approval is settled before its row is deleted. Ceremony crypto, caller
+authentication, and link building are shared with the mutation ceremony
+(`services/approval-ceremony.ts`); only the STORES stay separate. `use_credential` and `extract { store }` are unchanged and remain the
 default routes — `apps/mcp/src/tools/__tests__/never-exposed-paths.test.ts`
 pins that.
 

@@ -86,9 +86,9 @@ describe("passkey-gated fetch_credential", () => {
 
   // The add-a-field route is web-session only; the fetch path has to hold up
   // against a credential the HUMAN reshaped mid-approval.
-  async function webCookie(): Promise<string> {
+  async function webCookie(account = accountId): Promise<string> {
     const { record, jwt } = issueSession({
-      account_id: accountId,
+      account_id: account,
       ip: null,
       user_agent: null,
       now: new Date(nowMs),
@@ -114,10 +114,11 @@ describe("passkey-gated fetch_credential", () => {
     });
   }
 
-  async function ceremony(id: string) {
+  async function ceremony(id: string, cookie?: string) {
     const response = await server.inject({
       method: "GET",
       url: `/v1/vault/fetch-approvals/${id}/ceremony`,
+      headers: { cookie: cookie ?? (await webCookie()) },
     });
     expect(response.statusCode).toBe(200);
     return response.json() as { payload: unknown; payload_sha256: string };
@@ -143,19 +144,38 @@ describe("passkey-gated fetch_credential", () => {
       .sign(signingKey);
   }
 
+  // The human half of the ceremony is the OWNER's browser session — the same
+  // account that owns the credential, holding a live web cookie.
   async function approve(id: string, context = CREDENTIAL_FETCH_VOUCH_CONTEXT) {
-    const signed = await ceremony(id);
+    const cookie = await webCookie();
+    const signed = await ceremony(id, cookie);
     const jws = await signHash(signed.payload_sha256, context, `mandate_${id}`);
     return await server.inject({
       method: "POST",
       url: `/v1/vault/fetch-approvals/${id}/approve`,
+      headers: { cookie },
       payload: { jws },
+    });
+  }
+
+  async function deny(id: string, cookie?: string) {
+    return await server.inject({
+      method: "POST",
+      url: `/v1/vault/fetch-approvals/${id}/deny`,
+      headers: { cookie: cookie ?? (await webCookie()) },
+      payload: {},
     });
   }
 
   async function revealAudit() {
     const events = await deps.vaultAuditStore.list(accountId, { limit: 200 });
     return events.filter((event) => event.payload.purpose === VAULT_REVEAL_PURPOSE);
+  }
+
+  // Ledger ordering across a moving clock is not the property under test; the
+  // SET of terminal outcomes recorded is.
+  async function revealOutcomes(): Promise<string[]> {
+    return (await revealAudit()).map((event) => String(event.payload.outcome)).sort();
   }
 
   // Every no-value branch asserts on the raw body: a `fields` key that is
@@ -201,10 +221,18 @@ describe("passkey-gated fetch_credential", () => {
     expect(body.status).toBe("consumed");
     expect(body.fields).toEqual({ value: SECRET_VALUE });
 
+    // Both halves of the transaction are on the ledger: the human's approval
+    // (naming the approving account) and the delivery it authorized.
+    expect(await revealOutcomes()).toEqual(["approved", "success"]);
     const audit = await revealAudit();
-    expect(audit).toHaveLength(1);
-    expect(audit[0]!.type).toBe(VAULT_AUDIT_TYPES.retrieved);
-    expect(audit[0]!.payload).toMatchObject({
+    expect(audit.every((event) => event.type === VAULT_AUDIT_TYPES.retrieved)).toBe(true);
+    expect(audit.find((event) => event.payload.outcome === "approved")!.payload).toMatchObject({
+      reference,
+      purpose: "reveal",
+      approval_id: approval.approval_id,
+      approver_account_id: accountId,
+    });
+    expect(audit.find((event) => event.payload.outcome === "success")!.payload).toMatchObject({
       reference,
       requester: "agent",
       purpose: "reveal",
@@ -219,9 +247,11 @@ describe("passkey-gated fetch_credential", () => {
     const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
     const approval = (await createFetch({ reference })).json() as { approval_id: string };
 
+    const cookie = await webCookie();
     const unsigned = await server.inject({
       method: "POST",
       url: `/v1/vault/fetch-approvals/${approval.approval_id}/approve`,
+      headers: { cookie },
       payload: {},
     });
     expect(unsigned.statusCode).toBe(400);
@@ -229,6 +259,7 @@ describe("passkey-gated fetch_credential", () => {
     const malformed = await server.inject({
       method: "POST",
       url: `/v1/vault/fetch-approvals/${approval.approval_id}/approve`,
+      headers: { cookie },
       payload: { jws: "not.a.valid-jws" },
     });
     expect(malformed.statusCode).toBe(403);
@@ -262,6 +293,7 @@ describe("passkey-gated fetch_credential", () => {
     const crossed = await server.inject({
       method: "POST",
       url: `/v1/vault/fetch-approvals/${a.approval_id}/approve`,
+      headers: { cookie: await webCookie() },
       payload: { jws },
     });
     expect(crossed.statusCode).toBe(403);
@@ -276,11 +308,7 @@ describe("passkey-gated fetch_credential", () => {
     const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
     const approval = (await createFetch({ reference })).json() as { approval_id: string };
 
-    const denied = await server.inject({
-      method: "POST",
-      url: `/v1/vault/fetch-approvals/${approval.approval_id}/deny`,
-      payload: {},
-    });
+    const denied = await deny(approval.approval_id);
     expect(denied.statusCode).toBe(200);
     expect(denied.json()).toEqual({ status: "denied" });
 
@@ -295,7 +323,15 @@ describe("passkey-gated fetch_credential", () => {
 
     const audit = await revealAudit();
     expect(audit).toHaveLength(1);
-    expect(audit[0]!.payload).toMatchObject({ outcome: "denied", reference });
+    // The ledger names the outcome, the credential, and WHO refused it.
+    expect(audit[0]!.payload).toMatchObject({
+      outcome: "denied",
+      reference,
+      purpose: "reveal",
+      approval_id: approval.approval_id,
+      approver_account_id: accountId,
+    });
+    expect(JSON.stringify(audit)).not.toContain(SECRET_VALUE);
   });
 
   it("returns an error and no value once the approval expires, signed or not", async () => {
@@ -323,17 +359,14 @@ describe("passkey-gated fetch_credential", () => {
     );
     expectNoValueAnywhere(lateResume.body);
 
-    expect((await revealAudit()).map((event) => event.payload.outcome)).toEqual([
-      "expired",
-      "expired",
-    ]);
+    expect(await revealOutcomes()).toEqual(["approved", "expired", "expired"]);
 
     // Polling an already-lapsed approval must not keep growing the ledger.
     for (let i = 0; i < 4; i++) {
       expect((await resume(stale.approval_id)).statusCode).toBe(409);
       expect((await resume(signed.approval_id)).statusCode).toBe(409);
     }
-    expect(await revealAudit()).toHaveLength(2);
+    expect(await revealOutcomes()).toEqual(["approved", "expired", "expired"]);
   });
 
   it("delivers exactly once — a replayed approval_id returns no second value", async () => {
@@ -353,7 +386,8 @@ describe("passkey-gated fetch_credential", () => {
     // Re-signing a spent approval does not re-open it.
     expect((await approve(approval.approval_id)).statusCode).toBe(409);
     expectNoValueAnywhere((await resume(approval.approval_id)).body);
-    expect(await revealAudit()).toHaveLength(1);
+    // One approval, one delivery — a refused re-approval adds no second pair.
+    expect(await revealOutcomes()).toEqual(["approved", "success"]);
   });
 
   it("is invisible to another account, even with the exact approval id", async () => {
@@ -416,7 +450,9 @@ describe("passkey-gated fetch_credential", () => {
     const asFetch = await resume(mutationId);
     expect(asFetch.statusCode).toBe(404);
     expectNoValueAnywhere(asFetch.body);
-    expect(await revealAudit()).toEqual([]);
+    // The fetch approval was signed but never claimed: an approval row, and no
+    // delivery of any kind.
+    expect(await revealOutcomes()).toEqual(["approved"]);
   });
 
   it("selects one field, and refuses an ambiguous or unknown field with no value", async () => {
@@ -505,6 +541,198 @@ describe("passkey-gated fetch_credential", () => {
     expect(second.statusCode).toBe(200);
     expect((second.json() as { approval_id: string }).approval_id).toBe(first.approval_id);
     expectNoValueAnywhere(second.body);
+  });
+
+  // The hole this suite exists to close: holding the approval link is not
+  // authority to answer it. The requesting agent necessarily holds that link,
+  // so anyone it reaches would otherwise be able to release the owner's secret
+  // with their own entirely genuine passkey.
+  it("refuses an approval settled by ANOTHER account, and records the attempt", async () => {
+    const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
+    const approval = (await createFetch({ reference })).json() as { approval_id: string };
+
+    const intruder = await deps.accountStore.createAccount("intruder@example.test", "Intruder");
+    const intruderCookie = await webCookie(intruder.id);
+
+    // They cannot even read the bytes the ceremony asks a passkey to sign.
+    const peeked = await server.inject({
+      method: "GET",
+      url: `/v1/vault/fetch-approvals/${approval.approval_id}/ceremony`,
+      headers: { cookie: intruderCookie },
+    });
+    expect(peeked.statusCode).toBe(404);
+    expect(peeked.json()).toEqual({ error: "credential_fetch_approval_not_found" });
+
+    // …and a genuine, correctly-bound assertion over the REAL payload — the
+    // exact artifact the owner's own browser would produce — is still refused
+    // when the account presenting it is not the credential's owner.
+    const signed = await ceremony(approval.approval_id);
+    const jws = await signHash(
+      signed.payload_sha256,
+      CREDENTIAL_FETCH_VOUCH_CONTEXT,
+      `mandate_${approval.approval_id}`,
+    );
+    const crossed = await server.inject({
+      method: "POST",
+      url: `/v1/vault/fetch-approvals/${approval.approval_id}/approve`,
+      headers: { cookie: intruderCookie },
+      payload: { jws },
+    });
+    expect(crossed.statusCode).toBe(404);
+    expect(crossed.json()).toEqual({ error: "credential_fetch_approval_not_found" });
+
+    // Nor can a stranger with the link deny it out from under the owner.
+    const refused = await deny(approval.approval_id, intruderCookie);
+    expect(refused.statusCode).toBe(404);
+
+    // The owner's approval is untouched, and no value moved.
+    const polled = await resume(approval.approval_id);
+    expect((polled.json() as { status: string }).status).toBe("pending");
+    expectNoValueAnywhere(polled.body);
+
+    // All three attempts — the peek, the approve, the deny — land in the
+    // OWNER's ledger, naming who tried.
+    expect(await revealOutcomes()).toEqual([
+      "approver_rejected",
+      "approver_rejected",
+      "approver_rejected",
+    ]);
+    const attempt = (await revealAudit())[0]!;
+    expect(attempt.account_id).toBe(accountId);
+    expect(attempt.payload).toMatchObject({
+      reference,
+      purpose: "reveal",
+      outcome: "approver_rejected",
+      approval_id: approval.approval_id,
+      approver_account_id: intruder.id,
+    });
+    expect(JSON.stringify(await revealAudit())).not.toContain(SECRET_VALUE);
+  });
+
+  it("requires a web session — an agent token is the requester's authority, not the approver's", async () => {
+    const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
+    const approval = (await createFetch({ reference })).json() as { approval_id: string };
+    const signed = await ceremony(approval.approval_id);
+    const jws = await signHash(
+      signed.payload_sha256,
+      CREDENTIAL_FETCH_VOUCH_CONTEXT,
+      `mandate_${approval.approval_id}`,
+    );
+
+    for (const headers of [{}, { authorization: `Bearer ${agentToken}` }]) {
+      const anonymousCeremony = await server.inject({
+        method: "GET",
+        url: `/v1/vault/fetch-approvals/${approval.approval_id}/ceremony`,
+        headers,
+      });
+      expect(anonymousCeremony.statusCode).toBe(401);
+
+      const anonymousApprove = await server.inject({
+        method: "POST",
+        url: `/v1/vault/fetch-approvals/${approval.approval_id}/approve`,
+        headers,
+        payload: { jws },
+      });
+      expect(anonymousApprove.statusCode).toBe(401);
+
+      const anonymousDeny = await server.inject({
+        method: "POST",
+        url: `/v1/vault/fetch-approvals/${approval.approval_id}/deny`,
+        headers,
+        payload: {},
+      });
+      expect(anonymousDeny.statusCode).toBe(401);
+    }
+
+    const polled = await resume(approval.approval_id);
+    expect((polled.json() as { status: string }).status).toBe("pending");
+    expectNoValueAnywhere(polled.body);
+    expect(await revealAudit()).toEqual([]);
+  });
+
+  it("settles a lapsed approval as expired rather than logging a denial nobody made", async () => {
+    const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
+    const approval = (await createFetch({ reference })).json() as { approval_id: string };
+    nowMs += 11 * 60 * 1000;
+
+    const denied = await deny(approval.approval_id);
+    expect(denied.statusCode).toBe(409);
+    expect(denied.json()).toEqual({ error: "credential_fetch_approval_expired" });
+
+    expect(await revealOutcomes()).toEqual(["expired"]);
+    expect((await revealAudit())[0]!.payload).toMatchObject({
+      outcome: "expired",
+      reference,
+      approval_id: approval.approval_id,
+    });
+    expectNoValueAnywhere((await resume(approval.approval_id)).body);
+  });
+
+  it("audits a field set that moved under a signed approval as exactly that, not as success", async () => {
+    const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
+    const approval = (await createFetch({ reference })).json() as { approval_id: string };
+    expect((await approve(approval.approval_id)).statusCode).toBe(200);
+
+    // A rotation renames the field the human signed for out of existence.
+    const rotated = await server.inject({
+      method: "POST",
+      url: "/v1/vault/credentials",
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: { service: "OpenAI", fields: { renamed_value: "sk-live-rotated-and-renamed" } },
+    });
+    expect(rotated.statusCode).toBe(200);
+    expect((rotated.json() as { reference: string }).reference).toBe(reference);
+
+    const delivered = await resume(approval.approval_id);
+    expect(delivered.statusCode).toBe(409);
+    expect((delivered.json() as { error: string }).error).toBe("credential_fields_changed");
+    expectNoValueAnywhere(delivered.body);
+    expect(delivered.body).not.toContain("sk-live-rotated-and-renamed");
+
+    expect(await revealOutcomes()).toEqual(["approved", "field_set_changed"]);
+  });
+
+  it("audits a credential deleted between approval and claim as a missing credential", async () => {
+    const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
+    const approval = (await createFetch({ reference })).json() as { approval_id: string };
+    expect((await approve(approval.approval_id)).statusCode).toBe(200);
+
+    await deps.credentialStore.softDelete(reference, new Date(nowMs));
+
+    const delivered = await resume(approval.approval_id);
+    expect(delivered.statusCode).toBe(404);
+    expectNoValueAnywhere(delivered.body);
+    expect(await revealOutcomes()).toEqual(["approved", "missing_credential"]);
+  });
+
+  it("audits an internal failure that burned the approval instead of losing it", async () => {
+    const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
+    const approval = (await createFetch({ reference })).json() as { approval_id: string };
+    expect((await approve(approval.approval_id)).statusCode).toBe(200);
+
+    // The approval is spent the moment the claim lands, so a decrypt/KMS
+    // failure after it must still leave a terminal row behind.
+    vi.spyOn(deps.vault, "revealForApprovedFetch").mockRejectedValueOnce(new Error("kms wedged"));
+    const failed = await resume(approval.approval_id);
+    expect(failed.statusCode).toBe(500);
+    expectNoValueAnywhere(failed.body);
+    expect(await revealOutcomes()).toEqual(["approved", "internal_error"]);
+
+    // …and the burned approval releases nothing afterwards.
+    vi.restoreAllMocks();
+    const retried = await resume(approval.approval_id);
+    expect(retried.statusCode).toBe(409);
+    expectNoValueAnywhere(retried.body);
+  });
+
+  it("tells caches never to store the delivery", async () => {
+    const reference = await storeCredential({ service: "OpenAI", value: SECRET_VALUE });
+    const approval = (await createFetch({ reference })).json() as { approval_id: string };
+    expect((await approve(approval.approval_id)).statusCode).toBe(200);
+
+    const delivered = await resume(approval.approval_id);
+    expect(delivered.statusCode).toBe(200);
+    expect(delivered.headers["cache-control"]).toBe("no-store, private");
   });
 
   it("requires authentication to mint or resume", async () => {

@@ -302,6 +302,8 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   await fastify.register(registerCredentialFetchRoutes, {
     deps,
     requireAny: auth.requireAny,
+    // approve/deny/ceremony are the human half — the OWNER's web session only.
+    requireWeb: auth.requireWeb,
     ...(opts.vouchVerifier !== undefined ? { vouchVerifier: opts.vouchVerifier } : {}),
   });
   await fastify.register(registerTelegramRoute, {

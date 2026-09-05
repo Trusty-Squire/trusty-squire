@@ -40,9 +40,14 @@ released only after the user signs that exact approval with their passkey — th
 same Vouchflow ceremony that gates credential mutations and payments, under its
 own `vault_credential_fetch` context so a mutation or payment mandate can never
 authorize a reveal. The approval is bound to one (account, credential, field),
-delivery is single-use, and expiry or denial releases nothing. Every outcome is
-audited under `purpose: "reveal"` with the credential reference and the approval
-id — never the value. Implementation:
+delivery is single-use, and expiry or denial releases nothing. The human who
+answers it is the credential's OWNER: the ceremony, approve, and deny endpoints
+require that account's signed-in web session, so the approval link reaching
+anybody else — starting with the agent that requested it — is not authority to
+answer it. Every outcome — approved, delivered, denied, expired, attempted by a
+non-owner, or failed after the approval was spent — is audited under
+`purpose: "reveal"` with the credential reference, the approval id, and the
+approving account, and never the value. Implementation:
 [`apps/api/src/routes/credential-fetch.ts`](apps/api/src/routes/credential-fetch.ts).
 
 The property this preserves is not "the model can never see a secret" — it is

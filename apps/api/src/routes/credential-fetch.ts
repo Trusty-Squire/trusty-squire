@@ -6,6 +6,13 @@
 //   POST /v1/vault/fetch-approvals/:id/approve  → passkey mandate lands here
 //   POST /v1/vault/fetch-approvals/:id/deny     → the human refuses
 //
+// The three human-facing endpoints are OWNER-AUTHENTICATED: a signed-in web
+// session whose account owns the credential, or nothing. Possession of the
+// approval link is not authority — the agent that requested the fetch
+// necessarily holds that link, so anyone it reaches could otherwise stand in
+// for the owner and authorize the release of the owner's secret with their own
+// genuine passkey.
+//
 // The vault is otherwise a write-only sink: `use_credential` spends a secret
 // server-side and `extract { store }` puts one in without either ever crossing
 // to the agent. This route is the ONE exception, and every property that makes
@@ -14,6 +21,9 @@
 //   * disclosure runs only on a Vouchflow assertion signed over THIS approval's
 //     payload under the fetch-only context — a mutation or payment mandate
 //     hashes differently AND carries a different context, so neither can land;
+//   * the human who signs is the credential's owner: the approve/deny/ceremony
+//     endpoints require the owner's web session, and the signed payload itself
+//     carries an opaque binding to the owning account;
 //   * the approval is bound to (account, credential, field) at mint, and the
 //     resume re-checks the account, so an approval minted by one account is
 //     invisible to another;
@@ -23,25 +33,37 @@
 //     approval both go dead at expires_at.
 //
 // Every terminal outcome is audited under purpose `reveal` with the credential
-// reference and the approval id, and never the value.
+// reference, the approval id, the approving account where a human settled it —
+// and never the value. Outcomes reached after the decrypt (`success`,
+// `field_set_changed`, `missing_credential`) are written by the vault; the
+// rest go through recordCredentialFetchOutcome, which the retention cron
+// shares so a lapsed approval swept from the table is still settled first.
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
+  CredentialFieldsChangedError,
   CredentialNotFoundError,
-  VAULT_AUDIT_TYPES,
-  VAULT_REVEAL_PURPOSE,
   VaultRateLimitError,
 } from "@trusty-squire/vault";
 import type { ApiDeps } from "../services/deps.js";
 import { resolveCredentialForAccount } from "../services/credential-resolution.js";
 import type { CredentialFetchApprovalRecord } from "../services/credential-fetch-approval-store.js";
+import {
+  recordCredentialFetchOutcome,
+  type CredentialFetchTerminalOutcome,
+} from "../services/credential-fetch-audit.js";
+import {
+  approvalOwnership,
+  approvalPageUrl,
+  sendResolutionFailure,
+  verifyApprovalMandate,
+} from "../services/approval-ceremony.js";
 import { sendTelegramMessage } from "../services/telegram.js";
 import { authenticatedRequester } from "../services/requesting-agent.js";
 import {
   CREDENTIAL_FETCH_VOUCH_CONTEXT,
-  VouchMandateVerificationError,
   createVouchMandateVerifier,
   hashVouchPayload,
   type VouchMandateVerifier,
@@ -65,20 +87,26 @@ const createBody = z
 
 const approveBody = z.object({ jws: z.string().min(1).max(8192) }).strict();
 
-function webBaseUrl(): string {
-  return (
-    process.env.PWA_BASE_URL ?? process.env.TRUSTY_SQUIRE_WEB_BASE ?? "https://trustysquire.ai"
-  );
+function approvalUrl(id: string): string {
+  return approvalPageUrl("fetch", id);
 }
 
-function approvalUrl(id: string): string {
-  return `${webBaseUrl().replace(/\/+$/, "")}/vault/fetch/${encodeURIComponent(id)}`;
+// An opaque, purpose-specific digest of the owning account. Putting it inside
+// the signed bytes means the human's passkey attests to WHOSE secret is being
+// revealed, not merely which credential — and it does so without an account id
+// travelling through the browser.
+function accountBinding(accountId: string): string {
+  return createHash("sha256")
+    .update("trusty-squire/credential-fetch/account/v1\n")
+    .update(accountId)
+    .digest("base64url");
 }
 
 // What the passkey signs. `purpose` is inside the signed bytes as well as in
 // the context, so the human's device attests to a REVEAL specifically.
 export function credentialFetchPayload(record: CredentialFetchApprovalRecord): unknown {
   return {
+    account_binding: accountBinding(record.accountId),
     agent: record.agent,
     approval_id: record.id,
     credential: {
@@ -149,27 +177,15 @@ async function sendFetchTelegram(deps: ApiDeps, record: CredentialFetchApprovalR
 }
 
 // A refused disclosure is as much a security event as a granted one: it says
-// someone asked and was told no. Written straight to the audit store because
-// no decrypt path ran to write it for us. Callers must have performed the
-// state transition first, so a polling agent produces one row, not one per poll.
-async function recordRefusal(
+// someone asked and was told no. Callers must have performed the state
+// transition first, so a polling agent produces one row, not one per poll.
+async function recordOutcome(
   deps: ApiDeps,
   record: CredentialFetchApprovalRecord,
-  outcome: "denied" | "expired",
+  outcome: CredentialFetchTerminalOutcome,
+  approverAccountId?: string,
 ): Promise<void> {
-  await deps.vaultAuditStore.record({
-    account_id: record.accountId,
-    type: VAULT_AUDIT_TYPES.retrieved,
-    payload: {
-      reference: record.credentialReference,
-      requester: record.requesterKind === "web" ? "user" : "agent",
-      purpose: VAULT_REVEAL_PURPOSE,
-      outcome,
-      approval_id: record.id,
-      label: record.credentialLabel,
-      ...(record.credentialService !== null ? { service: record.credentialService } : {}),
-    },
-  });
+  await recordCredentialFetchOutcome(deps.vaultAuditStore, record, outcome, approverAccountId);
 }
 
 async function settleExpired(
@@ -178,32 +194,48 @@ async function settleExpired(
   now: Date,
 ): Promise<void> {
   const settled = await deps.credentialFetchApprovalStore.expire(record.id, now);
-  if (settled === "expired") await recordRefusal(deps, record, "expired");
+  if (settled === "expired") await recordOutcome(deps, record, "expired");
 }
 
-function sendResolutionFailure(
-  resolution: Awaited<ReturnType<typeof resolveCredentialForAccount>>,
+// The raw value travels in this response body. Shared caches normally decline
+// to store an authorized response, but "normally" is the wrong standard for a
+// plaintext secret — say it explicitly on every reply the resume can produce.
+function noStore(reply: FastifyReply): FastifyReply {
+  return reply.header("cache-control", "no-store, private");
+}
+
+/**
+ * Load an approval on behalf of the HUMAN settling it. Anything but the owner's
+ * own live web session gets 404 — and a foreign, authenticated attempt is
+ * written to the owner's ledger, because "somebody else tried to release your
+ * secret" is precisely what an audit trail exists to show.
+ */
+async function loadOwnedApproval(
+  deps: ApiDeps,
+  req: FastifyRequest,
   reply: FastifyReply,
-): boolean {
-  if (resolution.kind === "found") return false;
-  if (resolution.kind === "missing") {
-    reply.code(404).send({ error: "credential_not_found" });
-    return true;
+  id: string,
+): Promise<CredentialFetchApprovalRecord | null> {
+  const auth = req.auth!;
+  const ownership = approvalOwnership(
+    await deps.credentialFetchApprovalStore.getById(id),
+    (record) => record.accountId,
+    auth.account_id,
+  );
+  if (ownership.kind === "owner") return ownership.record;
+  if (ownership.kind === "foreign") {
+    await recordOutcome(deps, ownership.record, "approver_rejected", auth.account_id);
   }
-  reply.code(409).send({
-    error: "ambiguous_credential",
-    candidates: resolution.candidates.map((credential) => ({
-      reference: credential.reference,
-      service: typeof credential.metadata.service === "string" ? credential.metadata.service : null,
-      name: credential.label,
-    })),
-  });
-  return true;
+  reply.code(404).send({ error: "credential_fetch_approval_not_found" });
+  return null;
 }
 
 export const registerCredentialFetchRoutes: FastifyPluginAsync<{
   deps: ApiDeps;
   requireAny: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
+  // The human half of the ceremony is web-session only: an agent token is the
+  // requester's authority, never the approver's.
+  requireWeb: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
   vouchVerifier?: VouchMandateVerifier;
 }> = async (fastify, opts) => {
   const verifyVouch = opts.vouchVerifier ?? createVouchMandateVerifier();
@@ -292,6 +324,7 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
     async (req, reply) => {
       const auth = req.auth!;
       const now = opts.deps.now?.() ?? new Date();
+      noStore(reply);
       const claim = await opts.deps.credentialFetchApprovalStore.claim(
         req.params.id,
         auth.account_id,
@@ -342,57 +375,64 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
       }
 
       const record = claim.record;
+      // Disclose EXACTLY what the human approved, never what the credential
+      // happens to hold now. A field added (web "add a field") or renamed
+      // (rotation) between the ceremony and the claim would otherwise widen or
+      // hollow out a disclosure that was signed over a different field set. The
+      // vault applies the filter and audits the result of THAT, so the ledger
+      // cannot say `success` for a disclosure that turned out empty.
+      const approvedNames = record.field === null ? record.fieldNames : [record.field];
       let fields: Record<string, string>;
       try {
         fields = await opts.deps.vault.revealForApprovedFetch(
           record.credentialReference,
           record.accountId,
           record.id,
+          approvedNames,
         );
       } catch (error) {
+        // Everything below this point has already BURNED the single-use
+        // approval, so every branch has to leave a terminal row behind. The
+        // vault writes its own (`missing_credential`, `field_set_changed`,
+        // `rate_limited`); an unexpected decrypt/KMS/store failure has nobody
+        // else to write it, and must not vanish into a bare 500.
         if (error instanceof CredentialNotFoundError) {
           reply.code(404).send({ error: "credential_not_found" });
+          return;
+        }
+        if (error instanceof CredentialFieldsChangedError) {
+          reply.code(409).send({
+            ...approvalResponse(record, now),
+            error: "credential_fields_changed",
+            field_names: error.fieldNames,
+          });
           return;
         }
         if (error instanceof VaultRateLimitError) {
           reply.code(429).send({ error: "rate_limited", scope: "vault_retrieval" });
           return;
         }
+        await recordOutcome(opts.deps, record, "internal_error");
         throw error;
-      }
-      // Disclose EXACTLY what the human approved, never what the credential
-      // happens to hold now. A field added (web "add a field") or renamed
-      // (rotation) between the ceremony and the claim would otherwise widen or
-      // hollow out a disclosure that was signed over a different field set.
-      const approvedNames = record.field === null ? record.fieldNames : [record.field];
-      const disclosed = Object.fromEntries(
-        Object.entries(fields).filter(([name]) => approvedNames.includes(name)),
-      );
-      if (Object.keys(disclosed).length === 0) {
-        reply.code(409).send({
-          ...approvalResponse(record, now),
-          error: "credential_fields_changed",
-          field_names: Object.keys(fields),
-        });
-        return;
       }
       return reply.code(200).send({
         ...approvalResponse(record, now),
         status: "consumed",
-        fields: disclosed,
+        fields,
         fetched_at: now.toISOString(),
       });
     },
   );
 
+  // The exact bytes the owner's passkey will sign. Owner-authenticated like the
+  // decisions themselves: handing the ceremony payload to anyone holding the
+  // link is what lets a stranger produce a technically valid assertion.
   fastify.get<{ Params: { id: string } }>(
     "/v1/vault/fetch-approvals/:id/ceremony",
+    { preHandler: opts.requireWeb },
     async (req, reply) => {
-      const record = await opts.deps.credentialFetchApprovalStore.getById(req.params.id);
-      if (record === null) {
-        reply.code(404).send({ error: "credential_fetch_approval_not_found" });
-        return;
-      }
+      const record = await loadOwnedApproval(opts.deps, req, reply, req.params.id);
+      if (record === null) return;
       const now = opts.deps.now?.() ?? new Date();
       return reply.code(200).send({
         ...approvalResponse(record, now),
@@ -402,22 +442,26 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
     },
   );
 
+  // The human's YES. Two independent fences stand here, and both are needed:
+  // the caller must hold the OWNING account's web session (a genuine passkey
+  // belonging to a different Trusty Squire user must not release this secret),
+  // and the assertion must be signed over this exact approval's payload.
   fastify.post<{ Params: { id: string } }>(
     "/v1/vault/fetch-approvals/:id/approve",
+    { preHandler: opts.requireWeb },
     async (req, reply) => {
       const parsed = approveBody.safeParse(req.body);
       if (!parsed.success) {
         reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
         return;
       }
-      const record = await opts.deps.credentialFetchApprovalStore.getById(req.params.id);
-      if (record === null) {
-        reply.code(404).send({ error: "credential_fetch_approval_not_found" });
-        return;
-      }
+      const record = await loadOwnedApproval(opts.deps, req, reply, req.params.id);
+      if (record === null) return;
       const now = opts.deps.now?.() ?? new Date();
       const status = publicStatus(record, now);
       if (status === "expired") {
+        // Whoever notices the lapse first settles it, exactly once.
+        await settleExpired(opts.deps, record, now);
         reply.code(409).send({ error: "credential_fetch_approval_expired" });
         return;
       }
@@ -428,28 +472,22 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
         return;
       }
 
-      let claims;
-      try {
-        claims = await verifyVouch({
+      const claims = await verifyApprovalMandate(
+        verifyVouch,
+        {
           jws: parsed.data.jws,
           expectedPayloadHash: hashVouchPayload(credentialFetchPayload(record)),
           expectedContext: CREDENTIAL_FETCH_VOUCH_CONTEXT,
           expectedAudience: vouchflowAudience,
-        });
-      } catch (error) {
-        const code =
-          error instanceof VouchMandateVerificationError
-            ? error.code
-            : "mandate_verification_failed";
-        reply
-          .code(code === "vouchflow_expected_audience_unset" ? 503 : 403)
-          .send({ error: code });
-        return;
-      }
+        },
+        reply,
+      );
+      if (claims === null) return;
 
       const mandateId = typeof claims.mandate_id === "string" ? claims.mandate_id : null;
       const result = await opts.deps.credentialFetchApprovalStore.approve(record.id, mandateId);
       if (result === "expired") {
+        await settleExpired(opts.deps, record, now);
         reply.code(409).send({ error: "credential_fetch_approval_expired" });
         return;
       }
@@ -457,24 +495,39 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
         reply.code(409).send({ error: "credential_fetch_approval_not_pending" });
         return;
       }
+      // The human said yes: an event in its own right, and the row that names
+      // WHO said it. An approval that is never claimed would otherwise leave no
+      // trace of the decision until it lapsed.
+      if (result === "approved") {
+        await recordOutcome(opts.deps, record, "approved", req.auth!.account_id);
+      }
       return reply.code(200).send({ status: "approved" });
     },
   );
 
+  // The human's NO. Owner-authenticated for the same reason as approve, plus
+  // one of its own: an anonymous deny is a denial-of-service against the
+  // owner's fetch, recorded in their ledger as if they had refused it.
   fastify.post<{ Params: { id: string } }>(
     "/v1/vault/fetch-approvals/:id/deny",
+    { preHandler: opts.requireWeb },
     async (req, reply) => {
-      const record = await opts.deps.credentialFetchApprovalStore.getById(req.params.id);
-      if (record === null) {
-        reply.code(404).send({ error: "credential_fetch_approval_not_found" });
-        return;
-      }
-      const result = await opts.deps.credentialFetchApprovalStore.deny(record.id);
+      const record = await loadOwnedApproval(opts.deps, req, reply, req.params.id);
+      if (record === null) return;
+      const now = opts.deps.now?.() ?? new Date();
+      const result = await opts.deps.credentialFetchApprovalStore.deny(record.id, now);
       if (result === "denied") {
-        await recordRefusal(opts.deps, record, "denied");
+        await recordOutcome(opts.deps, record, "denied", req.auth!.account_id);
         return reply.code(200).send({ status: "denied" });
       }
       if (result === "already_denied") return reply.code(200).send({ status: "denied" });
+      // Lapsed before the human answered: settle it as the expiry it is rather
+      // than logging a refusal nobody made.
+      if (result === "expired") {
+        await settleExpired(opts.deps, record, now);
+        reply.code(409).send({ error: "credential_fetch_approval_expired" });
+        return;
+      }
       reply.code(409).send({ error: "credential_fetch_approval_not_pending" });
       return;
     },
