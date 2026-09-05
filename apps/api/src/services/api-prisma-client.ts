@@ -427,6 +427,13 @@ export interface ApiPrismaClient {
       where: Record<string, unknown>;
       orderBy?: Record<string, unknown>;
     }): Promise<CredentialFetchApprovalRow | null>;
+    // The retention sweep settles lapsed approvals before deleting them, so it
+    // needs the rows, not just a count.
+    findMany(args: {
+      where: Record<string, unknown>;
+      orderBy?: Record<string, unknown>;
+      take?: number;
+    }): Promise<CredentialFetchApprovalRow[]>;
     updateMany(args: {
       where: Record<string, unknown>;
       data: Record<string, unknown>;

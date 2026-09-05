@@ -56,7 +56,9 @@ export type CredentialFetchApproveResult =
   | "expired"
   | "not_pending";
 
-export type CredentialFetchDenyResult = "denied" | "already_denied" | "not_pending";
+/** `expired` means the approval lapsed before the human answered — the caller
+ * settles it as an expiry rather than recording a denial that never happened. */
+export type CredentialFetchDenyResult = "denied" | "already_denied" | "expired" | "not_pending";
 
 /** `expired` means THIS call performed the transition — the caller audits once. */
 export type CredentialFetchExpireResult = "expired" | "already_terminal";
@@ -78,7 +80,8 @@ export interface CredentialFetchApprovalStore {
   getById(id: string): Promise<CredentialFetchApprovalRecord | null>;
   getByIdForAccount(id: string, accountId: string): Promise<CredentialFetchApprovalRecord | null>;
   approve(id: string, mandateId: string | null): Promise<CredentialFetchApproveResult>;
-  deny(id: string): Promise<CredentialFetchDenyResult>;
+  /** Refuse a still-live pending approval. A lapsed one reports `expired`. */
+  deny(id: string, now: Date): Promise<CredentialFetchDenyResult>;
   /** approved → consumed, exactly once. The ONLY transition that authorizes a decrypt. */
   claim(id: string, accountId: string): Promise<CredentialFetchClaimResult>;
   /**
@@ -151,12 +154,15 @@ export class InMemoryCredentialFetchApprovalStore implements CredentialFetchAppr
     return "approved";
   }
 
-  async deny(id: string): Promise<CredentialFetchDenyResult> {
+  async deny(id: string, now: Date): Promise<CredentialFetchDenyResult> {
     const record = this.records.get(id);
     if (record === undefined) return "not_pending";
     if (record.status === "denied") return "already_denied";
     // An already-approved fetch stays approved: the value may already be out.
     if (record.status !== "pending") return "not_pending";
+    // A lapsed approval is not the human's refusal. Recording it as one would
+    // put an event in the ledger that never happened.
+    if (record.expiresAt <= now) return "expired";
     record.status = "denied";
     record.failureCode = "denied_by_user";
     return "denied";

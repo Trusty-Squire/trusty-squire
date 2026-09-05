@@ -267,6 +267,17 @@ export class CredentialNotFoundError extends Error {
     this.name = "CredentialNotFoundError";
   }
 }
+// The approval-gated reveal decrypted the credential but the field set the
+// human signed for is no longer present (a rotation renamed it, an edit
+// removed it). Nothing is disclosed: a signed approval names an exact field
+// set, and widening or hollowing it out is not what the human agreed to.
+// API maps to 409. Carries only field NAMES, never values.
+export class CredentialFieldsChangedError extends Error {
+  constructor(public readonly fieldNames: string[]) {
+    super(`credential field set changed since approval: ${fieldNames.join(", ")}`);
+    this.name = "CredentialFieldsChangedError";
+  }
+}
 // addField refused: the entry already has a field with this name. Adding
 // is additive — changing an existing field's value is the rotate path.
 // API maps to 409.
@@ -580,16 +591,35 @@ export class CredentialVault implements VaultClient {
   // value back to an agent. The caller must already have verified a
   // passkey-signed fetch approval bound to this exact (account, credential);
   // this method performs no authorization of its own beyond account scoping,
-  // which is why nothing but the fetch-approval route may call it. Audited
-  // under purpose `reveal` with the approval that authorized it, and counted
+  // which is why nothing but the fetch-approval route may call it. Counted
   // against the same retrieval ceiling as every other decrypt path.
+  //
+  // `approvedFieldNames` is the EXACT field set the human signed for, and the
+  // filtering happens here rather than in the caller so the audit row states
+  // what was actually disclosed: a caller-side filter would let the vault log
+  // `success` for a disclosure that ended up empty. Every outcome this method
+  // can produce — the credential vanished between approval and claim, its
+  // field set moved, or the fields went out — writes exactly one purpose
+  // `reveal` row carrying the approval id and never a value.
   async revealForApprovedFetch(
     reference: string,
     accountId: string,
     approvalId: string,
+    approvedFieldNames: readonly string[],
   ): Promise<Record<string, string>> {
     const record = await this.deps.store.findActive(reference);
     if (record === null || record.account_id !== accountId) {
+      // The approval is already spent by the time we get here, so this cannot
+      // be left unaudited: retrieveInternal's own missing-credential branch
+      // never runs for an account mismatch, and a 404 with no ledger row would
+      // make "every fetch outcome is audited" false.
+      await this.recordAudit(accountId, VAULT_AUDIT_TYPES.retrieved, {
+        reference,
+        purpose: VAULT_REVEAL_PURPOSE,
+        requester: "agent",
+        outcome: "missing_credential",
+        approval_id: approvalId,
+      });
       throw new CredentialNotFoundError(reference);
     }
     return this.retrieveInternal({
@@ -599,6 +629,7 @@ export class CredentialVault implements VaultClient {
       signingDeviceId: null,
       assertion: null,
       approvalId,
+      discloseFields: approvedFieldNames,
     });
   }
 
@@ -846,6 +877,9 @@ export class CredentialVault implements VaultClient {
     // Set only by the approval-gated reveal, so an auditor reading a
     // purpose=reveal row can find the exact approval that authorized it.
     approvalId?: string;
+    // Set only by the approval-gated reveal: disclose exactly these fields and
+    // audit the outcome of THAT, not of the raw decrypt.
+    discloseFields?: readonly string[];
   }): Promise<Record<string, string>> {
     const { reference, purpose, requester, signingDeviceId, assertion } = args;
     const approval = args.approvalId === undefined ? {} : { approval_id: args.approvalId };
@@ -889,8 +923,25 @@ export class CredentialVault implements VaultClient {
       throw new CredentialNotFoundError(reference);
     }
 
-    const fields = await this.decryptFields(record);
+    const decrypted = await this.decryptFields(record);
+    const fields =
+      args.discloseFields === undefined
+        ? decrypted
+        : Object.fromEntries(
+            Object.entries(decrypted).filter(([name]) => args.discloseFields!.includes(name)),
+          );
     await this.deps.store.markRetrieved(reference, this.now());
+    if (args.discloseFields !== undefined && Object.keys(fields).length === 0) {
+      await this.recordAudit(record.account_id, VAULT_AUDIT_TYPES.retrieved, {
+        reference,
+        purpose,
+        requester,
+        signing_device_id: signingDeviceId,
+        outcome: "field_set_changed",
+        ...approval,
+      });
+      throw new CredentialFieldsChangedError(Object.keys(decrypted));
+    }
     await this.recordAudit(record.account_id, VAULT_AUDIT_TYPES.retrieved, {
       reference,
       purpose,

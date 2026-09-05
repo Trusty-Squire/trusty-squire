@@ -375,6 +375,9 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     authPrisma !== null
       ? new RetentionCron({
           authPrisma: authPrisma ?? undefined,
+          // The sweep settles lapsed fetch approvals into the reveal ledger
+          // before deleting them; without the audit sink it would drop them.
+          vaultAuditStore,
           ...(opts.now !== undefined ? { now: opts.now } : {}),
         })
       : null;

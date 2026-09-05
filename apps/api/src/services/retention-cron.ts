@@ -7,20 +7,31 @@
 //     - Delete PaymentAuditEvent older than 365d
 //     - Delete PendingPaymentApproval rows past expires_at
 //     - Delete CredentialMutationApproval rows past expires_at
-//     - Delete CredentialFetchApproval rows past expires_at
+//     - Settle + audit, then delete, CredentialFetchApproval rows past
+//       expires_at (an abandoned reveal is a terminal outcome, not a row that
+//       merely ages out)
 //     - Delete TelegramLinkToken rows past expires_at
 //
 // Running this in-process is fine for v1: one machine, one schedule.
 // When we shard the API, move this to a separate worker or use
 // pg_cron.
 
+import type { VaultAuditStore } from "@trusty-squire/vault";
 import type { ApiPrismaClient } from "./api-prisma-client.js";
+import { recordCredentialFetchOutcome } from "./credential-fetch-audit.js";
 
 const HOUR_MS = 60 * 60 * 1000;
+// Rows settled per fetch-approval sweep. Bounded because settling writes an
+// audit row each; the hourly cadence drains any realistic backlog.
+const RETENTION_BATCH = 500;
 const DAY_MS = 24 * HOUR_MS;
 
 export interface RetentionCronDeps {
   authPrisma?: ApiPrismaClient | undefined;
+  // Required to sweep fetch approvals: a lapsed reveal must be SETTLED in the
+  // ledger before its row is deleted, or "every fetch outcome is audited"
+  // silently stops being true for every approval nobody came back for.
+  vaultAuditStore?: VaultAuditStore | undefined;
   // Test seam.
   now?: () => Date;
   // Tunables (env-overridable in production).
@@ -100,6 +111,52 @@ export class RetentionCron {
 
   status(): { last_run_at: Date | null; last_stats: RetentionCronStats | null } {
     return { last_run_at: this.lastRunAt, last_stats: this.lastStats };
+  }
+
+  // A fetch approval nobody ever came back for is still a terminal outcome of a
+  // raw-disclosure request, so the row cannot simply be swept: it is settled as
+  // `expired` and audited FIRST, and only rows whose audit write succeeded are
+  // deleted. Ordering it the other way would lose the event permanently — the
+  // row is the only remaining evidence that the request existed.
+  private async sweepCredentialFetchApprovals(
+    prisma: ApiPrismaClient,
+    startedAt: Date,
+  ): Promise<number> {
+    const lapsed = await prisma.credentialFetchApproval.findMany({
+      where: { expires_at: { lt: startedAt } },
+      take: RETENTION_BATCH,
+    });
+    const deletable: string[] = [];
+    for (const row of lapsed) {
+      if (row.status === "pending" || row.status === "approved") {
+        const auditStore = this.deps.vaultAuditStore;
+        // No audit sink wired (in-memory dev): leave the row rather than delete
+        // an unsettled reveal without a trace of it.
+        if (auditStore === undefined) continue;
+        await prisma.credentialFetchApproval.updateMany({
+          where: { id: row.id, status: { in: ["pending", "approved"] } },
+          data: { status: "failed", failure_code: "expired" },
+        });
+        await recordCredentialFetchOutcome(
+          auditStore,
+          {
+            id: row.id,
+            accountId: row.account_id,
+            credentialReference: row.credential_reference,
+            credentialService: row.credential_service,
+            credentialLabel: row.credential_label,
+            requesterKind: row.requester_kind === "web" ? "web" : "agent",
+          },
+          "expired",
+        );
+      }
+      deletable.push(row.id);
+    }
+    if (deletable.length === 0) return 0;
+    const deleted = await prisma.credentialFetchApproval.deleteMany({
+      where: { id: { in: deletable } },
+    });
+    return deleted.count;
   }
 
   // Single run. Public so ops can trigger it via an admin endpoint if
@@ -182,10 +239,10 @@ export class RetentionCron {
       }
 
       try {
-        const r = await this.deps.authPrisma.credentialFetchApproval.deleteMany({
-          where: { expires_at: { lt: startedAt } },
-        });
-        stats.credential_fetch_approvals_deleted = r.count;
+        stats.credential_fetch_approvals_deleted = await this.sweepCredentialFetchApprovals(
+          this.deps.authPrisma,
+          startedAt,
+        );
       } catch (err) {
         stats.errors.push(
           `credential fetch approval delete: ${err instanceof Error ? err.message : String(err)}`,

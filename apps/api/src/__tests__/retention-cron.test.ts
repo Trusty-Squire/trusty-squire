@@ -4,15 +4,42 @@
 // correct relative to the configured retention windows.
 
 import { describe, expect, it } from "vitest";
+import { InMemoryVaultAuditStore } from "@trusty-squire/vault";
 import { RetentionCron } from "../services/retention-cron.js";
 
 interface RecordedCall {
   table: string;
-  op: "deleteMany";
+  op: "deleteMany" | "findMany" | "updateMany";
   where: Record<string, unknown>;
 }
 
-function makeFakes(): {
+// A lapsed fetch approval the sweep will find. `status` decides whether it is
+// an unsettled reveal (pending/approved — must be audited before deletion) or
+// one already settled by a poll.
+function lapsedFetchRow(status: string, id = "fetch_1"): Record<string, unknown> {
+  return {
+    id,
+    account_id: "acct_owner",
+    credential_reference: "vault://acct_owner/sub/cred",
+    credential_service: "OpenAI",
+    credential_label: "default",
+    field: null,
+    field_names: ["value"],
+    nonce: "n",
+    agent: "codex",
+    requester_kind: "agent",
+    intent_hash: "h",
+    status,
+    failure_code: null,
+    mandate_id: null,
+    created_at: new Date("2026-01-15T11:00:00Z"),
+    expires_at: new Date("2026-01-15T11:10:00Z"),
+    approved_at: null,
+    delivered_at: null,
+  };
+}
+
+function makeFakes(fetchRows: Array<Record<string, unknown>> = []): {
   authPrisma: NonNullable<ConstructorParameters<typeof RetentionCron>[0]["authPrisma"]>;
   calls: RecordedCall[];
 } {
@@ -46,13 +73,21 @@ function makeFakes(): {
         },
       } as unknown as never,
       credentialFetchApproval: {
+        findMany: async (args: { where: Record<string, unknown> }) => {
+          calls.push({ table: "CredentialFetchApproval", op: "findMany", where: args.where });
+          return fetchRows;
+        },
+        updateMany: async (args: { where: Record<string, unknown> }) => {
+          calls.push({ table: "CredentialFetchApproval", op: "updateMany", where: args.where });
+          return { count: 1 };
+        },
         deleteMany: async (args: { where: Record<string, unknown> }) => {
           calls.push({
             table: "CredentialFetchApproval",
             op: "deleteMany",
             where: args.where,
           });
-          return { count: 1 };
+          return { count: (args.where["id"] as { in: string[] }).in.length };
         },
       } as unknown as never,
       credentialMutationApproval: {
@@ -123,9 +158,11 @@ describe("RetentionCron", () => {
     ] as { lt: Date };
     expect(credentialMutationApprovalWhere.lt).toEqual(now);
 
-    const credentialFetchApprovalDelete = calls.find((c) => c.table === "CredentialFetchApproval");
-    expect(credentialFetchApprovalDelete).toBeDefined();
-    const credentialFetchApprovalWhere = credentialFetchApprovalDelete!.where["expires_at"] as {
+    const credentialFetchApprovalScan = calls.find(
+      (c) => c.table === "CredentialFetchApproval" && c.op === "findMany",
+    );
+    expect(credentialFetchApprovalScan).toBeDefined();
+    const credentialFetchApprovalWhere = credentialFetchApprovalScan!.where["expires_at"] as {
       lt: Date;
     };
     expect(credentialFetchApprovalWhere.lt).toEqual(now);
@@ -173,7 +210,7 @@ describe("RetentionCron", () => {
           },
         } as unknown as never,
         credentialFetchApproval: {
-          deleteMany: async () => {
+          findMany: async () => {
             throw new Error("credential fetch approval boom");
           },
         } as unknown as never,
@@ -195,6 +232,72 @@ describe("RetentionCron", () => {
     expect(stats.errors[4]).toMatch(/credential mutation approval/);
     expect(stats.errors[5]).toMatch(/credential fetch approval/);
     expect(stats.errors[6]).toMatch(/telegram link token/);
+  });
+
+  // The cron used to delete lapsed fetch approvals outright, which made
+  // "every fetch outcome is audited" false for every approval nobody came back
+  // for: the row was the only remaining evidence the request existed.
+  it("settles and audits an abandoned fetch approval before deleting it", async () => {
+    const now = new Date("2026-01-15T12:00:00Z");
+    const auditStore = new InMemoryVaultAuditStore(() => now);
+    const { authPrisma, calls } = makeFakes([
+      lapsedFetchRow("pending", "fetch_pending"),
+      lapsedFetchRow("approved", "fetch_approved"),
+    ]);
+    const cron = new RetentionCron({ authPrisma, vaultAuditStore: auditStore, now: () => now });
+
+    const stats = await cron.runOnce();
+    expect(stats.credential_fetch_approvals_deleted).toBe(2);
+
+    expect(auditStore.events.map((event) => event.payload.outcome)).toEqual([
+      "expired",
+      "expired",
+    ]);
+    expect(auditStore.events[0]!.account_id).toBe("acct_owner");
+    expect(auditStore.events[0]!.payload).toMatchObject({
+      reference: "vault://acct_owner/sub/cred",
+      purpose: "reveal",
+      outcome: "expired",
+      approval_id: "fetch_pending",
+    });
+    // No decrypted material can reach these rows — there is no parameter for it.
+    expect(JSON.stringify(auditStore.events)).not.toContain("value\":\"sk-");
+
+    // Settled first, deleted second: the audit write cannot be skipped by a
+    // delete that already ran.
+    const fetchCalls = calls.filter((c) => c.table === "CredentialFetchApproval");
+    expect(fetchCalls.map((c) => c.op)).toEqual([
+      "findMany",
+      "updateMany",
+      "updateMany",
+      "deleteMany",
+    ]);
+  });
+
+  it("deletes an already-settled lapsed approval without a second audit row", async () => {
+    const now = new Date("2026-01-15T12:00:00Z");
+    const auditStore = new InMemoryVaultAuditStore(() => now);
+    const { authPrisma } = makeFakes([
+      lapsedFetchRow("failed", "fetch_settled"),
+      lapsedFetchRow("consumed", "fetch_delivered"),
+    ]);
+    const cron = new RetentionCron({ authPrisma, vaultAuditStore: auditStore, now: () => now });
+
+    const stats = await cron.runOnce();
+    expect(stats.credential_fetch_approvals_deleted).toBe(2);
+    expect(auditStore.events).toEqual([]);
+  });
+
+  it("keeps an unsettled approval rather than deleting it with no audit sink", async () => {
+    const now = new Date("2026-01-15T12:00:00Z");
+    const { authPrisma, calls } = makeFakes([lapsedFetchRow("pending")]);
+    const cron = new RetentionCron({ authPrisma, now: () => now });
+
+    const stats = await cron.runOnce();
+    expect(stats.credential_fetch_approvals_deleted).toBe(0);
+    expect(calls.some((c) => c.table === "CredentialFetchApproval" && c.op === "deleteMany")).toBe(
+      false,
+    );
   });
 
   it("status() exposes last-run state", async () => {

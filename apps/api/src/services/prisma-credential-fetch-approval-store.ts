@@ -86,16 +86,20 @@ export class PrismaCredentialFetchApprovalStore implements CredentialFetchApprov
     return "not_pending";
   }
 
-  async deny(id: string): Promise<CredentialFetchDenyResult> {
-    // Only a pending fetch can be denied: once approved, the value may
-    // already have been delivered, and a later "deny" would be a lie.
+  async deny(id: string, now: Date): Promise<CredentialFetchDenyResult> {
+    // Only a live pending fetch can be denied: once approved, the value may
+    // already have been delivered, and a later "deny" would be a lie — as
+    // would recording an approval that simply ran out the clock as a refusal
+    // the human made.
     const denied = await this.prisma.credentialFetchApproval.updateMany({
-      where: { id, status: "pending" },
+      where: { id, status: "pending", expires_at: { gt: now } },
       data: { status: "denied", failure_code: "denied_by_user" },
     });
     if (denied.count === 1) return "denied";
     const current = await this.getById(id);
-    return current?.status === "denied" ? "already_denied" : "not_pending";
+    if (current === null) return "not_pending";
+    if (current.status === "denied") return "already_denied";
+    return current.status === "pending" ? "expired" : "not_pending";
   }
 
   async expire(id: string, now: Date): Promise<CredentialFetchExpireResult> {

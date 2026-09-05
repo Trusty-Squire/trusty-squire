@@ -115,13 +115,28 @@ export interface VaultAuditPayload {
   // approval-gated agent reveal (fetch_credential): the human refused the
   // disclosure, or the signed approval aged out before it was claimed. Both
   // are recorded with NO value having been decrypted.
+  // `approved`, `denied`, `expired`, `approver_rejected`, `field_set_changed`
+  // and `internal_error` belong to the approval-gated agent reveal
+  // (fetch_credential), whose ledger records EVERY terminal outcome: the human
+  // approved, refused, or let it lapse; someone other than the owner tried to
+  // approve; the credential's field set changed under a signed approval; or the
+  // decrypt failed after the approval was already spent. None of them decrypted
+  // a value, and none of them may ever carry one.
   outcome?:
     | "success"
     | "rate_limited"
     | "stale_assertion"
     | "missing_credential"
+    | "approved"
     | "denied"
-    | "expired";
+    | "expired"
+    | "approver_rejected"
+    | "field_set_changed"
+    | "internal_error";
+  // The account whose passkey settled an approval-gated reveal. Equal to the
+  // credential owner on every accepted approval — it is recorded precisely so a
+  // rejected cross-account attempt is legible in the owner's ledger.
+  approver_account_id?: string;
   credential_type?: string;
   service?: string;
   label?: string;

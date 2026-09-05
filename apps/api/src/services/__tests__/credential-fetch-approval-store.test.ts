@@ -89,15 +89,27 @@ describe("InMemoryCredentialFetchApprovalStore", () => {
   it("denies only a pending approval — a denial cannot revoke a live approval", async () => {
     const store = new InMemoryCredentialFetchApprovalStore(() => new Date(T0));
     const pending = await store.create("acct_1", input());
-    expect(await store.deny(pending)).toBe("denied");
-    expect(await store.deny(pending)).toBe("already_denied");
+    expect(await store.deny(pending, new Date(T0))).toBe("denied");
+    expect(await store.deny(pending, new Date(T0))).toBe("already_denied");
     expect(await store.approve(pending, null)).toBe("not_pending");
     expect((await store.claim(pending, "acct_1")).kind).toBe("not_approved");
 
     // Once approved, "deny" is a lie — the value may already be out.
     const approved = await store.create("acct_1", input({ intentHash: "intent_2" }));
     await store.approve(approved, null);
-    expect(await store.deny(approved)).toBe("not_pending");
+    expect(await store.deny(approved, new Date(T0))).toBe("not_pending");
+  });
+
+  // The ledger must not carry a refusal the human never made: a lapsed
+  // approval is an expiry, and only the expiry path may settle it.
+  it("does not accept a denial for an approval that already lapsed", async () => {
+    const store = new InMemoryCredentialFetchApprovalStore(() => new Date(T0));
+    const id = await store.create("acct_1", input());
+    const lapsed = new Date(T0 + 11 * 60 * 1000);
+    expect(await store.deny(id, lapsed)).toBe("expired");
+    expect((await store.getById(id))?.status).toBe("pending");
+    expect(await store.expire(id, lapsed)).toBe("expired");
+    expect((await store.getById(id))?.failureCode).toBe("expired");
   });
 
   it("reuses a pending approval for the same intent, but never a spent one", async () => {
@@ -238,17 +250,30 @@ describe("PrismaCredentialFetchApprovalStore", () => {
 
   it("denies only a pending row", async () => {
     const pending = { ...baseRow(), status: "pending", approved_at: null, mandate_id: null };
-    const { prisma } = fakePrisma(pending);
+    const { prisma, updates } = fakePrisma(pending);
     const store = new PrismaCredentialFetchApprovalStore(prisma, () => new Date(T0 + 1000));
-    expect(await store.deny("fetch_1")).toBe("denied");
+    const now = new Date(T0 + 1000);
+    expect(await store.deny("fetch_1", now)).toBe("denied");
+    // Expiry is part of the WHERE clause, not a check the caller can forget.
+    expect(updates[0]!.where).toMatchObject({ id: "fetch_1", status: "pending" });
+    expect((updates[0]!.where["expires_at"] as { gt: Date }).gt).toEqual(now);
     expect(pending.failure_code).toBe("denied_by_user");
-    expect(await store.deny("fetch_1")).toBe("already_denied");
+    expect(await store.deny("fetch_1", now)).toBe("already_denied");
 
     const { prisma: approvedPrisma } = fakePrisma(baseRow());
     const approvedStore = new PrismaCredentialFetchApprovalStore(
       approvedPrisma,
       () => new Date(T0 + 1000),
     );
-    expect(await approvedStore.deny("fetch_1")).toBe("not_pending");
+    expect(await approvedStore.deny("fetch_1", now)).toBe("not_pending");
+  });
+
+  it("reports a lapsed pending row as expired rather than denying it", async () => {
+    const pending = { ...baseRow(), status: "pending", approved_at: null, mandate_id: null };
+    const { prisma } = fakePrisma(pending);
+    const store = new PrismaCredentialFetchApprovalStore(prisma, () => new Date(T0));
+    expect(await store.deny("fetch_1", new Date(T0 + 11 * 60 * 1000))).toBe("expired");
+    expect(pending.status).toBe("pending");
+    expect(pending.failure_code).toBeNull();
   });
 });

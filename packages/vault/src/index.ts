@@ -21,6 +21,7 @@ export {
   normalizeCredentialHosts,
   normalizeCredentialLabel,
   CredentialNotFoundError,
+  CredentialFieldsChangedError,
   FieldExistsError,
   StaleAssertionError,
   VaultRateLimitError,
