@@ -101,9 +101,9 @@ silent failures.
     (a maintained Playwright fork that closes the CDP-level tells the
     stealth plugin can't — `Runtime.enable`/mainWorld/webdriver/viewport).
     **Default-ON since 2026-06-08** (`BOT_CDP_HARDENED`, opt out with
-    `=0`); `getChromium()` in `browser.ts` loads it and falls back to the
-    baseline only if patchright isn't installed. `stealthProfile` reports
-    `cdp_hardened` vs `baseline`. So **do NOT re-diagnose a block as
+    `=0`); `getChromium()` in `browser-process-runtime.ts` loads it and falls
+    back to the baseline only if patchright isn't installed. `stealthProfile`
+    reports `cdp_hardened` vs `baseline`. So **do NOT re-diagnose a block as
     "automation fingerprinting" without first confirming patchright did
     NOT load** — that class of tell is already addressed.
   - **Tier 1 captcha bypass: behavior simulation** (bezier mouse,
@@ -146,9 +146,10 @@ silent failures.
     reference; `frameTargetAllowed`/`assertSecretFrameTargetAllowed` in
     `provision-session.ts` own the action-time security boundary.
   - **New-tab adoption.** The user-facing ownership and magic-link-following
-    contract lives in README's MCP-tool reference. `BrowserController` owns its
-    implementation; `newTabAdoptionAllowed` in `provision-session.ts` keeps
-    payment out of scope.
+    contract lives in README's MCP-tool reference. `PageDriver`
+    (`apps/mcp/src/bot/page-driver.ts`) owns its implementation behind the
+    `BrowserController` facade; `newTabAdoptionAllowed` in
+    `provision-session.ts` keeps payment out of scope.
 - **Single-tier install flow.** `npx @trusty-squire/mcp connect` does
   three things in one command:
   1. Issues a machine token (bot-internal credential for the operator
@@ -579,6 +580,17 @@ the facade FORWARDS each lifecycle export rather than re-implementing it, the
 3DS-audit-before-browser-close terminal ordering, and the COMPLETE key set of
 every observation payload. Treat a failure there as a behavior change, not a test
 to update.
+
+### Browser process vs page lifetime (`browser.ts` is a facade)
+
+`BrowserController` composes one exclusive `BrowserProcessOwner`
+(`apps/mcp/src/bot/browser-process-owner.ts`, Chrome process custody + bounded
+teardown; launch helpers in `browser-process-runtime.ts`) and one `PageDriver`
+(`page-driver.ts`, page/tab ownership, navigation, adoption). Single-session
+only — no broker or shared browser.
+[`docs/browser-process-page-boundary.md`](docs/browser-process-page-boundary.md)
+owns the boundary and the preserved close/cancellation ordering;
+`browser-process-page-boundary.test.ts` pins it.
 
 ### Operator observation model (compact-v2 ref identity)
 
