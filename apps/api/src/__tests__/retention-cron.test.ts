@@ -39,7 +39,24 @@ function lapsedFetchRow(status: string, id = "fetch_1"): Record<string, unknown>
   };
 }
 
-function makeFakes(fetchRows: Array<Record<string, unknown>> = []): {
+// The subset of Prisma `where` shapes the fetch sweep actually issues:
+// `{ id, status: { in: [...] } }` for the settlement fence and
+// `{ id, failure_code }` for the post-audit one.
+function matchesFetchWhere(row: Record<string, unknown>, where: Record<string, unknown>): boolean {
+  return Object.entries(where).every(([column, condition]) => {
+    if (typeof condition === "object" && condition !== null && "in" in condition) {
+      return (condition as { in: unknown[] }).in.includes(row[column]);
+    }
+    return row[column] === condition;
+  });
+}
+
+function makeFakes(
+  fetchRows: Array<Record<string, unknown>> = [],
+  // Fires after the sweep has snapshotted the lapsed rows and before it tries
+  // to settle them — the window in which approve/deny/claim can win the race.
+  onScan?: () => void,
+): {
   authPrisma: NonNullable<ConstructorParameters<typeof RetentionCron>[0]["authPrisma"]>;
   calls: RecordedCall[];
 } {
@@ -75,11 +92,23 @@ function makeFakes(fetchRows: Array<Record<string, unknown>> = []): {
       credentialFetchApproval: {
         findMany: async (args: { where: Record<string, unknown> }) => {
           calls.push({ table: "CredentialFetchApproval", op: "findMany", where: args.where });
-          return fetchRows;
+          // Prisma hands back detached rows, so a concurrent settlement changes
+          // the table without changing what the sweep already read.
+          const scanned = fetchRows.map((row) => ({ ...row }));
+          onScan?.();
+          return scanned;
         },
-        updateMany: async (args: { where: Record<string, unknown> }) => {
+        // Conditional, like the real one. The sweep's correctness rests on the
+        // returned `count` — a fake that always claims a match cannot show the
+        // difference between settling a row and losing the race for it.
+        updateMany: async (args: {
+          where: Record<string, unknown>;
+          data: Record<string, unknown>;
+        }) => {
           calls.push({ table: "CredentialFetchApproval", op: "updateMany", where: args.where });
-          return { count: 1 };
+          const matched = fetchRows.filter((row) => matchesFetchWhere(row, args.where));
+          for (const row of matched) Object.assign(row, args.data);
+          return { count: matched.length };
         },
         deleteMany: async (args: { where: Record<string, unknown> }) => {
           calls.push({
@@ -87,7 +116,10 @@ function makeFakes(fetchRows: Array<Record<string, unknown>> = []): {
             op: "deleteMany",
             where: args.where,
           });
-          return { count: (args.where["id"] as { in: string[] }).in.length };
+          const ids = (args.where["id"] as { in: string[] }).in;
+          const removed = fetchRows.filter((row) => ids.includes(row["id"] as string));
+          for (const row of removed) fetchRows.splice(fetchRows.indexOf(row), 1);
+          return { count: removed.length };
         },
       } as unknown as never,
       credentialMutationApproval: {
@@ -249,10 +281,7 @@ describe("RetentionCron", () => {
     const stats = await cron.runOnce();
     expect(stats.credential_fetch_approvals_deleted).toBe(2);
 
-    expect(auditStore.events.map((event) => event.payload.outcome)).toEqual([
-      "expired",
-      "expired",
-    ]);
+    expect(auditStore.events.map((event) => event.payload.outcome)).toEqual(["expired", "expired"]);
     expect(auditStore.events[0]!.account_id).toBe("acct_owner");
     expect(auditStore.events[0]!.payload).toMatchObject({
       reference: "vault://acct_owner/sub/cred",
@@ -261,7 +290,7 @@ describe("RetentionCron", () => {
       approval_id: "fetch_pending",
     });
     // No decrypted material can reach these rows — there is no parameter for it.
-    expect(JSON.stringify(auditStore.events)).not.toContain("value\":\"sk-");
+    expect(JSON.stringify(auditStore.events)).not.toContain('value":"sk-');
 
     // Settled first, deleted second: the audit write cannot be skipped by a
     // delete that already ran.
@@ -272,6 +301,34 @@ describe("RetentionCron", () => {
       "updateMany",
       "deleteMany",
     ]);
+  });
+
+  // The sweep's conditional update is a fence, not a formality: approve, deny
+  // and claim all race it. Ignoring its count let the cron write an expiry that
+  // never happened and delete the row that carried the real terminal state.
+  it("records no expiry when the row was settled between the scan and the update", async () => {
+    const now = new Date("2026-01-15T12:00:00Z");
+    const auditStore = new InMemoryVaultAuditStore(() => now);
+    const rows = [lapsedFetchRow("pending", "fetch_raced")];
+    const { authPrisma, calls } = makeFakes(rows, () => {
+      // The human approved and the agent claimed it, microseconds too late for
+      // the scan to have seen it.
+      rows[0]!["status"] = "consumed";
+      rows[0]!["delivered_at"] = now;
+    });
+    const cron = new RetentionCron({ authPrisma, vaultAuditStore: auditStore, now: () => now });
+
+    const stats = await cron.runOnce();
+
+    expect(auditStore.events).toEqual([]);
+    expect(stats.credential_fetch_approvals_deleted).toBe(0);
+    expect(calls.some((c) => c.table === "CredentialFetchApproval" && c.op === "deleteMany")).toBe(
+      false,
+    );
+    // The delivery stands: the sweep neither restated it as an expiry nor
+    // deleted it out from under the outcome the vault already audited.
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!["status"]).toBe("consumed");
   });
 
   it("deletes an already-settled lapsed approval without a second audit row", async () => {

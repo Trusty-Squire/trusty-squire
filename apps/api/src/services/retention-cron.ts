@@ -118,6 +118,12 @@ export class RetentionCron {
   // `expired` and audited FIRST, and only rows whose audit write succeeded are
   // deleted. Ordering it the other way would lose the event permanently — the
   // row is the only remaining evidence that the request existed.
+  //
+  // The conditional update is a FENCE, not a formality: approve, deny and claim
+  // all race it, and its `count` is the only answer to "did I settle this?".
+  // Reading the status and assuming the update took would let the cron record
+  // an expiry that never happened and delete the row carrying the real terminal
+  // state its settler just wrote.
   private async sweepCredentialFetchApprovals(
     prisma: ApiPrismaClient,
     startedAt: Date,
@@ -133,10 +139,15 @@ export class RetentionCron {
         // No audit sink wired (in-memory dev): leave the row rather than delete
         // an unsettled reveal without a trace of it.
         if (auditStore === undefined) continue;
-        await prisma.credentialFetchApproval.updateMany({
+        const settled = await prisma.credentialFetchApproval.updateMany({
           where: { id: row.id, status: { in: ["pending", "approved"] } },
           data: { status: "failed", failure_code: "expired" },
         });
+        // Lost the race: approve, deny or claim settled this row between the
+        // scan and here, and wrote its own terminal audit. There was no expiry
+        // to record, and the status we read is stale — leave the row for the
+        // next sweep to delete against its real terminal state.
+        if (settled.count === 0) continue;
         await recordCredentialFetchOutcome(
           auditStore,
           {
