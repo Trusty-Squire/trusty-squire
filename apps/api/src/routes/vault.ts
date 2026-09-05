@@ -10,8 +10,10 @@
 //
 // store is an upsert keyed (account, service, label) — re-storing a
 // service overwrites it (that IS rotation). Credential metadata edits enter
-// through the signed credential-mutation approval route. The raw value is
-// never returned to an agent; reveal is web-session only.
+// through the signed credential-mutation approval route. No route here returns
+// a raw value to an agent: this `reveal` is web-session only. The one
+// agent-reachable raw path lives in routes/credential-fetch.ts and requires a
+// passkey-signed approval per fetch.
 
 import { z } from "zod";
 import { ulid } from "ulid";

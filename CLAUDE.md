@@ -826,6 +826,49 @@ The storage contract and local safety invariants are documented at the owner:
 owns user-facing multi-account and logout guidance; test isolation belongs in
 [AGENTS.md](AGENTS.md#never-touch-the-operators-live-local-state-from-a-test-or-a-check).
 
+### fetch_credential — the one approval-gated raw-value path
+
+The vault is otherwise a write-only sink. `fetch_credential` is the single tool
+that returns a raw credential value to the agent, and it cannot do so on the
+agent's authority: the first call mints an approval and returns a
+`trustysquire.ai/vault/fetch/:id` link with NO value; the user signs that exact
+approval with their passkey; the agent resumes with the `approval_id` and the
+value is delivered ONCE.
+
+It reuses the existing Vouchflow ceremony (`services/vouch-mandate.ts`) but is a
+DELIBERATELY separate approval kind end to end — its own context
+(`vault_credential_fetch`), its own store
+(`services/credential-fetch-approval-store.ts` + the Prisma sibling), its own
+table, its own routes (`routes/credential-fetch.ts`). That separation is the
+security property: a signed mutation or payment mandate has nowhere to land, so
+it cannot be replayed into a reveal. Do NOT collapse it into
+`CredentialMutationApproval` as a third `operation`.
+
+Invariants, all covered by `apps/api/src/__tests__/credential-fetch.test.ts` —
+treat a failure there as a security regression, not a test to update:
+approval-bound to (account, credential, field); the human half
+(`ceremony`/`approve`/`deny`) is OWNER-authenticated (`requireWeb` + the record
+loaded for that account — a link-holder from another account gets 404 and an
+`approver_rejected` row in the owner's ledger); single-use delivery (the store's
+`approved → consumed` conditional update IS the fence); expiry closes both the
+unsigned and the signed-but-unclaimed halves, and fences denial too (a lapsed
+approval settles as `expired`, never as a refusal the human never made); every
+outcome audited under `purpose: "reveal"` (`VAULT_REVEAL_PURPOSE`), never the
+value — post-decrypt outcomes by the vault, the rest through
+`services/credential-fetch-audit.ts`, which the retention cron shares so a swept
+approval is settled before its row is deleted. The cron's sweep
+(`services/retention-cron.ts`) turns on TWO fences, and they answer different
+questions: the conditional settlement update's `count` decides whether an expiry
+happened at all (approve/deny/claim race it, and a lost race must record
+nothing), and the audit write decides whether the row may be deleted — it is
+parked at `expired_unaudited` until the ledger has it, so a transient audit-sink
+failure retries instead of erasing the event. The delivery row names the
+approver as well as the decision row does. Ceremony crypto, caller
+authentication, and link building are shared with the mutation ceremony
+(`services/approval-ceremony.ts`); only the STORES stay separate. `use_credential` and `extract { store }` are unchanged and remain the
+default routes — `apps/mcp/src/tools/__tests__/never-exposed-paths.test.ts`
+pins that.
+
 ### Vault security + lifecycle surface
 
 The credential vault's operational runbook lives at

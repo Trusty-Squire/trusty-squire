@@ -39,9 +39,12 @@ credential such as an OAuth client ID and secret, or a username/password login.
 
 **Write-only vault**
 
-Agents may store credentials and request controlled use of credentials, but they
-cannot retrieve plaintext secret values. The vault records metadata and audit
-events, never exposing raw values back to the agent.
+Agents may store credentials and request controlled use of credentials, but no
+agent action retrieves a plaintext secret value on its own authority. The vault
+records metadata and audit events, never exposing raw values back to the agent.
+The one raw-value path, `fetch_credential`, is gated on a per-fetch passkey
+approval signed by the user — see
+[`SECURITY.md`](../SECURITY.md#the-core-invariant-secrets-do-not-enter-the-model-context-on-the-agents-own-authority).
 
 **Client-encrypted card**
 
@@ -134,7 +137,9 @@ The important boundaries are:
 - The MCP server can store a secret and can use it through controlled tools.
 - The agent can see credential metadata, field names, masked values, and vault
   references.
-- The agent cannot read plaintext values back from the vault.
+- The agent cannot read plaintext values back from the vault on its own
+  authority; `fetch_credential` releases one only after a passkey-signed,
+  single-use approval for that exact credential.
 - Browser automation obeys the sealed-slot target-origin boundary defined in
   [`SECURITY.md`](../SECURITY.md#trust-boundaries).
 - Egress grants can inject secrets into provider calls only for allowed hosts

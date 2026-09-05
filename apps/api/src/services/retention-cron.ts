@@ -7,19 +7,36 @@
 //     - Delete PaymentAuditEvent older than 365d
 //     - Delete PendingPaymentApproval rows past expires_at
 //     - Delete CredentialMutationApproval rows past expires_at
+//     - Settle + audit, then delete, CredentialFetchApproval rows past
+//       expires_at (an abandoned reveal is a terminal outcome, not a row that
+//       merely ages out)
 //     - Delete TelegramLinkToken rows past expires_at
 //
 // Running this in-process is fine for v1: one machine, one schedule.
 // When we shard the API, move this to a separate worker or use
 // pg_cron.
 
+import type { VaultAuditStore } from "@trusty-squire/vault";
 import type { ApiPrismaClient } from "./api-prisma-client.js";
+import { recordCredentialFetchOutcome } from "./credential-fetch-audit.js";
 
 const HOUR_MS = 60 * 60 * 1000;
+// Rows settled per fetch-approval sweep. Bounded because settling writes an
+// audit row each; the hourly cadence drains any realistic backlog.
+const RETENTION_BATCH = 500;
 const DAY_MS = 24 * HOUR_MS;
+// Settlement marker written BEFORE the terminal audit and cleared to `expired`
+// after it lands. A row wearing it is settled but not yet in the ledger, which
+// is what makes the audit write retryable instead of a single chance to record
+// an event whose only other evidence is the row itself.
+const EXPIRED_UNAUDITED = "expired_unaudited";
 
 export interface RetentionCronDeps {
   authPrisma?: ApiPrismaClient | undefined;
+  // Required to sweep fetch approvals: a lapsed reveal must be SETTLED in the
+  // ledger before its row is deleted, or "every fetch outcome is audited"
+  // silently stops being true for every approval nobody came back for.
+  vaultAuditStore?: VaultAuditStore | undefined;
   // Test seam.
   now?: () => Date;
   // Tunables (env-overridable in production).
@@ -33,6 +50,7 @@ export interface RetentionCronStats {
   payment_audit_deleted: number;
   payment_approvals_deleted: number;
   credential_mutation_approvals_deleted: number;
+  credential_fetch_approvals_deleted: number;
   telegram_link_tokens_deleted: number;
   duration_ms: number;
   errors: string[];
@@ -100,6 +118,81 @@ export class RetentionCron {
     return { last_run_at: this.lastRunAt, last_stats: this.lastStats };
   }
 
+  // A fetch approval nobody ever came back for is still a terminal outcome of a
+  // raw-disclosure request, so the row cannot simply be swept: it is settled as
+  // `expired` and audited FIRST, and only rows whose audit write succeeded are
+  // deleted. Ordering it the other way would lose the event permanently — the
+  // row is the only remaining evidence that the request existed.
+  //
+  // Two races decide whether a row may be settled and whether it may be
+  // deleted, and they are NOT the same question:
+  //
+  //   * the conditional update is the settlement fence. Its `count` is the
+  //     answer to "did I settle this?" — approve/deny/claim can land between
+  //     the scan and the update, and a sweep that ignored the count would
+  //     record an expiry that never happened and delete the real terminal row;
+  //   * the audit write is the deletion fence. The row is parked at
+  //     EXPIRED_UNAUDITED until its audit persists, and only then becomes
+  //     deletable. A row settled straight to `expired` before the audit write
+  //     is indistinguishable, on the next run, from one already audited — so a
+  //     transient audit-store failure would delete it and erase the event.
+  private async sweepCredentialFetchApprovals(
+    prisma: ApiPrismaClient,
+    startedAt: Date,
+  ): Promise<number> {
+    const lapsed = await prisma.credentialFetchApproval.findMany({
+      where: { expires_at: { lt: startedAt } },
+      take: RETENTION_BATCH,
+    });
+    const deletable: string[] = [];
+    for (const row of lapsed) {
+      // Settled by an earlier sweep whose audit write did not land. It is ours
+      // already — retry the audit, do not re-run the settlement fence.
+      const awaitingAudit = row.status === "failed" && row.failure_code === EXPIRED_UNAUDITED;
+      if (row.status === "pending" || row.status === "approved" || awaitingAudit) {
+        const auditStore = this.deps.vaultAuditStore;
+        // No audit sink wired (in-memory dev): leave the row rather than delete
+        // an unsettled reveal without a trace of it.
+        if (auditStore === undefined) continue;
+        if (!awaitingAudit) {
+          const settled = await prisma.credentialFetchApproval.updateMany({
+            where: { id: row.id, status: { in: ["pending", "approved"] } },
+            data: { status: "failed", failure_code: EXPIRED_UNAUDITED },
+          });
+          // Lost the race: approve, deny or claim settled this row between the
+          // scan and here, and wrote its own terminal audit. There was no
+          // expiry to record, and the status we read is stale — leave the row
+          // for the next sweep to delete against its real terminal state.
+          if (settled.count === 0) continue;
+        }
+        await recordCredentialFetchOutcome(
+          auditStore,
+          {
+            id: row.id,
+            accountId: row.account_id,
+            credentialReference: row.credential_reference,
+            credentialService: row.credential_service,
+            credentialLabel: row.credential_label,
+            requesterKind: row.requester_kind === "web" ? "web" : "agent",
+          },
+          "expired",
+        );
+        // Audited. Only now may the row be deleted; until this lands, a later
+        // sweep re-enters the branch above rather than sweeping it away.
+        await prisma.credentialFetchApproval.updateMany({
+          where: { id: row.id, failure_code: EXPIRED_UNAUDITED },
+          data: { failure_code: "expired" },
+        });
+      }
+      deletable.push(row.id);
+    }
+    if (deletable.length === 0) return 0;
+    const deleted = await prisma.credentialFetchApproval.deleteMany({
+      where: { id: { in: deletable } },
+    });
+    return deleted.count;
+  }
+
   // Single run. Public so ops can trigger it via an admin endpoint if
   // needed, and so tests can drive it deterministically.
   async runOnce(): Promise<RetentionCronStats> {
@@ -110,6 +203,7 @@ export class RetentionCron {
       payment_audit_deleted: 0,
       payment_approvals_deleted: 0,
       credential_mutation_approvals_deleted: 0,
+      credential_fetch_approvals_deleted: 0,
       telegram_link_tokens_deleted: 0,
       duration_ms: 0,
       errors: [],
@@ -175,6 +269,17 @@ export class RetentionCron {
       } catch (err) {
         stats.errors.push(
           `credential mutation approval delete: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
+      try {
+        stats.credential_fetch_approvals_deleted = await this.sweepCredentialFetchApprovals(
+          this.deps.authPrisma,
+          startedAt,
+        );
+      } catch (err) {
+        stats.errors.push(
+          `credential fetch approval delete: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
 

@@ -1732,12 +1732,13 @@ describe("TOOLS registry", () => {
     }
   });
 
-  it("exposes the essential 10-operator, 20-tool default surface without maintainer diagnostics", () => {
+  it("exposes the essential 10-operator, 21-tool default surface without maintainer diagnostics", () => {
     // Credential read/write tools (write-only sink; rotation = re-store,
     // metadata edit/delete = passkey-vouched) + grant_app_access
     // (egress grants: a deployed app uses a vaulted credential via the proxy).
-    // The read-back get_credential tool was removed: in the sink model an
-    // agent never sees a raw secret value.
+    // The old read-back get_credential tool stays removed: no tool returns a
+    // raw secret on the agent's own authority. fetch_credential (below) is the
+    // approval-gated replacement, not a revival of it.
     // Bare-essentials cut (captain's decision 2026-08-15): every legacy
     // delegating alias was dropped from the registry. Their behavior remains
     // reachable as operate_act kinds (cart_add/select_many/extract/solve_captcha/
@@ -1749,11 +1750,16 @@ describe("TOOLS registry", () => {
     // operate_screenshot added (2026-08-23): a read-only debugging capture
     // with no alias/kind to fold into — operate_act's kinds all DO something;
     // this only looks.
-    expect(TOOLS).toHaveLength(20);
+    // fetch_credential added (2026-09-05): the ONE approval-gated raw-value
+    // path. The sink model is unchanged for everything the agent can do alone
+    // — this tool returns a value only after the user signs that exact fetch
+    // with their passkey, and delivers it once.
+    expect(TOOLS).toHaveLength(21);
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
       "audit_log",
       "delete_credential",
       "edit_credential",
+      "fetch_credential",
       "grant_app_access",
       "list_app_access",
       "list_credentials",
@@ -1785,14 +1791,14 @@ describe("TOOLS registry", () => {
       const tools = buildToolRegistry(
         disabled === undefined ? {} : { TRUSTY_SQUIRE_DIAGNOSTICS: disabled },
       );
-      expect(tools).toHaveLength(20);
+      expect(tools).toHaveLength(21);
       expect(tools.map((tool) => tool.name)).not.toEqual(
         expect.arrayContaining(["list_extract_failures", "get_extract_failure"]),
       );
     }
 
     const tools = buildToolRegistry({ TRUSTY_SQUIRE_DIAGNOSTICS: "1" });
-    expect(tools).toHaveLength(22);
+    expect(tools).toHaveLength(23);
     expect(tools.map((tool) => tool.name)).toEqual(
       expect.arrayContaining(["list_extract_failures", "get_extract_failure"]),
     );

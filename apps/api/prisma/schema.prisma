@@ -177,6 +177,7 @@ model Account {
   payment_audit_events          PaymentAuditEvent[]
   payment_approvals             PendingPaymentApproval[]
   credential_mutation_approvals CredentialMutationApproval[]
+  credential_fetch_approvals    CredentialFetchApproval[]
   telegram_link_tokens          TelegramLinkToken[]
 
   @@index([stripe_customer_id])
@@ -400,6 +401,40 @@ model CredentialMutationApproval {
   @@index([account_id, intent_hash, status])
   @@index([expires_at])
   @@map("credential_mutation_approvals")
+}
+
+// Approval record for `fetch_credential` — the one path that returns a raw
+// vaulted value to an agent, and only after a passkey-signed approval for
+// THIS exact (account, credential, field). Deliberately its own table rather
+// than an operation on CredentialMutationApproval: a signed mutation or
+// payment mandate has nowhere to land here, so it cannot authorize a reveal.
+// Delivery is single-use — approved → consumed happens exactly once.
+model CredentialFetchApproval {
+  id                   String    @id @db.VarChar(26)
+  account_id           String    @db.VarChar(26)
+  credential_reference String
+  credential_service   String?
+  credential_label     String
+  // The single field asked for, or null for the whole field map.
+  field                String?
+  field_names          String[]
+  nonce                String
+  agent                String
+  requester_kind       String    @default("agent")
+  intent_hash          String
+  status               String
+  failure_code         String?
+  mandate_id           String?
+  created_at           DateTime  @default(now())
+  expires_at           DateTime
+  approved_at          DateTime?
+  delivered_at         DateTime?
+
+  account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
+
+  @@index([account_id, intent_hash, status])
+  @@index([expires_at])
+  @@map("credential_fetch_approvals")
 }
 
 // Telegram account-linking token. Minted by POST /v1/telegram/link,

@@ -19,7 +19,7 @@
 
 Trusty Squire is an **MCP server that lets Claude Code, Codex, Cursor, OpenCode, Goose, and other coding agents sign up, provision, and purchase on your behalf**. It opens a real browser, works through signup, sign-in, setup, and checkout flows one step at a time, clears the bot-detection and email-verification steps that make operator tools stall, and hands the job back to a person only when one is actually required. That covers wiring up OAuth and API keys for the app you're building as much as it covers paying a checkout, sending a gift, or booking something — the same operator primitives drive all of it.
 
-Provider secrets and payment cards are write-only: the agent's credential tools return references and authenticated results, never stored plaintext. The raw secret never needs to enter the agent's context, so it can't be pasted into a commit, leaked in a log, or read back out over chat. Backend access is a host-scoped, rate-limited, independently revocable grant, so a leaked token is killed without rotating the provider key — and you connect Google or GitHub yourself in a real browser, so the agent never types your password. Full [threat model below](#security-and-threat-model).
+Provider secrets and payment cards are write-only: the agent's credential tools return references and authenticated results, never stored plaintext. The raw secret never needs to enter the agent's context, so it can't be pasted into a commit, leaked in a log, or read back out over chat. When a task genuinely needs the plaintext somewhere the agent controls, `fetch_credential` releases it — for one credential, once, and only after you sign that exact request with your passkey. Backend access is a host-scoped, rate-limited, independently revocable grant, so a leaked token is killed without rotating the provider key — and you connect Google or GitHub yourself in a real browser, so the agent never types your password. Full [threat model below](#security-and-threat-model).
 
 ## One prompt
 
@@ -267,7 +267,7 @@ The result contains a host-scoped egress `base_url` and a `token`, not the Clerk
 
 ## Security and threat model
 
-- Provider credentials are encrypted in the vault and are write-only to agent credential tools. Those tools return references or authenticated results, not stored plaintext.
+- Provider credentials are encrypted in the vault and are write-only to agent credential tools. Those tools return references or authenticated results, not stored plaintext. `fetch_credential` is the single exception and it is not the agent's to take: it returns the raw value only after you approve that specific fetch with your passkey, once per approval, with the reveal recorded in the audit ledger.
 - The raw provider key is injected only into the outbound provider request. It does not need to land in chat, generated code, the consuming app, or the project's `.env` file.
 - App grants are host-scoped, auditable, rate-limitable, and independently revocable. A leaked grant can be revoked without rotating the provider key.
 - You connect Google or GitHub in a real browser. Trusty Squire does not ask the coding agent to type those passwords.
@@ -473,6 +473,7 @@ still return only a current handle. `detail:"full"` keeps the V2 format. Maintai
   `error.guidance` repair fields as `operate_act`, including a safe resolution
   when `card_ref` and `card_label` conflict.
 - `list_credentials` and `use_credential` find saved credentials and make authenticated API calls without returning raw values.
+- `fetch_credential` returns a credential's raw value to the agent — the one path that does. It first returns an approval link and no value; you open it and sign with your passkey; the agent resumes with the returned `approval_id` and receives the value once. Denial or expiry releases nothing, and a mutation or payment approval cannot be used here. Reach for it only when the key must land somewhere the agent controls (a GitHub Actions secret, a `.env`) with no server-side injection path — `use_credential` is the right tool for calling an API.
 - `edit_credential` changes only an existing credential's non-secret name,
   `allowed_hosts`, or `login_hosts`; `delete_credential` soft-deletes one. Each
   first returns a Telegram/passkey approval link bound to the operation, exact
