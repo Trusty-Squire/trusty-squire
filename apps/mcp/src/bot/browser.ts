@@ -23,6 +23,7 @@
 // gate).
 
 import { chromium as baseChromium } from "playwright";
+import { OwnedPages } from "./owned-pages.js";
 import type {
   Browser,
   BrowserContext,
@@ -3473,6 +3474,12 @@ export class BrowserController {
   // is not an option: a single-use login token is sealed and must never be
   // handed to the model as text.
   private openedTabs: Page[] = [];
+  private readonly ownedPages = new OwnedPages((page) => {
+    this.trackMainDocument(page);
+    this.openedTabs.push(page);
+    if (this.openedTabs.length > 8) this.openedTabs.splice(0, this.openedTabs.length - 8);
+  });
+  private readonly documentSubscriptions = new Map<Page, () => void>();
   // Self-launch path (Turnstile-safe; see selfLaunchEnabled). When we spawn
   // Chrome ourselves and attach over CDP, these hold the child process and
   // the connected Browser so close() can tear both down.
@@ -3632,7 +3639,7 @@ export class BrowserController {
   }
 
   private trackMainDocument(page: Page): void {
-    if (this.trackedMainDocumentPages.has(page)) return;
+    if (page.isClosed() || this.trackedMainDocumentPages.has(page)) return;
     this.trackedMainDocumentPages.add(page);
     this.mainDocumentIdentities.set(page, ++this.mainDocumentSequence);
     // A REPLACED main document advances the identity; a same-document History
@@ -3645,9 +3652,18 @@ export class BrowserController {
     // A same-document route change to a genuinely different logical page is
     // still caught by the observation epoch's normalized origin+pathname fold
     // (compactV2EpochDoc), which is the backstop this narrowing relies on.
-    page.on("domcontentloaded", () => {
+    const onDocument = (): void => {
       this.mainDocumentIdentities.set(page, ++this.mainDocumentSequence);
-    });
+    };
+    const dispose = (): void => {
+      page.off("domcontentloaded", onDocument);
+      page.off("close", dispose);
+      this.documentSubscriptions.delete(page);
+      this.trackedMainDocumentPages.delete(page);
+    };
+    this.documentSubscriptions.set(page, dispose);
+    page.on("domcontentloaded", onDocument);
+    page.on("close", dispose);
   }
 
   mainDocumentIdentity(): string {
@@ -3663,25 +3679,17 @@ export class BrowserController {
     controller.context = page.context();
     controller.page = page;
     controller.primaryPage = page;
-    controller.trackMainDocument(page);
-    controller.trackOpenedTabs(page.context());
+    controller.trackOpenedTabs(page);
     controller.harnessAttachedPage = true;
     controller.launchedMode = "headless";
     return controller;
   }
 
-  // Record every page the CONTEXT opens. Covers window.open popups and
-  // target=_blank tabs alike; Playwright emits the same context-level "page"
-  // event for both.
-  private trackOpenedTabs(context: BrowserContext): void {
-    context.on("page", (page) => {
-      this.trackMainDocument(page);
-      this.openedTabs.push(page);
-      // Bounded: adoption only ever reads the newest followable entry, and a
-      // controller driven by something other than the operator's click path
-      // never arms (and so never drains) this queue.
-      if (this.openedTabs.length > 8) this.openedTabs.splice(0, this.openedTabs.length - 8);
-    });
+  // Register only explicitly created primary/recovery pages. Popup enrollment
+  // follows their creation-time opener events, never context-wide page events.
+  private trackOpenedTabs(page: Page): void {
+    this.ownedPages.register(page);
+    this.trackMainDocument(page);
   }
 
   // Per-launch egress override. null means direct egress. Explicit overrides
@@ -4480,10 +4488,8 @@ export class BrowserController {
     if (contextInitScripts.includes("webgl-spoof")) {
       await context.addInitScript({ content: installWebglSpoofScript });
     }
-    for (const page of context.pages()) this.trackMainDocument(page);
-    this.trackOpenedTabs(context);
     this.page = context.pages()[0] ?? (await context.newPage());
-    this.trackMainDocument(this.page);
+    this.trackOpenedTabs(this.page);
     this.primaryPage = this.page;
     // In baseline mode addInitScript covers document-start page JS, but
     // Playwright's page.evaluate utility execution can run in a separate realm.
@@ -14730,12 +14736,11 @@ export class BrowserController {
     }
     this.oauthProviderPage = null;
     this.oauthProviderPageClosed = false;
-    // Race a popup `page` event against the click. context-level
-    // "page" fires for both window.open popups and target=_blank.
-    const popupPromise = this.context.waitForEvent("page", { timeout: 8000 }).catch(() => null);
+    // Only the current page's creation-attributed popup can carry this handshake.
+    const popupPromise = this.page.waitForEvent("popup", { timeout: 8000 }).catch(() => null);
     await this.click(selector);
     const popup = await popupPromise;
-    if (popup !== null && popup !== this.page && !popup.isClosed()) {
+    if (popup !== null && popup !== this.page && this.ownedPages.has(popup)) {
       this.page = popup;
       this.oauthProviderPage = popup;
       // A provider returning from OAuth is allowed to close its own popup.
@@ -14810,6 +14815,7 @@ export class BrowserController {
     product.on("framenavigated", onProductNavigation);
     try {
       recovery = await context.newPage();
+      this.trackOpenedTabs(recovery);
       await recovery.goto(productUrl, {
         waitUntil: "domcontentloaded",
         timeout: remainingBudgetMs(),
@@ -14820,10 +14826,17 @@ export class BrowserController {
         resolvePopup = resolve;
       });
       const onPopup = (page: Page): void => {
-        context.off("page", onPopup);
+        if (!this.ownedPages.has(page)) return;
+        product.off("popup", onPopup);
         resolvePopup(page);
       };
-      context.on("page", onPopup);
+      const onProductClose = (): void => {
+        product.off("popup", onPopup);
+        product.off("framenavigated", onProductNavigation);
+        resolvePopup(null);
+      };
+      product.on("popup", onPopup);
+      product.once("close", onProductClose);
       try {
         if (Date.now() >= oauthDeadline) throw deadlineError();
         try {
@@ -14840,7 +14853,8 @@ export class BrowserController {
           this.sleep(Math.min(remainingBudgetMs(), 2_000)).then(() => null),
         ]);
       } finally {
-        context.off("page", onPopup);
+        product.off("popup", onPopup);
+        product.off("close", onProductClose);
         resolvePopup(null);
         resolveProductDeparture();
       }
@@ -15159,8 +15173,8 @@ export class BrowserController {
       );
     }
 
-    const popupPromise: Promise<Page | null> = this.context
-      .waitForEvent("page", { timeout: timeoutMs })
+    const popupPromise: Promise<Page | null> = this.page
+      .waitForEvent("popup", { timeout: timeoutMs })
       .then((p): Page | null => p)
       .catch((): Page | null => null);
 
@@ -15215,7 +15229,7 @@ export class BrowserController {
       }
     }
 
-    if (popup !== null && popup !== this.page && !popup.isClosed()) {
+    if (popup !== null && popup !== this.page && this.ownedPages.has(popup)) {
       this.page = popup;
       try {
         await this.page.waitForLoadState("domcontentloaded", { timeout: 15_000 });
@@ -15284,7 +15298,7 @@ export class BrowserController {
     for (let i = 0; i < 40 && !candidate.isClosed() && blank(candidate.url()); i++) {
       await this.sleep(50);
     }
-    if (candidate.isClosed()) return null;
+    if (!this.ownedPages.has(candidate)) return null;
     this.page = candidate;
     this.trackMainDocument(candidate);
     await candidate.bringToFront().catch(() => undefined);
@@ -15294,14 +15308,13 @@ export class BrowserController {
     return candidate.isClosed() ? null : candidate.url();
   }
 
-  // Newest queued tab the operator may follow. Pages the controller itself owns
-  // (the active page, the primary page, either side of an OAuth handshake, a
-  // recovery tab) are never adoption candidates — those lifecycles are managed
-  // by the code that created them.
+  // Newest owned popup the operator may follow. Explicit primary/recovery
+  // pages never enter the queue; the active page and OAuth transports retain
+  // their existing lifecycle handling.
   private takeFollowableTab(): Page | null {
     for (let i = this.openedTabs.length - 1; i >= 0; i--) {
       const tab = this.openedTabs[i]!;
-      if (tab.isClosed()) continue;
+      if (!this.ownedPages.has(tab)) continue;
       if (
         tab === this.page ||
         tab === this.primaryPage ||
@@ -15316,12 +15329,12 @@ export class BrowserController {
   }
 
   private adoptLivePage(): boolean {
-    if (this.page !== null && !this.page.isClosed()) return true;
+    if (this.page !== null && this.ownedPages.has(this.page)) return true;
     if (this.context === null) return false;
-    const pages = this.context.pages().filter((p) => !p.isClosed());
+    const pages = this.ownedPages.live();
     if (pages.length === 0) return false;
     const product =
-      this.oauthProductPage !== null && !this.oauthProductPage.isClosed()
+      this.oauthProductPage !== null && this.ownedPages.has(this.oauthProductPage)
         ? this.oauthProductPage
         : null;
     const nonAuth = [...pages]
@@ -15576,6 +15589,8 @@ export class BrowserController {
     if (this.context === null) return null;
     let identityPage: Page | null = null;
     try {
+      // Deliberately unregistered: this identity probe (and its popups) must
+      // never become the session's working page.
       identityPage = await this.context.newPage();
       const identityUrl = new URL("https://myaccount.google.com/");
       const expectedEmail = expectedGoogleAccountEmail?.trim();
@@ -16189,6 +16204,9 @@ export class BrowserController {
   }
 
   private async closeBrowser(): Promise<ProfileCloseState> {
+    this.ownedPages.dispose();
+    for (const dispose of this.documentSubscriptions.values()) dispose();
+    this.openedTabs.length = 0;
     if (this.harnessAttachedPage) {
       this.page = null;
       this.primaryPage = null;
