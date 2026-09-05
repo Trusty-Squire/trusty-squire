@@ -145,13 +145,10 @@ silent failures.
     operator-recipe replay. The user-facing contract lives in README's MCP-tool
     reference; `frameTargetAllowed`/`assertSecretFrameTargetAllowed` in
     `provision-session.ts` own the action-time security boundary.
-  - **New-tab adoption.** A `click`/`js_click` that opens a tab
-    (`target=_blank`, `window.open`) makes that tab the active page, so email
-    magic/verification links are followable — never `extract` the href, the
-    token is sealed by design. Contract in README's MCP-tool reference;
-    `armOpenedTabAdoption`/`adoptOpenedTab` (`browser.ts`) and
-    `newTabAdoptionAllowed` (`provision-session.ts`, which keeps payment out of
-    scope) own it.
+  - **New-tab adoption.** The user-facing ownership and magic-link-following
+    contract lives in README's MCP-tool reference. `BrowserController` owns its
+    implementation; `newTabAdoptionAllowed` in `provision-session.ts` keeps
+    payment out of scope.
 - **Single-tier install flow.** `npx @trusty-squire/mcp connect` does
   three things in one command:
   1. Issues a machine token (bot-internal credential for the operator
