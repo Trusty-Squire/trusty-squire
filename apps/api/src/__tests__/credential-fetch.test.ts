@@ -232,12 +232,16 @@ describe("passkey-gated fetch_credential", () => {
       approval_id: approval.approval_id,
       approver_account_id: accountId,
     });
+    // The delivery row names the approver too. A ledger where only the decision
+    // carries it cannot answer "who released this secret?" from the row that
+    // records the secret actually leaving.
     expect(audit.find((event) => event.payload.outcome === "success")!.payload).toMatchObject({
       reference,
       requester: "agent",
       purpose: "reveal",
       outcome: "success",
       approval_id: approval.approval_id,
+      approver_account_id: accountId,
     });
     // The audit trail records that a reveal happened, never what was revealed.
     expect(JSON.stringify(audit)).not.toContain(SECRET_VALUE);

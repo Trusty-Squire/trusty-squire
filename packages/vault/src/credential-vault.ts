@@ -606,6 +606,7 @@ export class CredentialVault implements VaultClient {
     accountId: string,
     approvalId: string,
     approvedFieldNames: readonly string[],
+    approverAccountId: string,
   ): Promise<Record<string, string>> {
     const record = await this.deps.store.findActive(reference);
     if (record === null || record.account_id !== accountId) {
@@ -619,6 +620,7 @@ export class CredentialVault implements VaultClient {
         requester: "agent",
         outcome: "missing_credential",
         approval_id: approvalId,
+        approver_account_id: approverAccountId,
       });
       throw new CredentialNotFoundError(reference);
     }
@@ -629,6 +631,7 @@ export class CredentialVault implements VaultClient {
       signingDeviceId: null,
       assertion: null,
       approvalId,
+      approverAccountId,
       discloseFields: approvedFieldNames,
     });
   }
@@ -877,12 +880,22 @@ export class CredentialVault implements VaultClient {
     // Set only by the approval-gated reveal, so an auditor reading a
     // purpose=reveal row can find the exact approval that authorized it.
     approvalId?: string;
+    // The account whose passkey released the value. Carried on EVERY outcome
+    // the reveal can reach, not just the route's `approved` row: a ledger where
+    // only the decision names the approver cannot answer "who released this
+    // secret?" from the delivery row itself.
+    approverAccountId?: string;
     // Set only by the approval-gated reveal: disclose exactly these fields and
     // audit the outcome of THAT, not of the raw decrypt.
     discloseFields?: readonly string[];
   }): Promise<Record<string, string>> {
     const { reference, purpose, requester, signingDeviceId, assertion } = args;
-    const approval = args.approvalId === undefined ? {} : { approval_id: args.approvalId };
+    const approval = {
+      ...(args.approvalId === undefined ? {} : { approval_id: args.approvalId }),
+      ...(args.approverAccountId === undefined
+        ? {}
+        : { approver_account_id: args.approverAccountId }),
+    };
     const record = await this.deps.store.findActive(reference);
     const accountId = record?.account_id ?? "";
 

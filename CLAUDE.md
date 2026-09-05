@@ -856,7 +856,14 @@ approval settles as `expired`, never as a refusal the human never made); every
 outcome audited under `purpose: "reveal"` (`VAULT_REVEAL_PURPOSE`), never the
 value — post-decrypt outcomes by the vault, the rest through
 `services/credential-fetch-audit.ts`, which the retention cron shares so a swept
-approval is settled before its row is deleted. Ceremony crypto, caller
+approval is settled before its row is deleted. The cron's sweep
+(`services/retention-cron.ts`) turns on TWO fences, and they answer different
+questions: the conditional settlement update's `count` decides whether an expiry
+happened at all (approve/deny/claim race it, and a lost race must record
+nothing), and the audit write decides whether the row may be deleted — it is
+parked at `expired_unaudited` until the ledger has it, so a transient audit-sink
+failure retries instead of erasing the event. The delivery row names the
+approver as well as the decision row does. Ceremony crypto, caller
 authentication, and link building are shared with the mutation ceremony
 (`services/approval-ceremony.ts`); only the STORES stay separate. `use_credential` and `extract { store }` are unchanged and remain the
 default routes — `apps/mcp/src/tools/__tests__/never-exposed-paths.test.ts`

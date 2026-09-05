@@ -389,6 +389,12 @@ export const registerCredentialFetchRoutes: FastifyPluginAsync<{
           record.accountId,
           record.id,
           approvedNames,
+          // Who released the secret. The approve endpoint is owner-authenticated
+          // (loadOwnedApproval), so the only account that can have signed this
+          // approval is the record's own — the same value the `approved` row
+          // carries. If approval on someone else's behalf is ever allowed, the
+          // approver has to be persisted on the record and read from there.
+          record.accountId,
         );
       } catch (error) {
         // Everything below this point has already BURNED the single-use
