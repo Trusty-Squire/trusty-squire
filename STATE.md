@@ -185,6 +185,54 @@ refinement — the firebase path already yields a valid GCP credential.
 
 ---
 
+## `connect` never left a Google session in the bot profile — SIGTERM, not detection (2026-09-04)
+
+Symptom (rc.28, reproduced twice on the operator's own box, including with
+`--force-relogin=google`): the claim succeeds, `session.json` is written, and
+then `Provider sessions: Google not connected; GitHub not connected`, so
+`decideConnectComplete` fails the install closed. The operator really did
+complete the Google sign-in.
+
+- **✗ FALSIFIED: "the provider probe is broken / reading the wrong profile."**
+  `detectActiveProviderSessions` and `detectGoogleAccountEmailInContext` are
+  byte-identical before and after #658, and the login browser and the probe both
+  use `CHROME_PROFILE_DIR`. The probe was telling the truth.
+- **✗ FALSIFIED: "#659's per-account session file lost the provider state."**
+  `printProviderState` prints the LIVE probe, not anything read back from
+  `session.json`.
+- **✓ CONFIRMED (forensics): the sign-in happened in the right profile and its
+  cookies were never written.** `Default/History` in the bot profile shows the
+  full dance — `signin/identifier` → `challenge/pwd` → `challenge/dp` →
+  `CheckCookie` → `SetSID` → consent → `/install?claim=1` — at 22:12:02, and
+  `Default/Cookies` holds exactly one `.google.com` row, `NID`, created at
+  22:12:07 by the probe's own `myaccount.google.com` visit. No `SID`/`HSID`/
+  `SSID`/`__Secure-1PSID` at all, from that run or any earlier one.
+- **✓ ROOT CAUSE (measured on real Chrome, deterministic across repeats):
+  Chrome routes SIGTERM to its "session ending" path and exits abruptly WITHOUT
+  flushing the SQLite cookie store.** Control: cookie set 6s before the signal
+  → SIGTERM loses it, SIGINT and SIGHUP keep it, and SIGTERM after 35s keeps it
+  (the store's own ~30s commit timer). Same result for a bare pid and for a
+  process-group signal. `launchPlainLoginBrowser`'s teardown sent SIGTERM
+  ~3 seconds after Google set its cookies, so the session it had just
+  established was discarded every time.
+- **Why it surfaced as a regression at #658:** the plain-Chrome connect
+  ceremony has never flushed. Until #658 the CDP-attached `login` subcommand
+  closed its context through Playwright — a graceful shutdown that does flush —
+  so `login` kept papering over it. #658 deleted `login` (Google's
+  secure-browser check rejects a CDP attach) and made the plain path the sole
+  re-auth pathway, which exposed it.
+- **Fix:** `PLAIN_LOGIN_BROWSER_QUIT_SIGNAL = "SIGINT"` plus a bounded wait for
+  the graceful exit BEFORE handing over to `closeLocalBrowserLaunch` — the
+  owner reaper escalates SIGTERM → SIGKILL, so handing over mid-flush would
+  reintroduce the abrupt exit. Never SIGTERM a Chrome whose profile state you
+  still need.
+- **? OPEN (same defect class, not fixed here):** `BrowserController.close()`
+  also SIGTERMs the process tree before `context.close()`, so cookies an
+  operator run establishes can be lost the same way. On-disk cookies already
+  flushed by `connect` are unaffected, which is why this is a separate ticket.
+
+---
+
 ## `meilisearch` — SPA stale-URL 404 trap (CRACKED 2026-06-23) → onboarding-wizard residual
 
 ### ✓ CONFIRMED + FIXED: the "no_credentials_after_already_signed_in" was a 404 false-positive, NOT an auth wall
