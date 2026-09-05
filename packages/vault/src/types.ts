@@ -145,6 +145,16 @@ export interface VaultAuditPayload {
   // Egress-grant lifecycle (grant_minted / grant_revoked events).
   grant_id?: string;
   revoke_attempt_nonce?: string;
+  // Vault-first egress targets (egress-fetch retrieval + the client-reported
+  // egress-delivered outcome). `egress_kind` is the destination kind
+  // (github_repo_secret / dotenv_write); `egress_destination` is the exact
+  // thing that received the key (owner/repo[:environment], or the .env path)
+  // — identity, never the value. `egress_error` is the destination's own
+  // failure text, which by construction never carries the secret.
+  egress_kind?: string;
+  egress_destination?: string;
+  egress_status?: string;
+  egress_error?: string;
 }
 
 export const VAULT_AUDIT_TYPES = {
@@ -169,6 +179,11 @@ export const VAULT_AUDIT_TYPES = {
   // payload is re-encrypted to merge the field; distinct from `rotated`
   // (full replace) so an additive edit is queryable on its own.
   fieldAdded: "vault.credential_field_added",
+  // A vaulted credential delivered to an egress destination the mcp acts on
+  // directly (a GitHub Actions secret, a .env file). Client-reported after
+  // the fact — the retrieval itself is a `retrieved` row with purpose
+  // "egress", so a fetch with no delivery row is visible as such.
+  egressDelivered: "vault.egress_delivered",
   // Payment-card lifecycle (the E2E wallet). The payload carries only
   // display metadata (label/brand/last4) — the sealed blob is opaque to
   // the server, so nothing sensitive can land here by construction.

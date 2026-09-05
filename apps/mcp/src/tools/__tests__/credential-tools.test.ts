@@ -193,6 +193,65 @@ describe("use_credential", () => {
     expect(useCredentialTool.annotations).toMatchObject({ destructiveHint: true });
     expect(useCredentialTool.meta).toMatchObject({ "anthropic/alwaysLoad": true });
   });
+
+  // IRON RULE: adding `target` (and `field`) must not perturb the http path by
+  // one byte. Pin the EXACT payload the proxy receives.
+  it("forwards the http request unchanged after the target split", async () => {
+    let seen: unknown = null;
+    const api = mockApi({
+      useCredential: async (input) => {
+        seen = input;
+        return {
+          response: { status: 204, headers: {}, body: "", truncated: false },
+        };
+      },
+    });
+    await useCredentialTool.handler(
+      useCredentialTool.inputSchema.parse({
+        service: "fred",
+        http: {
+          method: "POST",
+          url: "https://api.stlouisfed.org/series",
+          headers: { "content-type": "application/json" },
+          body: '{"a":1}',
+          query: { api_key: "${SECRET}" },
+        },
+      }),
+      api,
+    );
+    expect(seen).toEqual({
+      service: "fred",
+      http: {
+        method: "POST",
+        url: "https://api.stlouisfed.org/series",
+        headers: { "content-type": "application/json" },
+        body: '{"a":1}',
+        query: { api_key: "${SECRET}" },
+      },
+    });
+  });
+
+  it("omits absent http optionals rather than sending them undefined", async () => {
+    let seen: unknown = null;
+    const api = mockApi({
+      useCredential: async (input) => {
+        seen = input;
+        return { response: { status: 200, headers: {}, body: "", truncated: false } };
+      },
+    });
+    await useCredentialTool.handler(
+      useCredentialTool.inputSchema.parse({
+        reference: "vault://a/b/c",
+        http: { method: "GET", url: "https://api.openai.com/v1/models" },
+      }),
+      api,
+    );
+    expect(Object.keys(seen as Record<string, unknown>).sort()).toEqual(["http", "reference"]);
+    expect(Object.keys((seen as { http: Record<string, unknown> }).http).sort()).toEqual([
+      "method",
+      "url",
+    ]);
+  });
 });
 
 const BASE_MUTATION = {

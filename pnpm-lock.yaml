@@ -138,6 +138,9 @@ importers:
       jsonc-parser:
         specifier: ^3.3.1
         version: 3.3.1
+      libsodium-wrappers:
+        specifier: ^0.8.4
+        version: 0.8.4
       open:
         specifier: ^10.1.0
         version: 10.2.0
@@ -5263,6 +5266,16 @@ packages:
 
   /libqp@2.1.1:
     resolution: {integrity: sha512-0Wd+GPz1O134cP62YU2GTOPNA7Qgl09XwCqM5zpBv87ERCXdfDtyKXvV7c9U22yWJh44QZqBocFnXN11K96qow==}
+    dev: false
+
+  /libsodium-wrappers@0.8.4:
+    resolution: {integrity: sha512-mu8aAWucZjTB5O/BtGXtW4e1agy7uHxNYG7zPthmmD1jU43LCDmSWZLN4JhflbdPXj3yDO4lxM1O9hLDgIOXDw==}
+    dependencies:
+      libsodium: 0.8.4
+    dev: false
+
+  /libsodium@0.8.4:
+    resolution: {integrity: sha512-lMcYaRi0zcs7tarATsQUYC7rstliIXZuoq0c6zXSgNtSNtdvBgkSegjWhpMJAXzKX3SUSwIp7+zEsob+j3LuRw==}
     dev: false
 
   /light-my-request@5.14.0:

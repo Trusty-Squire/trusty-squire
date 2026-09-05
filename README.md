@@ -472,7 +472,21 @@ still return only a current handle. `detail:"full"` keeps the V2 format. Maintai
   browser. Malformed calls return the same
   `error.guidance` repair fields as `operate_act`, including a safe resolution
   when `card_ref` and `card_label` conflict.
-- `list_credentials` and `use_credential` find saved credentials and make authenticated API calls without returning raw values.
+- `list_credentials` and `use_credential` find saved credentials and use them
+  without returning raw values. `use_credential` takes exactly one of `http`
+  (call an API — the server injects the secret and returns only the upstream
+  response) or `target` (deploy the secret to where it is needed):
+  `{kind:"github_repo_secret", owner, repo, name, environment?}` sets a GitHub
+  Actions secret using your local `gh auth token` or `GITHUB_TOKEN` and requires
+  `api.github.com` on the credential's `allowed_hosts`;
+  `{kind:"dotenv_write", path, name}` writes `NAME="…"` into a `.env` resolved
+  under the project root the MCP server was launched in (0600, atomic, every
+  other byte preserved; a duplicate or multi-line assignment is refused rather
+  than guessed at). A server launched at a filesystem root or at `$HOME` has no
+  project root to confine writes to, so `dotenv_write` refuses there — relaunch
+  it from the project. Add `field` when the credential has several fields. Either
+  way the value never reaches the agent: a target returns `{ok:true,…}` or
+  `{written:true,…}`.
 - `edit_credential` changes only an existing credential's non-secret name,
   `allowed_hosts`, or `login_hosts`; `delete_credential` soft-deletes one. Each
   first returns a Telegram/passkey approval link bound to the operation, exact

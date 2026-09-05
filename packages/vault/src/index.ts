@@ -27,6 +27,8 @@ export {
   RestoreConflictError,
   DEFAULT_LABEL,
   MAX_CREDENTIAL_LABEL_LENGTH,
+  EGRESS_PURPOSE,
+  EGRESS_LOCAL_FILE_HOST,
   type CredentialVaultDeps,
   type VaultEntry,
   type VaultStoreInput,

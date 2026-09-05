@@ -359,6 +359,40 @@ export class ApiClient {
     return this.post("/v1/vault/browser-fill", input);
   }
 
+  // ── Vault-first egress targets: the key goes where it is NEEDED ──
+  //
+  // The server gates the destination against the credential's allowed_hosts
+  // BEFORE decrypting, then seals the requested fields to the ephemeral public
+  // key this process just generated. Plaintext exists only inside this process,
+  // for as long as it takes to hand it to the destination.
+
+  async egressFetchCredential(input: {
+    reference?: string;
+    service?: string;
+    name?: string;
+    // Omitted = every field the credential has, so the ${SECRET} selection
+    // rule can be applied locally.
+    fields?: string[];
+    encrypted_response_public_key: string;
+    destination: { kind: "github_repo_secret" | "dotenv_write"; host: string };
+  }): Promise<{ reference: string; encrypted_fields: Record<string, string> }> {
+    return this.post("/v1/vault/egress-fetch", input);
+  }
+
+  // Client-reported: what actually received the key and whether it landed.
+  // Same shape of trust as /v1/vault/payments/audit — the server cannot
+  // observe a GitHub PUT or a local file write, so the client reports it.
+  async reportEgressOutcome(input: {
+    reference: string;
+    destination:
+      | { kind: "github_repo_secret"; repo: string; environment?: string }
+      | { kind: "dotenv_write"; path: string };
+    status: "ok" | "error";
+    error?: string;
+  }): Promise<{ recorded: boolean }> {
+    return this.post("/v1/vault/egress-outcome", input);
+  }
+
   // ── Egress grants: a deployed app uses a vaulted credential via the proxy ──
 
   async grantAppAccess(input: {

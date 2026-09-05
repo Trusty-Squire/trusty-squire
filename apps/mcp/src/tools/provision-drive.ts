@@ -6,7 +6,6 @@
 // in place; the consent-at-install prompt is the remaining hardening.
 
 import { z } from "zod";
-import { constants, generateKeyPairSync, privateDecrypt } from "node:crypto";
 import type { Tool } from "./index.js";
 import type { ApiClient } from "../api-client.js";
 import {
@@ -61,6 +60,7 @@ import {
   type OperatorRecipe,
 } from "../bot/operator-recipe.js";
 import { isMaskedDisplay } from "../bot/credential-shape.js";
+import { fetchVaultFieldsSealed } from "./egress-targets.js";
 import { renderSkillHint, serviceSlugFromUrl } from "../bot/skill-hint.js";
 import { clientFromEnv, generateProvisionId } from "../skill-registry-client.js";
 import { openSessionStorage } from "../session.js";
@@ -368,7 +368,7 @@ const COMPACT_V2_CONTRACT =
   "and x=x for a cross-origin child, while an omitted x means the main frame. Actions are search,close,next,previous,submit," +
   "continue,login,signup,add_to_cart,view_cart,checkout,payment,destructive; fields are email,password,username,name,phone,search,address," +
   "city,region,postal,country,date,quantity,promo,payment. Short labels are included for viewport-prioritized controls; " +
-  "labels are never screened for content — what the page renders is what you get. The row form omits field " +
+  "labels are exactly what the page renders. The row form omits field " +
   "values purely as a size budget: read a value off the page with operate_screenshot, or with an explicitly " +
   "selected V1 session. For a named product/control from the task, " +
   "call operate_observe_query with those task words; it returns matching actionable refs with labels " +
@@ -387,8 +387,10 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
     OBSERVE_DELTA_CONTRACT +
     "YOU are the planner — read the observation, then drive the signup, setup, or " +
     "checkout with operate_act (and operate_pay for a purchase), re-read with " +
-    'operate_observe, and call operate_act { kind: "extract" } ' +
-    "when you reach the credentials. Always operate_finish when done. The " +
+    'operate_observe, and call operate_act { kind: "extract", store: {...} } ' +
+    "when you reach the credentials — that vaults the key and returns a `reference`, which " +
+    "use_credential { target } then deploys (GitHub Actions secret, .env). Always " +
+    "operate_finish when done. The " +
     "browser is domain-scoped to the target + its identity providers. If the " +
     "registry knows this service, the first observation includes a `hint` — the " +
     "route (login method, where the key lives, how many credentials). Read it and " +
@@ -482,8 +484,7 @@ export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
     "selected V1 session, isn't enough to tell what state " +
     "a stuck page is actually in — a challenge that never advances, an unexpected layout, a captcha you " +
     "need to SEE. Read-only: never navigates, clicks, types, submits, or steals focus; it only reads " +
-    "pixels. The image is the page's real pixels — nothing is masked or redacted, and a capture is " +
-    "never refused because the page is showing a secret or a card value.",
+    "pixels. The image is the page's real pixels, whatever the page is showing.",
   inputSchema: screenshotSchema,
   jsonInputSchema: {
     type: "object",
@@ -1269,12 +1270,17 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "select_many (ordered selections map — select sequentially, re-observe after " +
     "each success, and retain partial results; Compact V2 keys are current safe_table @e: refs or @labels, " +
     "while V1 keys may be observed labels or refs), extract (into_slot/secret_label/store — " +
-    "reveal masked keys and extract credentials from the current page, sealed slot or vaulted), " +
+    "THIS is how you obtain a credential from a page: it reveals masked keys and reads the " +
+    "credential off the current page. Pass `store` to vault it and get back a `reference` for " +
+    "use_credential — including use_credential { target } to put it straight into a GitHub " +
+    "Actions secret or a .env. Pass `into_slot` instead to hold it for a type_secret on this " +
+    "same site), " +
     "solve_captcha (detect and drive the in-session captcha gate; settled=false carries a " +
     "needs_user{gate,message,remedy} — FAIL FAST and relay it to the user), " +
     "await_verification (sender/into_slot/grant_inbox_consent — read the user's OWN inbox " +
-    "through their signed-in browser session for an email verification code/link, sealed " +
-    "into a slot with into_slot; Compact V2 never emits the raw code, link, or sender). Sealed username/password login lifecycle, never exposing raw " +
+    "through their signed-in browser session for an email verification code/link; pass into_slot " +
+    "to seal the code into a slot and fill it with type_secret instead of handling it yourself). " +
+    "Sealed username/password login lifecycle, never exposing raw " +
     "values: login_prepare_signup (login_slot/password_slot/password_length — seal the user's " +
     "captured email and a generated strong password into session slots; fill the signup form " +
     "with type_secret using the returned slots), login_store_signup (service + login_hosts, " +
@@ -1534,13 +1540,17 @@ const extractSchema = z.object({
 export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
   name: "operate_extract",
   description:
-    "Reveal masked keys and extract credentials from the current page: returns " +
+    "This is how you obtain a credential from a page. Pass `store` to vault it and get " +
+    "back a `reference` for use_credential — that reference is what deploys the key " +
+    "(use_credential { target } writes it into a GitHub Actions secret or a .env), and it " +
+    "keeps the value out of your context entirely. Reveals masked keys and extracts " +
+    "credentials from the current page: returns " +
     "{credentials, candidate_count, blocked_reason?}. credentials may include " +
     "`api_key` (or `api_key_truncated` if only a masked display was reachable) " +
-    "plus named fields for multi-credential services. Pass `store` to immediately " +
-    "save the extracted credential into the Trusty Squire vault with the session's " +
-    "observed hosts as allowed_hosts seed; when `store` is used, the response omits " +
-    "credential values and returns only vault metadata. If `blocked_reason` is set, " +
+    "plus named fields for multi-credential services. `store` saves into the Trusty " +
+    "Squire vault with the session's observed hosts as the allowed_hosts seed; the " +
+    "response then omits credential values and returns only vault metadata. If " +
+    "`blocked_reason` is set, " +
     "the page is a login wall / anti-bot interstitial with NO credential present " +
     "(do not treat the empty result as a real key) — drive an interactive login " +
     "or hand back to the user. Call when you have navigated to the keys page. " +
@@ -2428,33 +2438,25 @@ async function handleSealVaultCredential(
     throw new Error("operate_seal_vault_credential requires an active Trusty Squire session");
   }
   const current = currentProvisionUrl(args.session_id);
-  const { publicKey, privateKey } = generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-    publicKeyEncoding: { type: "spki", format: "pem" },
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-  });
-  const response = await api.browserFillCredential({
-    ...(args.reference !== undefined ? { reference: args.reference } : {}),
-    ...(args.service !== undefined ? { service: args.service } : {}),
-    current_host: current,
-    fields: args.fields,
-    encrypted_response_public_key: publicKey,
-  });
+  // The keypair-and-decrypt envelope is shared with vault-first egress
+  // (tools/egress-targets.ts); only the sealed-fetch route differs — this one
+  // gates on login_hosts, egress gates on allowed_hosts.
+  const { reference, fields } = await fetchVaultFieldsSealed((publicKey) =>
+    api.browserFillCredential({
+      ...(args.reference !== undefined ? { reference: args.reference } : {}),
+      ...(args.service !== undefined ? { service: args.service } : {}),
+      current_host: current,
+      fields: args.fields,
+      encrypted_response_public_key: publicKey,
+    }),
+  );
   const slots: Record<string, ReturnType<typeof stashSecretSlot>> = {};
-  for (const [field, encrypted] of Object.entries(response.encrypted_fields)) {
-    const value = privateDecrypt(
-      {
-        key: privateKey,
-        padding: constants.RSA_PKCS1_OAEP_PADDING,
-        oaepHash: "sha256",
-      },
-      Buffer.from(encrypted, "base64"),
-    ).toString("utf8");
+  for (const [field, value] of Object.entries(fields)) {
     slots[field] = stashSecretSlot(args.session_id, `${args.slot_prefix}_${field}`, value);
   }
   return {
     session_id: args.session_id,
-    reference: response.reference,
+    reference,
     slots,
   };
 }
@@ -2570,7 +2572,7 @@ export const operateLoginTool: Tool<z.infer<typeof loginSchema>> = {
 // operate_act's kinds and operate_recipe_save/run delegate to, and as direct handles
 // for tests that pin down that folded behavior.
 // operate_screenshot (2026-08-23) is a deliberate, narrow addition to this cut: a
-// read-only debugging instrument (page/frame pixels, money-fence redacted) with no
+// read-only debugging instrument (the page's or one frame's real pixels) with no
 // alias/kind it could fold into — operate_act's kinds all DO something; this only
 // looks.
 export const OPERATE_TOOLS: Tool[] = [

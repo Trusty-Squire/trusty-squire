@@ -522,6 +522,12 @@ file-by-file map live in
 [`docs/observation-model.md`](docs/observation-model.md) §4.5 — read it before
 touching this area.
 
+The absence of that machinery has no runtime assertion, so
+`apps/mcp/src/bot/__tests__/read-path-guard.test.ts` checks the SOURCE for it
+coming back: no detector import in the observation formatter, and none of the
+exact symbols #663 deleted anywhere on a read path. If it fails, you are
+re-adding a seal, not breaking a test.
+
 ### 17. `await_verification` must score link-picking on anchor TEXT too, and must retry through Gmail's own transient backend error
 
 Two failure modes measured live during a Xata Keycloak account-link signup

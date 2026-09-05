@@ -241,6 +241,15 @@ export interface VaultClient {
   delete(reference: string, accountId: string): Promise<void>;
 }
 
+// The audit `purpose` every vault-first egress row carries, so "where did
+// this key go" is one filter on the timeline.
+export const EGRESS_PURPOSE = "egress";
+
+// The sentinel `target_host` for the one egress destination that is not a
+// network host: a .env file on the user's own machine. Authorised by the
+// mcp-side project-root check, not by allowed_hosts.
+export const EGRESS_LOCAL_FILE_HOST = "local-file";
+
 const ASSERTION_MAX_AGE_MS = 60 * 60 * 1000;
 const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
 const RATE_LIMIT_MAX = 100;
@@ -547,6 +556,69 @@ export class CredentialVault implements VaultClient {
     });
   }
 
+  // Vault-first egress: decrypt a credential so the LOCAL mcp process can put
+  // it where it is needed (a GitHub Actions secret, a .env file). Same
+  // pre-decrypt host gate as `proxy` — `targetHost` must be on the
+  // credential's allowed_hosts, so an egress destination is exactly as
+  // user-authorised as a proxied call. EGRESS_LOCAL_FILE_HOST is the one
+  // destination with no network host at all; its authorisation is the
+  // mcp-side project-root check, so the server records it rather than
+  // host-checking it. Goes through retrieveInternal, which is what keeps
+  // egress under the same per-account retrieval ceiling as every other
+  // decrypt path.
+  async retrieveForEgress(
+    reference: string,
+    accountId: string,
+    targetHost: string,
+  ): Promise<Record<string, string>> {
+    const record = await this.deps.store.findActive(reference);
+    if (record === null || record.account_id !== accountId) {
+      throw new CredentialNotFoundError(reference);
+    }
+    if (targetHost !== EGRESS_LOCAL_FILE_HOST && !record.allowed_hosts.includes(targetHost)) {
+      await this.recordAudit(accountId, VAULT_AUDIT_TYPES.proxyRejected, {
+        reference,
+        requester: "agent",
+        purpose: EGRESS_PURPOSE,
+        target_host: targetHost,
+      });
+      throw new AllowlistViolationError(reference, targetHost);
+    }
+    return this.retrieveInternal({
+      reference,
+      purpose: EGRESS_PURPOSE,
+      requester: "agent",
+      signingDeviceId: null,
+      assertion: null,
+      targetHost,
+    });
+  }
+
+  // A client-reported egress delivery outcome: what actually received the
+  // key and whether it landed. The retrieval is already audited by
+  // retrieveForEgress; this row closes the loop on the delivery, the same
+  // way /v1/vault/payments/audit closes the loop on a charge.
+  async recordEgressDelivery(
+    accountId: string,
+    input: {
+      reference: string;
+      kind: string;
+      destination: string;
+      status: "ok" | "error";
+      error?: string;
+    },
+  ): Promise<void> {
+    await this.recordAudit(accountId, VAULT_AUDIT_TYPES.egressDelivered, {
+      reference: input.reference,
+      requester: "agent",
+      purpose: EGRESS_PURPOSE,
+      egress_kind: input.kind,
+      egress_destination: input.destination,
+      egress_status: input.status,
+      ...(input.error !== undefined ? { egress_error: input.error } : {}),
+    });
+  }
+
   // Web-only reveal: account-scoped, returns the field map. Audited.
   // Counts against the same per-account retrieval rate limit as the
   // agent/runtime paths — a reveal IS a retrieval, so the human path
@@ -813,8 +885,12 @@ export class CredentialVault implements VaultClient {
     requester: VaultRequester;
     signingDeviceId: string | null;
     assertion: DeviceAssertion | null;
+    // Egress only: the destination this decrypt is FOR, recorded on every
+    // audit row this retrieval emits so the trail says where the key went.
+    targetHost?: string;
   }): Promise<Record<string, string>> {
     const { reference, purpose, requester, signingDeviceId, assertion } = args;
+    const targetHostPayload = args.targetHost !== undefined ? { target_host: args.targetHost } : {};
     const record = await this.deps.store.findActive(reference);
     const accountId = record?.account_id ?? "";
 
@@ -835,6 +911,7 @@ export class CredentialVault implements VaultClient {
           requester,
           signing_device_id: signingDeviceId,
           outcome: "stale_assertion",
+          ...targetHostPayload,
         });
         throw new StaleAssertionError(
           `device assertion stale or invalid (age=${Number.isNaN(ageMs) ? "NaN" : ageMs}ms)`,
@@ -848,6 +925,7 @@ export class CredentialVault implements VaultClient {
         requester,
         signing_device_id: signingDeviceId,
         outcome: "missing_credential",
+        ...targetHostPayload,
       });
       throw new CredentialNotFoundError(reference);
     }
@@ -860,6 +938,7 @@ export class CredentialVault implements VaultClient {
       requester,
       signing_device_id: signingDeviceId,
       outcome: "success",
+      ...targetHostPayload,
     });
     return fields;
   }

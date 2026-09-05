@@ -193,6 +193,33 @@ not one:
 
 ---
 
+## Vault-first egress follow-ups (2026-09-05)
+
+Shipped in the same PR that added `use_credential { target }`
+(`github_repo_secret`, `dotenv_write`) — see
+`apps/mcp/src/tools/egress-targets.ts`.
+
+### Fly / Vercel / Cloudflare egress targets [P2 feature]
+
+The second, third, and fourth destinations a provisioned key actually needs to
+reach. Deliberately deferred out of the first cut: two kinds and one `switch`
+is the right shape until a third real user of it exists, and each of these
+brings its own auth story (`flyctl auth token` / `FLY_API_TOKEN`, a Vercel
+team+project selector, a Cloudflare account id + scoped token) rather than
+being a parameterisation of the GitHub one. Add them one at a time, each with
+its own timeouts and its own outcome report; do NOT introduce a plugin
+registry to hold them.
+
+### Persistence masking (recipes / audit) — separate decision [P2 decision]
+
+`recordableTokenV2` still screens page-derived strings before they reach the
+stderr audit trail and the registry-bound action trace, and the vault audit
+payload carries destination identities (`owner/repo`, a `.env` path). Neither
+is a read by the agent, so #663 left both alone and this PR did not revisit
+them. Whether cross-user institutional memory and the who-touched-my-keys
+timeline should mask at all is its own call, with its own threat model — take
+it as one decision rather than letting it drift per-surface.
+
 ## Tier 2 — known good, no time pressure
 
 ### Harvester subagent Phase 3 — dry-run [from `docs/DESIGN-harvester-subagent.md`]

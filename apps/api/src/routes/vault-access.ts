@@ -14,7 +14,11 @@
 import { z } from "zod";
 import { constants, publicEncrypt } from "node:crypto";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
-import { AllowlistViolationError, CredentialNotFoundError } from "@trusty-squire/vault";
+import {
+  AllowlistViolationError,
+  CredentialNotFoundError,
+  EGRESS_LOCAL_FILE_HOST,
+} from "@trusty-squire/vault";
 import type { ApiDeps } from "../services/deps.js";
 import { HttpProxyExecutor, ProxyError } from "../services/http-proxy.js";
 import { resolveCredentialForAccount } from "../services/credential-resolution.js";
@@ -40,6 +44,62 @@ const useBody = z
   .refine((b) => b.reference !== undefined || b.service !== undefined || b.name !== undefined, {
     message: "one of reference, service, or name is required",
   });
+
+// Vault-first egress. The agent names a credential and a DESTINATION it is
+// about to write the key into from its own machine; the server gates, decrypts,
+// and seals the fields to the caller's ephemeral public key. Deliberately not
+// `browser-fill`: that route gates on `login_hosts` (browser-fill semantics),
+// while an egress destination is a proxy-semantics `allowed_hosts` question.
+const egressDestination = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("github_repo_secret"), host: z.string().min(1).max(253) }),
+  // `.env` has no network host: the literal sentinel keeps the audit row
+  // honest about where the key went, and the project-root gate lives on the
+  // mcp side where the filesystem actually is.
+  z.object({ kind: z.literal("dotenv_write"), host: z.literal(EGRESS_LOCAL_FILE_HOST) }),
+]);
+
+const egressFetchBody = z
+  .object({
+    reference: z.string().min(1).max(400).optional(),
+    service: z.string().min(1).max(120).optional(),
+    name: z.string().min(1).max(60).optional(),
+    // Omitted = seal every field the credential has. The client needs the
+    // whole map to apply use_credential's ${SECRET} field-selection rule
+    // (named field / `value` / sole field / the one secret-ish name); it
+    // names an explicit subset when the caller passed `field`.
+    fields: z.array(z.string().min(1).max(120)).min(1).max(20).optional(),
+    encrypted_response_public_key: z.string().min(1).max(4096),
+    destination: egressDestination,
+  })
+  .refine((b) => b.reference !== undefined || b.service !== undefined || b.name !== undefined, {
+    message: "one of reference, service, or name is required",
+  });
+
+const egressOutcomeBody = z.object({
+  reference: z.string().min(1).max(400),
+  destination: z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("github_repo_secret"),
+      repo: z.string().min(1).max(300),
+      environment: z.string().min(1).max(200).optional(),
+    }),
+    z.object({ kind: z.literal("dotenv_write"), path: z.string().min(1).max(2048) }),
+  ]),
+  status: z.enum(["ok", "error"]),
+  error: z.string().max(2000).optional(),
+});
+
+// The exact string recorded as `egress_destination` — the identity of what
+// received the key, never its value.
+function egressDestinationLabel(
+  destination: z.infer<typeof egressOutcomeBody>["destination"],
+): string {
+  return destination.kind === "dotenv_write"
+    ? destination.path
+    : destination.environment !== undefined
+      ? `${destination.repo}:${destination.environment}`
+      : destination.repo;
+}
 
 const browserFillBody = z
   .object({
@@ -324,4 +384,114 @@ export const registerVaultAccessRoute: FastifyPluginAsync<{
       throw err;
     }
   });
+
+  fastify.post("/v1/vault/egress-fetch", { preHandler: opts.requireAgent }, async (req, reply) => {
+    const auth = req.auth!;
+    if (auth.kind !== "agent") return;
+    const parsed = egressFetchBody.safeParse(req.body);
+    if (!parsed.success) {
+      reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
+      return;
+    }
+    const data = parsed.data;
+    const selected = await resolveCredential(
+      auth.account_id,
+      {
+        ...(data.reference !== undefined ? { reference: data.reference } : {}),
+        ...(data.service !== undefined ? { service: data.service } : {}),
+        ...(data.name !== undefined ? { name: data.name } : {}),
+      },
+      reply,
+    );
+    if (selected === null) return;
+    if (isUsernamePasswordCredential(selected)) {
+      reply.code(400).send({
+        error: "unsupported_credential_type",
+        hint: "username_password credentials can only be used through browser fill.",
+      });
+      return;
+    }
+    // Normalise exactly like the proxy does before the allowlist compare, so a
+    // scheme/port/trailing-path spelling can't slip past the same-named gate.
+    const targetHost =
+      data.destination.kind === "dotenv_write"
+        ? EGRESS_LOCAL_FILE_HOST
+        : normaliseHost(data.destination.host);
+    if (targetHost === null) {
+      reply.code(400).send({ error: "invalid_destination_host" });
+      return;
+    }
+    try {
+      // The gate lives inside retrieveForEgress and runs BEFORE any decrypt —
+      // an off-allowlist destination never causes plaintext to exist.
+      const fields = await opts.deps.vault.retrieveForEgress(
+        selected.reference,
+        auth.account_id,
+        targetHost,
+      );
+      const requested = data.fields ?? Object.keys(fields);
+      const missing = requested.filter((field) => fields[field] === undefined);
+      if (missing.length > 0) {
+        reply.code(400).send({ error: "missing_fields", fields: missing });
+        return;
+      }
+      const encryptedFields: Record<string, string> = {};
+      try {
+        for (const field of requested) {
+          encryptedFields[field] = encryptBrowserFillField(
+            fields[field]!,
+            data.encrypted_response_public_key,
+          );
+        }
+      } catch {
+        reply.code(400).send({ error: "invalid_public_key" });
+        return;
+      }
+      return reply
+        .code(200)
+        .send({ reference: selected.reference, encrypted_fields: encryptedFields });
+    } catch (err) {
+      if (err instanceof AllowlistViolationError) {
+        reply.code(403).send({
+          error: "host_not_allowed",
+          host: err.host,
+          hint: "Add the host to this credential's allowed_hosts in /vault.",
+        });
+        return;
+      }
+      if (err instanceof CredentialNotFoundError) {
+        reply.code(404).send({ error: "credential_not_found" });
+        return;
+      }
+      throw err;
+    }
+  });
+
+  fastify.post(
+    "/v1/vault/egress-outcome",
+    { preHandler: opts.requireAgent },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "agent") return;
+      const parsed = egressOutcomeBody.safeParse(req.body);
+      if (!parsed.success) {
+        reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
+        return;
+      }
+      const data = parsed.data;
+      const record = await opts.deps.credentialStore.findActive(data.reference);
+      if (record === null || record.account_id !== auth.account_id) {
+        reply.code(404).send({ error: "credential_not_found" });
+        return;
+      }
+      await opts.deps.vault.recordEgressDelivery(auth.account_id, {
+        reference: data.reference,
+        kind: data.destination.kind,
+        destination: egressDestinationLabel(data.destination),
+        status: data.status,
+        ...(data.error !== undefined ? { error: data.error } : {}),
+      });
+      return reply.code(201).send({ recorded: true });
+    },
+  );
 };

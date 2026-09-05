@@ -77,7 +77,7 @@ export function shouldIdleExit(
 // Injected into the model's system prompt every turn (≤2KB). Teaches
 // the routing between store / use / request so the agent reaches for
 // the right credential tool without the user spelling it out.
-const SERVER_INSTRUCTIONS = `This is Trusty Squire — it drives a real browser through signup, provisioning,
+export const SERVER_INSTRUCTIONS = `This is Trusty Squire — it drives a real browser through signup, provisioning,
 and checkout flows on the user's behalf (\`operate_start\`/\`operate_observe\`/
 \`operate_act\`/\`operate_pay\`/\`operate_finish\`, plus recipe replay), and backs it
 with a write-only credential vault.
@@ -94,15 +94,19 @@ Routing rules for THIS server's vault tools:
   or \${SECRET.<field>} (multi-field) placeholders. The server injects
   the secret and returns only the upstream response; you never see the
   value. The target host must be on the credential's allowed_hosts.
+- To OBTAIN a credential from a page: \`operate_act { kind:"extract",
+  store:{...} }\` — it vaults the key and returns a \`reference\`. To DEPLOY
+  it: \`use_credential\` with \`target\` (\`github_repo_secret\` |
+  \`dotenv_write\`); the key never enters your context. Read plaintext
+  only when no target fits, and say so.
 - User wants to change allowed_hosts/login_hosts/name without changing the
   secret → call edit_credential. User wants a saved credential removed → call
   delete_credential. Both return a Telegram/passkey approval link first; resume
   with the returned approval_id only after the user signs the exact mutation.
 - Rotating a secret value = call store_credential again with the new value (it
   overwrites). edit_credential cannot read or change secret fields.
-- There is NO way to extract a raw secret value to you — by design. If a
-  user wants the plaintext (e.g. for a .env file), they read it from the
-  Trusty Squire web vault themselves.`;
+- There is NO way to extract a raw secret value to you — by design. What a
+  user wants in plaintext beyond a target, they read from the web vault.`;
 
 export interface ServerCallLifecycle {
   started(): boolean;

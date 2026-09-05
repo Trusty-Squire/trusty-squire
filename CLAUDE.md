@@ -826,6 +826,28 @@ The storage contract and local safety invariants are documented at the owner:
 owns user-facing multi-account and logout guidance; test isolation belongs in
 [AGENTS.md](AGENTS.md#never-touch-the-operators-live-local-state-from-a-test-or-a-check).
 
+### Vault-first egress targets (`use_credential { target }`)
+
+The deploy half of the vault: `operate_act { kind:"extract", store }` puts a key
+in the vault and returns a `reference`; `use_credential { target }` puts that key
+where it is needed — a GitHub Actions secret or a `.env` — without the value ever
+entering the model's context. `http` and `target` are mutually exclusive.
+
+Owners: the public contract is the [README tool
+reference](README.md#mcp-tools); the implementation is
+`apps/mcp/src/tools/egress-targets.ts` (one `switch`, no plugin registry —
+keep it that way); the server halves are `POST /v1/vault/egress-fetch` and
+`POST /v1/vault/egress-outcome` in `apps/api/src/routes/vault-access.ts`, over
+`retrieveForEgress` / `recordEgressDelivery` in
+`packages/vault/src/credential-vault.ts`.
+
+Two authorization boundaries, both reused rather than invented: a network
+destination must be on the credential's `allowed_hosts` (the SAME pre-decrypt
+gate the proxy uses — an off-allowlist destination never produces plaintext),
+and a `.env` path must resolve under the project root the MCP server was
+launched in. There is deliberately **no** destination-grants approval subsystem;
+do not add one. Deferred targets (Fly/Vercel/Cloudflare) are in `TODOS.md`.
+
 ### Vault security + lifecycle surface
 
 The credential vault's operational runbook lives at
