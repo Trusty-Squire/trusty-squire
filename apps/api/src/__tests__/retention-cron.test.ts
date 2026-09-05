@@ -51,6 +51,25 @@ function matchesFetchWhere(row: Record<string, unknown>, where: Record<string, u
   });
 }
 
+// An audit sink that fails its first `failures` writes. A terminal event whose
+// write throws must not be lost, so the sweep has to keep the row retryable.
+class FlakyAuditStore extends InMemoryVaultAuditStore {
+  private remainingFailures: number;
+
+  constructor(failures: number, now: () => Date) {
+    super(now);
+    this.remainingFailures = failures;
+  }
+
+  override async record(event: Parameters<InMemoryVaultAuditStore["record"]>[0]): Promise<void> {
+    if (this.remainingFailures > 0) {
+      this.remainingFailures -= 1;
+      throw new Error("audit store unavailable");
+    }
+    await super.record(event);
+  }
+}
+
 function makeFakes(
   fetchRows: Array<Record<string, unknown>> = [],
   // Fires after the sweep has snapshotted the lapsed rows and before it tries
@@ -292,11 +311,14 @@ describe("RetentionCron", () => {
     // No decrypted material can reach these rows — there is no parameter for it.
     expect(JSON.stringify(auditStore.events)).not.toContain('value":"sk-');
 
-    // Settled first, deleted second: the audit write cannot be skipped by a
-    // delete that already ran.
+    // Settled first, audited second, marked audited third, deleted last: the
+    // audit write cannot be skipped by a delete that already ran, and the row
+    // only becomes deletable once its audit has landed.
     const fetchCalls = calls.filter((c) => c.table === "CredentialFetchApproval");
     expect(fetchCalls.map((c) => c.op)).toEqual([
       "findMany",
+      "updateMany",
+      "updateMany",
       "updateMany",
       "updateMany",
       "deleteMany",
@@ -329,6 +351,35 @@ describe("RetentionCron", () => {
     // deleted it out from under the outcome the vault already audited.
     expect(rows).toHaveLength(1);
     expect(rows[0]!["status"]).toBe("consumed");
+  });
+
+  // Settlement and its audit have to be durable together. Flipping the row to a
+  // terminal state before the audit landed made a transient sink failure fatal:
+  // the next run saw a settled row, deleted it, and the event was gone.
+  it("keeps a settled approval retryable until its terminal audit lands", async () => {
+    const now = new Date("2026-01-15T12:00:00Z");
+    const auditStore = new FlakyAuditStore(1, () => now);
+    const rows = [lapsedFetchRow("pending", "fetch_flaky")];
+    const { authPrisma } = makeFakes(rows);
+    const cron = new RetentionCron({ authPrisma, vaultAuditStore: auditStore, now: () => now });
+
+    const first = await cron.runOnce();
+    expect(first.errors.filter((e) => /credential fetch approval/.test(e))).toHaveLength(1);
+    expect(first.credential_fetch_approvals_deleted).toBe(0);
+    expect(auditStore.events).toEqual([]);
+    // Settled, but not deletable — the ledger has not heard about it yet.
+    expect(rows).toHaveLength(1);
+
+    const second = await cron.runOnce();
+    expect(second.errors).toEqual([]);
+    expect(auditStore.events.map((event) => event.payload.outcome)).toEqual(["expired"]);
+    expect(auditStore.events[0]!.payload).toMatchObject({
+      purpose: "reveal",
+      outcome: "expired",
+      approval_id: "fetch_flaky",
+    });
+    expect(second.credential_fetch_approvals_deleted).toBe(1);
+    expect(rows).toEqual([]);
   });
 
   it("deletes an already-settled lapsed approval without a second audit row", async () => {
