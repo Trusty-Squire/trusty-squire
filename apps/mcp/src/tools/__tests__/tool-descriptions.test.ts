@@ -88,6 +88,33 @@ describe("the raw-value path is steered as the last resort", () => {
   });
 });
 
+// A screenshot is a full image — by far the most expensive thing on this tool
+// surface. The description is the only place that cost is visible to the model
+// before it spends it, so the steering is pinned here. It is a WARNING, not a
+// ban: the 3DS/captcha frame capture the tool exists for stays available.
+describe("the screenshot path is steered as expensive, not forbidden", () => {
+  const description = provisionScreenshotTool.description;
+
+  it("warns that a screenshot is expensive", () => {
+    expect(description).toContain("EXPENSIVE");
+    expect(description).toMatch(/costs far more context/i);
+  });
+
+  it("names DOM serialization as the route to try first", () => {
+    expect(description).toMatch(/safe_table/);
+    expect(description).toContain("operate_observe");
+    expect(description).toContain("operate_observe_query");
+    expect(description).toMatch(/ONLY when/);
+    expect(description).toMatch(/NOT sufficient/);
+  });
+
+  it("stays a warning — the debugging capture it exists for is still offered", () => {
+    expect(description).toContain("frame_url_contains");
+    expect(description).toMatch(/3-D Secure ACS frame/);
+    expect(description).not.toMatch(/refus/i);
+  });
+});
+
 // The sentences describing behaviour that DOES still exist, quoted, so the next
 // description rewrite cannot take them with it.
 describe("still-true contracts survive the cleanup", () => {

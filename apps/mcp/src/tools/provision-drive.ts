@@ -474,6 +474,10 @@ const screenshotSchema = z.object({
 export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
   name: "operate_screenshot",
   description:
+    "WARNING: EXPENSIVE — a screenshot is a full image and costs far more context than any " +
+    "observation. Reach for it ONLY when the DOM serialization (Compact V2 safe_table, " +
+    "operate_observe, operate_observe_query) is NOT sufficient to determine the page state; " +
+    "if the tables already tell you what the page is doing, do not take one. " +
     "Debugging tool: capture a screenshot of what the operate session's browser actually RENDERS — " +
     "the whole page (default: viewport; full_page:true for the whole scrollable page) or ONE specific " +
     "frame in isolation via frame_index or frame_url_contains, so a cross-origin challenge iframe (a " +
