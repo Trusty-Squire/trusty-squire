@@ -617,6 +617,14 @@ virgin signup succeeds on an UNCOVERED service (no active skill in registry)
   `apps/mcp/src/install/cli.ts`), and the operator's `google_session` wall hands
   back `resume: "connect"`. Never reintroduce a second sign-in entry point, and
   never point a user or an agent at `login`.
+- **Never quit a Chrome whose profile state you still need with SIGTERM.** Chrome
+  routes SIGTERM to its abrupt "session ending" exit and does NOT flush the
+  SQLite cookie store (its own commit timer is ~30s out), so a SIGTERM teardown
+  seconds after a sign-in silently discards the session that sign-in just
+  established — the 2026-09-04 `connect` regression. The login browser quits with
+  `PLAIN_LOGIN_BROWSER_QUIT_SIGNAL` (SIGINT) and waits for the graceful exit
+  before the owner reaper's SIGTERM → SIGKILL escalation takes over
+  (`apps/mcp/src/bot/browser.ts`); the evidence is in `STATE.md`.
 - `BrowserController` local launches are new-headless only; do not reintroduce
   virtual-display selection or `DISPLAY` plumbing into automated operator runs.
   `apps/mcp/src/bot/browser.ts` owns the supported local-headless and remote-CDP

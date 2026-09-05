@@ -809,8 +809,22 @@ async function ensureProvisionPrimaryProviderSession(
   if (typeof browser.detectGoogleAccountEmail === "function") {
     await browser.detectGoogleAccountEmail().catch(() => null);
   }
-  if (typeof browser.detectSessionProviders !== "function") return [];
-  return await browser.detectSessionProviders().catch(() => [] as OAuthProviderId[]);
+  if (typeof browser.detectSessionProviders !== "function") {
+    console.error(
+      "[operate] provider-session detection unavailable on this browser controller — " +
+        "treating as no live provider session",
+    );
+    return [];
+  }
+  // Fail closed, but never SILENTLY: an empty list refuses the start with the
+  // same `google_session` wall as a genuinely signed-out profile, so a throwing
+  // probe used to be indistinguishable from "not signed in". Say which it was.
+  return await browser.detectSessionProviders().catch((err: unknown) => {
+    console.error(
+      `[operate] provider-session detection failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return [] as OAuthProviderId[];
+  });
 }
 
 export async function startProvisionSession(

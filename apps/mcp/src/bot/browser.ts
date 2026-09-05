@@ -3283,6 +3283,51 @@ export interface PlainLoginBrowser {
   marker: string;
 }
 
+// The signal that quits the plain login browser.
+//
+// It MUST NOT be SIGTERM. Chrome routes SIGTERM to its "session ending" path,
+// which exits abruptly on the assumption the OS is tearing the machine down —
+// it does NOT flush the SQLite cookie store, and the store's own commit timer
+// is ~30s away. `connect` kills this browser within a couple of seconds of the
+// user finishing the Google OAuth dance, so a SIGTERM teardown discarded the
+// very session the ceremony existed to establish: the claim landed, the session
+// file was written, and the follow-up provider probe correctly reported "Google
+// not connected". SIGINT takes Chrome's graceful shutdown path, which flushes.
+// Measured on real Chrome 2026-09-04: cookie set 6s before the signal survives
+// SIGINT/SIGHUP and is lost on SIGTERM, deterministically, for both a bare pid
+// and a process-group signal.
+export const PLAIN_LOGIN_BROWSER_QUIT_SIGNAL: NodeJS.Signals = "SIGINT";
+
+// How long to let Chrome's graceful shutdown run before handing over to the
+// owner-launch reaper, whose own escalation starts at SIGTERM and would undo
+// the flush we just asked for.
+const PLAIN_LOGIN_BROWSER_QUIT_DEADLINE_MS = 10_000;
+
+// Quit the plain login browser and only THEN run the ownership-proving
+// teardown. Exported for tests: the ordering here is the fix, not an
+// implementation detail — `finalize` (the reaper) escalates SIGTERM →
+// SIGKILL, so running it while Chrome is still flushing reintroduces the
+// abrupt exit this signal choice exists to avoid.
+export async function quitPlainLoginBrowser(opts: {
+  signalQuit: (signal: NodeJS.Signals) => boolean;
+  isRunning: () => boolean;
+  finalize: () => Promise<void>;
+  deadlineMs?: number;
+  pollMs?: number;
+  wait?: (ms: number) => Promise<void>;
+}): Promise<void> {
+  const pollMs = opts.pollMs ?? 25;
+  const wait =
+    opts.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  // An undelivered quit has nothing to wait for — hand straight over to the
+  // reaper rather than burning the grace window on a process we cannot signal.
+  if (opts.signalQuit(PLAIN_LOGIN_BROWSER_QUIT_SIGNAL)) {
+    const deadline = Date.now() + (opts.deadlineMs ?? PLAIN_LOGIN_BROWSER_QUIT_DEADLINE_MS);
+    while (opts.isRunning() && Date.now() < deadline) await wait(pollMs);
+  }
+  await opts.finalize();
+}
+
 // Launch a TRULY PLAIN Chrome for the interactive connect claim — NO
 // `--remote-debugging-port`, NO `connectOverCDP`, NO Playwright attach at all.
 //
@@ -3425,12 +3470,20 @@ export async function launchPlainLoginBrowser(params: {
   const teardown = (): Promise<void> => {
     teardownPromise ??= (async () => {
       markLocalBrowserLaunchTerminal(child);
-      if (child !== null && childIdentity !== null) {
-        signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
-      } else if (childProcessIsRunning(child)) {
-        child?.kill("SIGTERM");
-      }
-      await closeLocalBrowserLaunch(launchMarker, params.profileDir);
+      await quitPlainLoginBrowser({
+        signalQuit: (signal) => {
+          if (child !== null && childIdentity !== null) {
+            return signalProfileProcess(childIdentity, params.profileDir, signal);
+          }
+          if (childProcessIsRunning(child)) {
+            child?.kill(signal);
+            return true;
+          }
+          return false;
+        },
+        isRunning: () => childProcessIsRunning(child),
+        finalize: async () => await closeLocalBrowserLaunch(launchMarker, params.profileDir),
+      });
     })();
     return teardownPromise;
   };

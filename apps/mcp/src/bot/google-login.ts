@@ -191,7 +191,13 @@ async function detectGoogleAccountEmailInContext(context: BrowserContext): Promi
       if (email !== null) return email;
     }
     return null;
-  } catch {
+  } catch (err) {
+    // A probe failure is NOT proof of "signed out", but every caller treats a
+    // null the same way, so name it. Losing this line is how a broken probe
+    // reads as an empty profile.
+    console.error(
+      `[connect] Google identity probe failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
     return null;
   } finally {
     await page?.close().catch(() => undefined);
