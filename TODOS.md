@@ -210,6 +210,22 @@ being a parameterisation of the GitHub one. Add them one at a time, each with
 its own timeouts and its own outcome report; do NOT introduce a plugin
 registry to hold them.
 
+### Per-field credential envelopes [P2, security-hardening]
+
+A credential is stored as ONE AES-GCM ciphertext over `JSON.stringify(fields)`
+(`packages/vault/src/credential-vault.ts`), so decrypting any field necessarily
+materialises every field of that credential in server memory for the length of
+one function call. `retrieveForEgress` narrows to the single requested field
+immediately and zeroes the rest, and the egress route accepts exactly one field
+name — but the transient whole-map plaintext is a property of the STORAGE
+FORMAT and cannot be removed above it.
+
+Closing it means a per-field envelope (one DEK-wrapped ciphertext per field,
+or a single envelope with per-field keys) plus a migration for existing rows.
+Worth doing before a credential with genuinely separable trust levels ships —
+an AWS key pair where the access-key id is fine to log and the secret is not.
+Not urgent while egress is the only per-field consumer.
+
 ### Persistence masking (recipes / audit) — separate decision [P2 decision]
 
 `recordableTokenV2` still screens page-derived strings before they reach the

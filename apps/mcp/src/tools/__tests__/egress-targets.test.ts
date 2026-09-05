@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { constants, publicEncrypt } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import sodium from "libsodium-wrappers";
@@ -18,9 +18,13 @@ import {
   EgressTargetError,
   executeEgressTarget,
   fetchVaultFieldsSealed,
+  openDotenvWriteContext,
+  readDotenv,
   resolveDotenvPath,
   selectEgressFieldName,
+  withDotenvLock,
   writeDotenv,
+  writeFileAtomic0600,
   serializeDotenvValue,
   unsafeProjectRoot,
   DEFAULT_EGRESS_TARGET_DEPS,
@@ -38,8 +42,12 @@ interface FakeApi {
   fetchCalls: Array<Record<string, unknown>>;
   outcomes: Array<Record<string, unknown>>;
   outcomeError: Error | null;
-  // A reporter that never settles — the network black hole finding 3 named.
+  // A reporter that honours abort (proves signal wiring).
   outcomeHangs: boolean;
+  // A reporter that IGNORES abort and never settles — the real network black
+  // hole. Only a settling timeout can bound this.
+  outcomeNeverSettles: boolean;
+  outcomeAbortSeen: boolean;
   fetchError: Error | null;
 }
 
@@ -52,6 +60,8 @@ function fakeApi(fields: Record<string, string> = { api_key: SECRET }): FakeApi 
     outcomes: [],
     outcomeError: null,
     outcomeHangs: false,
+    outcomeNeverSettles: false,
+    outcomeAbortSeen: false,
     fetchError: null,
     api: null as unknown as ApiClient,
   };
@@ -94,6 +104,13 @@ function fakeApi(fields: Record<string, string> = { api_key: SECRET }): FakeApi 
       return { reference: REFERENCE, encrypted_fields };
     },
     async reportEgressOutcome(input: Record<string, unknown>, signal?: AbortSignal) {
+      if (state.outcomeNeverSettles) {
+        signal?.addEventListener("abort", () => {
+          state.outcomeAbortSeen = true;
+        });
+        // Deliberately never settles, abort or not.
+        return await new Promise<never>(() => {});
+      }
       if (state.outcomeHangs) {
         return await new Promise<never>((_resolve, reject) => {
           signal?.addEventListener("abort", () =>
@@ -570,14 +587,17 @@ describe("github_repo_secret target", () => {
 // ── the outcome report is best-effort AND bounded ────────────────────────
 
 describe("egress-outcome reporting", () => {
-  it("returns the completed result even when the reporter never settles", async () => {
-    // Finding 3: an already-delivered secret must not be held hostage by the
-    // audit call. Real timers would make this a 5s test; fake ones prove the
-    // bound is the AbortController, not luck.
+  it("returns the completed result when the reporter IGNORES abort entirely", async () => {
+    // Finding 3, second pass. The previous version of this test used a mock
+    // that rejected on abort — which proves the signal is wired, not that the
+    // bound holds. An AbortSignal does not settle a promise: a fetch stack, a
+    // proxy, or a mocked client that ignores it leaves the await pending
+    // forever, and an already-delivered secret must never be held hostage by
+    // an audit row. This reporter is a true black hole.
     vi.useFakeTimers();
     try {
       const api = fakeApi();
-      api.outcomeHangs = true;
+      api.outcomeNeverSettles = true;
       const gh = fakeGithub();
 
       const pending = executeEgressTarget(
@@ -586,16 +606,46 @@ describe("egress-outcome reporting", () => {
         gh.deps,
       );
       let settled = false;
-      void pending.then(() => {
-        settled = true;
-      });
+      void pending.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
 
       await vi.advanceTimersByTimeAsync(1_000);
       expect(settled).toBe(false);
-      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(6_000);
 
       // Resolves, does not reject: the PUT succeeded, only the audit hung.
+      // The signal IS raised at the bound — but raising it settles nothing,
+      // which is exactly why the race is what makes the result return.
+      expect(api.outcomeAbortSeen).toBe(true);
       await expect(pending).resolves.toMatchObject({ ok: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns the ORIGINAL failure when the reporter never settles on an error path", async () => {
+    // The error path awaits the same report. A black hole there would swallow
+    // the failure the agent needs to see.
+    vi.useFakeTimers();
+    try {
+      const api = fakeApi();
+      api.outcomeNeverSettles = true;
+      const gh = fakeGithub({ put: { status: 403, body: '{"message":"nope"}' } });
+
+      const pending = executeEgressTarget(
+        api.api,
+        { selector: { reference: REFERENCE }, target: { ...GITHUB_TARGET } },
+        gh.deps,
+      );
+      const assertion = expect(pending).rejects.toThrow(/403/);
+      await vi.advanceTimersByTimeAsync(6_000);
+      await assertion;
     } finally {
       vi.useRealTimers();
     }
@@ -1137,6 +1187,85 @@ describe("dotenv_write target", () => {
     expect((await fs.stat(target)).mode & 0o777).toBe(0o600);
   });
 
+  it("refuses rather than clobbering a writer that never took the lock", async () => {
+    // Finding 2a. The lock serializes writers that USE it. An editor, or any
+    // other tool, does not — and renaming our temp file over their completed
+    // write destroys it silently. `writeFileAtomic0600` re-reads the target's
+    // stamp immediately before the rename; this drives that check directly by
+    // handing it a stamp that no longer matches.
+    const target = path.join(root, ".env");
+    await fs.writeFile(target, "BASE=1\n");
+    const destination = await resolveDotenvPath(".env");
+    const context = await openDotenvWriteContext(destination);
+    const stale = (await readDotenv(context)).stamp;
+
+    // Someone else writes while we were "thinking".
+    await fs.writeFile(target, "BASE=1\nEXTERNAL=keep\n");
+
+    await expect(writeFileAtomic0600(context, 'KEY="v"\n', stale)).rejects.toThrow();
+    await context.handle.close();
+
+    // Their update is intact, and no temp file was left behind.
+    expect(await fs.readFile(target, "utf8")).toBe("BASE=1\nEXTERNAL=keep\n");
+    expect(await fs.readdir(root)).toEqual([".env"]);
+  });
+
+  it("re-reads and reapplies when a non-locking writer lands mid-transaction", async () => {
+    // The same window, through the whole public path: a large value widens the
+    // temp write enough for an external writer to land, and the transaction
+    // must either preserve their update or fail — never silently drop it.
+    const target = path.join(root, ".env");
+    await fs.writeFile(target, "BASE=1\n");
+    const big = "x".repeat(4 * 1024 * 1024);
+
+    let external: Promise<void> | null = null;
+    const write = run({ path: ".env", name: "KEY" }, { api_key: big }).then(
+      () => "ok" as const,
+      () => "failed" as const,
+    );
+    // Land the external write while the 4MiB temp file is being written.
+    external = new Promise<void>((resolve) => {
+      setTimeout(() => {
+        void fs.writeFile(target, "BASE=1\nEXTERNAL=keep\n").then(() => resolve());
+      }, 1);
+    });
+
+    const [outcome] = await Promise.all([write, external]);
+    const finalContent = await fs.readFile(target, "utf8");
+
+    // The invariant: whatever happened, the external writer's completed update
+    // was not silently discarded.
+    if (outcome === "ok") {
+      expect(finalContent).toContain("EXTERNAL=keep");
+      expect(finalContent).toContain("KEY=");
+    } else {
+      expect(finalContent).toBe("BASE=1\nEXTERNAL=keep\n");
+    }
+  }, 30_000);
+
+  it("releases only a lock it still owns (ABA)", async () => {
+    // Finding 2b. Stale recovery and release used to unlink the lock PATHNAME
+    // unconditionally. If the lock we looked at is released and re-acquired by
+    // someone else in between, that deletes THEIR lock and admits two writers.
+    const target = path.join(root, ".env");
+    await fs.writeFile(target, "BASE=1\n");
+    const destination = await resolveDotenvPath(".env");
+    const lockPath = `${target}.lock`;
+
+    // A write whose body swaps the lock file for a DIFFERENT inode, standing in
+    // for "our lock expired and someone else took the pathname".
+    const context = await openDotenvWriteContext(destination);
+    await withDotenvLock(context, ".env.lock", async () => {
+      await fs.rm(lockPath, { force: true });
+      await fs.writeFile(lockPath, "someone-else");
+    });
+    await context.handle.close();
+
+    // Release must have left the impostor alone.
+    expect(await fs.readFile(lockPath, "utf8")).toBe("someone-else");
+    await fs.rm(lockPath, { force: true });
+  });
+
   it("refuses when the validated directory is swapped for a symlink before the write", async () => {
     // Finding 7: path validation is check-then-use. dev/ino identity is what
     // makes the recheck at write time mean something.
@@ -1158,6 +1287,80 @@ describe("dotenv_write target", () => {
       expect(await fs.readdir(outside)).toEqual([]);
     } finally {
       rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("writes through the directory HANDLE, so a swap before fs.open cannot escape", async () => {
+    // Finding 7, second pass. The reviewer swapped the directory in the window
+    // between the last identity check and the temp `fs.open`, and captured the
+    // plaintext from their own directory before cleanup removed it. Cleanup
+    // after exposure is not containment.
+    //
+    // The transaction now holds the validated directory OPEN and resolves every
+    // path through that descriptor, so the swap is simply irrelevant: the bytes
+    // follow the fd to the real directory.
+    const outside = await fs.realpath(mkdtempSync(path.join(tmpdir(), "ts-egress-swap2-")));
+    try {
+      await fs.mkdir(path.join(root, "config"));
+      const destination = await resolveDotenvPath("config/.env");
+      const context = await openDotenvWriteContext(destination);
+
+      // The swap, performed AFTER the context is open — precisely the window
+      // that used to leak.
+      await fs.rename(path.join(root, "config"), path.join(root, "config.moved"));
+      await fs.symlink(outside, path.join(root, "config"));
+
+      let wrote = true;
+      try {
+        await writeFileAtomic0600(context, `KEY="${SECRET}"\n`, null);
+      } catch {
+        wrote = false;
+      }
+      await context.handle.close();
+
+      // Whatever happened, NOTHING of ours is in the attacker's directory —
+      // not a finished file, not a temp file, not an empty one.
+      expect(await fs.readdir(outside)).toEqual([]);
+      // On a platform with fd-relative resolution the write simply succeeds
+      // against the real directory; without it, it refuses. Both are safe.
+      if (wrote) {
+        expect(await fs.readFile(path.join(root, "config.moved", ".env"), "utf8")).toBe(
+          `KEY="${SECRET}"\n`,
+        );
+      }
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("never leaves plaintext in a swapped-in directory, even transiently", async () => {
+    // The sharper form of the same property: poll the attacker's directory
+    // throughout the write and assert no file with the secret EVER appears —
+    // not "was cleaned up afterwards".
+    const outside = await fs.realpath(mkdtempSync(path.join(tmpdir(), "ts-egress-swap3-")));
+    let seenOutside: string[] = [];
+    const poll = setInterval(() => {
+      try {
+        seenOutside = seenOutside.concat(readdirSync(outside));
+      } catch {
+        /* directory momentarily unreadable */
+      }
+    }, 1);
+    try {
+      await fs.mkdir(path.join(root, "config"));
+      const destination = await resolveDotenvPath("config/.env");
+      const context = await openDotenvWriteContext(destination);
+      await fs.rename(path.join(root, "config"), path.join(root, "config.moved"));
+      await fs.symlink(outside, path.join(root, "config"));
+
+      await writeFileAtomic0600(context, `KEY="${SECRET}"\n`, null).catch(() => {});
+      await context.handle.close();
+    } finally {
+      clearInterval(poll);
+      const contents = readdirSync(outside);
+      rmSync(outside, { recursive: true, force: true });
+      expect(seenOutside).toEqual([]);
+      expect(contents).toEqual([]);
     }
   });
 

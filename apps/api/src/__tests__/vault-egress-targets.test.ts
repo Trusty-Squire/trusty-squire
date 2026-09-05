@@ -317,6 +317,53 @@ describe("POST /v1/vault/egress-fetch", () => {
     expect((res.json() as { error: string }).error).toBe("invalid_request");
   });
 
+  it("REJECTS a request for more than one field", async () => {
+    // Finding 11: `fields` being required did not stop a client from naming
+    // every field. Egress is one destination receiving one value.
+    const a = await actor(h, "many-fields@example.test");
+    const reference = await storeCred(h, a.cookie);
+
+    const res = await h.server.inject({
+      method: "POST",
+      url: "/v1/vault/egress-fetch",
+      headers: { authorization: `Bearer ${a.token}`, "content-type": "application/json" },
+      payload: {
+        reference,
+        fields: ["api_key", "username"],
+        encrypted_response_public_key: egressKeyPair().publicKey,
+        destination: { kind: "github_repo_secret", owner: "octo", repo: "demo" },
+      },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect((res.json() as { error: string }).error).toBe("invalid_request");
+    // Nothing was decrypted for a rejected request.
+    const events = await h.deps.vaultAuditStore.list(a.accountId);
+    expect(events.some((e) => e.type === VAULT_AUDIT_TYPES.retrieved)).toBe(false);
+  });
+
+  it("400s an unknown field name without leaking the credential's other fields", async () => {
+    const a = await actor(h, "unknown-field@example.test");
+    const reference = await storeCred(h, a.cookie);
+
+    const res = await h.server.inject({
+      method: "POST",
+      url: "/v1/vault/egress-fetch",
+      headers: { authorization: `Bearer ${a.token}`, "content-type": "application/json" },
+      payload: {
+        reference,
+        fields: ["nope"],
+        encrypted_response_public_key: egressKeyPair().publicKey,
+        destination: { kind: "github_repo_secret", owner: "octo", repo: "demo" },
+      },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ error: "missing_fields", fields: ["nope"] });
+    expect(res.body).not.toContain(SECRET_VALUE);
+    expect(res.body).not.toContain("username");
+  });
+
   it("seals ONLY the requested field out of a multi-field credential", async () => {
     const a = await actor(h, "one-field@example.test");
     const reference = await storeCred(h, a.cookie);
@@ -356,26 +403,6 @@ describe("POST /v1/vault/egress-fetch", () => {
 
     expect(res.statusCode).toBe(400);
     expect((res.json() as { error: string }).error).toBe("invalid_public_key");
-  });
-
-  it("400s a field the credential does not have", async () => {
-    const a = await actor(h, "missing@example.test");
-    const reference = await storeCred(h, a.cookie);
-
-    const res = await h.server.inject({
-      method: "POST",
-      url: "/v1/vault/egress-fetch",
-      headers: { authorization: `Bearer ${a.token}`, "content-type": "application/json" },
-      payload: {
-        reference,
-        fields: ["nope"],
-        encrypted_response_public_key: egressKeyPair().publicKey,
-        destination: { kind: "github_repo_secret", owner: "octo", repo: "demo" },
-      },
-    });
-
-    expect(res.statusCode).toBe(400);
-    expect(res.json()).toMatchObject({ error: "missing_fields", fields: ["nope"] });
   });
 
   it("REFUSES dotenv_write when `local-file` is not on allowed_hosts", async () => {

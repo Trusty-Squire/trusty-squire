@@ -851,8 +851,12 @@ client-supplied host back. `local-file` is an ordinary `allowed_hosts` entry the
 user adds with `edit_credential`, **not an exemption**; there is no destination
 kind that skips the allowlist. `.env` additionally requires the path to resolve
 under the project root (a second gate, never a substitute). Only the one field a
-destination needs is decrypted — the field is chosen from `list_credentials`'
-non-secret `field_names` before the fetch. There is deliberately **no**
+destination needs is RETURNED — the field is chosen from `list_credentials`'
+non-secret `field_names` before the fetch, the route accepts exactly one name,
+and `retrieveForEgress` narrows to it next to the decrypt. The single-ciphertext
+storage format still materialises the whole field map for one call inside the
+vault; that residency is a format property, tracked in `TODOS.md` as per-field
+envelopes — do not describe it as already solved. There is deliberately **no**
 destination-grants approval subsystem; do not add one. Deferred targets
 (Fly/Vercel/Cloudflare) are in `TODOS.md`.
 

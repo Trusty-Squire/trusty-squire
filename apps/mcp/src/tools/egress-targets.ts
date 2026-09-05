@@ -349,26 +349,110 @@ export async function resolveDotenvPath(rawPath: string): Promise<DotenvDestinat
   return { path: target, dir, dev: dirStat.dev, ino: dirStat.ino };
 }
 
-// Re-assert, at the moment of use, that the directory validated above is still
-// the SAME directory — not a symlink swapped in behind us. Path-based checks
-// alone are check-then-use; dev/ino identity is what makes the recheck mean
-// something.
-async function assertDirectoryUnchanged(destination: DotenvDestination): Promise<void> {
-  let current: Stats;
-  try {
-    current = await fs.stat(destination.dir);
-  } catch {
-    throw new EgressTargetError(
-      "path_outside_project",
-      `${destination.dir} disappeared between validation and write — nothing was written`,
-    );
-  }
+// ── the .env write transaction ───────────────────────────────────────────
+//
+// Path-based file operations are check-then-USE: whatever a path resolved to
+// when we validated it, it can resolve somewhere else by the time we write.
+// An attacker with write access to an in-project parent can rename the
+// validated directory and drop a symlink to their own directory in its place,
+// and every later `fs.open(path)` follows the symlink. Re-checking the path
+// afterwards detects the swap only after the plaintext has already been
+// written somewhere else — cleanup is not containment.
+//
+// So the whole transaction runs against an OPEN DIRECTORY HANDLE. `fstat` on
+// that fd cannot be spoofed by any path mutation, and on platforms with
+// `/proc/self/fd` every subsequent open/rename resolves THROUGH the fd
+// (openat semantics), so a swap of the original path is simply irrelevant.
+// Where that is unavailable the identity checks below are the guarantee, and
+// they run before any secret byte is written rather than after.
+
+export interface DotenvWriteContext {
+  handle: FileHandle;
+  // The prefix every file operation in this transaction joins onto. Either an
+  // fd-relative base (openat semantics) or the validated directory path.
+  base: string;
+  fdRelative: boolean;
+  destination: DotenvDestination;
+}
+
+// Confirm the directory fd we hold IS the directory that was validated. This
+// is fstat on our own descriptor — no path lookup, nothing to race.
+async function assertHandleIsValidatedDirectory(
+  handle: FileHandle,
+  destination: DotenvDestination,
+): Promise<void> {
+  const current = await handle.stat();
   if (current.dev !== destination.dev || current.ino !== destination.ino) {
     throw new EgressTargetError(
       "path_outside_project",
-      `${destination.dir} was replaced between validation and write — nothing was written`,
+      `${destination.dir} is no longer the directory that was validated — nothing was written`,
     );
   }
+}
+
+// Re-assert that the validated directory PATH still resolves to the directory
+// we hold open. Only meaningful on the fallback (non-fd-relative) route; under
+// openat semantics the path is irrelevant to where we write.
+async function assertPathStillResolvesToDirectory(context: DotenvWriteContext): Promise<void> {
+  if (context.fdRelative) return;
+  let current: Stats;
+  try {
+    current = await fs.stat(context.destination.dir);
+  } catch {
+    throw new EgressTargetError(
+      "path_outside_project",
+      `${context.destination.dir} disappeared during the write — nothing was written`,
+    );
+  }
+  if (current.dev !== context.destination.dev || current.ino !== context.destination.ino) {
+    throw new EgressTargetError(
+      "path_outside_project",
+      `${context.destination.dir} was replaced during the write — nothing was written`,
+    );
+  }
+}
+
+// `/proc/self/fd/<fd>` resolves through the descriptor, which is what turns
+// every path join below into an openat. Probed rather than assumed: it must
+// stat as the very same inode as the fd, or we fall back to the path.
+async function fdRelativeBase(handle: FileHandle, destination: DotenvDestination): Promise<string> {
+  const candidate = `/proc/self/fd/${handle.fd}`;
+  try {
+    const viaProc = await fs.stat(candidate);
+    if (viaProc.dev === destination.dev && viaProc.ino === destination.ino) return candidate;
+  } catch {
+    // No procfs (macOS, Windows) — fall through to the path.
+  }
+  return destination.dir;
+}
+
+// Exported with the transaction internals below so the check/use and
+// non-locking-writer windows can be driven deterministically in tests — those
+// windows are microseconds wide in production and cannot be hit by racing.
+export async function openDotenvWriteContext(
+  destination: DotenvDestination,
+): Promise<DotenvWriteContext> {
+  let handle: FileHandle;
+  try {
+    handle = await fs.open(destination.dir);
+  } catch {
+    throw new EgressTargetError(
+      "path_outside_project",
+      `${destination.dir} could not be opened — nothing was written`,
+    );
+  }
+  try {
+    await assertHandleIsValidatedDirectory(handle, destination);
+    const base = await fdRelativeBase(handle, destination);
+    return { handle, base, fdRelative: base !== destination.dir, destination };
+  } catch (err) {
+    await handle.close().catch(() => {});
+    throw err;
+  }
+}
+
+function inDir(context: DotenvWriteContext, name: string): string {
+  return path.join(context.base, name);
 }
 
 // Serialize .env writers on the same file. Atomic rename makes each individual
@@ -381,24 +465,50 @@ const DOTENV_LOCK_POLL_MS = 25;
 // A lock older than this belonged to a process that died holding it.
 const DOTENV_LOCK_STALE_MS = 30_000;
 
-async function withDotenvLock<T>(target: string, fn: () => Promise<T>): Promise<T> {
-  const lockPath = `${target}.lock`;
+// Remove a lock file ONLY if the path still names the exact inode we mean to
+// remove. Without this, both stale recovery and release are an ABA race: the
+// lock we looked at can be released and re-acquired by someone else between
+// our stat and our unlink, and we would delete THEIR lock — admitting two
+// writers, which is the whole thing the lock exists to prevent.
+async function unlinkLockIfSameInode(lockPath: string, ino: number): Promise<boolean> {
+  try {
+    const current = await fs.stat(lockPath);
+    if (current.ino !== ino) return false;
+    await fs.rm(lockPath, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function withDotenvLock<T>(
+  context: DotenvWriteContext,
+  lockName: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const lockPath = inDir(context, lockName);
   const deadline = Date.now() + DOTENV_LOCK_TIMEOUT_MS;
   let handle: FileHandle | null = null;
+  let ourIno = 0;
+  // The inode of the lock we have been waiting on. Stale recovery removes only
+  // a lock that has been the SAME inode for the whole stale window.
+  let watchedIno: number | null = null;
   for (;;) {
     try {
       handle = await fs.open(lockPath, "wx", 0o600);
+      ourIno = (await handle.stat()).ino;
       break;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      // Stale-lock recovery: a holder that died leaves the file behind, and
-      // its mtime is the only evidence of when that happened.
-      const age = await fs
-        .stat(lockPath)
-        .then((stat) => Date.now() - stat.mtimeMs)
-        .catch(() => 0);
-      if (age > DOTENV_LOCK_STALE_MS) {
-        await fs.rm(lockPath, { force: true }).catch(() => {});
+      const existing = await fs.stat(lockPath).catch(() => null);
+      if (existing === null) continue;
+      if (watchedIno !== existing.ino) {
+        // A different holder than the one we were watching: restart the clock.
+        watchedIno = existing.ino;
+      } else if (Date.now() - existing.mtimeMs > DOTENV_LOCK_STALE_MS) {
+        // Its holder died. Remove it by inode identity, so a lock acquired in
+        // the meantime is left alone.
+        await unlinkLockIfSameInode(lockPath, existing.ino);
         continue;
       }
       if (Date.now() >= deadline) {
@@ -414,43 +524,87 @@ async function withDotenvLock<T>(target: string, fn: () => Promise<T>): Promise<
     return await fn();
   } finally {
     await handle.close().catch(() => {});
-    await fs.rm(lockPath, { force: true }).catch(() => {});
+    await unlinkLockIfSameInode(lockPath, ourIno);
   }
 }
 
-// Atomic + 0600. The temp file is created in the destination directory so the
+// A file's identity as this module compares it: enough to notice ANY write,
+// including one by a process that never took our lock.
+export type FileStamp = string | null;
+
+function stampOf(stat: Stats): FileStamp {
+  return `${stat.size}:${stat.mtimeMs}:${stat.ino}`;
+}
+
+// Thrown when the target changed underneath the transaction. Retried, not
+// surfaced — a losing attempt re-reads and reapplies rather than clobbering.
+class DotenvChangedError extends Error {}
+
+// Atomic + 0600. The temp file lives in the destination directory so the
 // rename cannot cross a filesystem, and it carries 0600 from birth so the
 // secret is never briefly world-readable — including when it REPLACES an
 // existing file, whose looser mode must not be inherited.
 //
-// The directory identity is re-asserted twice: once before the temp file is
-// created, and again immediately before the rename, with an fstat on our own
-// fd confirming the temp file really landed on the validated device.
-async function writeFileAtomic0600(destination: DotenvDestination, content: string): Promise<void> {
-  await assertDirectoryUnchanged(destination);
-  const tmp = path.join(
-    destination.dir,
-    `.${path.basename(destination.path)}.${randomBytes(6).toString("hex")}.tmp`,
-  );
+// `expected` is the target's stamp as read under the lock. It is re-read
+// IMMEDIATELY BEFORE the rename, because a non-locking writer (an editor, some
+// other tool) can land between the read and the rename, and renaming over that
+// would silently destroy a completed write.
+export async function writeFileAtomic0600(
+  context: DotenvWriteContext,
+  content: string,
+  expected: FileStamp,
+): Promise<void> {
+  const targetName = path.basename(context.destination.path);
+  const tmpName = `.${targetName}.${randomBytes(6).toString("hex")}.tmp`;
+  const tmpPath = inDir(context, tmpName);
   let handle: FileHandle | null = null;
   try {
-    handle = await fs.open(tmp, "wx", 0o600);
-    await handle.writeFile(content, { encoding: "utf8" });
-    const written = await handle.stat();
-    if (written.dev !== destination.dev) {
-      throw new EgressTargetError(
-        "path_outside_project",
-        `${destination.dir} now resolves to a different filesystem — nothing was written`,
-      );
+    // Create the temp file EMPTY, then prove where it landed, and only then
+    // write the secret. Order is the whole point: a swap detected after the
+    // bytes are on disk has already leaked them.
+    handle = await fs.open(tmpPath, "wx", 0o600);
+    await assertHandleIsValidatedDirectory(context.handle, context.destination);
+    await assertPathStillResolvesToDirectory(context);
+    if (!context.fdRelative) {
+      // Without openat semantics, prove the file we hold open is the file at
+      // the path we expect inside the validated directory — this closes the
+      // ABA case where the directory is swapped away and back.
+      const held = await handle.stat();
+      const atPath = await fs.lstat(tmpPath);
+      if (held.dev !== atPath.dev || held.ino !== atPath.ino) {
+        throw new EgressTargetError(
+          "path_outside_project",
+          "the temporary file is not the one at its own path — nothing was written",
+        );
+      }
+      if (held.dev !== context.destination.dev) {
+        throw new EgressTargetError(
+          "path_outside_project",
+          `${context.destination.dir} now resolves to a different filesystem — nothing was written`,
+        );
+      }
     }
+
+    await handle.writeFile(content, { encoding: "utf8" });
     await handle.chmod(0o600);
     await handle.close();
     handle = null;
-    await assertDirectoryUnchanged(destination);
-    await fs.rename(tmp, destination.path);
+
+    // The last thing before the rename: has the target changed since we read
+    // it? A lock only serializes writers that take it.
+    const currentStamp = await fs
+      .stat(inDir(context, targetName))
+      .then(stampOf)
+      .catch(() => null);
+    if (currentStamp !== expected) {
+      throw new DotenvChangedError("the .env changed between read and write");
+    }
+    await assertHandleIsValidatedDirectory(context.handle, context.destination);
+    await assertPathStillResolvesToDirectory(context);
+    await fs.rename(tmpPath, inDir(context, targetName));
   } catch (err) {
     if (handle !== null) await handle.close().catch(() => {});
-    await fs.rm(tmp, { force: true }).catch(() => {});
+    await fs.rm(tmpPath, { force: true }).catch(() => {});
     throw err;
   }
 }
@@ -626,8 +780,13 @@ function outcomeDestination(
 
 // The delivery has already happened (or already failed) by the time this runs.
 // A missing audit row must never turn a completed egress into a reported
-// failure — and a network black hole must never stop the result from
-// returning at all, which is why the wait is bounded rather than open-ended.
+// failure — and it must never stop the result from returning AT ALL.
+//
+// An AbortSignal is advisory: it asks a cooperating implementation to settle,
+// and a fetch stack (or a proxy, or a mocked client) that ignores it leaves the
+// promise pending forever. So the wait is a RACE against a timer that resolves
+// on its own. The report keeps running in the background with its rejection
+// swallowed; nothing downstream waits on it.
 const OUTCOME_REPORT_TIMEOUT_MS = 5_000;
 
 async function reportOutcome(
@@ -638,9 +797,11 @@ async function reportOutcome(
   error?: string,
 ): Promise<void> {
   const controller = new AbortController();
+  // Cooperative implementations settle promptly on this; the race below is what
+  // makes the bound hold for the ones that do not.
   const timer = setTimeout(() => controller.abort(), OUTCOME_REPORT_TIMEOUT_MS);
-  try {
-    await api.reportEgressOutcome(
+  const report = api
+    .reportEgressOutcome(
       {
         reference,
         destination: outcomeDestination(target),
@@ -648,19 +809,35 @@ async function reportOutcome(
         ...(error !== undefined ? { error } : {}),
       },
       controller.signal,
-    );
-  } catch (err) {
-    process.stderr.write(
-      `[trusty-squire] egress outcome report failed: ${
-        controller.signal.aborted
-          ? `timed out after ${OUTCOME_REPORT_TIMEOUT_MS}ms`
-          : err instanceof Error
-            ? err.message
-            : String(err)
-      }\n`,
-    );
-  } finally {
+    )
+    .then(
+      () => "reported" as const,
+      (err: unknown) => {
+        process.stderr.write(
+          `[trusty-squire] egress outcome report failed: ${
+            err instanceof Error ? err.message : String(err)
+          }\n`,
+        );
+        return "failed" as const;
+      },
+    )
+    .finally(() => clearTimeout(timer));
+
+  let onTimeout: (() => void) | undefined;
+  const bound = new Promise<"timed_out">((resolve) => {
+    const t = setTimeout(() => resolve("timed_out"), OUTCOME_REPORT_TIMEOUT_MS);
+    onTimeout = () => clearTimeout(t);
+  });
+
+  const outcome = await Promise.race([report, bound]);
+  onTimeout?.();
+  if (outcome === "timed_out") {
+    // `report` is still pending. Its rejection is already handled above, so
+    // abandoning it here cannot surface as an unhandled rejection.
     clearTimeout(timer);
+    process.stderr.write(
+      `[trusty-squire] egress outcome report did not settle within ${OUTCOME_REPORT_TIMEOUT_MS}ms; continuing\n`,
+    );
   }
 }
 
@@ -845,15 +1022,18 @@ async function putGithubSecret(
 // its update with a stale snapshot.
 const DOTENV_WRITE_ATTEMPTS = 3;
 
-async function readDotenv(
-  target: string,
-): Promise<{ content: string | null; stamp: string | null }> {
+// Read the target through the transaction's directory handle, returning its
+// content and the stamp the rename will re-check.
+export async function readDotenv(
+  context: DotenvWriteContext,
+): Promise<{ content: string | null; stamp: FileStamp }> {
+  const target = inDir(context, path.basename(context.destination.path));
   try {
     const handle = await fs.open(target, "r");
     try {
       const stat = await handle.stat();
       const content = await handle.readFile("utf8");
-      return { content, stamp: `${stat.size}:${stat.mtimeMs}:${stat.ino}` };
+      return { content, stamp: stampOf(stat) };
     } finally {
       await handle.close();
     }
@@ -863,33 +1043,37 @@ async function readDotenv(
   }
 }
 
-// Exported so the check/use race in finding 7 can be driven deterministically:
-// a test resolves a destination, swaps the directory underneath it, and calls
-// this — which is exactly the window the identity re-check exists to close.
+// One read-modify-write transaction, bound to the directory handle for its
+// whole life. The lock serializes writers that use this code; the stamp
+// re-check immediately before the rename catches the ones that do not (an
+// editor, another tool) and re-reads instead of clobbering their update.
 export async function writeDotenv(
   destination: DotenvDestination,
   name: string,
   secret: string,
 ): Promise<{ path: string; created: boolean }> {
-  // Before the lockfile, not after: a directory that is no longer the one we
-  // validated must not even receive our lock.
-  await assertDirectoryUnchanged(destination);
-  return withDotenvLock(destination.path, async () => {
-    for (let attempt = 1; ; attempt += 1) {
-      const before = await readDotenv(destination.path);
-      const next = applyDotenvAssignment(before.content, name, secret);
-      const still = await readDotenv(destination.path);
-      if (still.stamp !== before.stamp) {
-        if (attempt >= DOTENV_WRITE_ATTEMPTS) {
-          throw new EgressTargetError(
-            "dotenv_write_conflict",
-            `${destination.path} kept changing underneath this write — nothing was written; retry when it settles`,
-          );
+  const context = await openDotenvWriteContext(destination);
+  try {
+    return await withDotenvLock(context, `${path.basename(destination.path)}.lock`, async () => {
+      for (let attempt = 1; ; attempt += 1) {
+        const before = await readDotenv(context);
+        const next = applyDotenvAssignment(before.content, name, secret);
+        try {
+          await writeFileAtomic0600(context, next, before.stamp);
+        } catch (err) {
+          if (err instanceof DotenvChangedError && attempt < DOTENV_WRITE_ATTEMPTS) continue;
+          if (err instanceof DotenvChangedError) {
+            throw new EgressTargetError(
+              "dotenv_write_conflict",
+              `${destination.path} kept changing underneath this write — nothing was written; retry when it settles`,
+            );
+          }
+          throw err;
         }
-        continue;
+        return { path: destination.path, created: before.content === null };
       }
-      await writeFileAtomic0600(destination, next);
-      return { path: destination.path, created: before.content === null };
-    }
-  });
+    });
+  } finally {
+    await context.handle.close().catch(() => {});
+  }
 }

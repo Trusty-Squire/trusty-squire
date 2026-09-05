@@ -17,6 +17,7 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import {
   AllowlistViolationError,
   CredentialNotFoundError,
+  EgressFieldNotFoundError,
   EGRESS_LOCAL_FILE_HOST,
 } from "@trusty-squire/vault";
 import type { ApiDeps } from "../services/deps.js";
@@ -82,12 +83,12 @@ const egressFetchBody = z
     reference: z.string().min(1).max(400).optional(),
     service: z.string().min(1).max(120).optional(),
     name: z.string().min(1).max(60).optional(),
-    // Required, and in practice exactly one: the client resolves which field
-    // it needs from the non-secret `field_names` in list_credentials BEFORE
-    // calling here, so only the field a destination actually receives is ever
-    // decrypted. Omitting it and sealing everything would widen plaintext
-    // residency for no gain.
-    fields: z.array(z.string().min(1).max(120)).min(1).max(20),
+    // EXACTLY one. The client resolves which field it needs from the
+    // non-secret `field_names` in list_credentials BEFORE calling here, so a
+    // destination only ever receives the one value it is for. Accepting a list
+    // would let an authenticated client ask for everything by name and call it
+    // least privilege.
+    fields: z.array(z.string().min(1).max(120)).length(1),
     encrypted_response_public_key: z.string().min(1).max(4096),
     destination: egressDestination,
   })
@@ -451,29 +452,25 @@ export const registerVaultAccessRoute: FastifyPluginAsync<{
     try {
       // The gate lives inside retrieveForEgress and runs BEFORE any decrypt —
       // an off-allowlist destination never causes plaintext to exist.
+      const requestedField = data.fields[0]!;
+      // The vault returns ONLY this field — the narrowing happens there, next
+      // to the decrypt, not here after the fact.
       const fields = await opts.deps.vault.retrieveForEgress(
         selected.reference,
         auth.account_id,
         targetHost,
         {
           kind: data.destination.kind,
+          field: requestedField,
           ...(destinationLabel !== undefined ? { destination: destinationLabel } : {}),
         },
       );
-      const requested = data.fields;
-      const missing = requested.filter((field) => fields[field] === undefined);
-      if (missing.length > 0) {
-        reply.code(400).send({ error: "missing_fields", fields: missing });
-        return;
-      }
       const encryptedFields: Record<string, string> = {};
       try {
-        for (const field of requested) {
-          encryptedFields[field] = encryptBrowserFillField(
-            fields[field]!,
-            data.encrypted_response_public_key,
-          );
-        }
+        encryptedFields[requestedField] = encryptBrowserFillField(
+          fields[requestedField]!,
+          data.encrypted_response_public_key,
+        );
       } catch {
         reply.code(400).send({ error: "invalid_public_key" });
         return;
@@ -488,6 +485,10 @@ export const registerVaultAccessRoute: FastifyPluginAsync<{
           host: err.host,
           hint: "Add the host to this credential's allowed_hosts in /vault.",
         });
+        return;
+      }
+      if (err instanceof EgressFieldNotFoundError) {
+        reply.code(400).send({ error: "missing_fields", fields: [err.field] });
         return;
       }
       if (err instanceof CredentialNotFoundError) {

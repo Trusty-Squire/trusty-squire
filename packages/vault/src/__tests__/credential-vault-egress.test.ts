@@ -13,6 +13,7 @@ import {
   AllowlistViolationError,
   CredentialNotFoundError,
   CredentialVault,
+  EgressFieldNotFoundError,
   EGRESS_LOCAL_FILE_HOST,
   EGRESS_PURPOSE,
   type VaultStoreInput,
@@ -26,6 +27,11 @@ const NOW = new Date("2026-09-05T12:00:00.000Z");
 const ACCOUNT = "01HACCOUNTAAAAAAAAAAAAAAAA";
 const OTHER_ACCOUNT = "01HACCOUNTBBBBBBBBBBBBBBBB";
 const SUB = "01HSUBAAAAAAAAAAAAAAAAAAAA";
+
+// Egress always names exactly ONE field — the single value the destination
+// receives.
+const GH = { kind: "github_repo_secret", field: "api_key" } as const;
+const DOTENV = { kind: "dotenv_write", field: "api_key" } as const;
 
 class CountingKMS implements KMSClient {
   decryptCalls = 0;
@@ -64,7 +70,7 @@ describe("retrieveForEgress", () => {
     const { vault, kms } = makeVault();
     const entry = await vault.store(storeInput());
 
-    const fields = await vault.retrieveForEgress(entry.reference, ACCOUNT, "api.github.com");
+    const fields = await vault.retrieveForEgress(entry.reference, ACCOUNT, "api.github.com", GH);
 
     expect(fields.api_key).toBe("sk-live-egress-secret");
     expect(kms.decryptCalls).toBe(1);
@@ -75,7 +81,7 @@ describe("retrieveForEgress", () => {
     const entry = await vault.store(storeInput());
 
     await expect(
-      vault.retrieveForEgress(entry.reference, ACCOUNT, "evil.example.com"),
+      vault.retrieveForEgress(entry.reference, ACCOUNT, "evil.example.com", GH),
     ).rejects.toBeInstanceOf(AllowlistViolationError);
 
     // The whole point: the gate ran first, so no plaintext was ever produced.
@@ -96,7 +102,7 @@ describe("retrieveForEgress", () => {
     const { vault, audit } = makeVault();
     const entry = await vault.store(storeInput());
 
-    await vault.retrieveForEgress(entry.reference, ACCOUNT, "api.github.com");
+    await vault.retrieveForEgress(entry.reference, ACCOUNT, "api.github.com", GH);
 
     const retrieved = (await audit.list(ACCOUNT)).filter(
       (e) => e.type === VAULT_AUDIT_TYPES.retrieved,
@@ -119,7 +125,7 @@ describe("retrieveForEgress", () => {
     const entry = await vault.store(storeInput({ observed_hosts: ["api.example.com"] }));
 
     await expect(
-      vault.retrieveForEgress(entry.reference, ACCOUNT, EGRESS_LOCAL_FILE_HOST),
+      vault.retrieveForEgress(entry.reference, ACCOUNT, EGRESS_LOCAL_FILE_HOST, DOTENV),
     ).rejects.toBeInstanceOf(AllowlistViolationError);
 
     expect(kms.decryptCalls).toBe(0);
@@ -133,9 +139,12 @@ describe("retrieveForEgress", () => {
       storeInput({ observed_hosts: ["api.example.com", EGRESS_LOCAL_FILE_HOST] }),
     );
 
-    const fields = await vault.retrieveForEgress(entry.reference, ACCOUNT, EGRESS_LOCAL_FILE_HOST, {
-      kind: "dotenv_write",
-    });
+    const fields = await vault.retrieveForEgress(
+      entry.reference,
+      ACCOUNT,
+      EGRESS_LOCAL_FILE_HOST,
+      DOTENV,
+    );
 
     expect(fields.api_key).toBe("sk-live-egress-secret");
     const retrieved = (await audit.list(ACCOUNT)).filter(
@@ -152,12 +161,12 @@ describe("retrieveForEgress", () => {
     const entry = await vault.store(storeInput());
 
     await vault.retrieveForEgress(entry.reference, ACCOUNT, "api.github.com", {
-      kind: "github_repo_secret",
+      ...GH,
       destination: "octo/demo:production",
     });
     await expect(
       vault.retrieveForEgress(entry.reference, ACCOUNT, "evil.example.com", {
-        kind: "github_repo_secret",
+        ...GH,
         destination: "octo/demo",
       }),
     ).rejects.toBeInstanceOf(AllowlistViolationError);
@@ -176,12 +185,50 @@ describe("retrieveForEgress", () => {
     expect(kms.decryptCalls).toBe(1);
   });
 
+  it("returns ONLY the requested field, never the rest of the credential", async () => {
+    // The stored credential has api_key AND username. Egress is for one
+    // destination and one value; nothing else may leave the vault call.
+    const { vault } = makeVault();
+    const entry = await vault.store(storeInput());
+
+    const fields = await vault.retrieveForEgress(entry.reference, ACCOUNT, "api.github.com", GH);
+
+    expect(Object.keys(fields)).toEqual(["api_key"]);
+    expect(fields.api_key).toBe("sk-live-egress-secret");
+    expect(JSON.stringify(fields)).not.toContain("ada");
+  });
+
+  it("selects a non-default field by name and still returns only it", async () => {
+    const { vault } = makeVault();
+    const entry = await vault.store(storeInput());
+
+    const fields = await vault.retrieveForEgress(entry.reference, ACCOUNT, "api.github.com", {
+      kind: "github_repo_secret",
+      field: "username",
+    });
+
+    expect(Object.keys(fields)).toEqual(["username"]);
+    expect(fields.username).toBe("ada");
+  });
+
+  it("throws rather than returning an empty map for a field the credential lacks", async () => {
+    const { vault } = makeVault();
+    const entry = await vault.store(storeInput());
+
+    await expect(
+      vault.retrieveForEgress(entry.reference, ACCOUNT, "api.github.com", {
+        kind: "github_repo_secret",
+        field: "nope",
+      }),
+    ).rejects.toBeInstanceOf(EgressFieldNotFoundError);
+  });
+
   it("refuses a credential belonging to another account", async () => {
     const { vault, kms } = makeVault();
     const entry = await vault.store(storeInput());
 
     await expect(
-      vault.retrieveForEgress(entry.reference, OTHER_ACCOUNT, "api.github.com"),
+      vault.retrieveForEgress(entry.reference, OTHER_ACCOUNT, "api.github.com", GH),
     ).rejects.toBeInstanceOf(CredentialNotFoundError);
     expect(kms.decryptCalls).toBe(0);
   });

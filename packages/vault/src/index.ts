@@ -24,6 +24,7 @@ export {
   StaleAssertionError,
   VaultRateLimitError,
   AllowlistViolationError,
+  EgressFieldNotFoundError,
   RestoreConflictError,
   DEFAULT_LABEL,
   MAX_CREDENTIAL_LABEL_LENGTH,

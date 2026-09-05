@@ -370,10 +370,10 @@ export class ApiClient {
     reference?: string;
     service?: string;
     name?: string;
-    // Required, and in practice exactly one: the field this destination needs,
-    // resolved from the non-secret `field_names` in list_credentials before
-    // calling. Nothing else is ever decrypted.
-    fields: string[];
+    // EXACTLY one: the field this destination needs, resolved from the
+    // non-secret `field_names` in list_credentials before calling. The route
+    // rejects a longer list — a destination receives one value.
+    fields: [string];
     encrypted_response_public_key: string;
     // The destination KIND plus (for GitHub) the repository identity for the
     // audit row. Deliberately NO host: the server derives the gated host from

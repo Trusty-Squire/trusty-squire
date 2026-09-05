@@ -32,9 +32,35 @@ function stripComments(text: string): string {
   return text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
 }
 
-// Every `from "..."` specifier in a file, imports and re-exports alike.
+// EVERY module specifier a file can pull in, in every spelling TypeScript
+// accepts. `from "x"` alone is not enough — a side-effect import has no `from`
+// at all, and a dynamic one hides behind a call:
+//
+//   import "./observation-redact.js";      // side effect, no bindings
+//   await import("./value-mask.js");       // dynamic
+//   export * from "./seal-policy.js";      // re-export
+//   require("./credential-shape.js");      // interop
+//
+// A guard that only understood `from` would have waved all but one of those
+// through, which is exactly how this check was bypassable.
+const SPECIFIER_PATTERNS: RegExp[] = [
+  // import ... from "x"  /  export ... from "x"
+  /\bfrom\s*["']([^"']+)["']/g,
+  // import "x"  (side effect; the negative lookahead keeps `import(` out)
+  /\bimport\s+["']([^"']+)["']/g,
+  // import("x")  /  await import("x")
+  /\bimport\s*\(\s*["']([^"']+)["']/g,
+  // require("x")
+  /\brequire\s*\(\s*["']([^"']+)["']/g,
+];
+
 function importSpecifiers(text: string): string[] {
-  return [...stripComments(text).matchAll(/\bfrom\s+"([^"]+)"/g)].map((m) => m[1]!);
+  const code = stripComments(text);
+  const found = new Set<string>();
+  for (const pattern of SPECIFIER_PATTERNS) {
+    for (const match of code.matchAll(pattern)) found.add(match[1]!);
+  }
+  return [...found];
 }
 
 // A module specifier that would bring a credential detector, or anything
@@ -163,17 +189,69 @@ describe("no read module re-declares a symbol #663 deleted", () => {
 
 describe("the guard actually catches the regressions it claims to", () => {
   it("catches a fresh detector import added to any read module", () => {
+    // A specifier no read module has today, in each spelling. Using one that
+    // provision-session already imports would dedupe into the approved set and
+    // let this test pass for the wrong reason.
     for (const relative of READ_PATH_MODULES) {
-      const mutated = `import { isCredentialShape } from "./credential-shape.js";\n${source(relative)}`;
-      const allowed = Object.keys(ALLOWED_DETECTOR_IMPORTS[relative] ?? {}).sort();
-      expect(detectorSpecifiers(mutated).sort()).not.toEqual(allowed);
+      for (const statement of [
+        'import { isCredentialShape } from "./credential-shape-v2.js";',
+        'import "./observation-redact.js";',
+        'const shape = await import("./value-mask.js");',
+        'const shape = require("./seal-policy.js");',
+      ]) {
+        const mutated = `${statement}\n${source(relative)}`;
+        const allowed = Object.keys(ALLOWED_DETECTOR_IMPORTS[relative] ?? {}).sort();
+        expect(detectorSpecifiers(mutated).sort(), `${relative}: ${statement}`).not.toEqual(
+          allowed,
+        );
+      }
     }
   });
 
-  it("catches a seal/redact/mask-shaped module imported into a read module", () => {
-    for (const specifier of ["./observation-redact.js", "./seal-policy.js", "./value-mask.js"]) {
-      const mutated = `import { screen } from "${specifier}";\n${source("bot/compact-observation-v2.ts")}`;
-      expect(detectorSpecifiers(mutated)).toEqual([specifier]);
+  it("catches a new BINDING added to an already-approved detector import", () => {
+    // provision-session legitimately imports credential-shape. The regression
+    // there is not a new module — it is a refusal predicate smuggled onto the
+    // import it already has.
+    const original = source("bot/provision-session.ts");
+    const mutated = original.replace(
+      '  pickRelaxedNearCopyCredential,\n} from "./credential-shape.js";',
+      '  pickRelaxedNearCopyCredential,\n  isMaskedDisplay,\n} from "./credential-shape.js";',
+    );
+    expect(mutated).not.toBe(original);
+    expect(namedImportsFrom(mutated, "./credential-shape.js")).toContain("isMaskedDisplay");
+  });
+
+  it("catches a seal/redact/mask-shaped module in EVERY import spelling", () => {
+    // The hole the second review found: only `import { x } from "y"` was
+    // recognised. Each of these is a real way to pull a module in.
+    const spellings = (specifier: string): string[] => [
+      `import { screen } from "${specifier}";`,
+      `import "${specifier}";`,
+      `import defaultScreen from "${specifier}";`,
+      `import * as screen from "${specifier}";`,
+      `export * from "${specifier}";`,
+      `export { screen } from "${specifier}";`,
+      `const screen = await import("${specifier}");`,
+      `const screen = require("${specifier}");`,
+      `import '${specifier}';`,
+    ];
+    for (const specifier of [
+      "./observation-redact.js",
+      "./seal-policy.js",
+      "./value-mask.js",
+      "./credential-shape.js",
+    ]) {
+      for (const statement of spellings(specifier)) {
+        const mutated = `${statement}\n${source("bot/compact-observation-v2.ts")}`;
+        expect(detectorSpecifiers(mutated), statement).toEqual([specifier]);
+      }
+    }
+  });
+
+  it("catches a dynamic detector import buried mid-file in any read module", () => {
+    for (const relative of READ_PATH_MODULES) {
+      const mutated = `${source(relative)}\nasync function screen() { return await import("./value-mask.js"); }\n`;
+      expect(detectorSpecifiers(mutated)).toContain("./value-mask.js");
     }
   });
 

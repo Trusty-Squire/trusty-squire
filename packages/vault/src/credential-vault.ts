@@ -241,6 +241,39 @@ export interface VaultClient {
   delete(reference: string, accountId: string): Promise<void>;
 }
 
+// Egress hands the local process ONE field — the single value the destination
+// receives — and drops every other field before returning.
+//
+// KNOWN LIMIT, stated rather than papered over: a credential is stored as ONE
+// AES-GCM ciphertext over `JSON.stringify(fields)`, so the decrypt necessarily
+// yields the whole map into server memory before this narrows it. That
+// transient residency can only be removed by a per-field envelope, which is a
+// storage-format change with a migration — filed in TODOS.md. What this DOES
+// guarantee is that nothing beyond the requested field is returned, sealed to
+// the caller, or leaves the process.
+function narrowToEgressField(
+  fields: Record<string, string>,
+  field: string,
+  reference: string,
+): Record<string, string> {
+  const value = fields[field];
+  for (const key of Object.keys(fields)) delete fields[key];
+  if (value === undefined) {
+    throw new EgressFieldNotFoundError(reference, field);
+  }
+  return { [field]: value };
+}
+
+export class EgressFieldNotFoundError extends Error {
+  constructor(
+    readonly reference: string,
+    readonly field: string,
+  ) {
+    super(`credential ${reference} has no field '${field}'`);
+    this.name = "EgressFieldNotFoundError";
+  }
+}
+
 // The audit `purpose` every vault-first egress row carries, so "where did
 // this key go" is one filter on the timeline.
 export const EGRESS_PURPOSE = "egress";
@@ -577,7 +610,7 @@ export class CredentialVault implements VaultClient {
     reference: string,
     accountId: string,
     targetHost: string,
-    destination?: { kind: string; destination?: string },
+    destination: { kind: string; destination?: string; field: string },
   ): Promise<Record<string, string>> {
     const record = await this.deps.store.findActive(reference);
     if (record === null || record.account_id !== accountId) {
@@ -599,7 +632,7 @@ export class CredentialVault implements VaultClient {
       });
       throw new AllowlistViolationError(reference, targetHost);
     }
-    return this.retrieveInternal({
+    const fields = await this.retrieveInternal({
       reference,
       purpose: EGRESS_PURPOSE,
       requester: "agent",
@@ -608,6 +641,7 @@ export class CredentialVault implements VaultClient {
       targetHost,
       extraPayload: destinationPayload,
     });
+    return narrowToEgressField(fields, destination.field, reference);
   }
 
   // A client-reported egress delivery outcome: what actually received the
