@@ -368,7 +368,7 @@ const COMPACT_V2_CONTRACT =
   "and x=x for a cross-origin child, while an omitted x means the main frame. Actions are search,close,next,previous,submit," +
   "continue,login,signup,add_to_cart,view_cart,checkout,payment,destructive; fields are email,password,username,name,phone,search,address," +
   "city,region,postal,country,date,quantity,promo,payment. Short labels are included for viewport-prioritized controls; " +
-  "labels are never screened for content — what the page renders is what you get. The row form omits field " +
+  "labels are exactly what the page renders. The row form omits field " +
   "values purely as a size budget: read a value off the page with operate_screenshot, or with an explicitly " +
   "selected V1 session. For a named product/control from the task, " +
   "call operate_observe_query with those task words; it returns matching actionable refs with labels " +
@@ -474,6 +474,10 @@ const screenshotSchema = z.object({
 export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
   name: "operate_screenshot",
   description:
+    "WARNING: EXPENSIVE — a screenshot is a full image and costs far more context than any " +
+    "observation. Reach for it ONLY when the DOM serialization (Compact V2 safe_table, " +
+    "operate_observe, operate_observe_query) is NOT sufficient to determine the page state; " +
+    "if the tables already tell you what the page is doing, do not take one. " +
     "Debugging tool: capture a screenshot of what the operate session's browser actually RENDERS — " +
     "the whole page (default: viewport; full_page:true for the whole scrollable page) or ONE specific " +
     "frame in isolation via frame_index or frame_url_contains, so a cross-origin challenge iframe (a " +
@@ -482,8 +486,7 @@ export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
     "selected V1 session, isn't enough to tell what state " +
     "a stuck page is actually in — a challenge that never advances, an unexpected layout, a captcha you " +
     "need to SEE. Read-only: never navigates, clicks, types, submits, or steals focus; it only reads " +
-    "pixels. The image is the page's real pixels — nothing is masked or redacted, and a capture is " +
-    "never refused because the page is showing a secret or a card value.",
+    "pixels. The image is the page's real pixels, whatever the page is showing.",
   inputSchema: screenshotSchema,
   jsonInputSchema: {
     type: "object",
@@ -1273,8 +1276,9 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "solve_captcha (detect and drive the in-session captcha gate; settled=false carries a " +
     "needs_user{gate,message,remedy} — FAIL FAST and relay it to the user), " +
     "await_verification (sender/into_slot/grant_inbox_consent — read the user's OWN inbox " +
-    "through their signed-in browser session for an email verification code/link, sealed " +
-    "into a slot with into_slot; Compact V2 never emits the raw code, link, or sender). Sealed username/password login lifecycle, never exposing raw " +
+    "through their signed-in browser session for an email verification code/link; pass into_slot " +
+    "to seal the code into a slot and fill it with type_secret instead of handling it yourself). " +
+    "Sealed username/password login lifecycle, never exposing raw " +
     "values: login_prepare_signup (login_slot/password_slot/password_length — seal the user's " +
     "captured email and a generated strong password into session slots; fill the signup form " +
     "with type_secret using the returned slots), login_store_signup (service + login_hosts, " +
@@ -2570,7 +2574,7 @@ export const operateLoginTool: Tool<z.infer<typeof loginSchema>> = {
 // operate_act's kinds and operate_recipe_save/run delegate to, and as direct handles
 // for tests that pin down that folded behavior.
 // operate_screenshot (2026-08-23) is a deliberate, narrow addition to this cut: a
-// read-only debugging instrument (page/frame pixels, money-fence redacted) with no
+// read-only debugging instrument (the page's or one frame's real pixels) with no
 // alias/kind it could fold into — operate_act's kinds all DO something; this only
 // looks.
 export const OPERATE_TOOLS: Tool[] = [

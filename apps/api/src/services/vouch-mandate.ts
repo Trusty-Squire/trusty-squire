@@ -1,5 +1,5 @@
 // Shared Vouchflow mandate verification for every approval-backed action.
-// Payment and credential mutation deliberately enter through this one
+// Payment, credential mutation, and credential fetch deliberately enter through this one
 // cryptographic boundary so a new approval kind cannot accidentally settle
 // for merely decoding a JWS or comparing an unsigned payload.
 
@@ -9,6 +9,9 @@ import { createLocalJWKSet, decodeJwt, jwtVerify, type JSONWebKeySet, type JWTPa
 
 export const PAYMENT_VOUCH_CONTEXT = "purchase";
 export const CREDENTIAL_MUTATION_VOUCH_CONTEXT = "vault_credential_mutation";
+// Disclosure, not mutation: a fetch mandate is signed over its own context so
+// a mutation or payment assertion can never be replayed to reveal a secret.
+export const CREDENTIAL_FETCH_VOUCH_CONTEXT = "vault_credential_fetch";
 
 export type VouchMandateFailureCode =
   | "vouchflow_expected_audience_unset"

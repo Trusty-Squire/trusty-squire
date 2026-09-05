@@ -546,6 +546,40 @@ Two failure modes measured live during a Xata Keycloak account-link signup
   before accepting a result as final. Do not treat a single empty/erroring
   Gmail search read as proof the message hasn't arrived.
 
+### 18. `fetch_credential` is the ONLY raw-value path, and it is not the agent's to open
+
+The vault stays a write-only sink for everything the agent can do alone.
+`fetch_credential` returns a raw credential value only after the USER signs
+that specific fetch with their passkey — first call mints an approval link and
+NO value, the resume with the returned `approval_id` delivers the value once.
+
+Three things about it are load-bearing; do not "simplify" any of them:
+
+- **It is a separate approval kind, not a third mutation `operation`.** Its own
+  vouch context (`vault_credential_fetch`), store, table, and routes. A signed
+  credential-mutation or payment mandate therefore has nowhere to land — the
+  refusal is structural, not a check someone can forget to write.
+- **Delivery is single-use.** The store's `approved → consumed` conditional
+  update is the fence; the decrypt happens only on that transition. Making the
+  resume idempotent "for convenience" would turn one approval into unlimited
+  reveals.
+- **The human half is owner-authenticated.** `ceremony`, `approve`, and `deny`
+  require the credential owner's web session, and a foreign attempt is refused
+  as `not_found` and written to the owner's ledger. Possession of the approval
+  link is not authority: the requesting agent necessarily holds that link, so
+  an unauthenticated approve endpoint lets anyone it reaches release the
+  owner's secret with their own genuine passkey. That was a real hole in the
+  first cut of this feature; do not reopen it for a "frictionless" link.
+- **Its description is a security control.** It has to keep steering agents to
+  `use_credential` first and keep saying that the value lands in the transcript.
+  A shorter, friendlier description measurably makes the model reach for the
+  raw key when injection would have done.
+
+`apps/api/src/__tests__/credential-fetch.test.ts` and
+`apps/mcp/src/tools/__tests__/never-exposed-paths.test.ts` are the oracles.
+Contract: [`SECURITY.md`](SECURITY.md#security-model); implementation map:
+[`CLAUDE.md`](CLAUDE.md).
+
 ## Final note
 
 You are reading this file because a prior agent burned four version numbers, confused users, and forced a human to intervene. The agent was not malicious. It was not lazy. It was pattern-matching on its own prose instead of on tool output.

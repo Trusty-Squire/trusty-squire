@@ -16,10 +16,12 @@ export { CredentialSlotConflictError } from "./types.js";
 
 export {
   CredentialVault,
+  VAULT_REVEAL_PURPOSE,
   coerceFieldMap,
   normalizeCredentialHosts,
   normalizeCredentialLabel,
   CredentialNotFoundError,
+  CredentialFieldsChangedError,
   FieldExistsError,
   StaleAssertionError,
   VaultRateLimitError,

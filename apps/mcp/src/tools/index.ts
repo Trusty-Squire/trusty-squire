@@ -20,6 +20,7 @@ import { auditLogTool } from "./audit-log.js";
 import { OPERATE_TOOLS } from "./provision-drive.js";
 import { listPaymentCardsTool, operatePayTool, operatePaymentStatusTool } from "./operate-pay.js";
 import { deleteCredentialTool, editCredentialTool } from "./credential-mutations.js";
+import { fetchCredentialTool } from "./fetch-credential.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
   name: string;
@@ -81,6 +82,9 @@ export function buildToolRegistry(env: NodeJS.ProcessEnv = process.env): Tool[] 
     editCredentialTool,
     deleteCredentialTool,
     useCredentialTool,
+    // The one approval-gated raw-value path. Listed AFTER use_credential so
+    // the cheaper, never-exposed route is the one the model reads first.
+    fetchCredentialTool,
     // Egress grants: a deployed app uses a vaulted credential via the proxy.
     grantAppAccessTool,
     listAppAccessTool,
@@ -118,6 +122,7 @@ export {
   editCredentialTool,
   deleteCredentialTool,
   useCredentialTool,
+  fetchCredentialTool,
   grantAppAccessTool,
   listAppAccessTool,
   revokeAppAccessTool,

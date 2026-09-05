@@ -24,13 +24,35 @@ and does not degrade the service for others is welcome.
 
 ## Security model
 
-### The core invariant: secrets never enter the model context
+### The core invariant: secrets do not enter the model context on the agent's own authority
 
-Agents can store credentials and request their *controlled use*, but they cannot
-read plaintext secret values back. This holds **even for a credential the agent
-just helped create** — a successful signup does not make the resulting API key
-visible to the model. The vault returns metadata, field names, masked values, and
-references; never the raw value.
+Agents can store credentials and request their *controlled use*, but no agent
+action reads a plaintext secret back. This holds **even for a credential the
+agent just helped create** — a successful signup does not make the resulting API
+key visible to the model. The vault returns metadata, field names, masked values,
+and references; never the raw value.
+
+**The one exception is `fetch_credential`, and a human opens it, not the agent.**
+Some tasks genuinely require the raw key to land somewhere the agent controls (a
+GitHub Actions secret, a `.env`, a config file) with no server-side injection
+path. `fetch_credential` mints an approval and returns a link; the raw value is
+released only after the user signs that exact approval with their passkey — the
+same Vouchflow ceremony that gates credential mutations and payments, under its
+own `vault_credential_fetch` context so a mutation or payment mandate can never
+authorize a reveal. The approval is bound to one (account, credential, field),
+delivery is single-use, and expiry or denial releases nothing. The human who
+answers it is the credential's OWNER: the ceremony, approve, and deny endpoints
+require that account's signed-in web session, so the approval link reaching
+anybody else — starting with the agent that requested it — is not authority to
+answer it. Every outcome — approved, delivered, denied, expired, attempted by a
+non-owner, or failed after the approval was spent — is audited under
+`purpose: "reveal"` with the credential reference, the approval id, and the
+approving account, and never the value. Implementation:
+[`apps/api/src/routes/credential-fetch.ts`](apps/api/src/routes/credential-fetch.ts).
+
+The property this preserves is not "the model can never see a secret" — it is
+"a secret reaches the model only when a human, holding the passkey, decides it
+should, for one named credential, once."
 
 ### Encryption at rest: server-managed credentials
 
@@ -307,7 +329,9 @@ events use the vault audit retention window, which defaults to 365 days.
 - The **user** may paste or create a secret.
 - The **MCP server** may store a secret and use it through controlled tools.
 - The **agent** may see credential metadata, field names, masked values, and
-  vault references — but **cannot read plaintext values** from the vault.
+  vault references. It **cannot read plaintext values** from the vault on its
+  own authority; the sole raw-value path, `fetch_credential`, requires a
+  passkey-signed approval per fetch (see the core invariant above).
 - **Sealed slots** let browser automation type a secret (e.g. a password) into
   the main document or a child frame on that page's own registrable domain
   without the agent ever reading the slot's contents. A raw slot value is
