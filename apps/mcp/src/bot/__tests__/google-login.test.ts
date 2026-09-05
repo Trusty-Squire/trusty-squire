@@ -320,7 +320,7 @@ describe("login browser lifecycle guards", () => {
 
     const controller = new BrowserController({ profileDir });
     const cleanupUnproven = vi.fn(async () => undefined);
-    const internals = controller as unknown as {
+    const internals = (controller as unknown as { processOwner: unknown }).processOwner as {
       waitForPersistentFallbackIdentity: () => Promise<{ state: "unknown" }>;
       requirePersistentFallbackOwnership: (cleanup: () => Promise<void>) => Promise<unknown>;
     };
@@ -334,7 +334,7 @@ describe("login browser lifecycle guards", () => {
   it("returns an unproven pre-launch close for quarantine", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-browser-cancel-"));
     const controller = new BrowserController({ profileDir });
-    const internals = controller as unknown as {
+    const internals = (controller as unknown as { processOwner: unknown }).processOwner as {
       startBrowser: () => Promise<void>;
       closeBrowser: () => Promise<"closed" | "force_closed_unproven" | "unknown">;
     };
@@ -375,7 +375,7 @@ describe("login browser lifecycle guards", () => {
       });
       symlinkSync(`${hostname()}-${replacement.pid!}`, join(profileDir, "SingletonLock"));
       const controller = new BrowserController({ profileDir });
-      const internals = controller as unknown as {
+      const internals = (controller as unknown as { processOwner: unknown }).processOwner as {
         startCancellationRequested: boolean;
       };
       internals.startCancellationRequested = true;
@@ -396,7 +396,7 @@ describe("login browser lifecycle guards", () => {
       releaseStart = resolve;
     });
     const controller = new BrowserController({ profileDir });
-    const internals = controller as unknown as {
+    const internals = (controller as unknown as { processOwner: unknown }).processOwner as {
       startLaunchCommitted: boolean;
       startBrowser: () => Promise<void>;
       closeBrowser: () => Promise<"closed" | "force_closed_unproven" | "unknown">;
@@ -432,7 +432,7 @@ describe("login browser lifecycle guards", () => {
       releaseStart = resolve;
     });
     const controller = new BrowserController({ profileDir });
-    const internals = controller as unknown as {
+    const internals = (controller as unknown as { processOwner: unknown }).processOwner as {
       startBrowser: () => Promise<void>;
       closeBrowser: () => Promise<"closed" | "force_closed_unproven" | "unknown">;
     };
