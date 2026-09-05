@@ -36,8 +36,9 @@ headers/body use \${SECRET} for a single-field credential, or
 \${SECRET.<field>} for a multi-field one (e.g. \${SECRET.access_key_id},
 \${SECRET.secret_access_key}); \${SECRET_JSON[.field]} JSON-escapes. Call
 list_credentials to see a credential's field names. Pass \`service\` or
-\`reference\` plus the HTTP fields (method, url, headers, body). This is
-the ONLY way to use a stored secret — there is no raw-value extraction.
+\`reference\` plus the HTTP fields (method, url, headers, body). Prefer this
+over fetch_credential for every "call an API with the key" task: the value
+never enters your context, and no human approval is needed.
 For APIs that authenticate via a query-string key (e.g. FRED's
 \`api_key\`), put the secret in \`query\` — \`query: { api_key: "\${SECRET}" }\`
 — NOT in the url (a \${SECRET} in the url is rejected; the server injects

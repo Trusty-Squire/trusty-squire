@@ -116,6 +116,22 @@ export interface CredentialMutationApproval {
   error?: string;
 }
 
+// fetch_credential's approval record. `fields` is present ONLY on the single
+// delivery that follows a passkey-signed approval; every other status carries
+// no value at all.
+export interface CredentialFetchApproval {
+  approval_id: string;
+  approval_url: string;
+  status: "pending" | "approved" | "consumed" | "denied" | "expired" | "failed";
+  credential: { reference: string; service: string | null; name: string };
+  field: string | null;
+  field_names: string[];
+  expires_at: string;
+  fields?: Record<string, string>;
+  fetched_at?: string;
+  error?: string;
+}
+
 export interface DirectoryEntry {
   service: string;
   latest_version: string;
@@ -328,6 +344,19 @@ export class ApiClient {
 
   async getCredentialMutationApproval(id: string): Promise<CredentialMutationApproval> {
     return this.get(`/v1/vault/mutation-approvals/${encodeURIComponent(id)}`);
+  }
+
+  async createCredentialFetchApproval(input: {
+    reference?: string;
+    service?: string;
+    name?: string;
+    field?: string;
+  }): Promise<CredentialFetchApproval> {
+    return this.post("/v1/vault/fetch-approvals", input);
+  }
+
+  async getCredentialFetchApproval(id: string): Promise<CredentialFetchApproval> {
+    return this.get(`/v1/vault/fetch-approvals/${encodeURIComponent(id)}`);
   }
 
   // ── use_credential: write-only-sink proxy ─────────────────

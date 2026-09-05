@@ -77,12 +77,13 @@ export function shouldIdleExit(
 // Injected into the model's system prompt every turn (≤2KB). Teaches
 // the routing between store / use / request so the agent reaches for
 // the right credential tool without the user spelling it out.
-const SERVER_INSTRUCTIONS = `This is Trusty Squire — it drives a real browser through signup, provisioning,
+export const SERVER_INSTRUCTIONS = `This is Trusty Squire — it drives a real browser through signup, provisioning,
 and checkout flows on the user's behalf (\`operate_start\`/\`operate_observe\`/
 \`operate_act\`/\`operate_pay\`/\`operate_finish\`, plus recipe replay), and backs it
 with a write-only credential vault.
 The user's secrets (API keys, tokens, passwords) live in the vault encrypted;
-they are NOT in the conversation context and CANNOT be read back to you.
+they are NOT in the conversation context. Reading one back is possible but
+costly — see fetch_credential below.
 Routing rules for THIS server's vault tools:
 
 - User pastes a secret-shaped value (sk-…, ghp_…, AKIA…, eyJ…) into chat
@@ -100,9 +101,11 @@ Routing rules for THIS server's vault tools:
   with the returned approval_id only after the user signs the exact mutation.
 - Rotating a secret value = call store_credential again with the new value (it
   overwrites). edit_credential cannot read or change secret fields.
-- There is NO way to extract a raw secret value to you — by design. If a
-  user wants the plaintext (e.g. for a .env file), they read it from the
-  Trusty Squire web vault themselves.`;
+- The raw value reaches you ONLY via fetch_credential, and only after the
+  user signs a passkey approval. It then lives in your transcript forever,
+  so use it only when the plaintext must land somewhere you control (a
+  GitHub Actions secret, a .env, a config file) with no server-side
+  injection path. For calling an API, use_credential is always the answer.`;
 
 export interface ServerCallLifecycle {
   started(): boolean;

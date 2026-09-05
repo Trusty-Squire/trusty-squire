@@ -118,6 +118,10 @@ import type {
 } from "./types.js";
 import { CredentialSlotConflictError, VAULT_AUDIT_TYPES } from "./types.js";
 
+// The audit `purpose` every approval-gated agent reveal is recorded under.
+// One constant so the API route, the vault, and the tests cannot drift.
+export const VAULT_REVEAL_PURPOSE = "reveal";
+
 export const DEFAULT_LABEL = "default";
 export const MAX_CREDENTIAL_LABEL_LENGTH = 60;
 
@@ -572,6 +576,32 @@ export class CredentialVault implements VaultClient {
     return fields;
   }
 
+  // Approval-gated AGENT reveal — the only path that hands a raw credential
+  // value back to an agent. The caller must already have verified a
+  // passkey-signed fetch approval bound to this exact (account, credential);
+  // this method performs no authorization of its own beyond account scoping,
+  // which is why nothing but the fetch-approval route may call it. Audited
+  // under purpose `reveal` with the approval that authorized it, and counted
+  // against the same retrieval ceiling as every other decrypt path.
+  async revealForApprovedFetch(
+    reference: string,
+    accountId: string,
+    approvalId: string,
+  ): Promise<Record<string, string>> {
+    const record = await this.deps.store.findActive(reference);
+    if (record === null || record.account_id !== accountId) {
+      throw new CredentialNotFoundError(reference);
+    }
+    return this.retrieveInternal({
+      reference,
+      purpose: VAULT_REVEAL_PURPOSE,
+      requester: "agent",
+      signingDeviceId: null,
+      assertion: null,
+      approvalId,
+    });
+  }
+
   async delete(
     reference: string,
     accountId: string,
@@ -813,8 +843,12 @@ export class CredentialVault implements VaultClient {
     requester: VaultRequester;
     signingDeviceId: string | null;
     assertion: DeviceAssertion | null;
+    // Set only by the approval-gated reveal, so an auditor reading a
+    // purpose=reveal row can find the exact approval that authorized it.
+    approvalId?: string;
   }): Promise<Record<string, string>> {
     const { reference, purpose, requester, signingDeviceId, assertion } = args;
+    const approval = args.approvalId === undefined ? {} : { approval_id: args.approvalId };
     const record = await this.deps.store.findActive(reference);
     const accountId = record?.account_id ?? "";
 
@@ -824,6 +858,7 @@ export class CredentialVault implements VaultClient {
         purpose,
         requester,
         signing_device_id: signingDeviceId,
+        ...approval,
       });
     }
     if (assertion !== null) {
@@ -835,6 +870,7 @@ export class CredentialVault implements VaultClient {
           requester,
           signing_device_id: signingDeviceId,
           outcome: "stale_assertion",
+          ...approval,
         });
         throw new StaleAssertionError(
           `device assertion stale or invalid (age=${Number.isNaN(ageMs) ? "NaN" : ageMs}ms)`,
@@ -848,6 +884,7 @@ export class CredentialVault implements VaultClient {
         requester,
         signing_device_id: signingDeviceId,
         outcome: "missing_credential",
+        ...approval,
       });
       throw new CredentialNotFoundError(reference);
     }
@@ -860,6 +897,7 @@ export class CredentialVault implements VaultClient {
       requester,
       signing_device_id: signingDeviceId,
       outcome: "success",
+      ...approval,
     });
     return fields;
   }
@@ -873,7 +911,7 @@ export class CredentialVault implements VaultClient {
     accountId: string,
     auditOnLimit: Pick<
       VaultAuditPayload,
-      "reference" | "purpose" | "requester" | "signing_device_id"
+      "reference" | "purpose" | "requester" | "signing_device_id" | "approval_id"
     >,
   ): Promise<void> {
     const since = new Date(this.now().getTime() - RATE_LIMIT_WINDOW_MS);

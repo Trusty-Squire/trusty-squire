@@ -111,7 +111,17 @@ export interface VaultAuditPayload {
   signing_device_id?: string | null;
   ip?: string;
   user_agent?: string;
-  outcome?: "success" | "rate_limited" | "stale_assertion" | "missing_credential";
+  // The vault's own retrieval outcomes. `denied` and `expired` belong to the
+  // approval-gated agent reveal (fetch_credential): the human refused the
+  // disclosure, or the signed approval aged out before it was claimed. Both
+  // are recorded with NO value having been decrypted.
+  outcome?:
+    | "success"
+    | "rate_limited"
+    | "stale_assertion"
+    | "missing_credential"
+    | "denied"
+    | "expired";
   credential_type?: string;
   service?: string;
   label?: string;

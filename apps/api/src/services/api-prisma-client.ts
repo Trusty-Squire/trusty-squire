@@ -193,6 +193,27 @@ interface CredentialMutationApprovalRow {
   executed_at: Date | null;
 }
 
+interface CredentialFetchApprovalRow {
+  id: string;
+  account_id: string;
+  credential_reference: string;
+  credential_service: string | null;
+  credential_label: string;
+  field: string | null;
+  field_names: string[];
+  nonce: string;
+  agent: string;
+  requester_kind: string;
+  intent_hash: string;
+  status: string;
+  failure_code: string | null;
+  mandate_id: string | null;
+  created_at: Date;
+  expires_at: Date;
+  approved_at: Date | null;
+  delivered_at: Date | null;
+}
+
 interface EgressGrantRow {
   id: string;
   account_id: string;
@@ -394,6 +415,18 @@ export interface ApiPrismaClient {
       where: Record<string, unknown>;
       orderBy?: Record<string, unknown>;
     }): Promise<CredentialMutationApprovalRow | null>;
+    updateMany(args: {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }): Promise<{ count: number }>;
+    deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
+  };
+  credentialFetchApproval: {
+    create(args: { data: Record<string, unknown>; select: { id: true } }): Promise<{ id: string }>;
+    findFirst(args: {
+      where: Record<string, unknown>;
+      orderBy?: Record<string, unknown>;
+    }): Promise<CredentialFetchApprovalRow | null>;
     updateMany(args: {
       where: Record<string, unknown>;
       data: Record<string, unknown>;

@@ -74,6 +74,11 @@ import {
 } from "./credential-mutation-approval-store.js";
 import { PrismaCredentialMutationApprovalStore } from "./prisma-credential-mutation-approval-store.js";
 import {
+  InMemoryCredentialFetchApprovalStore,
+  type CredentialFetchApprovalStore,
+} from "./credential-fetch-approval-store.js";
+import { PrismaCredentialFetchApprovalStore } from "./prisma-credential-fetch-approval-store.js";
+import {
   InMemoryTelegramLinkTokenStore,
   type TelegramLinkTokenStore,
 } from "./in-memory-telegram-link-token-store.js";
@@ -101,6 +106,9 @@ export interface ApiDeps {
   paymentAuditStore: PaymentAuditStore;
   pendingPaymentApprovalStore: PendingPaymentApprovalStore;
   credentialMutationApprovalStore: CredentialMutationApprovalStore;
+  // fetch_credential's approval records — the raw-value disclosure path.
+  // Separate from the mutation store on purpose (see its module header).
+  credentialFetchApprovalStore: CredentialFetchApprovalStore;
   telegramLinkTokenStore: TelegramLinkTokenStore;
   egressGrantStore: EgressGrantStore;
   machineTokenStore: MachineTokenStore;
@@ -282,10 +290,15 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
   let e2eCredentialStore: E2ECredentialStore;
   let pendingPaymentApprovalStore: PendingPaymentApprovalStore;
   let credentialMutationApprovalStore: CredentialMutationApprovalStore;
+  let credentialFetchApprovalStore: CredentialFetchApprovalStore;
   if (authPrisma !== null) {
     e2eCredentialStore = new PrismaE2ECredentialStore(authPrisma);
     pendingPaymentApprovalStore = new PrismaPendingPaymentApprovalStore(authPrisma);
     credentialMutationApprovalStore = new PrismaCredentialMutationApprovalStore(authPrisma);
+    credentialFetchApprovalStore = new PrismaCredentialFetchApprovalStore(
+      authPrisma,
+      opts.now ?? (() => new Date()),
+    );
   } else {
     const inMemoryE2ECredentialStore = new InMemoryE2ECredentialStore(opts.now);
     e2eCredentialStore = inMemoryE2ECredentialStore;
@@ -296,6 +309,9 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     credentialMutationApprovalStore = new InMemoryCredentialMutationApprovalStore(
       credentialStore,
       persistedVaultAuditStore,
+      opts.now ?? (() => new Date()),
+    );
+    credentialFetchApprovalStore = new InMemoryCredentialFetchApprovalStore(
       opts.now ?? (() => new Date()),
     );
   }
@@ -406,6 +422,7 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     paymentAuditStore,
     pendingPaymentApprovalStore,
     credentialMutationApprovalStore,
+    credentialFetchApprovalStore,
     telegramLinkTokenStore,
     egressGrantStore,
     machineTokenStore,

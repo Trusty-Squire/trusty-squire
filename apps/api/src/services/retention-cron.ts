@@ -7,6 +7,7 @@
 //     - Delete PaymentAuditEvent older than 365d
 //     - Delete PendingPaymentApproval rows past expires_at
 //     - Delete CredentialMutationApproval rows past expires_at
+//     - Delete CredentialFetchApproval rows past expires_at
 //     - Delete TelegramLinkToken rows past expires_at
 //
 // Running this in-process is fine for v1: one machine, one schedule.
@@ -33,6 +34,7 @@ export interface RetentionCronStats {
   payment_audit_deleted: number;
   payment_approvals_deleted: number;
   credential_mutation_approvals_deleted: number;
+  credential_fetch_approvals_deleted: number;
   telegram_link_tokens_deleted: number;
   duration_ms: number;
   errors: string[];
@@ -110,6 +112,7 @@ export class RetentionCron {
       payment_audit_deleted: 0,
       payment_approvals_deleted: 0,
       credential_mutation_approvals_deleted: 0,
+      credential_fetch_approvals_deleted: 0,
       telegram_link_tokens_deleted: 0,
       duration_ms: 0,
       errors: [],
@@ -175,6 +178,17 @@ export class RetentionCron {
       } catch (err) {
         stats.errors.push(
           `credential mutation approval delete: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
+      try {
+        const r = await this.deps.authPrisma.credentialFetchApproval.deleteMany({
+          where: { expires_at: { lt: startedAt } },
+        });
+        stats.credential_fetch_approvals_deleted = r.count;
+      } catch (err) {
+        stats.errors.push(
+          `credential fetch approval delete: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
 
