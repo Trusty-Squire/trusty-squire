@@ -60,9 +60,12 @@ describe("isCredentialNoise (reject non-key page text)", () => {
     expect(isCredentialNoise("https://example.com/x")).toBe(true);
     expect(isCredentialNoise("trusty-squire-dogfood-20260625")).toBe(true);
   });
-  it("now also rejects a masked display (the unified mask check — previously only ellipsis)", () => {
-    expect(isCredentialNoise("••••3f")).toBe(true);
-    expect(isCredentialNoise("sk-or-v1-1687…")).toBe(true);
+  it("no longer rejects a masked display — the operator returns what the page renders", () => {
+    expect(isCredentialNoise("••••3f")).toBe(false);
+    expect(isCredentialNoise("sk-or-v1-1687…")).toBe(false);
+    // isMaskedDisplay itself still exists: extract RANKS a masked candidate
+    // behind a revealed sibling, it just never refuses one.
+    expect(isMaskedDisplay("••••3f")).toBe(true);
   });
   it("does NOT reject a real key", () => {
     expect(isCredentialNoise("re_fake_1234567890abcdef")).toBe(false);

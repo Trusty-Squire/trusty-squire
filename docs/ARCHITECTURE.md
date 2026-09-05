@@ -240,16 +240,18 @@ agent starts operate_pay in the addressed checkout session
   -> before a single-page submit, a competing merchant-saved card radio is switched
      only when there is one unambiguous new-card choice; the choice and sealed values
      are rechecked immediately before dispatch, and every ambiguous state fails closed
-  -> the raw card is zeroed; sealed, observation-masked page fields remain, while
-     session state retains only approval/mandate and card-reference metadata
+  -> the raw card is zeroed; the filled page fields remain (marked for cleanup and
+     saved-card resolution, NOT masked — observations and screenshots show them),
+     while session state retains only approval/mandate and card-reference metadata
   -> the caller verifies the live final total against the approved amount itself
      and places the order through operate_act. For click/js_click, the session's
      fill-time approval snapshot permits at most one dispatch to a control matching
      the shared pay/place-order label heuristic; a repeat is refused and requires a
      fresh approval in a fresh session. Non-charge-labeled clicks, key presses, and
-     oauth_click remain ungated. Card VALUES stay masked in observations throughout
-     regardless of who submits (the money-fence guarantee lives in the session's
-     payment-field seal, not in who clicks)
+     oauth_click remain ungated. Card VALUES are visible in observations and
+     screenshots once filled — the operator masks no read (owner's order,
+     2026-09-05); the money-fence is the phone approval and the one-shot charge
+     click, not concealment
   -> a dispatched recognized place-order click best-effort records one metadata-only
      `vault.payment_executed` event with `payment_place_order_attempted` status,
      bound to the approval, optional mandate, approved amount/currency, merchant,
@@ -257,8 +259,8 @@ agent starts operate_pay in the addressed checkout session
   -> split confirm makes no browser or provider call: it reads no total, verifies
      no amount, and submits nothing (it never charges), so it reports the approved
      merchant/amount/currency back and releases the pending-fill lease into a
-     sealed state — masking stays active since the fields were never actually
-     cleared, and the session then refuses further payment operations for its
+     sealed state — the payment-field marker stays set since the fields were never
+     actually cleared, and the session then refuses further payment operations for its
      lifetime; there is no same-session refill, only operate_finish + a fresh
      session recovers a stuck or declined payment
   -> the addressed session owns and serializes payment entry and confirmation;

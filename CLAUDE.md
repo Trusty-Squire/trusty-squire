@@ -128,22 +128,15 @@ silent failures.
     `frame_url_contains` — the case it exists for: a cross-origin ACS/challenge
     or captcha iframe a full-page shot won't show clearly). Read-only — no
     navigation, click, type, focus/`bringToFront`, or DOM mutation.
-    **Primary money-fence: capture-scoped fail-closed refusal.**
-    `captureScreenshot` (`provision-session.ts`) always refuses during an
-    active card fill (`session.paymentFieldSealActive` or an operating payment
-    lease). Otherwise `assertOperatorScreenshotFramesNoSealedValues`
-    (`browser.ts`) checks only the page/frame set requested for capture and
-    refuses with
-    `screenshot_unavailable_sealed_context` if it finds a live sealed,
-    password, or card-shaped value (including a Luhn-valid PAN), or cannot
-    inspect an included frame. Historical `session.sealedFieldKeys` alone are
-    not a refusal: that allows an isolated clean ACS/3DS challenge frame and a
-    post-navigation error page after the sealed form has gone. The pixel-
-    redaction machinery (`SCREENSHOT_REDACTION_SELECTORS` + durable sealed-field
-    identity + Luhn-valid-value detection via `containsLuhnPanSpan`, collected
-    as capture-time rectangles, fail-closed on any unresolvable selector/
-    geometry, composited over the captured bytes with `sharp`, and guarded by a
-    post-capture stability re-check) remains defense in depth. Server-
+    **No redaction and no refusal (2026-09-05, owner's order to remove ALL
+    seals).** The capture returns the page's real pixels. The capture-scoped
+    fail-closed refusal, the `screenshot_unavailable_sealed_context` error code,
+    the `SCREENSHOT_REDACTION_SELECTORS` mask set, the durable sealed-field
+    identity machinery, and the `sharp` compositing pass are all gone;
+    `captureOperatorScreenshot` takes only the frame options. A card fill in
+    progress is not a refusal. Do NOT reintroduce a reduced seal, an env flag,
+    or a "payments only" remnant — see `AGENTS.md` §16 and
+    `docs/observation-model.md` §4.5. Server-
     side, a tool result carrying `image:{mime_type,data_base64}` (this tool,
     or any future one) gets a real MCP `type:"image"` content block
     (`toolResultContent` in `server.ts`), not base64 buried in JSON text.
@@ -600,6 +593,15 @@ per-act/per-observe ref churn.
 model (fingerprint, `@label` alias, document epoch), the fail-closed rules
 (`stale_ref` / `ambiguous_target`), the compactness invariant, and the phased
 roadmap. Implementation map is in its §9.
+
+**No observation sealing (2026-09-05, owner's order).** Observations return what
+the page renders — field values, labels, the live URL (path and query included),
+card material, and rendered API keys alike. The masking layer
+(`redactObservationText` / `present*` / `Session.sealedFieldKeys`), compact-v2's
+content screens, and `provision-drive.ts`'s compact-v2 tool-result seal
+(`compactV2ThickResult`) are deleted. Compact-v2 still omits page `text` and
+field values from its rows — that is a payload SIZE budget, not a seal. §4.5 of
+the doc and `AGENTS.md` §16 own the rule; do not add a seal back.
 
 ### Operator Recipe registry (replay-serve-live-domainlock)
 

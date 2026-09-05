@@ -1087,7 +1087,6 @@ function clearSessionArtifacts(session: Session): void {
   session.prevObserve = null;
   session.observeSnapshotFile = null;
   session.secretSlots.clear();
-  session.sealedFieldKeys.clear();
   const error = removeObserveSnapshotDirectory(observeSnapshotDir(session.id));
   if (error !== undefined) {
     const message = error instanceof Error ? error.message : String(error);

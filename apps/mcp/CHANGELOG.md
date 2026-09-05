@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+- **BREAKING: every observation seal, screenshot redaction, and extraction
+  masking refusal is removed.** The operator now returns what the page actually
+  renders. `operate_screenshot` returns real pixels — no mask compositing, no
+  capture-scoped node scan, and no `screenshot_unavailable_sealed_context` (the
+  error code no longer exists), including during an active card fill; its result
+  drops `redacted_count`. `operate_observe` / `operate_observe_query` return
+  field values, labels, and the live page URL (path and query included) verbatim;
+  the `[sealed]` / `[sealed payment]` placeholders are gone, as is the compact-v2
+  tool-result seal that blanked `credentials`, URLs, and verification codes to
+  `<sealed>`. `operate_act { kind: "extract" }` returns every labeled candidate
+  the page shows: the `no_legit_credential` report and the `into_slot` "the
+  secret is still masked/hidden — reveal it first" refusal are gone (a
+  masked-looking value is now ranked behind a revealed sibling, never refused).
+  This fixes the case the seal was actively breaking: on a service's settings
+  page with the key revealed, the screenshot refused because "a secret is
+  present" while extract refused because "nothing is revealed", leaving the
+  operator unable to come away with a key the page was plainly displaying.
+  Compact-v2 still omits page `text` and field values from its rows as a payload
+  SIZE budget, not a seal. Out of scope and unchanged: the vault's write-only
+  property and `use_credential`'s server-side injection, the payment approval
+  flow / 3DS / human approval, and the closed-vocabulary screen on the stderr
+  audit trail and the registry-bound recipe action trace.
+
 - **BREAKING: the `login` subcommand is removed — `connect` is the one
   onboarding and re-auth pathway.** `npx @trusty-squire/mcp login` (and its
   `--provider` / `--profile-dir` flags) now exits 64 pointing at

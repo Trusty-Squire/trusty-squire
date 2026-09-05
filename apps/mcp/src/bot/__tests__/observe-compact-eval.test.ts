@@ -42,7 +42,6 @@ function el(over: Partial<InteractiveElement>): InteractiveElement {
   };
 }
 
-const NONE = new Set<string>();
 
 // Planner-relevant identity of a SOURCE element, including the fields compact
 // alters (container + raw value) — the baseline "what full mode can distinguish".
@@ -83,7 +82,7 @@ function evalSet(name: string, els: InteractiveElement[]): void {
   // now drops `path` and leans on the distinct stable `ref` for the same
   // disambiguation (covered by observe-delta.test.ts). compactKey below still
   // uses `path`, so the eval must feed the path-bearing form.
-  const compact = els.map((e, i) => toCompactElement(e, `@g1:r${i}`, NONE, true));
+  const compact = els.map((e, i) => toCompactElement(e, `@g1:r${i}`, true));
 
   // P1 — coverage: 1:1, refs preserved, none dropped.
   expect(compact.length).toBe(els.length);

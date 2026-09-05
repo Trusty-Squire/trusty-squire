@@ -46,7 +46,6 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
         base64: TINY_JPEG_BASE64,
         frameUrl: null,
         frameCount: 1,
-        redactedCount: 2,
       }),
     } as unknown as BrowserController;
     const started = await startHarnessProvisionSession({ serviceUrl: url, browser });
@@ -79,34 +78,29 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
         url,
         frame_url: null,
         frame_count: 1,
-        redacted_count: 2,
       });
       expect(meta.image).toBeUndefined();
       expect(textBlock?.text ?? "").not.toContain(TINY_JPEG_BASE64);
 
-      expect((browser.captureOperatorScreenshot as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual(
-        [{}, [], []],
-      );
+      expect(
+        (browser.captureOperatorScreenshot as ReturnType<typeof vi.fn>).mock.calls[0],
+      ).toEqual([{}]);
     } finally {
       await client.close();
       await closeAllProvisionSessions();
     }
   });
 
-  it("allows an isolated ACS challenge frame after a historical seal and scopes its check to that frame", async () => {
+  it("forwards only the frame options — no seal inventory rides along", async () => {
     const url = "https://operator-screenshot.test/checkout";
     const browser = {
       goto: vi.fn().mockResolvedValue(undefined),
       recoverActivePage: vi.fn(),
       armOpenedTabAdoption: vi.fn(),
       adoptOpenedTab: vi.fn(async () => null),
-      // One field sealed via the ref-based type_secret path (session-tracked,
-      // no DOM marker) and one ordinary field: only the sealed one's selector
-      // may reach the capture's redaction set.
-      extractInteractiveElements: vi.fn().mockResolvedValue([
-        { selector: "#otp-code", sealed: true },
-        { selector: "#promo-code", sealed: false },
-      ]),
+      extractInteractiveElements: vi
+        .fn()
+        .mockResolvedValue([{ selector: "#otp-code" }, { selector: "#promo-code" }]),
       extractVisibleText: vi.fn().mockResolvedValue("Checkout page"),
       currentUrl: vi.fn().mockReturnValue(url),
       readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
@@ -115,14 +109,12 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
         base64: TINY_JPEG_BASE64,
         frameUrl: "https://authentication.cardinalcommerce.com/challenge",
         frameCount: 2,
-        redactedCount: 0,
       }),
     } as unknown as BrowserController;
     const started = await startHarnessProvisionSession({ serviceUrl: url, browser });
     const client = await connectedClient();
 
     try {
-      paymentSession(started.session_id).sealedFieldKeys.add("historical-card-form");
       await client.callTool({
         name: "operate_screenshot",
         arguments: {
@@ -131,16 +123,9 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
           full_page: true,
         },
       });
-      expect((browser.captureOperatorScreenshot as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual(
-        [
-          {
-            frameUrlContains: "cardinalcommerce.com",
-            fullPage: true,
-          },
-          ["historical-card-form"],
-          [],
-        ],
-      );
+      expect(
+        (browser.captureOperatorScreenshot as ReturnType<typeof vi.fn>).mock.calls[0],
+      ).toEqual([{ frameUrlContains: "cardinalcommerce.com", fullPage: true }]);
     } finally {
       await client.close();
       await closeAllProvisionSessions();
@@ -170,7 +155,6 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
         base64: TINY_JPEG_BASE64,
         frameUrl: null,
         frameCount: 1,
-        redactedCount: 0,
       }),
     } as unknown as BrowserController;
     const started = await startHarnessProvisionSession({ serviceUrl: url, browser });
@@ -185,7 +169,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
         arguments: { session_id: started.session_id },
       });
       expect(result.isError).not.toBe(true);
-      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({}, [], []);
+      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({});
       expect(
         (browser.extractInteractiveElements as ReturnType<typeof vi.fn>).mock.calls.length,
       ).toBe(extractionCalls);
@@ -195,7 +179,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
     }
   });
 
-  it("allows a post-navigation capture after a historical seal is no longer in the capture set", async () => {
+  it("captures a post-navigation page with a secret still held in a session slot", async () => {
     const url = "https://operator-screenshot.test/checkout";
     const browser = {
       goto: vi.fn().mockResolvedValue(undefined),
@@ -211,16 +195,13 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
         base64: TINY_JPEG_BASE64,
         frameUrl: null,
         frameCount: 1,
-        redactedCount: 0,
       }),
     } as unknown as BrowserController;
     const started = await startHarnessProvisionSession({ serviceUrl: url, browser });
     const client = await connectedClient();
 
     try {
-      // sealedFieldKeys is cumulative, but an empty current inventory means
-      // the sealed form is gone and the browser may inspect this new page.
-      paymentSession(started.session_id).sealedFieldKeys.add("some-target-key");
+      paymentSession(started.session_id).secretSlots.set("otp", "123456");
 
       const result = await client.callTool({
         name: "operate_screenshot",
@@ -228,14 +209,14 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       });
 
       expect(result.isError).not.toBe(true);
-      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({}, ["some-target-key"], []);
+      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({});
     } finally {
       await client.close();
       await closeAllProvisionSessions();
     }
   });
 
-  it("captures during an active payment seal so the browser can redact its secret nodes", async () => {
+  it("captures during an active card fill — a fill in progress is not a refusal", async () => {
     const url = "https://operator-screenshot.test/checkout";
     const browser = {
       goto: vi.fn().mockResolvedValue(undefined),
@@ -251,7 +232,6 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
         base64: TINY_JPEG_BASE64,
         frameUrl: null,
         frameCount: 1,
-        redactedCount: 0,
       }),
     } as unknown as BrowserController;
     const started = await startHarnessProvisionSession({ serviceUrl: url, browser });
@@ -266,7 +246,7 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       });
 
       expect(result.isError).not.toBe(true);
-      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({}, [], []);
+      expect(browser.captureOperatorScreenshot).toHaveBeenCalledWith({});
     } finally {
       await client.close();
       await closeAllProvisionSessions();

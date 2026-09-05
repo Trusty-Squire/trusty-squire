@@ -136,8 +136,9 @@ when the checkout origin still matches. One phone approval
 binds that amount and releases the card; Trusty Squire fills the card without
 submitting and its role in the purchase ends there. It fills only the merchant's own
 HTTPS frames or recognized payment-provider frames. The card stays in the page as
-sealed, observation-masked fields while the agent advances to the review step and
-places the order. Verify the live final total against the approved
+filled fields while the agent advances to the review step and places the order;
+those fields are ordinary page content in `operate_observe` and
+`operate_screenshot`, not masked. Verify the live final total against the approved
 `amount_cents`/currency yourself before placing the order; Trusty Squire no longer
 re-reads the total or submits anything. For `click` and `js_click`, a control whose
 label looks like pay/place-order may fire only once for that approval. A second
@@ -304,26 +305,26 @@ aliases remain. Continue a pending pre-charge approval by re-calling
 post-submit outcome checks. `operate_screenshot(session_id,
 frame_index?, frame_url_contains?, full_page?)` is a read-only debugging capture
 (page or one isolated frame, e.g. a cross-origin 3-D Secure/captcha challenge)
-returned as an actual MCP image. It refuses during an active card fill, when the
-requested capture still contains a sealed or card-shaped value, or when any
-included frame cannot be checked; capture-time pixel redaction remains a second
-safety fence.
+returned as an actual MCP image. It returns the page's real pixels: there is no
+redaction pass and no refusal when the page is showing a secret or a card value.
 The maintainer-only `list_extract_failures` → `get_extract_failure`
 DOM-diagnostics pair is excluded from that surface; set
 `TRUSTY_SQUIRE_DIAGNOSTICS=1` in the MCP server environment to opt into the
 22-tool diagnostics profile.
 
-Operate sessions default to Compact V2 observations: a screened
-`format:"compact-v2"` response with a finite stage, safe title/heading
-semantics, and opaque generation-bound controls in `safe_table`. Raw page text,
-URLs, DOM values, and snapshot files are not part of that format. Use
+Operate sessions default to Compact V2 observations: a compact
+`format:"compact-v2"` response with the live page URL, a finite stage,
+title/heading semantics, and generation-bound controls in `safe_table`. Nothing
+in that response is screened for content — labels and semantics are the page's
+own copy. Page text, DOM values, and snapshot files are omitted as a SIZE budget,
+not as a seal; read a value off the page with `operate_screenshot`, `operate_act
+{ kind: "extract" }`, or a V1 session. Use
 `operate_observe_query` with task words or `overflow.next_cursor` to retrieve a
 named or paged control while matching stays inside the live browser. A browser
 action invalidates the current handles; on `reobserve_required`, observe again
 and select a new handle. Exact cursorless `Google` and `GitHub` queries briefly
 refresh controls that hydrate or gain labels after the initial observation, but
-still return only a current sealed handle. `detail:"full"` remains inside the V2
-seal. Maintainers can select the legacy V1 `el_table`/snapshot contract with
+still return only a current handle. `detail:"full"` keeps the V2 format. Maintainers can select the legacy V1 `el_table`/snapshot contract with
 `TRUSTY_SQUIRE_OBSERVE_V2=off`, or exercise V2 without emitting it with
 `shadow`; the detailed wire and migration contract lives in
 [DESIGN-observe-compact.md](docs/DESIGN-observe-compact.md).

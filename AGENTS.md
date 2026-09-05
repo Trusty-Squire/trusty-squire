@@ -492,23 +492,35 @@ That lease, the watchdog, and the whole terminal-teardown ordering now live in
 `apps/mcp/src/bot/session/lifecycle.ts` (`provision-session.ts` re-exports them);
 see CLAUDE.md's "Operator session model" for what may not be reordered.
 
-### 16. Observation/screenshot redaction is PAYMENT-ONLY — do not re-harden it
+### 16. The operator does not seal, redact, or refuse a read — do not add one back
 
-Captain's decision (2026-09-03): "do not mask anything not payments related."
-`operate_observe` / `operate_observe_query` / `operate_screenshot` mask exactly
-three things — the exact value the operator injected from the vault, the active
-card-fill payment-field seal (`data-ts-sealed-payment`, checkout card-value
-selectors, `paymentFieldSealActive`), and Luhn-valid PANs / labeled CVVs. There
-is **no secret-SHAPE heuristic** anywhere in that path, on purpose: rendered API
-keys, recovery codes, TOTPs, and JWTs, plus every control on an auth/Keycloak
-page and the whole Gmail view, are content the driving agent must be able to
-read. Repeated attempts to "harden" this by adding shape matching or a
-vocabulary allowlist are what blinded the agent on real signups and checkouts
-(#627 → #636 → #639 → #645). Two surfaces are deliberately excluded and keep the
-old vocabulary screen (`recordableTokenV2`): the stderr audit trail and the
-registry-bound recipe action trace. The policy and its file-by-file map live in
+Owner's order (2026-09-05, stated three times, after twice declining an offered
+card-number carve-out): **remove ALL seals.** `operate_observe`,
+`operate_observe_query`, `operate_screenshot`, and `operate_act { kind:
+"extract" }` return what the page actually renders. There is no mask pass, no
+`screenshot_unavailable_sealed_context` (the code no longer exists), no
+observation value/label masking, no compact-v2 tool-result seal, and no
+"the secret is still masked/hidden" extract refusal.
+
+Do NOT reintroduce a reduced seal, a default-on env flag, an allowlist, or a
+"payments only" remnant — that carve-out was offered and refused. Repeated
+attempts to "harden" this by adding shape matching or a vocabulary allowlist are
+what blinded the agent on real signups and checkouts (#627 → #636 → #639 → #645),
+and the final failure was the two halves contradicting each other: on a
+BrowserStack settings page with the Access Key revealed, `operate_screenshot`
+refused ("a secret is present, you may not look") while `extract` on the same
+page answered `candidate_count: 4, blocked_reason: "still masked/hidden"`.
+
+Out of scope for that order and still in place: the vault's write-only property
+and `use_credential`'s server-side injection (storage, not sealing); the payment
+approval flow, 3DS, and the human-approval step; the
+`data-ts-sealed-payment="1"` marker (card-fill machinery — cleanup, saved-card
+resolution, profile destruction — which gates no read); and the two
+non-agent-read surfaces that keep `recordableTokenV2`'s vocabulary screen, the
+stderr audit trail and the registry-bound recipe action trace. The policy and its
+file-by-file map live in
 [`docs/observation-model.md`](docs/observation-model.md) §4.5 — read it before
-touching redaction.
+touching this area.
 
 ### 17. `await_verification` must score link-picking on anchor TEXT too, and must retry through Gmail's own transient backend error
 

@@ -125,16 +125,11 @@ export interface Session {
   browser: BrowserController;
   allowedHosts: AllowedHostEntry[];
   generation: number;
-  // Sealed credential slots: secret values extracted in-session and held ONLY
-  // here so a later type_secret can enter them into another site's form. Never
-  // returned to the host (the write-only-vault moat extended to transfers).
+  // Credential slots: secret values extracted in-session and held here so a
+  // later type_secret can enter them into another site's form without the host
+  // having to relay them. This is a transfer convenience, not a read seal —
+  // observations show whatever the page renders, including a slotted value.
   secretSlots: Map<string, string>;
-  // PR3 privacy — element target keys (screenPath/testId/ref) of fields a sealed
-  // secret slot was typed into via type_secret. A subsequent observation masks
-  // their DOM value so the cleartext can't surface to the host. Password-type
-  // inputs are masked unconditionally; this covers the rest (OTP/token fields,
-  // the email filled from the sealed login slot).
-  sealedFieldKeys: Set<string>;
   // The last extracted elements, kept so resolveTarget can be unit-tested
   // against a snapshot, but act() always RE-extracts first (re-resolution).
   lastElements: InteractiveElement[];
@@ -307,7 +302,6 @@ export function createSession(input: CreateSessionInput): Session {
     allowedHosts: input.allowedHosts,
     generation: 0,
     secretSlots: new Map(),
-    sealedFieldKeys: new Set(),
     lastElements: [],
     prevObserve: null,
     observeSnapshotFile: null,

@@ -1,6 +1,6 @@
 # Design: Trusty Squire operator observation model — skeleton + resident DOM + descriptive refs
 
-**Status:** Phases 1 (identity model) and 2 (node-level redaction) shipped — see §9; phases 3-4 not started
+**Status:** Phase 1 (identity model) shipped. Phase 2 shipped as node-level redaction and was then REMOVED ENTIRELY — see §4.5 and §9; phases 3-4 not started
 **Scope:** `@trusty-squire/mcp` operator observation/serialization layer (`operate_observe`, `operate_observe_query`, `operate_act`, `operate_screenshot`, and the compact-v2 serializer)
 **Author:** firstmate, from hands-on operator driving (ipinfo signup + whitejade.xyz checkout, rc.19)
 **Related:** PR #624 (interim gap-2 patch: tolerate live re-renders in compact-v2 overflow paging). This doc is the model that makes that patch unnecessary long-term.
@@ -69,58 +69,64 @@ Per-element cropped screenshots are O(N) calls — a flower grid would be death 
 - `screenshot` → **one** viewport (or full-page) capture with a labeled bounding box drawn over each interactive element, each box labeled with **the same descriptive ref**. The agent sees the whole grid at once and correlates "the red one, `@product-flower-3`" to its ref — one call, whole page. (This is the proven "set-of-marks" pattern.)
 - `show @ref` survives only as a secondary "zoom into this one element" primitive (e.g. one product image in detail), never the default.
 
-### 4.5 Redaction, not sealing (DECIDED: option B — don't seal, node redaction only; narrowed to PAYMENT-ONLY 2026-09-03)
+### 4.5 No redaction and no sealing (FINAL: owner's order, 2026-09-05 — remove ALL seals)
 
-Captain's call, made against codex's push for a frame-level seal: **never seal a
-whole page or frame; redact at the node level only.** Rationale: agent visibility
-is worth more than closing every leak path.
+The history of this section is a one-way ratchet toward visibility:
 
-**Superseding decision (captain, 2026-09-03): "do not mask anything not payments
-related."** Redaction is now PAYMENT-ONLY. Concretely, the observation and
-screenshot surfaces mask exactly three things and nothing else:
+1. **Option B (2026-09-02)** — never seal a whole page or frame; redact at the
+   node level only, against codex's push for a frame-level seal.
+2. **Payment-only narrowing (2026-09-03)** — "do not mask anything not payments
+   related." Redaction kept only the injected vault value, the active card-fill
+   seal, and a Luhn PAN / labeled CVV.
+3. **Removal (2026-09-05, this section's current state)** — **every seal comes
+   out. No carve-outs, no payments remnant, no default-on flag.**
 
-1. The **exact value the operator injected** from the vault — a `secretSlots`
-   value that `operate_act { kind: "type_secret" }` typed into the page. Matched
-   by identity (a literal string compare), never by shape.
-2. The **active card-fill payment-field seal** — `paymentFieldSealActive`
-   per-field, the `data-ts-sealed-payment="1"` marker `type_secret` stamps on the
-   one element it wrote to, and the checkout card-value field selectors.
-3. A **Luhn-valid PAN span** and a labeled CVV/CVC value, wherever rendered.
+**What that means concretely.** `operate_observe`, `operate_observe_query`,
+`operate_screenshot`, and `operate_act { kind: "extract" }` return what the page
+actually renders:
 
-Everything else is visible. In particular the following are NO LONGER masked:
+- `operate_screenshot` returns the page's real pixels. There is no mask
+  compositing pass, no capture-scoped node scan, no stability re-check, and no
+  `screenshot_unavailable_sealed_context` refusal — the error code no longer
+  exists.
+- Observation text, element values, labels, hrefs, test ids, paths, and frame
+  origins are verbatim. A password field's value, an operator-injected vault
+  value, a filled card number and CVV, a rendered API key, recovery code, TOTP,
+  or JWT are all ordinary page content.
+- Compact-v2's `url` is the live page URL, path and query included. Its rows
+  still omit field values — that is a payload SIZE budget, not a seal; read a
+  value with `operate_screenshot`, `extract`, or a V1 session.
+- `extract` returns every labeled candidate the page shows, including one that
+  still looks masked (it is ranked behind a revealed sibling, never refused).
+  The `no_legit_credential` and "the secret is still masked/hidden" refusals are
+  gone.
 
-- A rendered **API key, token, recovery code, TOTP/OTP, or JWT** on the page.
-  There is no secret-SHAPE heuristic left anywhere in the redaction path — no
-  `sk-`/`ghp_`/`AKIA`/`eyJ…` signatures, no high-entropy-token rule.
-- **Auth-page controls**: OAuth/sign-in buttons, email fields, and everything
-  else on Keycloak-style sign-in and registration pages (auth.xata.io, Neon).
-- The **Gmail list, search, and message view** — no whole-page or per-control
-  masking.
-- Addresses, names, city, postal code, shipping options and prices (already true
-  since #636; still true).
-- A **password field the operator did not inject into**. The browser renders it
-  as dots regardless; an injected password still carries the seal marker and is
-  masked by identity.
+**Why.** The seal and the extractor contradicted each other in production: on
+BrowserStack's settings page, with the Access Key revealed, `operate_screenshot`
+refused with `screenshot_unavailable_sealed_context` ("a real secret is present,
+you may not look") while `extract` on the same page at the same moment answered
+`candidate_count: 4, blocked_reason: "the secret is still masked/hidden — reveal
+it first"`. The operator was boxed out of a key the page was plainly displaying,
+which is the product's core purpose.
 
-**The hard invariant is unchanged**: the operator-injected card number and CVV
-never appear in `operate_observe`, `operate_observe_query`, or
-`operate_screenshot` output.
+**What is NOT sealing and stays.** The vault's write-only property and
+`use_credential`'s server-side injection (that is storage, not reading); the
+payment approval flow, 3DS, and the human-approval step; the
+`data-ts-sealed-payment="1"` marker, which is card-fill machinery (cleanup,
+saved-card resolution, profile destruction) and no longer gates any read; and the
+two surfaces below, which are not the agent's view of the page.
 
-**Accepted residual risk (recorded, not hand-waved).** Node redaction cannot
-cover a secret rendered in a `<canvas>`, an image, an SVG, a QR code,
-OCR-readable pixels, or an uninspectable cross-origin third-party iframe, and
-"payment iframes mask their own fields" is an assumption some processors violate.
-The captain accepts this exposure in exchange for agent visibility; revisit if a
-real leak occurs or a processor is found rendering PAN/CVV outside its iframe.
-Under the payment-only policy the accepted exposure is wider still: a rendered
-API key or recovery code reaches the agent's context by design.
+**Two surfaces are explicitly NOT covered by this section**, because they are not
+reads by the agent: the operator's structured stderr **audit trail**, and the
+recorded **action trace** a captured run publishes to the shared skill
+registry. Both keep their closed-vocabulary screen (`recordableTokenV2` in
+`compact-observation-v2.ts`) — one is a log, the other is cross-user
+institutional memory, and neither is the operator being refused a read.
 
-**Two surfaces are explicitly NOT covered by this policy**, because they are not
-the agent's view of the page: the operator's structured stderr **audit trail**,
-and the recorded **action trace** a captured run publishes to the shared skill
-registry. Both keep their original closed-vocabulary screen
-(`recordableTokenV2` in `compact-observation-v2.ts`) — one is a log, the other is
-cross-user institutional memory.
+**Accepted exposure (recorded, not hand-waved).** Everything the page renders can
+reach the agent's context, including a card number the operator itself filled.
+The owner made this call explicitly and repeatedly, having been offered and twice
+declined a card-number carve-out.
 
 ### 4.6 The descriptive ref is the join key
 
@@ -147,7 +153,7 @@ One handle names a skeleton row, addresses an `expand`/`read`, and labels a set-
 - Fill a 5+ field dynamic checkout (name/street/city/zip) in one observe + N acts without a re-observe-per-field, on a page that re-renders between acts.
 - Page-token churn (`?_r=` changing) does not invalidate refs on the same origin+path; a real path change does.
 - Set-of-marks screenshot labels every interactive element with its ref; a product grid is actionable from one image.
-- A rendered API key / recovery code is VISIBLE in `read` and `screenshot` (payment-only policy); an operator-injected card/CVV never is; a payment page is NOT sealed.
+- A rendered API key / recovery code / card value is VISIBLE in `read` and `screenshot`; no page or frame is ever sealed, and no capture is refused for its content.
 - Recorded recipe replay still resolves its targets under descriptive refs.
 
 ## 8. Review outcomes (plan-eng-review, 2026-09-02)
@@ -156,7 +162,7 @@ Independent outside voice: codex (gpt-5.x, high effort, read-only). It landed re
 
 ### Decisions made
 - **D1 — element identity = option A** (§4.1): opaque durable fingerprint (DOM id primary when unique+stable, structural+role+name fallback) bound to an observed document epoch; descriptive name is a readable label only; re-resolution only within a verified same-document/form scope; mismatch **fails closed**. Reverses the doc's original "descriptive = stable by construction," which codex correctly showed is false.
-- **D2 — sealing = option B** (§4.5): don't seal, node-level redaction only (extended to attributes/control state). Captain accepted the residual canvas/image/SVG/QR/OCR/iframe leak risk in exchange for agent visibility, against codex's push for a frame-level seal. Recorded as accepted risk, revisit on a real leak.
+- **D2 — sealing = option B** (§4.5): don't seal, node-level redaction only (extended to attributes/control state). Captain accepted the residual canvas/image/SVG/QR/OCR/iframe leak risk in exchange for agent visibility, against codex's push for a frame-level seal. **Superseded twice since — narrowed to payment-only 2026-09-03, then removed entirely 2026-09-05. See §4.5.**
 
 ### Codex findings folded as scope/implementation requirements (not open captain forks)
 - **Resident-DOM is not universal (feasibility).** Virtualized lists, lazy-load, offscreen controls, shadow DOM, and cross-origin iframes mean a node may not exist. skeleton/`expand`/`read` must handle scroll-to-materialize, shadow-DOM traversal, and iframe boundaries; "`expand` is free" holds only for already-resident nodes.
@@ -169,7 +175,7 @@ Independent outside voice: codex (gpt-5.x, high effort, read-only). It landed re
 
 ### Phasing (codex + review: this is a big-bang; ship it in slices)
 1. **Identity model A** (fingerprint + label + epoch) — highest value (fixes ~80% of the thrashing), ships and proves first.
-2. **Stop sealing + node-redaction extension** (D2).
+2. **Stop sealing + node-redaction extension** (D2) — shipped, then the redaction itself was removed (§4.5).
 3. **`expand`/`read`** with resident/virtualized/shadow/iframe handling.
 4. **Set-of-marks** with the rendering budget.
 
@@ -288,64 +294,44 @@ region slug (derived from the region's own text) and the path ordinal were both
 in the identity unconditionally, so ordinary form churn moved fingerprints that
 now hold.
 
-### Phase 2 — redaction, not sealing
+### Phase 2 — redaction shipped, then removed entirely (2026-09-05)
 
-`operate_screenshot` no longer rejects an ordinary or checkout document solely
-because it contains a filled secret field. `browser.ts` discovers sensitive
-nodes immediately before a capture and paints masks over their rendered
-rectangles; it rechecks after capture and paints the union of both masks if
-only the node set changed. The mask set covers secret-marked nodes, payment
-fields, Luhn PANs, secret-shaped text, control values, and attribute/state
-surfaces including `placeholder`, `aria-*`, `title`, autocomplete previews,
-and session-known injected vault values. `provision-session.ts` applies
-corresponding shape/exact-value redaction to host-facing observation text. An
-uninspectable unrelated child frame does not seal the surrounding screenshot;
-if it may contain a session-injected value, only that frame is covered.
+Phase 2 originally replaced `operate_screenshot`'s document-level refusal with
+node-level pixel redaction, and then narrowed that redaction to payment material
+only (#639, #645). Both are now gone: **the operator does not redact or refuse
+any read.**
 
-The accepted §4.5 residual remains unchanged: this cannot redact a secret
-rendered in canvas, an image, SVG, QR/OCR-readable pixels, or a cross-origin
-third-party iframe. That exposure is accepted for the visibility gained by
-node-level redaction; no additional concealment mechanism is implied here.
+What was deleted:
 
-#### Node-shape heuristics: removed (2026-09-03)
+- `browser.ts`: `SCREENSHOT_REDACTION_SELECTORS` /
+  `SCREENSHOT_SECRET_FIELD_SELECTORS`, the capture-scoped node scan
+  (`collectOperatorScreenshotMask`), the `sharp` mask compositing
+  (`redactOperatorScreenshot`), the pre-capture verification
+  (`assertOperatorScreenshotFramesNoSealedValues`), the post-capture stability
+  re-check, the durable sealed-field identity machinery
+  (`sealedElementSemanticKeys` / `sealedDocumentIdentity` /
+  `operatorScreenshotIdentityKeys` and the `sealedIdentityKeys` /
+  `sealedOrdinal` / `sealed` element fields), and every
+  `screenshot_unavailable_sealed_context` throw. `captureOperatorScreenshot`
+  now takes only the frame options and returns raw JPEG bytes; `redactedCount`
+  is gone from its result and `redacted_count` from the tool payload.
+- `provision-session.ts`: the whole observation-masking layer —
+  `redactObservationText`, `redactPaymentObservationText`,
+  `redactLuhnPanSpans`, `redactExactDigitSequence`, `presentPaymentSafeString`,
+  `presentFieldValue`, `presentLabel`, `isSealedFieldValue`,
+  `observationSealedFieldKeys`, and `Session.sealedFieldKeys` itself.
+- `compact-observation-v2.ts`: the `carriesPaymentMaterial` and `knownSecrets`
+  screens in `safeDescriptionV2`, `safeHostnameV2`, and
+  `controlMatchesPrivateQueryV2`; the payload's `url` is the live URL rather
+  than a screened origin.
+- `provision-drive.ts`: `compactV2PublicValue` / `compactV2ThickResult` — the
+  compact-v2 tool-result seal that blanked `credentials`, URLs, verification
+  codes, and arbitrary strings to `<sealed>` — plus the `isMaskedDisplay`
+  refusal in the `into_slot` extract path.
+- `credential-shape.ts`: the masked-display rejection inside
+  `isCredentialNoise`. `isMaskedDisplay` survives only to RANK a masked
+  candidate behind a revealed one.
 
-The original shape heuristics (PR #627) were BROAD: any `code`-word within 40
-characters of 4–8 digits, any secret-ish label before any 4+ character value,
-and Luhn scans over every attribute. On real checkout pages these matched
-ordinary content — prices, ZIP codes, the shipping address, generic labels —
-redacting hundreds of nodes (`redacted_count=569` on a Shopify checkout), and
-the per-node evaluate round trips made dynamic pages slow enough to trip the
-post-capture stability guard, which converts ANY pipeline failure into
-`screenshot_unavailable_sealed_context` — blinding the agent at the payment
-step. PR #636 replaced them with a TIGHT vendor-signature set; #639 made that
-the single default.
-
-**They are now gone entirely.** The tight set still masked a rendered API key,
-recovery code, TOTP, and JWT, and — together with the compact-v2 allowlist
-grammar over control descriptions — still blanked whole auth pages and Gmail
-views. Under the payment-only policy (§4.5) there is no shape matching left in
-the redaction path:
-
-- `OBSERVATION_SECRET_SHAPE_SOURCES` / `observationSecretShapeRes()` are deleted
-  from `credential-shape.ts`. The scanners that remain there
-  (`findCredentialTokens`, `looksLikeCredentialValue`) exist for credential
-  EXTRACTION — finding the key to vault — and must not be wired back into
-  redaction.
-- `browser.ts`'s in-page screenshot node scan matches injected values and
-  Luhn PANs only, and `SCREENSHOT_SECRET_FIELD_SELECTORS` is just the
-  `data-ts-sealed-payment="1"` marker (the password/OTP/PIN name-shaped
-  selectors are gone).
-- `provision-session.ts`'s observation-text scrub is exact-injected-value plus
-  the Luhn/CVV payment scrub; the shape pass is deleted.
-- `compact-observation-v2.ts`'s `safeDescriptionV2` no longer applies a
-  closed-vocabulary grammar, an email rule, an entropy rule, an OTP rule, or a
-  credential-shape rule — only the card-material screen. The vocabulary grammar
-  survives as `recordableTokenV2`, used solely by the audit trail and the
-  registry-bound action trace.
-
-The collector still uses the union of pre/post capture masks when only the node
-set changes, so a normal checkout re-render does not discard the image; a
-changed document or frame set still refuses. The guarantee that matters holds:
-an operator-injected vault value (a `secretSlots` value or a sealed field)
-never reaches an observation, screenshot text, or unmasked screenshot pixels,
-and a rendered Luhn-valid PAN is always masked.
+`recordableTokenV2` and its closed vocabulary remain, used solely by the stderr
+audit trail and the registry-bound action trace (§4.5) — neither is a read by
+the agent.
