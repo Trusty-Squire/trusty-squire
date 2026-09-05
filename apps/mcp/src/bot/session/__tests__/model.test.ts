@@ -54,7 +54,6 @@ describe("createSession", () => {
       expect(collection.size).toBe(0);
     }
     for (const collection of [
-      session.sealedFieldKeys,
       session.callDrainWaiters,
       session.paymentCallDrainWaiters,
     ]) {
@@ -115,10 +114,8 @@ describe("createSession", () => {
     const first = createSession(input({ id: "a" }));
     const second = createSession(input({ id: "b" }));
     first.secretSlots.set("slot", "value");
-    first.sealedFieldKeys.add("key");
     first.actionTrace.push({} as never);
     expect(second.secretSlots.size).toBe(0);
-    expect(second.sealedFieldKeys.size).toBe(0);
     expect(second.actionTrace).toEqual([]);
   });
 

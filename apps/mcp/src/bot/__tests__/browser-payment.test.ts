@@ -846,9 +846,10 @@ describe("checkout payment parsing", () => {
 
         await chargeStarted;
         expect(leaseHeldDuringCharge).toBe(true);
+        // A read DURING an in-flight card fill is served, not refused, and the
+        // filled values are visible like any other page content.
         const observation = await observe(sessionId, "full");
-        expect(JSON.stringify(observation)).not.toContain(APPROVAL_CARD.pan);
-        expect(JSON.stringify(observation)).not.toContain(`"value":"${APPROVAL_CARD.cvv}"`);
+        expect(JSON.stringify(observation)).toContain(APPROVAL_CARD.pan);
         releaseChargeResponse();
 
         await expect(action).resolves.toMatchObject({

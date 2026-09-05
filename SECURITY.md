@@ -142,9 +142,11 @@ are limited to the selected card controls and explicitly labeled billing control
 inside a positively identified payment context. Generic merchant address and country
 controls are treated as shipping controls and are never sealed or cleared by this
 payment path. On success the raw card is zeroed in the operator, while the eligible
-page fields remain sealed and observation-masked for the checkout's review step;
-session state retains only approval and mandate metadata, the checkout binding, card
-reference, and last four digits.
+page fields keep the payment-field marker for the checkout's review step. That
+marker is card-fill machinery (cleanup, saved-card resolution, profile
+destruction) — it does NOT mask anything: observations and screenshots show the
+filled card like any other page content. Session state retains only approval and
+mandate metadata, the checkout binding, card reference, and last four digits.
 
 Unsupported-wallet detection follows the frame containing the actual visible PAN
 field. PayPal and Braintree hosted card fields fail closed, while an unrelated PayPal
@@ -188,17 +190,17 @@ Trusty Squire cannot verify what the merchant did after the caller's click. The 
 write never blocks or changes the click result, and no PAN or CVV can enter the
 payload.
 
-The card VALUES remain masked in every observation for the life of the pending fill
-regardless. That masking is driven by the session's payment-field seal, independent
-of which caller clicks the submit control, so the money-fence guarantee that the
-coding-agent model never sees a raw PAN/CVV holds whether the operator or the caller
-ends up submitting.
+The card VALUES are visible in observations and screenshots once filled: the
+operator no longer masks any read (owner's decision, 2026-09-05). The money-fence
+that remains is the approval itself — the phone-approved amount, the one-shot
+charge click, and the fact that the vault never releases a card except to a page
+the operator fills under that approval.
 The `confirm` phase is a pure close-out: it makes no browser or provider call, reads
 no total, verifies no amount, and emits no audit event itself (it never charges), so it also
 cannot mislabel or falsely claim a payment was executed. It reports the approved
 merchant, amount, and currency back to the caller and releases the pending-fill
-lease into a sealed state — the observation seal (and so the masking) stays active,
-since the operator never actually cleared the live fields, and the session then
+lease into a sealed state — the payment-field marker stays set, since the operator
+never actually cleared the live fields, and the session then
 refuses further payment operations for its lifetime. There is deliberately no
 same-session path to fill a different card after a fill or a confirm: recovery from
 a stuck, declined, or abandoned payment is closing the session with `operate_finish`
@@ -319,9 +321,10 @@ events use the vault audit retention window, which defaults to 365 days.
   plus the constrained `brand` and `last4` display metadata.
 - During payment, the phone releases card data only to the ephemeral local
   operator key under the exact purchase binding. The API and coding-agent model
-  never see plaintext PAN or CVV. Split-checkout card fields remain sealed in the
-  live page after fill, including after close-out confirmation; observations mask
-  their values, and arbitrary cross-origin frames cannot receive them.
+  never see plaintext PAN or CVV until the operator types it into the merchant's
+  own page. Split-checkout card fields stay filled in the live page after fill,
+  including after close-out confirmation; arbitrary cross-origin frames cannot
+  receive them.
 
 ### Using a credential without exposing the key: egress grants
 

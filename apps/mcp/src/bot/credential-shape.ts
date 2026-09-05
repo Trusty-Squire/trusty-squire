@@ -63,10 +63,10 @@ export function isCredentialNoise(value: string): boolean {
   // var, and must reach the credential gate. Cap at 39 chars (key gate needs ≥40).
   if (/^[A-Z][A-Z0-9_]{2,38}=?$/.test(v)) return true;
   if (/^key_[A-Za-z0-9]{16,}$/i.test(v)) return true;
-  // A masked/truncated display is not a real value (canonical glyph test — was
-  // `includes("…")||includes("...")` here, now unified so a `••••`/`****` mask is
-  // caught too).
-  if (isMaskedDisplay(v)) return true;
+  // A mask-glyph display is deliberately NOT noise. The operator no longer
+  // refuses to hand back a value because it still looks masked — the page is
+  // rendering it, the agent asked for it, so it is returned and the agent
+  // decides whether to reveal and extract again.
   return false;
 }
 
@@ -153,13 +153,13 @@ export function pickRelaxedNearCopyCredential(nearCopyTokens: readonly string[])
 }
 
 // ---- Observation redaction policy note ------------------------------------
-// There is NO secret-SHAPE heuristic in the observation/screenshot redaction
-// path. Masking is PAYMENT-ONLY (captain's decision, 2026-09-03): the exact
-// value the operator injected from the vault, the active card-fill payment
-// field seal, and a Luhn-valid PAN. A rendered API key, recovery code, TOTP,
-// or JWT on a page is ordinary page content and stays visible to the agent.
-// The shape scanners below exist for credential EXTRACTION (finding the key to
-// vault), not for hiding page content — do not wire them back into redaction.
+// There is NO redaction in the observation or screenshot path at all (owner's
+// decision, 2026-09-05): no secret-shape screen, no payment/card carve-out, no
+// sealed-context refusal. What the page renders is what `operate_observe`,
+// `operate_observe_query`, and `operate_screenshot` return. The scanners in
+// this file exist for credential EXTRACTION (deciding WHICH on-page string is
+// the key to vault), never for hiding page content — do not wire them into a
+// presentation path.
 
 // The TIGHT host-side gate: is this string a credential VALUE we'd surface/store?
 // (Distinct from browser.ts's loose in-page collector — see the TIERS note above.)

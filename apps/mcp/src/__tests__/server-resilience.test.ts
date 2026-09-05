@@ -183,7 +183,11 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
           into_slot: "sealed_secret",
           secret_label: "API key",
         },
-        guidance: [/without exposing it/i, /never put credential values in arguments/i, /masked/i],
+        guidance: [
+          /hold a value in a session slot/i,
+          /never put credential values in arguments/i,
+          /store with a service to vault it/i,
+        ],
       },
       {
         arguments: { session_id: "", kind: "solve_captcha" },

@@ -26,7 +26,6 @@ import {
   finishProvisionSessionWithPreparation,
   observedHostsForSession,
   currentProvisionUrl,
-  isCompactV2ProvisionSession,
   stashSecretSlot,
   readSecretSlotValue,
   getSessionUserEmail,
@@ -42,7 +41,6 @@ import {
   type ExtractResult,
   manualCardEntryBlockReason,
 } from "../bot/provision-session.js";
-import { safeDescriptionV2 } from "../bot/compact-observation-v2.js";
 import { signSkillForPublish } from "../skill-cli/signing.js";
 import {
   readRecipe,
@@ -353,29 +351,31 @@ const OBSERVE_DELTA_CONTRACT =
   'div — e.g. some SPA "Add To Cart" buttons), it has no ref: click it with operate_act click/js_click ' +
   'target=`text="…"` or `css=…` (see operate_act). `click` respects actionability and throws if an overlay ' +
   "intercepts; dismiss the overlay or deliberately use `js_click`, which directly dispatches through a " +
-  "transparent overlay. Under default compact-v2, only refs and @labels from the current sealed action map are " +
+  "transparent overlay. Under default compact-v2, only refs and @labels from the current action map are " +
   "accepted. A ref is a durable element fingerprint: it stays valid across acts and benign re-renders on the same " +
   "document, so one observation can drive several acts. On opaque `stale_ref`, call operate_observe and choose a " +
   "new ref; do not retry the old one or use V1 replacement candidates or locator fallback. ";
 
 const COMPACT_V2_CONTRACT =
-  "When format is `compact-v2`, use its sealed map: session_id is the continuation handle; `url` is the screened page origin (never its path/query); `stage` is a finite enum; " +
-  "semantic carries the screened title and primary visible heading; safe_table rows use [ref,role,facts?], where role is " +
+  "When format is `compact-v2`, use its action map: session_id is the continuation handle; `url` is the live page URL; `stage` is a finite enum; " +
+  "semantic carries the page title and primary visible heading; safe_table rows use [ref,role,facts?], where role is " +
   "b=button,l=link,t=textbox,s=select,c=checkbox,r=radio,tb=tab,m=menuitem,f=file. ref is an opaque durable " +
   "element handle. facts is a pipe-delimited string: an optional first unkeyed segment is the row's @label alias, " +
-  "a slug of its screened short label that operate_act also accepts as a target. " +
+  "a slug of its short label that operate_act also accepts as a target. " +
   "The label is followed by any present s=<state bitset>, a=<action>, " +
   "f=<field>, q=<choice position>/<choice total>, and x=<frame> segments. Fact-only rows begin with a keyed segment. " +
   "State bitset codes are c=checked,u=unchecked,d=disabled,r=required; frame codes are x=s for a same-origin child " +
   "and x=x for a cross-origin child, while an omitted x means the main frame. Actions are search,close,next,previous,submit," +
   "continue,login,signup,add_to_cart,view_cart,checkout,payment,destructive; fields are email,password,username,name,phone,search,address," +
   "city,region,postal,country,date,quantity,promo,payment. Short labels are included for viewport-prioritized controls; " +
-  "card/secret-shaped text and field values are never emitted. For a named product/control from the task, " +
-  "call operate_observe_query with those task words; it returns matching actionable refs with screened labels " +
-  "and code-owned facts, but never field values, snapshots, or raw DOM. Use overflow.next_cursor to page. `detail:full` does not bypass this seal while V2 is enabled; " +
+  "labels are never screened for content — what the page renders is what you get. The row form omits field " +
+  "values purely as a size budget: read a value off the page with operate_screenshot, or with an explicitly " +
+  "selected V1 session. For a named product/control from the task, " +
+  "call operate_observe_query with those task words; it returns matching actionable refs with labels " +
+  "and code-owned facts. Use overflow.next_cursor to page. `detail:full` keeps the V2 format while V2 is enabled; " +
   "set TRUSTY_SQUIRE_OBSERVE_V2=off for the legacy format. A delta:true delta retains the preceding V2 table, then upserts tuple rows in safe_table, " +
   "removes refs in removed, and updates stage or semantic only when either changed. Omitted semantic title/heading remains from the preceding V2 page. " +
-  "A delta with none of those fields means the sealed view is unchanged. ";
+  "A delta with none of those fields means the view is unchanged. ";
 
 export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   name: "operate_start",
@@ -427,15 +427,15 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
 const observeSchema = z.object({
   session_id: z.string().min(1),
   // Payload verbosity within the selected observation mode. In V2 both values
-  // remain sealed; in V1, full requests the legacy expanded payload.
+  // return the compact action map; in V1, full requests the legacy expanded payload.
   detail: z.enum(["compact", "full"]).optional(),
 });
 
 export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
   name: "operate_observe",
   description:
-    "Re-read the current page of an operate session. The default compact-v2 mode returns the sealed " +
-    'safe_table action map; `detail:"full"` remains sealed and does not restore legacy fields. ' +
+    "Re-read the current page of an operate session. The default compact-v2 mode returns the compact " +
+    'safe_table action map; `detail:"full"` stays in that format and does not restore legacy fields. ' +
     COMPACT_V2_CONTRACT +
     "Only explicitly selected V1 modes use el_table, reusable stable refs, locator fallbacks, snapshot_file, " +
     "or the legacy expanded elements payload. " +
@@ -482,11 +482,8 @@ export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
     "selected V1 session, isn't enough to tell what state " +
     "a stuck page is actually in — a challenge that never advances, an unexpected layout, a captcha you " +
     "need to SEE. Read-only: never navigates, clicks, types, submits, or steals focus; it only reads " +
-    "pixels. Money-fence: refuses (screenshot_unavailable_sealed_context) during an active card fill or " +
-    "when a frame included in this capture still holds a sealed secret or card-shaped value. It fails closed " +
-    "when that frame cannot be checked, while capture-time masking remains a second fence. A historical fill " +
-    "does not block an isolated 3-D Secure/challenge frame or a page navigated away from the sealed form. " +
-    "If you need to see a page WHILE a card fill is in progress, finish or cancel the payment step first.",
+    "pixels. The image is the page's real pixels — nothing is masked or redacted, and a capture is " +
+    "never refused because the page is showing a secret or a card value.",
   inputSchema: screenshotSchema,
   jsonInputSchema: {
     type: "object",
@@ -921,7 +918,7 @@ const ACTION_REPAIR_BY_KIND: Partial<Record<ActionKind, ActionRepair>> = {
       secret_label: "API key",
     },
     safe_alternative:
-      "Retry extract after navigating to the credential page. Use into_slot with optional secret_label to seal a value without exposing it, or store with a service to vault it; never put credential values in arguments or seal a still-masked value." +
+      "Retry extract after navigating to the credential page. Use into_slot with optional secret_label to hold a value in a session slot for a later type_secret, or store with a service to vault it; never put credential values in arguments." +
       manualCardRecovery,
   },
   solve_captcha: {
@@ -1140,168 +1137,55 @@ async function handleFormSelectMany(args: FormSelectManyArgs) {
   return await formSelectMany(args.session_id, args.selections);
 }
 
-const COMPACT_V2_PUBLIC_CODE_VALUES = new Set([
-  "+1",
-  "0",
-  "added",
-  "already_in_cart",
-  "best_effort",
-  "cart",
-  "checkout",
-  "click",
-  "code",
-  "compact-v2",
-  "credential_unavailable",
-  "false",
-  "fill_card",
-  "informational_only",
-  "interaction_required",
-  "manual_card_entry_refused",
-  "operate_act",
-  "operate_observe",
-  "operate_pay",
-  "product",
-  "proceed_to_checkout",
-  "true",
-  "unknown",
-  "verification_code",
-]);
-
-const COMPACT_V2_PUBLIC_CORRELATION_KEYS = new Set(["reference", "session_id", "slot"]);
-
-const COMPACT_V2_PUBLIC_CODE_KEYS = new Set([
-  "authority",
-  "cart_delta",
-  "completeness",
-  "gate",
-  "intent",
-  "kind",
-  "missing_prerequisite",
-  "phase",
-  "retry_policy",
-  "resume",
-  "safe_alternative",
-  "stage",
-  "status",
-  "tool",
-  "variant",
-  "wall",
-]);
-
-const COMPACT_V2_OBSERVATION_OWNED_KEYS = new Set([
-  "delta",
-  "format",
-  "generation",
-  "guidance",
-  "hint",
-  "hint_overflow",
-  "oauth",
-  "observed",
-  "overflow",
-  "removed",
-  "safe_table",
-  "semantic",
-  "session_id",
-  "stage",
-  "text",
-  "unchanged",
-  "url",
-  "user_email",
-]);
-
-function compactV2PublicValue(key: string, value: unknown): unknown {
-  if (value === null || typeof value === "boolean" || typeof value === "number") return value;
-  if (key === "credentials") return {};
-  if (key === "code" || key === "link" || key === "source_from") return null;
-  if (key === "preview") return "<sealed>";
-  if (key === "product_identity" || key === "options_hash") return "<requested>";
-  if (
-    (key === "url" || key.endsWith("_url") || key.endsWith("_origin")) &&
-    typeof value === "string"
-  ) {
-    return "";
-  }
-  if (Array.isArray(value)) return value.map((item) => compactV2PublicValue(key, item));
-  if (typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    const observation = (key === "" || key === "observation") && record.format === "compact-v2";
-    return Object.fromEntries(
-      Object.entries(record).map(([nestedKey, nestedValue]) => [
-        nestedKey,
-        observation && COMPACT_V2_OBSERVATION_OWNED_KEYS.has(nestedKey)
-          ? nestedValue
-          : compactV2PublicValue(nestedKey, nestedValue),
-      ]),
-    );
-  }
-  if (typeof value !== "string") return value;
-  if (key === "currency") return /^[A-Z]{3}$/.test(value) ? value : null;
-  if (COMPACT_V2_PUBLIC_CODE_KEYS.has(key) && /^(?:[a-z][a-z0-9_]{0,63}|\+?[0-9]+)$/.test(value)) {
-    return value;
-  }
-  if (COMPACT_V2_PUBLIC_CODE_VALUES.has(value)) return value;
-  if (COMPACT_V2_PUBLIC_CORRELATION_KEYS.has(key)) return value;
-  return safeDescriptionV2(value) ?? "<sealed>";
-}
-
-function compactV2ThickResult<T extends object>(compactV2: boolean, result: T): T {
-  return (compactV2 ? compactV2PublicValue("", result) : result) as T;
-}
-
 async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
-  const compactV2 = isCompactV2ProvisionSession(args.session_id);
   const extracted = await extractCredentials(args.session_id);
 
-  // Sealed transfer: capture the primary secret into a session-local slot and
-  // return ONLY a masked handle. The value never reaches the host. A later
-  // type_secret enters it into another site's form. Mutually exclusive with
-  // store (a slotted secret is being shuttled, not vaulted, in this call).
+  // Slot transfer: capture the primary secret into a session-local slot so a
+  // later type_secret can enter it into another site's form without the host
+  // having to relay it. Mutually exclusive with store (a slotted secret is
+  // being shuttled, not vaulted, in this call).
   if (args.into_slot !== undefined) {
     const values = extracted.credentials;
-    // A still-masked display (Google's OAuth secret shows "GOCSPX-••••" with a
-    // copy button) must NOT be sealed — the slot would hold junk. Reject any
-    // value with mask glyphs (canonical isMaskedDisplay) or the truncated-capture
-    // marker, and prefer a full value over the masked api_key when the page has both.
     const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
     const candidates = Object.entries(values).filter(
-      ([k, v]) =>
-        !k.endsWith("_truncated") && typeof v === "string" && v.length >= 8 && !isMaskedDisplay(v),
+      ([k, v]) => !k.endsWith("_truncated") && typeof v === "string" && v.length >= 8,
     );
+    // A value that still LOOKS masked is never refused — it is simply ranked
+    // last, so a fully revealed sibling wins when the page shows both.
+    const ranked = [
+      ...candidates.filter(([, v]) => !isMaskedDisplay(v)),
+      ...candidates.filter(([, v]) => isMaskedDisplay(v)),
+    ];
     // When the page shows several credentials (Google's client ID + secret),
     // a secret_label picks the right one by field name; otherwise take the
     // first full value. Falling back avoids a hard fail when the label misses.
     const wantKey = args.secret_label !== undefined ? norm(args.secret_label) : null;
-    const matched =
-      wantKey !== null ? candidates.find(([k]) => norm(k).includes(wantKey)) : undefined;
-    const full = (matched ?? candidates[0])?.[1];
+    const matched = wantKey !== null ? ranked.find(([k]) => norm(k).includes(wantKey)) : undefined;
+    const full = (matched ?? ranked[0])?.[1];
     if (typeof full !== "string" || full.length === 0) {
-      return compactV2ThickResult(compactV2, {
+      return {
         session_id: extracted.session_id,
         url: extracted.url,
         candidate_count: extracted.candidate_count,
         sealed: false,
         slot: null,
         blocked_reason:
-          "the secret is still masked/hidden — reveal it first (click the " +
-          'show/reveal/copy control near the key), then operate_act { kind: "extract" } again',
-      });
+          "no credential value was found on this page — navigate to the keys/settings " +
+          'page, then operate_act { kind: "extract" } again',
+      };
     }
     const handle = stashSecretSlot(args.session_id, args.into_slot, full);
-    // Strip raw credential VALUES from the response — host gets the handle only.
-    return compactV2ThickResult(compactV2, {
+    return {
       session_id: extracted.session_id,
       url: extracted.url,
       candidate_count: extracted.candidate_count,
       sealed: true,
       slot: handle,
-      ...(extracted.blocked_reason !== undefined
-        ? { blocked_reason: extracted.blocked_reason }
-        : {}),
-    });
+    };
   }
 
   if (args.store === undefined || Object.keys(extracted.credentials).length === 0) {
-    return compactV2ThickResult(compactV2, extracted);
+    return extracted;
   }
   if (api === null) {
     throw new Error(
@@ -1309,7 +1193,7 @@ async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
     );
   }
   const stored = await persistExtracted(args.session_id, extracted.credentials, args.store, api);
-  return compactV2ThickResult(compactV2, storedExtractResult(extracted, stored));
+  return storedExtractResult(extracted, stored);
 }
 
 async function handleCaptcha(args: CaptchaArgs) {
@@ -1327,7 +1211,7 @@ async function handleAwaitVerification(args: AwaitVerificationArgs) {
 export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
   name: "operate_act",
   description:
-    "Take one action in an operate session. Under compact-v2 the default follow-up is a sealed delta " +
+    "Take one action in an operate session. Under compact-v2 the default follow-up is a compact delta " +
     "when its action map is unchanged; call operate_observe or operate_observe_query when you need a new map. " +
     "kinds: click (target=element ref, preferably a safe_table row's ref), " +
     "type (target + text; model-supplied card-number-shaped text is refused — card payment " +
@@ -1404,7 +1288,7 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "Squire-known address, contact, product_query, or quantity input; type_secret and " +
     "operate_pay record credential and card provenance from their sealed sources. " +
     "When repairing a replay fallback field, pass its replay_step_index and replay_hole. " +
-    "Under default compact-v2, target is either an @e: ref from the current sealed action map or the @label alias " +
+    "Under default compact-v2, target is either an @e: ref from the current action map or the @label alias " +
     "of exactly one of its rows; a @label matching several rows returns ambiguous_target listing their refs, never " +
     "a guess. Refs survive acts and benign re-renders on the same document; a real navigation retires them. On " +
     "opaque `stale_ref`, call operate_observe and choose a new ref; do not retry the old one. " +
@@ -1566,7 +1450,7 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
         throw err;
       }
     })();
-    return compactV2ThickResult(isCompactV2ProvisionSession(args.session_id), result);
+    return result;
   },
 };
 
@@ -1660,7 +1544,8 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
     "the page is a login wall / anti-bot interstitial with NO credential present " +
     "(do not treat the empty result as a real key) — drive an interactive login " +
     "or hand back to the user. Call when you have navigated to the keys page. " +
-    "With `into_slot`, a still-masked value is refused (reveal it first); pass " +
+    "With `into_slot`, a value that still looks masked is ranked behind a fully " +
+    "revealed sibling but never refused; pass " +
     '`secret_label` (e.g. "client secret") to pick the right one when the page ' +
     "shows several credentials.",
   inputSchema: extractSchema,
@@ -1850,7 +1735,6 @@ async function handleFinishOutcome(
   outcome: Exclude<FinishOutcome, { kind: "none" }>,
   api: ApiClient,
 ) {
-  const compactV2 = isCompactV2ProvisionSession(sessionId);
   let successfulOutcome = false;
   const { finish, prepared } = await finishProvisionSessionWithPreparation(
     sessionId,
@@ -1898,7 +1782,7 @@ async function handleFinishOutcome(
     },
     () => successfulOutcome,
   );
-  return compactV2ThickResult(compactV2, { ...prepared, url: finish.url });
+  return { ...prepared, url: finish.url };
 }
 
 // Not part of the default MCP tool surface (dropped from OPERATE_TOOLS). Kept
@@ -2026,8 +1910,7 @@ export const provisionFinishTool: Tool<z.infer<typeof finishSchema>> = {
   async handler(args, api) {
     const outcome = args.outcome ?? { kind: "none" as const };
     if (outcome.kind === "none") {
-      const compactV2 = isCompactV2ProvisionSession(args.session_id);
-      return compactV2ThickResult(compactV2, await finishProvisionSession(args.session_id));
+      return await finishProvisionSession(args.session_id);
     }
     if (outcome.kind === "credentials" && api === null) {
       throw new Error("operate_finish credentials requires an active Trusty Squire session");

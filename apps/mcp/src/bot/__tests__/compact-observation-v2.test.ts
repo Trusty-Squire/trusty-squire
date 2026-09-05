@@ -99,7 +99,7 @@ describe("compact observation v2", () => {
     expect(rows[1]).not.toHaveProperty("field");
   });
 
-  it("allows only enum fields even when every raw source contains secrets", () => {
+  it("emits enum fields plus the page's own label, whatever the label contains", () => {
     const planted = "4111111111111111 CVV=123 password=swordfish merchant=Northwind";
     const input = element({
       visibleText: planted,
@@ -119,15 +119,16 @@ describe("compact observation v2", () => {
       legacyRefs: refs,
       pageOrigin: "https://merchant.invalid",
     });
-    const wire = JSON.stringify(safe.rows);
-    expect(wire).not.toContain("4111111111111111");
-    expect(wire).not.toContain("swordfish");
-    expect(wire).not.toContain("Northwind");
+    // Everything but the label stays a code-owned enum (the wire format), and
+    // the label is the page's own copy — card material included. Nothing is
+    // screened out any more.
     expect(safe.rows).toEqual([
       expect.objectContaining({
         ref: expect.stringMatching(/^@e:/),
         role: "button",
         visibility: "viewport",
+        field: "payment",
+        label: expect.stringContaining("4111111111111111"),
       }),
     ]);
   });
@@ -148,7 +149,7 @@ describe("compact observation v2", () => {
     ]);
   });
 
-  it("keeps arbitrary page copy — only card material screens a description out", () => {
+  it("keeps every page-derived description, card material included", () => {
     expect(safeDescriptionV2("correcthorsebattery")).toBe("correcthorsebattery");
     expect(safeDescriptionV2("correct horse battery staple")).toBe("correct horse battery staple");
     expect(safeDescriptionV2("Sign in with Keycloak")).toBe("Sign in with Keycloak");
@@ -156,9 +157,10 @@ describe("compact observation v2", () => {
     expect(safeDescriptionV2("sk-proj-1234567890abcdefghijklmnopqrstuv")).toBe(
       "sk-proj-1234567890abcdefghijklmnopqrstuv",
     );
-    // The two payment screens survive: a Luhn PAN and a labeled CVV.
-    expect(safeDescriptionV2("4111 1111 1111 1111")).toBeUndefined();
-    expect(safeDescriptionV2("CVV 123")).toBeUndefined();
+    // The last payment screens are gone too: a rendered PAN and a labeled CVV
+    // are page copy the agent is meant to read.
+    expect(safeDescriptionV2("4111 1111 1111 1111")).toBe("4111 1111 1111 1111");
+    expect(safeDescriptionV2("CVV 123")).toBe("CVV 123");
     expect(
       safePageSemanticsV2({
         title: "correcthorsebattery",
@@ -193,30 +195,34 @@ describe("compact observation v2", () => {
     expect(JSON.stringify(sealed)).not.toContain("private-selector");
   });
 
-  it("screens retained frame origins through the payment boundary only", () => {
+  it("retains any structurally valid frame origin — no content screen remains", () => {
     expect(safeOriginV2("https://payments.example.com")).toBe("https://payments.example.com");
     // A long high-entropy subdomain is an ordinary host, not a secret.
     expect(safeOriginV2("https://apikeyabcdefghijklmnopqrstuvwxyz9.attacker.test")).toBe(
       "https://apikeyabcdefghijklmnopqrstuvwxyz9.attacker.test",
     );
-    // A card number in the host is still card material.
-    expect(safeOriginV2("https://4111-1111-1111-1111.attacker.test")).toBeNull();
-    const [sealed] = sealRetainedInteractiveElementsV2([
+    // Digits in the host are no longer card material to be hidden.
+    expect(safeOriginV2("https://4111-1111-1111-1111.attacker.test")).toBe(
+      "https://4111-1111-1111-1111.attacker.test",
+    );
+    const [retained] = sealRetainedInteractiveElementsV2([
       element({ frameOrigin: "https://4111-1111-1111-1111.attacker.test" }),
     ]);
-    expect(sealed?.frameOrigin).toBeNull();
+    expect(retained?.frameOrigin).toBe("https://4111-1111-1111-1111.attacker.test");
+    // A malformed origin is still rejected — that is validity, not masking.
+    expect(safeOriginV2("not a url")).toBeNull();
   });
 
-  it("emits only a screened origin instead of an empty or secret-bearing page URL", () => {
+  it("emits the live page URL, path and query included", () => {
+    const url = "https://ipinfo.io/signup?token=private-url-token-123456789";
     const page = encodeV2Page({
       sessionId: "session",
       stage: "browse",
-      pageUrl: "https://ipinfo.io/signup?token=private-url-token-123456789",
+      pageUrl: url,
       rows: [],
       cursorFor: (offset) => `cursor-${offset}`,
     });
-    expect(page.payload).toMatchObject({ url: "https://ipinfo.io", text: "" });
-    expect(JSON.stringify(page.payload)).not.toContain("private-url-token-123456789");
+    expect(page.payload).toMatchObject({ url, text: "" });
   });
 
   it("prioritizes signup actions over unlabeled landing-page navigation", () => {
@@ -426,10 +432,11 @@ describe("compact observation v2", () => {
     ]);
   });
 
-  it("preserves short semantic essentials while rejecting card and secret-shaped text", () => {
+  it("preserves short semantic essentials without rejecting card or secret-shaped text", () => {
     expect(
       safePageSemanticsV2({
         title: "Example storefront",
+        // Only the FIRST heading is carried (a size budget); nothing is screened.
         headings: [
           "Create your account",
           "4111111111111111",
@@ -437,6 +444,9 @@ describe("compact observation v2", () => {
         ],
       }),
     ).toEqual({ title: "Example storefront", headings: ["Create your account"] });
+    expect(
+      safePageSemanticsV2({ title: "4111111111111111", headings: ["API key: abcdef"] }),
+    ).toEqual({ title: "4111111111111111", headings: ["API key: abcdef"] });
     const button = element({ visibleText: "Continue to registration" });
     const cardLike = element({ selector: "#secret", visibleText: "4111111111111111" });
     const safe = safeControls({
@@ -450,7 +460,7 @@ describe("compact observation v2", () => {
     expect(safe.rows).toContainEqual(
       expect.objectContaining({ label: "@continue-to-registration" }),
     );
-    expect(JSON.stringify(safe.rows)).not.toContain("4111111111111111");
+    expect(safe.rows).toContainEqual(expect.objectContaining({ label: "@4111111111111111" }));
   });
 
   it("uses the visible text as the label — a high-entropy token is not screened out", () => {
@@ -468,7 +478,7 @@ describe("compact observation v2", () => {
     ]);
   });
 
-  it("falls back to the accessibility label when the visible text is card material", () => {
+  it("uses the visible text even when it is card material — no accessibility fallback", () => {
     const button = element({
       visibleText: "4111 1111 1111 1111",
       ariaLabel: "Copy API key",
@@ -478,7 +488,7 @@ describe("compact observation v2", () => {
       legacyRefs: new Map([[button, "@e:copy"]]),
       pageOrigin: "https://merchant.invalid",
     });
-    expect(safe.rows).toEqual([expect.objectContaining({ label: "@copy-api-key" })]);
+    expect(safe.rows).toEqual([expect.objectContaining({ label: "@4111-1111-1111-1111" })]);
   });
 
   it("matches every private query term against one control naming source", () => {

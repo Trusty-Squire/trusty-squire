@@ -311,7 +311,6 @@ describe("characterization: Session construction", () => {
       recipeRejectionReason: null,
       recordedValues: { kind: "Array", length: 0 },
       replayState: null,
-      sealedFieldKeys: { kind: "Set", size: 0 },
       secretSlots: { kind: "Map", size: 0 },
       startUrl: "https://app.example.com/signup",
       startedAt: expect.any(Number),
@@ -405,7 +404,6 @@ describe("characterization: Session construction", () => {
       recipeRejectionReason: null,
       recordedValues: { kind: "Array", length: 0 },
       replayState: null,
-      sealedFieldKeys: { kind: "Set", size: 0 },
       secretSlots: { kind: "Map", size: 0 },
       startUrl: "https://shop.example.com/cart",
       startedAt: expect.any(Number),
@@ -595,7 +593,6 @@ describe("characterization: session lifecycle facade", () => {
     const live = session as Session | null;
     expect(live).not.toBeNull();
     live!.secretSlots.set("slot_1", "value");
-    live!.sealedFieldKeys.add("#card");
     setActivePendingThreeDs({
       approval_id: "appr_characterization",
       approval_url: "https://web.test/vault/pay/appr_characterization",
@@ -618,7 +615,6 @@ describe("characterization: session lifecycle facade", () => {
     );
     // Artifacts cleared and the exact session dropped from the registry.
     expect(live!.secretSlots.size).toBe(0);
-    expect(live!.sealedFieldKeys.size).toBe(0);
     expect(live!.prevObserve).toBeNull();
     expect(live!.observeSnapshotFile).toBeNull();
     expect(live!.pendingThreeDs).toBeNull();

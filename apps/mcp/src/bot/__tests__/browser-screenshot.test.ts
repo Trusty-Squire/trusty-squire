@@ -1,8 +1,12 @@
-// operate_screenshot's browser implementation: captureOperatorScreenshot's
-// capture-scoped refusal plus screenshotForOperator's pixel redaction. Both are
-// read-only with respect to the live checkout DOM. Real-Chromium, mirroring
-// browser-payment.test.ts's harness pattern — a screenshot is inherently about
-// actual rendering, not something a mocked page can meaningfully stand in for.
+// operate_screenshot's browser implementation. There is no redaction pass and no
+// sealed-context refusal any more (owner's decision, 2026-09-05: ALL seals out),
+// so these tests pin the opposite of what they used to: the scenarios that
+// previously masked pixels or threw `screenshot_unavailable_sealed_context` must
+// now return the page's real pixels. The read-only property (no navigation, no
+// DOM mutation, no page-visible byte handling) and frame targeting are unchanged
+// and still covered here. Real-Chromium, mirroring browser-payment.test.ts's
+// harness pattern — a screenshot is inherently about actual rendering, not
+// something a mocked page can meaningfully stand in for.
 import { existsSync } from "node:fs";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -83,14 +87,21 @@ async function samplePixels(
   );
 }
 
-// Playwright's default mask color is #FF00FF; allow for JPEG compression drift.
+// The old redaction painted #FF00FF over every masked box. Nothing paints it now,
+// so a magenta pixel anywhere a value is rendered means a mask came back.
 function isMaskMagenta(pixel: readonly number[]): boolean {
   return (pixel[0] ?? 0) > 200 && (pixel[1] ?? 255) < 80 && (pixel[2] ?? 0) > 200;
 }
 
-describe("operate_screenshot money-fence redaction (real browser)", () => {
+async function centerOf(page: Page, selector: string): Promise<readonly [number, number]> {
+  const box = await page.locator(selector).boundingBox();
+  if (box === null) throw new Error(`no box for ${selector}`);
+  return [box.x + box.width / 2, box.y + box.height / 2] as const;
+}
+
+describe("operate_screenshot returns unmasked pixels (real browser)", () => {
   it.skipIf(!chromiumAvailable)(
-    "redacts a filled card PAN/expiry/CVV/name at capture time without mutating the DOM",
+    "captures a filled card PAN/expiry/CVV/name without masking, and without mutating the DOM",
     async () => {
       const browser = await launchIsolatedTestBrowser();
       try {
@@ -102,38 +113,26 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
           <input autocomplete="cc-csc" value="123">
           <input type="text" value="not a card field">
         `);
+        const domBefore = await page.content();
         const controller = BrowserController.fromHarnessPage(page);
 
         const result = await controller.screenshotForOperator();
 
-        expect(result.redactedCount).toBe(4);
         expect(isValidJpegBase64(result.base64)).toBe(true);
         expect(result.frameUrl).toBeNull();
 
-        // Pixel-level proof the IMAGE is redacted, not just the metadata:
-        // the PAN field's box must be the mask color, while the non-card
-        // field keeps ordinary (non-magenta) pixels.
-        const panBox = await page.locator('[autocomplete="cc-number"]').boundingBox();
-        const plainBox = await page.locator('input[type="text"]').boundingBox();
-        expect(panBox).not.toBeNull();
-        expect(plainBox).not.toBeNull();
-        const [panPixel, plainPixel] = await samplePixels(page, result.base64, [
-          [panBox!.x + panBox!.width / 2, panBox!.y + panBox!.height / 2],
-          [plainBox!.x + plainBox!.width / 2, plainBox!.y + plainBox!.height / 2],
-        ]);
-        expect(isMaskMagenta(panPixel!)).toBe(true);
-        expect(isMaskMagenta(plainPixel!)).toBe(false);
+        const points = await Promise.all(
+          [
+            '[autocomplete="cc-number"]',
+            '[autocomplete="cc-csc"]',
+            'input[type="text"]',
+          ].map(async (selector) => await centerOf(page, selector)),
+        );
+        const pixels = await samplePixels(page, result.base64, points);
+        for (const pixel of pixels) expect(isMaskMagenta(pixel)).toBe(false);
 
-        // The mask is painted into the image by Playwright's capture
-        // machinery — the live DOM keeps its exact pre-capture state: no
-        // marker attributes, and the ONE field with a pre-existing inline
-        // style still has it byte-for-byte.
-        const panStyle = await page.locator('[autocomplete="cc-number"]').getAttribute("style");
-        expect(panStyle).toBe("border:1px solid red");
-        const nameStyle = await page.locator('[autocomplete="cc-name"]').getAttribute("style");
-        expect(nameStyle).toBeNull();
-        const redactedMarkerCount = await page.locator("[data-ts-screenshot-redacted]").count();
-        expect(redactedMarkerCount).toBe(0);
+        // Read-only: the capture path must not touch the live checkout DOM.
+        expect(await page.content()).toBe(domBefore);
       } finally {
         await browser.close();
       }
@@ -141,205 +140,27 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "redacts a node sealed via data-ts-sealed-payment but not a bare password field",
+    "captures a payment-marked node and a password field without masking either",
     async () => {
       const browser = await launchIsolatedTestBrowser();
       try {
         const page = await browser.newPage();
         await page.setContent(`
-          <input type="password" value="hunter2">
-          <div data-ts-sealed-payment="1">4242 4242 4242 4242</div>
+          <div data-ts-sealed-payment="1" style="font-size:28px">4242 4242 4242 4242</div>
+          <input type="password" value="hunter2hunter2">
         `);
         const controller = BrowserController.fromHarnessPage(page);
 
-        // Masking is payment-only: the seal marker (the ONE field the operator
-        // injected into) is masked; a password the operator did not inject is
-        // not, and the browser renders it as dots anyway.
         const result = await controller.screenshotForOperator();
-        expect(result.redactedCount).toBe(1);
 
-        // No style ever written into the page — masking is capture-side only.
-        const divStyle = await page
-          .locator('div[data-ts-sealed-payment="1"]')
-          .getAttribute("style");
-        expect(divStyle).toBeNull();
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)("redacts a sealed field inside an open shadow root", async () => {
-    const browser = await launchIsolatedTestBrowser();
-    try {
-      const page = await browser.newPage();
-      await page.setContent(`<div id="host"></div>`);
-      await page.evaluate(() => {
-        const host = document.querySelector("#host")!;
-        const shadow = host.attachShadow({ mode: "open" });
-        const input = document.createElement("input");
-        input.setAttribute("autocomplete", "cc-number");
-        input.value = "4242424242424242";
-        shadow.append(input);
-      });
-      const controller = BrowserController.fromHarnessPage(page);
-
-      const result = await controller.screenshotForOperator();
-      expect(result.redactedCount).toBe(1);
-      expect(isValidJpegBase64(result.base64)).toBe(true);
-    } finally {
-      await browser.close();
-    }
-  });
-
-  it.skipIf(!chromiumAvailable)(
-    "includes session-supplied extra redaction selectors in the mask set",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        const page = await browser.newPage();
-        await page.setContent(`
-          <input id="otp-field" type="text" value="123456">
-          <input type="text" value="not sealed">
-        `);
-        const controller = BrowserController.fromHarnessPage(page);
-
-        const result = await controller.screenshotForOperator({
-          extraRedactionSelectors: ["#otp-field"],
-        });
-        expect(result.redactedCount).toBe(1);
         expect(isValidJpegBase64(result.base64)).toBe(true);
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "redacts ONLY the exact injected vault value, never secret-shaped page text",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        const page = await browser.newPage();
-        const injected = "stored-credential-7f3d9a";
-        await page.setContent(`
-          <p id="api">API key: sk-proj-1234567890abcdefghijklmnopqrstuv</p>
-          <p id="recovery" title="Recovery code: 814226">Use your recovery code</p>
-          <input id="vault" aria-label="Saved value ${injected}" placeholder="${injected}" value="${injected}">
-          <p id="ordinary">Keep this ordinary checkout instruction visible.</p>
-        `);
-        const controller = BrowserController.fromHarnessPage(page);
-
-        const result = await controller.captureOperatorScreenshot({}, [], [injected]);
-        // Only the vault-value node — the rendered API key and recovery code are
-        // page content the agent is meant to read.
-        expect(result.redactedCount).toBe(1);
-        const boxes = await Promise.all(
-          ["#api", "#recovery", "#vault", "#ordinary"].map(
-            async (selector) => await page.locator(selector).boundingBox(),
+        const points = await Promise.all(
+          ['div[data-ts-sealed-payment="1"]', 'input[type="password"]'].map(
+            async (selector) => await centerOf(page, selector),
           ),
         );
-        expect(boxes.every((box) => box !== null)).toBe(true);
-        const pixels = await samplePixels(
-          page,
-          result.base64,
-          boxes.map((box) => [box!.x + box!.width / 2, box!.y + box!.height / 2]),
-        );
-        expect(isMaskMagenta(pixels[0]!)).toBe(false);
-        expect(isMaskMagenta(pixels[1]!)).toBe(false);
-        expect(isMaskMagenta(pixels[2]!)).toBe(true);
-        expect(isMaskMagenta(pixels[3]!)).toBe(false);
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "fails closed — an unqueryable redaction selector aborts the capture entirely",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        const page = await browser.newPage();
-        await page.setContent(`<input autocomplete="cc-number" value="4242424242424242">`);
-        const controller = BrowserController.fromHarnessPage(page);
-
-        await expect(
-          controller.screenshotForOperator({ extraRedactionSelectors: ["#not[a(valid"] }),
-        ).rejects.toThrow("screenshot_redaction_unresolved");
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)("allows a proven hidden empty secret control", async () => {
-    const browser = await launchIsolatedTestBrowser();
-    try {
-      const page = await browser.newPage();
-      await page.setContent(`<input type="password" value="" style="display:none">`);
-      const controller = BrowserController.fromHarnessPage(page);
-
-      // A password field is outside the payment-only mask set entirely.
-      await expect(controller.captureOperatorScreenshot()).resolves.toMatchObject({
-        redactedCount: 0,
-      });
-    } finally {
-      await browser.close();
-    }
-  });
-
-  it.skipIf(!chromiumAvailable)(
-    "masks an input whose VALUE is a Luhn-valid PAN even without card attributes",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        const page = await browser.newPage();
-        await page.setContent(`
-          <input id="freeform" type="text" value="4242 4242 4242 4242">
-          <input id="harmless" type="text" value="order 123456">
-        `);
-        const controller = BrowserController.fromHarnessPage(page);
-
-        const result = await controller.screenshotForOperator();
-        expect(result.redactedCount).toBe(1);
-
-        const panBox = await page.locator("#freeform").boundingBox();
-        expect(panBox).not.toBeNull();
-        const [panPixel] = await samplePixels(page, result.base64, [
-          [panBox!.x + panBox!.width / 2, panBox!.y + panBox!.height / 2],
-        ]);
-        expect(isMaskMagenta(panPixel!)).toBe(true);
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "captures populated sealed, password, PAN, expiry, CVV, and select fields with node masks",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        const sensitiveFields = [
-          '<input data-ts-sealed-payment="1" value="still-secret">',
-          '<input type="password" value="otp-secret">',
-          '<input autocomplete="one-time-code" value="654321">',
-          '<input name="challenge_pin" value="9876">',
-          '<input value="4242 4242 4242 4242">',
-          '<input autocomplete="cc-exp" value="12/30">',
-          '<input autocomplete="cc-csc" value="123">',
-          '<select autocomplete="cc-exp-year"><option value="30" selected>2030</option></select>',
-          '<select autocomplete="cc-exp-year"><option value="" selected>2030</option></select>',
-        ];
-        for (const field of sensitiveFields) {
-          const page = await browser.newPage();
-          await page.setContent(field);
-          const controller = BrowserController.fromHarnessPage(page);
-          await expect(controller.captureOperatorScreenshot()).resolves.toMatchObject({
-            redactedCount: expect.any(Number),
-          });
-          await page.close();
+        for (const pixel of await samplePixels(page, result.base64, points)) {
+          expect(isMaskMagenta(pixel)).toBe(false);
         }
       } finally {
         await browser.close();
@@ -348,25 +169,27 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "preserves type_secret identity across a controlled-input rerender",
+    "captures a rendered API key, recovery code and TOTP — the case the operator was blocked on",
     async () => {
       const browser = await launchIsolatedTestBrowser();
       try {
         const page = await browser.newPage();
-        await page.setContent("<nav><input></nav>");
+        await page.setContent(`
+          <p id="key" style="font-size:24px">sk-live-9f2c8a1e4b7d6053ac91</p>
+          <p id="recovery" style="font-size:24px">ABCD-EFGH-IJKL-MNOP</p>
+          <p id="totp" style="font-size:24px">482913</p>
+        `);
         const controller = BrowserController.fromHarnessPage(page);
-        const sealedFieldKeys = await controller.type("input", "secret-value", true);
-        await page.locator("input").evaluate((input) => {
-          const replacement = input.cloneNode(true) as HTMLInputElement;
-          replacement.removeAttribute("data-ts-sealed-payment");
-          input.replaceWith(replacement);
-        });
 
-        await expect(
-          controller.captureOperatorScreenshot({}, sealedFieldKeys),
-        ).resolves.toMatchObject({
-          redactedCount: 1,
-        });
+        const result = await controller.screenshotForOperator();
+
+        expect(isValidJpegBase64(result.base64)).toBe(true);
+        const points = await Promise.all(
+          ["#key", "#recovery", "#totp"].map(async (selector) => await centerOf(page, selector)),
+        );
+        for (const pixel of await samplePixels(page, result.base64, points)) {
+          expect(isMaskMagenta(pixel)).toBe(false);
+        }
       } finally {
         await browser.close();
       }
@@ -374,50 +197,48 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "returns durable sealed identity from locator typing across a controlled rerender",
+    "captures a Luhn-valid PAN rendered as page text without refusing or masking",
     async () => {
       const browser = await launchIsolatedTestBrowser();
       try {
         const page = await browser.newPage();
-        await page.setContent('<nav><input id="secret"></nav>');
+        await page.setContent('<p id="pan" style="font-size:24px">4242-4242-4242-4242</p>');
         const controller = BrowserController.fromHarnessPage(page);
-        const resolved = await controller.resolvePageTarget("css", "#secret", "type");
-        expect(resolved.ok).toBe(true);
-        if (!resolved.ok) throw new Error("locator did not resolve");
 
-        const sealedFieldKeys = await controller.typeHandle(resolved.handle, "secret-value", true);
-        await resolved.handle.dispose();
-        await page.locator("#secret").evaluate((input) => {
-          const replacement = input.cloneNode(true) as HTMLInputElement;
-          replacement.removeAttribute("data-ts-sealed-payment");
-          input.replaceWith(replacement);
-        });
+        const result = await controller.captureOperatorScreenshot();
 
-        await expect(
-          controller.captureOperatorScreenshot({}, sealedFieldKeys),
-        ).resolves.toMatchObject({
-          redactedCount: 1,
-        });
+        expect(isValidJpegBase64(result.base64)).toBe(true);
+        const [pixel] = await samplePixels(page, result.base64, [await centerOf(page, "#pan")]);
+        expect(isMaskMagenta(pixel ?? [])).toBe(false);
       } finally {
         await browser.close();
       }
     },
   );
 
-  it.skipIf(!chromiumAvailable)("redacts a rendered separator-formatted PAN", async () => {
-    const browser = await launchIsolatedTestBrowser();
-    try {
-      const page = await browser.newPage();
-      await page.setContent("<div>Card on file: 4242-4242 4242-4242</div>");
-      const controller = BrowserController.fromHarnessPage(page);
+  it.skipIf(!chromiumAvailable)(
+    "captures while an operator-typed secret sits in a marked field",
+    async () => {
+      const browser = await launchIsolatedTestBrowser();
+      try {
+        const page = await browser.newPage();
+        await page.setContent('<input id="secret" style="width:400px">');
+        const controller = BrowserController.fromHarnessPage(page);
+        await controller.type("#secret", "sk-live-secret-value", true);
 
-      await expect(controller.captureOperatorScreenshot()).resolves.toMatchObject({
-        redactedCount: 1,
-      });
-    } finally {
-      await browser.close();
-    }
-  });
+        const result = await controller.captureOperatorScreenshot();
+
+        expect(isValidJpegBase64(result.base64)).toBe(true);
+        // The payment marker is still stamped — it is card-fill machinery, not a
+        // read seal — but it no longer changes what the capture returns.
+        expect(await page.locator('#secret[data-ts-sealed-payment="1"]').count()).toBe(1);
+        const [pixel] = await samplePixels(page, result.base64, [await centerOf(page, "#secret")]);
+        expect(isMaskMagenta(pixel ?? [])).toBe(false);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
 
   it.skipIf(!chromiumAvailable)(
     "never passes raw screenshot bytes through merchant page APIs",
@@ -461,297 +282,23 @@ describe("operate_screenshot money-fence redaction (real browser)", () => {
     },
   );
 
-  it.skipIf(!chromiumAvailable)(
-    "covers redaction geometry and element identity changes with the union mask",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        for (const mutation of ["move", "replace"] as const) {
-          const page = await browser.newPage();
-          await page.setContent('<input id="secret" autocomplete="cc-number" value="">');
-          const context = page.context();
-          const newCDPSession = context.newCDPSession.bind(context);
-          context.newCDPSession = async (target) => {
-            const session = await newCDPSession(target);
-            const send = session.send.bind(session);
-            session.send = async (method, params) => {
-              const result = await send(method, params);
-              if (method === "Page.captureScreenshot") {
-                await page.locator("#secret").evaluate((element, kind) => {
-                  if (kind === "move") {
-                    (element as HTMLElement).style.marginLeft = "80px";
-                  } else {
-                    element.replaceWith(element.cloneNode(true));
-                  }
-                }, mutation);
-              }
-              return result;
-            };
-            return session;
-          };
-          const controller = BrowserController.fromHarnessPage(page);
+  it.skipIf(!chromiumAvailable)("captures the full scrollable page on full_page", async () => {
+    const browser = await launchIsolatedTestBrowser();
+    try {
+      const page = await browser.newPage();
+      await page.setContent('<div style="height:3000px">tall</div>');
+      const controller = BrowserController.fromHarnessPage(page);
 
-          await expect(controller.screenshotForOperator()).resolves.toMatchObject({
-            redactedCount: 2,
-          });
-          await page.close();
-        }
-      } finally {
-        await browser.close();
-      }
-    },
-  );
+      const viewport = await controller.screenshotForOperator();
+      const full = await controller.screenshotForOperator({ fullPage: true });
 
-  it.skipIf(!chromiumAvailable)(
-    "retries and redacts a secret that appears immediately before pixel capture",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        const page = await browser.newPage();
-        await page.setContent("<div id=card></div>");
-        const context = page.context();
-        const newCDPSession = context.newCDPSession.bind(context);
-        let captureCalls = 0;
-        context.newCDPSession = async (target) => {
-          const session = await newCDPSession(target);
-          await page.locator("#card").evaluate((element) => {
-            element.textContent = "4242 4242 4242 4242";
-          });
-          const send = session.send.bind(session);
-          session.send = async (method, params) => {
-            if (method === "Page.captureScreenshot") captureCalls += 1;
-            return await send(method, params);
-          };
-          return session;
-        };
-        const controller = BrowserController.fromHarnessPage(page);
-
-        await expect(controller.captureOperatorScreenshot()).resolves.toMatchObject({
-          redactedCount: 1,
-        });
-        expect(captureCalls).toBeGreaterThanOrEqual(1);
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "returns one union-masked capture for an observed geometry mutation",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        const page = await browser.newPage();
-        await page.setContent('<input id="secret" autocomplete="cc-number" value="">');
-        const context = page.context();
-        const newCDPSession = context.newCDPSession.bind(context);
-        let captureCalls = 0;
-        context.newCDPSession = async (target) => {
-          const session = await newCDPSession(target);
-          const send = session.send.bind(session);
-          session.send = async (method, params) => {
-            const result = await send(method, params);
-            if (method === "Page.captureScreenshot") {
-              captureCalls += 1;
-              if (captureCalls === 1) {
-                await page.locator("#secret").evaluate((element) => {
-                  (element as HTMLElement).style.marginLeft = "80px";
-                });
-              }
-            }
-            return result;
-          };
-          return session;
-        };
-        const controller = BrowserController.fromHarnessPage(page);
-
-        const result = await controller.captureOperatorScreenshot();
-
-        expect(isValidJpegBase64(result.base64)).toBe(true);
-        expect(captureCalls).toBe(1);
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "allows empty ACS secret controls without mutating the document",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        const page = await browser.newPage();
-        await page.setContent(`
-          <input type="password" value="">
-          <input autocomplete="one-time-code" value="">
-          <select autocomplete="cc-exp-year"><option value="" selected>Year</option></select>
-        `);
-        await page.evaluate(() => {
-          (window as Window & { mutationCount?: number }).mutationCount = 0;
-          new MutationObserver((records) => {
-            (window as Window & { mutationCount?: number }).mutationCount! += records.length;
-          }).observe(document, { attributes: true, childList: true, subtree: true });
-        });
-        const controller = BrowserController.fromHarnessPage(page);
-
-        const result = await controller.captureOperatorScreenshot();
-
-        expect(isValidJpegBase64(result.base64)).toBe(true);
-        await page.evaluate(() => new Promise(requestAnimationFrame));
-        expect(
-          await page.evaluate(
-            () => (window as Window & { mutationCount?: number }).mutationCount ?? -1,
-          ),
-        ).toBe(0);
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "keeps Shopify-style shipping radios and addresses unmasked on a plain checkout",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        const page = await browser.newPage();
-        // A minimal Shopify-checkout-shaped page: shipping-address inputs and
-        // shipping-method radio options whose name/id slugs are long
-        // underscore/bracket identifiers with digits. Before the fix these
-        // matched the "pin"-in-"shipping" selector collision and the broad
-        // vendor-token heuristic, masking nearly every node on the page.
-        await page.setContent(`
-          <main>
-            <h1>Information</h1>
-            <input id="checkout_email" name="checkout[email]" value="buyer@example.com" autocomplete="email">
-            <h2>Shipping address</h2>
-            <input id="checkout_shipping_address_first_name" name="checkout[shipping_address][first_name]" value="Jamie" autocomplete="given-name">
-            <input id="checkout_shipping_address_address1" name="checkout[shipping_address][address1]" value="350 5th Ave" autocomplete="shipping address-line1">
-            <input id="checkout_shipping_address_city" name="checkout[shipping_address][city]" value="New York" autocomplete="shipping address-level2">
-            <input id="checkout_shipping_address_zip" name="checkout[shipping_address][zip]" value="10118" autocomplete="shipping postal-code">
-            <h2>Shipping method</h2>
-            <div role="radiogroup" aria-label="Shipping method">
-              <input type="radio" id="checkout_shipping_rate_standard" name="checkout[shipping_rate][id]" value="standard-8.00" checked>
-              <label for="checkout_shipping_rate_standard">Standard $8.00</label>
-              <input type="radio" id="checkout_shipping_rate_express" name="checkout[shipping_rate][id]" value="express-15.00">
-              <label for="checkout_shipping_rate_express">Express $15.00</label>
-            </div>
-          </main>
-        `);
-        const controller = BrowserController.fromHarnessPage(page);
-
-        const result = await controller.captureOperatorScreenshot();
-
-        // Nothing on this page is secret: zero masks, no redacted_count noise.
-        expect(result.redactedCount).toBe(0);
-        expect(isValidJpegBase64(result.base64)).toBe(true);
-
-        // Pixel-level proof: shipping-rate radio labels and the address
-        // line-1 input keep ordinary (non-magenta) pixels.
-        const boxes = await Promise.all(
-          [
-            'label[for="checkout_shipping_rate_standard"]',
-            'label[for="checkout_shipping_rate_express"]',
-            "#checkout_shipping_address_address1",
-            "#checkout_shipping_address_city",
-          ].map(async (selector) => await page.locator(selector).boundingBox()),
-        );
-        expect(boxes.every((box) => box !== null)).toBe(true);
-        const pixels = await samplePixels(
-          page,
-          result.base64,
-          boxes.map((box) => [box!.x + box!.width / 2, box!.y + box!.height / 2]),
-        );
-        for (const pixel of pixels) expect(isMaskMagenta(pixel)).toBe(false);
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "leaves rendered API keys, recovery codes, and TOTPs visible on a checkout",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        const page = await browser.newPage();
-        await page.setContent(`
-          <main>
-            <h2>Shipping address</h2>
-            <input id="checkout_shipping_address_address1" name="checkout[shipping_address][address1]" value="350 5th Ave" autocomplete="shipping address-line1">
-            <input type="radio" id="checkout_shipping_rate_standard" name="checkout[shipping_rate][id]" value="standard-8.00" checked>
-            <label for="checkout_shipping_rate_standard">Standard $8.00</label>
-            <p id="api">API key: sk-proj-1234567890abcdefghijklmnopqrstuv</p>
-            <p id="recovery" title="Recovery code: 814226">Use your recovery code</p>
-            <p id="totp">Your 2FA code is 553218</p>
-          </main>
-        `);
-        const controller = BrowserController.fromHarnessPage(page);
-
-        const result = await controller.captureOperatorScreenshot();
-
-        // Payment-only masking: nothing on this page is card material.
-        expect(result.redactedCount).toBe(0);
-        const boxes = await Promise.all(
-          [
-            "#api",
-            "#recovery",
-            "#totp",
-            "#checkout_shipping_address_address1",
-            'label[for="checkout_shipping_rate_standard"]',
-          ].map(async (selector) => await page.locator(selector).boundingBox()),
-        );
-        expect(boxes.every((box) => box !== null)).toBe(true);
-        const pixels = await samplePixels(
-          page,
-          result.base64,
-          boxes.map((box) => [box!.x + box!.width / 2, box!.y + box!.height / 2]),
-        );
-        for (const pixel of pixels) expect(isMaskMagenta(pixel)).toBe(false);
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "captures with no redaction when no card/sealed fields exist",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        const page = await browser.newPage();
-        await page.setContent("<h1>Nothing sensitive here</h1>");
-        const controller = BrowserController.fromHarnessPage(page);
-
-        const result = await controller.screenshotForOperator();
-        expect(result.redactedCount).toBe(0);
-        expect(isValidJpegBase64(result.base64)).toBe(true);
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "full_page passes through without redacting anything extra",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        const page = await browser.newPage();
-        await page.setContent(`
-        <div style="height:3000px">tall page</div>
-        <input autocomplete="cc-number" value="4242424242424242">
-      `);
-        const controller = BrowserController.fromHarnessPage(page);
-
-        const result = await controller.screenshotForOperator({ fullPage: true });
-        expect(result.redactedCount).toBe(1);
-        expect(isValidJpegBase64(result.base64)).toBe(true);
-      } finally {
-        await browser.close();
-      }
-    },
-  );
+      expect(isValidJpegBase64(viewport.base64)).toBe(true);
+      expect(isValidJpegBase64(full.base64)).toBe(true);
+      expect(full.base64.length).toBeGreaterThan(viewport.base64.length);
+    } finally {
+      await browser.close();
+    }
+  });
 });
 
 describe("operate_screenshot frame targeting (real browser)", () => {
@@ -769,35 +316,31 @@ describe("operate_screenshot frame targeting (real browser)", () => {
     return page;
   }
 
-  it.skipIf(!chromiumAvailable)(
-    "captures ONE cross-origin frame by index, redacting only that frame's card fields",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        const pageUrl = "https://shop.example.test/checkout";
-        const frameUrl = "https://checkout.pci.shopifyinc.com/card-fields";
-        const page = await servePages(browser, {
-          [pageUrl]: `
+  it.skipIf(!chromiumAvailable)("captures ONE cross-origin frame by index", async () => {
+    const browser = await launchIsolatedTestBrowser();
+    try {
+      const pageUrl = "https://shop.example.test/checkout";
+      const frameUrl = "https://checkout.pci.shopifyinc.com/card-fields";
+      const page = await servePages(browser, {
+        [pageUrl]: `
             <input autocomplete="cc-number" value="9999888877776666">
             <iframe src="${frameUrl}"></iframe>`,
-          [frameUrl]: `<input autocomplete="cc-number" value="4242424242424242">`,
-        });
-        await page.goto(pageUrl);
-        await page.waitForLoadState("networkidle");
-        const controller = BrowserController.fromHarnessPage(page);
+        [frameUrl]: `<input autocomplete="cc-number" value="4242424242424242">`,
+      });
+      await page.goto(pageUrl);
+      await page.waitForLoadState("networkidle");
+      const controller = BrowserController.fromHarnessPage(page);
 
-        const result = await controller.screenshotForOperator({ frameIndex: 1 });
-        expect(result.frameUrl).toBe(frameUrl);
-        expect(result.redactedCount).toBe(1);
-        expect(isValidJpegBase64(result.base64)).toBe(true);
-      } finally {
-        await browser.close();
-      }
-    },
-  );
+      const result = await controller.screenshotForOperator({ frameIndex: 1 });
+      expect(result.frameUrl).toBe(frameUrl);
+      expect(isValidJpegBase64(result.base64)).toBe(true);
+    } finally {
+      await browser.close();
+    }
+  });
 
   it.skipIf(!chromiumAvailable)(
-    "allows an isolated clean ACS frame even while the parent checkout still has a sealed field",
+    "captures an isolated ACS frame while the parent checkout holds a filled card field",
     async () => {
       const browser = await launchIsolatedTestBrowser();
       try {
@@ -811,9 +354,10 @@ describe("operate_screenshot frame targeting (real browser)", () => {
         await page.waitForLoadState("networkidle");
         const controller = BrowserController.fromHarnessPage(page);
 
-        await expect(controller.captureOperatorScreenshot()).resolves.toMatchObject({
-          redactedCount: 1,
-        });
+        // The whole page captures too — a filled card field is no longer a refusal.
+        const whole = await controller.captureOperatorScreenshot();
+        expect(isValidJpegBase64(whole.base64)).toBe(true);
+
         const result = await controller.captureOperatorScreenshot({
           frameUrlContains: "cardinalcommerce.com",
         });
@@ -825,140 +369,25 @@ describe("operate_screenshot frame targeting (real browser)", () => {
     },
   );
 
-  it.skipIf(!chromiumAvailable)(
-    "redacts a parent compositor overlay included in a targeted capture",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        const pageUrl = "https://shop.example.test/checkout";
-        const frameUrl = "https://authentication.cardinalcommerce.com/challenge/overlay";
-        const page = await servePages(browser, {
-          [pageUrl]: `
-            <style>
-              iframe { border: 0; width: 320px; height: 180px }
-              #overlay { position: fixed; inset: 0; background: white; z-index: 10 }
-            </style>
-            <iframe src="${frameUrl}"></iframe><div id="overlay">4242 4242 4242 4242</div>`,
-          [frameUrl]: `<style>html,body { margin: 0; background: rgb(0, 128, 0) }</style>`,
-        });
-        await page.goto(pageUrl);
-        await page.waitForLoadState("networkidle");
-        const controller = BrowserController.fromHarnessPage(page);
-
-        await expect(
-          controller.captureOperatorScreenshot({ frameUrlContains: "cardinalcommerce.com" }),
-        ).resolves.toMatchObject({ redactedCount: 1 });
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "redacts a secret node in descendant documents included by a targeted frame",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        const pageUrl = "https://shop.example.test/checkout";
-        const frameUrl = "https://authentication.cardinalcommerce.com/challenge/nested";
-        const nestedUrl = "https://issuer.example.test/card";
-        const page = await servePages(browser, {
-          [pageUrl]: `<iframe src="${frameUrl}"></iframe>`,
-          [frameUrl]: `<iframe src="${nestedUrl}"></iframe>`,
-          [nestedUrl]: `<input autocomplete="cc-csc" value="123">`,
-        });
-        await page.goto(pageUrl);
-        await page.waitForLoadState("networkidle");
-        const controller = BrowserController.fromHarnessPage(page);
-
-        await expect(
-          controller.captureOperatorScreenshot({ frameUrlContains: "cardinalcommerce.com" }),
-        ).resolves.toMatchObject({ redactedCount: 1 });
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "keeps viewport and full-page captures available around an unreadable unrelated frame",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        const pageUrl = "https://shop.example.test/checkout";
-        const badFrameUrl = "https://broken.example.test/frame";
-        const acsFrameUrl = "https://authentication.cardinalcommerce.com/challenge";
-        const page = await servePages(browser, {
-          [pageUrl]: `<iframe src="${badFrameUrl}"></iframe><iframe src="${acsFrameUrl}"></iframe>`,
-          [badFrameUrl]: `<input type="password"><script>Object.defineProperty(document.querySelector('input'), 'value', { get() { throw new Error('unreadable'); } })</script>`,
-          [acsFrameUrl]: `<p>Approve in your banking app</p>`,
-        });
-        await page.goto(pageUrl);
-        await page.waitForLoadState("networkidle");
-        const controller = BrowserController.fromHarnessPage(page);
-
-        await expect(controller.captureOperatorScreenshot()).resolves.toMatchObject({
-          frameUrl: null,
-          frameCount: 3,
-        });
-        await expect(
-          controller.captureOperatorScreenshot({ fullPage: true }),
-        ).resolves.toMatchObject({
-          frameUrl: null,
-          frameCount: 3,
-        });
-        await expect(
-          controller.captureOperatorScreenshot({ frameUrlContains: "cardinalcommerce.com" }),
-        ).resolves.toMatchObject({ frameUrl: acsFrameUrl });
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "discards a targeted capture when its verified document navigates",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        const pageUrl = "https://shop.example.test/checkout";
-        const frameUrl = "https://authentication.cardinalcommerce.com/challenge";
-        const replacementUrl = "https://issuer.example.test/replacement";
-        const page = await servePages(browser, {
-          [pageUrl]: `<iframe src="${frameUrl}"></iframe>`,
-          [frameUrl]: `<input type="password"><script>Object.defineProperty(document.querySelector('input'), 'value', { get() { location.href = '${replacementUrl}'; return ''; } })</script>`,
-          [replacementUrl]: `<input autocomplete="cc-csc" value="123">`,
-        });
-        await page.goto(pageUrl);
-        await page.waitForLoadState("networkidle");
-        const controller = BrowserController.fromHarnessPage(page);
-
-        await expect(
-          controller.captureOperatorScreenshot({ frameUrlContains: "cardinalcommerce.com" }),
-        ).rejects.toThrow("screenshot_unavailable_sealed_context");
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
   it.skipIf(!chromiumAvailable)("resolves a frame by a URL substring", async () => {
     const browser = await launchIsolatedTestBrowser();
     try {
       const pageUrl = "https://shop.example.test/checkout";
-      const frameUrl = "https://checkout.pci.shopifyinc.com/card-fields";
+      const frameUrl = "https://authentication.cardinalcommerce.com/challenge";
       const page = await servePages(browser, {
         [pageUrl]: `<iframe src="${frameUrl}"></iframe>`,
-        [frameUrl]: `<p>card fields</p>`,
+        [frameUrl]: `<p>Approve this payment in your banking app</p>`,
       });
       await page.goto(pageUrl);
       await page.waitForLoadState("networkidle");
       const controller = BrowserController.fromHarnessPage(page);
 
       const result = await controller.screenshotForOperator({
-        frameUrlContains: "shopifyinc.com",
+        frameUrlContains: "cardinalcommerce.com",
       });
       expect(result.frameUrl).toBe(frameUrl);
+      expect(result.frameCount).toBe(2);
+      expect(isValidJpegBase64(result.base64)).toBe(true);
     } finally {
       await browser.close();
     }
@@ -994,175 +423,6 @@ describe("operate_screenshot frame targeting (real browser)", () => {
         await expect(
           controller.screenshotForOperator({ frameUrlContains: "nonexistent.example" }),
         ).rejects.toThrow("screenshot_frame_not_found");
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-});
-
-describe("operate_screenshot default redaction (real browser)", () => {
-  it.skipIf(!chromiumAvailable)(
-    "default mode masks nothing on a page with no card material",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        const page = await browser.newPage();
-        await page.setContent(`
-          <p id="product">Fleece Jacket — FJ-2026-004</p>
-          <p id="price">$189.00 (was $249.00)</p>
-          <p id="address">450 Lexington Ave, New York, NY 10001, ZIP code 10001</p>
-          <p id="coupon">Discount code: SAVE20 applied at checkout</p>
-          <input id="zip" aria-label="ZIP code" value="10001">
-          <input id="phone" aria-label="Phone number" value="212-555-0199">
-          <p id="key">API key: sk-proj-1234567890abcdefghijklmnopqrstuv</p>
-          <p id="token">Token: ghp_AbcdefghijklmnopqrstuvwxyzAbcdefghij</p>
-          <p id="aws">Access key: AKIAIOSFODNN7EXAMPLE</p>
-          <p id="jwt">Session: eyJhbGciOiJIUzINiJ9.eyJzdWIiOiJhYmMifQ.c2lnbmF0dXJlX3BsYWNlaG9sZGVy (synthetic example)</p>
-        `);
-        const controller = BrowserController.fromHarnessPage(page);
-
-        const result = await controller.screenshotForOperator();
-
-        // Nothing here is card material, so nothing is masked — including the
-        // rendered API key / token / AWS key / JWT, which are page content.
-        expect(result.redactedCount).toBe(0);
-        const boxes = await Promise.all(
-          [
-            "#product",
-            "#price",
-            "#address",
-            "#coupon",
-            "#zip",
-            "#phone",
-            "#key",
-            "#token",
-            "#aws",
-            "#jwt",
-          ].map(async (selector) => await page.locator(selector).boundingBox()),
-        );
-        const pixels = await samplePixels(
-          page,
-          result.base64,
-          boxes.map((box) => [box!.x + box!.width / 2, box!.y + box!.height / 2]),
-        );
-        for (const pixel of pixels) expect(isMaskMagenta(pixel)).toBe(false);
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "masks operator-injected card/CVV values and nothing else",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        const page = await browser.newPage();
-        const injectedCard = "4242424242424242";
-        // Not a substring of the rendered API key below: exact-injected-value
-        // masking is a plain substring match, so a CVV that happens to occur
-        // inside other page text would legitimately mask that text too.
-        const injectedCvv = "917";
-        await page.setContent(`
-          <p id="key">API key: sk-proj-1234567890abcdefghijklmnopqrstuv</p>
-          <input id="injected-card" value="${injectedCard}">
-          <input id="injected-cvv" value="${injectedCvv}">
-          <p id="ordinary">Discount code: SAVE20, ZIP code 10001</p>
-        `);
-        const controller = BrowserController.fromHarnessPage(page);
-
-        const result = await controller.screenshotForOperator({}, [injectedCard, injectedCvv]);
-
-        // HARD INVARIANT: the exact values the operator injected never reach the
-        // image. The rendered API key is left visible.
-        expect(result.redactedCount).toBe(2);
-        const boxes = await Promise.all(
-          ["#key", "#injected-card", "#injected-cvv", "#ordinary"].map(
-            async (selector) => await page.locator(selector).boundingBox(),
-          ),
-        );
-        const pixels = await samplePixels(
-          page,
-          result.base64,
-          boxes.map((box) => [box!.x + box!.width / 2, box!.y + box!.height / 2]),
-        );
-        expect(isMaskMagenta(pixels[0]!)).toBe(false);
-        expect(isMaskMagenta(pixels[1]!)).toBe(true);
-        expect(isMaskMagenta(pixels[2]!)).toBe(true);
-        expect(isMaskMagenta(pixels[3]!)).toBe(false);
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "keeps the image when the mask set mutates mid-capture, masking the union",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        const page = await browser.newPage();
-        await page.setContent('<input id="secret" autocomplete="cc-number" value="">');
-        const context = page.context();
-        const newCDPSession = context.newCDPSession.bind(context);
-        context.newCDPSession = async (target) => {
-          const session = await newCDPSession(target);
-          const send = session.send.bind(session);
-          session.send = async (method, params) => {
-            const result = await send(method, params);
-            if (method === "Page.captureScreenshot") {
-              await page.locator("#secret").evaluate((element) => {
-                (element as HTMLElement).style.marginLeft = "80px";
-              });
-            }
-            return result;
-          };
-          return session;
-        };
-        const controller = BrowserController.fromHarnessPage(page);
-
-        const result = await controller.screenshotForOperator();
-
-        expect(isValidJpegBase64(result.base64)).toBe(true);
-        // The moved node is covered by the union of both samplings.
-        expect(result.redactedCount).toBeGreaterThanOrEqual(1);
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "still refuses when the frame set changes during capture",
-    async () => {
-      const browser = await launchIsolatedTestBrowser();
-      try {
-        const page = await browser.newPage();
-        await page.setContent('<input id="secret" autocomplete="cc-number" value="">');
-        const context = page.context();
-        const newCDPSession = context.newCDPSession.bind(context);
-        context.newCDPSession = async (target) => {
-          const session = await newCDPSession(target);
-          const send = session.send.bind(session);
-          session.send = async (method, params) => {
-            const result = await send(method, params);
-            if (method === "Page.captureScreenshot") {
-              await page.evaluate(() => {
-                const iframe = document.createElement("iframe");
-                iframe.id = "late-frame";
-                document.body.appendChild(iframe);
-              });
-            }
-            return result;
-          };
-          return session;
-        };
-        const controller = BrowserController.fromHarnessPage(page);
-
-        await expect(controller.screenshotForOperator()).rejects.toThrow(
-          "screenshot_redaction_unstable",
-        );
       } finally {
         await browser.close();
       }

@@ -125,7 +125,6 @@ import { serviceSlugFromHost } from "@trusty-squire/skill-schema";
 import type { PostVerifyStep } from "./provision-types.js";
 import {
   looksLikeCodeIdentifier,
-  looksLikeCredentialValue,
   isCredentialNoise,
   findCredentialTokens,
   findOtpCredential,
@@ -1145,71 +1144,6 @@ function elementTargetKeys(el: InteractiveElement): string[] {
   });
 }
 
-const PENDING_CARD_AUTOCOMPLETE_FIELDS = new Set([
-  "cc-number",
-  "cc-exp",
-  "cc-exp-month",
-  "cc-exp-year",
-  "cc-csc",
-  "cc-name",
-]);
-
-function isPendingCardFilledField(el: InteractiveElement): boolean {
-  const autocomplete = (el.autocomplete ?? "")
-    .toLowerCase()
-    .split(/\s+/)
-    .filter((token) => token.length > 0);
-  if (autocomplete.some((token) => PENDING_CARD_AUTOCOMPLETE_FIELDS.has(token))) return true;
-  if (
-    autocomplete.includes("billing") &&
-    autocomplete.some((token) =>
-      [
-        "address-line1",
-        "address-line2",
-        "address-level1",
-        "address-level2",
-        "postal-code",
-        "country",
-      ].includes(token),
-    )
-  ) {
-    return true;
-  }
-
-  const name = (el.name ?? "").toLowerCase();
-  const id = (el.id ?? "").toLowerCase();
-  const ariaLabel = (el.ariaLabel ?? "").toLowerCase();
-  const placeholder = (el.placeholder ?? "").toLowerCase();
-  return (
-    name.includes("cardnumber") ||
-    id.includes("card-number") ||
-    id.includes("cardnumber") ||
-    name.includes("cardholder") ||
-    name.includes("card-name") ||
-    id.includes("cardholder") ||
-    name.includes("cvv") ||
-    name.includes("cvc") ||
-    name.includes("security-code") ||
-    id.includes("cvv") ||
-    id.includes("cvc") ||
-    ((name.includes("exp") || id.includes("exp")) &&
-      (name.includes("month") ||
-        name.includes("year") ||
-        name.includes("date") ||
-        name.includes("expir") ||
-        id.includes("month") ||
-        id.includes("year") ||
-        id.includes("date") ||
-        id.includes("expir") ||
-        name === "exp" ||
-        id === "exp")) ||
-    placeholder.replace(/\s+/g, "") === "mm/yy" ||
-    ariaLabel.replace(/\s+/g, "") === "mm/yy" ||
-    ((name.includes("billing") || id.includes("billing")) &&
-      /address|line1|line2|city|locality|state|region|postal|zip|country/.test(`${name} ${id}`))
-  );
-}
-
 // Shopify defers address geocoding (and therefore delivery-rate loading) until
 // its required shipping street field is committed. Keep this deliberately
 // narrow: ordinary text fields and even other autocomplete controls retain
@@ -1221,167 +1155,6 @@ function isRequiredShippingAddressLine1(el: InteractiveElement): boolean {
     .split(/\s+/)
     .filter((token) => token.length > 0);
   return autocomplete.includes("shipping") && autocomplete.includes("address-line1");
-}
-
-function pendingCardSecretKind(el: InteractiveElement): "pan" | "cvv" | null {
-  const autocomplete = (el.autocomplete ?? "").toLowerCase().split(/\s+/);
-  const signal = `${el.name ?? ""} ${el.id ?? ""}`.toLowerCase();
-  if (
-    autocomplete.includes("cc-number") ||
-    signal.includes("cardnumber") ||
-    signal.includes("card-number")
-  ) {
-    return "pan";
-  }
-  if (
-    autocomplete.includes("cc-csc") ||
-    signal.includes("cvv") ||
-    signal.includes("cvc") ||
-    signal.includes("security-code")
-  ) {
-    return "cvv";
-  }
-  return null;
-}
-
-function redactPaymentObservationText(
-  text: string,
-  elements: readonly InteractiveElement[],
-  active: boolean,
-): string {
-  if (!active) return text;
-  let redacted = text;
-  for (const element of elements) {
-    const kind = pendingCardSecretKind(element);
-    const value = element.value?.trim() ?? "";
-    if (kind === null || value.length === 0) continue;
-    if (kind === "pan") {
-      redacted = redactExactDigitSequence(redacted, value.replace(/\D/g, ""));
-    }
-    const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    redacted = redacted.replace(
-      kind === "cvv" ? new RegExp(`\\b${escaped}\\b`, "g") : new RegExp(escaped, "g"),
-      "[sealed payment]",
-    );
-  }
-  redacted = redactLuhnPanSpans(redacted);
-  return redacted.replace(
-    /\b(cvv|cvc|security\s+code)\s*[:#-]?\s*\d{3,4}\b/gi,
-    "$1 [sealed payment]",
-  );
-}
-
-// D2 observation redaction, PAYMENT-ONLY: an injected vault value can be
-// reflected outside its original input (a page may put it in helper text, an
-// aria label, or a preview URL), so every host-facing text surface is scrubbed
-// by EXACT injected value. There is no secret-SHAPE pass — a rendered API key,
-// recovery code, TOTP, or JWT is ordinary page content the agent must be able
-// to read.
-const OBSERVATION_SECRET_PLACEHOLDER = "[sealed]";
-
-function redactObservationText(
-  text: string,
-  elements: readonly InteractiveElement[],
-  paymentSealActive: boolean,
-  knownSecrets: readonly string[],
-): string {
-  let redacted = redactPaymentObservationText(text, elements, paymentSealActive);
-  // Exact injected vault values are redacted in EVERY mode — this is the vault
-  // guarantee, not a heuristic.
-  for (const secret of [...knownSecrets]
-    .filter((value) => value.length > 0)
-    .sort((a, b) => b.length - a.length)) {
-    redacted = redacted.split(secret).join(OBSERVATION_SECRET_PLACEHOLDER);
-  }
-  // A rendered Luhn-valid PAN is a card value, not a heuristic guess.
-  return redactLuhnPanSpans(redacted);
-}
-
-function presentPaymentSafeString(
-  value: string,
-  paymentSealActive: boolean,
-  knownSecrets: readonly string[] = [],
-): string {
-  // Synthetic test inventories and a few legacy adapters omit optional string
-  // fields despite the public interface. Preserve their old pass-through
-  // behavior; real browser strings still always cross the redaction boundary.
-  if (typeof value !== "string") return value;
-  return redactObservationText(value, [], paymentSealActive, knownSecrets);
-}
-
-const PAYMENT_PAN_MAX_SPAN_CHARS = 96;
-
-function redactExactDigitSequence(text: string, expectedDigits: string): string {
-  if (expectedDigits.length < 13) return text;
-  const digitMatches = Array.from(text.matchAll(/\d/g));
-  const replacements: Array<{ start: number; end: number }> = [];
-  for (let start = 0; start + expectedDigits.length <= digitMatches.length; start += 1) {
-    const matches = digitMatches.slice(start, start + expectedDigits.length);
-    if (matches.map((match) => match[0]).join("") !== expectedDigits) continue;
-    if (matches[matches.length - 1]!.index - matches[0]!.index + 1 > PAYMENT_PAN_MAX_SPAN_CHARS) {
-      continue;
-    }
-    replacements.push({
-      start: matches[0]!.index,
-      end: matches[matches.length - 1]!.index + 1,
-    });
-    start += expectedDigits.length - 1;
-  }
-  if (replacements.length === 0) return text;
-  let cursor = 0;
-  let result = "";
-  for (const replacement of replacements) {
-    result += `${text.slice(cursor, replacement.start)}[sealed payment]`;
-    cursor = replacement.end;
-  }
-  return result + text.slice(cursor);
-}
-
-function redactLuhnPanSpans(text: string): string {
-  const digitPositions = Array.from(text.matchAll(/\d/g), (match) => match.index);
-  const replacements: Array<{ start: number; end: number }> = [];
-  let startDigit = 0;
-  while (startDigit + 13 <= digitPositions.length) {
-    let matchedDigits = 0;
-    const maxDigits = Math.min(19, digitPositions.length - startDigit);
-    for (let length = maxDigits; length >= 13; length -= 1) {
-      const positions = digitPositions.slice(startDigit, startDigit + length);
-      if (positions[positions.length - 1]! - positions[0]! + 1 > PAYMENT_PAN_MAX_SPAN_CHARS) {
-        continue;
-      }
-      const digits = positions.map((position) => text[position]).join("");
-      if (passesLuhn(digits)) {
-        matchedDigits = length;
-        replacements.push({
-          start: positions[0]!,
-          end: positions[positions.length - 1]! + 1,
-        });
-        break;
-      }
-    }
-    startDigit += matchedDigits || 1;
-  }
-  if (replacements.length === 0) return text;
-  let cursor = 0;
-  let result = "";
-  for (const replacement of replacements) {
-    result += `${text.slice(cursor, replacement.start)}[sealed payment]`;
-    cursor = replacement.end;
-  }
-  return result + text.slice(cursor);
-}
-
-function observationSealedFieldKeys(
-  session: Session,
-  elements: readonly InteractiveElement[],
-): ReadonlySet<string> {
-  if (!session.paymentFieldSealActive) return session.sealedFieldKeys;
-  const sealed = new Set(session.sealedFieldKeys);
-  for (const el of elements) {
-    if (!isPendingCardFilledField(el)) continue;
-    for (const key of elementTargetKeys(el)) sealed.add(key);
-  }
-  return sealed;
 }
 
 // Resolve a host-supplied target string to one live element. Matching is by
@@ -2165,9 +1938,6 @@ export function manualCardEntryBlockReason(text: string): string | null {
 export function buildScreenOutline(
   elements: readonly InteractiveElement[],
   pageText: string,
-  sealedFieldKeys: ReadonlySet<string> = new Set<string>(),
-  paymentSealActive = false,
-  knownSecrets: readonly string[] = [],
 ): ScreenOutline | undefined {
   if (elements.length === 0) return undefined;
   const byRegion = new Map<string, ScreenRegion>();
@@ -2176,8 +1946,8 @@ export function buildScreenOutline(
     const role = id.split(":")[0] ?? "region";
     const existing = byRegion.get(id);
     const region: ScreenRegion = existing ?? {
-      id: presentPaymentSafeString(id, paymentSealActive, knownSecrets),
-      role: presentPaymentSafeString(role, paymentSealActive, knownSecrets),
+      id: id,
+      role: role,
       topmost: false,
       occluded_by: null,
       children: [],
@@ -2190,28 +1960,28 @@ export function buildScreenOutline(
       el.occludedBy !== null &&
       el.occludedBy !== undefined
     ) {
-      region.occluded_by = presentPaymentSafeString(el.occludedBy, paymentSealActive, knownSecrets);
+      region.occluded_by = el.occludedBy;
     }
     if (region.children.length < 10) {
       region.children.push({
         ref:
           el.screenPath !== null && el.screenPath !== undefined
-            ? presentPaymentSafeString(el.screenPath, paymentSealActive, knownSecrets)
-            : presentLabel(el, sealedFieldKeys, paymentSealActive, knownSecrets),
+            ? el.screenPath
+            : elementRef(el),
         role:
           el.role === null
             ? null
-            : presentPaymentSafeString(el.role, paymentSealActive, knownSecrets),
-        text: presentLabel(el, sealedFieldKeys, paymentSealActive, knownSecrets),
+            : el.role,
+        text: elementRef(el),
         href:
           el.href === null || el.href === undefined
             ? null
-            : presentPaymentSafeString(el.href, paymentSealActive, knownSecrets),
+            : el.href,
         topmost: el.topmost ?? null,
         occluded_by:
           el.occludedBy === null || el.occludedBy === undefined
             ? null
-            : presentPaymentSafeString(el.occludedBy, paymentSealActive, knownSecrets),
+            : el.occludedBy,
       });
     }
     byRegion.set(id, region);
@@ -2235,56 +2005,9 @@ function roleForAccessibility(el: InteractiveElement): string {
   return el.tag;
 }
 
-// PR3 privacy — a host-facing observation reads field VALUES straight off the
-// live DOM, so after a type_secret the cleartext password (or any sealed slot)
-// would surface in the observation/accessibility tree the planner sees and logs.
-// The whole point of prepare_login/extract is that the host only ever holds a
-// MASKED handle. Mask the presented copy here; internal callers (form-fill,
-// replay, postcondition length checks) read the raw InteractiveElement and are
-// unaffected. A field is sealed if it's a password input or a target a secret
-// slot was typed into (tracked per-session in sealedFieldKeys).
-const SEALED_FIELD_PLACEHOLDER = "[sealed]";
-function isSealedFieldValue(el: InteractiveElement, sealed: ReadonlySet<string>): boolean {
-  if (el.sealed === true) return true;
-  if ((el.type ?? "").toLowerCase() === "password") return true;
-  if ((el.sealedIdentityKeys ?? []).some((key) => sealed.has(key))) return true;
-  return elementTargetKeys(el).some((k) => sealed.has(k));
-}
-function presentFieldValue(
-  el: InteractiveElement,
-  sealed: ReadonlySet<string>,
-  paymentSealActive = false,
-  knownSecrets: readonly string[] = [],
-): string | null {
-  const v = el.value ?? null;
-  if (v === null || v.length === 0) return v;
-  return isSealedFieldValue(el, sealed)
-    ? SEALED_FIELD_PLACEHOLDER
-    : presentPaymentSafeString(v, paymentSealActive, knownSecrets);
-}
-// The host-facing LABEL. elementRef falls back to a field's VALUE when it has no
-// other label text — which would leak a sealed secret as the element's name. For
-// a sealed field, re-derive the label with the value stripped so it lands on the
-// next signal (placeholder/name) or `tag#index`, never the secret. Ref-keying
-// and targeting still use the raw elementRef, so resolution is unaffected.
-function presentLabel(
-  el: InteractiveElement,
-  sealed: ReadonlySet<string>,
-  paymentSealActive = false,
-  knownSecrets: readonly string[] = [],
-): string {
-  const label = isSealedFieldValue(el, sealed)
-    ? elementRef({ ...el, value: null })
-    : elementRef(el);
-  return presentPaymentSafeString(label, paymentSealActive, knownSecrets);
-}
-
 export function buildAccessibilitySnapshot(
   elements: readonly InteractiveElement[],
   limit = 12000,
-  sealedFieldKeys: ReadonlySet<string> = new Set<string>(),
-  paymentSealActive = false,
-  knownSecrets: readonly string[] = [],
 ): AccessibilitySnapshot | undefined {
   if (elements.length === 0) return undefined;
   const refs = provisionElementRefs(elements);
@@ -2301,28 +2024,24 @@ export function buildAccessibilitySnapshot(
     entries.length > 24 || entries.some(([, group]) => group.length > 16);
   const lines: string[] = ["RootWebArea"];
   for (const [region, group] of entries.slice(0, 24)) {
-    lines.push(`  region "${presentPaymentSafeString(region, paymentSealActive, knownSecrets)}"`);
+    lines.push(`  region "${region}"`);
     for (const el of group.slice(0, 16)) {
-      const label = presentLabel(el, sealedFieldKeys, paymentSealActive, knownSecrets).replace(
+      const label = elementRef(el).replace(
         /"/g,
         '\\"',
       );
-      const role = presentPaymentSafeString(
-        roleForAccessibility(el),
-        paymentSealActive,
-        knownSecrets,
-      );
-      const shownValue = presentFieldValue(el, sealedFieldKeys, paymentSealActive, knownSecrets);
+      const role = roleForAccessibility(el);
+      const shownValue = (el.value ?? null);
       const flags = [
         el.value !== undefined && el.value !== null
           ? `value="${(shownValue ?? "").slice(0, 60)}"`
           : null,
         el.checked !== undefined && el.checked !== null ? `checked=${el.checked}` : null,
         el.href !== undefined && el.href !== null
-          ? `href="${presentPaymentSafeString(el.href, paymentSealActive, knownSecrets).slice(0, 120)}"`
+          ? `href="${el.href.slice(0, 120)}"`
           : null,
         el.topmost === false
-          ? `occluded_by="${presentPaymentSafeString(el.occludedBy ?? "unknown", paymentSealActive, knownSecrets)}"`
+          ? `occluded_by="${el.occludedBy ?? "unknown"}"`
           : null,
       ].filter((v): v is string => v !== null);
       lines.push(
@@ -2440,31 +2159,23 @@ export interface ScreenshotCapture {
   url: string;
   frame_url: string | null;
   frame_count: number;
-  redacted_count: number;
   image: { mime_type: string; data_base64: string };
 }
 
-// operate_screenshot's session-level entry point. Session-known secret values
-// remain inside the operator process and are used only to locate node-level
-// pixel masks; they are never included in a tool response.
-//
+// operate_screenshot's session-level entry point. The capture is the page's real
+// pixels — there is no redaction pass and no sealed-context refusal.
 export async function captureScreenshot(
   sessionId: string,
   opts: { frameIndex?: number; frameUrlContains?: string; fullPage?: boolean } = {},
 ): Promise<ScreenshotCapture> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  const captured = await session.browser.captureOperatorScreenshot(
-    opts,
-    [...session.sealedFieldKeys],
-    [...session.secretSlots.values()],
-  );
+  const captured = await session.browser.captureOperatorScreenshot(opts);
   return {
     session_id: sessionId,
     url: session.browser.currentUrl(),
     frame_url: captured.frameUrl,
     frame_count: captured.frameCount,
-    redacted_count: captured.redactedCount,
     image: { mime_type: "image/jpeg", data_base64: captured.base64 },
   };
 }
@@ -2941,12 +2652,7 @@ async function capturePrivateCheckoutState(session: Session): Promise<CheckoutSt
   const elements = await session.browser.extractInteractiveElements();
   retainSessionElements(session, elements);
   const url = session.browser.currentUrl();
-  const text = redactObservationText(
-    await session.browser.extractVisibleText(),
-    elements,
-    session.paymentFieldSealActive,
-    [...session.secretSlots.values()],
-  );
+  const text = await session.browser.extractVisibleText();
   const liveCheckout = await captureCartCheckoutForFillCardFallback(session, url);
   return checkoutStateForObservation(session, url, text.slice(0, 12_000), elements, liveCheckout);
 }
@@ -3273,7 +2979,6 @@ function annotatePaymentControl(out: ObservedElement, el: InteractiveElement): v
 export function toCompactElement(
   el: InteractiveElement,
   ref: string,
-  sealed: ReadonlySet<string>,
   // `path` is the single most verbose field and agents act by ref, not path — so
   // it is DROPPED from the default host payload (78% → 85% of the measured cut).
   // It is retained ONLY in the persisted snapshot file (includePath=true), which
@@ -3284,37 +2989,31 @@ export function toCompactElement(
   // form keeps full fidelity for re-expansion, so callers that write the file
   // pass false.
   elide = false,
-  paymentSealActive = false,
-  knownSecrets: readonly string[] = [],
 ): ObservedElement {
   const out: ObservedElement = {
     ref,
-    label: presentLabel(el, sealed, paymentSealActive, knownSecrets),
-    tag: presentPaymentSafeString(el.tag, paymentSealActive, knownSecrets),
+    label: elementRef(el),
+    tag: el.tag,
   };
-  if (el.role) out.role = presentPaymentSafeString(el.role, paymentSealActive, knownSecrets);
+  if (el.role) out.role = el.role;
   if (el.type && !(elide && shouldElideType(el))) {
-    out.type = presentPaymentSafeString(el.type, paymentSealActive, knownSecrets);
+    out.type = el.type;
   }
   // value_len is a LENGTH signal, not the value — report the REAL character count.
-  // presentFieldValue masks a sealed field to "[sealed]" (8 chars), so using its
-  // length made a correctly-filled 19-char email read as value_len:8 and misled
-  // the agent into thinking its fill truncated. The length isn't the secret (the
-  // min_value_len postcondition already uses the real length for the same reason).
   const realLen = (el.value ?? "").length;
   if (realLen > 0) out.value_len = realLen;
   if (el.checked !== null && el.checked !== undefined) out.checked = el.checked;
-  if (el.href) out.href = presentPaymentSafeString(el.href, paymentSealActive, knownSecrets);
-  if (el.testId) out.testId = presentPaymentSafeString(el.testId, paymentSealActive, knownSecrets);
+  if (el.href) out.href = el.href;
+  if (el.testId) out.testId = el.testId;
   if (includePath && el.screenPath) {
-    out.path = presentPaymentSafeString(el.screenPath, paymentSealActive, knownSecrets);
+    out.path = el.screenPath;
   }
   if (el.topmost === false) out.topmost = false;
   if (el.occludedBy) {
-    out.occluded_by = presentPaymentSafeString(el.occludedBy, paymentSealActive, knownSecrets);
+    out.occluded_by = el.occludedBy;
   }
   if (el.frameOrigin) {
-    out.frame_origin = presentPaymentSafeString(el.frameOrigin, paymentSealActive, knownSecrets);
+    out.frame_origin = el.frameOrigin;
   }
   annotatePaymentControl(out, el);
   return out;
@@ -3661,9 +3360,6 @@ export function buildCompactObservation(args: {
   textTruncated?: boolean;
   guidance?: string;
   elements: readonly InteractiveElement[];
-  sealed?: ReadonlySet<string>;
-  paymentSealActive?: boolean;
-  knownSecrets?: readonly string[];
   prev: ObserveDeltaState | null;
   // Wire encoding of the emitted element set. Default "columnar" (the tab table).
   // The eval harness passes "json" to measure the columnar transform's marginal
@@ -3674,11 +3370,8 @@ export function buildCompactObservation(args: {
   elide?: boolean;
 }): CompactObservationBuild {
   const { sessionId, url, text, elements, prev } = args;
-  const sealed = args.sealed ?? new Set<string>();
   const encode = args.encode ?? "columnar";
   const elide = args.elide ?? true;
-  const paymentSealActive = args.paymentSealActive ?? false;
-  const knownSecrets = args.knownSecrets ?? [];
   const refs = provisionElementRefs(elements);
   const refOf = (el: InteractiveElement): string => refs.get(el) ?? provisionElementRef(el);
 
@@ -3689,13 +3382,13 @@ export function buildCompactObservation(args: {
     const ref = refOf(el);
     fullByRef.set(
       ref,
-      toCompactElement(el, ref, sealed, false, elide, paymentSealActive, knownSecrets),
+      toCompactElement(el, ref, false, elide),
     );
     serializedByRef.set(ref, JSON.stringify(fullByRef.get(ref)));
     // The persisted file keeps FULL fidelity (path included, no elision) so a
     // re-expansion after a host compaction loses nothing.
     fileElements.push(
-      toCompactElement(el, ref, sealed, true, false, paymentSealActive, knownSecrets),
+      toCompactElement(el, ref, true, false),
     );
   }
   const nextState: ObserveDeltaState = { url, byRef: serializedByRef, text };
@@ -4290,7 +3983,6 @@ function compactV2LiveControls(
     handles: compactV2Handles(session, elements),
     pageOrigin,
     pageUrl: session.browser.currentUrl(),
-    knownSecrets: [...session.secretSlots.values()],
   });
 }
 
@@ -4382,9 +4074,7 @@ function compactV2PublicObservation(
   const payload: Observation = {
     format: "compact-v2",
     session_id: session.id,
-    // Keep the path/query private, but expose the screened origin so a
-    // successful navigation is distinguishable from an empty/about:blank view.
-    url: safeOriginV2(session.browser.currentUrl()) ?? "",
+    url: session.browser.currentUrl(),
     text: "",
     stage: fields.stage,
     ...(fields.guidance === undefined ? {} : { guidance: fields.guidance }),
@@ -4408,7 +4098,7 @@ function compactV2Observation(
     session.compactV2HintPages = [...startMetadata.hintPages];
   }
   const stage = safeStageV2(session.browser.currentUrl(), elements);
-  const semantics = safePageSemanticsV2(semanticSource, [...session.secretSlots.values()]);
+  const semantics = safePageSemanticsV2(semanticSource);
   const epochDoc = compactV2EpochDoc(session);
   const previous = session.compactV2Previous;
   const sameDocument = previous !== null && previous.epoch.doc === epochDoc;
@@ -4614,10 +4304,7 @@ export async function observeQuery(
   if (needle.length > 0) {
     for (const [ref, legacy] of session.compactV2Refs) {
       const element = liveByLegacy.get(legacy);
-      if (
-        element !== undefined &&
-        controlMatchesPrivateQueryV2(element, query, [...session.secretSlots.values()])
-      ) {
+      if (element !== undefined && controlMatchesPrivateQueryV2(element, query)) {
         privateMatches.add(ref);
       }
     }
@@ -4717,13 +4404,7 @@ async function observeSession(
     if (v2Mode === "shadow") exerciseCompactV2Shadow(session, generation, elements, semanticSource);
     session.compactV2Active = false;
     invalidateCompactV2Snapshot(session);
-    const sealedFieldKeys = observationSealedFieldKeys(session, elements);
-    const text = redactObservationText(
-      await session.browser.extractVisibleText(),
-      elements,
-      session.paymentFieldSealActive,
-      [...session.secretSlots.values()],
-    );
+    const text = await session.browser.extractVisibleText();
     const normalizedFull = text.replace(/\s+/g, " ").trim();
     const normalizedText = normalizedFull.slice(0, 4000);
     const guidance = provisionPerceptionGuidance(normalizedText);
@@ -4750,9 +4431,6 @@ async function observeSession(
         textTruncated,
         ...(guidance !== undefined ? { guidance } : {}),
         elements,
-        sealed: sealedFieldKeys,
-        paymentSealActive: session.paymentFieldSealActive,
-        knownSecrets: [...session.secretSlots.values()],
         prev: session.prevObserve,
       });
       // Persist the COMPLETE snapshot (path INCLUDED) — the safety net that makes
@@ -4821,32 +4499,10 @@ async function observeSession(
       url,
       normalizedText,
       textTruncated,
-      elements.map((el) =>
-        toCompactElement(
-          el,
-          refOf(el),
-          sealedFieldKeys,
-          true,
-          false,
-          session.paymentFieldSealActive,
-          [...session.secretSlots.values()],
-        ),
-      ),
+      elements.map((el) => toCompactElement(el, refOf(el), true, false)),
     );
-    const screen = buildScreenOutline(
-      elements,
-      normalizedText,
-      sealedFieldKeys,
-      session.paymentFieldSealActive,
-      [...session.secretSlots.values()],
-    );
-    const accessibility = buildAccessibilitySnapshot(
-      elements,
-      undefined,
-      sealedFieldKeys,
-      session.paymentFieldSealActive,
-      [...session.secretSlots.values()],
-    );
+    const screen = buildScreenOutline(elements, normalizedText);
+    const accessibility = buildAccessibilitySnapshot(elements);
     return withCheckoutState(
       {
         session_id: session.id,
@@ -4858,65 +4514,43 @@ async function observeSession(
         elements: elements.map((el) => {
           const observed: ObservedElement = {
             ref: refOf(el),
-            label: presentLabel(el, sealedFieldKeys, session.paymentFieldSealActive, [
-              ...session.secretSlots.values(),
-            ]),
-            tag: presentPaymentSafeString(el.tag, session.paymentFieldSealActive, [
-              ...session.secretSlots.values(),
-            ]),
+            label: elementRef(el),
+            tag: el.tag,
             role:
               el.role === null
                 ? null
-                : presentPaymentSafeString(el.role, session.paymentFieldSealActive, [
-                    ...session.secretSlots.values(),
-                  ]),
+                : el.role,
             type:
               el.type === null
                 ? null
-                : presentPaymentSafeString(el.type, session.paymentFieldSealActive, [
-                    ...session.secretSlots.values(),
-                  ]),
-            value: presentFieldValue(el, sealedFieldKeys, session.paymentFieldSealActive, [
-              ...session.secretSlots.values(),
-            ]),
+                : el.type,
+            value: (el.value ?? null),
             checked: el.checked ?? null,
             href:
               el.href === null || el.href === undefined
                 ? null
-                : presentPaymentSafeString(el.href, session.paymentFieldSealActive, [
-                    ...session.secretSlots.values(),
-                  ]),
+                : el.href,
             testId:
               el.testId === null || el.testId === undefined
                 ? null
-                : presentPaymentSafeString(el.testId, session.paymentFieldSealActive, [
-                    ...session.secretSlots.values(),
-                  ]),
+                : el.testId,
             path:
               el.screenPath === null || el.screenPath === undefined
                 ? null
-                : presentPaymentSafeString(el.screenPath, session.paymentFieldSealActive, [
-                    ...session.secretSlots.values(),
-                  ]),
+                : el.screenPath,
             container:
               el.container === null || el.container === undefined
                 ? null
-                : presentPaymentSafeString(el.container, session.paymentFieldSealActive, [
-                    ...session.secretSlots.values(),
-                  ]),
+                : el.container,
             topmost: el.topmost ?? null,
             occluded_by:
               el.occludedBy === null || el.occludedBy === undefined
                 ? null
-                : presentPaymentSafeString(el.occludedBy, session.paymentFieldSealActive, [
-                    ...session.secretSlots.values(),
-                  ]),
+                : el.occludedBy,
             frame_origin:
               el.frameOrigin === null || el.frameOrigin === undefined
                 ? null
-                : presentPaymentSafeString(el.frameOrigin, session.paymentFieldSealActive, [
-                    ...session.secretSlots.values(),
-                  ]),
+                : el.frameOrigin,
           };
           annotatePaymentControl(observed, el);
           return observed;
@@ -5287,8 +4921,7 @@ async function executeAct(
               assertSecretFrameTargetAllowed(session, resolved.frameTarget);
             }
             session.usedLocatorFallback = true;
-            const sealedFieldKeys = await browser.typeHandle(resolved.handle, value, true);
-            for (const key of sealedFieldKeys) session.sealedFieldKeys.add(key);
+            await browser.typeHandle(resolved.handle, value, true);
           } finally {
             await resolved.handle.dispose().catch(() => undefined);
           }
@@ -5323,17 +4956,11 @@ async function executeAct(
         // assertSecretFrameTargetAllowed; a main-frame or same-domain-frame
         // target is unaffected.
         assertSecretFrameTargetAllowed(session, el);
-        // Remember this field so the next observation masks its DOM value — the
-        // host sealed this secret into a slot and must never read it back.
-        for (const key of elementTargetKeys(el)) session.sealedFieldKeys.add(key);
         // Type the REAL value into the page. It crosses only browser↔page; the
         // value is never returned to the host and never logged.
         const target = frameTargetFor(el);
-        const sealedFieldKeys =
-          target !== null
-            ? await browser.typeInFrame(target, el.selector, value, true)
-            : await browser.type(el.selector, value, true);
-        for (const key of sealedFieldKeys) session.sealedFieldKeys.add(key);
+        if (target !== null) await browser.typeInFrame(target, el.selector, value, true);
+        else await browser.type(el.selector, value, true);
         audit(sessionId, "type_secret", {
           slot: action.slot,
           target: auditTarget,
@@ -7932,8 +7559,10 @@ export function sanitizeExtractedCredentials(
   for (const [key, value] of Object.entries(credentials)) {
     const k = normLabelKey(key);
     if (k === "refcode" || k === "referral_code") continue;
+    // Page PROSE is still dropped — a greeting or a date under a "Key" heading
+    // is not a value the page is presenting as a credential. A masked-looking
+    // display is NOT prose: it is what the page renders, so it is returned.
     if (isCredentialNoise(value)) continue;
-    if ((k === "key" || k === "api_key") && !looksLikeCredentialValue(value)) continue;
     if (host === "api.together.ai" && /^key_[A-Za-z0-9]{16,}$/i.test(value.trim())) continue;
     normalized[key] = value;
   }
@@ -8019,14 +7648,13 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     state = accumulateCandidate(state, cls);
   }
 
-  // Named credentials for multi-cred services (skip still-masked values and
-  // env-var NAME displays — "LANGWATCH_API_KEY=" is the SDK-snippet prefix, not
-  // a credential).
+  // Named credentials for multi-cred services. Every labeled value the page
+  // renders is returned under its label — including one that still LOOKS masked.
+  // A value on the page is the agent's to read; refusing it (the old
+  // `isMasked` skip) boxed the operator out of keys the page was displaying.
   const named: Record<string, string> = {};
   for (const c of labeled) {
-    if (c.label === null || c.isMasked) continue;
-    if (isCredentialNoise(c.value)) continue;
-    if (looksLikeCodeIdentifier(c.value)) continue;
+    if (c.label === null) continue;
     const k = normLabelKey(c.label);
     if (k.length > 0 && !(k in named)) named[k] = c.value;
   }
@@ -8077,29 +7705,12 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
   }
   const sanitized = sanitizeExtractedCredentials(credentials, browser.currentUrl(), haystack);
   const found = Object.keys(sanitized).length > 0;
-  // Report-back so the agent keeps going instead of treating an empty result as
-  // done: if the page HAD labeled candidates but none survived as a real
-  // credential, they were page noise (a date/email/greeting) or a still-masked
-  // display — i.e. this isn't the keys page or the key needs revealing. Tell the
-  // agent that so it navigates/reveals and extracts again, rather than storing junk.
-  const notLegit =
-    !found && labeled.length > 0
-      ? "no_legit_credential: the page had candidate values but none looked like a " +
-        "real key (they were page text — a date/email/label — or a still-masked " +
-        "display). You are likely NOT on the API-keys page, or the key is masked. " +
-        "Navigate to the keys/settings page (or click reveal/show/copy), then extract again."
-      : null;
-  audit(sessionId, "extract", {
-    found,
-    candidate_count: labeled.length,
-    not_legit: notLegit !== null,
-  });
+  audit(sessionId, "extract", { found, candidate_count: labeled.length });
   return {
     session_id: sessionId,
     url: browser.currentUrl(),
     credentials: sanitized,
     candidate_count: labeled.length,
-    ...(notLegit !== null ? { blocked_reason: notLegit } : {}),
   };
 }
 

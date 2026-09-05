@@ -23,7 +23,6 @@
 // gate).
 
 import { chromium as baseChromium } from "playwright";
-import sharp from "sharp";
 import type {
   Browser,
   BrowserContext,
@@ -31,7 +30,6 @@ import type {
   ElementHandle,
   FileChooser,
   Frame,
-  JSHandle,
   Locator,
   Page,
   Request,
@@ -936,52 +934,6 @@ const CHECKOUT_CARD_VALUE_FIELD_SELECTORS = [
   CHECKOUT_CVV_FIELD_SELECTORS,
   CHECKOUT_CARD_NAME_FIELD_SELECTORS,
 ].join(",");
-
-// Defense-in-depth redaction set for operate_screenshot, under the PAYMENT-ONLY
-// masking policy. The capture-scoped guard refuses nonempty values before pixels
-// are read; these selectors also identify empty card controls and provide
-// rectangles that are composited over the captured bytes. The set is exactly the
-// card fields fillCheckoutCardIntoFrames writes into plus the per-field seal
-// marker type_secret stamps on the ONE element it injected into. Password/OTP/PIN
-// name-shaped selectors are deliberately absent: masking a control because its
-// name looks secret is a shape heuristic, and it blanked ordinary sign-in and
-// verification pages. An operator-injected value still carries the seal marker,
-// so it is masked by identity rather than by shape.
-const SCREENSHOT_SECRET_FIELD_SELECTORS = '[data-ts-sealed-payment="1"]';
-const SCREENSHOT_REDACTION_SELECTORS = `${CHECKOUT_CARD_VALUE_FIELD_SELECTORS},${SCREENSHOT_SECRET_FIELD_SELECTORS}`;
-
-interface SealedElementDescriptor {
-  tag: string;
-  type: string | null;
-  id: string | null;
-  name: string | null;
-  testId: string | null;
-  labelText: string | null;
-  ariaLabel: string | null;
-  placeholder: string | null;
-  landmark: string | null;
-  ordinal: number;
-}
-
-function sealedElementSemanticKeys(descriptor: SealedElementDescriptor): string[] {
-  const clean = (value: string | null | undefined): string =>
-    (value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
-  const tag = clean(descriptor.tag);
-  const type = clean(descriptor.type);
-  const landmark = clean(descriptor.landmark);
-  const label = clean(descriptor.labelText ?? descriptor.ariaLabel ?? descriptor.placeholder);
-  return Array.from(
-    new Set(
-      [
-        clean(descriptor.testId) ? `test:${clean(descriptor.testId)}` : "",
-        clean(descriptor.id) ? `id:${clean(descriptor.id)}` : "",
-        clean(descriptor.name) ? `name:${tag}:${type}:${clean(descriptor.name)}` : "",
-        label ? `label:${landmark}:${tag}:${type}:${label}` : "",
-        `position:${landmark}:${tag}:${type}:${descriptor.ordinal}`,
-      ].filter((key) => key.length > 0),
-    ),
-  );
-}
 
 // Charge-verb button labels — the click that may move money. Used by
 // submitFilledCheckout to find the charge control, and by operate_act's
@@ -3506,11 +3458,6 @@ export class BrowserController {
   private observedPaymentInstrumentMismatch: PaymentInstrumentMismatch | undefined;
   private checkoutSubmitSequence = 0;
   private clickDispatchSequence = 0;
-  private sealedDocumentSequence = 0;
-  private readonly sealedDocuments = new Map<
-    Frame,
-    { handle: JSHandle<Document>; identity: string }
-  >();
   private mainDocumentSequence = 0;
   private readonly mainDocumentIdentities = new WeakMap<Page, number>();
   private readonly trackedMainDocumentPages = new WeakSet<Page>();
@@ -4976,9 +4923,9 @@ export class BrowserController {
     }
   }
 
-  async type(selector: string, text: string, sealed = false): Promise<string[]> {
+  async type(selector: string, text: string, sealed = false): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
-    return await this.withModalInertNeutralized(selector, () =>
+    await this.withModalInertNeutralized(selector, () =>
       this.typeInner(selector, text, sealed),
     );
   }
@@ -5003,14 +4950,14 @@ export class BrowserController {
     await this.sleep(500);
   }
 
-  private async typeInner(selector: string, text: string, sealed = false): Promise<string[]> {
+  private async typeInner(selector: string, text: string, sealed = false): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     // Wait for element to be visible and enabled before typing.
     await this.page.waitForSelector(selector, { state: "visible", timeout: 10000 });
     const locator = this.page.locator(selector);
-    const sealedFieldKeys = sealed
-      ? await this.operatorScreenshotIdentityKeys(locator, this.page.mainFrame())
-      : [];
+    // The marker is payment machinery — the card-clearing and saved-card
+    // resolution passes find the fields they filled through it. It is not a
+    // read seal: nothing masks or refuses a read because of it.
     if (sealed) {
       await locator.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
     }
@@ -5018,7 +4965,7 @@ export class BrowserController {
     if (!this.humanize) {
       // Fast path for tests / non-humanized runs.
       await this.page.fill(selector, text);
-      return sealedFieldKeys;
+      return;
     }
 
     // Humanized typing:
@@ -5050,7 +4997,6 @@ export class BrowserController {
     // hook, and over-engineering it added zero observable behavior-
     // score improvement.
     await locator.pressSequentially(text, { delay: rand(40, 110) });
-    return sealedFieldKeys;
   }
 
   // Best-effort scan for the SPECIFIC unfilled required field(s) blocking a
@@ -6099,27 +6045,19 @@ export class BrowserController {
     }
   }
 
-  async typeHandle(
-    handle: ElementHandle<Element>,
-    text: string,
-    sealed = false,
-  ): Promise<string[]> {
+  async typeHandle(handle: ElementHandle<Element>, text: string, sealed = false): Promise<void> {
     const ownerFrame = await handle.ownerFrame();
     if (ownerFrame === null) throw new Error("locator target has no owning frame");
-    const sealedFieldKeys = sealed
-      ? await this.operatorScreenshotIdentityKeys(handle, ownerFrame)
-      : [];
     if (sealed) {
       await handle.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
     }
     if (!this.humanize) {
       await handle.fill(text);
-      return sealedFieldKeys;
+      return;
     }
     await handle.click({ timeout: 8000 }).catch(() => undefined);
     await handle.fill("").catch(() => undefined);
     await handle.type(text, { delay: rand(40, 110) });
-    return sealedFieldKeys;
   }
 
   // Dispatch a DOM .click() in the page context. Some React copy buttons fire
@@ -8943,913 +8881,96 @@ export class BrowserController {
     return null;
   }
 
-  private async operatorScreenshotCaptureScope(targetFrame: Frame | null): Promise<{
-    frames: Frame[];
-    strictFrames: ReadonlySet<Frame>;
-    clip: { x: number; y: number; width: number; height: number } | null;
-  }> {
-    if (!this.page) throw new Error("Browser not started");
-    if (targetFrame === null || targetFrame === this.page.mainFrame()) {
-      const frames = this.page.frames();
-      return { frames, strictFrames: new Set(frames), clip: null };
-    }
-    const strictFrames = new Set<Frame>();
-    const visit = (frame: Frame): void => {
-      strictFrames.add(frame);
-      for (const child of frame.childFrames()) visit(child);
-    };
-    visit(targetFrame);
-    const targetHandle = await targetFrame.frameElement();
-    const clip = await targetHandle.boundingBox();
-    await targetHandle.dispose().catch(() => undefined);
-    if (clip === null) throw new Error("screenshot_redaction_unresolved");
-    const intersects = (box: { x: number; y: number; width: number; height: number }): boolean =>
-      box.x < clip.x + clip.width &&
-      box.x + box.width > clip.x &&
-      box.y < clip.y + clip.height &&
-      box.y + box.height > clip.y;
-    const frames: Frame[] = [];
-    for (const frame of this.page.frames()) {
-      if (frame === this.page.mainFrame() || strictFrames.has(frame)) {
-        frames.push(frame);
-        continue;
-      }
-      const handle = await frame.frameElement();
-      try {
-        const box = await handle.boundingBox();
-        if (box !== null && intersects(box)) frames.push(frame);
-      } finally {
-        await handle.dispose().catch(() => undefined);
-      }
-    }
-    return { frames, strictFrames, clip };
-  }
-
-  private async sealedDocumentIdentity(frame: Frame): Promise<string> {
-    const current = this.sealedDocuments.get(frame);
-    if (
-      current !== undefined &&
-      !frame.isDetached() &&
-      (await frame.evaluate((expected) => document === expected, current.handle).catch(() => false))
-    ) {
-      return current.identity;
-    }
-    await current?.handle.dispose().catch(() => undefined);
-    const handle = await frame.evaluateHandle(() => document);
-    const identity = `document-${this.sealedDocumentSequence++}`;
-    this.sealedDocuments.set(frame, { handle, identity });
-    return identity;
-  }
-
-  private async operatorScreenshotIdentityKeys(
-    target: Locator | ElementHandle<Element>,
-    frame: Frame,
-  ): Promise<string[]> {
-    const descriptor = await (target as unknown as ElementHandle<Element>).evaluate((el) => {
-      const clean = (value: string | null | undefined): string | null => {
-        const normalized = (value ?? "").replace(/\s+/g, " ").trim();
-        return normalized.length > 0 ? normalized : null;
-      };
-      const labelFor = (element: Element): string | null => {
-        const id = element.getAttribute("id");
-        if (id !== null && id.length > 0) {
-          const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
-          if (label !== null) return clean(label.textContent);
-        }
-        const labelledBy = element.getAttribute("aria-labelledby");
-        if (labelledBy !== null) {
-          const text = labelledBy
-            .split(/\s+/)
-            .map((part) => clean(document.getElementById(part)?.textContent))
-            .filter((part): part is string => part !== null)
-            .join(" ");
-          if (text.length > 0) return text;
-        }
-        return clean(element.closest("label")?.textContent);
-      };
-      const controls = Array.from(
-        (el.getRootNode() as Document | ShadowRoot).querySelectorAll(
-          "input,textarea,select,[contenteditable='true']",
-        ),
-      );
-      return {
-        tag: el.tagName.toLowerCase(),
-        type: el.getAttribute("type"),
-        id: el.getAttribute("id"),
-        name: el.getAttribute("name"),
-        testId:
-          el.getAttribute("data-testid") ??
-          el.getAttribute("data-test-id") ??
-          el.getAttribute("data-test") ??
-          el.getAttribute("data-cy") ??
-          el.getAttribute("data-qa"),
-        labelText: labelFor(el),
-        ariaLabel: el.getAttribute("aria-label"),
-        placeholder: el.getAttribute("placeholder"),
-        landmark:
-          el.closest("header,main,footer,nav,aside,article,section")?.tagName.toLowerCase() ?? null,
-        ordinal: controls.indexOf(el),
-      } satisfies SealedElementDescriptor;
-    });
-    const documentIdentity = await this.sealedDocumentIdentity(frame);
-    return sealedElementSemanticKeys(descriptor).map((key) => `${documentIdentity}:${key}`);
-  }
-
-  private async resolveOperatorScreenshotSealedLocators(
-    frames: readonly Frame[],
-    sealedFieldKeys: ReadonlySet<string>,
-  ): Promise<Map<Frame, Locator[]>> {
-    const byFrame = new Map<Frame, Locator[]>();
-    for (const frame of frames) {
-      const matches: Locator[] = [];
-      const candidates = await frame
-        .locator("input,textarea,select,[contenteditable='true']")
-        .all();
-      for (const candidate of candidates) {
-        const keys = await this.operatorScreenshotIdentityKeys(candidate, frame);
-        if (keys.some((key) => sealedFieldKeys.has(key))) matches.push(candidate);
-      }
-      byFrame.set(frame, matches);
-    }
-    return byFrame;
-  }
-
-  // Resolve every card-shaped/sealed field in the captured frames to a
-  // screenshot redaction rectangles — text-masking (presentFieldValue in
-  // provision-session.ts) only covers the JSON observation, not a rendered
-  // image. Beyond the attribute-based
-  // selector set, every renderable input/textarea whose CURRENT value contains
-  // a Luhn-valid PAN span is masked too (containsLuhnPanSpan — the same
-  // detection the payment paths use), so a card number sitting in a field the
-  // fixed selectors don't recognize still never reaches the image. Fail-closed
-  // throughout: a selector that cannot be queried, a value that cannot be
-  // read, or a matched element whose geometry cannot be resolved (boundingBox
-  // returns null rather than throwing) aborts the whole capture rather than
-  // shrinking the redaction. The per-frame count signature lets the caller
-  // verify the redaction set stayed stable across the capture window.
-  private async collectOperatorScreenshotMask(
-    frames: readonly Frame[],
-    extraRedactionSelectors: readonly string[],
-    sealedLocators: ReadonlyMap<Frame, readonly Locator[]> = new Map(),
-    knownSecrets: readonly string[] = [],
-    captureClip: { x: number; y: number; width: number; height: number } | null = null,
-    strictFrames: ReadonlySet<Frame> = new Set(frames),
-  ): Promise<{
-    rectangles: Array<{ x: number; y: number; width: number; height: number }>;
-    redactedCount: number;
-    signature: string;
-    handles: ElementHandle<Node>[];
-  }> {
-    const selector = [SCREENSHOT_REDACTION_SELECTORS, ...extraRedactionSelectors].join(",");
-    const secrets = knownSecrets.filter((value) => value.length > 0);
-    const rectangles: Array<{ x: number; y: number; width: number; height: number }> = [];
-    const handles: ElementHandle<Node>[] = [];
-    const signatureParts: string[] = [];
-    try {
-      for (const [frameIndex, frame] of frames.entries()) {
-        let frameCount = 0;
-        const handlesStart = handles.length;
-        const rectanglesStart = rectangles.length;
-        const signatureStart = signatureParts.length;
-        try {
-          const frameHandles = await frame.locator(selector).elementHandles();
-          for (const locator of sealedLocators.get(frame) ?? []) {
-            const handle = await locator.elementHandle({ timeout: 5_000 });
-            if (handle === null) throw new Error("screenshot_redaction_unresolved");
-            if (
-              !(await handle.evaluate((el, matchSelector) => el.matches(matchSelector), selector))
-            ) {
-              frameHandles.push(handle);
-            } else {
-              await handle.dispose();
-            }
-          }
-          const valueCandidates = await frame
-            .locator('input:not([type="hidden" i]),textarea')
-            .elementHandles();
-          for (const candidate of valueCandidates) {
-            const value = await candidate.inputValue({ timeout: 5_000 });
-            if (!containsLuhnPanSpan(value)) {
-              await candidate.dispose();
-              continue;
-            }
-            const duplicate = await Promise.all(
-              frameHandles.map(
-                async (existing) => await candidate.evaluate((el, other) => el === other, existing),
-              ),
-            );
-            if (duplicate.includes(true)) {
-              await candidate.dispose();
-              continue;
-            }
-            frameHandles.push(candidate);
-          }
-          // A secret is not necessarily a form value. It can be reflected by a
-          // page into visible text, title/aria/placeholder attributes, or a
-          // browser-autofill preview. Find the smallest renderable owner node
-          // (direct text only, never a parent merely because a child is secret)
-          // and mask that node's rectangle. This intentionally does not attempt
-          // to cover pixels in canvas/image/SVG/QR/cross-origin rendering; that
-          // residual is the accepted D2 observation-model posture.
-          //
-          // One in-page pass returns every matching node in a single round trip;
-          // PR #627's per-node evaluate loop (one round trip per candidate over
-          // every element) made dynamic checkout pages slow enough to trip the
-          // stability guard below at the payment step and blind the agent.
-          // evaluateHandle (not evaluate): nested DOM nodes serialize as strings
-          // through a plain evaluate return; a handle to the array plus property
-          // enumeration preserves per-node handles.
-          const matchesHandle = await frame.evaluateHandle(
-            (args) => {
-              const { secrets } = args;
-              const hasLuhnPan = (text: string): boolean => {
-                const positions = Array.from(text.matchAll(/\d/g), (match) => match.index);
-                const luhn = (digits: string): boolean => {
-                  let sum = 0;
-                  let double = false;
-                  for (let index = digits.length - 1; index >= 0; index -= 1) {
-                    let digit = Number(digits[index]);
-                    if (double) {
-                      digit *= 2;
-                      if (digit > 9) digit -= 9;
-                    }
-                    sum += digit;
-                    double = !double;
-                  }
-                  return sum % 10 === 0;
-                };
-                for (let start = 0; start + 13 <= positions.length; start += 1) {
-                  const maxLength = Math.min(19, positions.length - start);
-                  for (let length = 13; length <= maxLength; length += 1) {
-                    const span = positions.slice(start, start + length);
-                    if (span[span.length - 1]! - span[0]! + 1 > 96) break;
-                    if (luhn(span.map((position) => text[position]).join(""))) return true;
-                  }
-                }
-                return false;
-              };
-              // PAYMENT-ONLY node redaction: the exact values the operator
-              // injected from the vault, and Luhn-valid PANs. There is no
-              // secret-SHAPE pass — a rendered API key, recovery code, TOTP, or
-              // JWT is ordinary page content the agent is meant to read. Shape
-              // matching also kept catching DOM identifiers (Shopify's
-              // "checkout_shipping_address_address1"), masking whole shipping
-              // blocks out of the image.
-              const containsInjected = (text: string): boolean =>
-                secrets.some((secret) => secret.length > 0 && text.includes(secret));
-              // Values/text also admit a Luhn-valid PAN (a card number rendered
-              // or typed into a field); attributes admit injected values only.
-              const secretValue = (text: string, kind: "value" | "attr" | "text"): boolean => {
-                if (text.length === 0) return false;
-                if (containsInjected(text)) return true;
-                return kind !== "attr" && hasLuhnPan(text);
-              };
-              const matches = new Set<Element>();
-              const check = (el: Element): void => {
-                const state =
-                  el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
-                    ? el.value
-                    : el instanceof HTMLSelectElement
-                      ? `${el.value} ${el.options[el.selectedIndex]?.textContent ?? ""}`
-                      : "";
-                if (state.length > 0 && secretValue(state, "value")) {
-                  matches.add(el);
-                  return;
-                }
-                for (const attribute of Array.from(el.attributes)) {
-                  if (secretValue(attribute.value, "attr")) {
-                    matches.add(el);
-                    return;
-                  }
-                }
-                const directText = Array.from(el.childNodes)
-                  .filter((node) => node.nodeType === Node.TEXT_NODE)
-                  .map((node) => node.textContent ?? "")
-                  .join(" ")
-                  .trim();
-                if (directText.length > 0 && secretValue(directText, "text")) matches.add(el);
-              };
-              // Walk the light DOM and every open shadow root — parity with the
-              // piercing the old frame.locator("*") candidates provided.
-              const walk = (root: Document | ShadowRoot | Element): void => {
-                for (const el of Array.from(root.querySelectorAll("*"))) {
-                  check(el);
-                  if (el.shadowRoot !== null) walk(el.shadowRoot);
-                }
-              };
-              walk(document);
-              return Array.from(matches);
-            },
-            { secrets },
-          );
-          const sensitiveProperties = await matchesHandle.getProperties();
-          await matchesHandle.dispose().catch(() => undefined);
-          for (const property of sensitiveProperties.values()) {
-            const candidate = property.asElement();
-            if (candidate === null) {
-              await property.dispose().catch(() => undefined);
-              throw new Error("screenshot_redaction_unresolved");
-            }
-            const duplicate = await Promise.all(
-              frameHandles.map(
-                async (existing) => await candidate.evaluate((el, other) => el === other, existing),
-              ),
-            );
-            if (duplicate.includes(true)) {
-              await candidate.dispose();
-              continue;
-            }
-            frameHandles.push(candidate);
-          }
-          for (const handle of frameHandles) {
-            if (!(await handle.evaluate((el) => el.isConnected))) {
-              throw new Error("screenshot_redaction_unresolved");
-            }
-            const box = await handle.boundingBox();
-            if (
-              captureClip !== null &&
-              !strictFrames.has(frame) &&
-              (box === null ||
-                box.x >= captureClip.x + captureClip.width ||
-                box.x + box.width <= captureClip.x ||
-                box.y >= captureClip.y + captureClip.height ||
-                box.y + box.height <= captureClip.y)
-            ) {
-              await handle.dispose();
-              continue;
-            }
-            handles.push(handle);
-            if (box !== null) rectangles.push(box);
-            signatureParts.push(
-              `${frameIndex}:${box === null ? "hidden" : [box.x, box.y, box.width, box.height].join(":")}`,
-            );
-            frameCount += 1;
-          }
-          signatureParts.push(`count:${frameIndex}:${frameCount}`);
-        } catch {
-          const discarded = handles.splice(handlesStart);
-          rectangles.splice(rectanglesStart);
-          signatureParts.splice(signatureStart);
-          await Promise.all(
-            discarded.map(async (handle) => await handle.dispose().catch(() => undefined)),
-          );
-          // An unreadable embedded third-party frame is part of the accepted
-          // cross-origin residual risk. Do not blind an otherwise ordinary
-          // checkout page because analytics/chat cannot be inspected. The main
-          // document and an explicitly targeted frame still fail closed.
-          if (
-            frame === this.page?.mainFrame() ||
-            (captureClip !== null && strictFrames.has(frame))
-          ) {
-            throw new Error("screenshot_redaction_unresolved");
-          }
-          // If this frame may contain a session-injected value, preserving the
-          // vault guarantee wins over the normal cross-origin residual: hide
-          // only this uninspectable iframe, never the surrounding page.
-          if (secrets.length > 0 || (sealedLocators.get(frame)?.length ?? 0) > 0) {
-            const owner = await frame.frameElement();
-            try {
-              const box = await owner.boundingBox();
-              if (box === null) throw new Error("screenshot_redaction_unresolved");
-              rectangles.push(box);
-              signatureParts.push(
-                `${frameIndex}:opaque:${[box.x, box.y, box.width, box.height].join(":")}`,
-              );
-              frameCount = 1;
-            } finally {
-              await owner.dispose().catch(() => undefined);
-            }
-          }
-          signatureParts.push(`uninspectable:${frameIndex}`);
-          signatureParts.push(`count:${frameIndex}:${frameCount}`);
-        }
-      }
-    } catch {
-      await Promise.all(
-        handles.map(async (handle) => await handle.dispose().catch(() => undefined)),
-      );
-      throw new Error("screenshot_redaction_unresolved");
-    }
-    return {
-      rectangles,
-      redactedCount: handles.length,
-      signature: signatureParts.join("|"),
-      handles,
-    };
-  }
-
-  private async redactOperatorScreenshot(
-    buffer: Buffer,
-    rectangles: ReadonlyArray<{ x: number; y: number; width: number; height: number }>,
-    origin: { x: number; y: number },
-    captureSize: { width: number; height: number },
-  ): Promise<string> {
-    const metadata = await sharp(buffer).metadata();
-    if (metadata.width === undefined || metadata.height === undefined) {
-      throw new Error("screenshot_redaction_unresolved");
-    }
-    const scaleX = metadata.width / captureSize.width;
-    const scaleY = metadata.height / captureSize.height;
-    const rects = rectangles
-      .map(
-        (box) =>
-          `<rect x="${(box.x - origin.x) * scaleX}" y="${(box.y - origin.y) * scaleY}" width="${box.width * scaleX}" height="${box.height * scaleY}" fill="#ff00ff"/>`,
-      )
-      .join("");
-    const overlay = Buffer.from(
-      `<svg width="${metadata.width}" height="${metadata.height}" xmlns="http://www.w3.org/2000/svg">${rects}</svg>`,
-    );
-    return (
-      await sharp(buffer)
-        .composite([{ input: overlay, blend: "over" }])
-        .jpeg({ quality: 80 })
-        .toBuffer()
-    ).toString("base64");
-  }
-
-  // Verify the capture set before pixels are read. This is deliberately
-  // narrower than the capture-time mask: empty checkout controls are harmless,
-  // but a nonempty type_secret target, payment-sealed node, or
-  // Luhn-valid PAN means the requested image could contain a card value. Every
-  // frame included by the image must be readable; a detached or navigating
-  // frame is not evidence that it is safe to capture.
-  private async assertOperatorScreenshotFramesNoSealedValues(
-    frames: readonly Frame[],
-    extraRedactionSelectors: readonly string[],
-    sealedLocators: ReadonlyMap<Frame, readonly Locator[]> = new Map(),
-    captureClip: { x: number; y: number; width: number; height: number } | null = null,
-    strictFrames: ReadonlySet<Frame> = new Set(frames),
-  ): Promise<void> {
-    const sealedSelector = [SCREENSHOT_REDACTION_SELECTORS, ...extraRedactionSelectors].join(",");
-
-    try {
-      for (const frame of frames) {
-        if (frame.isDetached()) throw new Error("frame detached");
-        const sealedMatches = [
-          ...(await frame.locator(sealedSelector).all()),
-          ...(sealedLocators.get(frame) ?? []),
-        ];
-        for (const match of sealedMatches) {
-          const box = strictFrames.has(frame) ? null : await match.boundingBox();
-          if (
-            captureClip !== null &&
-            !strictFrames.has(frame) &&
-            (box === null ||
-              box.x >= captureClip.x + captureClip.width ||
-              box.x + box.width <= captureClip.x ||
-              box.y >= captureClip.y + captureClip.height ||
-              box.y + box.height <= captureClip.y)
-          ) {
-            continue;
-          }
-          const hasValue = await match.evaluate((el) => {
-            if (el instanceof HTMLSelectElement) {
-              const optionText = el.options[el.selectedIndex]?.textContent ?? "";
-              const normalizedOption = optionText.replace(/\s+/g, " ").trim();
-              const placeholder =
-                /^(?:select|choose)?\s*(?:a\s+)?(?:month|year|mm|yy)?\s*(?:\.\.\.|[-–—]*)$/i;
-              return (
-                el.value.trim().length > 0 ||
-                (normalizedOption.length > 0 && !placeholder.test(normalizedOption))
-              );
-            }
-            if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-              return el.value.trim().length > 0;
-            }
-            return (el.textContent ?? "").trim().length > 0;
-          });
-          if (hasValue) throw new Error("sealed value");
-        }
-        const candidates = await frame.locator('input:not([type="hidden" i]),textarea').all();
-        for (const candidate of candidates) {
-          const box = strictFrames.has(frame) ? null : await candidate.boundingBox();
-          if (
-            captureClip !== null &&
-            !strictFrames.has(frame) &&
-            (box === null ||
-              box.x >= captureClip.x + captureClip.width ||
-              box.x + box.width <= captureClip.x ||
-              box.y >= captureClip.y + captureClip.height ||
-              box.y + box.height <= captureClip.y)
-          ) {
-            continue;
-          }
-          const hasPan = await candidate.evaluate((el) => {
-            const text =
-              el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement ? el.value : "";
-            const digits = Array.from(text.matchAll(/\d/g), (match) => match.index);
-            const luhn = (value: string): boolean => {
-              let sum = 0;
-              let double = false;
-              for (let index = value.length - 1; index >= 0; index -= 1) {
-                let digit = Number(value[index]);
-                if (double) {
-                  digit *= 2;
-                  if (digit > 9) digit -= 9;
-                }
-                sum += digit;
-                double = !double;
-              }
-              return sum % 10 === 0;
-            };
-            for (let start = 0; start + 13 <= digits.length; start += 1) {
-              const maxLength = Math.min(19, digits.length - start);
-              for (let length = 13; length <= maxLength; length += 1) {
-                const positions = digits.slice(start, start + length);
-                if (
-                  positions[positions.length - 1]! - positions[0]! + 1 >
-                  PAYMENT_PAN_MAX_SPAN_CHARS
-                ) {
-                  break;
-                }
-                if (luhn(positions.map((position) => text[position]).join(""))) return true;
-              }
-            }
-            return false;
-          });
-          if (hasPan) throw new Error("card value");
-        }
-        if (strictFrames.has(frame) || captureClip === null || frame !== this.page?.mainFrame()) {
-          const renderedText = await frame.evaluate(
-            () => document.body?.innerText ?? document.documentElement?.innerText ?? "",
-          );
-          if (containsLuhnPanSpan(renderedText)) throw new Error("rendered card value");
-        } else {
-          const renderedTextInClip = await frame.evaluate((clip) => {
-            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-            const texts: string[] = [];
-            let node = walker.nextNode();
-            while (node !== null) {
-              const text = node.textContent ?? "";
-              if (/\d/.test(text)) {
-                const range = document.createRange();
-                range.selectNodeContents(node);
-                const overlaps = Array.from(range.getClientRects()).some(
-                  (rect) =>
-                    rect.left < clip.x + clip.width &&
-                    rect.right > clip.x &&
-                    rect.top < clip.y + clip.height &&
-                    rect.bottom > clip.y,
-                );
-                if (overlaps) texts.push(text);
-              }
-              node = walker.nextNode();
-            }
-            return texts.join(" ");
-          }, captureClip);
-          if (containsLuhnPanSpan(renderedTextInClip)) throw new Error("rendered card value");
-        }
-      }
-    } catch {
-      throw new Error("screenshot_unavailable_sealed_context");
-    }
-  }
-
+  // Read-only pixel capture for operate_screenshot. It never navigates, clicks,
+  // types, focuses, or mutates the DOM — and it never masks anything. What the
+  // page renders is what the driving agent gets back.
   async captureOperatorScreenshot(
     opts: {
       frameIndex?: number;
       frameUrlContains?: string;
       fullPage?: boolean;
     } = {},
-    sealedFieldKeys: readonly string[] = [],
-    knownSecrets: readonly string[] = [],
   ): Promise<{
     base64: string;
     frameUrl: string | null;
     frameCount: number;
-    redactedCount: number;
   }> {
-    if (!this.page) throw new Error("Browser not started");
-    const targetFrame = this.resolveOperatorScreenshotFrame(opts);
-    const scope = await this.operatorScreenshotCaptureScope(targetFrame);
-    const { frames } = scope;
-    const documents: JSHandle<Document>[] = [];
-    try {
-      for (const frame of frames) {
-        if (frame.isDetached()) throw new Error("frame detached");
-        documents.push(await frame.evaluateHandle(() => document));
-      }
-      const sealedLocators = await this.resolveOperatorScreenshotSealedLocators(
-        frames,
-        new Set(sealedFieldKeys),
-      );
-      const documentsStillCurrent = async (): Promise<boolean> => {
-        if (documents.length !== frames.length) return false;
-        for (let index = 0; index < frames.length; index += 1) {
-          const frame = frames[index]!;
-          if (frame.isDetached()) return false;
-          if (!(await frame.evaluate((expected) => document === expected, documents[index]!))) {
-            return false;
-          }
-        }
-        return true;
-      };
-      if (!(await documentsStillCurrent())) {
-        // Give a navigation caught between scope resolution and this check one
-        // short settle before rejecting a genuinely changed document.
-        await this.wait(0.5);
-        if (!(await documentsStillCurrent())) {
-          throw new Error("screenshot_unavailable_sealed_context");
-        }
-      }
-      let captured:
-        | {
-            base64: string;
-            frameUrl: string | null;
-            frameCount: number;
-            redactedCount: number;
-          }
-        | undefined;
-      let attemptScope = scope;
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        if (attempt > 0) {
-          attemptScope = await this.operatorScreenshotCaptureScope(targetFrame);
-          if (
-            attemptScope.frames.length !== frames.length ||
-            !frames.every((frame, index) => attemptScope.frames[index] === frame)
-          ) {
-            throw new Error("screenshot_unavailable_sealed_context");
-          }
-        }
-        try {
-          captured = await this.screenshotForOperatorResolved(
-            opts,
-            targetFrame,
-            frames,
-            sealedLocators,
-            attemptScope,
-            async () => {
-              if (!(await documentsStillCurrent())) {
-                // The redaction set is collected immediately before capture and
-                // re-collected after it. A new/moved/replaced secret node makes
-                // the image unstable and is discarded; it never seals the
-                // surrounding document.
-                throw new Error("screenshot_unavailable_sealed_context");
-              }
-            },
-            knownSecrets,
-          );
-          break;
-        } catch (error) {
-          if (
-            attempt === 0 &&
-            error instanceof Error &&
-            error.message === "screenshot_redaction_unstable"
-          ) {
-            continue;
-          }
-          throw error;
-        }
-      }
-      if (captured === undefined) throw new Error("screenshot_unavailable_sealed_context");
-      if (!(await documentsStillCurrent())) {
-        throw new Error("screenshot_unavailable_sealed_context");
-      }
-      return captured;
-    } catch (error) {
-      if (error instanceof Error && error.message === "screenshot_frame_not_found") throw error;
-      if (error instanceof Error && error.message === "screenshot_unavailable_sealed_context") {
-        throw error;
-      }
-      throw new Error("screenshot_unavailable_sealed_context");
-    } finally {
-      await Promise.all(
-        documents.map(async (document) => await document.dispose().catch(() => undefined)),
-      );
-    }
+    return await this.screenshotForOperator(opts);
   }
 
-  // Low-level read-only capture used by captureOperatorScreenshot after its
-  // capture-scoped node-redaction discovery, and directly by redaction tests. It
-  // never navigates, clicks, types, focuses, or mutates the DOM. Redaction
-  // covers every frame included in the image: the whole page composites its
-  // visible frames, while an isolated frame includes only that frame.
-  // `extraRedactionSelectors` is retained for callers that already resolved
-  // additional sensitive elements; production capture passes durable locators.
   async screenshotForOperator(
     opts: {
       frameIndex?: number;
       frameUrlContains?: string;
       fullPage?: boolean;
-      extraRedactionSelectors?: readonly string[];
     } = {},
-    knownSecrets: readonly string[] = [],
   ): Promise<{
     base64: string;
     frameUrl: string | null;
     frameCount: number;
-    redactedCount: number;
-  }> {
-    if (!this.page) throw new Error("Browser not started");
-    const targetFrame = this.resolveOperatorScreenshotFrame(opts);
-    const scope = await this.operatorScreenshotCaptureScope(targetFrame);
-    return await this.screenshotForOperatorResolved(
-      opts,
-      targetFrame,
-      scope.frames,
-      new Map(),
-      scope,
-      undefined,
-      knownSecrets,
-    );
-  }
-
-  private async screenshotForOperatorResolved(
-    opts: {
-      fullPage?: boolean;
-      extraRedactionSelectors?: readonly string[];
-    },
-    targetFrame: Frame | null,
-    framesBefore: readonly Frame[],
-    sealedLocators: ReadonlyMap<Frame, readonly Locator[]> = new Map(),
-    scope: {
-      frames: Frame[];
-      strictFrames: ReadonlySet<Frame>;
-      clip: { x: number; y: number; width: number; height: number } | null;
-    } = { frames: [...framesBefore], strictFrames: new Set(framesBefore), clip: null },
-    beforeCapture?: () => Promise<void>,
-    knownSecrets: readonly string[] = [],
-  ): Promise<{
-    base64: string;
-    frameUrl: string | null;
-    frameCount: number;
-    redactedCount: number;
   }> {
     if (!this.page) throw new Error("Browser not started");
     const page = this.page;
-    const extraRedactionSelectors = opts.extraRedactionSelectors ?? [];
-    const before = await this.collectOperatorScreenshotMask(
-      framesBefore,
-      extraRedactionSelectors,
-      sealedLocators,
-      knownSecrets,
-      scope.clip,
-      scope.strictFrames,
-    );
-    const { rectangles, redactedCount, signature } = before;
-    let recheck: typeof before | undefined;
+    const targetFrame = this.resolveOperatorScreenshotFrame(opts);
+    const cdp = await page.context().newCDPSession(page);
     try {
-      // caret:"initial" skips Playwright's default caret-hiding pass, which
-      // writes (and restores) caret-color on every editable element's inline
-      // style — this capture must leave element styles untouched.
-      let buffer: Buffer;
-      let origin = { x: 0, y: 0 };
-      let captureSize: { width: number; height: number };
-      const cdp = await page.context().newCDPSession(page);
-      try {
-        if (targetFrame !== null && targetFrame !== page.mainFrame()) {
-          const handle = await targetFrame.frameElement();
-          try {
-            const box = await handle.boundingBox();
-            if (box === null) throw new Error("screenshot_redaction_unresolved");
-            if (
-              scope.clip === null ||
-              box.x !== scope.clip.x ||
-              box.y !== scope.clip.y ||
-              box.width !== scope.clip.width ||
-              box.height !== scope.clip.height
-            ) {
-              throw new Error("screenshot_redaction_unresolved");
-            }
-            const scroll = await page.evaluate(() => ({ x: window.scrollX, y: window.scrollY }));
-            origin = { x: box.x, y: box.y };
-            captureSize = { width: box.width, height: box.height };
-            await beforeCapture?.();
-            const result = await cdp.send("Page.captureScreenshot", {
-              format: "jpeg",
-              quality: 80,
-              fromSurface: true,
-              captureBeyondViewport: true,
-              clip: {
-                x: box.x + scroll.x,
-                y: box.y + scroll.y,
-                width: box.width,
-                height: box.height,
-                scale: 1,
-              },
-            });
-            buffer = Buffer.from(result.data, "base64");
-          } finally {
-            await handle.dispose().catch(() => undefined);
-          }
-        } else if (opts.fullPage === true) {
-          const dimensions = await page.evaluate(() => ({
-            origin: { x: -window.scrollX, y: -window.scrollY },
-            size: {
-              width: document.documentElement.scrollWidth,
-              height: document.documentElement.scrollHeight,
-            },
-          }));
-          origin = dimensions.origin;
-          captureSize = dimensions.size;
-          await beforeCapture?.();
+      // caret:"initial" is not needed here — the CDP capture never runs
+      // Playwright's caret-hiding pass, so element styles stay untouched.
+      let base64: string;
+      if (targetFrame !== null && targetFrame !== page.mainFrame()) {
+        const handle = await targetFrame.frameElement();
+        try {
+          const box = await handle.boundingBox();
+          if (box === null) throw new Error("screenshot_frame_not_visible");
+          const scroll = await page.evaluate(() => ({ x: window.scrollX, y: window.scrollY }));
           const result = await cdp.send("Page.captureScreenshot", {
             format: "jpeg",
             quality: 80,
             fromSurface: true,
             captureBeyondViewport: true,
             clip: {
-              x: 0,
-              y: 0,
-              width: dimensions.size.width,
-              height: dimensions.size.height,
+              x: box.x + scroll.x,
+              y: box.y + scroll.y,
+              width: box.width,
+              height: box.height,
               scale: 1,
             },
           });
-          buffer = Buffer.from(result.data, "base64");
-        } else {
-          const viewport = page.viewportSize();
-          if (viewport === null) throw new Error("screenshot_redaction_unresolved");
-          captureSize = viewport;
-          await beforeCapture?.();
-          const result = await cdp.send("Page.captureScreenshot", {
-            format: "jpeg",
-            quality: 80,
-            fromSurface: true,
-          });
-          buffer = Buffer.from(result.data, "base64");
+          base64 = result.data;
+        } finally {
+          await handle.dispose().catch(() => undefined);
         }
-      } finally {
-        await cdp.detach().catch(() => undefined);
+      } else if (opts.fullPage === true) {
+        const size = await page.evaluate(() => ({
+          width: document.documentElement.scrollWidth,
+          height: document.documentElement.scrollHeight,
+        }));
+        const result = await cdp.send("Page.captureScreenshot", {
+          format: "jpeg",
+          quality: 80,
+          fromSurface: true,
+          captureBeyondViewport: true,
+          clip: { x: 0, y: 0, width: size.width, height: size.height, scale: 1 },
+        });
+        base64 = result.data;
+      } else {
+        const result = await cdp.send("Page.captureScreenshot", {
+          format: "jpeg",
+          quality: 80,
+          fromSurface: true,
+        });
+        base64 = result.data;
       }
-      // Stability guard: the mask set was fixed before a capture that can take
-      // seconds. If the page grew another matching field or frame meanwhile,
-      // the image may hold pixels no mask covered — re-run the same collection
-      // and discard the image unless the frame set and per-frame redaction
-      // signature are unchanged.
-      const scopeAfter = await this.operatorScreenshotCaptureScope(targetFrame);
-      const framesAfter = scopeAfter.frames;
-      let framesStable =
-        JSON.stringify(scopeAfter.clip) === JSON.stringify(scope.clip) &&
-        framesAfter.length === framesBefore.length &&
-        framesBefore.every((frame, index) => framesAfter[index] === frame);
-      let maskStable = framesStable;
-      if (framesStable) {
-        try {
-          recheck = await this.collectOperatorScreenshotMask(
-            framesAfter,
-            extraRedactionSelectors,
-            sealedLocators,
-            knownSecrets,
-            scope.clip,
-            scope.strictFrames,
-          );
-          maskStable =
-            recheck.signature === signature && recheck.handles.length === before.handles.length;
-          if (maskStable) {
-            for (let index = 0; index < before.handles.length; index += 1) {
-              if (
-                !(await recheck.handles[index]!.evaluate(
-                  (el, expected) => el === expected,
-                  before.handles[index]!,
-                ))
-              ) {
-                maskStable = false;
-                break;
-              }
-            }
-          }
-        } catch {
-          maskStable = false;
-        }
-      }
-      if (!maskStable) {
-        if (!framesStable) {
-          throw new Error("screenshot_redaction_unstable");
-        }
-        // The node set drifted while capture was in flight. Paint the union of
-        // both samplings, so every secret found at either end is covered. A
-        // frame-set change still refuses because it can add unseen pixels.
-        const unionRectangles = [...rectangles, ...(recheck?.rectangles ?? [])];
-        const unionBase64 = await this.redactOperatorScreenshot(
-          buffer,
-          unionRectangles,
-          origin,
-          captureSize,
-        );
-        return {
-          base64: unionBase64,
-          frameUrl: targetFrame?.url() ?? null,
-          frameCount: page.frames().length,
-          redactedCount: unionRectangles.length,
-        };
-      }
-      const base64 = await this.redactOperatorScreenshot(buffer, rectangles, origin, captureSize);
       return {
         base64,
         frameUrl: targetFrame?.url() ?? null,
         frameCount: page.frames().length,
-        redactedCount,
       };
     } finally {
-      await Promise.all([
-        ...before.handles.map(async (handle) => await handle.dispose().catch(() => undefined)),
-        ...(recheck?.handles ?? []).map(
-          async (handle) => await handle.dispose().catch(() => undefined),
-        ),
-      ]);
+      await cdp.detach().catch(() => undefined);
     }
   }
+
 
   async getState(): Promise<BrowserState> {
     if (!this.page) throw new Error("Browser not started");
@@ -14891,8 +14012,6 @@ export class BrowserController {
         selectOptions: Array<{ value: string; text: string }> | null;
         selectedOptionText: string | null;
         interactedThisRun: boolean;
-        sealed: boolean;
-        sealedOrdinal: number;
         screenPath: string | null;
         container: string | null;
         inDialog: boolean;
@@ -15052,12 +14171,6 @@ export class BrowserController {
               ? clean(el.options[el.selectedIndex]?.textContent ?? null)
               : null,
           interactedThisRun: el.getAttribute("data-ts-touched") === "1",
-          sealed: el.getAttribute("data-ts-sealed-payment") === "1",
-          sealedOrdinal: Array.from(
-            (el.getRootNode() as Document | ShadowRoot).querySelectorAll(
-              "input,textarea,select,[contenteditable='true']",
-            ),
-          ).indexOf(el),
           screenPath:
             `${container ?? "body:root"} > ${elementKind(el)}:` +
             slug(pathLabel, `${elementKind(el)}-${out.length}`),
@@ -15393,7 +14506,7 @@ export class BrowserController {
     selector: string,
     text: string,
     sealed = false,
-  ): Promise<string[]> {
+  ): Promise<void> {
     const handle = await this.resolveFrameElement(target, selector);
     if (handle === null) {
       throw new Error(`type: the target's frame is no longer present (${this.frameLabel(target)})`);
@@ -15402,20 +14515,16 @@ export class BrowserController {
       await handle.waitForElementState("visible", { timeout: 10000 });
       const frame = await handle.ownerFrame();
       if (frame === null) throw new Error("type target has no owning frame");
-      const sealedFieldKeys = sealed
-        ? await this.operatorScreenshotIdentityKeys(handle, frame)
-        : [];
       if (sealed) {
         await handle.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
       }
       if (!this.humanize) {
         await handle.fill(text);
-        return sealedFieldKeys;
+        return;
       }
       await handle.click({ timeout: 8000 }).catch(() => undefined);
       await handle.fill("").catch(() => undefined);
       await handle.type(text, { delay: rand(40, 110) });
-      return sealedFieldKeys;
     } finally {
       await handle.dispose().catch(() => undefined);
     }
@@ -15503,21 +14612,8 @@ export class BrowserController {
     const page = this.page;
     const mainRaw = await this.extractElementsFromContext(page);
     const mainGroups = assignCardRadioGroups(mainRaw.clusterMeta);
-    const mainDocumentIdentity = await this.sealedDocumentIdentity(page.mainFrame());
     const mainElements = mainRaw.out.map((e, i) => ({
       ...e,
-      sealedIdentityKeys: sealedElementSemanticKeys({
-        tag: e.tag,
-        type: e.type,
-        id: e.id,
-        name: e.name,
-        testId: e.testId,
-        labelText: e.labelText,
-        ariaLabel: e.ariaLabel,
-        placeholder: e.placeholder,
-        landmark: e.landmark,
-        ordinal: e.sealedOrdinal,
-      }).map((key) => `${mainDocumentIdentity}:${key}`),
       cardRadioGroup: mainGroups[i] ?? null,
       frameOrigin: null,
       frameUrl: null,
@@ -15548,23 +14644,10 @@ export class BrowserController {
         const raw = await this.extractElementsFromContext(frame);
         const security = await this.frameSecurity(frame);
         const frameOrigin = security.origin;
-        const frameDocumentIdentity = await this.sealedDocumentIdentity(frame);
         const groups = assignCardRadioGroups(raw.clusterMeta);
         for (const [i, e] of raw.out.entries()) {
           framedElements.push({
             ...e,
-            sealedIdentityKeys: sealedElementSemanticKeys({
-              tag: e.tag,
-              type: e.type,
-              id: e.id,
-              name: e.name,
-              testId: e.testId,
-              labelText: e.labelText,
-              ariaLabel: e.ariaLabel,
-              placeholder: e.placeholder,
-              landmark: e.landmark,
-              ordinal: e.sealedOrdinal,
-            }).map((key) => `${frameDocumentIdentity}:${key}`),
             cardRadioGroup: groups[i] ?? null,
             frameOrigin,
             frameUrl,
@@ -17635,9 +16718,6 @@ export interface InteractiveElement {
   visible: boolean;
   inViewport: boolean;
   inConsentWidget: boolean;
-  sealed?: boolean;
-  sealedIdentityKeys?: string[];
-  sealedOrdinal?: number;
   // T13 follow-up — OAuth-affordance signals. `href` is the link
   // target (an OAuth <a> points at e.g. /identity/login/google/);
   // `iconLabel` folds in a descendant <img alt> / <svg><title> /

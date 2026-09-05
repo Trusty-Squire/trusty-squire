@@ -70,10 +70,8 @@ function el(partial: Partial<InteractiveElement>): InteractiveElement {
 }
 
 describe("toCompactElement (BOT_OBSERVE_COMPACT)", () => {
-  const NONE = new Set<string>();
-
   it("omits empty fields — a bare button is just ref/label/tag", () => {
-    const c = toCompactElement(el({ tag: "button", visibleText: "Continue" }), "@g1:x", NONE);
+    const c = toCompactElement(el({ tag: "button", visibleText: "Continue" }), "@g1:x");
     expect(c).toEqual({ ref: "@g1:x", label: "Continue", tag: "button" });
     // no null keys serialized
     expect(Object.values(c).every((v) => v !== null && v !== undefined)).toBe(true);
@@ -88,7 +86,7 @@ describe("toCompactElement (BOT_OBSERVE_COMPACT)", () => {
       labelText: "Card number",
     });
     expect(paymentFieldForObservation(card)).toBe("card_number");
-    expect(toCompactElement(card, "@e:card", NONE)).toMatchObject({
+    expect(toCompactElement(card, "@e:card")).toMatchObject({
       payment_field: "card_number",
       interaction: "vaulted_card_only",
       recommended_action: { tool: "operate_pay", phase: "fill_card" },
@@ -106,7 +104,7 @@ describe("toCompactElement (BOT_OBSERVE_COMPACT)", () => {
       screenPath: "nav:main > link:docs",
       container: "nav:main",
     });
-    const c = toCompactElement(args, "@e:d_1", NONE);
+    const c = toCompactElement(args, "@e:d_1");
     expect(c.href).toBe("/docs");
     expect(c.testId).toBe("docs-link");
     // path is the single most verbose field and agents act by ref — dropped from
@@ -115,42 +113,39 @@ describe("toCompactElement (BOT_OBSERVE_COMPACT)", () => {
     expect("container" in c).toBe(false); // redundant with path
     expect("value" in c).toBe(false);
     // includePath=true (the persisted snapshot form) DOES carry path.
-    const withPath = toCompactElement(args, "@e:d_1", NONE, true);
+    const withPath = toCompactElement(args, "@e:d_1", true);
     expect(withPath.path).toBe("nav:main > link:docs");
   });
 
-  it("reports the REAL value_len (a length signal, not the value) — even for sealed fields", () => {
+  it("reports the REAL value_len for every field, password fields included", () => {
     const filled = toCompactElement(
       el({ tag: "input", type: "text", value: "hello@example.com" }),
       "@g1:e",
-      NONE,
     );
     expect(filled.value_len).toBe("hello@example.com".length);
     expect("value" in filled).toBe(false);
 
-    const sealedKey = elementRef(el({ tag: "input", type: "password", value: "supersecret" }));
-    const sealed = toCompactElement(
+    // A password field is no longer a special case: same real length, and the
+    // compact element form carries value_len rather than value for every field
+    // as a size budget, not as a seal.
+    const password = toCompactElement(
       el({ tag: "input", type: "password", value: "supersecret" }),
       "@g1:p",
-      new Set([sealedKey]),
     );
-    // value_len is the REAL length (fill-verification signal), NOT "[sealed]".length
-    // (8) — that made a correctly-filled field read as truncated. The value itself
-    // stays hidden (never serialized); only its length is reported.
-    expect(sealed.value_len).toBe("supersecret".length);
-    expect("value" in sealed).toBe(false);
+    expect(password.value_len).toBe("supersecret".length);
+    expect("value" in password).toBe(false);
   });
 
   it("keeps checked for real checkables (true AND false), omits when null", () => {
     expect(
-      toCompactElement(el({ tag: "input", type: "checkbox", checked: true }), "@g1:a", NONE)
+      toCompactElement(el({ tag: "input", type: "checkbox", checked: true }), "@g1:a")
         .checked,
     ).toBe(true);
     expect(
-      toCompactElement(el({ tag: "input", type: "checkbox", checked: false }), "@g1:b", NONE)
+      toCompactElement(el({ tag: "input", type: "checkbox", checked: false }), "@g1:b")
         .checked,
     ).toBe(false);
-    expect("checked" in toCompactElement(el({ tag: "button", checked: null }), "@g1:c", NONE)).toBe(
+    expect("checked" in toCompactElement(el({ tag: "button", checked: null }), "@g1:c")).toBe(
       false,
     );
   });
@@ -159,14 +154,12 @@ describe("toCompactElement (BOT_OBSERVE_COMPACT)", () => {
     const occluded = toCompactElement(
       el({ tag: "button", visibleText: "Hidden", topmost: false, occludedBy: "modal:dialog" }),
       "@g1:o",
-      NONE,
     );
     expect(occluded.topmost).toBe(false);
     expect(occluded.occluded_by).toBe("modal:dialog");
     const top = toCompactElement(
       el({ tag: "button", visibleText: "Top", topmost: true }),
       "@g1:t",
-      NONE,
     );
     expect("topmost" in top).toBe(false);
     expect("occluded_by" in top).toBe(false);
@@ -197,7 +190,7 @@ describe("toCompactElement (BOT_OBSERVE_COMPACT)", () => {
       topmost: true,
       occluded_by: null,
     };
-    const compactBytes = JSON.stringify(toCompactElement(e, "@g1:z", NONE)).length;
+    const compactBytes = JSON.stringify(toCompactElement(e, "@g1:z")).length;
     expect(compactBytes).toBeLessThan(JSON.stringify(full).length * 0.6);
   });
 });
@@ -436,7 +429,7 @@ describe("buildAccessibilitySnapshot", () => {
     expect(snap?.tree).toContain('textbox "Email" ref=@e:');
   });
 
-  it("masks a password-type field value, never leaking the cleartext", () => {
+  it("reports a password-type field's real value — nothing is masked", () => {
     const elements = [
       el({
         tag: "input",
@@ -447,12 +440,11 @@ describe("buildAccessibilitySnapshot", () => {
       }),
     ];
     const snap = buildAccessibilitySnapshot(elements);
-    expect(snap?.tree).not.toContain("nG^6+HsnfVCcXp8");
-    expect(snap?.tree).toContain('value="[sealed]"');
+    expect(snap?.tree).toContain("nG^6+HsnfVCcXp8");
+    expect(snap?.tree).not.toContain("[sealed]");
   });
 
-  it("masks a non-password field whose key was sealed (type_secret target)", () => {
-    const sealed = new Set(["form:signup > input:email"]);
+  it("reports a type_secret target's real value like any other field", () => {
     const elements = [
       el({
         tag: "input",
@@ -469,14 +461,13 @@ describe("buildAccessibilitySnapshot", () => {
         selector: "#org",
       }),
     ];
-    const snap = buildAccessibilitySnapshot(elements, undefined, sealed);
-    expect(snap?.tree).not.toContain("methoxine@gmail.com");
-    expect(snap?.tree).toContain('value="[sealed]"');
-    // a non-sealed, non-password field keeps its real value
+    const snap = buildAccessibilitySnapshot(elements);
+    expect(snap?.tree).toContain("methoxine@gmail.com");
     expect(snap?.tree).toContain('value="Acme Inc"');
+    expect(snap?.tree).not.toContain("[sealed]");
   });
 
-  it("leaves ordinary field values untouched when nothing is sealed", () => {
+  it("leaves ordinary field values untouched", () => {
     const elements = [
       el({
         tag: "input",

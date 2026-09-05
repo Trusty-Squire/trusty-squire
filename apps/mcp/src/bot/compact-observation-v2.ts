@@ -211,17 +211,11 @@ function wireControl(row: SafeControlV2): WireControlV2 {
 }
 
 const SAFE_DESCRIPTION_MAX_CHARS = 40;
-// PAYMENT-ONLY description screening. Card material is the whole of it: a
-// Luhn-valid PAN span and a labeled CVV/CVC value. Everything else a page
-// renders — OAuth button copy, an email address in a field label, a Gmail
-// subject line, a street address, a shipping option, and yes a rendered API
-// key or recovery code — is ordinary content the driving agent needs to read.
-//
-// This replaces a closed-vocabulary allowlist grammar (~120 permitted words)
-// plus email/entropy/OTP/credential-shape rejections. That grammar is what
-// blanked auth pages (an unlisted word anywhere in a label screened the whole
-// label out) and whole Gmail views, so the agent saw unlabeled role letters
-// where a page full of legible controls existed.
+// There is NO description screening on the observation path. Every string a
+// page renders — OAuth button copy, an email address, a Gmail subject line, a
+// street address, a rendered API key, a card number — is content the driving
+// agent needs to read. The only transform left is truncation, which is the
+// compactness budget, not masking.
 const CARD_SECURITY_VALUE_RE = /\b(?:cvv|cvc|security\s*code)\s*[:#-]?\s*\d{3,4}\b/i;
 const PAN_MAX_SPAN_CHARS = 96;
 
@@ -254,7 +248,11 @@ function containsLuhnPan(value: string): boolean {
   return false;
 }
 
-/** The one screen every page-derived string passes: it must carry no card value. */
+/**
+ * Card material, used ONLY by the recordable-token screen below (the operator's
+ * stderr audit trail and the action trace a capture publishes to the SHARED
+ * skill registry). It is never applied to what the agent is shown.
+ */
 function carriesPaymentMaterial(value: string): boolean {
   return containsLuhnPan(value) || CARD_SECURITY_VALUE_RE.test(value);
 }
@@ -422,23 +420,10 @@ export function recordableTokenV2(value: string | null | undefined): string | un
 }
 
 /**
- * The safe-text gate for the tiny semantic layer. It receives only
- * title/heading/control-label sources (never input values or arbitrary page
- * regions), rejects card material, then truncates the remaining human
- * description before it can enter a wire row or delta. The truncation is the
- * compactness budget, not redaction.
+ * Normalize and length-budget a page-derived description for the wire row. It
+ * rejects nothing: the truncation is the compactness budget, not redaction.
  */
-export function safeDescriptionV2(
-  value: string | null | undefined,
-  /**
-   * Values the operator injected from the vault this session. A page can
-   * reflect one back outside the field it was typed into (helper text, an aria
-   * label, an autocomplete preview), so descriptions are screened against them
-   * by EXACT match. This is the vault guarantee, not a shape guess — before the
-   * payment-only narrowing it was an accident of the entropy heuristic.
-   */
-  knownSecrets: readonly string[] = [],
-): string | undefined {
+export function safeDescriptionV2(value: string | null | undefined): string | undefined {
   if (typeof value !== "string") return undefined;
   // Control characters would break the positional wire encoding; they are not
   // page copy, so dropping them is formatting rather than masking.
@@ -446,10 +431,7 @@ export function safeDescriptionV2(
     .replace(/[\p{Cc}\p{Cf}]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
-  if (normalized.length === 0 || carriesPaymentMaterial(normalized)) return undefined;
-  if (knownSecrets.some((secret) => secret.length > 0 && normalized.includes(secret))) {
-    return undefined;
-  }
+  if (normalized.length === 0) return undefined;
   return normalized.length <= SAFE_DESCRIPTION_MAX_CHARS
     ? normalized
     : `${normalized.slice(0, SAFE_DESCRIPTION_MAX_CHARS - 1)}…`;
@@ -509,15 +491,11 @@ function safeAutocompleteV2(value: string | null | undefined): string | null {
     : null;
 }
 
-// Structural hostname validity, plus the payment screen. The credential-shape
-// and entropy rejections that used to live here were the same secret-SHAPE
-// heuristic the rest of this layer dropped: they turned a legitimate long
-// subdomain into "<sealed-origin>" and hid which page the agent was on.
+// Structural hostname validity only — no content screen. A host that fails this
+// is malformed, not sensitive.
 function safeHostnameV2(value: string): boolean {
   const hostname = value.toLowerCase();
-  if (hostname.length === 0 || hostname.length > 253 || carriesPaymentMaterial(hostname)) {
-    return false;
-  }
+  if (hostname.length === 0 || hostname.length > 253) return false;
   return hostname.split(".").every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
 }
 
@@ -659,7 +637,6 @@ export function sealRetainedInteractiveElementsV2(
     visible: element.visible === true,
     inViewport: element.inViewport === true,
     inConsentWidget: element.inConsentWidget === true,
-    sealed: element.sealed === true,
     href: null,
     iconLabel: description(element.iconLabel),
     title: description(element.title),
@@ -718,11 +695,10 @@ export function sealRetainedInteractiveElementsV2(
 
 export function safePageSemanticsV2(
   source: ObservationSemanticSourceV2,
-  knownSecrets: readonly string[] = [],
 ): SafePageSemanticsV2 {
-  const title = safeDescriptionV2(source.title, knownSecrets);
+  const title = safeDescriptionV2(source.title);
   const headings = source.headings
-    .map((heading) => safeDescriptionV2(heading, knownSecrets))
+    .map((heading) => safeDescriptionV2(heading))
     .filter((value): value is string => value !== undefined)
     .filter((value, index, all) => all.indexOf(value) === index)
     .slice(0, 1);
@@ -776,7 +752,7 @@ export function encodeV2Delta(args: {
 }): Record<string, unknown> | null {
   const payload: Record<string, unknown> = {
     format: "compact-v2",
-    url: safeOriginV2(args.pageUrl) ?? "",
+    url: args.pageUrl ?? "",
     text: "",
     session_id: args.sessionId,
     delta: true,
@@ -848,14 +824,11 @@ function candidateText(el: InteractiveElement): string {
   return candidateTexts(el).join(" ");
 }
 
-function controlDescription(
-  el: InteractiveElement,
-  knownSecrets: readonly string[] = [],
-): string | undefined {
+function controlDescription(el: InteractiveElement): string | undefined {
   // Labels are chosen from visible/accessibility naming sources only. Native
   // button values are names; field values, `name`, and `id` stay excluded.
   return controlNamingTexts(el)
-    .map((candidate) => safeDescriptionV2(candidate, knownSecrets))
+    .map((candidate) => safeDescriptionV2(candidate))
     .find((candidate) => candidate !== undefined);
 }
 
@@ -874,9 +847,7 @@ function privateQueryTokenV2(value: string): string | null {
 
 function privateQueryTermsV2(value: string): string[] | null {
   const normalized = value.normalize("NFKC").trim().toLowerCase();
-  if (normalized.length < 1 || normalized.length > 96 || carriesPaymentMaterial(normalized)) {
-    return null;
-  }
+  if (normalized.length < 1 || normalized.length > 96) return null;
   const rawTerms = normalized.match(/[\p{L}\p{M}\p{N}]{1,48}/gu);
   if (rawTerms === null || rawTerms.length === 0 || rawTerms.length > 6) return null;
   const separators = normalized.replace(/[\p{L}\p{M}\p{N}]{1,48}/gu, "");
@@ -885,11 +856,7 @@ function privateQueryTermsV2(value: string): string[] | null {
   return terms.every((term): term is string => term !== null) ? [...new Set(terms)] : null;
 }
 
-export function controlMatchesPrivateQueryV2(
-  el: InteractiveElement,
-  query: string,
-  knownSecrets: readonly string[] = [],
-): boolean {
+export function controlMatchesPrivateQueryV2(el: InteractiveElement, query: string): boolean {
   const needles = privateQueryTermsV2(query);
   if (needles === null) return false;
   // The private match also consults the element's name/id slugs so
@@ -900,11 +867,6 @@ export function controlMatchesPrivateQueryV2(
   // comparison.
   return [...controlNamingTexts(el), el.name, el.id].some((candidate) => {
     if (typeof candidate !== "string") return false;
-    const normalized = candidate.normalize("NFKC").trim().toLowerCase();
-    if (carriesPaymentMaterial(normalized)) return false;
-    if (knownSecrets.some((secret) => secret.length > 0 && candidate.includes(secret))) {
-      return false;
-    }
     const tokens = candidate.normalize("NFKC").match(/[\p{L}\p{M}\p{N}]{1,48}/gu);
     if (tokens === null) return false;
     const safeTokens = new Set(
@@ -1137,8 +1099,6 @@ export function buildSafeControlsV2(args: {
   handles: ReadonlyMap<InteractiveElement, string>;
   pageOrigin: string;
   pageUrl?: string;
-  /** Operator-injected vault values, screened out of every description. */
-  knownSecrets?: readonly string[];
 }): { rows: SafeControlV2[]; byRef: Map<string, string> } {
   const rows: Array<{
     ref: string;
@@ -1163,7 +1123,7 @@ export function buildSafeControlsV2(args: {
     // already CDP-derived interactive inventory supplies each visible control's
     // descendant/accessibility name. This pass binds that name to its own live
     // element, so no cross-serializer tag/role fallback can swap labels.
-    const label = controlLabelV2(controlDescription(el, args.knownSecrets ?? []));
+    const label = controlLabelV2(controlDescription(el));
     const row: Omit<SafeControlV2, "ref"> = {
       role,
       visibility: el.inViewport ? "viewport" : "near",
@@ -1199,7 +1159,7 @@ export function buildSafeControlsV2(args: {
 export function encodeV2Page(args: {
   sessionId: string;
   stage: SafeStageV2;
-  /** Only the screened origin reaches the wire; paths and query strings stay private. */
+  /** The live page URL, path and query included — the agent needs to know where it is. */
   pageUrl?: string;
   semantics?: SafePageSemanticsV2;
   rows: readonly SafeControlV2[];
@@ -1216,7 +1176,7 @@ export function encodeV2Page(args: {
   if (args.unchanged === true && offset === 0) {
     const payload: Record<string, unknown> = {
       format: "compact-v2",
-      url: safeOriginV2(args.pageUrl) ?? "",
+      url: args.pageUrl ?? "",
       text: "",
       session_id: args.sessionId,
       stage: args.stage,
@@ -1250,7 +1210,7 @@ export function encodeV2Page(args: {
     const remainder = args.rows.length - (index + 1);
     const payload: Record<string, unknown> = {
       format: "compact-v2",
-      url: safeOriginV2(args.pageUrl) ?? "",
+      url: args.pageUrl ?? "",
       text: "",
       session_id: args.sessionId,
       stage: args.stage,
@@ -1276,7 +1236,7 @@ export function encodeV2Page(args: {
   const remaining = args.rows.length - nextOffset;
   const payload: Record<string, unknown> = {
     format: "compact-v2",
-    url: safeOriginV2(args.pageUrl) ?? "",
+    url: args.pageUrl ?? "",
     text: "",
     session_id: args.sessionId,
     stage: args.stage,

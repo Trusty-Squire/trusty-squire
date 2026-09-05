@@ -46,7 +46,7 @@ Inside `elements`:
 The session observation format is selected once at start by
 `TRUSTY_SQUIRE_OBSERVE_V2=on|shadow|off` and defaults to `on`:
 
-- `on` emits Compact V2. Every detail level remains inside the V2 seal;
+- `on` emits Compact V2. Every detail level stays in the V2 format;
   `detail:"full"` does not expose the V1 inventory.
 - `shadow` runs the native Compact V2 serializer without retaining or emitting
   its result, while callers continue to receive and target V1 observations.
@@ -62,7 +62,7 @@ detail:  none  <  compact  <  full
 `operate_observe({ detail })` accepts `compact|full`; `operate_act({ detail })`
 also accepts `none` (a bare ack). Default everywhere is **compact**. In V1, a
 genuinely ambiguous step can escalate to `detail:"full"` for that one call. In
-V2, ambiguity is resolved through its sealed paging/query protocol instead of
+V2, ambiguity is resolved through its paging/query protocol instead of
 restoring legacy fields.
 
 ## Compact V2 — current default contract
@@ -72,17 +72,16 @@ already extracted through `BrowserController`'s CDP path. It ports only the
 compact tuple formatting; it does not launch Python or depend on browser-use at
 runtime.
 
-The serializer constructs a screened view before any V2 audit, delta,
-retention, recipe-capture, or public-result sink. Page URLs and visible text are
-empty on the wire. Page-derived hostnames, origins, titles, headings, labels,
-options, errors, and nested action results cross the card seal before they can
-leave the session. That seal is **payment-only** (captain, 2026-09-03): only a
-Luhn-valid PAN, a labeled CVV, and the exact value the operator injected from
-the vault are screened out — see
-[observation-model.md §4.5](observation-model.md). Ordinary page copy, including
-a rendered API key or one-time code, reaches the wire. The audit trail and the
-registry-bound recipe trace keep the older closed-vocabulary screen
-(`recordableTokenV2`). This is output screening only: V2 does not add a payment
+The serializer emits the live page URL and a compact control map. **Nothing on
+that wire is screened for content** (owner's order, 2026-09-05: remove ALL seals
+— see [observation-model.md §4.5](observation-model.md)). Page-derived
+hostnames, origins, titles, headings, labels, options, errors, and nested action
+results are the page's own copy, card material and rendered API keys included.
+Visible `text` is empty and rows carry no field values purely as a payload SIZE
+budget — read a value with `operate_screenshot`, `operate_act { kind: "extract"
+}`, or a V1 session. The audit trail and the
+registry-bound recipe trace keep the closed-vocabulary screen
+(`recordableTokenV2`), because neither is a read by the agent. V2 does not add a payment
 validation or approval gate.
 
 The public observation contains:
@@ -102,16 +101,15 @@ The public observation contains:
 browser. The query, optional role filter, and HMAC-bound cursor stay inside the
 session; results remain screened `safe_table` tuples. An empty query consumes an
 `overflow.next_cursor`, and also consumes `hint_overflow.next_cursor` when the
-trusted start hint spans more than one page. Card-shaped query material (a Luhn PAN or a
-labeled CVV) is rejected from matching rather than echoed; other query material
-is matched normally under the payment-only policy.
+trusted start hint spans more than one page. Query material is matched normally
+whatever it spells; there is no card or secret screen on the query path.
 
 An exact, cursorless `Google` or `GitHub` lookup has a narrow bounded hydration
 repair for auth shells that mount or label their provider controls after the
-initial observation. Each refresh rebuilds and revalidates the complete sealed
+initial observation. Each refresh rebuilds and revalidates the complete
 action map. A privately matched, initially unlabeled control may receive only the
-queried provider name in the screened result; its returned ref is still the
-current indexed safe handle. Explicit cursors remain immutable and stale on DOM
+queried provider name in the result; its returned ref is still the
+current indexed handle. Explicit cursors remain immutable and stale on DOM
 change, arbitrary queries do not receive this wait, and the repair never clicks
 or falls back to a generic locator.
 
@@ -120,7 +118,7 @@ Action refs are opaque snapshot indexes of the form
 these checks before the private legacy target is resolved:
 
 1. canonical syntax and the current observation generation;
-2. membership in the session-held sealed action map;
+2. membership in the session-held action map;
 3. an unexpired index bound to both the browser's main-document identity and
    current URL;
 4. an exact live match for the complete indexed control map and its private
@@ -132,7 +130,7 @@ invalidate the map. The caller must observe again and select a new handle; V2
 never falls through to label, `text=`, CSS, or V1 replacement-candidate
 resolution.
 
-When the page identity and complete sealed control map are unchanged, a repeat
+When the page identity and complete control map are unchanged, a repeat
 observe may return `delta:true`; omitted `safe_table` and semantic fields retain
 their preceding V2 values. Any structural action-map or stage change remints a
 generation and sends a fresh paged map. The tuple delta decoder still treats
@@ -143,7 +141,7 @@ remains forward-compatible without weakening snapshot membership.
 screening, query, stage, semantics, budget, and tuple-format gates.
 `operate-session-flow.test.ts` owns session-mode rollout, start metadata,
 cursor/page/document identity, live-map membership, action invalidation, V2
-audit/public-result sealing, and V1 compatibility gates.
+audit screening, and V1 compatibility gates.
 
 ## Legacy V1 — Phase 1 compact encoder ✅ shipped
 
@@ -159,9 +157,9 @@ When V1 is selected and `detail` is `compact` (the V1 default), `observeSession`
 - **Drop `path` and `container` from the wire payload.** `container` is redundant
   with `path`; the verbose `path` remains in the complete persisted snapshot for
   re-expansion and targeted searches.
-- **`value` → `value_len`** (a number), never the raw value — reinforces the
-  sealed-field moat and saves bytes. (Sealed fields already render `[sealed]`;
-  in compact they become `value_len` of the placeholder.)
+- **`value` → `value_len`** (a number) — a payload size budget, not a seal, and
+  it reports the field's REAL length for every field including password inputs.
+  `detail:"full"` carries the raw `value`.
 - **Metadata** so omission is explicit, never silent:
   `elements_total` (the complete current count, including delta/collapsed
   omissions), `text_truncated` (the 4000-char text cap tripped), and
