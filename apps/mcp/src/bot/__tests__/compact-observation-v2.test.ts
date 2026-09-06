@@ -205,6 +205,38 @@ describe("compact observation v2", () => {
       expect(wire).not.toContain("f9a0");
     });
 
+    it("screens the full name when the description budget would cut the token short", () => {
+      // A 28-31 char preamble pushes the bare token across the 40-char
+      // description cut, leaving fewer than the entropy screen's minimum run;
+      // the label must be screened on the untruncated name so no leading
+      // fragment survives into the slug.
+      for (const visibleText of [
+        `Your ipinfo access token is: ${token}`,
+        `Copy access token to clipboard: ${token}`,
+      ]) {
+        const control = element({ visibleText });
+        const safe = buildSafeControlsV2({
+          elements: [control],
+          legacyRefs: new Map([[control, "@e:preamble"]]),
+          handles: new Map([[control, "@e:preamble"]]),
+          pageOrigin: "https://ipinfo.invalid",
+        });
+        expect(safe.rows[0]?.label, visibleText).toBe(REDACTED_SECRET_LABEL_V2);
+        expect(safe.rows[0], visibleText).toEqual(
+          expect.objectContaining({ ref: "@e:preamble", role: "button" }),
+        );
+        const page = encodeV2Page({
+          sessionId: "session",
+          stage: "browse",
+          rows: safe.rows,
+          cursorFor: (offset) => `cursor-${offset}`,
+        });
+        const wire = JSON.stringify(page.payload);
+        expect(wire, visibleText).not.toContain(token);
+        expect(wire, visibleText).not.toContain("f9a0");
+      }
+    });
+
     it("keeps the redacted row actionable through a delta upsert", () => {
       const copyToken = element({ visibleText: token });
       const safe = buildSafeControlsV2({
@@ -663,6 +695,8 @@ describe("compact observation v2", () => {
       "login | Bearer 9f8e7d6c5b4a",
       "curl -H 'Authorization: Bearer f9a062f02fadf5'",
       "token f9a062f02fadf5 (never expires)",
+      "Your ipinfo access token is: f9a062f02fadf5",
+      "Copy access token to clipboard: f9a062f02fadf5",
     ];
     const kept: readonly string[] = [
       "View plans & pricing",

@@ -301,6 +301,8 @@ const LABEL_MAX_CHARS = 32;
  * credential (including one whose truncation carried only a secret FRAGMENT —
  * the curl-bearer example) yields the redaction marker instead of the slug,
  * so no part of the secret, not even its leading characters, reaches the wire.
+ * Callers pass the UNTRUNCATED name: screening after the 40-char description
+ * cut let a bare token behind a long preamble slip past the run-length floor.
  */
 export function controlLabelV2(description: string | undefined): string | undefined {
   if (description === undefined) return undefined;
@@ -563,6 +565,20 @@ export function recordableTokenV2(value: string | null | undefined): string | un
  * rejects nothing: the truncation is the compactness budget, not redaction.
  */
 export function safeDescriptionV2(value: string | null | undefined): string | undefined {
+  const normalized = normalizeDescriptionV2(value);
+  if (normalized === undefined) return undefined;
+  return normalized.length <= SAFE_DESCRIPTION_MAX_CHARS
+    ? normalized
+    : `${normalized.slice(0, SAFE_DESCRIPTION_MAX_CHARS - 1)}…`;
+}
+
+/**
+ * The whitespace/control-character normalization half of `safeDescriptionV2`,
+ * without the length budget. The label alias screens THIS text: the 40-char
+ * cut can slice a bare token below the entropy screen's minimum run and leave
+ * its leading characters for the slug, so the screen must see the whole name.
+ */
+export function normalizeDescriptionV2(value: string | null | undefined): string | undefined {
   if (typeof value !== "string") return undefined;
   // Control characters would break the positional wire encoding; they are not
   // page copy, so dropping them is formatting rather than masking.
@@ -570,10 +586,7 @@ export function safeDescriptionV2(value: string | null | undefined): string | un
     .replace(/[\p{Cc}\p{Cf}]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
-  if (normalized.length === 0) return undefined;
-  return normalized.length <= SAFE_DESCRIPTION_MAX_CHARS
-    ? normalized
-    : `${normalized.slice(0, SAFE_DESCRIPTION_MAX_CHARS - 1)}…`;
+  return normalized.length === 0 ? undefined : normalized;
 }
 
 const SAFE_AUTOCOMPLETE_TOKENS = new Set([
@@ -965,8 +978,10 @@ function candidateText(el: InteractiveElement): string {
 function controlDescription(el: InteractiveElement): string | undefined {
   // Labels are chosen from visible/accessibility naming sources only. Native
   // button values are names; field values, `name`, and `id` stay excluded.
+  // The name is NOT length-budgeted here: `controlLabelV2` screens the full
+  // text and its slug carries the label's own budget.
   return controlNamingTexts(el)
-    .map((candidate) => safeDescriptionV2(candidate))
+    .map((candidate) => normalizeDescriptionV2(candidate))
     .find((candidate) => candidate !== undefined);
 }
 
