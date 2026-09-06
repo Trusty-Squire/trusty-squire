@@ -283,9 +283,9 @@ describe("compact observation v2", () => {
     });
     expect(page.payload.hint).toBeUndefined();
     expect(page.payload.safe_table).toEqual([]);
-    expect(
-      Buffer.byteLength(JSON.stringify(page.payload), "utf8"),
-    ).toBeLessThanOrEqual(OBSERVE_V2_MAX_WIRE_BYTES);
+    expect(Buffer.byteLength(JSON.stringify(page.payload), "utf8")).toBeLessThanOrEqual(
+      OBSERVE_V2_MAX_WIRE_BYTES,
+    );
   });
 
   it("shrinks a URL that exceeds the wire budget before packing so the first page keeps multiple rows", () => {
@@ -317,7 +317,9 @@ describe("compact observation v2", () => {
     expect(Buffer.byteLength(JSON.stringify(page.payload), "utf8")).toBeLessThanOrEqual(
       OBSERVE_V2_MAX_WIRE_BYTES,
     );
-    const overflow = page.payload.overflow as { remaining: number; next_cursor: string } | undefined;
+    const overflow = page.payload.overflow as
+      | { remaining: number; next_cursor: string }
+      | undefined;
     if (overflow !== undefined) {
       expect(overflow).toEqual({
         remaining: 40 - firstPage.length,

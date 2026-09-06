@@ -12,6 +12,20 @@
 
 ## Unreleased
 
+- **`operate_observe` / `operate_observe_query` reach every actionable control
+  on long pages.** A compact-v2 page now packs rows in priority order until the
+  4,096-byte wire budget is reached instead of stopping at four, so a primary
+  CTA below a large content block lands in the default map. Fixed metadata (a
+  long OAuth-shaped URL, `semantic`, start hints) degrades before any row is
+  dropped, so `compact-v2 budget metadata exceeded` no longer fails observation
+  on real pages. The default map's `overflow.next_cursor` and every unfiltered
+  page's cursor are filter-independent: passing one together with a query or
+  role searches the whole map instead of returning `invalid_cursor`. Query
+  matching ANDs the terms across every naming source plus the control's role
+  word, so generic terms such as `region dropdown` or `use case textbox` find
+  their control. Opaque refs and the wire shape are unchanged; the contract
+  lives in `docs/DESIGN-observe-compact.md`.
+
 - **BREAKING: every observation seal, screenshot redaction, and extraction
   masking refusal is removed.** The operator now returns what the page actually
   renders. `operate_screenshot` returns real pixels — no mask compositing, no

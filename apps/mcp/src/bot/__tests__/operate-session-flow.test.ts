@@ -4140,12 +4140,9 @@ describe("Compact V2 action-map boundary", () => {
     // A filter riding on the MAP cursor means "search the whole map for this":
     // it resolves the filtered lookup instead of rejecting with invalid_cursor
     // (the live Xata failure).
-    const byQuery = (await observeQuery(
-      started.session_id,
-      "Item 149",
-      undefined,
-      pageCursor,
-    )) as { safe_table: unknown[] };
+    const byQuery = (await observeQuery(started.session_id, "Item 149", undefined, pageCursor)) as {
+      safe_table: unknown[];
+    };
     expect(byQuery.safe_table).toHaveLength(1);
     const byRole = (await observeQuery(started.session_id, "", "button", pageCursor)) as {
       safe_table: unknown[];
@@ -4155,12 +4152,9 @@ describe("Compact V2 action-map boundary", () => {
     // A cursor minted on a FILTERED page continues that filtered list.
     const queryPage = await observeQuery(started.session_id, "Item");
     const queryCursor = (queryPage.overflow as { next_cursor: string }).next_cursor;
-    const continued = (await observeQuery(
-      started.session_id,
-      "Item",
-      undefined,
-      queryCursor,
-    )) as { safe_table: unknown[] };
+    const continued = (await observeQuery(started.session_id, "Item", undefined, queryCursor)) as {
+      safe_table: unknown[];
+    };
     expect(continued.safe_table.length).toBeGreaterThan(0);
     // It does not continue under a different filter or role.
     await expect(observeQuery(started.session_id, "Other", undefined, queryCursor)).rejects.toThrow(
@@ -4484,12 +4478,9 @@ describe("Compact V2 action-map boundary", () => {
     const rest =
       page.overflow === undefined
         ? { safe_table: [] as Array<[string, string, string?]> }
-        : ((await observeQuery(
-            started.session_id,
-            "",
-            undefined,
-            page.overflow.next_cursor,
-          )) as { safe_table: Array<[string, string, string?]> });
+        : ((await observeQuery(started.session_id, "", undefined, page.overflow.next_cursor)) as {
+            safe_table: Array<[string, string, string?]>;
+          });
     const refs = [...page.safe_table, ...rest.safe_table].map((row) => row[0]);
     expect(refs).toHaveLength(fields.length);
 
@@ -9821,7 +9812,11 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
     );
     const started = (await startProvisionSession({
       serviceUrl: "https://xata.example.com/dense",
-    })) as unknown as { session_id: string; safe_table: Array<[string]>; overflow?: { next_cursor: string } };
+    })) as unknown as {
+      session_id: string;
+      safe_table: Array<[string]>;
+      overflow?: { next_cursor: string };
+    };
     const mapCursor = started.overflow?.next_cursor;
     expect(mapCursor).toBeDefined();
 

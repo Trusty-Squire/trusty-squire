@@ -1265,7 +1265,9 @@ export function encodeV2Page(args: {
     return {
       ...fixed,
       safe_table: table,
-      ...(remaining > 0 ? { overflow: { remaining, next_cursor: args.cursorFor(nextOffset) } } : {}),
+      ...(remaining > 0
+        ? { overflow: { remaining, next_cursor: args.cursorFor(nextOffset) } }
+        : {}),
     };
   };
   if (offset < args.rows.length) {
