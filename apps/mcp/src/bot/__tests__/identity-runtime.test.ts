@@ -210,6 +210,22 @@ describe("IdentityRuntime", () => {
     expect(ok.epoch).toBe(1);
   });
 
+  it("isLaunching is true only while a launch is in flight", async () => {
+    const runtime = new IdentityRuntime<FakeChrome, FakeSettings>();
+    const settings: FakeSettings = { profileDir: "/p" };
+    const gate = deferred<void>();
+    expect(runtime.isLaunching()).toBe(false);
+    const pending = runtime.acquire(settings, async () => {
+      await gate.promise;
+      return new FakeChrome();
+    });
+    expect(runtime.isLaunching()).toBe(true);
+    gate.resolve();
+    await pending;
+    expect(runtime.isLaunching()).toBe(false);
+    expect(runtime.isLive()).toBe(true);
+  });
+
   it("uses a custom settingsCompatible comparator when supplied", async () => {
     const runtime = new IdentityRuntime<FakeChrome, FakeSettings>({
       settingsCompatible: (live, requested) => live.profileDir === requested.profileDir,

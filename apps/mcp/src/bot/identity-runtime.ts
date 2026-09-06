@@ -69,6 +69,16 @@ export class IdentityRuntime<THandle extends IdentityRuntimeCloseable, TSettings
     return this.handle !== null;
   }
 
+  // True while some caller's launch() is in flight (single-flighted — see
+  // acquire()). Lets a caller that lost a synchronous race for the OS-level
+  // resource the launch itself protects (see session/lifecycle.ts's
+  // experimental-multisession fallback) tell "this identity is being (or
+  // already was) launched IN THIS PROCESS" from "busy for an unrelated
+  // reason" before deciding to join it.
+  isLaunching(): boolean {
+    return this.launchPromise !== null;
+  }
+
   activeLeaseCount(): number {
     return this.leaseCount;
   }

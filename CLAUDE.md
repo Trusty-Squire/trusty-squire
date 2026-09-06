@@ -587,7 +587,11 @@ to update.
 (`apps/mcp/src/bot/browser-process-owner.ts`, Chrome process custody + bounded
 teardown; launch helpers in `browser-process-runtime.ts`) and one `PageDriver`
 (`page-driver.ts`, page/tab ownership, navigation, adoption). Single-session
-only — no broker or shared browser.
+only by default — no broker or shared browser. The one exception is the
+off-by-default experimental `TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION` flag
+(`session/multisession-flag.ts`), test scaffolding that lets a second
+`operate_start` join the live Chrome as a satellite; `AGENTS.md` owns that
+contract.
 [`docs/browser-process-page-boundary.md`](docs/browser-process-page-boundary.md)
 owns the boundary and the preserved close/cancellation ordering;
 `browser-process-page-boundary.test.ts` pins it.
