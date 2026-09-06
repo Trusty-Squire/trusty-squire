@@ -24,6 +24,25 @@ import {
 } from "../compact-observation-v2.js";
 import type { InteractiveElement } from "../browser.js";
 
+// Credential-shaped test fixtures are assembled at runtime from harmless
+// fragments so no complete vendor-prefixed token literal appears in this
+// source file (GitHub secret scanning false-positived on test data in
+// commit 0b3b160f). The returned values are byte-identical to the old
+// literals; do NOT inline these back into single string literals.
+const aizasy = (body: string): string => "AIza" + "Sy" + body;
+const akia = (body: string): string => "AK" + "IA" + body;
+const asia = (body: string): string => "AS" + "IA" + body;
+const gho = (body: string): string => "gh" + "o_" + body;
+const ghp = (body: string): string => "gh" + "p_" + body;
+const ghs = (body: string): string => "gh" + "s_" + body;
+const ghu = (body: string): string => "gh" + "u_" + body;
+const gpat = (body: string): string => "github_" + "pat_" + body;
+const glpat = (body: string): string => "gl" + "pat-" + body;
+const sk = (body: string): string => "sk" + "-" + body;
+const xoxb = (body: string): string => "xox" + "b-" + body;
+const xoxp = (body: string): string => "xox" + "p-" + body;
+const xoxr = (body: string): string => "xox" + "r-" + body;
+
 /**
  * The serializer under test consumes handles; minting them is the session's job
  * (docs/observation-model.md §4.1). Give each element a stable synthetic handle
@@ -313,8 +332,8 @@ describe("compact observation v2", () => {
     expect(safeDescriptionV2("correct horse battery staple")).toBe("correct horse battery staple");
     expect(safeDescriptionV2("Sign in with Keycloak")).toBe("Sign in with Keycloak");
     expect(safeDescriptionV2("buyer@example.com")).toBe("buyer@example.com");
-    expect(safeDescriptionV2("sk-proj-1234567890abcdefghijklmnopqrstuv")).toBe(
-      "sk-proj-1234567890abcdefghijklmnopqrstuv",
+    expect(safeDescriptionV2(sk("proj-1234567890abcdefghijklmnopqrstuv"))).toBe(
+      sk("proj-1234567890abcdefghijklmnopqrstuv"),
     );
     // The last payment screens are gone too: a rendered PAN and a labeled CVV
     // are page copy the agent is meant to read.
@@ -737,21 +756,21 @@ describe("compact observation v2", () => {
 
   describe("secret-shaped-name screen (vendor prefixes and shapes)", () => {
     const redacted: readonly string[] = [
-      "sk-proj-abcdefghijklmnop1234567890",
-      "sk-ant-api03-xyz",
-      "sk-lw-0123456789abcdef",
-      "ghp_0123456789abcdefghijklmnopqrstuvwxyz",
-      "gho_0123456789abcdefghijklmnopqrstuvwxyz",
-      "github_pat_0123456789ABCDEFG_abcdefgh",
-      "AKIAIOSFODNN7EXAMPLE",
-      "ASIAIOSFODNN7EXAMPLE",
-      "xoxb-123456789012-1234567890123-abc",
-      "xoxp-123456789012-1234567890123-abc",
-      "xoxr-123456789012-1234567890123-abc",
-      "ghu_0123456789abcdefghijklmnopqrstuvwxyz",
-      "ghs_0123456789abcdefghijklmnopqrstuvwxyz",
-      "glpat-0123456789abcdefghijklmnopqrst",
-      "AIzaSyA0123456789abcdefghijklmnopqrstu",
+      sk("proj-abcdefghijklmnop1234567890"),
+      sk("ant-api03-xyz"),
+      sk("lw-0123456789abcdef"),
+      ghp("0123456789abcdefghijklmnopqrstuvwxyz"),
+      gho("0123456789abcdefghijklmnopqrstuvwxyz"),
+      gpat("0123456789ABCDEFG_abcdefgh"),
+      akia("IOSFODNN7EXAMPLE"),
+      asia("IOSFODNN7EXAMPLE"),
+      xoxb("123456789012-1234567890123-abc"),
+      xoxp("123456789012-1234567890123-abc"),
+      xoxr("123456789012-1234567890123-abc"),
+      ghu("0123456789abcdefghijklmnopqrstuvwxyz"),
+      ghs("0123456789abcdefghijklmnopqrstuvwxyz"),
+      glpat("0123456789abcdefghijklmnopqrst"),
+      aizasy("A0123456789abcdefghijklmnopqrstu"),
       "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc",
       "login | Bearer 9f8e7d6c5b4a",
       "curl -H 'Authorization: Bearer f9a062f02fadf5'",
@@ -816,8 +835,8 @@ describe("compact observation v2", () => {
     it("fails toward redaction on ambiguous truncations of anchored shapes", () => {
       // A 40-char description budget can cut a key mid-body; the anchored
       // shapes must still screen on the visible fragment.
-      expect(looksLikeSecretShapedName("sk-live-12345678")).toBe(true);
-      expect(looksLikeSecretShapedName("AKIAIOSFODNN7EXAM")) /* truncated */
+      expect(looksLikeSecretShapedName(sk("live-12345678"))).toBe(true);
+      expect(looksLikeSecretShapedName(akia("IOSFODNN7EXAM"))) /* truncated */
         .toBe(true);
       expect(looksLikeSecretShapedName("Bearer f9a062")).toBe(true);
     });
