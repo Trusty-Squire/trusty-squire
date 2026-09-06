@@ -372,7 +372,7 @@ export class OAuthFailedError extends Error {
   }
 }
 
-// Pure decision at the heart of Fix C's honest three-outcome classification,
+// Pure decision at the heart of Fix C's honest outcome classification,
 // applied the instant an OAuth completion wait's deadline elapses. Exported
 // so the exact race it recovers — the deadline firing in the same instant the
 // provider actually hands control back — can be unit-tested without racing
@@ -381,22 +381,65 @@ export class OAuthFailedError extends Error {
 // the tool reported a fabricated "session may have expired" failure for an
 // action that had, in fact, just succeeded.
 //
-//   - `transientOnProductOrigin` at the deadline (same-tab, the page actually
+//   - `transientClosed` at the deadline → the provider page is gone, which is
+//     this codebase's ordinary popup completion signal (waitForOAuthLifecycle
+//     reports the same state as "closed"); settle it the same way.
+//   - `returnedToProductOrigin` at the deadline (same-tab, the page actually
 //     left the product origin and is back on it — the same departure
 //     condition waitForOAuthLifecycle requires) → the provider DID return
 //     control; report completion, not failure.
-//   - otherwise, `transientClosed` is the one real terminal signal available
-//     (the page is actually gone) → `failed`.
 //   - otherwise we simply don't know yet → `awaiting_human` (a consent
 //     screen or 2FA challenge is commonly still showing); never asserted as
 //     a cause, just the honest "not done".
+//
+// A real failure is never inferred here: it comes only from an observed OAuth
+// error on the return URL (`oauthErrorFromReturnUrl`).
 export function classifyOAuthTimeout(
   transientClosed: boolean,
-  transientOnProductOrigin: boolean,
-): "returned" | "awaiting_human" | "failed" {
-  if (!transientClosed && transientOnProductOrigin) return "returned";
-  if (transientClosed) return "failed";
+  returnedToProductOrigin: boolean,
+): "closed" | "returned" | "awaiting_human" {
+  if (transientClosed) return "closed";
+  if (returnedToProductOrigin) return "returned";
   return "awaiting_human";
+}
+
+// The one observed denial/error signal OAuth defines: the provider redirects
+// back to the relying party carrying `error=<code>` (RFC 6749 §4.1.2.1 in the
+// query; §4.2.2.1 in the fragment for implicit flows). The code is reported
+// verbatim — it is a fact the provider stated, not a guess.
+const OAUTH_ERROR_CODE_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
+
+export function oauthErrorFromReturnUrl(
+  url: string,
+): { error: string; description: string | null } | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  for (const params of [
+    parsed.searchParams,
+    new URLSearchParams(parsed.hash.startsWith("#") ? parsed.hash.slice(1) : ""),
+  ]) {
+    const error = params.get("error");
+    if (error === null || !OAUTH_ERROR_CODE_RE.test(error)) continue;
+    const description = params.get("error_description");
+    return {
+      error,
+      description: description === null || description.length === 0 ? null : description,
+    };
+  }
+  return null;
+}
+
+export function oauthAwaitingHumanMessage(productOrigin: string, budgetMs: number): string {
+  return (
+    `OAuth has not returned to ${productOrigin} within ${Math.ceil(budgetMs / 1000)} seconds. ` +
+    "A consent screen or a 2FA/verification challenge may still be showing on the provider; " +
+    "call operate_observe to read it, or retry oauth_login or oauth_settle, rather than " +
+    "treating this as a failure."
+  );
 }
 
 export async function runCaptureConfirmedPaymentSubmit<T>(options: {
@@ -13114,16 +13157,12 @@ export class BrowserController {
     // A consent screen or 2FA challenge is routinely still showing; the
     // caller should keep waiting/retry, not treat this as a dead end.
     const awaitingHumanError = (): OAuthAwaitingHumanError =>
-      new OAuthAwaitingHumanError(
-        `OAuth has not returned to ${safeOrigin(productUrl)} within ` +
-          `${Math.ceil(oauthBudgetMs / 1000)} seconds. A consent screen or a 2FA/verification ` +
-          "challenge may still be showing on the provider; retry oauth_login or oauth_settle " +
-          "rather than treating this as a failure.",
-      );
+      new OAuthAwaitingHumanError(oauthAwaitingHumanMessage(safeOrigin(productUrl), oauthBudgetMs));
     const oauthFailedError = (reason: string): OAuthFailedError => new OAuthFailedError(reason);
     let recovery: Page | null = null;
     let providerPage: Page | null = null;
     let productDeparted = false;
+    let pendingOnProvider = false;
     let resolveProductDeparture: () => void = () => undefined;
     const productDeparturePromise = new Promise<void>((resolve) => {
       resolveProductDeparture = resolve;
@@ -13161,7 +13200,13 @@ export class BrowserController {
       product.on("popup", onPopup);
       product.once("close", onProductClose);
       try {
-        if (Date.now() >= oauthDeadline) throw awaitingHumanError();
+        if (Date.now() >= oauthDeadline) {
+          throw new OAuthAwaitingHumanError(
+            `OAuth has not been attempted yet: the ${Math.ceil(oauthBudgetMs / 1000)}-second ` +
+              `budget elapsed before the OAuth control on ${safeOrigin(productUrl)} was clicked. ` +
+              "Retry oauth_login.",
+          );
+        }
         try {
           await this.click(selector);
         } catch (error) {
@@ -13232,15 +13277,27 @@ export class BrowserController {
             productDeparted &&
             this.isOAuthProductUrl(transient.url(), productUrl),
         );
-        if (outcome === "returned") {
-          settled = "returned";
-        } else if (outcome === "failed") {
-          throw oauthFailedError(
-            `The provider page closed before returning to ${safeOrigin(productUrl)}.`,
-          );
-        } else {
+        if (outcome === "awaiting_human") {
+          pendingOnProvider = true;
           throw awaitingHumanError();
         }
+        settled = outcome;
+      }
+      const returnUrl =
+        settled === "returned"
+          ? transient.url()
+          : durableProduct !== null &&
+              !durableProduct.isClosed() &&
+              durableProduct.url() !== productUrl
+            ? durableProduct.url()
+            : null;
+      const denial = returnUrl === null ? null : oauthErrorFromReturnUrl(returnUrl);
+      if (denial !== null) {
+        throw oauthFailedError(
+          `OAuth returned to ${safeOrigin(returnUrl ?? productUrl)} with error=${denial.error}` +
+            (denial.description === null ? "" : ` (${denial.description})`) +
+            ".",
+        );
       }
       if (providerPage === null && product.isClosed()) {
         if (Date.now() >= oauthDeadline) {
@@ -13255,13 +13312,19 @@ export class BrowserController {
       }
     } finally {
       product.off("framenavigated", onProductNavigation);
-      const retained = product.isClosed() ? recovery : product;
-      this.page = retained?.isClosed() === false ? retained : this.primaryPage;
-      this.oauthProductPage = null;
-      this.oauthProviderPage = null;
-      this.oauthProviderPageClosed = false;
-      if (providerPage !== null && !providerPage.isClosed()) {
-        await providerPage.close().catch(() => undefined);
+      const providerStillShowing =
+        pendingOnProvider && providerPage !== null && !providerPage.isClosed();
+      if (providerStillShowing) {
+        this.page = providerPage;
+      } else {
+        const retained = product.isClosed() ? recovery : product;
+        this.page = retained?.isClosed() === false ? retained : this.primaryPage;
+        this.oauthProductPage = null;
+        this.oauthProviderPage = null;
+        this.oauthProviderPageClosed = false;
+        if (providerPage !== null && !providerPage.isClosed()) {
+          await providerPage.close().catch(() => undefined);
+        }
       }
       if (recovery !== null && recovery !== this.page && !recovery.isClosed()) {
         await recovery.close().catch(() => undefined);

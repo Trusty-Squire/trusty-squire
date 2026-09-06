@@ -6,7 +6,13 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
-import { BrowserController, OAuthAwaitingHumanError, classifyOAuthTimeout } from "../browser.js";
+import {
+  BrowserController,
+  OAuthAwaitingHumanError,
+  OAuthFailedError,
+  classifyOAuthTimeout,
+  oauthErrorFromReturnUrl,
+} from "../browser.js";
 import {
   act,
   finishProvisionSession,
@@ -426,6 +432,50 @@ describe("BrowserController OAuth popup lifecycle", () => {
         message: expect.stringMatching(/expired|force-relogin/i),
       });
       expect(Date.now() - startedAt).toBeLessThan(5_000);
+      // The pending challenge must stay reachable: the provider popup is still
+      // open and is the controller's active page, so operate_observe reads it
+      // and oauth_settle can resume from it.
+      const popup = context
+        .pages()
+        .find((page) => page.url().startsWith("https://accounts.google.com/"));
+      expect(popup?.isClosed()).toBe(false);
+      expect((controller as unknown as { page: Page }).page).toBe(popup);
+      expect(controller.currentUrl()).toBe("https://accounts.google.com/provider");
+      expect(product.isClosed()).toBe(false);
+      expect(await controller.extractVisibleText()).toContain("Provider did not settle");
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("reports failed with the provider's own error code when the return carries error=access_denied", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/**", async (route) => {
+      const callback = route.request().url().includes("/callback");
+      await route.fulfill({
+        contentType: "text/html",
+        body: callback
+          ? "<main>Login cancelled</main>"
+          : '<button id="oauth" onclick="location.href=\'https://provider.test/oauth\'">Login with Provider</button>',
+      });
+    });
+    await context.route("https://provider.test/oauth", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<script>setTimeout(() => location.href="https://product.test/callback?error=access_denied&error_description=The+user+denied+access", 20)</script>',
+      });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+
+    try {
+      const rejected = controller.loginWithOAuth("#oauth", 3_000);
+      await expect(rejected).rejects.toBeInstanceOf(OAuthFailedError);
+      await expect(rejected).rejects.toMatchObject({
+        message: expect.stringMatching(/error=access_denied \(The user denied access\)/),
+      });
+      expect(product.isClosed()).toBe(false);
     } finally {
       await context.close().catch(() => undefined);
     }
@@ -546,14 +596,35 @@ describe("classifyOAuthTimeout (Fix C decision logic)", () => {
     expect(classifyOAuthTimeout(false, false)).toBe("awaiting_human");
   });
 
-  it("reports failed only on an actually-observed terminal signal (the page is gone)", () => {
-    expect(classifyOAuthTimeout(true, false)).toBe("failed");
+  it("settles a provider page that closed at the deadline exactly like the lifecycle wait does", () => {
+    // A closed provider page is this codebase's ordinary popup completion
+    // signal, never a failure.
+    expect(classifyOAuthTimeout(true, false)).toBe("closed");
+    expect(classifyOAuthTimeout(true, true)).toBe("closed");
+  });
+});
+
+describe("oauthErrorFromReturnUrl (observed OAuth denial)", () => {
+  it("reads a standard error code and its description from the query", () => {
+    expect(
+      oauthErrorFromReturnUrl(
+        "https://product.test/callback?error=access_denied&error_description=User+cancelled&state=x",
+      ),
+    ).toEqual({ error: "access_denied", description: "User cancelled" });
   });
 
-  it("never lets a closed page masquerade as a return", () => {
-    // transientOnProductOrigin can only be computed for a live same-tab page
-    // that actually departed (see call site), but the pure function still
-    // fails closed if ever called with both true.
-    expect(classifyOAuthTimeout(true, true)).toBe("failed");
+  it("reads an implicit-flow error from the fragment", () => {
+    expect(oauthErrorFromReturnUrl("https://product.test/cb#error=consent_required")).toEqual({
+      error: "consent_required",
+      description: null,
+    });
+  });
+
+  it("treats a return with no error parameter, or free text where a code belongs, as no denial", () => {
+    expect(oauthErrorFromReturnUrl("https://product.test/callback?code=abc&state=x")).toBeNull();
+    expect(
+      oauthErrorFromReturnUrl("https://product.test/?error=Something%20went%20wrong"),
+    ).toBeNull();
+    expect(oauthErrorFromReturnUrl("not a url")).toBeNull();
   });
 });

@@ -591,27 +591,36 @@ async function waitForOAuthActionQuiescence(deadline: OAuthActionDeadline): Prom
   }
 }
 
-// Fix C: this is the OUTER backstop race (withinOAuthActionDeadline), which
-// fires only if the inner browser.ts wait somehow outlives its own deadline.
-// It has no page to re-check, so it can only report the one fact it actually
-// observed — the call did not finish in time — never a guessed cause. Treat
-// it the same as the inner wait's timeout: recoverable, not a failure.
-function oauthActionDeadlineError(deadline: OAuthActionDeadline): OAuthAwaitingHumanError {
+// Fix C: the OUTER backstop race (withinOAuthActionDeadline) has no page to
+// re-check, so it can only report the one fact it actually observed — never a
+// guessed cause. Which fact depends on the phase: while the action was still
+// queued behind a prior OAuth call's lease it was never attempted at all,
+// whereas once running the inner browser.ts wait outlived its own deadline.
+// Both are recoverable, not failures.
+function oauthActionDeadlineError(
+  deadline: OAuthActionDeadline,
+  phase: "lease" | "action",
+): OAuthAwaitingHumanError {
+  const seconds = Math.ceil(deadline.timeoutMs / 1000);
   return new OAuthAwaitingHumanError(
-    `OAuth action did not complete within ${Math.ceil(deadline.timeoutMs / 1000)} seconds. ` +
-      "Retry oauth_login or oauth_settle rather than treating this as a failure.",
+    phase === "lease"
+      ? "OAuth has not been attempted yet: it was still waiting behind a prior OAuth call " +
+          `on this browser after ${seconds} seconds. Retry oauth_login.`
+      : `OAuth action did not complete within ${seconds} seconds. ` +
+          "Retry oauth_login or oauth_settle rather than treating this as a failure.",
   );
 }
 
 async function withinOAuthActionDeadline<T>(
   promise: Promise<T>,
   deadline: OAuthActionDeadline,
+  phase: "lease" | "action" = "action",
 ): Promise<T> {
   const tracked = trackOAuthActionPromise(deadline, promise);
   const remainingMs = oauthActionRemainingMs(deadline);
   if (remainingMs <= 0 || deadline.timedOut) {
     expireOAuthAction(deadline);
-    throw oauthActionDeadlineError(deadline);
+    throw oauthActionDeadlineError(deadline, phase);
   }
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -620,7 +629,7 @@ async function withinOAuthActionDeadline<T>(
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => {
           expireOAuthAction(deadline);
-          reject(oauthActionDeadlineError(deadline));
+          reject(oauthActionDeadlineError(deadline, phase));
         }, remainingMs);
       }),
     ]);
@@ -658,7 +667,7 @@ async function withOAuthActionLease<T>(
   let acquired = false;
   try {
     if (deadline === undefined) await previous;
-    else await withinOAuthActionDeadline(previous, deadline);
+    else await withinOAuthActionDeadline(previous, deadline, "lease");
     acquired = true;
     return await run();
   } finally {

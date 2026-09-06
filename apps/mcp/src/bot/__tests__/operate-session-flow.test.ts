@@ -3612,8 +3612,11 @@ describe("operate session — OAuth lifecycle", () => {
       }),
     ];
     h.oauthResultUrl = `https://accounts.google.com/signin/challenge/dp/2?continue=${"x".repeat(1_200)}`;
+    const { oauthAwaitingHumanMessage } = await vi.importActual<{
+      oauthAwaitingHumanMessage: (productOrigin: string, budgetMs: number) => string;
+    }>("../browser.js");
     h.oauthLoginError = new OAuthAwaitingHumanError(
-      "OAuth has not returned to https://app.example.com within 10 seconds.",
+      oauthAwaitingHumanMessage("https://app.example.com", 30_000),
     );
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
     const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
@@ -3627,6 +3630,45 @@ describe("operate session — OAuth lifecycle", () => {
     });
     expect(pending.url).toBe("https://accounts.google.com");
     expect(Buffer.byteLength(JSON.stringify(pending), "utf8")).toBeLessThanOrEqual(1_024);
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("labels a budget spent queued behind a prior OAuth call as not-yet-attempted, not a pending challenge", async () => {
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "10";
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    let releaseFirst!: () => void;
+    h.oauthLoginGates.set(
+      0,
+      new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      }),
+    );
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+    // The first attempt times out while its provider wait is still in flight,
+    // so it keeps the OAuth lease; the retry queues behind it and its whole
+    // budget elapses before it is ever attempted.
+    await expect(
+      act(started.session_id, { kind: "oauth_login", target: "Continue with Google" }),
+    ).resolves.toMatchObject({ oauth: { state: "awaiting_human" } });
+    const queued = await act(started.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+    });
+    expect(queued.oauth).toMatchObject({ state: "awaiting_human" });
+    if (queued.oauth?.state === "awaiting_human") {
+      expect(queued.oauth.reason).toMatch(/has not been attempted yet/);
+      expect(queued.oauth.reason).not.toMatch(/challenge|consent/i);
+    }
+    expect(h.oauthLoginCalls).toHaveLength(1);
+    releaseFirst();
     await finishProvisionSession(started.session_id);
   });
 
