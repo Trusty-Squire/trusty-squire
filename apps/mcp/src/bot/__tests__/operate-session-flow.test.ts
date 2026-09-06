@@ -9683,3 +9683,248 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
     expect(activeCartCheckoutForOrigin("https://cart.step.rakuten.co.jp")).toBeNull();
   });
 });
+
+describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", () => {
+  // Mirrors the live Xata signup/login failure: a long marketing page with many
+  // decorative/nav controls, the primary CTA and form controls below a large
+  // content block (out of the viewport), a custom Region dropdown, a free-text
+  // "use case" textbox, and a native select. Every actionable control must be
+  // reachable through the default map, overflow paging, and generic queries —
+  // with no budget throw — so the Xata-class failure cannot happen.
+  function xataShapedElements(): unknown[] {
+    const nav = Array.from({ length: 24 }, (_, index) =>
+      elem({
+        index,
+        tag: "a",
+        role: "link",
+        visibleText: `Nav link ${index}`,
+        selector: `#nav-${index}`,
+        href: `https://xata.example.com/${index}`,
+      }),
+    );
+    return [
+      ...nav,
+      elem({
+        index: 100,
+        tag: "input",
+        type: "email",
+        role: "textbox",
+        labelText: "Work email",
+        selector: "#email",
+      }),
+      elem({
+        index: 101,
+        tag: "button",
+        role: "button",
+        visibleText: "Sign in",
+        selector: "#signin",
+      }),
+      // Below a large marketing content block: out of the viewport.
+      elem({
+        index: 102,
+        tag: "button",
+        role: "button",
+        visibleText: "Continue",
+        selector: "#continue",
+        inViewport: false,
+      }),
+      elem({
+        index: 103,
+        tag: "input",
+        type: "password",
+        role: "textbox",
+        labelText: "Password",
+        selector: "#password",
+        inViewport: false,
+      }),
+      elem({
+        index: 104,
+        tag: "div",
+        role: "combobox",
+        visibleText: "Region",
+        selector: "#region",
+        inViewport: false,
+      }),
+      elem({
+        index: 105,
+        tag: "textarea",
+        role: "textbox",
+        labelText: "Tell us about your use case",
+        selector: "#use-case",
+        inViewport: false,
+      }),
+      elem({
+        index: 106,
+        tag: "select",
+        labelText: "Country",
+        selector: "#country",
+        inViewport: false,
+      }),
+    ];
+  }
+
+  function rowLabel(row: unknown): string {
+    return (Array.isArray(row) && typeof row[2] === "string" ? row[2] : "") as string;
+  }
+
+  it("keeps below-the-fold actionable controls in the default action map", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = xataShapedElements();
+    const started = (await startProvisionSession({
+      serviceUrl: "https://xata.example.com/login",
+    })) as unknown as { safe_table: Array<[string, string, string?]>; overflow?: unknown };
+
+    const facts = started.safe_table.map(rowLabel);
+    // The primary CTA sits below a large content block; it must still be in
+    // the default map, not stranded in overflow.
+    expect(facts.some((value) => value.includes("@continue"))).toBe(true);
+    expect(facts.some((value) => value.includes("@region"))).toBe(true);
+    expect(facts.some((value) => value.includes("@use-case") || value.includes("@tell-us"))).toBe(
+      true,
+    );
+  });
+
+  it("pages overflow deterministically and accepts query/role filters without invalid_cursor", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = Array.from({ length: 150 }, (_, index) =>
+      elem({
+        index,
+        tag: "button",
+        role: "button",
+        visibleText: `Item control ${index}`,
+        selector: `#item-${index}`,
+        inViewport: index < 10,
+      }),
+    );
+    const started = (await startProvisionSession({
+      serviceUrl: "https://xata.example.com/dense",
+    })) as unknown as { safe_table: Array<[string]>; overflow?: { next_cursor: string } };
+    const mapCursor = started.overflow?.next_cursor;
+    expect(mapCursor).toBeDefined();
+
+    // Enumerate the entire map through overflow paging. Every control appears
+    // exactly once and paging never fails.
+    const seen = new Set<string>(started.safe_table.map((row) => row[0]!));
+    let cursor = mapCursor;
+    let guard = 0;
+    while (cursor !== undefined) {
+      expect(guard++).toBeLessThan(50);
+      const page = (await observeQuery(started.session_id, "", undefined, cursor)) as {
+        safe_table: Array<[string]>;
+        overflow?: { next_cursor: string };
+      };
+      for (const row of page.safe_table) seen.add(row[0]!);
+      cursor = page.overflow?.next_cursor;
+    }
+    expect(seen.size).toBe(150);
+
+    // Paging while naming what the model is looking for (a query or role
+    // filter alongside the MAP cursor — exactly how the live run drove the
+    // Xata page) must never reject with invalid_cursor; it performs the
+    // filtered lookup over the whole map and stays paged.
+    const byQuery = (await observeQuery(
+      started.session_id,
+      "control 149",
+      undefined,
+      mapCursor,
+    )) as { safe_table: Array<[string, string, string?]> };
+    expect(byQuery.safe_table).toHaveLength(1);
+    const byRole = (await observeQuery(started.session_id, "", "button", mapCursor)) as {
+      safe_table: unknown[];
+      overflow?: { next_cursor: string } | undefined;
+    };
+    expect(byRole.safe_table.length).toBeGreaterThan(0);
+    if (byRole.overflow !== undefined) {
+      const nextPage = (await observeQuery(
+        started.session_id,
+        "",
+        "button",
+        byRole.overflow.next_cursor,
+      )) as { safe_table: unknown[] };
+      expect(Array.isArray(nextPage.safe_table)).toBe(true);
+    }
+  });
+
+  it("finds controls by generic terms across label, role word, and placeholder", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        index: 0,
+        tag: "div",
+        role: "combobox",
+        visibleText: "Region",
+        selector: "#region",
+      }),
+      elem({
+        index: 1,
+        tag: "textarea",
+        role: "textbox",
+        labelText: "Tell us about your use case",
+        selector: "#use-case",
+      }),
+      elem({
+        index: 2,
+        tag: "input",
+        type: "text",
+        role: "textbox",
+        placeholder: "you@company.com",
+        selector: "#work-email",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://xata.example.com/signup" });
+
+    const region = (await observeQuery(started.session_id, "region dropdown")) as {
+      safe_table: unknown[];
+    };
+    expect(region.safe_table).toHaveLength(1);
+
+    const useCase = (await observeQuery(started.session_id, "use case textbox")) as {
+      safe_table: unknown[];
+    };
+    expect(useCase.safe_table).toHaveLength(1);
+
+    const placeholder = (await observeQuery(started.session_id, "company")) as {
+      safe_table: unknown[];
+    };
+    expect(placeholder.safe_table).toHaveLength(1);
+  });
+
+  it("never trips the budget cliff on a real-world OAuth-shaped URL", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = xataShapedElements();
+    const started = await startProvisionSession({
+      serviceUrl: "https://xata.example.com/login",
+    });
+    const firstRef = ((started as unknown as { safe_table: Array<[string]> }).safe_table[0] ??
+      [])[0];
+
+    // An OAuth callback URL with long provider parameters — the shape that
+    // ended the live Xata session with "compact-v2 budget metadata exceeded".
+    // Long enough that even a one-row delta payload crosses the cap, forcing
+    // the full-page path (and, pre-fix, the throw).
+    const longQuery = Array.from(
+      { length: 24 },
+      (_, index) => `param${index}=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`,
+    ).join("&");
+    h.currentUrl = `https://xata.example.com/auth/callback?code=x&state=y&${longQuery}`;
+    h.elements = [
+      ...(xataShapedElements() as Array<Record<string, unknown>>),
+      elem({
+        index: 200,
+        tag: "button",
+        role: "button",
+        visibleText: "Fresh CTA",
+        selector: "#fresh-cta",
+      }),
+    ];
+
+    const observation = (await observe(started.session_id, "compact")) as unknown as Record<
+      string,
+      unknown
+    >;
+    expect(observation.format).toBe("compact-v2");
+    const wire = JSON.stringify(observation);
+    expect(wire).toContain("Fresh CTA".toLowerCase().replace(" ", "-"));
+    expect(firstRef === undefined || typeof firstRef === "string").toBe(true);
+  });
+});
