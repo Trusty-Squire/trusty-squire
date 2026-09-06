@@ -438,13 +438,14 @@ async function releaseWarmBrowserPage(
     throw new Error("operator browser terminal teardown was forced");
   }
   if (group !== undefined) group.refCount -= 1;
+  const emptiedGroup = group !== undefined && group.refCount <= 0;
   try {
     if (owner?.forced) throw new Error("operator browser terminal teardown was forced");
     if (group === undefined) {
       // Production still tears the identity's Chrome down at every session
       // finish (flag off, or no multisession group formed).
       await browser.close();
-    } else if (group.refCount > 0) {
+    } else if (!emptiedGroup) {
       await browser.closeOwnPagesOnly();
     } else {
       if (browser !== group.primary) await browser.closeOwnPagesOnly().catch(() => undefined);
@@ -459,7 +460,7 @@ async function releaseWarmBrowserPage(
         operatorIdentityRuntime.forgetAfterShutdown();
       } else {
         leased.identityLease();
-        if (group.refCount <= 0) {
+        if (emptiedGroup) {
           group.lease.release();
           operatorIdentityRuntime.forgetAfterShutdown();
           if (sharedIdentityGroup === group) sharedIdentityGroup = null;
@@ -480,6 +481,7 @@ async function forceReleaseWarmBrowserPage(
   // teardown empties the group — primary or satellite, graceful or forced —
   // is the one that closes the shared Chrome.
   if (group !== undefined) group.refCount -= 1;
+  const emptiedGroup = group !== undefined && group.refCount <= 0;
   try {
     if (group === undefined) {
       await closeBrowserUntilProven(
@@ -488,7 +490,7 @@ async function forceReleaseWarmBrowserPage(
         "operator browser force-close timed out",
         () => owner?.requireProvenBrowserClose === true,
       );
-    } else if (group.refCount > 0) {
+    } else if (!emptiedGroup) {
       await closeOwnPagesBounded(browser);
     } else {
       if (browser !== group.primary) await closeOwnPagesBounded(browser);
@@ -504,7 +506,7 @@ async function forceReleaseWarmBrowserPage(
       leased.identityLease();
       if (group === undefined) {
         operatorIdentityRuntime.forgetAfterShutdown();
-      } else if (group.refCount <= 0) {
+      } else if (emptiedGroup) {
         operatorIdentityRuntime.forgetAfterShutdown();
         if (sharedIdentityGroup === group) sharedIdentityGroup = null;
       }
@@ -512,7 +514,7 @@ async function forceReleaseWarmBrowserPage(
   }
   if (leased === undefined) return;
   if (group === undefined) leased.lease.release();
-  else if (group.refCount <= 0) group.lease.release();
+  else if (emptiedGroup) group.lease.release();
   leasedBrowsers.delete(browser);
 }
 

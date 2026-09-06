@@ -34,6 +34,7 @@ const h = vi.hoisted(() => ({
   // Test levers: park the primary's real close, park a satellite attach, or
   // make a satellite's own-page close hang forever (a wedged Chrome).
   primaryCloseGate: null as Promise<void> | null,
+  primaryOwnPagesGate: null as Promise<void> | null,
   attachGate: null as Promise<void> | null,
   attachEntered: null as (() => void) | null,
   hangOwnPagesClose: false,
@@ -75,6 +76,7 @@ vi.mock("../browser.js", async (importOriginal) => {
     async closeOwnPagesOnly(): Promise<string> {
       this.record.closeOwnPagesOnlyCalls += 1;
       if (this.record.isSatellite && h.hangOwnPagesClose) await new Promise<never>(() => {});
+      if (!this.record.isSatellite && h.primaryOwnPagesGate !== null) await h.primaryOwnPagesGate;
       return "closed";
     }
     async waitForThreeDsResolution(): Promise<string> {
@@ -155,6 +157,7 @@ beforeEach(() => {
   h.nextId = 0;
   h.instances = [];
   h.primaryCloseGate = null;
+  h.primaryOwnPagesGate = null;
   h.attachGate = null;
   h.attachEntered = null;
   h.hangOwnPagesClose = false;
@@ -411,6 +414,52 @@ describe("TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION on", () => {
     expect(outcome).toBe("closed");
     expect(satelliteRecord!.closeOwnPagesOnlyCalls).toBeGreaterThanOrEqual(1);
     expect(primaryRecord!.closeCalls).toBe(1);
+  });
+
+  it("keeps the profile guard held until the shared Chrome's close completes when two finishes overlap", async () => {
+    const first = await startProvisionSession({
+      serviceUrl: "https://app.example.com",
+      profileDir,
+    });
+    const second = await startProvisionSession({
+      serviceUrl: "https://other.example.com",
+      profileDir,
+    });
+    const [primaryRecord] = h.instances;
+    const tick = async (): Promise<void> =>
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    // The primary finishes first but its own-page close is slow; the
+    // satellite finishes meanwhile, empties the group, and is parked in the
+    // shared Chrome's real close when the primary's teardown resumes.
+    let releaseOwnPages!: () => void;
+    h.primaryOwnPagesGate = new Promise<void>((resolve) => (releaseOwnPages = resolve));
+    let releaseClose!: () => void;
+    h.primaryCloseGate = new Promise<void>((resolve) => (releaseClose = resolve));
+    const finishingPrimary = finishProvisionSession(first.session_id);
+    while (primaryRecord!.closeOwnPagesOnlyCalls === 0) await tick();
+    const finishingSatellite = finishProvisionSession(second.session_id);
+    while (primaryRecord!.closeCalls === 0) await tick();
+    releaseOwnPages();
+    await tick();
+
+    // The non-last session's teardown has completed, but the shared Chrome
+    // is still closing: the profile guard must still be held, so a new start
+    // is busy rather than launching a second Chrome against the profile.
+    await expect(
+      startProvisionSession({ serviceUrl: "https://third.example.com", profileDir }),
+    ).rejects.toBeInstanceOf(ProfileBusyError);
+    expect(h.instances).toHaveLength(2);
+
+    releaseClose();
+    await Promise.all([finishingPrimary, finishingSatellite]);
+    const third = await startProvisionSession({
+      serviceUrl: "https://third.example.com",
+      profileDir,
+    });
+    expect(h.instances).toHaveLength(3);
+    expect(h.instances[2]!.isSatellite).toBe(false);
+    await finishProvisionSession(third.session_id);
   });
 
   it("joins a THIRD session while two are already live", async () => {
