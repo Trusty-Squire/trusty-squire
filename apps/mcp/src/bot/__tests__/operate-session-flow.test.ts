@@ -5517,8 +5517,7 @@ describe("Compact V2 checkout copy stays unredacted", () => {
 
   it("still redacts injected vault values and tight secret shapes from observation text", async () => {
     const secret = "injected-1234567890abcdef";
-    h.visibleText =
-      `API key: ${sk("proj-1234567890abcdefghijklmnopqrstuv")} Recovery code: 814226 Your 2FA code is 553218`;
+    h.visibleText = `API key: ${sk("proj-1234567890abcdefghijklmnopqrstuv")} Recovery code: 814226 Your 2FA code is 553218`;
     h.elements = [
       elem({
         tag: "input",

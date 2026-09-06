@@ -129,11 +129,9 @@ describe("operate_screenshot returns unmasked pixels (real browser)", () => {
         expect(result.frameUrl).toBeNull();
 
         const points = await Promise.all(
-          [
-            '[autocomplete="cc-number"]',
-            '[autocomplete="cc-csc"]',
-            'input[type="text"]',
-          ].map(async (selector) => await centerOf(page, selector)),
+          ['[autocomplete="cc-number"]', '[autocomplete="cc-csc"]', 'input[type="text"]'].map(
+            async (selector) => await centerOf(page, selector),
+          ),
         );
         const pixels = await samplePixels(page, result.base64, points);
         for (const pixel of pixels) expect(isMaskMagenta(pixel)).toBe(false);

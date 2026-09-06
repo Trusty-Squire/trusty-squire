@@ -19,7 +19,10 @@ import {
 // literals; do NOT inline these back into single string literals.
 const sk = (body: string): string => "sk" + "-" + body;
 
-const S = (patch: Partial<ExtractionState> = {}): ExtractionState => ({ ...initialExtractionState(), ...patch });
+const S = (patch: Partial<ExtractionState> = {}): ExtractionState => ({
+  ...initialExtractionState(),
+  ...patch,
+});
 const full = (value: string): CandidateClass => ({ kind: "full", value });
 const trunc = (value: string): CandidateClass => ({ kind: "truncated", value });
 const none: CandidateClass = { kind: "none" };
@@ -64,13 +67,19 @@ describe("accumulateCandidate", () => {
 
 describe("resolveExtraction", () => {
   it("a full key resolves to {api_key}", () => {
-    expect(resolveExtraction(S({ apiKey: sk("real-abcdefghij") }))).toEqual({ api_key: sk("real-abcdefghij") });
+    expect(resolveExtraction(S({ apiKey: sk("real-abcdefghij") }))).toEqual({
+      api_key: sk("real-abcdefghij"),
+    });
   });
   it("only a truncated stub resolves to {api_key_truncated} (honest partial)", () => {
-    expect(resolveExtraction(S({ truncatedHit: sk("or-v1-1687") }))).toEqual({ api_key_truncated: sk("or-v1-1687") });
+    expect(resolveExtraction(S({ truncatedHit: sk("or-v1-1687") }))).toEqual({
+      api_key_truncated: sk("or-v1-1687"),
+    });
   });
   it("a full key takes priority over a truncated stub", () => {
-    expect(resolveExtraction(S({ apiKey: sk("full-xxxx"), truncatedHit: sk("trunc-1687") }))).toEqual({ api_key: sk("full-xxxx") });
+    expect(
+      resolveExtraction(S({ apiKey: sk("full-xxxx"), truncatedHit: sk("trunc-1687") })),
+    ).toEqual({ api_key: sk("full-xxxx") });
   });
   it("nothing found resolves to {} (keep navigating)", () => {
     expect(resolveExtraction(S())).toEqual({});

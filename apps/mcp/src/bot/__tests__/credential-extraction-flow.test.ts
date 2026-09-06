@@ -42,9 +42,7 @@ describe("CredentialExtractionFlow credential policy", () => {
   });
 
   it("keeps access_token as a usable single-field credential", () => {
-    expect(hasUsableCredentialBundle({ access_token: "ddp_example_token" })).toBe(
-      true,
-    );
+    expect(hasUsableCredentialBundle({ access_token: "ddp_example_token" })).toBe(true);
     expect(isMultiCredBundle({ access_token: "ddp_example_token" })).toBe(false);
   });
 
@@ -112,9 +110,7 @@ describe("CredentialExtractionFlow credential policy", () => {
   });
 });
 
-function port(
-  overrides: Partial<PostSignupExtractionRoundPort>,
-): PostSignupExtractionRoundPort {
+function port(overrides: Partial<PostSignupExtractionRoundPort>): PostSignupExtractionRoundPort {
   return {
     extractText: async () => "",
     extractAllInputValues: async () => [],

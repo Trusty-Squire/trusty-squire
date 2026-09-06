@@ -167,10 +167,7 @@ describe("extractApiKeyFromText — prefixed keys", () => {
 
   it("extracts a JWT (eyJ.eyJ.sig) — Convex token shape (rc.23)", () => {
     // 3-segment base64url JWT
-    const jwt =
-      "eyJ" + "A".repeat(32) +
-      ".eyJ" + "B".repeat(40) +
-      "." + "C".repeat(43);
+    const jwt = "eyJ" + "A".repeat(32) + ".eyJ" + "B".repeat(40) + "." + "C".repeat(43);
     expect(extractApiKeyFromText(`token=${jwt}`)).toBe(jwt);
   });
 
@@ -215,9 +212,7 @@ describe("extractApiKeyFromText — labeled keys", () => {
 
   it("extracts a bearer token", () => {
     const text = "Authorization: Bearer bearerTOKENvalue1234567890abcdef";
-    expect(extractApiKeyFromText(text)).toBe(
-      "bearerTOKENvalue1234567890abcdef",
-    );
+    expect(extractApiKeyFromText(text)).toBe("bearerTOKENvalue1234567890abcdef");
   });
 
   it("returns null when there is no key at all", () => {
@@ -229,14 +224,12 @@ describe("extractApiKeyFromText — captcha-token rejection", () => {
   it("rejects a cf-turnstile-response value carrying the widget marker", () => {
     // A real Turnstile token is long and the field name leaks into
     // visible text on some misrendered pages.
-    const text =
-      "secret_key: cf-turnstile-response.0.abcDEFghiJKLmnopqrstuvwxyz0123456789";
+    const text = "secret_key: cf-turnstile-response.0.abcDEFghiJKLmnopqrstuvwxyz0123456789";
     expect(extractApiKeyFromText(text)).toBeNull();
   });
 
   it("rejects a g-recaptcha-response value carrying the widget marker", () => {
-    const text =
-      "api_key: g-recaptcha-response_03AGdBq24abcdefghijklmnopqrstuvwx";
+    const text = "api_key: g-recaptcha-response_03AGdBq24abcdefghijklmnopqrstuvwx";
     expect(extractApiKeyFromText(text)).toBeNull();
   });
 
@@ -319,9 +312,7 @@ describe("isTruncatedCapture — F10 truncation detection", () => {
 
   it("flags a key followed by the Unicode ellipsis", () => {
     const text = sk("or-v1-example000000000000000000000001…");
-    expect(isTruncatedCapture(text, sk("or-v1-example000000000000000000000001"))).toBe(
-      true,
-    );
+    expect(isTruncatedCapture(text, sk("or-v1-example000000000000000000000001"))).toBe(true);
   });
 
   it("flags a key with whitespace before the ellipsis", () => {
@@ -446,12 +437,8 @@ describe("isCredentialNoiseCandidate — password-manager UI affordances", () =>
 
   it("does NOT flag real credential values", () => {
     // The exact shapes the scan tiers feed in — these must pass through.
-    expect(
-      isCredentialNoiseCandidate("rnd_aB3xY7zQ9wK2mN4pR6tV8uW0jL5hG1dF"),
-    ).toBe(false);
-    expect(
-      isCredentialNoiseCandidate("5588a1c2-7c4d-4e2c-9c41-1234567890ab"),
-    ).toBe(false);
+    expect(isCredentialNoiseCandidate("rnd_aB3xY7zQ9wK2mN4pR6tV8uW0jL5hG1dF")).toBe(false);
+    expect(isCredentialNoiseCandidate("5588a1c2-7c4d-4e2c-9c41-1234567890ab")).toBe(false);
     expect(isCredentialNoiseCandidate("f9a062f02fadf5")).toBe(false);
     // A token whose body merely contains "password" as a substring is
     // not a whole-token match and must not be flagged.

@@ -145,12 +145,10 @@ describe("toCompactElement (BOT_OBSERVE_COMPACT)", () => {
 
   it("keeps checked for real checkables (true AND false), omits when null", () => {
     expect(
-      toCompactElement(el({ tag: "input", type: "checkbox", checked: true }), "@g1:a")
-        .checked,
+      toCompactElement(el({ tag: "input", type: "checkbox", checked: true }), "@g1:a").checked,
     ).toBe(true);
     expect(
-      toCompactElement(el({ tag: "input", type: "checkbox", checked: false }), "@g1:b")
-        .checked,
+      toCompactElement(el({ tag: "input", type: "checkbox", checked: false }), "@g1:b").checked,
     ).toBe(false);
     expect("checked" in toCompactElement(el({ tag: "button", checked: null }), "@g1:c")).toBe(
       false,
@@ -164,10 +162,7 @@ describe("toCompactElement (BOT_OBSERVE_COMPACT)", () => {
     );
     expect(occluded.topmost).toBe(false);
     expect(occluded.occluded_by).toBe("modal:dialog");
-    const top = toCompactElement(
-      el({ tag: "button", visibleText: "Top", topmost: true }),
-      "@g1:t",
-    );
+    const top = toCompactElement(el({ tag: "button", visibleText: "Top", topmost: true }), "@g1:t");
     expect("topmost" in top).toBe(false);
     expect("occluded_by" in top).toBe(false);
   });

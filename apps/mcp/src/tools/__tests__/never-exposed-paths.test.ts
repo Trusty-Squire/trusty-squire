@@ -66,9 +66,9 @@ describe("use_credential is unchanged: the agent still never sees the value", ()
   });
 
   it("takes no approval_id and has no resume mode — it never needed one", () => {
-    expect(useCredentialTool.inputSchema.safeParse({ service: "X", approval_id: "a" }).success).toBe(
-      false,
-    );
+    expect(
+      useCredentialTool.inputSchema.safeParse({ service: "X", approval_id: "a" }).success,
+    ).toBe(false);
     expect(Object.keys(useCredentialTool.jsonInputSchema.properties as object)).not.toContain(
       "approval_id",
     );
