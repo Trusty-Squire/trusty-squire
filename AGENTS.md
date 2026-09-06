@@ -774,6 +774,27 @@ workspace dependencies are built before the server starts.
 
 ---
 
+## `page.evaluate` callbacks must be self-contained
+
+Playwright serializes only the callback's source text into the page — the
+module's closure does not travel. A page-side function that references a
+module-scope constant throws `ReferenceError` in the page on first use while
+compiling fine in Node, and a swallowing `catch` at the call site turns that
+into a silently inert feature. This shipped the compact-v2 text channel
+totally inert (1.1.14-rc.3: `extractObservationProseItems` referenced
+module-level size bounds; every observation emitted `text: ""`). The rule:
+keep every function passed to `page.evaluate` (or wrapped by a method that
+does so, e.g. `BrowserController.extractObservationProse` →
+`extractObservationProseItems` in `apps/mcp/src/bot/browser.ts`) self-contained
+— constants defined inside the function — and regression-test the REAL
+serialization path (`page.evaluate(fn)` against real Chromium, see
+`apps/mcp/src/bot/__tests__/observation-prose.test.ts`); a stubbed
+double on such a method verifies nothing about the page side. A capability
+whose failure is availability-optional must still surface a concrete reason
+(e.g. the `text_unavailable` field) — never fail open with an empty result.
+
+---
+
 ## Never touch the operator's live local state from a test or a check
 
 Manual checks must use an isolated `HOME` and `XDG_CONFIG_HOME`, never the

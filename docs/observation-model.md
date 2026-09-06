@@ -143,8 +143,12 @@ Finding 1 made the map safe; Finding 2 makes it *comprehensible*:
   actually emitted (the degraded subset, not the full screened list), so a
   degraded page is re-sent whole on the next unchanged-rows observe rather
   than leaving the consumer with a permanent subset. Prose extraction is
-  availability-optional; a harness or older browser without it degrades to
-  the old empty `text` silently.
+  availability-optional: a failed extraction surfaces as a bounded
+  `text_unavailable` reason on the payload instead of failing open with a
+  silent empty `text`, while a genuinely prose-free page still emits the
+  empty `text`. The page-side extractor (`extractObservationProseItems` in
+  `browser.ts`) must stay self-contained — `page.evaluate` serializes only
+  its source, and the module closure does not travel.
 - **Duplicate-label ordinals.** Two controls legitimately sharing an
   accessible name (two `@curl-example` copy buttons) both emitted the same
   label, so `@curl-example` was a dead ambiguous target forever. Labels are

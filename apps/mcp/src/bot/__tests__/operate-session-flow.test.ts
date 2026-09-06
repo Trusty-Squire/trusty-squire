@@ -128,6 +128,9 @@ const h = vi.hoisted(() => ({
   prose: [] as string[],
   proseQueue: [] as string[][],
   proseExtractCalls: 0,
+  // When non-null, extractObservationProse() throws this message — scripts a
+  // failed page-side extractor so tests can pin the surfaced diagnostic.
+  proseError: null as string | null,
   openFirstMailResult: false,
   // fill_card cart-total-carry-forward (Session.lastCartCheckout): null means
   // "no total on this page" (readCheckoutSummary rejects, the common case).
@@ -335,6 +338,7 @@ vi.mock("../browser.js", () => ({
     }
     async extractObservationProse(): Promise<string[]> {
       h.proseExtractCalls += 1;
+      if (h.proseError !== null) throw new Error(h.proseError);
       if (h.oauthReadError !== null) throw new Error(h.oauthReadError);
       if (h.proseQueue.length > 0) return h.proseQueue.shift() ?? h.prose;
       return h.prose;
@@ -1205,6 +1209,7 @@ beforeEach(() => {
   h.prose = [];
   h.proseQueue = [];
   h.proseExtractCalls = 0;
+  h.proseError = null;
   h.openFirstMailResult = false;
   h.checkoutSummary = null;
   h.cartLineItems = [];
@@ -4945,6 +4950,61 @@ describe("Compact V2 action-map boundary", () => {
     h.prose = ["Rate limit reached: upgrade to view more requests."];
     const changed = await observe(started.session_id, "compact");
     expect(changed.text).toBe("Rate limit reached: upgrade to view more requests.");
+  });
+
+  it("surfaces a concrete text_unavailable reason when the prose extractor throws", async () => {
+    // The 2026-09-06 inert text channel: the page-side extractor threw on
+    // every real page and the observation swallowed it, so a failed channel
+    // was indistinguishable from a page with no prose. The channel must fail
+    // LOUD: the map is unaffected, but the wire carries the concrete reason.
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    h.prose = ["This page would have prose, but extraction fails."];
+    h.proseError = "page.evaluate: ReferenceError: OBSERVATION_PROSE_MAX_ITEMS is not defined";
+    const started = await startHarnessProvisionSession({
+      browser: new BrowserController(),
+      observationFormat: "compact-v2",
+      serviceUrl: "https://app.example.com/dashboard",
+    });
+    const payload = started as unknown as Record<string, unknown>;
+    expect(started.text).toBe("");
+    expect(payload.text_unavailable).toContain("ReferenceError");
+    expect(payload.text_unavailable).toContain("OBSERVATION_PROSE_MAX_ITEMS");
+    // The action map survives the failed channel untouched.
+    const rows = (started as unknown as { safe_table: unknown[] }).safe_table;
+    expect(rows).toHaveLength(1);
+    // A later delta keeps the diagnostic until the channel recovers.
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+      elem({ tag: "button", role: "button", visibleText: "Cancel", selector: "#cancel" }),
+    ];
+    const delta = await observe(started.session_id, "compact");
+    expect((delta as unknown as Record<string, unknown>).text_unavailable).toContain(
+      "ReferenceError",
+    );
+    // Recovery: the channel comes back and the reason disappears.
+    h.proseError = null;
+    h.prose = ["Extraction recovered."];
+    const recovered = await observe(started.session_id, "compact");
+    expect(recovered.text).toContain("Extraction recovered.");
+    expect((recovered as unknown as Record<string, unknown>).text_unavailable).toBeUndefined();
+  });
+
+  it("emits no text_unavailable for a page that legitimately has no prose", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    h.prose = [];
+    const started = await startHarnessProvisionSession({
+      browser: new BrowserController(),
+      observationFormat: "compact-v2",
+      serviceUrl: "https://app.example.com/dashboard",
+    });
+    expect(started.text).toBe("");
+    expect((started as unknown as Record<string, unknown>).text_unavailable).toBeUndefined();
   });
 
   it("re-offers the full text channel after a budget-degraded resync page", async () => {
