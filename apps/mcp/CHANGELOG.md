@@ -1,5 +1,14 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.14-rc.3 (2026-09-06)
+
+- fix(mcp): screen credential-shaped accessible names out of the compact-v2 observation map (#678).
+  **A live API token previously reached the model as a button/copy-control label.**
+  Grouped/segmented credentials and post-truncation fragments are covered too.
+- feat(mcp): readable page-prose text channel, duplicate-label disambiguation,
+  whole (untruncated) routing hints, and richer context on opaque labels in
+  compact-v2 observation (#679).
+
 ## 1.1.14-rc.2 (2026-09-06)
 
 - fix(mcp): make every actionable control reachable in compact-v2 observation (#676).
