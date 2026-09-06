@@ -268,9 +268,10 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
     }
     assertProvisionStartAdmitted(generation);
   } catch (err) {
-    if (controller !== null) {
+    const constructed = controller ?? pending.controller;
+    if (constructed !== null) {
       identityLease?.();
-      await controller.close().catch(() => undefined);
+      await constructed.close().catch(() => undefined);
       operatorIdentityRuntime.forgetAfterShutdown();
     }
     lease.release();
@@ -307,13 +308,15 @@ async function releaseWarmBrowserPage(
     await browser.close();
   } finally {
     leasedBrowsers.delete(browser);
-    leased?.lease.release();
-    // Production still tears the identity's Chrome down at every session
-    // finish, so its tab family and the identity itself are released
-    // together here — a later PR that turns on sequential reuse would
-    // instead call only identityLease() and defer forgetAfterShutdown().
-    leased?.identityLease();
-    operatorIdentityRuntime.forgetAfterShutdown();
+    if (leased !== undefined) {
+      leased.lease.release();
+      // Production still tears the identity's Chrome down at every session
+      // finish, so its tab family and the identity itself are released
+      // together here — a later PR that turns on sequential reuse would
+      // instead call only identityLease() and defer forgetAfterShutdown().
+      leased.identityLease();
+      operatorIdentityRuntime.forgetAfterShutdown();
+    }
   }
 }
 
@@ -330,8 +333,10 @@ async function forceReleaseWarmBrowserPage(
       () => owner?.requireProvenBrowserClose === true,
     );
   } finally {
-    leased?.identityLease();
-    operatorIdentityRuntime.forgetAfterShutdown();
+    if (leased !== undefined) {
+      leased.identityLease();
+      operatorIdentityRuntime.forgetAfterShutdown();
+    }
   }
   if (leased === undefined) return;
   leased.lease.release();

@@ -68,6 +68,7 @@ const h = vi.hoisted(() => ({
   startCalls: 0,
   startGate: null as Promise<void> | null,
   startGates: new Map<number, Promise<void>>(),
+  startError: null as Error | null,
   closeCalls: 0,
   forceCloseCalls: 0,
   closeState: "closed" as "closed" | "force_closed_unproven" | "unknown",
@@ -262,6 +263,11 @@ vi.mock("../browser.js", () => ({
       const gate = h.startGates.get(this.index);
       if (gate !== undefined) await gate;
       if (h.startGate !== null) await h.startGate;
+      if (h.startError !== null) {
+        const error = h.startError;
+        h.startError = null;
+        throw error;
+      }
     }
     isConnected(): boolean {
       return h.connections[this.index] === true;
@@ -1124,6 +1130,7 @@ beforeEach(() => {
   h.startCalls = 0;
   h.startGate = null;
   h.startGates = new Map();
+  h.startError = null;
   h.closeCalls = 0;
   h.forceCloseCalls = 0;
   h.closeState = "closed";
@@ -6195,6 +6202,28 @@ describe("operate session — real-profile lifecycle", () => {
     } finally {
       lease.release();
     }
+  });
+
+  it("closes the constructed browser and releases the profile when the launch rejects", async () => {
+    const profileDir = "/tmp/trusty-squire-unit-live-profile-launch-rejects";
+    h.startError = new Error("self-launched Chrome exposed no default browser context");
+    await expect(
+      startProvisionSession({ serviceUrl: "https://app.example.com/one", profileDir }),
+    ).rejects.toThrow(/no default browser context/);
+    expect(h.startCalls).toBe(1);
+    expect(h.closeCalls).toBe(1);
+    expect(h.connections).toEqual([false]);
+    expect(activeSessionCount()).toBe(0);
+
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/one",
+      profileDir,
+    });
+    expect(h.startCalls).toBe(2);
+    expect(h.connections).toEqual([false, true]);
+    await finishProvisionSession(started.session_id);
+    const lease = acquireProfileOperationGuard(profileDir);
+    lease.release();
   });
 });
 describe("operate session — await_verification into_slot (T3 fix: OTP never round-trips)", () => {
