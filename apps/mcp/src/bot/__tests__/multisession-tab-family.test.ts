@@ -199,11 +199,24 @@ describeChromium("experimental multisession — real tab-family isolation", () =
     );
     expect(apiHits).toHaveLength(2);
 
-    // A finished satellite's guard no longer judges anything on the context.
+    // A page NO session has claimed is judged by every guard on the context:
+    // while the satellite is live its ["localhost"] guard aborts this call.
+    const unclaimed = await context.newPage();
+    await unclaimed.goto(`http://127.0.0.1:${port}/unclaimed`);
+    expect(await fetchOutcome(unclaimed, `http://127.0.0.1:${port}/api/unclaimed`)).toBe(
+      "rejected",
+    );
+    expect(apiHits).toHaveLength(2);
+
+    // A finished satellite's guard is unrouted, so only the primary's
+    // ["127.0.0.1"] guard remains to judge the same unclaimed page.
     await satellite.closeOwnPagesOnly();
+    expect(await fetchOutcome(unclaimed, `http://127.0.0.1:${port}/api/unclaimed`)).toBe(
+      "resolved",
+    );
     expect(await fetchOutcome(primaryPage, `http://127.0.0.1:${port}/api/after`)).toBe(
       "resolved",
     );
-    expect(apiHits).toHaveLength(3);
+    expect(apiHits).toHaveLength(4);
   }, 30_000);
 });

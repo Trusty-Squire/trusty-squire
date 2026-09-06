@@ -6,10 +6,13 @@
 // two-agent auth-preservation spike can run. It is experimental test
 // scaffolding, not a production concurrency feature: two sessions against
 // the SAME site under the SAME login share cookies and can collide, and
-// per-session host-scope network guards are not mutually session-aware once
-// a second session shares the context (see session/lifecycle.ts). Neither
-// limitation is addressed here — this flag is for different-site
-// concurrency and the auth spike, not a general guarantee.
+// that is not addressed here — this flag is for different-site concurrency
+// and the auth spike, not a general guarantee. Each session's host-scope
+// network guard IS page-aware: it judges only requests from pages its own
+// OwnedPages claims and hands a page another session has claimed on to that
+// session's guard (see installHostScopeGuard in bot/browser.ts). Only a page
+// no session has claimed, or a frameless service-worker request, is still
+// judged by every guard on the shared context.
 const TRUTHY = new Set(["1", "true", "yes", "on"]);
 
 export function experimentalMultiSessionEnabled(env: NodeJS.ProcessEnv = process.env): boolean {

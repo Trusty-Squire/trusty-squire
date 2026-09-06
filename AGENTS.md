@@ -698,13 +698,18 @@ virgin signup succeeds on an UNCOVERED service (no active skill in registry)
   `session/lifecycle.ts` refcounts the group so whichever session's finish
   empties it runs the real teardown (via the group's `primary`, even when a
   satellite finishes last) — every other finish calls
-  `closeOwnPagesOnly()` and leaves the shared browser running. Known,
-  accepted limitations (test scaffolding, not a production concurrency
-  feature): two sessions on the same site under the same login share cookies
-  and can collide, and each session's host-scope network guard
-  (`installHostScopeGuard`) is not mutually session-aware once a second
-  session shares the context. Do not build a site-workflow scheduler/broker
-  on top of this — that is out of scope for the flag.
+  `closeOwnPagesOnly()` (closing that session's whole tab family and
+  unrouting its guard) and leaves the shared browser running. Each session's
+  host-scope network guard (`installHostScopeGuard`) is page-aware: a
+  request is judged only by the guard of the session whose `OwnedPages`
+  claims its page, and a page another session has claimed falls through
+  (`route.fallback`) to that session's own guard. Only a page no session has
+  claimed (e.g. a popup whose opener attribution failed closed) or a
+  frameless service-worker request is still judged by every guard on the
+  context. Known, accepted limitation (test scaffolding, not a production
+  concurrency feature): two sessions on the same site under the same login
+  share cookies and can collide. Do not build a site-workflow
+  scheduler/broker on top of this — that is out of scope for the flag.
 - Interactive human login is the deliberate exception. When `connect` (the one
   onboarding and re-auth pathway, including `--force-relogin`) runs without a
   user-visible display,

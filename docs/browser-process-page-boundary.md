@@ -132,13 +132,19 @@ when this flag is off.
   controller — even when a satellite is the one whose finish emptied it, so
   the shared Chrome always gets torn down exactly once regardless of finish
   order.
-- **Known, accepted limitations** (do not try to fix here): two sessions
-  against the SAME site under the SAME login share cookies and can collide;
-  each session's own `installHostScopeGuard` context-wide route is not
-  mutually session-aware once a second session shares the context, so a
-  session's out-of-scope request could in principle be judged by another
-  session's guard. This flag is for different-site concurrency and the auth
-  spike, not a general concurrency guarantee — do not build a site-workflow
+- **Host-scope guard under sharing.** Each session installs its own
+  `installHostScopeGuard` route on the shared context, and Playwright runs
+  every context route for every request — so the guard is page-aware: it
+  judges only requests whose page its own `OwnedPages` claims, and hands a
+  page another session has claimed on (`route.fallback`) to that session's
+  guard. `closeOwnPagesOnly()` unroutes the finished session's guard. The
+  residual: a page NO session has claimed (a popup whose opener attribution
+  failed closed) or a frameless service-worker request is still judged by
+  every guard on the context, fail-closed as before.
+- **Known, accepted limitation** (do not try to fix here): two sessions
+  against the SAME site under the SAME login share cookies and can collide.
+  This flag is for different-site concurrency and the auth spike, not a
+  general concurrency guarantee — do not build a site-workflow
   scheduler/broker on top of it.
 - `multisession-concurrency.test.ts` pins flag-off preservation (one
   instance ever constructed, `PROFILE_BUSY` on a second start) and flag-on
