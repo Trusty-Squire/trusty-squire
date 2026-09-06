@@ -73,9 +73,15 @@ test (`identity-runtime.test.ts` exercises it against a fake handle).
 
 `session/lifecycle.ts` wires one module-level `IdentityRuntime` into
 `acquireWarmBrowser`/`releaseWarmBrowserPage`/`forceReleaseWarmBrowserPage` for
-the operator profile. **Production still calls `forgetAfterShutdown()`
-unconditionally at every session finish (and on every acquire failure)**, so
-today this is purely single-flight/epoch bookkeeping around the exact same
+the operator profile. **Production still calls `forgetAfterShutdown()` after
+closing the browser at every finish of a runtime-acquired session, and on an
+acquire failure after closing whichever `BrowserController` the launch had
+constructed** (so a launch that rejects after Chrome spawned still reaps the
+process instead of leaving it holding the profile lock). Only browsers leased
+from the runtime touch it: a harness session (`startHarnessProvisionSession`,
+caller-owned browser) finishing never resets the runtime underneath a live
+`operate_start` session — `operate-session-flow.test.ts` pins both. So today
+this is purely single-flight/epoch bookkeeping around the exact same
 construct-then-close lifecycle as before — Chrome is not yet kept warm across
 sessions, and admission is still capped at exactly one session via the
 existing profile lease (`acquireProfileOperationGuard`/`waitForProfileFree`),

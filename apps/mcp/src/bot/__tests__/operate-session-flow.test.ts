@@ -6225,6 +6225,46 @@ describe("operate session — real-profile lifecycle", () => {
     const lease = acquireProfileOperationGuard(profileDir);
     lease.release();
   });
+
+  it("a harness session finishing does not forget a live operate_start browser's identity", async () => {
+    // The harness browser is caller-owned and never leased from the shared
+    // operator IdentityRuntime, so closing it must not reset that runtime's
+    // bookkeeping underneath a still-live operate_start session. Observable
+    // proxy: while session A's Chrome is live, a request for a different
+    // identity (another profile) is rejected instead of launching a second
+    // Chrome — and that stays true after an unrelated harness session closes.
+    const liveProfile = "/tmp/trusty-squire-unit-live-profile-harness-a";
+    const otherProfile = "/tmp/trusty-squire-unit-live-profile-harness-b";
+    const live = await startProvisionSession({
+      serviceUrl: "https://app.example.com/one",
+      profileDir: liveProfile,
+    });
+    try {
+      expect(h.startCalls).toBe(1);
+      const harness = await startHarnessProvisionSession({
+        browser: new BrowserController(),
+        serviceUrl: "https://shop.example.com/checkout",
+      });
+      await finishProvisionSession(harness.session_id);
+
+      await expect(
+        startProvisionSession({
+          serviceUrl: "https://app.example.com/two",
+          profileDir: otherProfile,
+        }),
+      ).rejects.toThrow(/incompatible with the live\/in-flight identity/);
+      // No second Chrome was launched for the live identity.
+      expect(h.startCalls).toBe(1);
+      expect(h.connections[0]).toBe(true);
+      expect(activeSessionCount()).toBe(1);
+      // The rejected start released its own profile lease.
+      acquireProfileOperationGuard(otherProfile).release();
+    } finally {
+      await finishProvisionSession(live.session_id);
+    }
+    expect(h.connections[0]).toBe(false);
+    acquireProfileOperationGuard(liveProfile).release();
+  });
 });
 describe("operate session — await_verification into_slot (T3 fix: OTP never round-trips)", () => {
   it("seals a found OTP into a slot (masked handle, no raw code) and type_secret enters it", async () => {

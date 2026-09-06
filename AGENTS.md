@@ -679,9 +679,10 @@ virgin signup succeeds on an UNCOVERED service (no active skill in registry)
 - `apps/mcp/src/bot/identity-runtime.ts` owns Chrome's lifetime independent of
   any one session (single-flight launch + epoch + tab acquire/release, wired
   into `session/lifecycle.ts`). Production still tears the identity's Chrome
-  down at every session finish (`forgetAfterShutdown()` called unconditionally)
-  — this is scaffolding for later sequential reuse, not reuse itself. Don't
-  skip `forgetAfterShutdown()` at finish without also resetting
+  down at every finish of a session whose browser came from the runtime
+  (`forgetAfterShutdown()` after the close) — this is scaffolding for later
+  sequential reuse, not reuse itself. Don't skip `forgetAfterShutdown()` at
+  finish without also resetting
   `BrowserController`/`PageDriver` per-session state to a clean baseline; see
   `docs/browser-process-page-boundary.md#identity-runtime-step-3--chrome-lifetime-independent-of-one-session`.
 - Interactive human login is the deliberate exception. When `connect` (the one

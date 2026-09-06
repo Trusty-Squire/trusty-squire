@@ -92,8 +92,9 @@ interface LeasedBrowser {
 // Step 3 of the browser-broker migration: the identity that owns Chrome's
 // process lifetime for the (currently single) operator profile, independent
 // of any one session's reference to it. Production still closes this
-// identity's browser at every session finish (forgetAfterShutdown() below is
-// called unconditionally), so launch is single-flighted and stale references
+// identity's browser at every finish of a session that leased it from here
+// (forgetAfterShutdown() below runs after each such close; harness-owned
+// browsers never touch it), so launch is single-flighted and stale references
 // are epoch-detectable, but Chrome is not yet kept warm across sessions —
 // see docs/browser-process-page-boundary.md and identity-runtime.ts.
 interface OperatorIdentitySettings {

@@ -131,10 +131,7 @@ describe("IdentityRuntime", () => {
     await first.handle.close();
     first.releaseTabs();
     runtime.forgetAfterShutdown();
-    const second = await runtime.acquire(
-      { profileDir: "/p", proxyUrl: "http://proxy-b" },
-      launch,
-    );
+    const second = await runtime.acquire({ profileDir: "/p", proxyUrl: "http://proxy-b" }, launch);
     expect(launch).toHaveBeenCalledTimes(2);
     expect(second.handle).not.toBe(first.handle);
     expect(second.epoch).toBe(2);
