@@ -50,6 +50,7 @@ import type {
   Locator,
   Page,
   Request,
+  Route,
 } from "playwright";
 import { BrowserProcessOwner } from "./browser-process-owner.js";
 import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
@@ -2581,6 +2582,7 @@ export class BrowserController {
     | null = null;
   private readonly operationScopedAllowedHosts = new Map<string, number>();
   private hostScopeGuardInstallation: Promise<void> | null = null;
+  private hostScopeGuardHandler: ((route: Route) => Promise<void>) | null = null;
 
   // Feed the current session's allowed hosts to the request-scope guard. Read
   // lazily per request, so allow_host / auto-widen updates take effect without
@@ -2634,11 +2636,24 @@ export class BrowserController {
   // request that never resolved — wedging the page with an infinite spinner.
   // Here it is aborted with a real net error so the page's fetch/XHR rejects
   // promptly and the site's own error handling runs.
+  //
+  // The route is CONTEXT-scoped, so under the experimental multisession flag
+  // every session sharing the context has its own guard here and Playwright
+  // runs them all for every request. A request from a page another session
+  // has positively claimed is that session's guard's to judge — this one
+  // hands it on untouched. A page nobody has claimed, or one whose page can't
+  // be resolved (service-worker requests have no frame), is judged here
+  // exactly as before, so the single-session guard keeps its fail-closed
+  // default.
   private async installHostScopeGuard(): Promise<void> {
     const ctx = this.context;
     if (ctx === null) throw new Error("Browser not started");
-    await ctx.route("**/*", async (route) => {
+    const handler = async (route: Route): Promise<void> => {
       try {
+        if (this.requestPageClaimedByAnotherSession(route)) {
+          await route.fallback();
+          return;
+        }
         const url = route.request().url();
         const type = route.request().resourceType();
         const scope = this.hostScopeAllowedHostsProvider?.() ?? null;
@@ -2652,7 +2667,24 @@ export class BrowserController {
       } catch {
         await route.fallback().catch(() => undefined);
       }
-    });
+    };
+    await ctx.route("**/*", handler);
+    this.hostScopeGuardHandler = handler;
+  }
+  private requestPageClaimedByAnotherSession(route: Route): boolean {
+    try {
+      return this.ownedPages.claimedByAnother(route.request().frame().page());
+    } catch {
+      return false;
+    }
+  }
+  private async uninstallHostScopeGuard(): Promise<void> {
+    const handler = this.hostScopeGuardHandler;
+    const ctx = this.context;
+    this.hostScopeGuardHandler = null;
+    this.hostScopeGuardInstallation = null;
+    if (handler === null || ctx === null) return;
+    await ctx.unroute("**/*", handler).catch(() => undefined);
   }
   get launchMode(): "headed" | "headless" | "remote" | "unknown" {
     return this.processOwner.launchMode;
@@ -2697,9 +2729,11 @@ export class BrowserController {
 
   // Opens and registers this controller's OWN page in the shared context.
   // Mirrors what initializePages() does for the primary's first page, minus
-  // the context-level setup (init scripts, resource-blocking/host-scope
-  // routes) — those are CONTEXT-scoped and already installed once by
-  // whichever controller launched the shared browser.
+  // the context-level setup (init scripts, resource-blocking routes) — those
+  // are CONTEXT-scoped and already installed once by whichever controller
+  // launched the shared browser. The host-scope guard is NOT shared: each
+  // session installs its own via setHostScopeAllowedHosts, and the guard
+  // dispatches by page ownership so the two never judge each other's pages.
   private async attachOwnPage(): Promise<void> {
     const ctx = this.processOwner.context;
     if (ctx === null) {
@@ -2718,14 +2752,26 @@ export class BrowserController {
   // multisession identity except whichever one's finish empties the group
   // (which still runs the real close()); see session/lifecycle.ts.
   async closeOwnPagesOnly(): Promise<ProfileCloseState> {
+    // Snapshot the whole tab family — the OAuth recovery tab and any adopted
+    // popups live in OwnedPages, not just in `page` — BEFORE
+    // disposeRegistrations() drops the only map that can enumerate them.
+    const family = new Set<Page>(this.ownedPages.live());
+    for (const page of [
+      this.pageDriver.page,
+      this.pageDriver.primaryPage,
+      this.pageDriver.oauthProductPage,
+      this.pageDriver.oauthProviderPage,
+    ]) {
+      if (page !== null && !page.isClosed()) family.add(page);
+    }
+    await this.uninstallHostScopeGuard();
     this.pageDriver.disposeRegistrations();
-    const page = this.pageDriver.page;
     this.pageDriver.page = null;
     this.pageDriver.primaryPage = null;
     this.pageDriver.oauthProductPage = null;
     this.pageDriver.oauthProviderPage = null;
     this.pageDriver.oauthProviderPageClosed = false;
-    if (page !== null) await page.close().catch(() => undefined);
+    for (const page of family) await page.close().catch(() => undefined);
     return "closed";
   }
 
