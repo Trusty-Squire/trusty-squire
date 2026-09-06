@@ -24,6 +24,8 @@ import {
   CHECKOUT_SUBMIT_LABEL_RE,
   clickDispatchStatusForError,
   parseCheckoutAmount,
+  OAuthAwaitingHumanError,
+  OAuthFailedError,
   type BrowserController,
   type ClickDispatchStatus,
   type CheckoutSummary,
@@ -343,11 +345,23 @@ export interface Observation {
   // was still settling. This is an expected browser lifecycle transition, not
   // a failed login or a reason to abandon the session. The host should simply
   // re-observe; the controller will retain or reattach the product page.
-  oauth?: {
-    state: "in_progress";
-    provider_page: "closed_or_detached";
-    next_action: "operate_observe";
-  };
+  oauth?:
+    | {
+        state: "in_progress";
+        provider_page: "closed_or_detached";
+        next_action: "operate_observe";
+      }
+    // Fix C: an OAuth action timed out without a confirmed origin-return. This
+    // is honest uncertainty, not a failure — a consent screen or 2FA/
+    // verification challenge is commonly still showing. `reason` names only
+    // what was actually observed (never a guessed cause like "session
+    // expired"). The host should re-observe/retry rather than abandon the
+    // flow.
+    | {
+        state: "awaiting_human";
+        reason: string;
+        next_action: "operate_observe";
+      };
   // Change 5 — fail-closed identity hand-back: set ONLY when an operate task
   // required a live Google session that was absent. The task did NOT start; the
   // host asks the user to log in, then retries. No browser was driven.
@@ -577,19 +591,15 @@ async function waitForOAuthActionQuiescence(deadline: OAuthActionDeadline): Prom
   }
 }
 
-function oauthActionDeadlineError(deadline: OAuthActionDeadline): Error {
-  if (deadline.provider === undefined || deadline.provider === "google") {
-    return Object.assign(
-      new Error(
-        `google_session: OAuth did not complete within ${Math.ceil(deadline.timeoutMs / 1000)} seconds; ` +
-          "the saved session may have expired, so reconnect with " +
-          "`npx @trusty-squire/mcp connect --force-relogin=google` before retrying",
-      ),
-      { code: "google_session" },
-    );
-  }
-  return new Error(
-    `OAuth action did not complete within ${Math.ceil(deadline.timeoutMs / 1000)} seconds`,
+// Fix C: this is the OUTER backstop race (withinOAuthActionDeadline), which
+// fires only if the inner browser.ts wait somehow outlives its own deadline.
+// It has no page to re-check, so it can only report the one fact it actually
+// observed — the call did not finish in time — never a guessed cause. Treat
+// it the same as the inner wait's timeout: recoverable, not a failure.
+function oauthActionDeadlineError(deadline: OAuthActionDeadline): OAuthAwaitingHumanError {
+  return new OAuthAwaitingHumanError(
+    `OAuth action did not complete within ${Math.ceil(deadline.timeoutMs / 1000)} seconds. ` +
+      "Retry oauth_login or oauth_settle rather than treating this as a failure.",
   );
 }
 
@@ -4687,6 +4697,38 @@ interface InternalActResult {
   };
 }
 
+// Fix C: the honest, non-throwing "still waiting on a human" outcome for an
+// oauth_login/oauth_click action. `reason` is OAuthAwaitingHumanError's own
+// message — always something actually observed (no origin-return within
+// budget), never a guessed cause. Mirrors observeSession's oauthInProgress()
+// shape so both compact-v2 and legacy hosts get the same treatment: a normal
+// (non-error) observation the host re-observes/retries against.
+function oauthAwaitingHumanObservation(session: Session, reason: string): Observation {
+  session.prevObserve = null;
+  invalidateCompactV2Snapshot(session);
+  const guidance =
+    "OAuth is still awaiting a response from the provider (a consent screen or a 2FA/" +
+    "verification challenge may be showing). This is not a failure — call operate_observe " +
+    "or retry oauth_login/oauth_settle rather than abandoning the session.";
+  const oauth: NonNullable<Observation["oauth"]> = {
+    state: "awaiting_human",
+    reason,
+    next_action: "operate_observe",
+  };
+  return compactV2PublicObservation(
+    session,
+    () => ({
+      session_id: session.id,
+      url: session.browser.currentUrl(),
+      text: "",
+      guidance,
+      elements: [],
+      oauth,
+    }),
+    { stage: "auth", guidance, oauth },
+  );
+}
+
 async function actInternally(
   sessionId: string,
   action: ProvisionAction,
@@ -4714,6 +4756,11 @@ async function actInternally(
       ? await withOAuthActionBoundary(session, oauthProvider, execute)
       : await execute(undefined);
   } catch (error) {
+    // Fix C: an OAuth wait timing out is honest uncertainty, not a failure —
+    // return it as a normal (non-throwing) observation instead of an error.
+    if (error instanceof OAuthAwaitingHumanError && session !== undefined) {
+      return { observation: oauthAwaitingHumanObservation(session, error.message), outcome: {} };
+    }
     if (
       session?.compactV2Active === true &&
       !(error instanceof ManualCardEntryBlockedError) &&
@@ -4743,6 +4790,11 @@ export async function act(
         : await execute(undefined);
     return result.observation;
   } catch (error) {
+    // Fix C: an OAuth wait timing out is honest uncertainty, not a failure —
+    // return it as a normal (non-throwing) observation instead of an error.
+    if (error instanceof OAuthAwaitingHumanError && session !== undefined) {
+      return oauthAwaitingHumanObservation(session, error.message);
+    }
     if (session?.compactV2Active === true) {
       throw new Error(compactV2ActionFailureReason(error, action.kind));
     }
@@ -5524,9 +5576,13 @@ function compactV2SelectionFailureReason(error: unknown): string {
 
 function compactV2ActionFailureReason(error: unknown, kind: ProvisionAction["kind"]): string {
   if (error instanceof CompactV2ActionFailureError) return error.message;
-  if (error instanceof Error && (error as Error & { code?: unknown }).code === "google_session") {
-    return error.message;
-  }
+  // Fix C: report the honest, observed outcome — never the removed
+  // unverified-cause string ("the saved session may have expired"). A
+  // pending `awaiting_human` normally returns as a non-throwing observation
+  // (see act()/actInternally() below); this branch is a defensive fallback
+  // for any caller of this reason-mapper that doesn't go through that path.
+  if (error instanceof OAuthAwaitingHumanError) return "awaiting_human";
+  if (error instanceof OAuthFailedError) return error.message;
   if (error instanceof CompactV2StaleRefError) return "stale_ref";
   if (error instanceof TargetStaleError) return "reobserve_required";
   if (error instanceof ProvisionTargetNotAllowedError) {

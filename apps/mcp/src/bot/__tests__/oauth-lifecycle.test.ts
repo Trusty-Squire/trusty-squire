@@ -6,7 +6,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
-import { BrowserController } from "../browser.js";
+import { BrowserController, OAuthAwaitingHumanError, classifyOAuthTimeout } from "../browser.js";
 import {
   act,
   finishProvisionSession,
@@ -391,7 +391,13 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
-  it("returns a re-login result when Google never reaches its OAuth completion signal", async () => {
+  it("reports awaiting_human — never a guessed cause — when Google never reaches its OAuth completion signal", async () => {
+    // Fix C regression: this used to reject with a fabricated cause ("the
+    // saved session may have expired") even though nothing observed here
+    // proves the session expired — the provider simply never returned
+    // control. A live dogfood run hit exactly this shape (a routine 2FA
+    // challenge, not an expired session) and the false cause made the agent
+    // relay wrong information to the operator.
     const context = await browser.newContext();
     const product = await context.newPage();
     await context.route("https://product.test/**", async (route) => {
@@ -412,11 +418,12 @@ describe("BrowserController OAuth popup lifecycle", () => {
 
     try {
       const rejected = controller.loginWithOAuth("#oauth", 1_000, "google");
+      await expect(rejected).rejects.toBeInstanceOf(OAuthAwaitingHumanError);
       await expect(rejected).rejects.toMatchObject({
-        code: "google_session",
-        message: expect.stringMatching(
-          /session may have expired.*connect --force-relogin=google/is,
-        ),
+        message: expect.stringMatching(/has not returned to https:\/\/product\.test/i),
+      });
+      await expect(rejected).rejects.not.toMatchObject({
+        message: expect.stringMatching(/expired|force-relogin/i),
       });
       expect(Date.now() - startedAt).toBeLessThan(5_000);
     } finally {
@@ -490,5 +497,35 @@ describe("BrowserController OAuth popup lifecycle", () => {
     } finally {
       await context.close().catch(() => undefined);
     }
+  });
+});
+
+// Fix C's honest three-outcome classification, pinned as a pure unit test
+// rather than a live-timer race: reproducing the exact real-world race this
+// recovers (the deadline elapsing in the same instant the provider's
+// redirect lands) deterministically in a real browser would require racing
+// Node's event loop against Playwright's navigation events, which is
+// inherently flaky. The decision itself has no browser dependency, so pin it
+// directly.
+describe("classifyOAuthTimeout (Fix C decision logic)", () => {
+  it("reports completion when the provider returned control despite the timeout", () => {
+    // The exact false-negative from the 2026-09 dogfood: OAuth had actually
+    // completed, but the strict wait's confirmation loop still timed out.
+    expect(classifyOAuthTimeout(false, true)).toBe("returned");
+  });
+
+  it("reports awaiting_human when nothing observed proves either completion or failure", () => {
+    expect(classifyOAuthTimeout(false, false)).toBe("awaiting_human");
+  });
+
+  it("reports failed only on an actually-observed terminal signal (the page is gone)", () => {
+    expect(classifyOAuthTimeout(true, false)).toBe("failed");
+  });
+
+  it("never lets a closed page masquerade as a return", () => {
+    // transientOnProductOrigin can only be computed for a live page (see
+    // call site: `!transient.isClosed() && this.isOAuthProductUrl(...)`), but
+    // the pure function still fails closed if ever called with both true.
+    expect(classifyOAuthTimeout(true, true)).toBe("failed");
   });
 });

@@ -881,6 +881,21 @@ vi.mock("../browser.js", () => ({
     }
     return null;
   },
+  // Fix C — mirrors the real exports so provision-session.ts's honest
+  // OAuth-timeout classification (never asserting an unverifiable cause) can
+  // throw/catch these against this mocked module.
+  OAuthAwaitingHumanError: class extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = "OAuthAwaitingHumanError";
+    }
+  },
+  OAuthFailedError: class extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = "OAuthFailedError";
+    }
+  },
 }));
 
 vi.mock("../captcha-solver-2captcha.js", () => ({
@@ -3534,7 +3549,12 @@ describe("operate session — OAuth lifecycle", () => {
     // chooser/consent screen became unreachable — observe/screenshot/oauth_settle
     // all returned "unknown provision session" and the only recovery was a
     // fresh session that lost all progress. A timeout must surface as a
-    // recoverable error while the session stays usable.
+    // recoverable state while the session stays usable.
+    //
+    // Fix C: a timeout is honest uncertainty, not a failure — it no longer
+    // rejects at all (the old rejection asserted an unverifiable cause, "the
+    // saved session may have expired"). It resolves as a non-throwing
+    // `awaiting_human` observation instead.
     process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "10";
     h.visibleText = "Continue with Google";
     h.elements = [
@@ -3553,9 +3573,14 @@ describe("operate session — OAuth lifecycle", () => {
       }),
     );
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
-    await expect(
-      act(started.session_id, { kind: "oauth_login", target: "Continue with Google" }),
-    ).rejects.toMatchObject({ code: "google_session" });
+    const timedOut = await act(started.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+    });
+    expect(timedOut.oauth).toMatchObject({ state: "awaiting_human", next_action: "operate_observe" });
+    if (timedOut.oauth?.state === "awaiting_human") {
+      expect(timedOut.oauth.reason).not.toMatch(/expired|force-relogin/i);
+    }
 
     // The timeout must NOT have deregistered the session: observe succeeds…
     await expect(observe(started.session_id)).resolves.toMatchObject({
