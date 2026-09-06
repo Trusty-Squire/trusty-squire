@@ -11,6 +11,7 @@ import {
   looksLikeSecretShapedName,
   controlMatchesPrivateQueryV2,
   diffSafeControlsV2,
+  disambiguateDuplicateLabelsV2,
   equalSafePageSemanticsV2,
   encodeV2Delta,
   encodeV2Page,
@@ -624,6 +625,46 @@ describe("compact observation v2", () => {
     expect(isCompactV2Label("@continue-with-google")).toBe(true);
     expect(isCompactV2Label("@e:hhhhhhhhh1")).toBe(false);
     expect(isCompactV2Handle("@e:hhhhhhhhh1")).toBe(true);
+  });
+
+  it("disambiguates duplicate labels with a deterministic ordinal so identical rows are distinguishable", () => {
+    // The /dashboard/token dogfood returned two distinct copy buttons both
+    // labelled "curl example" — a correct pick was a coin flip.
+    const first = element({ visibleText: "curl example", selector: "#copy-a" });
+    const second = element({ visibleText: "curl example", selector: "#copy-b" });
+    const safe = safeControls({
+      elements: [first, second],
+      legacyRefs: new Map([
+        [first, "@e:copy_a"],
+        [second, "@e:copy_b"],
+      ]),
+      pageOrigin: "https://merchant.invalid",
+    });
+    expect(safe.rows.map((row) => row.label)).toEqual(["@curl-example", "@curl-example-2"]);
+    // Ordinals follow the map's own row order, so re-serializing the same
+    // elements (in either extraction order, mapped to the same sorted rows)
+    // keeps the numbering stable.
+    const flipped = safeControls({
+      elements: [second, first],
+      legacyRefs: new Map([
+        [second, "@e:copy_a"],
+        [first, "@e:copy_b"],
+      ]),
+      pageOrigin: "https://merchant.invalid",
+    });
+    expect(flipped.rows.map((row) => row.label)).toEqual(["@curl-example", "@curl-example-2"]);
+  });
+
+  it("skips an ordinal that would collide with an existing label", () => {
+    expect(
+      disambiguateDuplicateLabelsV2(["@curl-example", "@curl-example-2", "@curl-example"]),
+    ).toEqual(["@curl-example", "@curl-example-2", "@curl-example-3"]);
+    // Singles are untouched.
+    expect(disambiguateDuplicateLabelsV2(["@one", undefined, "@two"])).toEqual([
+      "@one",
+      undefined,
+      "@two",
+    ]);
   });
 
   it("uses the native DOM label while retaining TS's local action ref", () => {

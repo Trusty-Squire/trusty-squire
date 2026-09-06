@@ -1283,6 +1283,44 @@ function frameOf(el: InteractiveElement, pageOrigin: string): SafeControlV2["fra
   return el.frameOrigin === pageOrigin ? "same_origin" : "cross_origin";
 }
 
+/**
+ * Deterministically disambiguate duplicate labels within one snapshot. The
+ * /dashboard/token dogfood returned two distinct rows both labelled
+ * `@curl-example` with nothing to tell them apart — a correct pick was a coin
+ * flip. The first occurrence keeps the plain label; the second and later
+ * occurrences get a stable ordinal suffix (`@curl-example-2`, `-3`, …)
+ * following the map's own row order, so the same page always yields the same
+ * numbering. A suffix that would collide with an existing label (the page
+ * itself rendering "curl example 2" alongside two "curl example" rows) is
+ * skipped, so disambiguation never mints a new ambiguity.
+ */
+export function disambiguateDuplicateLabelsV2(
+  labels: readonly (string | undefined)[],
+): Array<string | undefined> {
+  const occurrences = new Map<string, number>();
+  for (const label of labels) {
+    if (label === undefined) continue;
+    occurrences.set(label, (occurrences.get(label) ?? 0) + 1);
+  }
+  const assigned = new Set<string>();
+  for (const label of labels) if (label !== undefined) assigned.add(label);
+  const seen = new Map<string, number>();
+  return labels.map((label) => {
+    if (label === undefined) return undefined;
+    const occurrence = (seen.get(label) ?? 0) + 1;
+    seen.set(label, occurrence);
+    if (occurrence === 1) return label;
+    let suffix = occurrence;
+    let candidate = `${label}-${suffix}`;
+    while (assigned.has(candidate)) {
+      suffix += 1;
+      candidate = `${label}-${suffix}`;
+    }
+    assigned.add(candidate);
+    return candidate;
+  });
+}
+
 export function buildSafeControlsV2(args: {
   elements: readonly InteractiveElement[];
   legacyRefs: ReadonlyMap<InteractiveElement, string>;
@@ -1339,23 +1377,15 @@ export function buildSafeControlsV2(args: {
     });
   }
   rows.sort((a, b) => a.priority - b.priority || a.legacy.localeCompare(b.legacy));
+  // Disambiguate AFTER the final ordering so duplicate labels (two copy
+  // buttons for two different tokens, identically labelled) get ordinals that
+  // are deterministic per snapshot rather than extraction-order-dependent.
+  const disambiguated = disambiguateDuplicateLabelsV2(rows.map(({ row }) => row.label));
   const byRef = new Map<string, string>();
-  // Redacted rows share one marker label, which would make them
-  // indistinguishable to label-based acts (and trip the act-time ambiguity
-  // error). Assign a stable per-observation discriminator instead — rows are
-  // sorted deterministically, so the same observation always yields the same
-  // labels; the ref stays the primary target either way. Rows are never
-  // dropped: every redacted control keeps its ref, role, and non-secret facts.
-  let redactedOrdinal = 0;
-  const safeRows = rows.map(({ ref, legacy, row }) => {
+  const safeRows = rows.map(({ ref, legacy, row }, position) => {
+    const label = disambiguated[position];
     byRef.set(ref, legacy);
-    if (row.label === REDACTED_SECRET_LABEL_V2) {
-      redactedOrdinal += 1;
-      return redactedOrdinal === 1
-        ? { ref, ...row }
-        : { ref, ...row, label: `${REDACTED_SECRET_LABEL_V2}-${redactedOrdinal}` };
-    }
-    return { ref, ...row };
+    return { ref, ...row, ...(label === undefined ? {} : { label }) };
   });
   return { rows: safeRows, byRef };
 }

@@ -4849,6 +4849,51 @@ describe("Compact V2 action-map boundary", () => {
     expect(reconstructed).toContain("SUCCESS: credential sealed");
   });
 
+  it("pages the start hint at token boundaries instead of cutting it mid-word", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    // The ipinfo dogfood's real hint shape: the fixed 384-byte first page used
+    // to cut "- entry: https://ipin" mid-URL, forcing an extra paging call to
+    // reassemble trusted routing metadata. Boundaries must now fall after
+    // whitespace, and paging must stay lossless.
+    const routeHint =
+      `Known route for "ipinfo" — a MAP, not a script. Drive toward it; ` +
+      `fall back to your own judgment if the live page diverges.\n` +
+      `- login: the user has a live session for google (prefer "google"). IF the ` +
+      `page offers one of those as a sign-in option, use it — the account may ` +
+      `already exist, so log IN, don't re-sign-up. If there's no such button, ` +
+      `sign up with email.\n` +
+      `- entry: https://ipinfo.io/signup\n` +
+      `- after login, navigate: /dashboard → /dashboard/token\n`;
+    const started = await startProvisionSession({
+      serviceUrl: "https://ipinfo.io/signup",
+      hint: routeHint,
+    });
+    const pages: string[] = [started.hint ?? ""];
+    let hintCursor = started.hint_overflow?.next_cursor;
+    while (hintCursor !== undefined) {
+      const page = await observeQuery(started.session_id, "", undefined, hintCursor);
+      pages.push(page.hint as string);
+      hintCursor = (page.hint_overflow as { next_cursor?: string } | undefined)?.next_cursor;
+    }
+    expect(pages.length).toBeGreaterThan(1);
+    // The session composes its own login guidance ahead of the route hint, so
+    // assert on the properties that matter rather than exact composition:
+    // lossless (nothing dropped), token-aligned boundaries, and the entry URL
+    // never cut mid-token (the dogfood read "https://ipin").
+    const reconstructed = pages.join("");
+    expect(reconstructed).toContain("- entry: https://ipinfo.io/signup\n");
+    expect(reconstructed.endsWith("- after login, navigate: /dashboard → /dashboard/token\n")).toBe(
+      true,
+    );
+    // No page ends mid-token: every boundary falls on whitespace.
+    for (const page of pages.slice(0, -1)) {
+      expect(page).toMatch(/\s$/);
+    }
+  });
+
   it("keeps harness V1 consumers explicit while bounding opt-in V2 metadata", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.visibleText = "Harness page";

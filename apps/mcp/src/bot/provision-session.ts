@@ -3834,6 +3834,24 @@ export interface CompactV2StartMetadata {
   userEmail?: string;
 }
 
+/**
+ * Last index in `page` at which a split leaves complete whitespace-delimited
+ * tokens on both sides (the position right after the final whitespace run), or
+ * -1 when the page holds no interior token boundary.
+ */
+function lastUtf8TokenBoundary(page: string): number {
+  const match = /\s(?=\S*$)/.exec(page);
+  return match === null ? -1 : match.index + 1;
+}
+
+/**
+ * Split `value` into byte-bounded pages LOSSLESSLY (concatenating the pages
+ * reproduces the input) and at TOKEN boundaries: an overflow never cuts a word
+ * or URL mid-token when an interior boundary exists — the ipinfo dogfood read
+ * "- entry: https://ipin" off page 0 and had to spend an extra paging call to
+ * reassemble trusted routing metadata. Only a single token longer than a whole
+ * page falls back to the old character split.
+ */
 function splitUtf8Pages(value: string, maxBytes: number): string[] {
   if (value.length === 0) return [];
   const pages: string[] = [];
@@ -3842,9 +3860,17 @@ function splitUtf8Pages(value: string, maxBytes: number): string[] {
   for (const character of value) {
     const characterBytes = Buffer.byteLength(character, "utf8");
     if (bytes + characterBytes > maxBytes && page.length > 0) {
-      pages.push(page);
-      page = "";
-      bytes = 0;
+      const boundary = lastUtf8TokenBoundary(page);
+      if (boundary > 0) {
+        const rest = page.slice(boundary);
+        pages.push(page.slice(0, boundary));
+        page = rest;
+        bytes = Buffer.byteLength(rest, "utf8");
+      } else {
+        pages.push(page);
+        page = "";
+        bytes = 0;
+      }
     }
     page += character;
     bytes += characterBytes;
