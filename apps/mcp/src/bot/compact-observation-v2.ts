@@ -237,6 +237,12 @@ export function shannonEntropyBitsPerChar(value: string): number {
 }
 
 const SECRET_NAME_MIN_RUN_CHARS = 12;
+// A credential may be PRESENTED in hyphen/underscore groups (base64url
+// grouping, UUIDs, license keys): "f9a062f0-2fadf5ab-9c1d2e3f". The run scan
+// therefore also scores each such group joined into one candidate — but only
+// when every segment is ≥4 chars, so ordinary copy like "SKU-12345",
+// "8-8-8-8", "1-1-1-1", and "task-management-101" never produces a candidate.
+const SECRET_NAME_MIN_GROUP_SEGMENT_CHARS = 4;
 // Entropy floors per character. Hex runs get the lower floor (a 16-symbol
 // alphabet rarely exceeds ~3.3 bits/char even at full randomness; the live
 // ipinfo token measured ~3.17). Other digit-bearing runs (base32/62/64url
@@ -266,17 +272,35 @@ const SECRET_NAME_SHAPE_RES: readonly RegExp[] = [
 const SECRET_NAME_JWT_RE = /\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/;
 
 /**
+ * Alnum runs of the description, plus each hyphen/underscore-separated group
+ * (all segments ≥4 chars) joined into one run, so a grouped credential is
+ * scored as a whole instead of slipping through as short segments.
+ */
+function secretShapedCandidateRuns(description: string): string[] {
+  const candidates = [...(description.match(/[A-Za-z0-9]+/g) ?? [])];
+  for (const group of description.match(/[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)+/g) ?? []) {
+    const segments = group.split(/[-_]/);
+    if (segments.every((segment) => segment.length >= SECRET_NAME_MIN_GROUP_SEGMENT_CHARS)) {
+      candidates.push(segments.join(""));
+    }
+  }
+  return candidates;
+}
+
+/**
  * Whether a control's accessible name reads as a credential rather than a
  * word. Combines vendor anchors, JWT shape, and LENGTH + CHARACTER-CLASS +
- * ENTROPY over unbroken alnum runs — the live leak was a bare 14-char
- * lowercase hex string with no vendor prefix, so a prefix allowlist alone is
- * insufficient and entropy is load-bearing. Pure-alpha runs are ordinary
- * words and never screen (this is what spares @authorization-style labels).
+ * ENTROPY over unbroken alnum runs (and joined hyphen/underscore groups — a
+ * UUID- or license-key-shaped body must not survive as short segments). The
+ * live leak was a bare 14-char lowercase hex string with no vendor prefix, so
+ * a prefix allowlist alone is insufficient and entropy is load-bearing.
+ * Pure-alpha runs are ordinary words and never screen (this is what spares
+ * @authorization-style labels).
  */
 export function looksLikeSecretShapedName(description: string): boolean {
   if (SECRET_NAME_SHAPE_RES.some((shape) => shape.test(description))) return true;
   if (SECRET_NAME_JWT_RE.test(description)) return true;
-  for (const run of description.match(/[A-Za-z0-9]+/g) ?? []) {
+  for (const run of secretShapedCandidateRuns(description)) {
     if (run.length < SECRET_NAME_MIN_RUN_CHARS) continue;
     if (!/[0-9]/.test(run)) continue;
     const entropy = shannonEntropyBitsPerChar(run);
@@ -1318,8 +1342,21 @@ export function buildSafeControlsV2(args: {
   }
   rows.sort((a, b) => a.priority - b.priority || a.legacy.localeCompare(b.legacy));
   const byRef = new Map<string, string>();
+  // Redacted rows share one marker label, which would make them
+  // indistinguishable to label-based acts (and trip the act-time ambiguity
+  // error). Assign a stable per-observation discriminator instead — rows are
+  // sorted deterministically, so the same observation always yields the same
+  // labels; the ref stays the primary target either way. Rows are never
+  // dropped: every redacted control keeps its ref, role, and non-secret facts.
+  let redactedOrdinal = 0;
   const safeRows = rows.map(({ ref, legacy, row }) => {
     byRef.set(ref, legacy);
+    if (row.label === REDACTED_SECRET_LABEL_V2) {
+      redactedOrdinal += 1;
+      return redactedOrdinal === 1
+        ? { ref, ...row }
+        : { ref, ...row, label: `${REDACTED_SECRET_LABEL_V2}-${redactedOrdinal}` };
+    }
     return { ref, ...row };
   });
   return { rows: safeRows, byRef };

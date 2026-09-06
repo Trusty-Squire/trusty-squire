@@ -258,23 +258,45 @@ describe("compact observation v2", () => {
     });
 
     it("keeps every legitimate captured label verbatim", () => {
-      for (const visibleText of [
-        "View Plans & Pricing",
-        "AS15169",
-        "8.8.8.8",
-        "1.1.1.1",
-        "bmbmlite",
-        "curl example",
-        "Copy",
-      ]) {
+      const expected: Readonly<Record<string, string>> = {
+        "View Plans & Pricing": "@view-plans-pricing",
+        AS15169: "@as15169",
+        "8.8.8.8": "@8-8-8-8",
+        "1.1.1.1": "@1-1-1-1",
+        bmbmlite: "@bmbmlite",
+        "curl example": "@curl-example",
+      };
+      for (const [visibleText, label] of Object.entries(expected)) {
         const control = element({ visibleText });
         const safe = safeControls({
           elements: [control],
           legacyRefs: new Map([[control, "@e:legit"]]),
           pageOrigin: "https://ipinfo.invalid",
         });
-        expect(safe.rows[0]?.label, visibleText).not.toBe(REDACTED_SECRET_LABEL_V2);
+        expect(safe.rows[0]?.label, visibleText).toBe(label);
       }
+    });
+
+    it("gives each redacted row a stable per-observation discriminator", () => {
+      const first = element({ visibleText: "550e8400-e29b-41d4-a716-446655440000" });
+      const second = element({ visibleText: "Copy 3kR9xQ2m-7LpW4vZn" });
+      const safe = buildSafeControlsV2({
+        elements: [first, second],
+        legacyRefs: new Map([
+          [first, "@e:legit1"],
+          [second, "@e:legit2"],
+        ]),
+        handles: new Map([
+          [first, "@e:legit1"],
+          [second, "@e:legit2"],
+        ]),
+        pageOrigin: "https://ipinfo.invalid",
+      });
+      const labels = safe.rows.map((row) => row.label).sort();
+      expect(labels).toEqual(["@redacted-secret", "@redacted-secret-2"]);
+      // Both rows survive with ref, role, and label — clickable by ref.
+      expect(safe.rows.map((row) => row.ref).sort()).toEqual(["@e:legit1", "@e:legit2"]);
+      expect(safe.rows.every((row) => row.role === "button")).toBe(true);
     });
   });
 
@@ -689,6 +711,9 @@ describe("compact observation v2", () => {
       "ASIAIOSFODNN7EXAMPLE",
       "xoxb-123456789012-1234567890123-abc",
       "xoxp-123456789012-1234567890123-abc",
+      "xoxr-123456789012-1234567890123-abc",
+      "ghu_0123456789abcdefghijklmnopqrstuvwxyz",
+      "ghs_0123456789abcdefghijklmnopqrstuvwxyz",
       "glpat-0123456789abcdefghijklmnopqrst",
       "AIzaSyA0123456789abcdefghijklmnopqrstu",
       "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc",
@@ -723,6 +748,28 @@ describe("compact observation v2", () => {
 
     it("keeps ordinary UI copy", () => {
       for (const value of kept) expect(looksLikeSecretShapedName(value), value).toBe(false);
+    });
+
+    it("scores a hyphen/underscore-grouped credential as one joined run", () => {
+      // Grouped credential bodies (base64url grouping, license keys) would
+      // otherwise slip through as short segments.
+      expect(looksLikeSecretShapedName("Copy f9a062f0-2fadf5ab-9c1d2e3f"), "hex groups").toBe(
+        true,
+      );
+      expect(looksLikeSecretShapedName("Copy 3kR9xQ2m-7LpW4vZn"), "base62 groups").toBe(true);
+      expect(
+        looksLikeSecretShapedName("550e8400-e29b-41d4-a716-446655440000"),
+        "canonical v4 UUID",
+      ).toBe(true);
+      expect(
+        looksLikeSecretShapedName("key_3kR9xQ2m_7LpW4vZn"),
+        "underscore groups",
+      ).toBe(true);
+      // Ordinary hyphenated copy never produces a joined candidate: segments
+      // shorter than 4 chars, pure-alpha joins, and letterless digit joins stay.
+      expect(looksLikeSecretShapedName("SKU-12345")).toBe(false);
+      expect(looksLikeSecretShapedName("task-management-101")).toBe(false);
+      expect(looksLikeSecretShapedName("8.8.8.8")).toBe(false);
     });
 
     it("is length + character-class + entropy: a bare hex run needs entropy, not a prefix", () => {

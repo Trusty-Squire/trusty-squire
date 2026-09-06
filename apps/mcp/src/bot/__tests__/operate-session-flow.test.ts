@@ -5771,7 +5771,7 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     expect(JSON.stringify(full)).toContain(secret);
   });
 
-  it("keeps a reflected slot value ON the compact-v2 wire, label, and query", async () => {
+  it("keeps a reflected slot value on the compact-v2 wire and query; its credential-shaped label redacts", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const secret = "stored-credential-7f3d9a";
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
@@ -5794,8 +5794,12 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     const table = (observation as unknown as { safe_table: Array<[string, string, string?]> })
       .safe_table;
     expect(table).toHaveLength(2);
-    // The row carries the page's own label, reflected value included.
-    expect(table[0]![2] ?? "").toContain("@saved-value");
+    // The row is NOT dropped — but its accessible name is credential-shaped
+    // (a reflected vault value), so the label alias redacts per the 2026-09-06
+    // ipinfo screen. The value itself stays readable via full observe/extract
+    // (see "shows a slotted value the page reflected back").
+    expect(table[0]![2] ?? "").toContain("@redacted-secret");
+    expect(table[0]![2] ?? "").not.toContain("stored-credential");
 
     const query = await observeQuery(started.session_id, "saved value");
     expect(query.safe_table).toHaveLength(1);
