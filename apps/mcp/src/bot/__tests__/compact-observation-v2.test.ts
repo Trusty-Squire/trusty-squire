@@ -2,7 +2,6 @@ import { Buffer } from "node:buffer";
 import { describe, expect, it } from "vitest";
 import {
   OBSERVE_V2_MAX_WIRE_BYTES,
-  OBSERVE_V2_MAX_TOKENS,
   buildSafeControlsV2,
   compactV2LegacyRefForHandle,
   controlLabelV2,
@@ -268,20 +267,65 @@ describe("compact observation v2", () => {
     expect(page.payload.stage).toBe("browse");
   });
 
-  it("rejects token-dense metadata below the byte ceiling but above the token cap", () => {
-    const denseHint = "!".repeat(OBSERVE_V2_MAX_TOKENS + 64);
-    expect(Buffer.byteLength(JSON.stringify({ hint: denseHint }), "utf8")).toBeLessThan(
+  it("degrades oversized start metadata instead of failing the page", () => {
+    const denseHint = "!".repeat(OBSERVE_V2_MAX_WIRE_BYTES + 64);
+    expect(Buffer.byteLength(JSON.stringify({ hint: denseHint }), "utf8")).toBeGreaterThan(
       OBSERVE_V2_MAX_WIRE_BYTES,
     );
-    expect(() =>
-      encodeV2Page({
-        sessionId: "session",
-        stage: "browse",
-        rows: [],
-        cursorFor: (offset) => `cursor-${offset}`,
-        startMetadata: { hint: denseHint },
+    // A hint this dense is dropped by the graceful metadata degradation — the
+    // observation itself must never fail on real-world metadata.
+    const page = encodeV2Page({
+      sessionId: "session",
+      stage: "browse",
+      rows: [],
+      cursorFor: (offset) => `cursor-${offset}`,
+      startMetadata: { hint: denseHint },
+    });
+    expect(page.payload.hint).toBeUndefined();
+    expect(page.payload.safe_table).toEqual([]);
+    expect(Buffer.byteLength(JSON.stringify(page.payload), "utf8")).toBeLessThanOrEqual(
+      OBSERVE_V2_MAX_WIRE_BYTES,
+    );
+  });
+
+  it("shrinks a URL that exceeds the wire budget before packing so the first page keeps multiple rows", () => {
+    const dense = Array.from({ length: 40 }, (_, index) =>
+      element({
+        index,
+        visibleText: `Control ${index}`,
+        selector: `#control-${index}`,
       }),
-    ).toThrow("compact-v2 budget metadata exceeded");
+    );
+    const safe = safeControls({
+      elements: dense,
+      legacyRefs: new Map(dense.map((control, index) => [control, `@e:legacy_${index}`])),
+      pageOrigin: "https://merchant.invalid",
+    });
+    const idToken = "a".repeat(OBSERVE_V2_MAX_WIRE_BYTES + 256);
+    const pageUrl = `https://merchant.invalid/auth/callback?id_token=${idToken}`;
+    expect(Buffer.byteLength(pageUrl, "utf8")).toBeGreaterThan(OBSERVE_V2_MAX_WIRE_BYTES);
+    const page = encodeV2Page({
+      sessionId: "session",
+      stage: "auth",
+      pageUrl,
+      rows: safe.rows,
+      cursorFor: (offset) => `cursor-${offset}`,
+    });
+    const firstPage = page.payload.safe_table as unknown[];
+    expect(firstPage.length).toBeGreaterThan(1);
+    expect(page.payload.url).toBe(pageUrl.slice(0, 512));
+    expect(Buffer.byteLength(JSON.stringify(page.payload), "utf8")).toBeLessThanOrEqual(
+      OBSERVE_V2_MAX_WIRE_BYTES,
+    );
+    const overflow = page.payload.overflow as
+      | { remaining: number; next_cursor: string }
+      | undefined;
+    if (overflow !== undefined) {
+      expect(overflow).toEqual({
+        remaining: 40 - firstPage.length,
+        next_cursor: `cursor-${firstPage.length}`,
+      });
+    }
   });
 
   it("clamps a dense page with long raw labels to a paged, sealed first action map", () => {
@@ -308,8 +352,15 @@ describe("compact observation v2", () => {
     });
     const wire = JSON.stringify(page.payload);
     expect(safe.rows).toHaveLength(94);
-    expect(page.payload.safe_table as unknown[]).toHaveLength(4);
-    expect(page.payload.overflow).toEqual({ remaining: 90, next_cursor: "cursor-4" });
+    // Budget-driven packing: rows fill the page until the wire budget is
+    // actually reached — never clamped to a fixed first-page row count that
+    // strands below-the-fold CTAs in overflow.
+    const firstPage = page.payload.safe_table as unknown[];
+    expect(firstPage.length).toBeGreaterThan(4);
+    expect(page.payload.overflow).toEqual({
+      remaining: 94 - firstPage.length,
+      next_cursor: `cursor-${firstPage.length}`,
+    });
     expect(page.payload.semantic).toEqual({ title: "Dense sample", headings: ["First controls"] });
     expect(Buffer.byteLength(wire, "utf8")).toBeLessThanOrEqual(OBSERVE_V2_MAX_WIRE_BYTES);
     expect(wire).not.toContain(longLabel);

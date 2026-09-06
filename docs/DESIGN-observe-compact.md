@@ -92,16 +92,25 @@ The public observation contains:
   `[ref,role,facts?]`; roles are finite one- or two-character codes and `facts`
   can contain only a screened short name plus code-owned state, action, field,
   choice-position, and frame facts.
-- At most four prioritized rows on the first page. The complete encoded payload
-  must satisfy both the 4,096-byte wire ceiling and the conservative 1,024-unit
-  byte-count gate. `overflow.next_cursor` pages the remaining action map through
-  the MCP, never through a persisted snapshot file.
+- Rows are packed in priority order until the budget is reached; there is no
+  fixed first-page row count. The complete encoded payload must satisfy both
+  the 4,096-byte wire ceiling and the 1,024-token cap, estimated at ~4 bytes
+  per token. When fixed metadata alone would starve the rows, it degrades
+  first (shrink `url`, drop `semantic`, drop start hints) before any row is
+  left off the page; the budget throw remains only as a fail-closed guard on
+  code-owned fields. `overflow.next_cursor` pages the remaining action map
+  through the MCP, never through a persisted snapshot file.
 
 `operate_observe_query` performs named-control lookup privately against the live
 browser. The query, optional role filter, and HMAC-bound cursor stay inside the
 session; results remain screened `safe_table` tuples. An empty query consumes an
 `overflow.next_cursor`, and also consumes `hint_overflow.next_cursor` when the
-trusted start hint spans more than one page. Query material is matched normally
+trusted start hint spans more than one page. Map cursors (the default
+observation's and every unfiltered page's) are filter-independent: a map cursor
+combined with a query or role performs the filtered lookup over the whole map
+from the start. Only a filtered page mints a cursor bound to its exact query
+and role, so that filtered list continues deterministically and does not
+continue under a different filter. Query material is matched normally
 whatever it spells; there is no card or secret screen on the query path.
 
 An exact, cursorless `Google` or `GitHub` lookup has a narrow bounded hydration

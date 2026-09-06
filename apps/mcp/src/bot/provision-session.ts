@@ -45,8 +45,7 @@ import {
   buildSafeControlsV2,
   checkoutStageFromUrlV2,
   compactV2LegacyRefForHandle,
-  compactV2PayloadWithinBudget,
-  OBSERVE_V2_MAX_TOKENS,
+  compactV2DegradeMetadata,
   COMPACT_V2_HANDLE_LENGTH,
   isCompactV2Handle,
   isCompactV2Label,
@@ -3874,6 +3873,21 @@ function compactV2StartMetadata(
   };
 }
 
+/**
+ * Scope for the default map's overflow paging cursors. Deliberately NOT bound
+ * to a query/role: the map ordering is canonical and any filter rides on top
+ * of paging. Binding the scope to the exact query/role (the old behavior)
+ * made the model's natural "page the overflow, looking for X" call — a map
+ * cursor plus a search term — fail with invalid_cursor on every attempt (the
+ * live Xata failure).
+ */
+function compactV2ControlCursorScope(session: Session): string {
+  return createHmac("sha256", session.compactV2Secret)
+    .update("control-map-paging")
+    .digest("base64url")
+    .slice(0, 10);
+}
+
 function compactV2QueryCursorScope(
   session: Session,
   query: string,
@@ -4075,10 +4089,10 @@ function compactV2HintPage(
         }
       : {}),
   };
-  if (!compactV2PayloadWithinBudget(payload)) {
-    throw new Error("compact-v2 budget metadata exceeded");
-  }
-  return payload;
+  // Start hints are routing metadata; degrade rather than fail the page.
+  const degraded = compactV2DegradeMetadata(payload);
+  if (degraded === null) throw new Error("compact-v2 budget metadata exceeded");
+  return degraded;
 }
 
 function compactV2PublicObservation(
@@ -4104,14 +4118,11 @@ function compactV2PublicObservation(
     ...(fields.oauth === undefined ? {} : { oauth: fields.oauth }),
     ...(fields.observed === undefined ? {} : { observed: fields.observed }),
   };
-  if (fields.url !== undefined && !compactV2PayloadWithinBudget(payload)) {
-    const overflow = Buffer.byteLength(JSON.stringify(payload), "utf8") - OBSERVE_V2_MAX_TOKENS;
-    payload.url = fields.url.slice(0, Math.max(0, fields.url.length - overflow));
-  }
-  if (!compactV2PayloadWithinBudget(payload)) {
-    throw new Error("compact-v2 budget metadata exceeded");
-  }
-  return payload;
+  // Fixed metadata (long OAuth-shaped URLs) degrades before observation ever
+  // fails; the throw is unreachable from real pages.
+  const degraded = compactV2DegradeMetadata(payload as unknown as Record<string, unknown>);
+  if (degraded === null) throw new Error("compact-v2 budget metadata exceeded");
+  return degraded as unknown as Observation;
 }
 
 function compactV2Observation(
@@ -4193,12 +4204,7 @@ function compactV2Observation(
     semantics,
     rows: index.rows,
     cursorFor: (offset) =>
-      compactV2Cursor(
-        session,
-        epoch.rev,
-        offset,
-        compactV2QueryCursorScope(session, "", undefined),
-      ),
+      compactV2Cursor(session, epoch.rev, offset, compactV2ControlCursorScope(session)),
     ...(startMetadata === undefined
       ? {}
       : {
@@ -4270,10 +4276,13 @@ export async function observeQuery(
     throw new Error("stale_cursor");
   }
   const needle = norm(query);
-  const cursorScope = compactV2QueryCursorScope(session, needle, role);
+  const unfiltered = needle.length === 0 && role === undefined;
+  const cursorScope = unfiltered
+    ? compactV2ControlCursorScope(session)
+    : compactV2QueryCursorScope(session, needle, role);
   let offset = 0;
   if (cursor !== undefined) {
-    if (needle.length === 0 && role === undefined && session.compactV2HintPages.length > 0) {
+    if (unfiltered && session.compactV2HintPages.length > 0) {
       try {
         const parsed = parseCompactV2Cursor(session, cursor, compactV2HintCursorScope(session));
         if (parsed.rev !== index.epoch.rev) throw new Error("stale_cursor");
@@ -4282,9 +4291,26 @@ export async function observeQuery(
         if (!(error instanceof Error) || error.message !== "invalid_cursor") throw error;
       }
     }
-    const parsed = parseCompactV2Cursor(session, cursor, cursorScope);
+    // Two cursor producers share the map paging surface: the default map
+    // (scope-free with respect to filters) and filtered search pages (bound
+    // to the exact query/role). Try the map scope first; a filter riding on a
+    // MAP cursor means "search the whole map for this" — start the filtered
+    // page from the beginning rather than rejecting with invalid_cursor (the
+    // live Xata failure). Only a cursor minted on a filtered page continues
+    // that filtered list positionally.
+    let parsed: { rev: number; offset: number } | null = null;
+    try {
+      parsed = parseCompactV2Cursor(session, cursor, compactV2ControlCursorScope(session));
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== "invalid_cursor") throw error;
+    }
+    let filterBound = false;
+    if (parsed === null) {
+      parsed = parseCompactV2Cursor(session, cursor, cursorScope);
+      filterBound = true;
+    }
     if (parsed.rev !== index.epoch.rev) throw new Error("stale_cursor");
-    offset = parsed.offset;
+    offset = filterBound || unfiltered ? parsed.offset : 0;
   }
   const liveElements = await session.browser.extractInteractiveElements();
   const liveSafe = compactV2LiveControls(session, liveElements);
