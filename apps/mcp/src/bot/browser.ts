@@ -13273,11 +13273,11 @@ export class BrowserController {
         }
       }
       const observedUrls = [
-        transient.isClosed() ? lastTransientUrl : transient.url(),
-        ...(durableProduct !== null &&
-        !durableProduct.isClosed() &&
-        durableProduct.url() !== productUrl
-          ? [durableProduct.url()]
+        ...(providerPage !== null || productDeparted
+          ? [transient.isClosed() ? lastTransientUrl : transient.url()]
+          : []),
+        ...(providerPage !== null && !product.isClosed() && product.url() !== productUrl
+          ? [product.url()]
           : []),
       ];
       for (const observedUrl of observedUrls) {

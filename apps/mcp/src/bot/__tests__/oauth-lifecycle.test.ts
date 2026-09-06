@@ -573,6 +573,30 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it("ignores an error= parameter the page already carried before this attempt", async () => {
+    // A stale denial from an earlier attempt is still in the address bar; this
+    // attempt never navigates, so nothing was observed and it must not fail.
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/**", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<button id="oauth" onclick="event.preventDefault()">Continue</button>',
+      });
+    });
+    await product.goto("https://product.test/login?error=access_denied");
+    const controller = BrowserController.fromHarnessPage(product);
+
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 1_000)).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+      expect(controller.currentUrl()).toBe("https://product.test/login?error=access_denied");
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
   it("waits for a same-tab provider round trip to return and settle", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();
