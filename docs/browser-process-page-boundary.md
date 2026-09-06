@@ -45,3 +45,43 @@ and independent page disposal. `google-login.test.ts` also drives cancellation
 through the facade, with its private launch fixtures now injected into the process
 owner. The existing real process, page adoption, OAuth, and payment suites remain
 required; `pnpm --filter @trusty-squire/mcp test:fast` runs that tier.
+
+## Identity runtime (Step 3 — Chrome lifetime independent of one session)
+
+`apps/mcp/src/bot/identity-runtime.ts` adds one more layer above the
+process/page split above: `IdentityRuntime` owns Chrome's lifetime for one
+identity/profile, decoupled from a `BrowserController`/`BrowserProcessOwner`
+launch. It is generic over the launched handle so it needs no real Chrome to
+test (`identity-runtime.test.ts` exercises it against a fake handle).
+
+- **Single-flight launch.** Concurrent `acquire()` calls for the same (or an
+  in-flight) settings collapse into one `launch()`; every other caller awaits
+  or reuses the result instead of double-launching.
+- **Epoch.** Increments once per real (re)launch, so a caller that stashed an
+  earlier `epoch` can detect via `isEpochStale()` that the runtime has since
+  relaunched underneath it.
+- **Tab acquire/release is a separate operation from Chrome shutdown.**
+  `acquire()` returns a `releaseTabs()` closure; calling it only decrements
+  the runtime's active-lease count and never closes the browser. Only
+  `forgetAfterShutdown()` — called after the caller itself closes the handle —
+  resets the runtime so the next `acquire()` launches fresh.
+- **Incompatible settings are rejected, never silently applied.** A second
+  `acquire()` against a live or in-flight identity with different settings
+  (e.g. a different proxy) throws `IncompatibleIdentityRuntimeSettingsError`
+  rather than mutating the shared context. The only sanctioned path to
+  different settings is close → `forgetAfterShutdown()` → `acquire()` again.
+
+`session/lifecycle.ts` wires one module-level `IdentityRuntime` into
+`acquireWarmBrowser`/`releaseWarmBrowserPage`/`forceReleaseWarmBrowserPage` for
+the operator profile. **Production still calls `forgetAfterShutdown()`
+unconditionally at every session finish (and on every acquire failure)**, so
+today this is purely single-flight/epoch bookkeeping around the exact same
+construct-then-close lifecycle as before — Chrome is not yet kept warm across
+sessions, and admission is still capped at exactly one session via the
+existing profile lease (`acquireProfileOperationGuard`/`waitForProfileFree`),
+untouched by this change. Turning on sequential reuse (skip
+`forgetAfterShutdown()` at finish so the next session's `acquire()` reuses the
+still-live Chrome) is the follow-up: it additionally requires resetting
+`BrowserController`/`PageDriver` per-session state (page references, host-scope
+guard routes, checkout/payment scratch fields) to a clean baseline before
+reuse, which this PR deliberately does not attempt.

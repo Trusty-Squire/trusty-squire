@@ -42,6 +42,7 @@ import {
   OperatorBrowserWatchdog,
   type OperatorBrowserWatchdogReason,
 } from "../operator-browser-watchdog.js";
+import { IdentityRuntime } from "../identity-runtime.js";
 import { createSession } from "./model.js";
 import type { AllowedHostEntry, Session, SessionTerminalTeardownOwner } from "./model.js";
 import {
@@ -83,7 +84,23 @@ interface LeasedBrowser {
   lease: ProfileOperationLease;
   shutdownGeneration: number;
   proxyUrl?: string;
+  // This session's claim on identityRuntime's shared Chrome. Calling it
+  // releases only the tab family — never the browser process itself.
+  identityLease: () => void;
 }
+
+// Step 3 of the browser-broker migration: the identity that owns Chrome's
+// process lifetime for the (currently single) operator profile, independent
+// of any one session's reference to it. Production still closes this
+// identity's browser at every session finish (forgetAfterShutdown() below is
+// called unconditionally), so launch is single-flighted and stale references
+// are epoch-detectable, but Chrome is not yet kept warm across sessions —
+// see docs/browser-process-page-boundary.md and identity-runtime.ts.
+interface OperatorIdentitySettings {
+  profileDir: string;
+  proxyUrl?: string;
+}
+const operatorIdentityRuntime = new IdentityRuntime<BrowserController, OperatorIdentitySettings>();
 
 interface AcquiredBrowser {
   controller: BrowserController;
@@ -218,31 +235,50 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
   };
   startingBrowsers.add(pending);
   let controller: BrowserController | null = null;
+  let identityLease: (() => void) | null = null;
   try {
     if (pending.cancelRequested) {
       throw new Error("operate_start cancelled: operator server is shutting down");
     }
-    controller = new BrowserController({
+    const identitySettings: OperatorIdentitySettings = {
       profileDir,
       ...(opts.proxyUrl !== undefined ? { proxyUrl: opts.proxyUrl } : {}),
+    };
+    // Single-flighted through operatorIdentityRuntime rather than constructed
+    // inline: today it always launches fresh (production still forgets this
+    // identity at every session finish, below), but the acquisition itself
+    // now goes through the one place that will later decide whether to reuse
+    // a still-live Chrome instead of relaunching it.
+    const acquired = await operatorIdentityRuntime.acquire(identitySettings, async (settings) => {
+      const launched = new BrowserController({
+        profileDir: settings.profileDir,
+        ...(settings.proxyUrl !== undefined ? { proxyUrl: settings.proxyUrl } : {}),
+      });
+      pending.controller = launched;
+      pending.launch = startBrowserBounded(launched, sessionId, async () => {
+        await cancelStartingBrowser(pending);
+      });
+      await pending.launch;
+      return launched;
     });
-    pending.controller = controller;
-    pending.launch = startBrowserBounded(controller, sessionId, async () => {
-      await cancelStartingBrowser(pending);
-    });
-    await pending.launch;
+    controller = acquired.handle;
+    identityLease = acquired.releaseTabs;
     if (pending.cancelRequested) {
       throw new Error("operate_start cancelled: operator server is shutting down");
     }
     assertProvisionStartAdmitted(generation);
   } catch (err) {
-    if (controller !== null) await controller.close().catch(() => undefined);
+    if (controller !== null) {
+      identityLease?.();
+      await controller.close().catch(() => undefined);
+      operatorIdentityRuntime.forgetAfterShutdown();
+    }
     lease.release();
     throw err;
   } finally {
     startingBrowsers.delete(pending);
   }
-  if (controller === null) {
+  if (controller === null || identityLease === null) {
     throw new Error("operate_start cancelled before browser initialization");
   }
   leasedBrowsers.set(controller, {
@@ -250,6 +286,7 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
     profileDir,
     lease,
     shutdownGeneration: generation,
+    identityLease,
     ...(opts.proxyUrl === undefined ? {} : { proxyUrl: opts.proxyUrl }),
   });
   return {
@@ -271,6 +308,12 @@ async function releaseWarmBrowserPage(
   } finally {
     leasedBrowsers.delete(browser);
     leased?.lease.release();
+    // Production still tears the identity's Chrome down at every session
+    // finish, so its tab family and the identity itself are released
+    // together here — a later PR that turns on sequential reuse would
+    // instead call only identityLease() and defer forgetAfterShutdown().
+    leased?.identityLease();
+    operatorIdentityRuntime.forgetAfterShutdown();
   }
 }
 
@@ -279,12 +322,17 @@ async function forceReleaseWarmBrowserPage(
   owner?: SessionTerminalTeardownOwner,
 ): Promise<void> {
   const leased = leasedBrowsers.get(browser);
-  await closeBrowserUntilProven(
-    browser,
-    false,
-    "operator browser force-close timed out",
-    () => owner?.requireProvenBrowserClose === true,
-  );
+  try {
+    await closeBrowserUntilProven(
+      browser,
+      false,
+      "operator browser force-close timed out",
+      () => owner?.requireProvenBrowserClose === true,
+    );
+  } finally {
+    leased?.identityLease();
+    operatorIdentityRuntime.forgetAfterShutdown();
+  }
   if (leased === undefined) return;
   leased.lease.release();
   leasedBrowsers.delete(browser);

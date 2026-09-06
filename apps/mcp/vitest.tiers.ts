@@ -27,6 +27,7 @@ export const REQUIRED_BEHAVIOR_FILES = [
   "src/bot/__tests__/browser-process-page-boundary.test.ts",
   "src/bot/__tests__/browser-frame-support.test.ts",
   "src/bot/__tests__/google-login.test.ts",
+  "src/bot/__tests__/identity-runtime.test.ts",
   "src/bot/__tests__/locator-fallback.test.ts",
   "src/bot/__tests__/modal-overlay-inert.test.ts",
   "src/bot/__tests__/new-tab-adoption.test.ts",
