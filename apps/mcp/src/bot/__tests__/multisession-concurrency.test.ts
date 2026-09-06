@@ -145,7 +145,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProfileBusyError } from "../profile.js";
-import { startProvisionSession, finishProvisionSession, closeAllProvisionSessions } from "../provision-session.js";
+import {
+  startProvisionSession,
+  finishProvisionSession,
+  closeAllProvisionSessions,
+} from "../provision-session.js";
 import type { Session } from "../provision-session.js";
 import { sessionForCall } from "../session/lifecycle.js";
 

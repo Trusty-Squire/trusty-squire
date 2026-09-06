@@ -37,8 +37,7 @@ try {
 const describeChromium = chromiumAvailable ? describe : describe.skip;
 
 type Internals = { page: Page | null; ownedPages: OwnedPages };
-const internals = (controller: BrowserController): Internals =>
-  controller as unknown as Internals;
+const internals = (controller: BrowserController): Internals => controller as unknown as Internals;
 
 let server: Server;
 let port: number;
@@ -149,9 +148,7 @@ describeChromium("experimental multisession — real tab-family isolation", () =
     );
     expect(await primary.adoptOpenedTab(200)).toBeNull();
     expect(internals(primary).page).toBe(popup);
-    expect(await satellite.adoptOpenedTab(200)).toBe(
-      `http://localhost:${port}/satellite-popup`,
-    );
+    expect(await satellite.adoptOpenedTab(200)).toBe(`http://localhost:${port}/satellite-popup`);
   }, 30_000);
 
   it("closeOwnPagesOnly closes the satellite's whole family and nothing of the primary's", async () => {
@@ -179,13 +176,9 @@ describeChromium("experimental multisession — real tab-family isolation", () =
 
   it("installs the primary's per-navigation page normalization on the satellite's page", async () => {
     const normalized = async (page: Page): Promise<boolean> =>
-      await page.evaluate(
-        () => typeof (globalThis as { __name?: unknown }).__name === "function",
-      );
+      await page.evaluate(() => typeof (globalThis as { __name?: unknown }).__name === "function");
     await satellitePage.goto(`http://localhost:${port}/satellite-again`);
-    await expect.poll(async () => await normalized(satellitePage), { timeout: 5_000 }).toBe(
-      true,
-    );
+    await expect.poll(async () => await normalized(satellitePage), { timeout: 5_000 }).toBe(true);
     expect(
       await satellitePage.evaluate(() => [
         navigator.hardwareConcurrency,
@@ -227,10 +220,7 @@ describeChromium("experimental multisession — real tab-family isolation", () =
     expect(await fetchOutcome(satellitePage, `http://localhost:${port}/api/satellite`)).toBe(
       "resolved",
     );
-    expect(apiHits).toEqual([
-      `127.0.0.1:${port}/api/primary`,
-      `localhost:${port}/api/satellite`,
-    ]);
+    expect(apiHits).toEqual([`127.0.0.1:${port}/api/primary`, `localhost:${port}/api/satellite`]);
 
     // Each guard still fails closed for its OWN page's out-of-scope call.
     expect(await fetchOutcome(primaryPage, `http://localhost:${port}/api/blocked`)).toBe(
@@ -256,9 +246,7 @@ describeChromium("experimental multisession — real tab-family isolation", () =
     expect(await fetchOutcome(unclaimed, `http://127.0.0.1:${port}/api/unclaimed`)).toBe(
       "resolved",
     );
-    expect(await fetchOutcome(primaryPage, `http://127.0.0.1:${port}/api/after`)).toBe(
-      "resolved",
-    );
+    expect(await fetchOutcome(primaryPage, `http://127.0.0.1:${port}/api/after`)).toBe("resolved");
     expect(apiHits).toHaveLength(4);
   }, 30_000);
 });

@@ -6,18 +6,15 @@ describe("experimentalMultiSessionEnabled", () => {
     expect(experimentalMultiSessionEnabled({})).toBe(false);
   });
 
-  it.each(["0", "false", "off", "no", "", "  ", "nonsense"])(
-    "is off for %j",
-    (value) => {
-      expect(experimentalMultiSessionEnabled({ TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION: value })).toBe(
-        false,
-      );
-    },
-  );
+  it.each(["0", "false", "off", "no", "", "  ", "nonsense"])("is off for %j", (value) => {
+    expect(
+      experimentalMultiSessionEnabled({ TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION: value }),
+    ).toBe(false);
+  });
 
   it.each(["1", "true", "yes", "on", "TRUE", " 1 "])("is on for %j", (value) => {
-    expect(experimentalMultiSessionEnabled({ TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION: value })).toBe(
-      true,
-    );
+    expect(
+      experimentalMultiSessionEnabled({ TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION: value }),
+    ).toBe(true);
   });
 });

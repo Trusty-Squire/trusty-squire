@@ -1,8 +1,9 @@
 # Exclusive browser process and page ownership
 
 `BrowserController` composes one `BrowserProcessOwner` and one `PageDriver` for
-one session. It preserves the operator API. There is no broker, shared browser,
-additional admission, or detach operation.
+one session. It preserves the operator API. By default there is no broker,
+shared browser, additional admission, or detach operation; the only exception
+is the off-by-default experimental flag described in the last section below.
 
 - `apps/mcp/src/bot/browser-process-owner.ts` owns launch state, the connected
   context/transport, process identity proof, cancellation, display custody, and
