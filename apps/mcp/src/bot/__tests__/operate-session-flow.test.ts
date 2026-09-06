@@ -713,8 +713,8 @@ vi.mock("../browser.js", () => ({
       h.oauthExpectedGoogleAccountEmails.push(expectedGoogleAccountEmail);
       const gate = h.oauthLoginGates.get(this.index);
       if (gate !== undefined) await gate;
-      if (h.oauthLoginError !== null) throw h.oauthLoginError;
       h.currentUrl = h.oauthResultUrl;
+      if (h.oauthLoginError !== null) throw h.oauthLoginError;
       h.visibleText = "Signed in";
     }
     async settleAfterOAuth(): Promise<void> {}
@@ -961,7 +961,7 @@ import { sealToRecipient } from "../payment-hpke.js";
 import { operatePayTool, operatePaymentStatusTool } from "../../tools/operate-pay.js";
 import { ApiClient } from "../../api-client.js";
 import { dispatchOperatorBrowserProcessTermination } from "../operator-browser-watchdog.js";
-import { BrowserController } from "../browser.js";
+import { BrowserController, OAuthAwaitingHumanError } from "../browser.js";
 import { acquireProfileOperationGuard } from "../profile.js";
 import {
   startProvisionSession,
@@ -3594,6 +3594,80 @@ describe("operate session — OAuth lifecycle", () => {
       session_id: started.session_id,
       closed: true,
     });
+  });
+
+  it("returns awaiting_human inside the compact-v2 budget even when the live challenge URL is huge", async () => {
+    // Same-tab topology: at the deadline the current page IS the provider's
+    // challenge page, whose URL alone can exceed the whole compact-v2 payload
+    // budget. The pending human step must still come back as an observation,
+    // never as a "compact-v2 budget metadata exceeded" error.
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    h.oauthResultUrl = `https://accounts.google.com/signin/challenge/dp/2?continue=${"x".repeat(1_200)}`;
+    h.oauthLoginError = new OAuthAwaitingHumanError(
+      "OAuth has not returned to https://app.example.com within 10 seconds.",
+    );
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table;
+    const oauthRef = rows[0]?.[0];
+    expect(oauthRef).toBeDefined();
+    const pending = await act(started.session_id, { kind: "oauth_login", target: oauthRef! });
+    expect(pending.oauth).toMatchObject({
+      state: "awaiting_human",
+      next_action: "operate_observe",
+    });
+    expect(pending.url).toBe("https://accounts.google.com");
+    expect(Buffer.byteLength(JSON.stringify(pending), "utf8")).toBeLessThanOrEqual(1_024);
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("stops recipe replay at an OAuth step that is still awaiting a human", async () => {
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    h.oauthLoginError = new OAuthAwaitingHumanError(
+      "OAuth has not returned to https://app.example.com within 10 seconds.",
+    );
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        entry_url: "https://app.example.com/login",
+        allowed_hosts: ["app.example.com"],
+        trace: [
+          {
+            action: {
+              kind: "oauth_click",
+              target: { visible_text: "Continue with Google", css: "#google-oauth" },
+            },
+          },
+          { action: { kind: "press", key: "Enter" } },
+        ],
+      }),
+      {},
+    );
+    expect(result).toMatchObject({
+      status: "fallback_required",
+      step_index: 0,
+      reason: expect.stringMatching(/has not returned to https:\/\/app\.example\.com/),
+    });
+    expect(h.pressedKeys).toEqual([]);
+    await finishProvisionSession(started.session_id);
   });
 });
 describe("operate_start — consent-overlay auto-dismiss", () => {

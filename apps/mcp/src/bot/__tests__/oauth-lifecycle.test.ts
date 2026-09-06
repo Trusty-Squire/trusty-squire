@@ -431,6 +431,34 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it("does not report completion for a same-tab control that never left the product origin", async () => {
+    // A disabled/no-op OAuth control (or a One-Tap affordance that never
+    // redirects) leaves the page on the product origin for the whole budget.
+    // Still being on the product origin at the deadline is not a return from
+    // the provider, so this must stay awaiting_human rather than resolve as
+    // a completed login.
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/**", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<button id="oauth" onclick="event.preventDefault()">Continue</button>',
+      });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 1_000)).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+      expect(product.isClosed()).toBe(false);
+      expect(controller.currentUrl()).toBe("https://product.test/login");
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
   it("waits for a same-tab provider round trip to return and settle", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();
@@ -523,9 +551,9 @@ describe("classifyOAuthTimeout (Fix C decision logic)", () => {
   });
 
   it("never lets a closed page masquerade as a return", () => {
-    // transientOnProductOrigin can only be computed for a live page (see
-    // call site: `!transient.isClosed() && this.isOAuthProductUrl(...)`), but
-    // the pure function still fails closed if ever called with both true.
+    // transientOnProductOrigin can only be computed for a live same-tab page
+    // that actually departed (see call site), but the pure function still
+    // fails closed if ever called with both true.
     expect(classifyOAuthTimeout(true, true)).toBe("failed");
   });
 });

@@ -381,7 +381,9 @@ export class OAuthFailedError extends Error {
 // the tool reported a fabricated "session may have expired" failure for an
 // action that had, in fact, just succeeded.
 //
-//   - `transientOnProductOrigin` at the deadline → the provider DID return
+//   - `transientOnProductOrigin` at the deadline (same-tab, the page actually
+//     left the product origin and is back on it — the same departure
+//     condition waitForOAuthLifecycle requires) → the provider DID return
 //     control; report completion, not failure.
 //   - otherwise, `transientClosed` is the one real terminal signal available
 //     (the page is actually gone) → `failed`.
@@ -13225,7 +13227,10 @@ export class BrowserController {
         // for the false-negative this recovers.
         const outcome = classifyOAuthTimeout(
           transient.isClosed(),
-          !transient.isClosed() && this.isOAuthProductUrl(transient.url(), productUrl),
+          !transient.isClosed() &&
+            providerPage === null &&
+            productDeparted &&
+            this.isOAuthProductUrl(transient.url(), productUrl),
         );
         if (outcome === "returned") {
           settled = "returned";

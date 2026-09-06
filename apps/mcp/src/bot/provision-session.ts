@@ -4077,6 +4077,7 @@ function compactV2PublicObservation(
     guidance?: string;
     oauth?: Observation["oauth"];
     observed?: ObserveDetail;
+    url?: string;
   },
 ): Observation {
   if (session.compactV2Mode !== "on") return legacy();
@@ -4084,7 +4085,7 @@ function compactV2PublicObservation(
   const payload: Observation = {
     format: "compact-v2",
     session_id: session.id,
-    url: session.browser.currentUrl(),
+    url: fields.url ?? session.browser.currentUrl(),
     text: "",
     stage: fields.stage,
     ...(fields.guidance === undefined ? {} : { guidance: fields.guidance }),
@@ -4706,10 +4707,8 @@ interface InternalActResult {
 function oauthAwaitingHumanObservation(session: Session, reason: string): Observation {
   session.prevObserve = null;
   invalidateCompactV2Snapshot(session);
-  const guidance =
-    "OAuth is still awaiting a response from the provider (a consent screen or a 2FA/" +
-    "verification challenge may be showing). This is not a failure — call operate_observe " +
-    "or retry oauth_login/oauth_settle rather than abandoning the session.";
+  const url = safeOriginV2(session.browser.currentUrl()) ?? "";
+  const guidance = "Not a failure: call operate_observe, or retry oauth_login/oauth_settle.";
   const oauth: NonNullable<Observation["oauth"]> = {
     state: "awaiting_human",
     reason,
@@ -4719,13 +4718,13 @@ function oauthAwaitingHumanObservation(session: Session, reason: string): Observ
     session,
     () => ({
       session_id: session.id,
-      url: session.browser.currentUrl(),
+      url,
       text: "",
       guidance,
       elements: [],
       oauth,
     }),
-    { stage: "auth", guidance, oauth },
+    { stage: "auth", guidance, oauth, url },
   );
 }
 
@@ -7488,7 +7487,14 @@ export async function replayOperatorRecipe(
 
     try {
       await options.beforeAction?.({ step_index: i, action });
-      await actInternally(sessionId, action, "none");
+      const acted = await actInternally(sessionId, action, "none");
+      if (acted.observation.oauth?.state === "awaiting_human") {
+        return await fallback(
+          step,
+          i,
+          session.compactV2Active ? "awaiting_human" : acted.observation.oauth.reason,
+        );
+      }
       replayed += 1;
       const expected = state.expectedFields.get(i);
       if (expected !== undefined) {
