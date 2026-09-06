@@ -355,7 +355,9 @@ been removed — only the `*.fly` Dockerfiles remain.
 
 **One package** ships to the public npm registry: `@trusty-squire/mcp`
 — the MCP server, install CLI, and the bundled operator-driver toolkit
-(`src/bot/`). Latest stable is `1.0.0` (next dev line `1.0.1-rc.x`).
+(`src/bot/`). The current version is the `version` field in
+`apps/mcp/package.json`; npm's `latest` / `next` dist-tags and
+`apps/mcp/CHANGELOG.md` record what has shipped.
 
 The bot used to be a separate `@trusty-squire/universal-bot` package.
 That split caused a recurring bug: a bot fix shipped to git, `mcp` was

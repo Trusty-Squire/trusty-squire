@@ -1,18 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
-## 1.1.14-rc.1 (2026-09-06)
+## 1.1.14-rc.2 (2026-09-06)
 
-- _summarize the changes_
-
-## 1.1.13-rc.32 (2026-09-06)
-
-- refactor(mcp): add IdentityRuntime to own Chrome's lifetime independent of any one session (#671)
-- refactor(mcp): separate browser process lifetime from page lifetime behind BrowserController (#670)
-- fix(mcp): restrict tab adoption to session-owned pages (#669)
-
-## Unreleased
-
-- **`operate_observe` / `operate_observe_query` reach every actionable control
+- fix(mcp): make every actionable control reachable in compact-v2 observation (#676).
+  **`operate_observe` / `operate_observe_query` reach every actionable control
   on long pages.** A compact-v2 page now packs rows in priority order until the
   4,096-byte wire budget is reached instead of stopping at four, so a primary
   CTA below a large content block lands in the default map. Fixed metadata (a
@@ -25,6 +16,20 @@
   word, so generic terms such as `region dropdown` or `use case textbox` find
   their control. Opaque refs and the wire shape are unchanged; the contract
   lives in `docs/DESIGN-observe-compact.md`.
+- fix(mcp): honest OAuth terminal-state detection with non-throwing awaiting_human (#675)
+- feat(mcp): flag-gated experimental concurrent multisession on the shared IdentityRuntime Chrome (#674)
+
+## 1.1.14-rc.1 (2026-09-06)
+
+- _summarize the changes_
+
+## 1.1.13-rc.32 (2026-09-06)
+
+- refactor(mcp): add IdentityRuntime to own Chrome's lifetime independent of any one session (#671)
+- refactor(mcp): separate browser process lifetime from page lifetime behind BrowserController (#670)
+- fix(mcp): restrict tab adoption to session-owned pages (#669)
+
+## Unreleased
 
 - **BREAKING: every observation seal, screenshot redaction, and extraction
   masking refusal is removed.** The operator now returns what the page actually
