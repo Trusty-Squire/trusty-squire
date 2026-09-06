@@ -1,5 +1,11 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.13-rc.32 (2026-09-06)
+
+- refactor(mcp): add IdentityRuntime to own Chrome's lifetime independent of any one session (#671)
+- refactor(mcp): separate browser process lifetime from page lifetime behind BrowserController (#670)
+- fix(mcp): restrict tab adoption to session-owned pages (#669)
+
 ## Unreleased
 
 - **BREAKING: every observation seal, screenshot redaction, and extraction
