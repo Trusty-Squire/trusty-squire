@@ -155,6 +155,21 @@ export interface SafeObservationBaselineV2 {
   stage: SafeStageV2;
   semantics: SafePageSemanticsV2;
   byRef: Map<string, SafeControlV2>;
+  /** Screened page prose already emitted for this document (see below). */
+  prose?: string[];
+}
+
+/**
+ * Whether a screened prose item list differs from the one already emitted.
+ * Like semantics, prose is sticky across deltas: a repeat observation only
+ * carries the text channel when its screened representation changed.
+ */
+export function equalObservationProseV2(
+  previous: readonly string[] | undefined,
+  current: readonly string[],
+): boolean {
+  if (previous === undefined) return false;
+  return previous.length === current.length && previous.every((item, i) => item === current[i]);
 }
 
 /**
@@ -300,20 +315,71 @@ function secretShapedCandidateRuns(description: string): string[] {
 export function looksLikeSecretShapedName(description: string): boolean {
   if (SECRET_NAME_SHAPE_RES.some((shape) => shape.test(description))) return true;
   if (SECRET_NAME_JWT_RE.test(description)) return true;
-  for (const run of secretShapedCandidateRuns(description)) {
-    if (run.length < SECRET_NAME_MIN_RUN_CHARS) continue;
-    if (!/[0-9]/.test(run)) continue;
-    const entropy = shannonEntropyBitsPerChar(run);
-    if (/^[0-9a-f]+$/i.test(run)) {
-      // A hex run still needs a hex LETTER: pure-digit runs are compact
-      // timestamps, order ids, and PANs (low-entropy anyway) — ordinary UI
-      // copy that must survive; credential-shaped hex carries both classes.
-      if (/[a-f]/i.test(run) && entropy >= SECRET_NAME_HEX_MIN_ENTROPY_BITS) return true;
-    } else if (entropy >= SECRET_NAME_MIXED_MIN_ENTROPY_BITS) {
-      return true;
-    }
+  return secretShapedCandidateRuns(description).some(isSecretShapedRun);
+}
+
+/**
+ * The length + character-class + entropy arm of the secret screen, shared by
+ * the boolean predicate and the prose redactor so both call sites can never
+ * drift apart on what counts as a credential.
+ */
+function isSecretShapedRun(run: string): boolean {
+  if (run.length < SECRET_NAME_MIN_RUN_CHARS) return false;
+  if (!/[0-9]/.test(run)) return false;
+  const entropy = shannonEntropyBitsPerChar(run);
+  if (/^[0-9a-f]+$/i.test(run)) {
+    // A hex run still needs a hex LETTER: pure-digit runs are compact
+    // timestamps, order ids, and PANs (low-entropy anyway) — ordinary UI
+    // copy that must survive; credential-shaped hex carries both classes.
+    return /[a-f]/i.test(run) && entropy >= SECRET_NAME_HEX_MIN_ENTROPY_BITS;
   }
-  return false;
+  return entropy >= SECRET_NAME_MIXED_MIN_ENTROPY_BITS;
+}
+
+const OBSERVATION_PROSE_REDACTION_MARKER = "[redacted]";
+
+/**
+ * Substring redaction of one prose item through the SAME primitive that
+ * screens label aliases: the vendor/JWT shape regexes and the shared run
+ * predicate above. Page prose is sentences, not slugs, so instead of
+ * replacing the whole item with a marker, only the secret-shaped substrings
+ * are — the surrounding sentence ("Your API key was created") survives so
+ * the channel stays comprehensible. Idempotent, and fails toward redaction:
+ * anything the boolean predicate would have caught is rewritten here.
+ */
+export function redactObservationProseV2(item: string): string {
+  let redacted = item;
+  for (const shape of SECRET_NAME_SHAPE_RES) {
+    redacted = redacted.replace(new RegExp(shape.source, "g"), OBSERVATION_PROSE_REDACTION_MARKER);
+  }
+  redacted = redacted.replace(
+    new RegExp(SECRET_NAME_JWT_RE.source, "g"),
+    OBSERVATION_PROSE_REDACTION_MARKER,
+  );
+  redacted = redacted.replace(/[A-Za-z0-9]+/g, (run) =>
+    isSecretShapedRun(run) ? OBSERVATION_PROSE_REDACTION_MARKER : run,
+  );
+  return redacted.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The text channel's screen: every prose item passes through the shared
+ * redactor before it can reach the wire, empties are dropped, and duplicates
+ * collapse. A live key reflected into a page paragraph is rewritten to
+ * `[redacted]` here — never emitted.
+ */
+export function screenObservationProseV2(items: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const screened: string[] = [];
+  for (const item of items) {
+    const redacted = redactObservationProseV2(item);
+    if (redacted.length === 0) continue;
+    const key = redacted.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    screened.push(redacted);
+  }
+  return screened;
 }
 
 const LABEL_MAX_CHARS = 32;
@@ -923,6 +989,8 @@ export function encodeV2Delta(args: {
   pageUrl?: string;
   semantics?: SafePageSemanticsV2 | undefined;
   delta: SafeObservationDeltaV2;
+  /** Screened prose items; emitted only when the caller saw them change. */
+  pageText?: readonly string[];
 }): Record<string, unknown> | null {
   const payload: Record<string, unknown> = {
     format: "compact-v2",
@@ -940,6 +1008,16 @@ export function encodeV2Delta(args: {
       : {}),
     ...(args.delta.removed.length > 0 ? { removed: args.delta.removed } : {}),
   };
+  // The text channel fills whatever budget the map and fixed metadata left
+  // and degrades item-by-item before anything else is touched. A delta that
+  // cannot fit its prose stays useful without it (the consumer retains the
+  // prior text, sticky like safe_table); it never degrades into a null that
+  // forces a full resync just because prose grew.
+  const screened = screenObservationProseV2(args.pageText ?? []);
+  for (let count = screened.length; count > 0; count -= 1) {
+    const candidate = { ...payload, text: screened.slice(0, count).join("\n") };
+    if (compactV2PayloadWithinBudget(candidate)) return candidate;
+  }
   return compactV2PayloadWithinBudget(payload) ? payload : null;
 }
 const INTENTS: ReadonlyArray<[SafeIntentV2, RegExp]> = [
@@ -1002,9 +1080,38 @@ function controlDescription(el: InteractiveElement): string | undefined {
   // button values are names; field values, `name`, and `id` stay excluded.
   // The name is NOT length-budgeted here: `controlLabelV2` screens the full
   // text and its slug carries the label's own budget.
-  return controlNamingTexts(el)
+  const chosen = controlNamingTexts(el)
     .map((candidate) => normalizeDescriptionV2(candidate))
     .find((candidate) => candidate !== undefined);
+  if (chosen === undefined) return undefined;
+  // Reduce label lossiness: a slug-only accessible name the agent cannot act
+  // on (@as15169, @1w, @f9a062f02fadf5 in the 2026-09-06 ipinfo dogfood)
+  // gains the short SCREENED context of the region it sits in, so the label
+  // reads "@as15169-as-details" instead of a bare opaque token. The context
+  // is page-derived copy, so it goes through the same seal as any naming
+  // source AND the shared secret-shape screen — a region that displays a key
+  // as its heading never rides into a label as "context".
+  const context = screenedRegionContextV2(el.container, chosen);
+  return context === undefined ? chosen : `${chosen} ${context}`;
+}
+
+/** A description is "uninformative" when it carries no 3+-letter word run: ids, short codes, hex fragments. */
+function isUninformativeDescriptionV2(description: string): boolean {
+  return !/[a-zA-Z]{3,}/.test(description);
+}
+
+function screenedRegionContextV2(
+  container: string | null | undefined,
+  chosen: string,
+): string | undefined {
+  if (container === null || container === undefined) return undefined;
+  if (!isUninformativeDescriptionV2(chosen)) return undefined;
+  // `container` is "kind:slug" (e.g. "section:api-tokens"); the kind adds no
+  // information for the agent and only spends label bytes.
+  const rawSlug = container.includes(":") ? container.slice(container.indexOf(":") + 1) : container;
+  const context = safeDescriptionV2(rawSlug);
+  if (context === undefined || looksLikeSecretShapedName(context)) return undefined;
+  return context.slice(0, 24).replace(/-+$/, "") || undefined;
 }
 
 function privateQueryTokenV2(value: string): string | null {
@@ -1400,6 +1507,8 @@ export function encodeV2Page(args: {
   cursorFor: (offset: number) => string;
   offset?: number;
   unchanged?: boolean;
+  /** Screened page prose for the text channel; degraded item-by-item to fit. */
+  pageText?: readonly string[];
   startMetadata?: {
     hint?: string;
     userEmail?: string;
@@ -1480,6 +1589,18 @@ export function encodeV2Page(args: {
     nextOffset = offset + 1;
   }
   let payload = pageWith(visible, nextOffset);
+  // The text channel is added only after the map is packed, so prose can
+  // never displace a row: it fills the budget the map left unused and
+  // degrades item-by-item from the tail (headings/page intro survive first).
+  // A payload that cannot fit any prose keeps text: "" — never a map loss.
+  const screened = screenObservationProseV2(args.pageText ?? []);
+  for (let count = screened.length; count > 0; count -= 1) {
+    const candidate = { ...payload, text: screened.slice(0, count).join("\n") };
+    if (compactV2PayloadWithinBudget(candidate)) {
+      payload = candidate;
+      break;
+    }
+  }
   if (!compactV2PayloadWithinBudget(payload)) {
     // Only hostile fixed metadata (a code-owned session id/cursor) lands here;
     // degrade the metadata before ever dropping an actionable row.

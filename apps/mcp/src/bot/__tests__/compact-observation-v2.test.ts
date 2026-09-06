@@ -18,6 +18,7 @@ import {
   safePageSemanticsV2,
   safeDescriptionV2,
   safeOriginV2,
+  screenObservationProseV2,
   sealRetainedInteractiveElementsV2,
   safeStageV2,
 } from "../compact-observation-v2.js";
@@ -1174,5 +1175,170 @@ describe("compact observation v2", () => {
     expect(wire).toContain("@e:removed");
     expect(wire).not.toContain(planted);
     expect(wire).not.toContain("Northwind");
+  });
+});
+
+describe("compact observation v2 text channel", () => {
+  const liveToken = "f9a062f02fadf5";
+
+  const pageWithRows = (overrides: Partial<Parameters<typeof encodeV2Page>[0]> = {}) => {
+    const el = element({ visibleText: "Continue" });
+    const safe = safeControls({
+      elements: [el],
+      legacyRefs: new Map([[el, "@e:continue"]]),
+      pageOrigin: "https://shop.example.com",
+    });
+    return encodeV2Page({
+      sessionId: "session",
+      stage: "browse",
+      rows: safe.rows,
+      cursorFor: (offset) => `cursor-${offset}`,
+      ...overrides,
+    });
+  };
+
+  it("emits screened page prose in the text field instead of an empty string", () => {
+    const page = pageWithRows({
+      pageText: [
+        "ipinfo makes data actionable",
+        "Your token was created. Treat it like a password.",
+        "Free plan: 50,000 requests per month",
+      ],
+    });
+    expect(page.payload.text).toContain("ipinfo makes data actionable");
+    expect(page.payload.text).toContain("Your token was created. Treat it like a password.");
+  });
+
+  it("redacts a secret-shaped token reflected into page prose via the shared redactor", () => {
+    const page = pageWithRows({
+      pageText: [
+        `Your API token ${liveToken} has been created.`,
+        "Rate limit: 50,000 requests per month",
+      ],
+    });
+    const text = page.payload.text as string;
+    expect(text).toContain("[redacted]");
+    expect(text).toContain("Your API token [redacted] has been created.");
+    expect(text).toContain("Rate limit: 50,000 requests per month");
+    // Nothing secret-shaped survives anywhere on the wire.
+    expect(JSON.stringify(page.payload)).not.toContain(liveToken);
+  });
+
+  it("keeps ordinary UI copy verbatim — prose screening never eats words", () => {
+    const page = pageWithRows({
+      pageText: [
+        "View plans and pricing for teams of every size",
+        "1.1.1.1 and 8.8.8.8 are public DNS resolvers",
+      ],
+    });
+    const text = page.payload.text as string;
+    expect(text).toContain("View plans and pricing for teams of every size");
+    expect(text).toContain("1.1.1.1 and 8.8.8.8 are public DNS resolvers");
+  });
+
+  it("under a tight budget degrades the text to empty while the action map stays intact", () => {
+    // Fill the budget with rows first: they pack until the wire cap is
+    // actually reached, so whatever remains cannot fit a full prose item.
+    const rows = Array.from({ length: 140 }, (_, i) =>
+      element({ visibleText: `Continue action button number ${i}` }),
+    );
+    const safe = safeControls({
+      elements: rows,
+      legacyRefs: new Map(rows.map((el, i) => [el, `@e:row-${i}`])),
+      pageOrigin: "https://shop.example.com",
+    });
+    const page = encodeV2Page({
+      sessionId: "session",
+      stage: "browse",
+      rows: safe.rows,
+      cursorFor: (offset) => `cursor-${offset}`,
+      pageText: ["x".repeat(180)],
+    });
+    const packedRows = page.payload.safe_table as unknown[];
+    expect(packedRows.length).toBeGreaterThan(0);
+    // The map consumed the budget; prose degraded to nothing — never the map.
+    expect(packedRows.length).toBeLessThan(rows.length);
+    expect(page.payload.text).toBe("");
+    // A page with room to spare carries the prose instead.
+    const roomy = encodeV2Page({
+      sessionId: "session",
+      stage: "browse",
+      rows: safe.rows.slice(0, 2),
+      cursorFor: (offset) => `cursor-${offset}`,
+      pageText: ["prose with room to spare"],
+    });
+    expect(roomy.payload.text).toBe("prose with room to spare");
+  });
+
+  it("attaches a screened region context to uninformative label slugs", () => {
+    // The ipinfo dogfood's /dashboard/token read "@as15169" — an opaque ASN
+    // fragment. The region's own name gives the agent something to act on.
+    const el = element({ visibleText: "as15169", container: "section:as-details" });
+    const safe = safeControls({
+      elements: [el],
+      legacyRefs: new Map([[el, "@e:as"]]),
+      pageOrigin: "https://shop.example.com",
+    });
+    expect(safe.rows[0]!.label).toBe("@as15169-as-details");
+  });
+
+  it("keeps informative labels untouched and never uses a secret-shaped region as context", () => {
+    const informative = element({
+      visibleText: "Continue checkout",
+      container: "main:checkout",
+    });
+    const opaque = element({ visibleText: "1w", container: "section:sk-proj-abcdefghij" });
+    const safe = safeControls({
+      elements: [informative, opaque],
+      legacyRefs: new Map([
+        [informative, "@e:continue"],
+        [opaque, "@e:one-week"],
+      ]),
+      pageOrigin: "https://shop.example.com",
+    });
+    // A legible label gains nothing from context — bytes stay on the map.
+    expect(safe.rows[0]!.label).toBe("@continue-checkout");
+    // The region heading is vendor-key-shaped: the shared screen keeps it out.
+    expect(safe.rows[1]!.label).toBe("@1w");
+  });
+
+  it("carries prose on a delta only when the caller saw it change, and never nulls the delta for text", () => {
+    const previous = {
+      epoch: { doc: "d", rev: 1 },
+      stage: "browse" as const,
+      semantics: { title: "T" },
+      byRef: new Map(),
+    };
+    const delta = diffSafeControlsV2(previous, "browse", [
+      { ref: "@e:new", role: "button", label: "@new-button", visibility: "viewport", frame: "main" },
+    ]);
+    const withText = encodeV2Delta({
+      sessionId: "session",
+      stage: "browse",
+      delta,
+      pageText: [`Your API token ${liveToken} was copied to the clipboard.`],
+    });
+    expect(withText).not.toBeNull();
+    expect(withText?.text).toContain("Your API token [redacted] was copied to the clipboard.");
+    // A prose blob far larger than the remaining budget degrades to text: ""
+    // rather than forcing a full-resync null.
+    const oversized = encodeV2Delta({
+      sessionId: "session",
+      stage: "browse",
+      delta,
+      pageText: Array.from({ length: 48 }, (_, i) => `prose ${i} ` + "y".repeat(200)),
+    });
+    expect(oversized).not.toBeNull();
+  });
+
+  it("screenObservationProseV2 drops empties and duplicates", () => {
+    expect(
+      screenObservationProseV2([
+        "Same line",
+        "same line",
+        "   ",
+        "Your API token f9a062f02fadf5 has been created.",
+      ]),
+    ).toEqual(["Same line", "Your API token [redacted] has been created."]);
   });
 });

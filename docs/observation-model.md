@@ -117,8 +117,47 @@ and emits `@redacted-secret` instead — with a stable per-observation
 keeping the row's ref, role, and every non-secret fact so the control stays
 actionable.
 Nothing else on the read path changes: page text, values, screenshots, and
-extracts remain verbatim, and ordinary labels (`@as15169`, `@8-8-8-8`,
-`@bmbmlite`) are tuned to survive verbatim.
+extracts remain verbatim, and ordinary labels (`@8-8-8-8`, `@bmbmlite`) are
+tuned to survive verbatim.
+
+**The same run's Finding 2 — compact-v2 comprehensibility (2026-09-06).**
+Finding 1 made the map safe; Finding 2 makes it *comprehensible*:
+
+- **Screened page-text channel.** The observation's `text` field was always
+  `""` — the agent got the control map but not the page's prose (headings,
+  intro copy, alerts), so a /dashboard/token page looked like an unlabeled
+  wall. The browser extractor (`extractObservationProse` in `browser.ts`)
+  now returns a bounded list of salient prose items (headings, paragraphs,
+  list items, alerts/live regions — skipping interactive-control
+  descendants, whose labels are the map's job). `screenObservationProseV2`
+  screens each item through the SAME shared primitive as the label alias
+  (`looksLikeSecretShapedName` + run-entropy predicate) by redacting only the
+  secret-shaped substrings to `[redacted]`, so "Your API token [redacted] was
+  copied to the clipboard" keeps its context. Prose fills whatever wire
+  budget the action map leaves over (rows pack first — the map is never
+  starved for text's sake), degrades item-by-item from the tail, and is
+  sticky: a delta resends prose only when it changed. Prose extraction is
+  availability-optional; a harness or older browser without it degrades to
+  the old empty `text` silently.
+- **Duplicate-label ordinals.** Two controls legitimately sharing an
+  accessible name (two `@curl-example` copy buttons) both emitted the same
+  label, so `@curl-example` was a dead ambiguous target forever. Labels are
+  now disambiguated deterministically at map-build time: the first
+  occurrence keeps the base slug, later ones gain `-2`, `-3`, … — each row
+  individually addressable, no ordinal-dependent fingerprint change.
+- **Lossless hint paging.** The compact-v2 wire budget (4096 bytes / 1024
+  tokens) used to cut the composed session hint at a raw byte boundary — the
+  first page ended mid-URL (`- entry: https://ipin…`), costing an extra
+  paging call and a mis-assembled route. Pages now split at UTF-8 token
+  boundaries (last whitespace within each page's byte cap; a whitespace-free
+  hint falls back to the hard split), making paging lossless.
+- **Region context for opaque labels.** A label slug with no 3+-letter word
+  run (`@as15169`, `@1w`) is unreadable to the agent. Such labels gain the
+  short, screened name of the region they sit in (`@as15169-as-details`); a
+  legible label gains nothing (bytes stay on the map), and a secret-shaped
+  region name is refused as context by the same shared screen — a section
+  that displays a key as its heading never rides into a label as
+  "context".
 
 **Why.** The seal and the extractor contradicted each other in production: on
 BrowserStack's settings page, with the Access Key revealed, `operate_screenshot`

@@ -51,6 +51,7 @@ import {
   isCompactV2Label,
   controlMatchesPrivateQueryV2,
   diffSafeControlsV2,
+  equalObservationProseV2,
   equalSafePageSemanticsV2,
   encodeV2Delta,
   encodeV2Page,
@@ -61,6 +62,7 @@ import {
   safeDescriptionV2,
   safeOriginV2,
   safePageSemanticsV2,
+  screenObservationProseV2,
   sealRetainedInteractiveElementsV2,
   safeStageV2,
   type SafeControlV2,
@@ -263,7 +265,9 @@ export interface Observation {
   // a skill exists for the service. The host agent reads it before driving.
   hint?: string;
   // V1 layout-aware page prose (innerText), capped to keep tool payloads
-  // bounded. Compact V2 deliberately emits an empty string.
+  // bounded. Compact V2 emits bounded SCREENED page prose: headings, copy,
+  // errors, and selected-state text, redacted through the shared secret-shape
+  // primitive and degraded item-by-item — never at the action map's expense.
   text: string;
   // Domain-aware steering for the host planner. This is not a script; it is
   // guardrail context for states the raw page text routinely misleads agents on.
@@ -4156,6 +4160,7 @@ function compactV2Observation(
   generation: number,
   elements: readonly InteractiveElement[],
   semanticSource: ObservationSemanticSourceV2,
+  proseSource?: readonly string[],
   startMetadata?: CompactV2StartMetadata,
 ): Observation {
   if (startMetadata?.hintPages !== undefined) {
@@ -4163,6 +4168,10 @@ function compactV2Observation(
   }
   const stage = safeStageV2(session.browser.currentUrl(), elements);
   const semantics = safePageSemanticsV2(semanticSource);
+  // The text channel is screened through the same shared redactor as label
+  // aliases (screenObservationProseV2 → looksLikeSecretShapedName shapes +
+  // run entropy); an unavailability here never touches the action map.
+  const prose = proseSource === undefined ? undefined : screenObservationProseV2(proseSource);
   const epochDoc = compactV2EpochDoc(session);
   const previous = session.compactV2Previous;
   const sameDocument = previous !== null && previous.epoch.doc === epochDoc;
@@ -4206,6 +4215,10 @@ function compactV2Observation(
     stage,
     semantics,
     byRef: new Map(safe.rows.map((row) => [row.ref, row])),
+    // The screened prose this document last emitted, so a repeat observation
+    // carries the text channel only when it actually changed (sticky, like
+    // safe_table and semantics).
+    ...(prose === undefined || prose.length === 0 ? {} : { prose }),
   };
   session.prevObserve = null;
   if (previous !== null && !requiresResync && delta !== null) {
@@ -4217,6 +4230,10 @@ function compactV2Observation(
       // are sticky, so resend only a sealed semantic change rather than the
       // same title/heading on every harmless re-observe.
       semantics: equalSafePageSemanticsV2(previous.semantics, semantics) ? undefined : semantics,
+      // Sticky like semantics: resend prose only when its screened form changed.
+      ...(prose !== undefined && prose.length > 0 && !equalObservationProseV2(previous.prose, prose)
+        ? { pageText: prose }
+        : {}),
       delta,
     });
     // A high-churn delta is less useful than a fresh paged map.  This also
@@ -4229,6 +4246,9 @@ function compactV2Observation(
     pageUrl: session.browser.currentUrl(),
     semantics,
     rows: index.rows,
+    // Full pages re-establish the whole view; the text channel rides along
+    // and degrades item-by-item inside the encode, never at the map's expense.
+    ...(prose === undefined || prose.length === 0 ? {} : { pageText: prose }),
     cursorFor: (offset) =>
       compactV2Cursor(session, epoch.rev, offset, compactV2ControlCursorScope(session)),
     ...(startMetadata === undefined
@@ -4473,12 +4493,20 @@ async function observeSession(
       // Semantic context is optional availability-wise; it is independently
       // sealed below and never changes action-map safety.
     }
+    // Same for the text channel's prose source: availability-optional, and it
+    // fills only the wire budget the action map leaves unused.
+    let proseSource: string[] = [];
+    try {
+      proseSource = await session.browser.extractObservationProse();
+    } catch {
+      // text stays ""; the map is unaffected.
+    }
     // Native TypeScript compact serializer over TS's own CDP-derived DOM
     // inventory. Its allowlist seal runs before any retained/emitted view; no
     // Python subprocess or externally provisioned runtime participates.
     const v2Mode = session.compactV2Mode;
     if (v2Mode === "on") {
-      return compactV2Observation(session, generation, elements, semanticSource, startMetadata);
+      return compactV2Observation(session, generation, elements, semanticSource, proseSource, startMetadata);
     }
     if (v2Mode === "shadow") exerciseCompactV2Shadow(session, generation, elements, semanticSource);
     session.compactV2Active = false;
