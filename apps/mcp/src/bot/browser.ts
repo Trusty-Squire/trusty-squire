@@ -2054,10 +2054,19 @@ function extractObservationVisibleText(): string {
 // dogfood: `text` was always ""). Structured, visibility-respecting, and
 // deliberately complementing the map: interactive-control labels stay out so
 // the same bytes are not paid for twice.
-const OBSERVATION_PROSE_MAX_ITEMS = 48;
-const OBSERVATION_PROSE_MAX_ITEM_CHARS = 200;
-
-function extractObservationProseItems(): string[] {
+/**
+ * Serialized into the page by `page.evaluate()` in `extractObservationProse()`:
+ * the page receives ONLY this function's source text, not the module's closure.
+ * Every identifier it references must therefore be defined inside this function
+ * (or be a page global) — a module-scope constant becomes a `ReferenceError` in
+ * the page on the first matching element. That exact bug shipped the compact-v2
+ * text channel inert (2026-09-06): the bound checks below named module-level
+ * constants, every real page threw, the call site's catch swallowed it, and the
+ * channel emitted `text: ""` everywhere. Keep this function self-contained.
+ */
+export function extractObservationProseItems(): string[] {
+  const OBSERVATION_PROSE_MAX_ITEMS = 48;
+  const OBSERVATION_PROSE_MAX_ITEM_CHARS = 200;
   const body = document.body;
   if (!body) return [];
   const clean = (value: string | null | undefined): string =>

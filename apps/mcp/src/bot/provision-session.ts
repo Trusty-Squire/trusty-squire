@@ -4138,6 +4138,8 @@ function compactV2Observation(
   semanticSource: ObservationSemanticSourceV2,
   proseSource?: readonly string[],
   startMetadata?: CompactV2StartMetadata,
+  /** Concrete reason the prose extractor failed; surfaced as `text_unavailable`. */
+  proseUnavailable?: string,
 ): Observation {
   if (startMetadata?.hintPages !== undefined) {
     session.compactV2HintPages = [...startMetadata.hintPages];
@@ -4215,6 +4217,7 @@ function compactV2Observation(
       ...(prose !== undefined && prose.length > 0 && !equalObservationProseV2(previous.prose, prose)
         ? { pageText: prose }
         : {}),
+      ...(proseUnavailable === undefined ? {} : { textUnavailable: proseUnavailable }),
       delta,
     });
     // A high-churn delta is less useful than a fresh paged map.  This also
@@ -4233,6 +4236,7 @@ function compactV2Observation(
     // Full pages re-establish the whole view; the text channel rides along
     // and degrades item-by-item inside the encode, never at the map's expense.
     ...(prose === undefined || prose.length === 0 ? {} : { pageText: prose }),
+    ...(proseUnavailable === undefined ? {} : { textUnavailable: proseUnavailable }),
     cursorFor: (offset) =>
       compactV2Cursor(session, epoch.rev, offset, compactV2ControlCursorScope(session)),
     ...(startMetadata === undefined
@@ -4486,12 +4490,17 @@ async function observeSession(
       // sealed below and never changes action-map safety.
     }
     // Same for the text channel's prose source: availability-optional, and it
-    // fills only the wire budget the action map leaves unused.
+    // fills only the wire budget the action map leaves unused. A failure here
+    // must NOT fail open: the map is unaffected, but the channel carries a
+    // concrete `text_unavailable` reason to the wire so an extractor error is
+    // distinguishable from a page with no prose (the 2026-09-06 inert text
+    // channel shipped green because this catch swallowed the throw silently).
     let proseSource: string[] = [];
+    let proseUnavailable: string | undefined;
     try {
       proseSource = await session.browser.extractObservationProse();
-    } catch {
-      // text stays ""; the map is unaffected.
+    } catch (err) {
+      proseUnavailable = (err instanceof Error ? err.message : String(err)).slice(0, 200);
     }
     // Native TypeScript compact serializer over TS's own CDP-derived DOM
     // inventory. Its allowlist seal runs before any retained/emitted view; no
@@ -4505,6 +4514,7 @@ async function observeSession(
         semanticSource,
         proseSource,
         startMetadata,
+        proseUnavailable,
       );
     }
     if (v2Mode === "shadow") exerciseCompactV2Shadow(session, generation, elements, semanticSource);

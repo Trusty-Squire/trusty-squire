@@ -1009,6 +1009,13 @@ export function encodeV2Delta(args: {
   delta: SafeObservationDeltaV2;
   /** Screened prose items; emitted only when the caller saw them change. */
   pageText?: readonly string[];
+  /**
+   * Concrete reason the text channel could not be extracted at all (e.g. the
+   * page-side prose extractor threw). Emitted as `text_unavailable` so a
+   * failed channel is distinguishable from a page with no prose — the text
+   * channel must never fail open with a silent `text: ""`.
+   */
+  textUnavailable?: string;
 }): Record<string, unknown> | null {
   const payload: Record<string, unknown> = {
     format: "compact-v2",
@@ -1018,6 +1025,7 @@ export function encodeV2Delta(args: {
     delta: true,
     ...(args.semantics === undefined ? {} : { semantic: args.semantics }),
     ...(args.delta.stageChanged ? { stage: args.stage } : {}),
+    ...(args.textUnavailable === undefined ? {} : { text_unavailable: args.textUnavailable }),
     // `safe_table` follows the established TS delta protocol: rows are
     // upserts, irrespective of whether their ref is new or changed. This keeps
     // existing delta consumers compatible while the @e: map itself stays V2.
@@ -1527,6 +1535,8 @@ export function encodeV2Page(args: {
   unchanged?: boolean;
   /** Screened page prose for the text channel; degraded item-by-item to fit. */
   pageText?: readonly string[];
+  /** Concrete reason the text channel could not be extracted; see encodeV2Delta. */
+  textUnavailable?: string;
   startMetadata?: {
     hint?: string;
     userEmail?: string;
@@ -1550,6 +1560,7 @@ export function encodeV2Page(args: {
     ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
       ? {}
       : { semantic: args.semantics }),
+    ...(args.textUnavailable === undefined ? {} : { text_unavailable: args.textUnavailable }),
   };
   if (args.unchanged === true && offset === 0) {
     // Fixed metadata degrades before the map is touched; the throw is the
