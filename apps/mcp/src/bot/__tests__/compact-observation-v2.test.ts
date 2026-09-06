@@ -268,20 +268,25 @@ describe("compact observation v2", () => {
     expect(page.payload.stage).toBe("browse");
   });
 
-  it("rejects token-dense metadata below the byte ceiling but above the token cap", () => {
-    const denseHint = "!".repeat(OBSERVE_V2_MAX_TOKENS + 64);
-    expect(Buffer.byteLength(JSON.stringify({ hint: denseHint }), "utf8")).toBeLessThan(
+  it("degrades oversized start metadata instead of failing the page", () => {
+    const denseHint = "!".repeat(OBSERVE_V2_MAX_WIRE_BYTES + 64);
+    expect(Buffer.byteLength(JSON.stringify({ hint: denseHint }), "utf8")).toBeGreaterThan(
       OBSERVE_V2_MAX_WIRE_BYTES,
     );
-    expect(() =>
-      encodeV2Page({
-        sessionId: "session",
-        stage: "browse",
-        rows: [],
-        cursorFor: (offset) => `cursor-${offset}`,
-        startMetadata: { hint: denseHint },
-      }),
-    ).toThrow("compact-v2 budget metadata exceeded");
+    // A hint this dense is dropped by the graceful metadata degradation — the
+    // observation itself must never fail on real-world metadata.
+    const page = encodeV2Page({
+      sessionId: "session",
+      stage: "browse",
+      rows: [],
+      cursorFor: (offset) => `cursor-${offset}`,
+      startMetadata: { hint: denseHint },
+    });
+    expect(page.payload.hint).toBeUndefined();
+    expect(page.payload.safe_table).toEqual([]);
+    expect(
+      Buffer.byteLength(JSON.stringify(page.payload), "utf8"),
+    ).toBeLessThanOrEqual(OBSERVE_V2_MAX_WIRE_BYTES);
   });
 
   it("clamps a dense page with long raw labels to a paged, sealed first action map", () => {
@@ -308,8 +313,15 @@ describe("compact observation v2", () => {
     });
     const wire = JSON.stringify(page.payload);
     expect(safe.rows).toHaveLength(94);
-    expect(page.payload.safe_table as unknown[]).toHaveLength(4);
-    expect(page.payload.overflow).toEqual({ remaining: 90, next_cursor: "cursor-4" });
+    // Budget-driven packing: rows fill the page until the wire budget is
+    // actually reached — never clamped to a fixed first-page row count that
+    // strands below-the-fold CTAs in overflow.
+    const firstPage = page.payload.safe_table as unknown[];
+    expect(firstPage.length).toBeGreaterThan(4);
+    expect(page.payload.overflow).toEqual({
+      remaining: 94 - firstPage.length,
+      next_cursor: `cursor-${firstPage.length}`,
+    });
     expect(page.payload.semantic).toEqual({ title: "Dense sample", headings: ["First controls"] });
     expect(Buffer.byteLength(wire, "utf8")).toBeLessThanOrEqual(OBSERVE_V2_MAX_WIRE_BYTES);
     expect(wire).not.toContain(longLabel);

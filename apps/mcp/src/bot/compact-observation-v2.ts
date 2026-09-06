@@ -3,11 +3,50 @@ import type { InteractiveElement } from "./browser.js";
 
 export const OBSERVE_V2_MAX_WIRE_BYTES = 4_096;
 export const OBSERVE_V2_MAX_TOKENS = 1_024;
-const FIRST_PAGE_ROW_LIMIT = 4;
 
 export function compactV2PayloadWithinBudget(payload: unknown): boolean {
   const bytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
-  return bytes <= OBSERVE_V2_MAX_WIRE_BYTES && bytes <= OBSERVE_V2_MAX_TOKENS;
+  if (bytes > OBSERVE_V2_MAX_WIRE_BYTES) return false;
+  // Token estimate at the ~4 bytes/token the wire's enum-only prose runs.
+  // Comparing raw BYTES against the token cap (the old behavior) made the
+  // effective budget 1024 bytes, so a real-world OAuth-shaped URL alone
+  // hard-failed observation — the live "compact-v2 budget metadata exceeded"
+  // session killer. The byte cap bounds the MCP message; the token cap bounds
+  // model context, and both now scale with the page instead of strangling it.
+  return Math.ceil(bytes / 4) <= OBSERVE_V2_MAX_TOKENS;
+}
+
+/**
+ * Graceful degradation for a payload whose FIXED metadata (url, semantic
+ * context, start hints) alone exceeds the wire budget. Degrades in order:
+ * shrink the URL, drop the semantic title/heading, drop start-routing hints —
+ * never the safe_table rows or the overflow cursor, which are the actionable
+ * map. Returns null only when code-owned fields (session id / cursor) are
+ * themselves hostile, which the caller fails closed on.
+ */
+export function compactV2DegradeMetadata(
+  payload: Record<string, unknown>,
+): Record<string, unknown> | null {
+  if (compactV2PayloadWithinBudget(payload)) return payload;
+  let candidate = payload;
+  for (const urlCap of [512, 128]) {
+    const url = typeof candidate.url === "string" ? candidate.url : "";
+    if (url.length > urlCap) candidate = { ...candidate, url: url.slice(0, urlCap) };
+    if (compactV2PayloadWithinBudget(candidate)) return candidate;
+  }
+  if ("semantic" in candidate) {
+    candidate = { ...candidate, semantic: undefined };
+    if (compactV2PayloadWithinBudget(candidate)) return candidate;
+  }
+  if ("hint" in candidate || "user_email" in candidate || "hint_overflow" in candidate) {
+    const rest = { ...candidate };
+    delete rest.hint;
+    delete rest.user_email;
+    delete rest.hint_overflow;
+    candidate = rest;
+    if (compactV2PayloadWithinBudget(candidate)) return candidate;
+  }
+  return null;
 }
 
 export type SafeRoleV2 =
@@ -768,7 +807,6 @@ export function encodeV2Delta(args: {
   };
   return compactV2PayloadWithinBudget(payload) ? payload : null;
 }
-
 const INTENTS: ReadonlyArray<[SafeIntentV2, RegExp]> = [
   ["add_to_cart", /add\s+(?:to\s+)?(?:cart|bag|basket)/i],
   ["view_cart", /view\s+(?:cart|bag|basket)/i],
@@ -859,21 +897,37 @@ function privateQueryTermsV2(value: string): string[] | null {
 export function controlMatchesPrivateQueryV2(el: InteractiveElement, query: string): boolean {
   const needles = privateQueryTermsV2(query);
   if (needles === null) return false;
-  // The private match also consults the element's name/id slugs so
-  // choice-group members without their own copy — Shopify shipping-rate
-  // radios (name "checkout[shipping_rate][id]", id "checkout_shipping_rate_…")
-  // — stay queryable. These are DOM identifiers, never field values, and each
-  // candidate still passes the full secret-shape gate below before any token
-  // comparison.
-  return [...controlNamingTexts(el), el.name, el.id].some((candidate) => {
-    if (typeof candidate !== "string") return false;
+  // AND-match every needle against the COMBINED token set across all naming
+  // sources — visible text, label, aria label, icon, title, placeholder,
+  // value, plus name/id slugs (so choice-group members without their own copy
+  // — Shopify shipping-rate radios — stay queryable; these are DOM
+  // identifiers, never field values) and the control's own role word.
+  // Requiring each needle to hit ONE source (the old behavior) made generic
+  // multi-term queries — "region dropdown" for a combobox labeled "Region",
+  // "use case textbox" for a textarea — return empty on real pages.
+  const role = roleOf(el);
+  const candidates: Array<string | null | undefined> = [
+    ...controlNamingTexts(el),
+    el.name,
+    el.id,
+    role,
+  ];
+  const combined = new Set<string>();
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string" || candidate.length === 0) continue;
     const tokens = candidate.normalize("NFKC").match(/[\p{L}\p{M}\p{N}]{1,48}/gu);
-    if (tokens === null) return false;
-    const safeTokens = new Set(
-      tokens.map(privateQueryTokenV2).filter((token): token is string => token !== null),
-    );
-    return needles.every((needle) => safeTokens.has(needle));
-  });
+    if (tokens === null) continue;
+    for (const token of tokens) {
+      const safe = privateQueryTokenV2(token);
+      if (safe !== null) combined.add(safe);
+    }
+  }
+  if (role === "select") {
+    // Common spoken words for the wire role keep role-term queries reachable.
+    combined.add("dropdown");
+    combined.add("combobox");
+  }
+  return needles.every((needle) => combined.has(needle));
 }
 
 function roleOf(el: InteractiveElement): SafeRoleV2 | null {
@@ -1192,23 +1246,27 @@ export function encodeV2Page(args: {
         : { semantic: args.semantics }),
       delta: true,
     };
-    if (!compactV2PayloadWithinBudget(payload)) {
-      throw new Error("compact-v2 budget metadata exceeded");
-    }
+    // Fixed metadata degrades before the map is touched; the throw is the
+    // fail-closed guard against hostile code-owned fields, unreachable from
+    // real pages.
+    const degraded = compactV2DegradeMetadata(payload);
+    if (degraded === null) throw new Error("compact-v2 budget metadata exceeded");
     return {
-      payload,
+      payload: degraded,
       nextOffset: 0,
     };
   }
   const visible: WireControlV2[] = [];
-  // Initial observations stay decisively small. Overflow is retrieved through
-  // the in-MCP query cursor, never a shell-readable snapshot file.
-  const pageEnd =
-    offset === 0 ? Math.min(args.rows.length, FIRST_PAGE_ROW_LIMIT) : args.rows.length;
-  for (let index = offset; index < pageEnd; index += 1) {
-    const candidate = args.rows[index]!;
+  // Every interactive control is a candidate for the default map: rows are
+  // packed in priority order until the wire budget is actually reached, so a
+  // below-the-fold primary CTA is never stranded behind an arbitrary row cap
+  // (the live Xata failure). Overflow remains reachable through the in-MCP
+  // query cursor, never a shell-readable snapshot file.
+  let nextOffset = offset;
+  for (let index = offset; index < args.rows.length; index += 1) {
+    const candidate = wireControl(args.rows[index]!);
     const remainder = args.rows.length - (index + 1);
-    const payload: Record<string, unknown> = {
+    const trial: Record<string, unknown> = {
       format: "compact-v2",
       url: args.pageUrl ?? "",
       text: "",
@@ -1224,17 +1282,24 @@ export function encodeV2Page(args: {
       ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
         ? {}
         : { semantic: args.semantics }),
-      safe_table: [...visible, wireControl(candidate)],
+      safe_table: [...visible, candidate],
       ...(remainder > 0
         ? { overflow: { remaining: remainder, next_cursor: args.cursorFor(index + 1) } }
         : {}),
     };
-    if (!compactV2PayloadWithinBudget(payload)) break;
-    visible.push(wireControl(candidate));
+    if (!compactV2PayloadWithinBudget(trial)) break;
+    visible.push(candidate);
+    nextOffset = index + 1;
   }
-  const nextOffset = offset + visible.length;
+  if (visible.length === 0 && offset < args.rows.length) {
+    // Budget-driven packing must never emit an empty page whose cursor points
+    // back at the same offset. Force the first row in and let fixed metadata
+    // degrade around it — on a real page this is unreachable.
+    visible.push(wireControl(args.rows[offset]!));
+    nextOffset = offset + 1;
+  }
   const remaining = args.rows.length - nextOffset;
-  const payload: Record<string, unknown> = {
+  let payload: Record<string, unknown> = {
     format: "compact-v2",
     url: args.pageUrl ?? "",
     text: "",
@@ -1253,10 +1318,12 @@ export function encodeV2Page(args: {
     safe_table: visible,
     ...(remaining > 0 ? { overflow: { remaining, next_cursor: args.cursorFor(nextOffset) } } : {}),
   };
-  // The fixed fields are deliberately tiny, so failure means a hostilely long
-  // session id/cursor. Fail closed rather than exceeding the wire contract.
   if (!compactV2PayloadWithinBudget(payload)) {
-    throw new Error("compact-v2 budget metadata exceeded");
+    // Only hostile fixed metadata (a code-owned session id/cursor) lands here;
+    // degrade the metadata before ever dropping an actionable row.
+    const degraded = compactV2DegradeMetadata(payload);
+    if (degraded === null) throw new Error("compact-v2 budget metadata exceeded");
+    payload = degraded;
   }
   return { payload, nextOffset };
 }
