@@ -610,6 +610,7 @@ function oauthActionDeadlineError(
       : `OAuth action did not complete within ${seconds} seconds. ` +
           "Call operate_observe to check whether the pending step has resolved, rather than " +
           "treating this as a failure.",
+    phase === "lease" ? "not_attempted" : "pending",
   );
 }
 
@@ -4719,12 +4720,18 @@ interface InternalActResult {
 // budget), never a guessed cause. Mirrors observeSession's oauthInProgress()
 // shape so both compact-v2 and legacy hosts get the same treatment: a normal
 // (non-error) observation the host re-observes/retries against.
-function oauthAwaitingHumanObservation(session: Session, reason: string): Observation {
+function oauthAwaitingHumanObservation(
+  session: Session,
+  error: OAuthAwaitingHumanError,
+): Observation {
   session.prevObserve = null;
   invalidateCompactV2Snapshot(session);
   const url = session.browser.currentUrl();
+  const reason = error.message;
   const guidance =
-    "Not a failure: call operate_observe to check whether the pending challenge has resolved.";
+    error.phase === "not_attempted"
+      ? "Not a failure: nothing was clicked, so no challenge is pending. Retry oauth_login."
+      : "Not a failure: call operate_observe to check whether the pending challenge has resolved.";
   const oauth: NonNullable<Observation["oauth"]> = {
     state: "awaiting_human",
     reason,
@@ -4774,7 +4781,7 @@ async function actInternally(
     // Fix C: an OAuth wait timing out is honest uncertainty, not a failure —
     // return it as a normal (non-throwing) observation instead of an error.
     if (error instanceof OAuthAwaitingHumanError && session !== undefined) {
-      return { observation: oauthAwaitingHumanObservation(session, error.message), outcome: {} };
+      return { observation: oauthAwaitingHumanObservation(session, error), outcome: {} };
     }
     if (
       session?.compactV2Active === true &&
@@ -4808,7 +4815,7 @@ export async function act(
     // Fix C: an OAuth wait timing out is honest uncertainty, not a failure —
     // return it as a normal (non-throwing) observation instead of an error.
     if (error instanceof OAuthAwaitingHumanError && session !== undefined) {
-      return oauthAwaitingHumanObservation(session, error.message);
+      return oauthAwaitingHumanObservation(session, error);
     }
     if (session?.compactV2Active === true) {
       throw new Error(compactV2ActionFailureReason(error, action.kind));

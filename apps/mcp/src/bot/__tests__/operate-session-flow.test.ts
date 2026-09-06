@@ -885,9 +885,11 @@ vi.mock("../browser.js", () => ({
   // OAuth-timeout classification (never asserting an unverifiable cause) can
   // throw/catch these against this mocked module.
   OAuthAwaitingHumanError: class extends Error {
-    constructor(message: string) {
+    readonly phase: "not_attempted" | "pending";
+    constructor(message: string, phase: "not_attempted" | "pending" = "pending") {
       super(message);
       this.name = "OAuthAwaitingHumanError";
+      this.phase = phase;
     }
   },
   OAuthFailedError: class extends Error {
@@ -3673,6 +3675,10 @@ describe("operate session — OAuth lifecycle", () => {
       expect(queued.oauth.reason).toMatch(/has not been attempted yet/);
       expect(queued.oauth.reason).not.toMatch(/challenge|consent/i);
     }
+    // Nothing was clicked, so the guidance must recommend the retry the
+    // reason names — not re-observing a challenge that was never started.
+    expect(queued.guidance).toMatch(/oauth_login/);
+    expect(queued.guidance).not.toMatch(/operate_observe|pending challenge/);
     expect(queued.url).toBe(h.currentUrl);
     expect(h.oauthLoginCalls).toHaveLength(1);
     releaseFirst();

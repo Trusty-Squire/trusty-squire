@@ -358,10 +358,14 @@ export class PaymentSubmitOutcomeUnknownError extends Error {
 // keep waiting / retry, not treat it as a dead end. `OAuthFailedError` is
 // reserved for an actually-observed terminal signal (the page closed with no
 // live recovery path) — still never a guess about the cause.
+export type OAuthAwaitingHumanPhase = "not_attempted" | "pending";
+
 export class OAuthAwaitingHumanError extends Error {
-  constructor(message: string) {
+  readonly phase: OAuthAwaitingHumanPhase;
+  constructor(message: string, phase: OAuthAwaitingHumanPhase = "pending") {
     super(message);
     this.name = "OAuthAwaitingHumanError";
+    this.phase = phase;
   }
 }
 
@@ -13206,6 +13210,7 @@ export class BrowserController {
             `OAuth has not been attempted yet: the ${Math.ceil(oauthBudgetMs / 1000)}-second ` +
               `budget elapsed before the OAuth control on ${safeOrigin(productUrl)} was clicked. ` +
               "Retry oauth_login.",
+            "not_attempted",
           );
         }
         try {
