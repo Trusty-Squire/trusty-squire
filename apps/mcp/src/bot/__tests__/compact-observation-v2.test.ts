@@ -1306,7 +1306,7 @@ describe("compact observation v2 text channel", () => {
       visibleText: "Continue checkout",
       container: "main:checkout",
     });
-    const opaque = element({ visibleText: "1w", container: "section:sk-proj-abcdefghij" });
+    const opaque = element({ visibleText: "1w", container: `section:${sk("proj-abcdefghij")}` });
     const safe = safeControls({
       elements: [informative, opaque],
       legacyRefs: new Map([

@@ -311,7 +311,7 @@ describe("extractApiKeyFromText — OpenRouter / Anthropic / OpenAI prefixes (F1
 
 describe("isTruncatedCapture — F10 truncation detection", () => {
   it("flags a key directly followed by '...'", () => {
-    const text = "Your key: sk-or-v1-example000000000000000000000001...";
+    const text = `Your key: ${sk("or-v1-example000000000000000000000001")}...`;
     // Simulate what the labeled regex would have captured here.
     const captured = sk("or-v1-example000000000000000000000001");
     expect(isTruncatedCapture(text, captured)).toBe(true);
@@ -334,7 +334,7 @@ describe("isTruncatedCapture — F10 truncation detection", () => {
   it("does NOT flag a key followed by two dots (ordinary punctuation)", () => {
     // An or-v1 key followed by ".. and ..." — two trailing dots can appear in
     // prose. Three or more dots is the marker.
-    const text = "Your key sk-or-v1-abc123.. configured.";
+    const text = `Your key ${sk("or-v1-abc123")}.. configured.`;
     expect(isTruncatedCapture(text, sk("or-v1-abc123"))).toBe(false);
   });
 

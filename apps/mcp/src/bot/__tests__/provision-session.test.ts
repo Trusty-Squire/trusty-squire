@@ -863,7 +863,7 @@ describe("detectExtractionBlock (fail-closed on a login wall)", () => {
   it("does NOT flag a real keys page that merely mentions enabling JavaScript", () => {
     // A long, content-rich page is not a wall even if the phrase appears in a footer.
     const realPage =
-      "Your API keys\nProduction key sk-live-abc123def456ghi789\n".repeat(20) +
+      `Your API keys\nProduction key ${sk("live-abc123def456ghi789")}\n`.repeat(20) +
       "Note: enable JavaScript for the best experience.";
     expect(detectExtractionBlock(realPage)).toBeNull();
   });
@@ -1192,9 +1192,9 @@ describe("hasOneTimeSecretModal (Luma one-time reveal)", () => {
     ).toBe(true);
   });
   it("does NOT fire on an ordinary always-visible key field", () => {
-    expect(hasOneTimeSecretModal("Your API key: sk-live-abc123 (always available here)")).toBe(
-      false,
-    );
+    expect(
+      hasOneTimeSecretModal(`Your API key: ${sk("live-abc123")} (always available here)`),
+    ).toBe(false);
   });
 });
 

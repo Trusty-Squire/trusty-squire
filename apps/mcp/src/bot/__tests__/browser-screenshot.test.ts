@@ -182,7 +182,7 @@ describe("operate_screenshot returns unmasked pixels (real browser)", () => {
       try {
         const page = await browser.newPage();
         await page.setContent(`
-          <p id="key" style="font-size:24px">sk-live-9f2c8a1e4b7d6053ac91</p>
+          <p id="key" style="font-size:24px">${sk("live-9f2c8a1e4b7d6053ac91")}</p>
           <p id="recovery" style="font-size:24px">ABCD-EFGH-IJKL-MNOP</p>
           <p id="totp" style="font-size:24px">482913</p>
         `);

@@ -5518,7 +5518,7 @@ describe("Compact V2 checkout copy stays unredacted", () => {
   it("still redacts injected vault values and tight secret shapes from observation text", async () => {
     const secret = "injected-1234567890abcdef";
     h.visibleText =
-      "API key: sk-proj-1234567890abcdefghijklmnopqrstuv Recovery code: 814226 Your 2FA code is 553218";
+      `API key: ${sk("proj-1234567890abcdefghijklmnopqrstuv")} Recovery code: 814226 Your 2FA code is 553218`;
     h.elements = [
       elem({
         tag: "input",
@@ -5930,7 +5930,7 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
 
     const secret = "stored-credential-7f3d9a";
     stashSecretSlot(started.session_id, "login", secret);
-    h.visibleText = `API key: sk-proj-1234567890abcdefghijklmnopqrstuv ${secret}`;
+    h.visibleText = `API key: ${sk("proj-1234567890abcdefghijklmnopqrstuv")} ${secret}`;
     h.elements = [];
     const full = await observe(started.session_id, "full");
     expect(full.text).not.toContain("[sealed]");
@@ -6973,7 +6973,7 @@ describe("operate_finish lifecycle consolidation", () => {
     const previousAutoPromote = process.env.TRUSTY_SQUIRE_AUTO_PROMOTE;
     process.env.TRUSTY_SQUIRE_AUTO_PROMOTE = "0";
     let releaseExtraction: (() => void) | undefined;
-    h.visibleText = "API key sk-live-finish-exclusive-123456789";
+    h.visibleText = `API key ${sk("live-finish-exclusive-123456789")}`;
     const storeCredential = vi.fn().mockResolvedValue({
       reference: "vault://acct/finish-exclusive",
       service: "example",
