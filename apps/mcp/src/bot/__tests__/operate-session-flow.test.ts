@@ -3579,7 +3579,10 @@ describe("operate session — OAuth lifecycle", () => {
       kind: "oauth_login",
       target: "Continue with Google",
     });
-    expect(timedOut.oauth).toMatchObject({ state: "awaiting_human", next_action: "operate_observe" });
+    expect(timedOut.oauth).toMatchObject({
+      state: "awaiting_human",
+      next_action: "operate_observe",
+    });
     if (timedOut.oauth?.state === "awaiting_human") {
       expect(timedOut.oauth.reason).not.toMatch(/expired|force-relogin/i);
     }
