@@ -2,11 +2,13 @@ import { Buffer } from "node:buffer";
 import { describe, expect, it } from "vitest";
 import {
   OBSERVE_V2_MAX_WIRE_BYTES,
+  REDACTED_SECRET_LABEL_V2,
   buildSafeControlsV2,
   compactV2LegacyRefForHandle,
   controlLabelV2,
   isCompactV2Handle,
   isCompactV2Label,
+  looksLikeSecretShapedName,
   controlMatchesPrivateQueryV2,
   diffSafeControlsV2,
   equalSafePageSemanticsV2,
@@ -132,7 +134,7 @@ describe("compact observation v2", () => {
     ]);
   });
 
-  it("keeps a credential-shaped label — masking is payment-only", () => {
+  it("redacts a credential-shaped accessible name but keeps the row actionable", () => {
     const button = element({ visibleText: "Copy api_1234567890123" });
     const safe = safeControls({
       elements: [button],
@@ -143,9 +145,115 @@ describe("compact observation v2", () => {
       expect.objectContaining({
         ref: "@e:hhhhhhhhh1",
         role: "button",
-        label: "@copy-api-" + "1234567890123",
+        label: REDACTED_SECRET_LABEL_V2,
       }),
     ]);
+  });
+
+  // Live evidence (2026-09-06 ipinfo dogfood, Finding 1): on /dashboard and
+  // /dashboard/token the action map emitted the account's LIVE api token as
+  // the copy button's label — `["@e:6b3eXuaBV7","b","@f9a062f02fadf5"]` — and
+  // a curl example's label carried its first four characters. Both labels are
+  // reproduced below verbatim from the captured maps; the token itself is
+  // reconstructed to the same 14-lowercase-hex shape.
+  describe("ipinfo captured-map regression", () => {
+    const token = "f9a062f02fadf5"; // 14 lowercase hex — ipinfo's live token shape
+
+    it("redacts the copy-token button's label and keeps ref + role + actionability", () => {
+      const copyToken = element({ visibleText: token });
+      const safe = buildSafeControlsV2({
+        elements: [copyToken],
+        legacyRefs: new Map([[copyToken, "@e:6b3eXuaBV7"]]),
+        handles: new Map([[copyToken, "@e:6b3eXuaBV7"]]),
+        pageOrigin: "https://ipinfo.invalid",
+      });
+      expect(safe.rows).toHaveLength(1);
+      expect(safe.rows[0]).toEqual(
+        expect.objectContaining({ ref: "@e:6b3eXuaBV7", role: "button" }),
+      );
+      expect(safe.rows[0]?.label).toBe(REDACTED_SECRET_LABEL_V2);
+      const page = encodeV2Page({
+        sessionId: "session",
+        stage: "browse",
+        rows: safe.rows,
+        cursorFor: (offset) => `cursor-${offset}`,
+      });
+      expect(page.payload.safe_table).toEqual([
+        ["@e:6b3eXuaBV7", "b", REDACTED_SECRET_LABEL_V2],
+      ]);
+      expect(JSON.stringify(page.payload)).not.toContain(token);
+    });
+
+    it("redacts the curl example whose truncated label carried the token fragment", () => {
+      const curlExample = element({
+        visibleText: `curl -H "Authorization: Bearer ${token}"`,
+      });
+      const safe = safeControls({
+        elements: [curlExample],
+        legacyRefs: new Map([[curlExample, "@e:curl-ex"]]),
+        pageOrigin: "https://ipinfo.invalid",
+      });
+      expect(safe.rows[0]?.label).toBe(REDACTED_SECRET_LABEL_V2);
+      const page = encodeV2Page({
+        sessionId: "session",
+        stage: "browse",
+        rows: safe.rows,
+        cursorFor: (offset) => `cursor-${offset}`,
+      });
+      const wire = JSON.stringify(page.payload);
+      expect(wire).not.toContain(token);
+      expect(wire).not.toContain("f9a0");
+    });
+
+    it("keeps the redacted row actionable through a delta upsert", () => {
+      const copyToken = element({ visibleText: token });
+      const safe = buildSafeControlsV2({
+        elements: [copyToken],
+        legacyRefs: new Map([[copyToken, "@e:6b3eXuaBV7"]]),
+        handles: new Map([[copyToken, "@e:6b3eXuaBV7"]]),
+        pageOrigin: "https://ipinfo.invalid",
+      });
+      const payload = encodeV2Delta({
+        sessionId: "session",
+        stage: "browse",
+        delta: { stageChanged: true, added: safe.rows, changed: [], removed: [] },
+      });
+      expect(payload).not.toBeNull();
+      expect(payload!.safe_table).toEqual([
+        ["@e:6b3eXuaBV7", "b", REDACTED_SECRET_LABEL_V2],
+      ]);
+      expect(JSON.stringify(payload)).not.toContain(token);
+    });
+
+    it("keeps every legitimate captured label verbatim", () => {
+      for (const visibleText of [
+        "View Plans & Pricing",
+        "AS15169",
+        "8.8.8.8",
+        "1.1.1.1",
+        "bmbmlite",
+        "curl example",
+        "Copy",
+      ]) {
+        const control = element({ visibleText });
+        const safe = safeControls({
+          elements: [control],
+          legacyRefs: new Map([[control, "@e:legit"]]),
+          pageOrigin: "https://ipinfo.invalid",
+        });
+        expect(safe.rows[0]?.label, visibleText).not.toBe(REDACTED_SECRET_LABEL_V2);
+      }
+    });
+  });
+
+  it("screens the derived composite label even when only the slug would leak", () => {
+    // The description survives truncation intact but the SLUG truncates at 32
+    // chars, carrying the token's first four characters; the marker replaces
+    // the whole slug, so no fragment leaks either way.
+    expect(controlLabelV2(`curl -H "Authorization: Bearer f9a062f02fadf5"`)).toBe(
+      REDACTED_SECRET_LABEL_V2,
+    );
+    expect(controlLabelV2("Bearer f9a062f02f")).toBe(REDACTED_SECRET_LABEL_V2);
   });
 
   it("keeps every page-derived description, card material included", () => {
@@ -514,7 +622,7 @@ describe("compact observation v2", () => {
     expect(safe.rows).toContainEqual(expect.objectContaining({ label: "@4111111111111111" }));
   });
 
-  it("uses the visible text as the label — a high-entropy token is not screened out", () => {
+  it("redacts a prefixless high-entropy token rendered as the accessible name", () => {
     const button = element({
       visibleText: "abcdefghijklmnopqrstuvwxyz123456",
       ariaLabel: "Copy API key",
@@ -525,8 +633,81 @@ describe("compact observation v2", () => {
       pageOrigin: "https://merchant.invalid",
     });
     expect(safe.rows).toEqual([
-      expect.objectContaining({ label: "@abcdefghijklmnopqrstuvwxyz123456" }),
+      expect.objectContaining({ label: REDACTED_SECRET_LABEL_V2 }),
     ]);
+  });
+
+  it("keeps word-like pure-alpha and low-entropy digit labels unscreened", () => {
+    expect(controlLabelV2("authorization")).toBe("@authorization");
+    expect(controlLabelV2("authentication")).toBe("@authentication");
+    expect(controlLabelV2("4111111111111111")).toBe("@4111111111111111");
+    expect(controlLabelV2("202609060941")).toBe("@202609060941");
+    expect(controlLabelV2("deadbeefcafe")).toBe("@deadbeefcafe");
+  });
+
+  describe("secret-shaped-name screen (vendor prefixes and shapes)", () => {
+    const redacted: readonly string[] = [
+      "sk-proj-abcdefghijklmnop1234567890",
+      "sk-ant-api03-xyz",
+      "sk-lw-0123456789abcdef",
+      "ghp_0123456789abcdefghijklmnopqrstuvwxyz",
+      "gho_0123456789abcdefghijklmnopqrstuvwxyz",
+      "github_pat_0123456789ABCDEFG_abcdefgh",
+      "AKIAIOSFODNN7EXAMPLE",
+      "ASIAIOSFODNN7EXAMPLE",
+      "xoxb-123456789012-1234567890123-abc",
+      "xoxp-123456789012-1234567890123-abc",
+      "glpat-0123456789abcdefghijklmnopqrst",
+      "AIzaSyA0123456789abcdefghijklmnopqrstu",
+      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc",
+      "login | Bearer 9f8e7d6c5b4a",
+      "curl -H 'Authorization: Bearer f9a062f02fadf5'",
+      "token f9a062f02fadf5 (never expires)",
+    ];
+    const kept: readonly string[] = [
+      "View plans & pricing",
+      "AS15169",
+      "8.8.8.8",
+      "1.1.1.1",
+      "bmbmlite",
+      "curl example",
+      "Copy API key",
+      "authorization",
+      "authentication",
+      "xoxo gossip girl club",
+      "task-management-101",
+      "standard-bearer of the fleet",
+      "user@example.com",
+      "4111 1111 1111 1111",
+      "SKU-12345",
+      "v1.2.3",
+    ];
+
+    it("redacts every vendor-prefixed or token-shaped name", () => {
+      for (const value of redacted) expect(looksLikeSecretShapedName(value), value).toBe(true);
+    });
+
+    it("keeps ordinary UI copy", () => {
+      for (const value of kept) expect(looksLikeSecretShapedName(value), value).toBe(false);
+    });
+
+    it("is length + character-class + entropy: a bare hex run needs entropy, not a prefix", () => {
+      expect(looksLikeSecretShapedName("f9a062f02fadf5")).toBe(true);
+      expect(looksLikeSecretShapedName("a1b2c3d4e5f6a7b8")).toBe(true);
+      // Low-entropy digit runs (dates, Luhn-valid PANs, counters) stay.
+      expect(looksLikeSecretShapedName("4111111111111111")).toBe(false);
+      expect(looksLikeSecretShapedName("111111111111")).toBe(false);
+      // High-entropy digit-bearing base62 run with no prefix.
+      expect(looksLikeSecretShapedName("Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz")).toBe(true);
+    });
+
+    it("fails toward redaction on ambiguous truncations of anchored shapes", () => {
+      // A 40-char description budget can cut a key mid-body; the anchored
+      // shapes must still screen on the visible fragment.
+      expect(looksLikeSecretShapedName("sk-live-12345678")).toBe(true);
+      expect(looksLikeSecretShapedName("AKIAIOSFODNN7EXAM")) /* truncated */.toBe(true);
+      expect(looksLikeSecretShapedName("Bearer f9a062")).toBe(true);
+    });
   });
 
   it("uses the visible text even when it is card material — no accessibility fallback", () => {

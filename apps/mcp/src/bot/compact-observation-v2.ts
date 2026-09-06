@@ -198,15 +198,113 @@ export function compactV2LegacyRefForHandle(
   return handles.get(target) ?? null;
 }
 
+// ---- Accessible-name secret screen ----------------------------------------
+// A control's accessible name is page-rendered text, and sites routinely render
+// an API key as the accessible name of its copy/reveal button (ipinfo's token
+// button, cloud consoles). When they do, the derived label alias IS the secret:
+// the 2026-09-06 ipinfo dogfood emitted the account's live 14-hex-char token as
+// `@f9a062f02fadf5`, and its first four characters again inside a curl
+// example's `@curl-h-authorization-bearer-f9a0`, putting the credential into
+// the model's context and transcript — precisely the exposure the write-only
+// vault exists to prevent.
+//
+// This screen is deliberately LABEL-ONLY and does not reopen the read-seal
+// order of 2026-09-05 (docs/observation-model.md §4.5): page text, semantics,
+// screenshots, extracts, and field values are untouched. The label alias is a
+// code-derived target whose documented contract was always "screened ... never
+// a value" — the screen below is what makes that contract true for sites that
+// display a key as clickable text. A redacted row keeps its ref, role, and
+// every non-secret fact (state/action/field/choice/frame) so the control stays
+// clickable; only the value is replaced, with a marker that says why.
+// Detection fails toward redaction on ambiguous shapes but must not eat
+// ordinary UI copy: measured-live legitimate labels — @view-plans-pricing,
+// @as15169, @8-8-8-8, @1-1-1-1, @bmbmlite, @curl-example — survive verbatim.
+
+/** The label emitted when an accessible name screened as secret-shaped. */
+export const REDACTED_SECRET_LABEL_V2 = "@redacted-secret";
+
+/** Shannon entropy of the character distribution, in bits per character. */
+export function shannonEntropyBitsPerChar(value: string): number {
+  if (value.length === 0) return 0;
+  const counts = new Map<string, number>();
+  for (const character of value) counts.set(character, (counts.get(character) ?? 0) + 1);
+  let bits = 0;
+  for (const count of counts.values()) {
+    const probability = count / value.length;
+    bits -= probability * Math.log2(probability);
+  }
+  return bits;
+}
+
+const SECRET_NAME_MIN_RUN_CHARS = 12;
+// Entropy floors per character. Hex runs get the lower floor (a 16-symbol
+// alphabet rarely exceeds ~3.3 bits/char even at full randomness; the live
+// ipinfo token measured ~3.17). Other digit-bearing runs (base32/62/64url
+// shapes) get the higher floor.
+const SECRET_NAME_HEX_MIN_ENTROPY_BITS = 2.5;
+const SECRET_NAME_MIXED_MIN_ENTROPY_BITS = 2.8;
+
+// Vendor-anchored shapes. Each redacts on a prefix plus a bounded run, so a
+// description truncated before the key's end still screens (a 40-char budget
+// cuts an "Authorization: Bearer <key>" example mid-key — the curl-example
+// leak rode exactly that truncation into the label slug).
+const SECRET_NAME_SHAPE_RES: readonly RegExp[] = [
+  /\bsk-[A-Za-z0-9_-]{8,}/, // OpenAI-style
+  /\bgh[pousr]_[A-Za-z0-9]{16,}/, // GitHub classic PATs
+  /\bgithub_pat_[A-Za-z0-9_]{16,}/, // GitHub fine-grained PATs
+  /\bA[KS]IA[0-9A-Z]{8,}/, // AWS access key ids
+  /\bxox[bposr]-(?=[A-Za-z-]*\d)[A-Za-z0-9-]{8,}/, // Slack tokens (digit-bearing)
+  /\bglpat-[A-Za-z0-9_-]{16,}/, // GitLab PATs
+  /\bAIza[0-9A-Za-z_-]{16,}/, // Google API keys
+  /\beyJ[A-Za-z0-9_-]{12,}/, // JWT header segment (base64url of `{"`)
+  /\b[A-Za-z][A-Za-z0-9]{1,9}_(?=[A-Za-z_]*\d)[A-Za-z0-9_]{12,}/, // snake-prefixed keys (api_…, key_…)
+  /\b[Bb]earer[ \t]+[A-Za-z0-9_.\-=]{6,}/, // composite auth/curl examples
+];
+
+// JWT header.payload.signature: three dot-separated base64url segments. Real
+// hostnames never present three consecutive 8+-char alphanumeric segments.
+const SECRET_NAME_JWT_RE = /\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/;
+
+/**
+ * Whether a control's accessible name reads as a credential rather than a
+ * word. Combines vendor anchors, JWT shape, and LENGTH + CHARACTER-CLASS +
+ * ENTROPY over unbroken alnum runs — the live leak was a bare 14-char
+ * lowercase hex string with no vendor prefix, so a prefix allowlist alone is
+ * insufficient and entropy is load-bearing. Pure-alpha runs are ordinary
+ * words and never screen (this is what spares @authorization-style labels).
+ */
+export function looksLikeSecretShapedName(description: string): boolean {
+  if (SECRET_NAME_SHAPE_RES.some((shape) => shape.test(description))) return true;
+  if (SECRET_NAME_JWT_RE.test(description)) return true;
+  for (const run of description.match(/[A-Za-z0-9]+/g) ?? []) {
+    if (run.length < SECRET_NAME_MIN_RUN_CHARS) continue;
+    if (!/[0-9]/.test(run)) continue;
+    const entropy = shannonEntropyBitsPerChar(run);
+    if (/^[0-9a-f]+$/i.test(run)) {
+      // A hex run still needs a hex LETTER: pure-digit runs are compact
+      // timestamps, order ids, and PANs (low-entropy anyway) — ordinary UI
+      // copy that must survive; credential-shaped hex carries both classes.
+      if (/[a-f]/i.test(run) && entropy >= SECRET_NAME_HEX_MIN_ENTROPY_BITS) return true;
+    } else if (entropy >= SECRET_NAME_MIXED_MIN_ENTROPY_BITS) {
+      return true;
+    }
+  }
+  return false;
+}
+
 const LABEL_MAX_CHARS = 32;
 
 /**
  * The addressable alias for a screened control description. Slugified so the
  * agent can type it back verbatim; `undefined` when the description screened
- * out or carries no alphanumeric content.
+ * out or carries no alphanumeric content. A description that reads as a
+ * credential (including one whose truncation carried only a secret FRAGMENT —
+ * the curl-bearer example) yields the redaction marker instead of the slug,
+ * so no part of the secret, not even its leading characters, reaches the wire.
  */
 export function controlLabelV2(description: string | undefined): string | undefined {
   if (description === undefined) return undefined;
+  if (looksLikeSecretShapedName(description)) return REDACTED_SECRET_LABEL_V2;
   const slug = description
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
