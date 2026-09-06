@@ -1227,79 +1227,7 @@ export function encodeV2Page(args: {
   };
 }): { payload: Record<string, unknown>; nextOffset: number } {
   const offset = args.offset ?? 0;
-  if (args.unchanged === true && offset === 0) {
-    const payload: Record<string, unknown> = {
-      format: "compact-v2",
-      url: args.pageUrl ?? "",
-      text: "",
-      session_id: args.sessionId,
-      stage: args.stage,
-      ...(args.startMetadata?.hint === undefined ? {} : { hint: args.startMetadata.hint }),
-      ...(args.startMetadata?.userEmail === undefined
-        ? {}
-        : { user_email: args.startMetadata.userEmail }),
-      ...(args.startMetadata?.hintOverflow === undefined
-        ? {}
-        : { hint_overflow: args.startMetadata.hintOverflow }),
-      ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
-        ? {}
-        : { semantic: args.semantics }),
-      delta: true,
-    };
-    // Fixed metadata degrades before the map is touched; the throw is the
-    // fail-closed guard against hostile code-owned fields, unreachable from
-    // real pages.
-    const degraded = compactV2DegradeMetadata(payload);
-    if (degraded === null) throw new Error("compact-v2 budget metadata exceeded");
-    return {
-      payload: degraded,
-      nextOffset: 0,
-    };
-  }
-  const visible: WireControlV2[] = [];
-  // Every interactive control is a candidate for the default map: rows are
-  // packed in priority order until the wire budget is actually reached, so a
-  // below-the-fold primary CTA is never stranded behind an arbitrary row cap
-  // (the live Xata failure). Overflow remains reachable through the in-MCP
-  // query cursor, never a shell-readable snapshot file.
-  let nextOffset = offset;
-  for (let index = offset; index < args.rows.length; index += 1) {
-    const candidate = wireControl(args.rows[index]!);
-    const remainder = args.rows.length - (index + 1);
-    const trial: Record<string, unknown> = {
-      format: "compact-v2",
-      url: args.pageUrl ?? "",
-      text: "",
-      session_id: args.sessionId,
-      stage: args.stage,
-      ...(args.startMetadata?.hint === undefined ? {} : { hint: args.startMetadata.hint }),
-      ...(args.startMetadata?.userEmail === undefined
-        ? {}
-        : { user_email: args.startMetadata.userEmail }),
-      ...(args.startMetadata?.hintOverflow === undefined
-        ? {}
-        : { hint_overflow: args.startMetadata.hintOverflow }),
-      ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
-        ? {}
-        : { semantic: args.semantics }),
-      safe_table: [...visible, candidate],
-      ...(remainder > 0
-        ? { overflow: { remaining: remainder, next_cursor: args.cursorFor(index + 1) } }
-        : {}),
-    };
-    if (!compactV2PayloadWithinBudget(trial)) break;
-    visible.push(candidate);
-    nextOffset = index + 1;
-  }
-  if (visible.length === 0 && offset < args.rows.length) {
-    // Budget-driven packing must never emit an empty page whose cursor points
-    // back at the same offset. Force the first row in and let fixed metadata
-    // degrade around it — on a real page this is unreachable.
-    visible.push(wireControl(args.rows[offset]!));
-    nextOffset = offset + 1;
-  }
-  const remaining = args.rows.length - nextOffset;
-  let payload: Record<string, unknown> = {
+  let fixed: Record<string, unknown> = {
     format: "compact-v2",
     url: args.pageUrl ?? "",
     text: "",
@@ -1315,9 +1243,61 @@ export function encodeV2Page(args: {
     ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
       ? {}
       : { semantic: args.semantics }),
-    safe_table: visible,
-    ...(remaining > 0 ? { overflow: { remaining, next_cursor: args.cursorFor(nextOffset) } } : {}),
   };
+  if (args.unchanged === true && offset === 0) {
+    // Fixed metadata degrades before the map is touched; the throw is the
+    // fail-closed guard against hostile code-owned fields, unreachable from
+    // real pages.
+    const degraded = compactV2DegradeMetadata({ ...fixed, delta: true });
+    if (degraded === null) throw new Error("compact-v2 budget metadata exceeded");
+    return {
+      payload: degraded,
+      nextOffset: 0,
+    };
+  }
+  const pageWith = (
+    table: readonly WireControlV2[],
+    nextOffset: number,
+  ): Record<string, unknown> => {
+    const remaining = args.rows.length - nextOffset;
+    return {
+      ...fixed,
+      safe_table: table,
+      ...(remaining > 0 ? { overflow: { remaining, next_cursor: args.cursorFor(nextOffset) } } : {}),
+    };
+  };
+  if (offset < args.rows.length) {
+    const probe = pageWith([wireControl(args.rows[offset]!)], offset + 1);
+    if (!compactV2PayloadWithinBudget(probe)) {
+      const degraded = compactV2DegradeMetadata(probe);
+      if (degraded === null) throw new Error("compact-v2 budget metadata exceeded");
+      const degradedFixed = { ...degraded };
+      delete degradedFixed.safe_table;
+      delete degradedFixed.overflow;
+      fixed = degradedFixed;
+    }
+  }
+  const visible: WireControlV2[] = [];
+  // Every interactive control is a candidate for the default map: rows are
+  // packed in priority order until the wire budget is actually reached, so a
+  // below-the-fold primary CTA is never stranded behind an arbitrary row cap
+  // (the live Xata failure). Overflow remains reachable through the in-MCP
+  // query cursor, never a shell-readable snapshot file.
+  let nextOffset = offset;
+  for (let index = offset; index < args.rows.length; index += 1) {
+    const candidate = wireControl(args.rows[index]!);
+    if (!compactV2PayloadWithinBudget(pageWith([...visible, candidate], index + 1))) break;
+    visible.push(candidate);
+    nextOffset = index + 1;
+  }
+  if (visible.length === 0 && offset < args.rows.length) {
+    // Budget-driven packing must never emit an empty page whose cursor points
+    // back at the same offset. Force the first row in and let fixed metadata
+    // degrade around it — on a real page this is unreachable.
+    visible.push(wireControl(args.rows[offset]!));
+    nextOffset = offset + 1;
+  }
+  let payload = pageWith(visible, nextOffset);
   if (!compactV2PayloadWithinBudget(payload)) {
     // Only hostile fixed metadata (a code-owned session id/cursor) lands here;
     // degrade the metadata before ever dropping an actionable row.

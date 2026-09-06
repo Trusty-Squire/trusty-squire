@@ -4276,10 +4276,13 @@ export async function observeQuery(
     throw new Error("stale_cursor");
   }
   const needle = norm(query);
-  const cursorScope = compactV2QueryCursorScope(session, needle, role);
+  const unfiltered = needle.length === 0 && role === undefined;
+  const cursorScope = unfiltered
+    ? compactV2ControlCursorScope(session)
+    : compactV2QueryCursorScope(session, needle, role);
   let offset = 0;
   if (cursor !== undefined) {
-    if (needle.length === 0 && role === undefined && session.compactV2HintPages.length > 0) {
+    if (unfiltered && session.compactV2HintPages.length > 0) {
       try {
         const parsed = parseCompactV2Cursor(session, cursor, compactV2HintCursorScope(session));
         if (parsed.rev !== index.epoch.rev) throw new Error("stale_cursor");
@@ -4307,8 +4310,7 @@ export async function observeQuery(
       filterBound = true;
     }
     if (parsed.rev !== index.epoch.rev) throw new Error("stale_cursor");
-    offset = filterBound ? parsed.offset : 0;
-    if (needle.length === 0 && role === undefined) offset = parsed.offset;
+    offset = filterBound || unfiltered ? parsed.offset : 0;
   }
   const liveElements = await session.browser.extractInteractiveElements();
   const liveSafe = compactV2LiveControls(session, liveElements);

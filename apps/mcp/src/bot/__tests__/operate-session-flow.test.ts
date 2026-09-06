@@ -9809,7 +9809,7 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
 
   it("pages overflow deterministically and accepts query/role filters without invalid_cursor", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
-    h.elements = Array.from({ length: 150 }, (_, index) =>
+    h.elements = Array.from({ length: 400 }, (_, index) =>
       elem({
         index,
         tag: "button",
@@ -9828,6 +9828,7 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
     // Enumerate the entire map through overflow paging. Every control appears
     // exactly once and paging never fails.
     const seen = new Set<string>(started.safe_table.map((row) => row[0]!));
+    const pagedCursors: string[] = [];
     let cursor = mapCursor;
     let guard = 0;
     while (cursor !== undefined) {
@@ -9838,8 +9839,29 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
       };
       for (const row of page.safe_table) seen.add(row[0]!);
       cursor = page.overflow?.next_cursor;
+      if (cursor !== undefined) pagedCursors.push(cursor);
     }
-    expect(seen.size).toBe(150);
+    expect(seen.size).toBe(400);
+
+    // The cursor minted by an UNFILTERED overflow page is still a map cursor:
+    // paging twice and then naming what the model is looking for must resolve
+    // the filtered lookup, not reject with invalid_cursor one page in.
+    expect(pagedCursors.length).toBeGreaterThan(0);
+    const secondPageCursor = pagedCursors[0]!;
+    const fromSecondPage = (await observeQuery(
+      started.session_id,
+      "control 399",
+      undefined,
+      secondPageCursor,
+    )) as { safe_table: Array<[string, string, string?]> };
+    expect(fromSecondPage.safe_table).toHaveLength(1);
+    const roleFromSecondPage = (await observeQuery(
+      started.session_id,
+      "",
+      "button",
+      secondPageCursor,
+    )) as { safe_table: unknown[] };
+    expect(roleFromSecondPage.safe_table.length).toBeGreaterThan(0);
 
     // Paging while naming what the model is looking for (a query or role
     // filter alongside the MAP cursor — exactly how the live run drove the
@@ -9847,7 +9869,7 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
     // filtered lookup over the whole map and stays paged.
     const byQuery = (await observeQuery(
       started.session_id,
-      "control 149",
+      "control 399",
       undefined,
       mapCursor,
     )) as { safe_table: Array<[string, string, string?]> };

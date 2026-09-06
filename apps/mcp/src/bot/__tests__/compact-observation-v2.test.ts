@@ -2,7 +2,6 @@ import { Buffer } from "node:buffer";
 import { describe, expect, it } from "vitest";
 import {
   OBSERVE_V2_MAX_WIRE_BYTES,
-  OBSERVE_V2_MAX_TOKENS,
   buildSafeControlsV2,
   compactV2LegacyRefForHandle,
   controlLabelV2,
@@ -287,6 +286,44 @@ describe("compact observation v2", () => {
     expect(
       Buffer.byteLength(JSON.stringify(page.payload), "utf8"),
     ).toBeLessThanOrEqual(OBSERVE_V2_MAX_WIRE_BYTES);
+  });
+
+  it("shrinks a URL that exceeds the wire budget before packing so the first page keeps multiple rows", () => {
+    const dense = Array.from({ length: 40 }, (_, index) =>
+      element({
+        index,
+        visibleText: `Control ${index}`,
+        selector: `#control-${index}`,
+      }),
+    );
+    const safe = safeControls({
+      elements: dense,
+      legacyRefs: new Map(dense.map((control, index) => [control, `@e:legacy_${index}`])),
+      pageOrigin: "https://merchant.invalid",
+    });
+    const idToken = "a".repeat(OBSERVE_V2_MAX_WIRE_BYTES + 256);
+    const pageUrl = `https://merchant.invalid/auth/callback?id_token=${idToken}`;
+    expect(Buffer.byteLength(pageUrl, "utf8")).toBeGreaterThan(OBSERVE_V2_MAX_WIRE_BYTES);
+    const page = encodeV2Page({
+      sessionId: "session",
+      stage: "auth",
+      pageUrl,
+      rows: safe.rows,
+      cursorFor: (offset) => `cursor-${offset}`,
+    });
+    const firstPage = page.payload.safe_table as unknown[];
+    expect(firstPage.length).toBeGreaterThan(1);
+    expect(page.payload.url).toBe(pageUrl.slice(0, 512));
+    expect(Buffer.byteLength(JSON.stringify(page.payload), "utf8")).toBeLessThanOrEqual(
+      OBSERVE_V2_MAX_WIRE_BYTES,
+    );
+    const overflow = page.payload.overflow as { remaining: number; next_cursor: string } | undefined;
+    if (overflow !== undefined) {
+      expect(overflow).toEqual({
+        remaining: 40 - firstPage.length,
+        next_cursor: `cursor-${firstPage.length}`,
+      });
+    }
   });
 
   it("clamps a dense page with long raw labels to a paged, sealed first action map", () => {
