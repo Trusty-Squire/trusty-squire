@@ -678,13 +678,33 @@ virgin signup succeeds on an UNCOVERED service (no active skill in registry)
   operator paths.
 - `apps/mcp/src/bot/identity-runtime.ts` owns Chrome's lifetime independent of
   any one session (single-flight launch + epoch + tab acquire/release, wired
-  into `session/lifecycle.ts`). Production still tears the identity's Chrome
-  down at every finish of a session whose browser came from the runtime
-  (`forgetAfterShutdown()` after the close) — this is scaffolding for later
-  sequential reuse, not reuse itself. Don't skip `forgetAfterShutdown()` at
-  finish without also resetting
+  into `session/lifecycle.ts`). By default (flag below unset) production still
+  tears the identity's Chrome down at every finish of a session whose browser
+  came from the runtime (`forgetAfterShutdown()` after the close). Don't skip
+  `forgetAfterShutdown()` at finish without also resetting
   `BrowserController`/`PageDriver` per-session state to a clean baseline; see
   `docs/browser-process-page-boundary.md#identity-runtime-step-3--chrome-lifetime-independent-of-one-session`.
+- `TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION` (default off — `session/multisession-flag.ts`)
+  is the one place two `operate_start` sessions are allowed to share that same
+  identity's Chrome concurrently, for a controlled two-agent auth-preservation
+  test. Off, `session/lifecycle.ts` is unchanged (one profile-operation lease
+  admits one session; a second gets `PROFILE_BUSY`). On, a session that loses
+  the profile-operation guard to an already-live-or-launching in-process
+  identity joins it as a SATELLITE: `BrowserController.attachSatellite()`
+  (`browser.ts`) constructs a second controller sharing the primary's
+  `BrowserProcessOwner` (same Chrome process/context) but with its OWN
+  `PageDriver`/`OwnedPages`, so tab-family isolation falls out of the existing
+  tab-ownership registry with no changes there. `SharedIdentityGroup` in
+  `session/lifecycle.ts` refcounts the group so whichever session's finish
+  empties it runs the real teardown (via the group's `primary`, even when a
+  satellite finishes last) — every other finish calls
+  `closeOwnPagesOnly()` and leaves the shared browser running. Known,
+  accepted limitations (test scaffolding, not a production concurrency
+  feature): two sessions on the same site under the same login share cookies
+  and can collide, and each session's host-scope network guard
+  (`installHostScopeGuard`) is not mutually session-aware once a second
+  session shares the context. Do not build a site-workflow scheduler/broker
+  on top of this — that is out of scope for the flag.
 - Interactive human login is the deliberate exception. When `connect` (the one
   onboarding and re-auth pathway, including `--force-relogin`) runs without a
   user-visible display,

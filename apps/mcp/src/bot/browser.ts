@@ -2659,15 +2659,74 @@ export class BrowserController {
   }
   private readonly processOwner: BrowserProcessOwner;
   private readonly pageDriver: PageDriver;
+  // Experimental (TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION only — see
+  // session/lifecycle.ts). True for a controller constructed by
+  // attachSatellite(): it shares ITS PEER's BrowserProcessOwner (same Chrome
+  // process/context) rather than owning one, so start()/close() must never
+  // touch the shared process — only this controller's own page(s).
+  private readonly isSatelliteAttachment: boolean;
 
-  constructor(opts: BrowserControllerOptions = {}) {
+  constructor(opts: BrowserControllerOptions = {}, sharedFrom?: BrowserController) {
     this.humanize = opts.humanize ?? true;
     this.pageDriver = new PageDriver(() => this.processOwner.context, this.humanize);
-    this.processOwner = new BrowserProcessOwner(
-      opts,
-      this.pageDriver,
-      (context, hardened, remoteMode) => this.initializePages(context, hardened, remoteMode),
-    );
+    this.processOwner =
+      sharedFrom !== undefined
+        ? sharedFrom.processOwner
+        : new BrowserProcessOwner(opts, this.pageDriver, (context, hardened, remoteMode) =>
+            this.initializePages(context, hardened, remoteMode),
+          );
+    this.isSatelliteAttachment = sharedFrom !== undefined;
+  }
+
+  // Experimental (TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION only). A SECOND
+  // controller sharing `primary`'s already-live BrowserProcessOwner — same
+  // Chrome process and BrowserContext — but with its OWN independent
+  // PageDriver/OwnedPages, so it owns a tab family neither the primary nor
+  // any other satellite can adopt (owned-pages.ts already refuses to
+  // register a page under a second OwnedPages instance). close() on the
+  // result only ever tears down its own page — never the shared process; see
+  // session/lifecycle.ts for the shared-teardown ordering that requires.
+  static async attachSatellite(
+    primary: BrowserController,
+    opts: BrowserControllerOptions = {},
+  ): Promise<BrowserController> {
+    const satellite = new BrowserController(opts, primary);
+    await satellite.attachOwnPage();
+    return satellite;
+  }
+
+  // Opens and registers this controller's OWN page in the shared context.
+  // Mirrors what initializePages() does for the primary's first page, minus
+  // the context-level setup (init scripts, resource-blocking/host-scope
+  // routes) — those are CONTEXT-scoped and already installed once by
+  // whichever controller launched the shared browser.
+  private async attachOwnPage(): Promise<void> {
+    const ctx = this.processOwner.context;
+    if (ctx === null) {
+      throw new Error(
+        "BrowserController.attachSatellite: shared browser has no live context to attach a page to",
+      );
+    }
+    const page = await ctx.newPage();
+    this.page = page;
+    this.primaryPage = page;
+    this.trackOpenedTabs(page);
+  }
+
+  // Closes ONLY this controller's own page(s) — never the shared Chrome
+  // process/context. Used for every session sharing an experimental
+  // multisession identity except whichever one's finish empties the group
+  // (which still runs the real close()); see session/lifecycle.ts.
+  async closeOwnPagesOnly(): Promise<ProfileCloseState> {
+    this.pageDriver.disposeRegistrations();
+    const page = this.pageDriver.page;
+    this.pageDriver.page = null;
+    this.pageDriver.primaryPage = null;
+    this.pageDriver.oauthProductPage = null;
+    this.pageDriver.oauthProviderPage = null;
+    this.pageDriver.oauthProviderPageClosed = false;
+    if (page !== null) await page.close().catch(() => undefined);
+    return "closed";
   }
 
   private async initializePages(
@@ -3044,6 +3103,9 @@ export class BrowserController {
     );
   }
   async start(): Promise<void> {
+    // A satellite's page is already attached by attachSatellite() — there is
+    // no process for it to start.
+    if (this.isSatelliteAttachment) return;
     return await this.processOwner.start();
   }
   async reload(): Promise<void> {
@@ -14194,12 +14256,15 @@ export class BrowserController {
     }
   }
   async close(options: { cancelStart?: boolean } = {}): Promise<ProfileCloseState> {
+    if (this.isSatelliteAttachment) return await this.closeOwnPagesOnly();
     return await this.processOwner.close(options);
   }
   async waitForCancelledStartQuiescence(): Promise<void> {
+    if (this.isSatelliteAttachment) return;
     return await this.processOwner.waitForCancelledStartQuiescence();
   }
   async forceCloseOwnedProcessTree(): Promise<ProfileCloseState> {
+    if (this.isSatelliteAttachment) return await this.closeOwnPagesOnly();
     return await this.processOwner.forceCloseOwnedProcessTree();
   }
 }

@@ -91,3 +91,57 @@ still-live Chrome) is the follow-up: it additionally requires resetting
 `BrowserController`/`PageDriver` per-session state (page references, host-scope
 guard routes, checkout/payment scratch fields) to a clean baseline before
 reuse, which this PR deliberately does not attempt.
+
+## Experimental concurrent multisession (Step 4/5 — audit slice)
+
+`TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION` (default off; see
+`session/multisession-flag.ts`) is a narrower, orthogonal follow-up to Step 3
+above: instead of ONE session reusing Chrome SEQUENTIALLY after another
+finishes, it lets TWO (or more) sessions use the SAME live Chrome
+CONCURRENTLY, for a controlled two-agent auth-preservation test. It is test
+scaffolding, not a production concurrency feature, and does not touch the
+sequential-reuse question above at all — Step 3's admission cap and
+`forgetAfterShutdown()`-at-every-finish behavior are completely unchanged
+when this flag is off.
+
+- **Admission.** Off, `session/lifecycle.ts`'s `acquireWarmBrowser` is
+  unmodified: one profile-operation lease admits one session; a second
+  concurrent `operate_start` gets `PROFILE_BUSY` from
+  `acquireProfileOperationGuard`, exactly as today. On, a caller that loses
+  that guard falls back to `tryAcquireSatelliteBrowser`, which joins the
+  identity ONLY when `operatorIdentityRuntime.isLive()` or `.isLaunching()`
+  (both in-process signals) is true — a busy signal from an unrelated
+  process, or a different profile dir, still propagates the real
+  `ProfileBusyError`. This is race-free against a primary launch still in
+  flight because it reuses `IdentityRuntime.acquire()`'s own single-flight
+  join rather than re-checking and re-acting on `isLive()` itself.
+- **Tab-family isolation.** `BrowserController.attachSatellite(primary, opts)`
+  (`browser.ts`) constructs a SECOND `BrowserController` that shares
+  `primary`'s `BrowserProcessOwner` (same Chrome process and
+  `BrowserContext`) but gets its OWN `PageDriver`/`OwnedPages` — no changes to
+  either of those classes were needed. `owned-pages.ts`'s existing
+  per-instance `Symbol` ownership (`register()` throws if a page already
+  belongs to a different `OwnedPages`) is what makes "neither session ever
+  adopts the other's tabs" fall out for free.
+- **Shared teardown.** `SharedIdentityGroup` in `session/lifecycle.ts`
+  refcounts every session sharing one identity. `releaseWarmBrowserPage` /
+  `forceReleaseWarmBrowserPage` decrement first, then: if sessions remain,
+  call `browser.closeOwnPagesOnly()` (new on `BrowserController` — closes
+  only that controller's own page, never the shared context/process); once
+  the group empties, run the real close via the group's `primary`
+  controller — even when a satellite is the one whose finish emptied it, so
+  the shared Chrome always gets torn down exactly once regardless of finish
+  order.
+- **Known, accepted limitations** (do not try to fix here): two sessions
+  against the SAME site under the SAME login share cookies and can collide;
+  each session's own `installHostScopeGuard` context-wide route is not
+  mutually session-aware once a second session shares the context, so a
+  session's out-of-scope request could in principle be judged by another
+  session's guard. This flag is for different-site concurrency and the auth
+  spike, not a general concurrency guarantee — do not build a site-workflow
+  scheduler/broker on top of it.
+- `multisession-concurrency.test.ts` pins flag-off preservation (one
+  instance ever constructed, `PROFILE_BUSY` on a second start) and flag-on
+  behavior (satellite attach, tab-family isolation, shared-browser-survives
+  regardless of finish order, a third session joining two already-live
+  ones).
