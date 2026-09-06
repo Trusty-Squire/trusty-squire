@@ -74,9 +74,12 @@ runtime.
 
 The serializer emits the live page URL and a compact control map. **Nothing on
 that wire is screened for content** (owner's order, 2026-09-05: remove ALL seals
-— see [observation-model.md §4.5](observation-model.md)). Page-derived
+— see [observation-model.md §4.5](observation-model.md)), with one label-alias
+carve-out: a control's accessible name that reads as a credential is screened
+to `@redacted-secret` by `controlLabelV2` (§4.5). Page-derived
 hostnames, origins, titles, headings, labels, options, errors, and nested action
-results are the page's own copy, card material and rendered API keys included.
+results are otherwise the page's own copy, card material and rendered API keys
+included.
 Visible `text` is empty and rows carry no field values purely as a payload SIZE
 budget — read a value with `operate_screenshot`, `operate_act { kind: "extract"
 }`, or a V1 session. The audit trail and the

@@ -869,9 +869,7 @@ export function sealRetainedInteractiveElementsV2(
   }));
 }
 
-export function safePageSemanticsV2(
-  source: ObservationSemanticSourceV2,
-): SafePageSemanticsV2 {
+export function safePageSemanticsV2(source: ObservationSemanticSourceV2): SafePageSemanticsV2 {
   const title = safeDescriptionV2(source.title);
   const headings = source.headings
     .map((heading) => safeDescriptionV2(heading))

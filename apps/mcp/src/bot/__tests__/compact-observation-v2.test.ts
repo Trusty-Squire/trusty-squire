@@ -178,9 +178,7 @@ describe("compact observation v2", () => {
         rows: safe.rows,
         cursorFor: (offset) => `cursor-${offset}`,
       });
-      expect(page.payload.safe_table).toEqual([
-        ["@e:6b3eXuaBV7", "b", REDACTED_SECRET_LABEL_V2],
-      ]);
+      expect(page.payload.safe_table).toEqual([["@e:6b3eXuaBV7", "b", REDACTED_SECRET_LABEL_V2]]);
       expect(JSON.stringify(page.payload)).not.toContain(token);
     });
 
@@ -251,9 +249,7 @@ describe("compact observation v2", () => {
         delta: { stageChanged: true, added: safe.rows, changed: [], removed: [] },
       });
       expect(payload).not.toBeNull();
-      expect(payload!.safe_table).toEqual([
-        ["@e:6b3eXuaBV7", "b", REDACTED_SECRET_LABEL_V2],
-      ]);
+      expect(payload!.safe_table).toEqual([["@e:6b3eXuaBV7", "b", REDACTED_SECRET_LABEL_V2]]);
       expect(JSON.stringify(payload)).not.toContain(token);
     });
 
@@ -686,9 +682,7 @@ describe("compact observation v2", () => {
       legacyRefs: new Map([[button, "@e:copy"]]),
       pageOrigin: "https://merchant.invalid",
     });
-    expect(safe.rows).toEqual([
-      expect.objectContaining({ label: REDACTED_SECRET_LABEL_V2 }),
-    ]);
+    expect(safe.rows).toEqual([expect.objectContaining({ label: REDACTED_SECRET_LABEL_V2 })]);
   });
 
   it("keeps word-like pure-alpha and low-entropy digit labels unscreened", () => {
@@ -753,18 +747,13 @@ describe("compact observation v2", () => {
     it("scores a hyphen/underscore-grouped credential as one joined run", () => {
       // Grouped credential bodies (base64url grouping, license keys) would
       // otherwise slip through as short segments.
-      expect(looksLikeSecretShapedName("Copy f9a062f0-2fadf5ab-9c1d2e3f"), "hex groups").toBe(
-        true,
-      );
+      expect(looksLikeSecretShapedName("Copy f9a062f0-2fadf5ab-9c1d2e3f"), "hex groups").toBe(true);
       expect(looksLikeSecretShapedName("Copy 3kR9xQ2m-7LpW4vZn"), "base62 groups").toBe(true);
       expect(
         looksLikeSecretShapedName("550e8400-e29b-41d4-a716-446655440000"),
         "canonical v4 UUID",
       ).toBe(true);
-      expect(
-        looksLikeSecretShapedName("key_3kR9xQ2m_7LpW4vZn"),
-        "underscore groups",
-      ).toBe(true);
+      expect(looksLikeSecretShapedName("key_3kR9xQ2m_7LpW4vZn"), "underscore groups").toBe(true);
       // Ordinary hyphenated copy never produces a joined candidate: segments
       // shorter than 4 chars, pure-alpha joins, and letterless digit joins stay.
       expect(looksLikeSecretShapedName("SKU-12345")).toBe(false);
@@ -786,7 +775,8 @@ describe("compact observation v2", () => {
       // A 40-char description budget can cut a key mid-body; the anchored
       // shapes must still screen on the visible fragment.
       expect(looksLikeSecretShapedName("sk-live-12345678")).toBe(true);
-      expect(looksLikeSecretShapedName("AKIAIOSFODNN7EXAM")) /* truncated */.toBe(true);
+      expect(looksLikeSecretShapedName("AKIAIOSFODNN7EXAM")) /* truncated */
+        .toBe(true);
       expect(looksLikeSecretShapedName("Bearer f9a062")).toBe(true);
     });
   });

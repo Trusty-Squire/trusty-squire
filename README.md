@@ -314,9 +314,11 @@ DOM-diagnostics pair is excluded from that surface; set
 
 Operate sessions default to Compact V2 observations: a compact
 `format:"compact-v2"` response with the live page URL, a finite stage,
-title/heading semantics, and generation-bound controls in `safe_table`. Nothing
-in that response is screened for content — labels and semantics are the page's
-own copy. Page text, DOM values, and snapshot files are omitted as a SIZE budget,
+title/heading semantics, and generation-bound controls in `safe_table`. Labels,
+semantics, and page content are the page's own copy, unscreened — the one
+exception is the label alias, which screens credential-shaped accessible names
+to `@redacted-secret` (see [observation-model.md §4.5](docs/observation-model.md)).
+Page text, DOM values, and snapshot files are omitted as a SIZE budget,
 not as a seal; read a value off the page with `operate_screenshot`, `operate_act
 { kind: "extract" }`, or a V1 session. Use
 `operate_observe_query` with task words or `overflow.next_cursor` to retrieve a
