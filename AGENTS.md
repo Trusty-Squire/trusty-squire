@@ -522,14 +522,17 @@ file-by-file map live in
 [`docs/observation-model.md`](docs/observation-model.md) §4.5 — read it before
 touching this area.
 
-One narrow label-alias carve-out (2026-09-06, ipinfo Finding 1): the compact-v2
-label alias screens credential-shaped accessible names into `@redacted-secret`
-(`looksLikeSecretShapedName` in `compact-observation-v2.ts`) — a site that
-renders an API key as its copy button's accessible name had emitted the live
-token as the label. This fixes the alias's own documented "screened … never a
-value" contract; it is NOT a read seal. Do not extend it to page text, values,
-screenshots, or extracts, and do not use it to justify any other shape-matching
-screen.
+One narrow compact-v2 screening carve-out (2026-09-06, ipinfo Findings 1–2): the
+compact-v2 label alias screens credential-shaped accessible names into
+`@redacted-secret` (`looksLikeSecretShapedName` in `compact-observation-v2.ts`)
+— a site that renders an API key as its copy button's accessible name had
+emitted the live token as the label. Later the same day, the owner's Finding-2
+order extended that one shared screen to the compact-v2 page-text channel: the
+bounded, budget-degraded, sticky `text` field runs its extracted prose through
+the same redactor, rewriting only secret-shaped substrings to `[redacted]`.
+Both are code-derived target/wire-shape contracts, not read seals: map rows,
+values, screenshots, and extracts remain verbatim, and neither justifies any
+other shape-matching screen.
 
 ### 17. `await_verification` must score link-picking on anchor TEXT too, and must retry through Gmail's own transient backend error
 

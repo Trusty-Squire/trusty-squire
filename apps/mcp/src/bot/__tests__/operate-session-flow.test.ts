@@ -4940,6 +4940,43 @@ describe("Compact V2 action-map boundary", () => {
     expect(changed.text).toBe("Rate limit reached: upgrade to view more requests.");
   });
 
+  it("re-offers the full text channel after a budget-degraded resync page", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const bulkyTwo = `Prose item two: ${"x".repeat(1200)}`;
+    const bulkyThree = `Prose item three: ${"y".repeat(1200)}`;
+    h.prose = ["Prose item one.", bulkyTwo, bulkyThree];
+    const started = await startHarnessProvisionSession({
+      browser: new BrowserController(),
+      observationFormat: "compact-v2",
+      serviceUrl: "https://app.example.com/dashboard",
+    });
+    // Baseline: a small map leaves budget for the whole text channel, so the
+    // consumer holds all three items.
+    expect(started.text).toContain("Prose item one.");
+    expect(started.text).toContain("Prose item three:");
+    // A row change forces a fresh paged map whose rows consume the wire
+    // budget; the text channel degrades on that resync page.
+    h.elements = Array.from({ length: 40 }, (_, i) =>
+      elem({
+        tag: "button",
+        role: "button",
+        visibleText: `Dynamically rendered section control number ${i} with a long descriptive name`,
+        selector: `#dyn-${i}`,
+      }),
+    );
+    const resync = await observe(started.session_id, "compact");
+    expect(resync.text.length).toBeLessThan(bulkyTwo.length);
+    // The rows are now unchanged, so the delta is small: the consumer only
+    // ever received a degraded subset, so the full prose must be re-offered
+    // instead of being suppressed as "unchanged" against the stored list.
+    const again = await observe(started.session_id, "compact");
+    expect(again.text).toContain("Prose item one.");
+    expect(again.text).toContain("Prose item three:");
+  });
+
   it("keeps harness V1 consumers explicit while bounding opt-in V2 metadata", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.visibleText = "Harness page";

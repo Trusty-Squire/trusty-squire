@@ -4215,12 +4215,17 @@ function compactV2Observation(
     stage,
     semantics,
     byRef: new Map(safe.rows.map((row) => [row.ref, row])),
-    // The screened prose this document last emitted, so a repeat observation
-    // carries the text channel only when it actually changed (sticky, like
-    // safe_table and semantics).
-    ...(prose === undefined || prose.length === 0 ? {} : { prose }),
   };
   session.prevObserve = null;
+  // The baseline records the prose the consumer ACTUALLY received (the encode
+  // may have degraded the text channel to a subset under the wire budget), so
+  // a repeat observation re-offers the text whenever the consumer holds less
+  // than the page currently renders — sticky only up to what was emitted.
+  const recordEmittedProse = (payload: { text?: unknown }): void => {
+    const text = typeof payload.text === "string" ? payload.text : "";
+    if (text.length === 0 || session.compactV2Previous === null) return;
+    session.compactV2Previous.prose = text.split("\n");
+  };
   if (previous !== null && !requiresResync && delta !== null) {
     const encodedDelta = encodeV2Delta({
       sessionId: session.id,
@@ -4238,7 +4243,10 @@ function compactV2Observation(
     });
     // A high-churn delta is less useful than a fresh paged map.  This also
     // guarantees any overflow remains in the MCP cursor protocol.
-    if (encodedDelta !== null) return encodedDelta as unknown as Observation;
+    if (encodedDelta !== null) {
+      recordEmittedProse(encodedDelta);
+      return encodedDelta as unknown as Observation;
+    }
   }
   const page = encodeV2Page({
     sessionId: session.id,
@@ -4277,6 +4285,7 @@ function compactV2Observation(
           },
         }),
   });
+  recordEmittedProse(page.payload);
   return page.payload as unknown as Observation;
 }
 
@@ -4393,6 +4402,13 @@ export async function observeQuery(
       stage: pagingStage,
       semantics: index.semantics,
       byRef: new Map(liveSafe.rows.map((row) => [row.ref, row])),
+      // A query page carries no text channel, so the consumer keeps whatever
+      // prose it already holds for this same document; carry it forward
+      // rather than forcing one spurious full prose resend on the next
+      // observe.
+      ...(session.compactV2Previous?.prose === undefined
+        ? {}
+        : { prose: session.compactV2Previous.prose }),
     };
   }
   const liveByLegacy = new Map<string, InteractiveElement>();

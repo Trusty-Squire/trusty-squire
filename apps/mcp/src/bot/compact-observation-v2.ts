@@ -291,13 +291,25 @@ const SECRET_NAME_JWT_RE = /\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-
  * (all segments ≥4 chars) joined into one run, so a grouped credential is
  * scored as a whole instead of slipping through as short segments.
  */
+const SECRET_NAME_GROUP_RUN_RE = /[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)+/g;
+
+/**
+ * The joined candidate a hyphen/underscore group is scored as when every
+ * segment is ≥4 chars; `undefined` for ordinary copy like "SKU-12345".
+ */
+function secretShapedGroupCandidate(group: string): string | undefined {
+  const segments = group.split(/[-_]/);
+  if (!segments.every((segment) => segment.length >= SECRET_NAME_MIN_GROUP_SEGMENT_CHARS)) {
+    return undefined;
+  }
+  return segments.join("");
+}
+
 function secretShapedCandidateRuns(description: string): string[] {
   const candidates = [...(description.match(/[A-Za-z0-9]+/g) ?? [])];
-  for (const group of description.match(/[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)+/g) ?? []) {
-    const segments = group.split(/[-_]/);
-    if (segments.every((segment) => segment.length >= SECRET_NAME_MIN_GROUP_SEGMENT_CHARS)) {
-      candidates.push(segments.join(""));
-    }
+  for (const group of description.match(SECRET_NAME_GROUP_RUN_RE) ?? []) {
+    const candidate = secretShapedGroupCandidate(group);
+    if (candidate !== undefined) candidates.push(candidate);
   }
   return candidates;
 }
@@ -356,6 +368,12 @@ export function redactObservationProseV2(item: string): string {
     new RegExp(SECRET_NAME_JWT_RE.source, "g"),
     OBSERVATION_PROSE_REDACTION_MARKER,
   );
+  redacted = redacted.replace(SECRET_NAME_GROUP_RUN_RE, (group) => {
+    const candidate = secretShapedGroupCandidate(group);
+    return candidate !== undefined && isSecretShapedRun(candidate)
+      ? OBSERVATION_PROSE_REDACTION_MARKER
+      : group;
+  });
   redacted = redacted.replace(/[A-Za-z0-9]+/g, (run) =>
     isSecretShapedRun(run) ? OBSERVATION_PROSE_REDACTION_MARKER : run,
   );

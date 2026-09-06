@@ -1331,6 +1331,29 @@ describe("compact observation v2 text channel", () => {
     expect(oversized).not.toBeNull();
   });
 
+  it("screenObservationProseV2 redacts grouped credentials exactly when the label screen would", () => {
+    // Hyphen/underscore-grouped credentials (UUIDs, grouped base64url) must
+    // not survive prose because grouping kept every plain run under the
+    // 12-char floor — the same strings screen as labels.
+    const grouped = [
+      "Your key: 3kR9xQ2m-7LpW4vZn — keep it safe.",
+      "Token 550e8400-e29b-41d4-a716-446655440000 has been created.",
+      "License AAAE2F9K-Q2m7LpW4-vZn3kR9x expired.",
+    ];
+    for (const item of grouped) {
+      expect(looksLikeSecretShapedName(item)).toBe(true);
+    }
+    expect(screenObservationProseV2(grouped)).toEqual([
+      "Your key: [redacted] — keep it safe.",
+      "Token [redacted] has been created.",
+      "License [redacted] expired.",
+    ]);
+    // Ordinary grouped copy with short or low-entropy segments survives.
+    expect(screenObservationProseV2(["See SKU-12345 and task-management-101."])).toEqual([
+      "See SKU-12345 and task-management-101.",
+    ]);
+  });
+
   it("screenObservationProseV2 drops empties and duplicates", () => {
     expect(
       screenObservationProseV2([
