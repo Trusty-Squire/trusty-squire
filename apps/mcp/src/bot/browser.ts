@@ -348,6 +348,105 @@ export class PaymentSubmitOutcomeUnknownError extends Error {
   }
 }
 
+// Fix C (operator reliability, 2026-09): an OAuth completion wait that times
+// out proves only that the provider has not returned control yet — it is NOT
+// evidence that a saved session expired, was revoked, or anything else about
+// WHY. A live dogfood run hit this directly: Google threw a routine 2FA
+// number-match challenge, the human hadn't tapped it yet when the wait
+// elapsed, and the tool told the operator "the saved session may have
+// expired" — a fabricated cause — while the login went on to succeed a few
+// seconds later. `OAuthAwaitingHumanError` reports only what was observed
+// (no origin-return within budget) and is recoverable: the caller should
+// keep waiting / retry, not treat it as a dead end. `OAuthFailedError` is
+// reserved for an actually-observed terminal signal (the page closed with no
+// live recovery path) — still never a guess about the cause.
+export type OAuthAwaitingHumanPhase = "not_attempted" | "pending";
+
+export class OAuthAwaitingHumanError extends Error {
+  readonly phase: OAuthAwaitingHumanPhase;
+  constructor(message: string, phase: OAuthAwaitingHumanPhase = "pending") {
+    super(message);
+    this.name = "OAuthAwaitingHumanError";
+    this.phase = phase;
+  }
+}
+
+export class OAuthFailedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OAuthFailedError";
+  }
+}
+
+// Pure decision at the heart of Fix C's honest outcome classification,
+// applied the instant an OAuth completion wait's deadline elapses. Exported
+// so the exact race it recovers — the deadline firing in the same instant the
+// provider actually hands control back — can be unit-tested without racing
+// real timers: a 2026-09 dogfood run hit precisely this (Google's redirect
+// landed, but the strict wait's confirmation loop had already timed out) and
+// the tool reported a fabricated "session may have expired" failure for an
+// action that had, in fact, just succeeded.
+//
+//   - `transientClosed` at the deadline → the provider page is gone, which is
+//     this codebase's ordinary popup completion signal (waitForOAuthLifecycle
+//     reports the same state as "closed"); settle it the same way.
+//   - `returnedToProductOrigin` at the deadline (same-tab, the page actually
+//     left the product origin and is back on it — the same departure
+//     condition waitForOAuthLifecycle requires) → the provider DID return
+//     control; report completion, not failure.
+//   - otherwise we simply don't know yet → `awaiting_human` (a consent
+//     screen or 2FA challenge is commonly still showing); never asserted as
+//     a cause, just the honest "not done".
+//
+// A real failure is never inferred here: it comes only from an observed OAuth
+// error on the return URL (`oauthErrorFromReturnUrl`).
+export function classifyOAuthTimeout(
+  transientClosed: boolean,
+  returnedToProductOrigin: boolean,
+): "closed" | "returned" | "awaiting_human" {
+  if (transientClosed) return "closed";
+  if (returnedToProductOrigin) return "returned";
+  return "awaiting_human";
+}
+
+// The one observed denial/error signal OAuth defines: the provider redirects
+// back to the relying party carrying `error=<code>` (RFC 6749 §4.1.2.1 in the
+// query; §4.2.2.1 in the fragment for implicit flows). The code is reported
+// verbatim — it is a fact the provider stated, not a guess.
+const OAUTH_ERROR_CODE_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
+
+export function oauthErrorFromReturnUrl(
+  url: string,
+): { error: string; description: string | null } | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  for (const params of [
+    parsed.searchParams,
+    new URLSearchParams(parsed.hash.startsWith("#") ? parsed.hash.slice(1) : ""),
+  ]) {
+    const error = params.get("error");
+    if (error === null || !OAUTH_ERROR_CODE_RE.test(error)) continue;
+    const description = params.get("error_description");
+    return {
+      error,
+      description: description === null || description.length === 0 ? null : description,
+    };
+  }
+  return null;
+}
+
+export function oauthAwaitingHumanMessage(productOrigin: string, budgetMs: number): string {
+  return (
+    `OAuth has not returned to ${productOrigin} within ${Math.ceil(budgetMs / 1000)} seconds. ` +
+    "A consent screen or a 2FA/verification challenge may still be showing on the provider; " +
+    "call operate_observe to check whether it has resolved, rather than treating this as a failure."
+  );
+}
+
 export async function runCaptureConfirmedPaymentSubmit<T>(options: {
   click: (markInputDispatchPossible: () => void) => Promise<void>;
   readEvidence: () => Promise<{ baseline: T | null; dispatched: boolean }>;
@@ -13176,22 +13275,26 @@ export class BrowserController {
     const productUrl = product.url();
     const oauthDeadline = Date.now() + oauthBudgetMs;
     const remainingBudgetMs = (): number => Math.max(1, oauthDeadline - Date.now());
-    const deadlineError = (): Error =>
-      consentProvider === "google"
-        ? Object.assign(
-            new Error(
-              `google_session: OAuth did not complete within ${Math.ceil(oauthBudgetMs / 1000)} seconds; ` +
-                "the saved session may have expired, so reconnect with " +
-                "`npx @trusty-squire/mcp connect --force-relogin=google` before retrying",
-            ),
-            { code: "google_session" },
-          )
-        : new Error(
-            `OAuth login is still awaiting the provider after ${Math.ceil(oauthBudgetMs / 1000)} seconds. Retry oauth_login; do not read or close the browser session.`,
-          );
+    const safeOrigin = (url: string): string => {
+      try {
+        return new URL(url).origin;
+      } catch {
+        return url;
+      }
+    };
+    // Fix C: a timed-out wait only proves control has not returned to the
+    // product origin yet — never assert WHY (expired session, denial, etc.).
+    // A consent screen or 2FA challenge is routinely still showing; the
+    // caller should keep waiting/retry, not treat this as a dead end.
+    const awaitingHumanError = (): OAuthAwaitingHumanError =>
+      new OAuthAwaitingHumanError(oauthAwaitingHumanMessage(safeOrigin(productUrl), oauthBudgetMs));
+    const oauthFailedError = (reason: string): OAuthFailedError => new OAuthFailedError(reason);
     let recovery: Page | null = null;
     let providerPage: Page | null = null;
     let productDeparted = false;
+    let pendingOnProvider = false;
+    let lastTransientUrl = productUrl;
+    let onTransientNavigation: ((frame: Frame) => void) | null = null;
     let resolveProductDeparture: () => void = () => undefined;
     const productDeparturePromise = new Promise<void>((resolve) => {
       resolveProductDeparture = resolve;
@@ -13229,7 +13332,14 @@ export class BrowserController {
       product.on("popup", onPopup);
       product.once("close", onProductClose);
       try {
-        if (Date.now() >= oauthDeadline) throw deadlineError();
+        if (Date.now() >= oauthDeadline) {
+          throw new OAuthAwaitingHumanError(
+            `OAuth has not been attempted yet: the ${Math.ceil(oauthBudgetMs / 1000)}-second ` +
+              `budget elapsed before the OAuth control on ${safeOrigin(productUrl)} was clicked. ` +
+              "Retry oauth_login.",
+            "not_attempted",
+          );
+        }
         try {
           await this.click(selector);
         } catch (error) {
@@ -13250,6 +13360,11 @@ export class BrowserController {
         resolveProductDeparture();
       }
       const transient = providerPage ?? product;
+      lastTransientUrl = transient.url();
+      onTransientNavigation = (frame: Frame): void => {
+        if (frame === transient.mainFrame()) lastTransientUrl = frame.url();
+      };
+      transient.on("framenavigated", onTransientNavigation);
       productDeparted = productDeparted || !this.isOAuthProductUrl(transient.url(), productUrl);
       const durableProduct = providerPage === null ? recovery : product;
       this.oauthProductPage = durableProduct;
@@ -13289,25 +13404,74 @@ export class BrowserController {
           if (!advanced) await this.sleep(Math.min(250, remainingBudgetMs()));
         }
       }
+      const observedUrls = [
+        ...(providerPage !== null || productDeparted
+          ? [transient.isClosed() ? lastTransientUrl : transient.url()]
+          : []),
+        ...(providerPage !== null && !product.isClosed() && product.url() !== productUrl
+          ? [product.url()]
+          : []),
+      ];
+      for (const observedUrl of observedUrls) {
+        const denial = oauthErrorFromReturnUrl(observedUrl);
+        if (denial === null) continue;
+        throw oauthFailedError(
+          `OAuth returned to ${safeOrigin(observedUrl)} with error=${denial.error}` +
+            (denial.description === null ? "" : ` (${denial.description})`) +
+            ".",
+        );
+      }
       if (settled === null) {
-        throw deadlineError();
+        // Timed out without a confirmed origin-return. Re-check honestly
+        // rather than assume failure — see classifyOAuthTimeout's doc comment
+        // for the false-negative this recovers.
+        const outcome = classifyOAuthTimeout(
+          transient.isClosed(),
+          !transient.isClosed() &&
+            providerPage === null &&
+            productDeparted &&
+            this.isOAuthProductUrl(transient.url(), productUrl),
+        );
+        if (outcome === "awaiting_human") {
+          pendingOnProvider = true;
+          throw awaitingHumanError();
+        }
+        settled = outcome;
       }
       if (providerPage === null && product.isClosed()) {
-        if (Date.now() >= oauthDeadline) throw deadlineError();
-        await recovery.reload({
-          waitUntil: "domcontentloaded",
-          timeout: remainingBudgetMs(),
-        });
+        const reloaded = await recovery
+          .reload({
+            waitUntil: "domcontentloaded",
+            timeout: Math.max(remainingBudgetMs(), 500),
+          })
+          .then(() => true)
+          .catch(() => false);
+        if (!reloaded) {
+          throw new OAuthAwaitingHumanError(
+            `${safeOrigin(productUrl)} closed during OAuth and could not be reloaded within the ` +
+              "budget, so completion could not be confirmed. Call operate_observe to check the " +
+              "current page.",
+          );
+        }
       }
     } finally {
       product.off("framenavigated", onProductNavigation);
-      const retained = product.isClosed() ? recovery : product;
-      this.page = retained?.isClosed() === false ? retained : this.primaryPage;
-      this.oauthProductPage = null;
-      this.oauthProviderPage = null;
-      this.oauthProviderPageClosed = false;
-      if (providerPage !== null && !providerPage.isClosed()) {
-        await providerPage.close().catch(() => undefined);
+      if (onTransientNavigation !== null) {
+        (providerPage ?? product).off("framenavigated", onTransientNavigation);
+      }
+      const providerStillShowing =
+        pendingOnProvider && providerPage !== null && !providerPage.isClosed();
+      if (providerStillShowing) {
+        this.page = providerPage;
+      } else {
+        const retained = product.isClosed() ? recovery : product;
+        this.page = retained?.isClosed() === false ? retained : this.primaryPage;
+        this.oauthProductPage = null;
+        this.oauthProviderPage = null;
+        this.oauthProviderPageClosed = false;
+        if (providerPage !== null && !providerPage.isClosed()) {
+          await providerPage.close().catch(() => undefined);
+        }
       }
       if (recovery !== null && recovery !== this.page && !recovery.isClosed()) {
         await recovery.close().catch(() => undefined);

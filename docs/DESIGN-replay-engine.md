@@ -183,11 +183,14 @@ the leg cold.
 
 Replay walks the trace in order. A binding, target, live-ref, or action miss
 returns exactly one `fallback_required` result containing the missed step and a
-`next_index`. Extraction and payment also return local repair points because
-credential discovery and the existing `operate_pay` approval flow remain
-host-driven. After repairing that step, the host calls `operate_recipe_run` with
-the same recipe bindings, `session_id`, and `resume_from = next_index`; replay
-checks the continuation against the same recipe and bindings, then continues.
+`next_index`. An `oauth_login` step whose observation comes back
+`oauth.state: "awaiting_human"` is such a miss: replay stops there and hands the
+pending provider step to the host instead of continuing blind. Extraction and
+payment also return local repair points because credential discovery and the
+existing `operate_pay` approval flow remain host-driven. After repairing that
+step, the host calls `operate_recipe_run` with the same recipe bindings,
+`session_id`, and `resume_from = next_index`; replay checks the continuation
+against the same recipe and bindings, then continues.
 
 Organic redirects and OAuth popups remain outside the explicit-action domain
 lock and follow the existing session navigation model.

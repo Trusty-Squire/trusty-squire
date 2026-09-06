@@ -390,10 +390,15 @@ still return only a current handle. `detail:"full"` keeps the V2 format. Maintai
   `detail` is `none`. Every `oauth_login` and legacy `oauth_click` is serialized
   from action start through completion and a short release cooldown; other
   session work remains parallel. The whole serialized action has a 30-second
-  deadline. If Google does not complete in time, the call returns
-  `google_session` re-login guidance and closes that operator session without
-  replacing the saved identity; start a fresh session after reconnecting.
-  `oauth_click` and `oauth_settle` remain for
+  deadline. If the provider has not handed control back in time, the call does
+  not error and does not close the session: it returns a normal observation
+  with `oauth.state: "awaiting_human"`, a `reason` naming only what was
+  observed, and `next_action: "operate_observe"`. A consent screen or a
+  2FA/verification challenge is usually still showing, so re-observe and drive
+  it; the session stays open and usable. A denial the provider actually
+  reported (an OAuth `error=` code on the return URL) is the one case that
+  fails the action, with that code in the message. `oauth_click` and
+  `oauth_settle` remain for
   legacy replay compatibility. If an observation races that legacy transition,
   the response reports `oauth.state: "in_progress"` and directs the host to
   observe again.

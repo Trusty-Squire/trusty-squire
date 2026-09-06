@@ -24,6 +24,8 @@ import {
   CHECKOUT_SUBMIT_LABEL_RE,
   clickDispatchStatusForError,
   parseCheckoutAmount,
+  OAuthAwaitingHumanError,
+  OAuthFailedError,
   type BrowserController,
   type ClickDispatchStatus,
   type CheckoutSummary,
@@ -44,6 +46,7 @@ import {
   checkoutStageFromUrlV2,
   compactV2LegacyRefForHandle,
   compactV2PayloadWithinBudget,
+  OBSERVE_V2_MAX_TOKENS,
   COMPACT_V2_HANDLE_LENGTH,
   isCompactV2Handle,
   isCompactV2Label,
@@ -343,11 +346,23 @@ export interface Observation {
   // was still settling. This is an expected browser lifecycle transition, not
   // a failed login or a reason to abandon the session. The host should simply
   // re-observe; the controller will retain or reattach the product page.
-  oauth?: {
-    state: "in_progress";
-    provider_page: "closed_or_detached";
-    next_action: "operate_observe";
-  };
+  oauth?:
+    | {
+        state: "in_progress";
+        provider_page: "closed_or_detached";
+        next_action: "operate_observe";
+      }
+    // Fix C: an OAuth action timed out without a confirmed origin-return. This
+    // is honest uncertainty, not a failure — a consent screen or 2FA/
+    // verification challenge is commonly still showing. `reason` names only
+    // what was actually observed (never a guessed cause like "session
+    // expired"). The host should re-observe/retry rather than abandon the
+    // flow.
+    | {
+        state: "awaiting_human";
+        reason: string;
+        next_action: "operate_observe";
+      };
   // Change 5 — fail-closed identity hand-back: set ONLY when an operate task
   // required a live Google session that was absent. The task did NOT start; the
   // host asks the user to log in, then retries. No browser was driven.
@@ -577,31 +592,38 @@ async function waitForOAuthActionQuiescence(deadline: OAuthActionDeadline): Prom
   }
 }
 
-function oauthActionDeadlineError(deadline: OAuthActionDeadline): Error {
-  if (deadline.provider === undefined || deadline.provider === "google") {
-    return Object.assign(
-      new Error(
-        `google_session: OAuth did not complete within ${Math.ceil(deadline.timeoutMs / 1000)} seconds; ` +
-          "the saved session may have expired, so reconnect with " +
-          "`npx @trusty-squire/mcp connect --force-relogin=google` before retrying",
-      ),
-      { code: "google_session" },
-    );
-  }
-  return new Error(
-    `OAuth action did not complete within ${Math.ceil(deadline.timeoutMs / 1000)} seconds`,
+// Fix C: the OUTER backstop race (withinOAuthActionDeadline) has no page to
+// re-check, so it can only report the one fact it actually observed — never a
+// guessed cause. Which fact depends on the phase: while the action was still
+// queued behind a prior OAuth call's lease it was never attempted at all,
+// whereas once running the inner browser.ts wait outlived its own deadline.
+// Both are recoverable, not failures.
+function oauthActionDeadlineError(
+  deadline: OAuthActionDeadline,
+  phase: "lease" | "action",
+): OAuthAwaitingHumanError {
+  const seconds = Math.ceil(deadline.timeoutMs / 1000);
+  return new OAuthAwaitingHumanError(
+    phase === "lease"
+      ? "OAuth has not been attempted yet: it was still waiting behind a prior OAuth call " +
+          `on this browser after ${seconds} seconds. Retry oauth_login.`
+      : `OAuth action did not complete within ${seconds} seconds. ` +
+          "Call operate_observe to check whether the pending step has resolved, rather than " +
+          "treating this as a failure.",
+    phase === "lease" ? "not_attempted" : "pending",
   );
 }
 
 async function withinOAuthActionDeadline<T>(
   promise: Promise<T>,
   deadline: OAuthActionDeadline,
+  phase: "lease" | "action" = "action",
 ): Promise<T> {
   const tracked = trackOAuthActionPromise(deadline, promise);
   const remainingMs = oauthActionRemainingMs(deadline);
   if (remainingMs <= 0 || deadline.timedOut) {
     expireOAuthAction(deadline);
-    throw oauthActionDeadlineError(deadline);
+    throw oauthActionDeadlineError(deadline, phase);
   }
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -610,7 +632,7 @@ async function withinOAuthActionDeadline<T>(
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => {
           expireOAuthAction(deadline);
-          reject(oauthActionDeadlineError(deadline));
+          reject(oauthActionDeadlineError(deadline, phase));
         }, remainingMs);
       }),
     ]);
@@ -648,7 +670,7 @@ async function withOAuthActionLease<T>(
   let acquired = false;
   try {
     if (deadline === undefined) await previous;
-    else await withinOAuthActionDeadline(previous, deadline);
+    else await withinOAuthActionDeadline(previous, deadline, "lease");
     acquired = true;
     return await run();
   } finally {
@@ -4067,6 +4089,7 @@ function compactV2PublicObservation(
     guidance?: string;
     oauth?: Observation["oauth"];
     observed?: ObserveDetail;
+    url?: string;
   },
 ): Observation {
   if (session.compactV2Mode !== "on") return legacy();
@@ -4074,13 +4097,17 @@ function compactV2PublicObservation(
   const payload: Observation = {
     format: "compact-v2",
     session_id: session.id,
-    url: session.browser.currentUrl(),
+    url: fields.url ?? session.browser.currentUrl(),
     text: "",
     stage: fields.stage,
     ...(fields.guidance === undefined ? {} : { guidance: fields.guidance }),
     ...(fields.oauth === undefined ? {} : { oauth: fields.oauth }),
     ...(fields.observed === undefined ? {} : { observed: fields.observed }),
   };
+  if (fields.url !== undefined && !compactV2PayloadWithinBudget(payload)) {
+    const overflow = Buffer.byteLength(JSON.stringify(payload), "utf8") - OBSERVE_V2_MAX_TOKENS;
+    payload.url = fields.url.slice(0, Math.max(0, fields.url.length - overflow));
+  }
   if (!compactV2PayloadWithinBudget(payload)) {
     throw new Error("compact-v2 budget metadata exceeded");
   }
@@ -4687,6 +4714,43 @@ interface InternalActResult {
   };
 }
 
+// Fix C: the honest, non-throwing "still waiting on a human" outcome for an
+// oauth_login/oauth_click action. `reason` is OAuthAwaitingHumanError's own
+// message — always something actually observed (no origin-return within
+// budget), never a guessed cause. Mirrors observeSession's oauthInProgress()
+// shape so both compact-v2 and legacy hosts get the same treatment: a normal
+// (non-error) observation the host re-observes/retries against.
+function oauthAwaitingHumanObservation(
+  session: Session,
+  error: OAuthAwaitingHumanError,
+): Observation {
+  session.prevObserve = null;
+  invalidateCompactV2Snapshot(session);
+  const url = session.browser.currentUrl();
+  const reason = error.message;
+  const guidance =
+    error.phase === "not_attempted"
+      ? "Not a failure: nothing was clicked, so no challenge is pending. Retry oauth_login."
+      : "Not a failure: call operate_observe to check whether the pending challenge has resolved.";
+  const oauth: NonNullable<Observation["oauth"]> = {
+    state: "awaiting_human",
+    reason,
+    next_action: "operate_observe",
+  };
+  return compactV2PublicObservation(
+    session,
+    () => ({
+      session_id: session.id,
+      url,
+      text: "",
+      guidance,
+      elements: [],
+      oauth,
+    }),
+    { stage: "auth", guidance, oauth, url },
+  );
+}
+
 async function actInternally(
   sessionId: string,
   action: ProvisionAction,
@@ -4714,6 +4778,11 @@ async function actInternally(
       ? await withOAuthActionBoundary(session, oauthProvider, execute)
       : await execute(undefined);
   } catch (error) {
+    // Fix C: an OAuth wait timing out is honest uncertainty, not a failure —
+    // return it as a normal (non-throwing) observation instead of an error.
+    if (error instanceof OAuthAwaitingHumanError && session !== undefined) {
+      return { observation: oauthAwaitingHumanObservation(session, error), outcome: {} };
+    }
     if (
       session?.compactV2Active === true &&
       !(error instanceof ManualCardEntryBlockedError) &&
@@ -4743,6 +4812,11 @@ export async function act(
         : await execute(undefined);
     return result.observation;
   } catch (error) {
+    // Fix C: an OAuth wait timing out is honest uncertainty, not a failure —
+    // return it as a normal (non-throwing) observation instead of an error.
+    if (error instanceof OAuthAwaitingHumanError && session !== undefined) {
+      return oauthAwaitingHumanObservation(session, error);
+    }
     if (session?.compactV2Active === true) {
       throw new Error(compactV2ActionFailureReason(error, action.kind));
     }
@@ -5524,9 +5598,13 @@ function compactV2SelectionFailureReason(error: unknown): string {
 
 function compactV2ActionFailureReason(error: unknown, kind: ProvisionAction["kind"]): string {
   if (error instanceof CompactV2ActionFailureError) return error.message;
-  if (error instanceof Error && (error as Error & { code?: unknown }).code === "google_session") {
-    return error.message;
-  }
+  // Fix C: report the honest, observed outcome — never the removed
+  // unverified-cause string ("the saved session may have expired"). A
+  // pending `awaiting_human` normally returns as a non-throwing observation
+  // (see act()/actInternally() below); this branch is a defensive fallback
+  // for any caller of this reason-mapper that doesn't go through that path.
+  if (error instanceof OAuthAwaitingHumanError) return "awaiting_human";
+  if (error instanceof OAuthFailedError) return error.message;
   if (error instanceof CompactV2StaleRefError) return "stale_ref";
   if (error instanceof TargetStaleError) return "reobserve_required";
   if (error instanceof ProvisionTargetNotAllowedError) {
@@ -7432,7 +7510,14 @@ export async function replayOperatorRecipe(
 
     try {
       await options.beforeAction?.({ step_index: i, action });
-      await actInternally(sessionId, action, "none");
+      const acted = await actInternally(sessionId, action, "none");
+      if (acted.observation.oauth?.state === "awaiting_human") {
+        return await fallback(
+          step,
+          i,
+          session.compactV2Active ? "awaiting_human" : acted.observation.oauth.reason,
+        );
+      }
       replayed += 1;
       const expected = state.expectedFields.get(i);
       if (expected !== undefined) {

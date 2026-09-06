@@ -713,8 +713,8 @@ vi.mock("../browser.js", () => ({
       h.oauthExpectedGoogleAccountEmails.push(expectedGoogleAccountEmail);
       const gate = h.oauthLoginGates.get(this.index);
       if (gate !== undefined) await gate;
-      if (h.oauthLoginError !== null) throw h.oauthLoginError;
       h.currentUrl = h.oauthResultUrl;
+      if (h.oauthLoginError !== null) throw h.oauthLoginError;
       h.visibleText = "Signed in";
     }
     async settleAfterOAuth(): Promise<void> {}
@@ -881,6 +881,23 @@ vi.mock("../browser.js", () => ({
     }
     return null;
   },
+  // Fix C — mirrors the real exports so provision-session.ts's honest
+  // OAuth-timeout classification (never asserting an unverifiable cause) can
+  // throw/catch these against this mocked module.
+  OAuthAwaitingHumanError: class extends Error {
+    readonly phase: "not_attempted" | "pending";
+    constructor(message: string, phase: "not_attempted" | "pending" = "pending") {
+      super(message);
+      this.name = "OAuthAwaitingHumanError";
+      this.phase = phase;
+    }
+  },
+  OAuthFailedError: class extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = "OAuthFailedError";
+    }
+  },
 }));
 
 vi.mock("../captcha-solver-2captcha.js", () => ({
@@ -946,7 +963,7 @@ import { sealToRecipient } from "../payment-hpke.js";
 import { operatePayTool, operatePaymentStatusTool } from "../../tools/operate-pay.js";
 import { ApiClient } from "../../api-client.js";
 import { dispatchOperatorBrowserProcessTermination } from "../operator-browser-watchdog.js";
-import { BrowserController } from "../browser.js";
+import { BrowserController, OAuthAwaitingHumanError } from "../browser.js";
 import { acquireProfileOperationGuard } from "../profile.js";
 import {
   startProvisionSession,
@@ -3534,7 +3551,12 @@ describe("operate session — OAuth lifecycle", () => {
     // chooser/consent screen became unreachable — observe/screenshot/oauth_settle
     // all returned "unknown provision session" and the only recovery was a
     // fresh session that lost all progress. A timeout must surface as a
-    // recoverable error while the session stays usable.
+    // recoverable state while the session stays usable.
+    //
+    // Fix C: a timeout is honest uncertainty, not a failure — it no longer
+    // rejects at all (the old rejection asserted an unverifiable cause, "the
+    // saved session may have expired"). It resolves as a non-throwing
+    // `awaiting_human` observation instead.
     process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "10";
     h.visibleText = "Continue with Google";
     h.elements = [
@@ -3553,9 +3575,17 @@ describe("operate session — OAuth lifecycle", () => {
       }),
     );
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
-    await expect(
-      act(started.session_id, { kind: "oauth_login", target: "Continue with Google" }),
-    ).rejects.toMatchObject({ code: "google_session" });
+    const timedOut = await act(started.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+    });
+    expect(timedOut.oauth).toMatchObject({
+      state: "awaiting_human",
+      next_action: "operate_observe",
+    });
+    if (timedOut.oauth?.state === "awaiting_human") {
+      expect(timedOut.oauth.reason).not.toMatch(/expired|force-relogin/i);
+    }
 
     // The timeout must NOT have deregistered the session: observe succeeds…
     await expect(observe(started.session_id)).resolves.toMatchObject({
@@ -3569,6 +3599,133 @@ describe("operate session — OAuth lifecycle", () => {
       session_id: started.session_id,
       closed: true,
     });
+  });
+
+  it("returns awaiting_human inside the compact-v2 budget even when the live challenge URL is huge", async () => {
+    // Same-tab topology: at the deadline the current page IS the provider's
+    // challenge page, whose URL alone can exceed the whole compact-v2 payload
+    // budget. The pending human step must still come back as an observation,
+    // never as a "compact-v2 budget metadata exceeded" error.
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    h.oauthResultUrl = `https://accounts.google.com/signin/challenge/dp/2?continue=${"x".repeat(1_200)}`;
+    const { oauthAwaitingHumanMessage } = await vi.importActual<{
+      oauthAwaitingHumanMessage: (productOrigin: string, budgetMs: number) => string;
+    }>("../browser.js");
+    h.oauthLoginError = new OAuthAwaitingHumanError(
+      oauthAwaitingHumanMessage("https://app.example.com", 30_000),
+    );
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
+      .safe_table;
+    const oauthRef = rows[0]?.[0];
+    expect(oauthRef).toBeDefined();
+    const pending = await act(started.session_id, { kind: "oauth_login", target: oauthRef! });
+    expect(pending.oauth).toMatchObject({
+      state: "awaiting_human",
+      next_action: "operate_observe",
+    });
+    // The live challenge URL is reported as-is, length-capped only as far as
+    // the compact-v2 byte budget requires — never reduced to its origin.
+    expect(h.oauthResultUrl.startsWith(pending.url)).toBe(true);
+    expect(pending.url).toContain("https://accounts.google.com/signin/challenge/dp/2?continue=");
+    expect(pending.url.length).toBeGreaterThan(300);
+    expect(pending.guidance).toMatch(/operate_observe/);
+    expect(pending.guidance).not.toMatch(/oauth_settle|oauth_login/);
+    expect(Buffer.byteLength(JSON.stringify(pending), "utf8")).toBeLessThanOrEqual(1_024);
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("labels a budget spent queued behind a prior OAuth call as not-yet-attempted, not a pending challenge", async () => {
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "10";
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    let releaseFirst!: () => void;
+    h.oauthLoginGates.set(
+      0,
+      new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      }),
+    );
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+    // The first attempt times out while its provider wait is still in flight,
+    // so it keeps the OAuth lease; the retry queues behind it and its whole
+    // budget elapses before it is ever attempted.
+    await expect(
+      act(started.session_id, { kind: "oauth_login", target: "Continue with Google" }),
+    ).resolves.toMatchObject({ oauth: { state: "awaiting_human" } });
+    const queued = await act(started.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+    });
+    expect(queued.oauth).toMatchObject({ state: "awaiting_human" });
+    if (queued.oauth?.state === "awaiting_human") {
+      expect(queued.oauth.reason).toMatch(/has not been attempted yet/);
+      expect(queued.oauth.reason).not.toMatch(/challenge|consent/i);
+    }
+    // Nothing was clicked, so the guidance must recommend the retry the
+    // reason names — not re-observing a challenge that was never started.
+    expect(queued.guidance).toMatch(/oauth_login/);
+    expect(queued.guidance).not.toMatch(/operate_observe|pending challenge/);
+    expect(queued.url).toBe(h.currentUrl);
+    expect(h.oauthLoginCalls).toHaveLength(1);
+    releaseFirst();
+    await finishProvisionSession(started.session_id);
+  });
+
+  it("stops recipe replay at an OAuth step that is still awaiting a human", async () => {
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    h.oauthLoginError = new OAuthAwaitingHumanError(
+      "OAuth has not returned to https://app.example.com within 10 seconds.",
+    );
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        entry_url: "https://app.example.com/login",
+        allowed_hosts: ["app.example.com"],
+        trace: [
+          {
+            action: {
+              kind: "oauth_click",
+              target: { visible_text: "Continue with Google", css: "#google-oauth" },
+            },
+          },
+          { action: { kind: "press", key: "Enter" } },
+        ],
+      }),
+      {},
+    );
+    expect(result).toMatchObject({
+      status: "fallback_required",
+      step_index: 0,
+      reason: expect.stringMatching(/has not returned to https:\/\/app\.example\.com/),
+    });
+    expect(h.pressedKeys).toEqual([]);
+    await finishProvisionSession(started.session_id);
   });
 });
 describe("operate_start — consent-overlay auto-dismiss", () => {

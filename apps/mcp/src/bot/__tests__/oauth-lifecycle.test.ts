@@ -6,7 +6,13 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
-import { BrowserController } from "../browser.js";
+import {
+  BrowserController,
+  OAuthAwaitingHumanError,
+  OAuthFailedError,
+  classifyOAuthTimeout,
+  oauthErrorFromReturnUrl,
+} from "../browser.js";
 import {
   act,
   finishProvisionSession,
@@ -391,7 +397,13 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
-  it("returns a re-login result when Google never reaches its OAuth completion signal", async () => {
+  it("reports awaiting_human — never a guessed cause — when Google never reaches its OAuth completion signal", async () => {
+    // Fix C regression: this used to reject with a fabricated cause ("the
+    // saved session may have expired") even though nothing observed here
+    // proves the session expired — the provider simply never returned
+    // control. A live dogfood run hit exactly this shape (a routine 2FA
+    // challenge, not an expired session) and the false cause made the agent
+    // relay wrong information to the operator.
     const context = await browser.newContext();
     const product = await context.newPage();
     await context.route("https://product.test/**", async (route) => {
@@ -412,13 +424,174 @@ describe("BrowserController OAuth popup lifecycle", () => {
 
     try {
       const rejected = controller.loginWithOAuth("#oauth", 1_000, "google");
+      await expect(rejected).rejects.toBeInstanceOf(OAuthAwaitingHumanError);
       await expect(rejected).rejects.toMatchObject({
-        code: "google_session",
-        message: expect.stringMatching(
-          /session may have expired.*connect --force-relogin=google/is,
-        ),
+        message: expect.stringMatching(/has not returned to https:\/\/product\.test/i),
+      });
+      await expect(rejected).rejects.not.toMatchObject({
+        message: expect.stringMatching(/expired|force-relogin|oauth_settle|retry oauth_login/i),
+      });
+      await expect(rejected).rejects.toMatchObject({
+        message: expect.stringMatching(/operate_observe/),
       });
       expect(Date.now() - startedAt).toBeLessThan(5_000);
+      // The pending challenge must stay reachable: the provider popup is still
+      // open and is the controller's active page, so operate_observe reads it.
+      const popup = context
+        .pages()
+        .find((page) => page.url().startsWith("https://accounts.google.com/"));
+      expect(popup?.isClosed()).toBe(false);
+      expect((controller as unknown as { page: Page }).page).toBe(popup);
+      expect(controller.currentUrl()).toBe("https://accounts.google.com/provider");
+      expect(product.isClosed()).toBe(false);
+      expect(await controller.extractVisibleText()).toContain("Provider did not settle");
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("reports failed when a popup carries the denial to the callback and then closes itself", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/**", async (route) => {
+      const callback = route.request().url().includes("/callback");
+      await route.fulfill({
+        contentType: "text/html",
+        body: callback
+          ? "<main>Login cancelled</main><script>setTimeout(() => window.close(), 20)</script>"
+          : '<button id="oauth" onclick="window.open(\'https://provider.test/oauth\')">Login with Provider</button>',
+      });
+    });
+    await context.route("https://provider.test/oauth", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<script>setTimeout(() => location.href="https://product.test/callback?error=access_denied", 20)</script>',
+      });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+
+    try {
+      const rejected = controller.loginWithOAuth("#oauth", 3_000);
+      await expect(rejected).rejects.toBeInstanceOf(OAuthFailedError);
+      await expect(rejected).rejects.toMatchObject({
+        message: expect.stringMatching(/error=access_denied/),
+      });
+      expect(product.isClosed()).toBe(false);
+      expect(controller.currentUrl()).toBe("https://product.test/login");
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("never reports failed when the same-tab product page closes at the deadline", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/**", async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<button id="oauth" onclick="location.href=\'https://provider.test/oauth\'">Login with Provider</button>',
+      });
+    });
+    await context.route("https://provider.test/oauth", async (route) => {
+      await route.fulfill({ contentType: "text/html", body: "<main>Provider challenge</main>" });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    const budgetMs = 1_500;
+
+    try {
+      const login = controller.loginWithOAuth("#oauth", budgetMs);
+      setTimeout(() => void product.close().catch(() => undefined), budgetMs - 50);
+      await login;
+      expect(product.isClosed()).toBe(true);
+      expect(controller.currentUrl()).toBe("https://product.test/login");
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("reports failed with the provider's own error code when the return carries error=access_denied", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/**", async (route) => {
+      const callback = route.request().url().includes("/callback");
+      await route.fulfill({
+        contentType: "text/html",
+        body: callback
+          ? "<main>Login cancelled</main>"
+          : '<button id="oauth" onclick="location.href=\'https://provider.test/oauth\'">Login with Provider</button>',
+      });
+    });
+    await context.route("https://provider.test/oauth", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<script>setTimeout(() => location.href="https://product.test/callback?error=access_denied&error_description=The+user+denied+access", 20)</script>',
+      });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+
+    try {
+      const rejected = controller.loginWithOAuth("#oauth", 3_000);
+      await expect(rejected).rejects.toBeInstanceOf(OAuthFailedError);
+      await expect(rejected).rejects.toMatchObject({
+        message: expect.stringMatching(/error=access_denied \(The user denied access\)/),
+      });
+      expect(product.isClosed()).toBe(false);
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("does not report completion for a same-tab control that never left the product origin", async () => {
+    // A disabled/no-op OAuth control (or a One-Tap affordance that never
+    // redirects) leaves the page on the product origin for the whole budget.
+    // Still being on the product origin at the deadline is not a return from
+    // the provider, so this must stay awaiting_human rather than resolve as
+    // a completed login.
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/**", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<button id="oauth" onclick="event.preventDefault()">Continue</button>',
+      });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 1_000)).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+      expect(product.isClosed()).toBe(false);
+      expect(controller.currentUrl()).toBe("https://product.test/login");
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("ignores an error= parameter the page already carried before this attempt", async () => {
+    // A stale denial from an earlier attempt is still in the address bar; this
+    // attempt never navigates, so nothing was observed and it must not fail.
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/**", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<button id="oauth" onclick="event.preventDefault()">Continue</button>',
+      });
+    });
+    await product.goto("https://product.test/login?error=access_denied");
+    const controller = BrowserController.fromHarnessPage(product);
+
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 1_000)).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+      expect(controller.currentUrl()).toBe("https://product.test/login?error=access_denied");
     } finally {
       await context.close().catch(() => undefined);
     }
@@ -490,5 +663,56 @@ describe("BrowserController OAuth popup lifecycle", () => {
     } finally {
       await context.close().catch(() => undefined);
     }
+  });
+});
+
+// Fix C's honest three-outcome classification, pinned as a pure unit test
+// rather than a live-timer race: reproducing the exact real-world race this
+// recovers (the deadline elapsing in the same instant the provider's
+// redirect lands) deterministically in a real browser would require racing
+// Node's event loop against Playwright's navigation events, which is
+// inherently flaky. The decision itself has no browser dependency, so pin it
+// directly.
+describe("classifyOAuthTimeout (Fix C decision logic)", () => {
+  it("reports completion when the provider returned control despite the timeout", () => {
+    // The exact false-negative from the 2026-09 dogfood: OAuth had actually
+    // completed, but the strict wait's confirmation loop still timed out.
+    expect(classifyOAuthTimeout(false, true)).toBe("returned");
+  });
+
+  it("reports awaiting_human when nothing observed proves either completion or failure", () => {
+    expect(classifyOAuthTimeout(false, false)).toBe("awaiting_human");
+  });
+
+  it("settles a provider page that closed at the deadline exactly like the lifecycle wait does", () => {
+    // A closed provider page is this codebase's ordinary popup completion
+    // signal, never a failure.
+    expect(classifyOAuthTimeout(true, false)).toBe("closed");
+    expect(classifyOAuthTimeout(true, true)).toBe("closed");
+  });
+});
+
+describe("oauthErrorFromReturnUrl (observed OAuth denial)", () => {
+  it("reads a standard error code and its description from the query", () => {
+    expect(
+      oauthErrorFromReturnUrl(
+        "https://product.test/callback?error=access_denied&error_description=User+cancelled&state=x",
+      ),
+    ).toEqual({ error: "access_denied", description: "User cancelled" });
+  });
+
+  it("reads an implicit-flow error from the fragment", () => {
+    expect(oauthErrorFromReturnUrl("https://product.test/cb#error=consent_required")).toEqual({
+      error: "consent_required",
+      description: null,
+    });
+  });
+
+  it("treats a return with no error parameter, or free text where a code belongs, as no denial", () => {
+    expect(oauthErrorFromReturnUrl("https://product.test/callback?code=abc&state=x")).toBeNull();
+    expect(
+      oauthErrorFromReturnUrl("https://product.test/?error=Something%20went%20wrong"),
+    ).toBeNull();
+    expect(oauthErrorFromReturnUrl("not a url")).toBeNull();
   });
 });
