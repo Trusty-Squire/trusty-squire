@@ -31,6 +31,12 @@ const h = vi.hoisted(() => ({
   workerEmail: "operator@example.com" as string | null,
   nextId: 0,
   instances: [] as FakeInstance[],
+  // Test levers: park the primary's real close, park a satellite attach, or
+  // make a satellite's own-page close hang forever (a wedged Chrome).
+  primaryCloseGate: null as Promise<void> | null,
+  attachGate: null as Promise<void> | null,
+  attachEntered: null as (() => void) | null,
+  hangOwnPagesClose: false,
 }));
 
 vi.mock("../browser.js", async (importOriginal) => {
@@ -52,6 +58,8 @@ vi.mock("../browser.js", async (importOriginal) => {
       primary: FakeBrowserController,
       opts: unknown = {},
     ): Promise<FakeBrowserController> {
+      h.attachEntered?.();
+      if (h.attachGate !== null) await h.attachGate;
       return new FakeBrowserController(opts, primary);
     }
     async start(): Promise<void> {
@@ -62,9 +70,11 @@ vi.mock("../browser.js", async (importOriginal) => {
     }
     async close(): Promise<void> {
       this.record.closeCalls += 1;
+      if (!this.record.isSatellite && h.primaryCloseGate !== null) await h.primaryCloseGate;
     }
     async closeOwnPagesOnly(): Promise<string> {
       this.record.closeOwnPagesOnlyCalls += 1;
+      if (this.record.isSatellite && h.hangOwnPagesClose) await new Promise<never>(() => {});
       return "closed";
     }
     async waitForThreeDsResolution(): Promise<string> {
@@ -144,11 +154,16 @@ beforeEach(() => {
   h.workerEmail = "operator@example.com";
   h.nextId = 0;
   h.instances = [];
+  h.primaryCloseGate = null;
+  h.attachGate = null;
+  h.attachEntered = null;
+  h.hangOwnPagesClose = false;
   profileDir = mkdtempSync(join(tmpdir(), "ts-multisession-"));
 });
 
 afterEach(async () => {
   delete process.env.TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION;
+  delete process.env.TRUSTY_SQUIRE_OPERATOR_FORCE_CLOSE_TIMEOUT_MS;
   await closeAllProvisionSessions().catch(() => undefined);
   rmSync(profileDir, { recursive: true, force: true });
 });
@@ -302,6 +317,100 @@ describe("TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION on", () => {
     expect(primaryRecord!.closeCalls).toBe(1);
     expect(satelliteRecord!.closeCalls).toBe(0);
     expect(satelliteRecord!.closeOwnPagesOnlyCalls).toBe(1);
+  });
+
+  it("refuses to join while the last session's teardown is already closing the shared Chrome", async () => {
+    const first = await startProvisionSession({
+      serviceUrl: "https://app.example.com",
+      profileDir,
+    });
+    let releaseClose!: () => void;
+    h.primaryCloseGate = new Promise<void>((resolve) => (releaseClose = resolve));
+    const finishing = finishProvisionSession(first.session_id);
+    while (h.instances[0]!.closeCalls === 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+
+    // The group is empty and its Chrome is mid-close: nothing to join.
+    await expect(
+      startProvisionSession({ serviceUrl: "https://other.example.com", profileDir }),
+    ).rejects.toBeInstanceOf(ProfileBusyError);
+    expect(h.instances).toHaveLength(1);
+
+    releaseClose();
+    await finishing;
+    // With the group fully released, the next start is a fresh primary.
+    const third = await startProvisionSession({
+      serviceUrl: "https://third.example.com",
+      profileDir,
+    });
+    expect(h.instances).toHaveLength(2);
+    expect(h.instances[1]!.isSatellite).toBe(false);
+    expect(h.instances[1]!.startCalls).toBe(1);
+    await finishProvisionSession(third.session_id);
+  });
+
+  it("abandons a satellite whose group emptied while its attach was in flight", async () => {
+    const first = await startProvisionSession({
+      serviceUrl: "https://app.example.com",
+      profileDir,
+    });
+    let releaseAttach!: () => void;
+    h.attachGate = new Promise<void>((resolve) => (releaseAttach = resolve));
+    const entered = new Promise<void>((resolve) => (h.attachEntered = resolve));
+    const joining = startProvisionSession({ serviceUrl: "https://other.example.com", profileDir });
+    await entered;
+
+    // The only live session finishes completely while the attach is parked.
+    await finishProvisionSession(first.session_id);
+    expect(h.instances[0]!.closeCalls).toBe(1);
+
+    releaseAttach();
+    await expect(joining).rejects.toBeInstanceOf(ProfileBusyError);
+    // The attached-but-unjoinable satellite closed its own page and was
+    // never registered: a fresh start launches a new primary.
+    expect(h.instances).toHaveLength(2);
+    expect(h.instances[1]!.isSatellite).toBe(true);
+    expect(h.instances[1]!.closeOwnPagesOnlyCalls).toBe(1);
+    const third = await startProvisionSession({
+      serviceUrl: "https://third.example.com",
+      profileDir,
+    });
+    expect(h.instances).toHaveLength(3);
+    expect(h.instances[2]!.isSatellite).toBe(false);
+    await finishProvisionSession(third.session_id);
+  });
+
+  it("reports busy, not a runtime-internal error, when the second start's proxy differs from the live identity", async () => {
+    const first = await startProvisionSession({
+      serviceUrl: "https://app.example.com",
+      profileDir,
+    });
+    await expect(
+      startProvisionSession({
+        serviceUrl: "https://other.example.com",
+        profileDir,
+        proxyUrl: "socks5://127.0.0.1:1080",
+      }),
+    ).rejects.toBeInstanceOf(ProfileBusyError);
+    expect(h.instances).toHaveLength(1);
+    await finishProvisionSession(first.session_id);
+  });
+
+  it("bounds a forced teardown even when a satellite's own-page close hangs", async () => {
+    process.env.TRUSTY_SQUIRE_OPERATOR_FORCE_CLOSE_TIMEOUT_MS = "50";
+    await startProvisionSession({ serviceUrl: "https://app.example.com", profileDir });
+    await startProvisionSession({ serviceUrl: "https://other.example.com", profileDir });
+    const [primaryRecord, satelliteRecord] = h.instances;
+    h.hangOwnPagesClose = true;
+
+    const outcome = await Promise.race([
+      closeAllProvisionSessions().then(() => "closed" as const),
+      new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 2_000)),
+    ]);
+    expect(outcome).toBe("closed");
+    expect(satelliteRecord!.closeOwnPagesOnlyCalls).toBeGreaterThanOrEqual(1);
+    expect(primaryRecord!.closeCalls).toBe(1);
   });
 
   it("joins a THIRD session while two are already live", async () => {

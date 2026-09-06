@@ -42,7 +42,11 @@ import {
   OperatorBrowserWatchdog,
   type OperatorBrowserWatchdogReason,
 } from "../operator-browser-watchdog.js";
-import { IdentityRuntime } from "../identity-runtime.js";
+import {
+  IdentityRuntime,
+  IncompatibleIdentityRuntimeSettingsError,
+  type AcquiredIdentity,
+} from "../identity-runtime.js";
 import { experimentalMultiSessionEnabled } from "./multisession-flag.js";
 import { createSession } from "./model.js";
 import type { AllowedHostEntry, Session, SessionTerminalTeardownOwner } from "./model.js";
@@ -254,13 +258,21 @@ async function tryAcquireSatelliteBrowser(
     profileDir,
     ...(opts.proxyUrl !== undefined ? { proxyUrl: opts.proxyUrl } : {}),
   };
-  const acquired = await operatorIdentityRuntime.acquire(identitySettings, async () => {
-    throw new Error(
-      "operate_start (TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION): expected to join an already-live " +
-        "identity but the runtime attempted a fresh launch instead — this should be unreachable",
-    );
-  });
-  if (!acquired.reused || sharedIdentityGroup === null || sharedIdentityGroup.profileDir !== profileDir) {
+  let acquired: AcquiredIdentity<BrowserController>;
+  try {
+    acquired = await operatorIdentityRuntime.acquire(identitySettings, async () => {
+      throw new Error(
+        "operate_start (TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION): expected to join an already-live " +
+          "identity but the runtime attempted a fresh launch instead — this should be unreachable",
+      );
+    });
+  } catch (err) {
+    if (err instanceof IncompatibleIdentityRuntimeSettingsError) return null;
+    throw err;
+  }
+  const joinable = (group: SharedIdentityGroup | null): group is SharedIdentityGroup =>
+    group !== null && group.profileDir === profileDir && group.refCount > 0;
+  if (!acquired.reused || !joinable(sharedIdentityGroup)) {
     acquired.releaseTabs();
     return null;
   }
@@ -280,6 +292,13 @@ async function tryAcquireSatelliteBrowser(
   } catch (err) {
     acquired.releaseTabs();
     throw err;
+  }
+  // The last live session's teardown may have emptied the group while the
+  // attach was in flight; a satellite must never be committed onto it.
+  if (sharedIdentityGroup !== group || !joinable(group)) {
+    await satellite.closeOwnPagesOnly().catch(() => undefined);
+    acquired.releaseTabs();
+    return null;
   }
   group.refCount += 1;
   audit(sessionId, "multisession_satellite_attach", { profile_dir: profileDir });
@@ -470,9 +489,9 @@ async function forceReleaseWarmBrowserPage(
         () => owner?.requireProvenBrowserClose === true,
       );
     } else if (group.refCount > 0) {
-      await browser.closeOwnPagesOnly().catch(() => undefined);
+      await closeOwnPagesBounded(browser);
     } else {
-      if (browser !== group.primary) await browser.closeOwnPagesOnly().catch(() => undefined);
+      if (browser !== group.primary) await closeOwnPagesBounded(browser);
       await closeBrowserUntilProven(
         group.primary,
         false,
@@ -495,6 +514,21 @@ async function forceReleaseWarmBrowserPage(
   if (group === undefined) leased.lease.release();
   else if (group.refCount <= 0) group.lease.release();
   leasedBrowsers.delete(browser);
+}
+
+// The forced-teardown counterpart of closeOwnPagesOnly: page.close() can hang
+// indefinitely on a wedged Chrome, so the grouped forced path keeps the same
+// bounded contract closeBrowserBounded gives the ungrouped one.
+async function closeOwnPagesBounded(browser: BrowserController): Promise<void> {
+  const timeoutMs = positiveTimeout(
+    "TRUSTY_SQUIRE_OPERATOR_FORCE_CLOSE_TIMEOUT_MS",
+    DEFAULT_OPERATOR_FORCE_CLOSE_TIMEOUT_MS,
+  );
+  await withTerminalTimeout(
+    browser.closeOwnPagesOnly(),
+    timeoutMs,
+    "operator browser own-page force-close timed out",
+  ).catch(() => undefined);
 }
 
 async function closeBrowserBounded(

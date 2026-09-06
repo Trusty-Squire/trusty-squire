@@ -118,11 +118,17 @@ when this flag is off.
 - **Tab-family isolation.** `BrowserController.attachSatellite(primary, opts)`
   (`browser.ts`) constructs a SECOND `BrowserController` that shares
   `primary`'s `BrowserProcessOwner` (same Chrome process and
-  `BrowserContext`) but gets its OWN `PageDriver`/`OwnedPages` — no changes to
-  either of those classes were needed. `owned-pages.ts`'s existing
-  per-instance `Symbol` ownership (`register()` throws if a page already
-  belongs to a different `OwnedPages`) is what makes "neither session ever
-  adopts the other's tabs" fall out for free.
+  `BrowserContext`) but gets its OWN `PageDriver`/`OwnedPages`; the only
+  change to those classes is the read-only `claimedByAnother()` accessor
+  `owned-pages.ts` gained for the page-aware host-scope guard.
+  `owned-pages.ts`'s existing per-instance `Symbol` ownership (`register()`
+  throws if a page already belongs to a different `OwnedPages`) is what
+  makes "neither session ever adopts the other's tabs" fall out for free.
+  A join is committed only while the group is still live: the join path
+  re-checks the group after `attachSatellite` resolves and, if the last
+  session's teardown emptied it meanwhile, closes the just-attached page and
+  propagates the ordinary `ProfileBusyError`; a second start whose
+  identity settings (proxy) differ from the live identity is likewise busy.
 - **Shared teardown.** `SharedIdentityGroup` in `session/lifecycle.ts`
   refcounts every session sharing one identity. `releaseWarmBrowserPage` /
   `forceReleaseWarmBrowserPage` decrement first, then: if sessions remain,
