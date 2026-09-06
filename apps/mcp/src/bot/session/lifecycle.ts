@@ -409,11 +409,15 @@ async function releaseWarmBrowserPage(
 ): Promise<void> {
   const leased = leasedBrowsers.get(browser);
   const group = leased?.identityGroup;
-  // Decrement up front — BEFORE the owner?.forced check below can throw —
-  // so two sessions finishing concurrently (including a graceful finish
-  // racing its own watchdog-triggered force-terminate, which throws here and
-  // hands off to forceReleaseWarmBrowserPage) agree on who is actually last
-  // regardless of which of them (primary or a satellite) this call is for.
+  // A forced teardown of a GROUPED session belongs wholly to
+  // forceReleaseWarmBrowserPage, which the forcing path runs next on this same
+  // session: it performs the group's one decrement and, when last, the
+  // primary close. Touching the refcount, the lease, or the leasedBrowsers
+  // entry here first would discard the group before anything closed the
+  // shared Chrome. The ungrouped (flag-off) path is unchanged.
+  if (group !== undefined && owner?.forced) {
+    throw new Error("operator browser terminal teardown was forced");
+  }
   if (group !== undefined) group.refCount -= 1;
   try {
     if (owner?.forced) throw new Error("operator browser terminal teardown was forced");
@@ -452,9 +456,10 @@ async function forceReleaseWarmBrowserPage(
 ): Promise<void> {
   const leased = leasedBrowsers.get(browser);
   const group = leased?.identityGroup;
-  // See releaseWarmBrowserPage — decremented up front so both functions agree
-  // on who is last even when a session's graceful finish and its own
-  // watchdog-triggered force-terminate race each other.
+  // The group's one decrement for a forced session happens here, never in a
+  // preempted releaseWarmBrowserPage (see there), so whichever session's
+  // teardown empties the group — primary or satellite, graceful or forced —
+  // is the one that closes the shared Chrome.
   if (group !== undefined) group.refCount -= 1;
   try {
     if (group === undefined) {

@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { createServer } from "node:http";
-import { chromium, type Browser } from "playwright";
+import { chromium, type Browser, type BrowserContext } from "playwright";
 import { BrowserController } from "../browser.js";
 import {
   isFailFastScopeAbort,
@@ -124,9 +124,10 @@ describe("Defect A — same-registrable-domain scope + fail-fast", () => {
         if (address === null || typeof address === "string") throw new Error("missing test server");
         playwrightBrowser = await chromium.launch({ headless: true });
         const context = await playwrightBrowser.newContext();
-        const page = await context.newPage();
-        const controller = BrowserController.fromHarnessPage(page);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { context: BrowserContext }).context = context;
         await controller.setHostScopeAllowedHosts(() => RAKUTEN_CHECKOUT_HOSTS);
+        const page = await context.newPage();
         await page.setContent("<title>scope guard</title>");
         const outcome = await page.evaluate(async (url) => {
           return await Promise.race([

@@ -132,22 +132,37 @@ when this flag is off.
   controller — even when a satellite is the one whose finish emptied it, so
   the shared Chrome always gets torn down exactly once regardless of finish
   order.
-- **Host-scope guard under sharing.** Each session installs its own
-  `installHostScopeGuard` route on the shared context, and Playwright runs
-  every context route for every request — so the guard is page-aware: it
-  judges only requests whose page its own `OwnedPages` claims, and hands a
-  page another session has claimed on (`route.fallback`) to that session's
-  guard. `closeOwnPagesOnly()` unroutes the finished session's guard. The
-  residual: a page NO session has claimed (a popup whose opener attribution
-  failed closed) or a frameless service-worker request is still judged by
-  every guard on the context, fail-closed as before.
+- **Forced teardown of a grouped session.** `releaseWarmBrowserPage`
+  throws WITHOUT touching the refcount, the lease, or the `leasedBrowsers`
+  entry when the session's teardown owner is already `forced`; the
+  `forceReleaseWarmBrowserPage` call the forcing path runs next performs the
+  group's one decrement and, when last, the primary close. (Decrementing
+  first discarded the group before anything closed the shared Chrome.)
+- **Host-scope guard under sharing.** With the flag off the guard judges
+  every request unconditionally, exactly as before. Under the flag each
+  session installs its own `installHostScopeGuard` route on the shared
+  context, Playwright runs every context route for every request, and a
+  guard hands a page another session's `OwnedPages` has DEFINITELY claimed
+  on (`route.fallback`) to that session's guard; everything else — an
+  unclaimed page or a frameless service-worker request — it judges itself,
+  fail-closed, so such a request must pass every live session's scope.
+  `closeOwnPagesOnly()` unroutes the finished session's guard. The real
+  residual: Playwright fires the opener's `popup` event only after the
+  popup's first navigation commits, so EVERY popup is unclaimed for that
+  window and its earliest XHR/fetch (an OAuth/consent page's first API call)
+  is aborted unless in scope for every live session.
 - **Known, accepted limitation** (do not try to fix here): two sessions
   against the SAME site under the SAME login share cookies and can collide.
   This flag is for different-site concurrency and the auth spike, not a
   general concurrency guarantee — do not build a site-workflow
   scheduler/broker on top of it.
-- `multisession-concurrency.test.ts` pins flag-off preservation (one
-  instance ever constructed, `PROFILE_BUSY` on a second start) and flag-on
-  behavior (satellite attach, tab-family isolation, shared-browser-survives
-  regardless of finish order, a third session joining two already-live
-  ones).
+- `multisession-concurrency.test.ts` (fake controller, real lifecycle) pins
+  flag-off preservation (one instance ever constructed, `PROFILE_BUSY` on a
+  second start) and flag-on admission/teardown (satellite attach,
+  shared-browser-survives regardless of finish order, a third session
+  joining two already-live ones, a forced shutdown racing a graceful finish
+  still closing the shared Chrome once). `multisession-tab-family.test.ts`
+  (real Chromium, one shared context) pins tab-family isolation: popup
+  ownership and cross-session adoption refusal, `closeOwnPagesOnly()`
+  closing only its own family, the per-page normalization on the
+  satellite's page, and the guard's flag-off/flag-on dispatch.

@@ -694,19 +694,27 @@ virgin signup succeeds on an UNCOVERED service (no active skill in registry)
   (`browser.ts`) constructs a second controller sharing the primary's
   `BrowserProcessOwner` (same Chrome process/context) but with its OWN
   `PageDriver`/`OwnedPages`, so tab-family isolation falls out of the existing
-  tab-ownership registry with no changes there. `SharedIdentityGroup` in
+  tab-ownership registry (`owned-pages.ts` gained only the read-only
+  `claimedByAnother()` accessor the guard below uses); the satellite's page
+  gets the same per-page normalization as the primary's
+  (`installPageNormalization`). `SharedIdentityGroup` in
   `session/lifecycle.ts` refcounts the group so whichever session's finish
   empties it runs the real teardown (via the group's `primary`, even when a
   satellite finishes last) — every other finish calls
   `closeOwnPagesOnly()` (closing that session's whole tab family and
-  unrouting its guard) and leaves the shared browser running. Each session's
-  host-scope network guard (`installHostScopeGuard`) is page-aware: a
-  request is judged only by the guard of the session whose `OwnedPages`
-  claims its page, and a page another session has claimed falls through
-  (`route.fallback`) to that session's own guard. Only a page no session has
-  claimed (e.g. a popup whose opener attribution failed closed) or a
-  frameless service-worker request is still judged by every guard on the
-  context. Known, accepted limitation (test scaffolding, not a production
+  unrouting its guard) and leaves the shared browser running. A forced
+  teardown of a grouped session is wholly `forceReleaseWarmBrowserPage`'s: a
+  preempted `releaseWarmBrowserPage` throws before touching the refcount or
+  the lease, so the shared Chrome is never orphaned by the race. The
+  host-scope network guard (`installHostScopeGuard`) judges every request
+  unconditionally with the flag off, exactly as before. Under the flag it is
+  page-aware: a page another session's `OwnedPages` has definitely claimed
+  falls through (`route.fallback`) to that session's own guard; everything
+  else — an unclaimed page, or a frameless service-worker request — is judged
+  by every guard on the context and must pass all of them. Every popup is
+  unclaimed between its first navigation commit and its opener's `popup`
+  event, so a popup's earliest XHR/fetch must be in scope for every live
+  session. Known, accepted limitation (test scaffolding, not a production
   concurrency feature): two sessions on the same site under the same login
   share cookies and can collide. Do not build a site-workflow
   scheduler/broker on top of this — that is out of scope for the flag.

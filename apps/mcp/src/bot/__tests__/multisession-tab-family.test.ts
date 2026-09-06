@@ -9,8 +9,12 @@
 //     the other session can neither register it nor adopt it;
 //   - closing a session's own pages closes its whole family (its page plus
 //     every popup it owns) and nothing the other session owns;
-//   - each session's host-scope guard judges only its own pages, so a
-//     different-site session is not aborted by its neighbour's scope.
+//   - the satellite's page gets the same per-navigation normalization as the
+//     primary's page (the evaluate-name shim and device spoof);
+//   - with the flag off the host-scope guard judges every request
+//     unconditionally; with it on, each session's guard judges only its own
+//     claimed pages, so a different-site session is not aborted by its
+//     neighbour's scope, while an unclaimed page still answers to every guard.
 //
 // The lifecycle refcounting around this (who runs the real close, finish
 // order) is covered with a fake controller in multisession-concurrency.test.ts.
@@ -100,6 +104,7 @@ describeChromium("experimental multisession — real tab-family isolation", () =
   }, 60_000);
 
   afterEach(async () => {
+    delete process.env.TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION;
     await browser?.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
@@ -172,7 +177,44 @@ describeChromium("experimental multisession — real tab-family isolation", () =
     expect(await primaryPage.evaluate(() => document.title)).toBe("/primary");
   }, 30_000);
 
-  it("scopes each session's host-scope guard to its own pages on the shared context", async () => {
+  it("installs the primary's per-navigation page normalization on the satellite's page", async () => {
+    const normalized = async (page: Page): Promise<boolean> =>
+      await page.evaluate(
+        () => typeof (globalThis as { __name?: unknown }).__name === "function",
+      );
+    await satellitePage.goto(`http://localhost:${port}/satellite-again`);
+    await expect.poll(async () => await normalized(satellitePage), { timeout: 5_000 }).toBe(
+      true,
+    );
+    expect(
+      await satellitePage.evaluate(() => [
+        navigator.hardwareConcurrency,
+        (navigator as Navigator & { deviceMemory?: number }).deviceMemory,
+      ]),
+    ).toEqual([8, 8]);
+
+    // The environment itself does none of this: a page no controller
+    // attached, in the same context, stays raw.
+    const raw = await context.newPage();
+    await raw.goto(`http://localhost:${port}/raw`);
+    expect(await normalized(raw)).toBe(false);
+  }, 30_000);
+
+  it("flag off: a guard judges every request on the context, with no page-ownership bypass", async () => {
+    await primary.setHostScopeAllowedHosts(() => ["127.0.0.1"]);
+    await satellite.setHostScopeAllowedHosts(() => ["localhost"]);
+
+    // The primary's own in-scope call is still judged by the satellite's
+    // guard (installed later, so it runs first) and aborted — the shipped
+    // single-session behavior, where no second guard ever exists.
+    expect(await fetchOutcome(primaryPage, `http://127.0.0.1:${port}/api/primary`)).toBe(
+      "rejected",
+    );
+    expect(apiHits).toHaveLength(0);
+  }, 30_000);
+
+  it("flag on: scopes each session's host-scope guard to its own claimed pages on the shared context", async () => {
+    process.env.TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION = "1";
     await primary.setHostScopeAllowedHosts(() => ["127.0.0.1"]);
     await satellite.setHostScopeAllowedHosts(() => ["localhost"]);
 

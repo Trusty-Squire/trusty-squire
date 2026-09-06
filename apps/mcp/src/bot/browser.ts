@@ -52,6 +52,7 @@ import type {
   Request,
   Route,
 } from "playwright";
+import { experimentalMultiSessionEnabled } from "./session/multisession-flag.js";
 import { BrowserProcessOwner } from "./browser-process-owner.js";
 import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
@@ -2506,6 +2507,107 @@ export async function launchPlainLoginBrowser(params: {
   };
 }
 
+// Dev-runtime guard: when the bot is run through `tsx`, esbuild may inject
+// calls to its `__name(fn, "name")` helper into functions passed to
+// page.evaluate/addInitScript. Those functions execute in the browser page,
+// where Node's helper does not exist, causing an immediate
+// `ReferenceError: __name is not defined` before the real signup even
+// starts. Define the same no-op helper in every document. Built `dist`
+// should not emit these calls, but the helper is harmless there too.
+const EVALUATE_NAME_SHIM_SCRIPT =
+  'Object.defineProperty(globalThis, "__name", { value: (fn) => fn, configurable: true });';
+
+// rc.33 / 2026-06-04 — spoof the WebGL UNMASKED vendor+renderer toward a
+// stock Intel GPU, so the software Mesa/llvmpipe string (--enable-unsafe-
+// swiftshader gives us a context, but llvmpipe is itself a VM/headless
+// tell) doesn't read through. Applied TWO ways because patchright
+// (hardened) isolates document-start scripts from the page's main world:
+//   • addInitScript — document-start; the effective path in the stealth
+//     BASELINE (non-patchright).
+//   • re-applied via page.evaluate on every navigation — the ONLY path that
+//     reaches the MAIN world under patchright. MEASURED 2026-06-04:
+//     addInitScript AND raw CDP Page.addScriptToEvaluateOnNewDocument both
+//     land in patchright's isolated world (renderer stayed llvmpipe);
+//     page.evaluate does not (renderer became Intel), and the v3 score held
+//     at 1.0. Idempotent via a marker so the per-nav re-apply is cheap, and
+//     getParameter.toString() is masked to the original native source so
+//     the patch itself isn't a tell. Only strings change, not rendering.
+const INSTALL_WEBGL_SPOOF_SCRIPT = String.raw`(() => {
+      const VENDOR_WEBGL = 0x9245; // UNMASKED_VENDOR_WEBGL
+      const RENDERER_WEBGL = 0x9246; // UNMASKED_RENDERER_WEBGL
+      const spoof = (proto) => {
+        // The marker lives on the prototype so re-application is a no-op; the
+        // cast is the one typed-alternative-exhausted spot (adding an ad-hoc
+        // brand to a DOM prototype).
+        if (proto.__tsWebglPatched === true) return;
+        const orig = proto.getParameter;
+        const native = orig.toString();
+        proto.getParameter = function (p) {
+          if (p === VENDOR_WEBGL) return "Google Inc. (Intel)";
+          if (p === RENDERER_WEBGL) {
+            return "ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (KBL GT2), OpenGL 4.6)";
+          }
+          return orig.call(this, p);
+        };
+        Object.defineProperty(proto.getParameter, "toString", {
+          value: () => native,
+          configurable: true,
+          writable: true,
+        });
+        proto.__tsWebglPatched = true;
+      };
+      if (typeof WebGLRenderingContext !== "undefined") {
+        spoof(WebGLRenderingContext.prototype);
+      }
+      if (typeof WebGL2RenderingContext !== "undefined") {
+        spoof(WebGL2RenderingContext.prototype);
+      }
+      // Device-tell normalization. The headless harvester box reports 20
+      // logical cores (navigator.hardwareConcurrency) — a consumer residential
+      // device is 4-16. A 20-core Linux machine behind a "residential" IP is
+      // an internal inconsistency Cloudflare Turnstile scores against
+      // (MEASURED 2026-06-11: exa/cartesia Turnstile won't issue a token on a
+      // clean-fingerprint click; hwConcurrency=20 + Linux is the standout
+      // anomaly). Normalize to a common consumer profile. Same per-nav main-
+      // world application as the WebGL spoof — patchright denies init-world
+      // reach, and Turnstile reads these after the challenge script loads
+      // (seconds in), so the framenavigated re-apply wins the race. Defined on
+      // Navigator.prototype (where the native getters live) so there's no own-
+      // property tell on the instance.
+      const navProto = Navigator.prototype;
+      if (navProto.__tsDevicePatched !== true) {
+        try {
+          Object.defineProperty(Navigator.prototype, "hardwareConcurrency", {
+            get: () => 8,
+            configurable: true,
+          });
+          Object.defineProperty(Navigator.prototype, "deviceMemory", {
+            get: () => 8,
+            configurable: true,
+          });
+          // Screen availHeight tell: a virtual screen reports
+          // availHeight == height (no OS taskbar), whereas a real Windows
+          // desktop reserves ~40px for the taskbar (availHeight = height-40,
+          // availWidth = width). Reinstate that gap so the screen reads like
+          // an ordinary desktop, not a bare framebuffer. Guarded so it only
+          // applies when the two are currently equal (i.e. headless).
+          try {
+            if (screen.availHeight === screen.height) {
+              Object.defineProperty(Screen.prototype, "availHeight", {
+                get: () => screen.height - 40,
+                configurable: true,
+              });
+            }
+          } catch {
+            // leave it
+          }
+          navProto.__tsDevicePatched = true;
+        } catch {
+          // descriptor already locked by something else — leave it.
+        }
+      }
+    })();`;
+
 export class BrowserController {
   private get context(): BrowserContext | null {
     return this.processOwner.context;
@@ -2637,20 +2739,23 @@ export class BrowserController {
   // Here it is aborted with a real net error so the page's fetch/XHR rejects
   // promptly and the site's own error handling runs.
   //
-  // The route is CONTEXT-scoped, so under the experimental multisession flag
-  // every session sharing the context has its own guard here and Playwright
-  // runs them all for every request. A request from a page another session
-  // has positively claimed is that session's guard's to judge — this one
-  // hands it on untouched. A page nobody has claimed, or one whose page can't
-  // be resolved (service-worker requests have no frame), is judged here
-  // exactly as before, so the single-session guard keeps its fail-closed
-  // default.
+  // The route is CONTEXT-scoped. With TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION
+  // off (the shipped default) every request is judged here unconditionally,
+  // exactly as it always was. Under the flag every session sharing the
+  // context has its own guard here and Playwright runs them all for every
+  // request, so a request from a page another session's OwnedPages has
+  // positively claimed is handed on untouched for that session's guard to
+  // judge. A page nobody has claimed (every popup, between its first
+  // navigation commit and the opener's "popup" event), or one whose page
+  // can't be resolved (service-worker requests have no frame), is still
+  // judged here fail-closed.
   private async installHostScopeGuard(): Promise<void> {
     const ctx = this.context;
     if (ctx === null) throw new Error("Browser not started");
+    const pageAware = experimentalMultiSessionEnabled();
     const handler = async (route: Route): Promise<void> => {
       try {
-        if (this.requestPageClaimedByAnotherSession(route)) {
+        if (pageAware && this.requestPageClaimedByAnotherSession(route)) {
           await route.fallback();
           return;
         }
@@ -2728,12 +2833,14 @@ export class BrowserController {
   }
 
   // Opens and registers this controller's OWN page in the shared context.
-  // Mirrors what initializePages() does for the primary's first page, minus
-  // the context-level setup (init scripts, resource-blocking routes) — those
-  // are CONTEXT-scoped and already installed once by whichever controller
+  // Mirrors what initializePages() does for the primary's first page — the
+  // same per-page normalization via installPageNormalization — minus the
+  // context-level setup (init scripts, resource-blocking routes), which is
+  // CONTEXT-scoped and already installed once by whichever controller
   // launched the shared browser. The host-scope guard is NOT shared: each
-  // session installs its own via setHostScopeAllowedHosts, and the guard
-  // dispatches by page ownership so the two never judge each other's pages.
+  // session installs its own via setHostScopeAllowedHosts, and under the
+  // flag the guard dispatches by page ownership so the two never judge each
+  // other's claimed pages.
   private async attachOwnPage(): Promise<void> {
     const ctx = this.processOwner.context;
     if (ctx === null) {
@@ -2745,6 +2852,7 @@ export class BrowserController {
     this.page = page;
     this.primaryPage = page;
     this.trackOpenedTabs(page);
+    await this.installPageNormalization(page, this.processOwner.launchMode === "remote");
   }
 
   // Closes ONLY this controller's own page(s) — never the shared Chrome
@@ -2782,15 +2890,6 @@ export class BrowserController {
   ): Promise<void> {
     // Speed: optionally abort heavy/irrelevant requests before any navigation.
     await this.installResourceBlocking();
-    // Dev-runtime guard: when the bot is run through `tsx`, esbuild may inject
-    // calls to its `__name(fn, "name")` helper into functions passed to
-    // page.evaluate/addInitScript. Those functions execute in the browser page,
-    // where Node's helper does not exist, causing an immediate
-    // `ReferenceError: __name is not defined` before the real signup even
-    // starts. Define the same no-op helper in every document. Built `dist`
-    // should not emit these calls, but the helper is harmless there too.
-    const evaluateNameShimScript =
-      'Object.defineProperty(globalThis, "__name", { value: (fn) => fn, configurable: true });';
     const contextInitScripts = contextInitScriptsFor({ hardened, remoteMode });
     // Never register context init scripts under patchright. Its injection path
     // rewrites text/html after decoding the response as UTF-8, corrupting
@@ -2800,7 +2899,7 @@ export class BrowserController {
     // Baseline playwright-extra does not rewrite responses and keeps these
     // document-start installs. Regression guard: observe-jp-mojibake.test.ts.
     if (contextInitScripts.includes("evaluate-name-shim")) {
-      await context.addInitScript({ content: evaluateNameShimScript });
+      await context.addInitScript({ content: EVALUATE_NAME_SHIM_SCRIPT });
     }
     // Patch navigator.webdriver — BASELINE ONLY. Measured against the
     // rebrowser bot-detector, this manual `defineProperty` is
@@ -2814,96 +2913,6 @@ export class BrowserController {
       });
     }
 
-    // rc.33 / 2026-06-04 — spoof the WebGL UNMASKED vendor+renderer toward a
-    // stock Intel GPU, so the software Mesa/llvmpipe string (--enable-unsafe-
-    // swiftshader gives us a context, but llvmpipe is itself a VM/headless
-    // tell) doesn't read through. Applied TWO ways because patchright
-    // (hardened) isolates document-start scripts from the page's main world:
-    //   • addInitScript — document-start; the effective path in the stealth
-    //     BASELINE (non-patchright).
-    //   • re-applied via page.evaluate on every navigation — the ONLY path that
-    //     reaches the MAIN world under patchright. MEASURED 2026-06-04:
-    //     addInitScript AND raw CDP Page.addScriptToEvaluateOnNewDocument both
-    //     land in patchright's isolated world (renderer stayed llvmpipe);
-    //     page.evaluate does not (renderer became Intel), and the v3 score held
-    //     at 1.0. Idempotent via a marker so the per-nav re-apply is cheap, and
-    //     getParameter.toString() is masked to the original native source so
-    //     the patch itself isn't a tell. Only strings change, not rendering.
-    const installWebglSpoofScript = String.raw`(() => {
-      const VENDOR_WEBGL = 0x9245; // UNMASKED_VENDOR_WEBGL
-      const RENDERER_WEBGL = 0x9246; // UNMASKED_RENDERER_WEBGL
-      const spoof = (proto) => {
-        // The marker lives on the prototype so re-application is a no-op; the
-        // cast is the one typed-alternative-exhausted spot (adding an ad-hoc
-        // brand to a DOM prototype).
-        if (proto.__tsWebglPatched === true) return;
-        const orig = proto.getParameter;
-        const native = orig.toString();
-        proto.getParameter = function (p) {
-          if (p === VENDOR_WEBGL) return "Google Inc. (Intel)";
-          if (p === RENDERER_WEBGL) {
-            return "ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (KBL GT2), OpenGL 4.6)";
-          }
-          return orig.call(this, p);
-        };
-        Object.defineProperty(proto.getParameter, "toString", {
-          value: () => native,
-          configurable: true,
-          writable: true,
-        });
-        proto.__tsWebglPatched = true;
-      };
-      if (typeof WebGLRenderingContext !== "undefined") {
-        spoof(WebGLRenderingContext.prototype);
-      }
-      if (typeof WebGL2RenderingContext !== "undefined") {
-        spoof(WebGL2RenderingContext.prototype);
-      }
-      // Device-tell normalization. The headless harvester box reports 20
-      // logical cores (navigator.hardwareConcurrency) — a consumer residential
-      // device is 4-16. A 20-core Linux machine behind a "residential" IP is
-      // an internal inconsistency Cloudflare Turnstile scores against
-      // (MEASURED 2026-06-11: exa/cartesia Turnstile won't issue a token on a
-      // clean-fingerprint click; hwConcurrency=20 + Linux is the standout
-      // anomaly). Normalize to a common consumer profile. Same per-nav main-
-      // world application as the WebGL spoof — patchright denies init-world
-      // reach, and Turnstile reads these after the challenge script loads
-      // (seconds in), so the framenavigated re-apply wins the race. Defined on
-      // Navigator.prototype (where the native getters live) so there's no own-
-      // property tell on the instance.
-      const navProto = Navigator.prototype;
-      if (navProto.__tsDevicePatched !== true) {
-        try {
-          Object.defineProperty(Navigator.prototype, "hardwareConcurrency", {
-            get: () => 8,
-            configurable: true,
-          });
-          Object.defineProperty(Navigator.prototype, "deviceMemory", {
-            get: () => 8,
-            configurable: true,
-          });
-          // Screen availHeight tell: a virtual screen reports
-          // availHeight == height (no OS taskbar), whereas a real Windows
-          // desktop reserves ~40px for the taskbar (availHeight = height-40,
-          // availWidth = width). Reinstate that gap so the screen reads like
-          // an ordinary desktop, not a bare framebuffer. Guarded so it only
-          // applies when the two are currently equal (i.e. headless).
-          try {
-            if (screen.availHeight === screen.height) {
-              Object.defineProperty(Screen.prototype, "availHeight", {
-                get: () => screen.height - 40,
-                configurable: true,
-              });
-            }
-          } catch {
-            // leave it
-          }
-          navProto.__tsDevicePatched = true;
-        } catch {
-          // descriptor already locked by something else — leave it.
-        }
-      }
-    })();`;
     // Skip under patchright (hardened) — see the mojibake note above: any
     // context.addInitScript triggers patchright's charset-lossy text/html
     // rewrite. This spoof is already re-applied per navigation via
@@ -2911,17 +2920,27 @@ export class BrowserController {
     // the ONLY path that reaches the main world under patchright anyway, so the
     // context init copy is dead weight there.
     if (contextInitScripts.includes("webgl-spoof")) {
-      await context.addInitScript({ content: installWebglSpoofScript });
+      await context.addInitScript({ content: INSTALL_WEBGL_SPOOF_SCRIPT });
     }
     this.page = context.pages()[0] ?? (await context.newPage());
     this.trackOpenedTabs(this.page);
     this.primaryPage = this.page;
+    await this.installPageNormalization(this.page, remoteMode);
+  }
+
+  // Every per-page install the primary's first page gets — the evaluate-name
+  // shim, the per-navigation main-world spoof re-apply, the captcha-iframe
+  // in-frame spoof, and the optional captcha trace. Under patchright the
+  // context init scripts are skipped, so this per-navigation path is the ONLY
+  // fingerprint normalization a page gets; a satellite's page
+  // (attachOwnPage) must therefore go through it too.
+  private async installPageNormalization(page: Page, remoteMode: boolean): Promise<void> {
     // In baseline mode addInitScript covers document-start page JS, but
     // Playwright's page.evaluate utility execution can run in a separate realm.
     // Install the same no-op helper there with a STRING evaluate (tsx cannot
     // wrap strings with __name). This prevents dev-runtime source runs from
     // crashing before replay reaches the service page.
-    await this.page.evaluate(evaluateNameShimScript).catch(() => undefined);
+    await page.evaluate(EVALUATE_NAME_SHIM_SCRIPT).catch(() => undefined);
     // Re-apply on every navigation — the main-world reach patchright's isolated
     // init world denies us. framenavigated fires at navigation-commit (before
     // most page JS), so a late WebGL query (reCAPTCHA scores seconds in) sees
@@ -2931,8 +2950,8 @@ export class BrowserController {
       const pg = this.page;
       if (pg === null) return;
       void (async () => {
-        await pg.evaluate(evaluateNameShimScript).catch(() => undefined);
-        await pg.evaluate(installWebglSpoofScript).catch(() => {
+        await pg.evaluate(EVALUATE_NAME_SHIM_SCRIPT).catch(() => undefined);
+        await pg.evaluate(INSTALL_WEBGL_SPOOF_SCRIPT).catch(() => {
           // mid-navigation / closed page — the next navigation re-applies.
         });
       })();
@@ -2952,7 +2971,7 @@ export class BrowserController {
     // a captcha would read. Logged only under CAPTCHA_TRACE to prove the fix.
     const RENDERER_PROBE = String.raw`(() => { try { const c = document.createElement("canvas"); const gl = c.getContext("webgl") || c.getContext("webgl2"); if (!gl) return "no-gl"; const e = gl.getExtension("WEBGL_debug_renderer_info"); return e ? String(gl.getParameter(e.UNMASKED_RENDERER_WEBGL)) : "no-ext"; } catch (err) { return "err:" + (err && err.message); } })()`;
     const trace = process.env.UNIVERSAL_BOT_CAPTCHA_TRACE === "1";
-    this.page.on("framenavigated", (frame) => {
+    page.on("framenavigated", (frame) => {
       if (remoteMode) return; // real-GPU remote host: no in-iframe spoof
       if (this.page === null) return;
       if (frame === this.page.mainFrame()) {
@@ -2980,7 +2999,7 @@ export class BrowserController {
         // place before the scoring read.
         let landed = false;
         for (let i = 0; i < 20 && !landed; i++) {
-          await frame.evaluate(installWebglSpoofScript).catch(() => undefined);
+          await frame.evaluate(INSTALL_WEBGL_SPOOF_SCRIPT).catch(() => undefined);
           const r = await frame.evaluate(RENDERER_PROBE).catch(() => "eval-fail");
           if (typeof r === "string" && r.includes("Intel")) landed = true;
           else await new Promise((res) => setTimeout(res, 150));
@@ -2992,7 +3011,7 @@ export class BrowserController {
         }
       })();
     });
-    this.page.on("load", reapplyWebglSpoof);
+    page.on("load", reapplyWebglSpoof);
 
     // rc.33 — captcha tracing. When UNIVERSAL_BOT_CAPTCHA_TRACE=1 is
     // set, log every response from Cloudflare/Google's challenge
@@ -3003,7 +3022,7 @@ export class BrowserController {
     // it CAN observe its network. Off by default; opt in for
     // diagnostic runs only since the bodies can be large.
     if (process.env.UNIVERSAL_BOT_CAPTCHA_TRACE === "1") {
-      this.page.on("response", async (resp) => {
+      page.on("response", async (resp) => {
         const url = resp.url();
         if (
           !/challenges\.cloudflare\.com|google\.com\/recaptcha|hcaptcha\.com|newassets\.hcaptcha\.com/.test(
@@ -3032,7 +3051,7 @@ export class BrowserController {
           }`,
         );
       });
-      this.page.on("console", (msg) => {
+      page.on("console", (msg) => {
         const text = msg.text();
         if (!/turnstile|cloudflare|challenge|recaptcha/i.test(text)) return;
         console.error(`[captcha-trace] console.${msg.type()}: ${text}`);
