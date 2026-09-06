@@ -123,6 +123,11 @@ const h = vi.hoisted(() => ({
   visibleTextQueue: [] as string[],
   visibleTextGate: null as Promise<void> | null,
   extractVisibleTextCalls: 0,
+  // Compact-v2 text channel: the prose list extractObservationProse() returns
+  // (with the same queue-scripting option as visibleText).
+  prose: [] as string[],
+  proseQueue: [] as string[][],
+  proseExtractCalls: 0,
   openFirstMailResult: false,
   // fill_card cart-total-carry-forward (Session.lastCartCheckout): null means
   // "no total on this page" (readCheckoutSummary rejects, the common case).
@@ -327,6 +332,12 @@ vi.mock("../browser.js", () => ({
       if (h.oauthReadError !== null) throw new Error(h.oauthReadError);
       if (h.visibleTextQueue.length > 0) return h.visibleTextQueue.shift()!;
       return h.visibleText;
+    }
+    async extractObservationProse(): Promise<string[]> {
+      h.proseExtractCalls += 1;
+      if (h.oauthReadError !== null) throw new Error(h.oauthReadError);
+      if (h.proseQueue.length > 0) return h.proseQueue.shift() ?? h.prose;
+      return h.prose;
     }
     async revealMaskedCredentials(): Promise<void> {}
     async extractLabeledCredentialCandidates(): Promise<unknown[]> {
@@ -1184,6 +1195,9 @@ beforeEach(() => {
   h.visibleTextQueue = [];
   h.visibleTextGate = null;
   h.extractVisibleTextCalls = 0;
+  h.prose = [];
+  h.proseQueue = [];
+  h.proseExtractCalls = 0;
   h.openFirstMailResult = false;
   h.checkoutSummary = null;
   h.cartLineItems = [];
@@ -4832,9 +4846,13 @@ describe("Compact V2 action-map boundary", () => {
     );
     expect(started).toMatchObject({
       format: "compact-v2",
-      hint: expect.stringContaining("route-🧭"),
       user_email: "operator@example.test",
     });
+    // The first page holds the composed hint's head (the login guidance line
+    // ends at whitespace, so the token-boundary pager keeps it whole and the
+    // route hint starts on a later page); the assertions below page through
+    // and verify the reconstruction is lossless.
+    expect(started.hint).toBeTruthy();
     let reconstructed = started.hint ?? "";
     let hintCursor = started.hint_overflow?.next_cursor;
     while (hintCursor !== undefined) {
@@ -4847,6 +4865,116 @@ describe("Compact V2 action-map boundary", () => {
     }
     expect(reconstructed).toContain(routeHint);
     expect(reconstructed).toContain("SUCCESS: credential sealed");
+  });
+
+  it("pages the start hint at token boundaries instead of cutting it mid-word", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    // The ipinfo dogfood's real hint shape: the fixed 384-byte first page used
+    // to cut "- entry: https://ipin" mid-URL, forcing an extra paging call to
+    // reassemble trusted routing metadata. Boundaries must now fall after
+    // whitespace, and paging must stay lossless.
+    const routeHint =
+      `Known route for "ipinfo" — a MAP, not a script. Drive toward it; ` +
+      `fall back to your own judgment if the live page diverges.\n` +
+      `- login: the user has a live session for google (prefer "google"). IF the ` +
+      `page offers one of those as a sign-in option, use it — the account may ` +
+      `already exist, so log IN, don't re-sign-up. If there's no such button, ` +
+      `sign up with email.\n` +
+      `- entry: https://ipinfo.io/signup\n` +
+      `- after login, navigate: /dashboard → /dashboard/token\n`;
+    const started = await startProvisionSession({
+      serviceUrl: "https://ipinfo.io/signup",
+      hint: routeHint,
+    });
+    const pages: string[] = [started.hint ?? ""];
+    let hintCursor = started.hint_overflow?.next_cursor;
+    while (hintCursor !== undefined) {
+      const page = await observeQuery(started.session_id, "", undefined, hintCursor);
+      pages.push(page.hint as string);
+      hintCursor = (page.hint_overflow as { next_cursor?: string } | undefined)?.next_cursor;
+    }
+    expect(pages.length).toBeGreaterThan(1);
+    // The session composes its own login guidance ahead of the route hint, so
+    // assert on the properties that matter rather than exact composition:
+    // lossless (nothing dropped), token-aligned boundaries, and the entry URL
+    // never cut mid-token (the dogfood read "https://ipin").
+    const reconstructed = pages.join("");
+    expect(reconstructed).toContain("- entry: https://ipinfo.io/signup\n");
+    expect(reconstructed.endsWith("- after login, navigate: /dashboard → /dashboard/token\n")).toBe(
+      true,
+    );
+    // No page ends mid-token: every boundary falls on whitespace.
+    for (const page of pages.slice(0, -1)) {
+      expect(page).toMatch(/\s$/);
+    }
+  });
+
+  it("carries screened page prose in the compact-v2 text channel", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    h.prose = [
+      "Your token was created. Treat it like a password.",
+      "Live token: f9a062f02fadf5 — copy it now.",
+    ];
+    const started = await startHarnessProvisionSession({
+      browser: new BrowserController(),
+      observationFormat: "compact-v2",
+      serviceUrl: "https://app.example.com/dashboard",
+    });
+    expect(started.format).toBe("compact-v2");
+    expect(started.text).toContain("Your token was created. Treat it like a password.");
+    // A token reflected into page prose is redacted by the shared primitive.
+    expect(started.text).toContain("[redacted]");
+    expect(started.text).not.toContain("f9a062f02fadf5");
+    // Sticky: an unchanged re-observe does not resend the same prose.
+    const again = await observe(started.session_id, "compact");
+    expect(again.text).toBe("");
+    // A changed prose payload rides the delta, screened like the first emit.
+    h.prose = ["Rate limit reached: upgrade to view more requests."];
+    const changed = await observe(started.session_id, "compact");
+    expect(changed.text).toBe("Rate limit reached: upgrade to view more requests.");
+  });
+
+  it("re-offers the full text channel after a budget-degraded resync page", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const bulkyTwo = `Prose item two: ${"x".repeat(1200)}`;
+    const bulkyThree = `Prose item three: ${"y".repeat(1200)}`;
+    h.prose = ["Prose item one.", bulkyTwo, bulkyThree];
+    const started = await startHarnessProvisionSession({
+      browser: new BrowserController(),
+      observationFormat: "compact-v2",
+      serviceUrl: "https://app.example.com/dashboard",
+    });
+    // Baseline: a small map leaves budget for the whole text channel, so the
+    // consumer holds all three items.
+    expect(started.text).toContain("Prose item one.");
+    expect(started.text).toContain("Prose item three:");
+    // A row change forces a fresh paged map whose rows consume the wire
+    // budget; the text channel degrades on that resync page.
+    h.elements = Array.from({ length: 40 }, (_, i) =>
+      elem({
+        tag: "button",
+        role: "button",
+        visibleText: `Dynamically rendered section control number ${i} with a long descriptive name`,
+        selector: `#dyn-${i}`,
+      }),
+    );
+    const resync = await observe(started.session_id, "compact");
+    expect(resync.text.length).toBeLessThan(bulkyTwo.length);
+    // The rows are now unchanged, so the delta is small: the consumer only
+    // ever received a degraded subset, so the full prose must be re-offered
+    // instead of being suppressed as "unchanged" against the stored list.
+    const again = await observe(started.session_id, "compact");
+    expect(again.text).toContain("Prose item one.");
+    expect(again.text).toContain("Prose item three:");
   });
 
   it("keeps harness V1 consumers explicit while bounding opt-in V2 metadata", async () => {
@@ -5483,7 +5611,7 @@ describe("Compact V2 durable ref identity", () => {
     expect(h.clickCalls).toBe(1);
   });
 
-  it("refuses a label shared by two grid controls, and acts on either ref", async () => {
+  it("disambiguates a label shared by two grid controls with ordinals, and acts on either", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [0, 1].map((index) =>
       elem({
@@ -5500,24 +5628,20 @@ describe("Compact V2 durable ref identity", () => {
     });
     const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
       .safe_table;
+    // Deterministic ordinals: the first occurrence keeps the base slug, later
+    // occurrences gain -2, -3, … so every row is individually addressable.
     expect(rows.map(([, , facts]) => facts)).toEqual([
       "@add-to-cart|a=add_to_cart",
-      "@add-to-cart|a=add_to_cart",
+      "@add-to-cart-2|a=add_to_cart",
     ]);
-    // Same label, different fingerprints.
+    // Same labels would be ambiguous; distinct labels are not. Distinct refs.
     expect(rows[0]![0]).not.toBe(rows[1]![0]);
 
-    const error = await act(started.session_id, {
-      kind: "click",
-      target: "@add-to-cart",
-    }).catch((cause: unknown) => cause);
-    expect((error as Error).message).toContain('ambiguous_target: "@add-to-cart" names 2 controls');
-    expect((error as Error).message).toContain(rows[0]![0]);
-    expect((error as Error).message).toContain(rows[1]![0]);
-    expect(h.clickCalls).toBe(0);
+    await act(started.session_id, { kind: "click", target: "@add-to-cart" });
+    expect(h.clickCalls).toBe(1);
 
     await act(started.session_id, { kind: "click", target: rows[1]![0] });
-    expect(h.clickCalls).toBe(1);
+    expect(h.clickCalls).toBe(2);
   });
 
   it("acts on a label that names exactly one control", async () => {

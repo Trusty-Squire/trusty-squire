@@ -614,13 +614,15 @@ the page renders — field values, labels, the live URL (path and query included
 card material, and rendered API keys alike. The masking layer
 (`redactObservationText` / `present*` / `Session.sealedFieldKeys`), compact-v2's
 content screens, and `provision-drive.ts`'s compact-v2 tool-result seal
-(`compactV2ThickResult`) are deleted. Compact-v2 still omits page `text` and
-field values from its rows — that is a payload SIZE budget, not a seal. §4.5 of
-the doc and `AGENTS.md` §16 own the rule; do not add a seal back. One narrow
-label-alias carve-out (2026-09-06): compact-v2's `controlLabelV2` screens
-credential-shaped accessible names into `@redacted-secret` (the ipinfo run
-emitted a live token as a copy button's label); that fixes the alias's own
-contract, not a read — see §4.5 and `AGENTS.md` §16.
+(`compactV2ThickResult`) are deleted. Compact-v2 omits field values from its rows and emits page `text`
+only through the narrow carve-out below — that is a payload SIZE budget, not a
+seal. §4.5 of the doc and `AGENTS.md` §16 own the rule; do not add a seal back.
+One narrow compact-v2 screening carve-out (2026-09-06, ipinfo Findings 1–2):
+the label alias (`controlLabelV2`) screens credential-shaped accessible names
+into `@redacted-secret`, and the bounded page-prose `text` channel runs its
+extracted prose through the same shared redactor, rewriting only secret-shaped
+substrings to `[redacted]`. Both are code-derived target/wire-shape contracts,
+not read seals — see §4.5 and `AGENTS.md` §16 for the owner contract.
 
 ### Operator Recipe registry (replay-serve-live-domainlock)
 

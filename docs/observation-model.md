@@ -90,10 +90,11 @@ actually renders:
   `screenshot_unavailable_sealed_context` refusal — the error code no longer
   exists.
 - Observation text, element values, labels, hrefs, test ids, paths, and frame
-  origins are verbatim — except the compact-v2 label alias, which the
-  label-alias carve-out below screens. A password field's value, an operator-injected vault
+  origins are verbatim. A password field's value, an operator-injected vault
   value, a filled card number and CVV, a rendered API key, recovery code, TOTP,
-  or JWT are all ordinary page content.
+  or JWT are all ordinary page content. (One bounded exception, owner's
+  2026-09-06 Finding-2 order: compact-v2's extracted page-prose `text` channel
+  rewrites secret-shaped substrings — see the carve-outs below.)
 - Compact-v2's `url` is the live page URL, path and query included. Its rows
   still omit field values — that is a payload SIZE budget, not a seal; read a
   value with `operate_screenshot`, `extract`, or a V1 session.
@@ -102,23 +103,67 @@ actually renders:
   The `no_legit_credential` and "the secret is still masked/hidden" refusals are
   gone.
 
-**One label-alias carve-out (2026-09-06, ipinfo dogfood Finding 1).** The
-compact-v2 label alias is a code-derived target, not a read, and its documented
+**One compact-v2 screening carve-out (2026-09-06, ipinfo dogfood Findings 1–2).**
+The compact-v2 label alias is a code-derived target, not a read, and its documented
 contract was always "screened … never a value." The ipinfo run caught that
 contract being false: a site that renders an API key as its copy button's
 accessible name emitted the live token as the label `@f9a062f02fadf5` (and its
 first four characters again inside `@curl-h-authorization-bearer-f9a0`), putting
 the secret into the transcript. `controlLabelV2` now screens the accessible
 name for credential shape (vendor anchors, JWT shape, length + character-class
-+ entropy over unbroken runs and over hyphen/underscore-grouped bodies scored
-as one joined run — `looksLikeSecretShapedName` in `compact-observation-v2.ts`)
-and emits `@redacted-secret` instead — with a stable per-observation
-`@redacted-secret-N` discriminator when several rows redact on one page —
-keeping the row's ref, role, and every non-secret fact so the control stays
-actionable.
-Nothing else on the read path changes: page text, values, screenshots, and
-extracts remain verbatim, and ordinary labels (`@as15169`, `@8-8-8-8`,
-`@bmbmlite`) are tuned to survive verbatim.
++ entropy over unbroken runs and over hyphen/underscore-grouped bodies with all
+segments ≥4 chars scored as one joined run — `looksLikeSecretShapedName` in
+`compact-observation-v2.ts`) and emits `@redacted-secret` instead, keeping the
+row's ref, role, and every non-secret fact so the control stays actionable.
+Values, screenshots, and extracts remain verbatim, and ordinary labels
+(`@8-8-8-8`, `@bmbmlite`) are tuned to survive verbatim. Later the same day the
+owner's Finding-2 order extended this one shared screen to the compact-v2
+page-text channel — the bounded, budget-degraded, sticky `text` field documented
+just below — whose extracted prose rewrites only secret-shaped substrings to
+`[redacted]`. That is the channel's own documented wire contract, not a read
+seal and not a precedent for any other shape-matching screen.
+
+**The same run's Finding 2 — compact-v2 comprehensibility (2026-09-06).**
+Finding 1 made the map safe; Finding 2 makes it *comprehensible*:
+
+- **Screened page-text channel.** The observation's `text` field was always
+  `""` — the agent got the control map but not the page's prose (headings,
+  intro copy, alerts), so a /dashboard/token page looked like an unlabeled
+  wall. The browser extractor (`extractObservationProse` in `browser.ts`)
+  now returns a bounded list of salient prose items (headings, paragraphs,
+  list items, alerts/live regions — skipping interactive-control
+  descendants, whose labels are the map's job). `screenObservationProseV2`
+  screens each item through the SAME shared primitive as the label alias
+  (`looksLikeSecretShapedName` + run-entropy predicate) by redacting only the
+  secret-shaped substrings to `[redacted]`, so "Your API token [redacted] was
+  copied to the clipboard" keeps its context. Prose fills whatever wire
+  budget the action map leaves over (rows pack first — the map is never
+  starved for text's sake), degrades item-by-item from the tail, and is
+  sticky: a delta resends prose only when it differs from what was last
+  actually emitted (the degraded subset, not the full screened list), so a
+  degraded page is re-sent whole on the next unchanged-rows observe rather
+  than leaving the consumer with a permanent subset. Prose extraction is
+  availability-optional; a harness or older browser without it degrades to
+  the old empty `text` silently.
+- **Duplicate-label ordinals.** Two controls legitimately sharing an
+  accessible name (two `@curl-example` copy buttons) both emitted the same
+  label, so `@curl-example` was a dead ambiguous target forever. Labels are
+  now disambiguated deterministically at map-build time: the first
+  occurrence keeps the base slug, later ones gain `-2`, `-3`, … — each row
+  individually addressable, no ordinal-dependent fingerprint change.
+- **Lossless hint paging.** The compact-v2 wire budget (4096 bytes / 1024
+  tokens) used to cut the composed session hint at a raw byte boundary — the
+  first page ended mid-URL (`- entry: https://ipin…`), costing an extra
+  paging call and a mis-assembled route. Pages now split at UTF-8 token
+  boundaries (last whitespace within each page's byte cap; a whitespace-free
+  hint falls back to the hard split), making paging lossless.
+- **Region context for opaque labels.** A label slug with no 3+-letter word
+  run (`@as15169`, `@1w`) is unreadable to the agent. Such labels gain the
+  short, screened name of the region they sit in (`@as15169-as-details`); a
+  legible label gains nothing (bytes stay on the map), and a secret-shaped
+  region name is refused as context by the same shared screen — a section
+  that displays a key as its heading never rides into a label as
+  "context".
 
 **Why.** The seal and the extractor contradicted each other in production: on
 BrowserStack's settings page, with the Access Key revealed, `operate_screenshot`
@@ -259,8 +304,13 @@ and where it is deliberately narrower or more conservative than §4.1 above.
   embedded frame can never hash onto a main-page ref.
 - **Label** — `@continue-with-google`, slugified from the already-screened
   control description. It is an addressable alias: `operate_act` accepts it and
-  resolves it to a ref. A label naming more than one observed control raises
-  `ambiguous_target` listing the candidate refs; it never guesses.
+  resolves it to a ref. Duplicate labels are disambiguated deterministically at
+  map-build time (`disambiguateDuplicateLabelsV2`): the first occurrence keeps
+  the base slug, later ones gain `-2`/`-3` ordinals in the map's own row order,
+  so two controls sharing an accessible name are individually addressable
+  instead of permanently ambiguous. `resolveCompactV2Label` still refuses with
+  `ambiguous_target` if a label ever names more than one observed row — a
+  fail-closed backstop, not the expected path; it never guesses.
 - **Epoch** — `{ doc, rev }`. `doc` is an HMAC of the browser's stable
   main-document identity; `rev` is a monotonic counter that advances only when
   the serialized skeleton actually changed. `doc` is the authorization boundary

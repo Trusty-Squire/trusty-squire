@@ -51,6 +51,7 @@ import {
   isCompactV2Label,
   controlMatchesPrivateQueryV2,
   diffSafeControlsV2,
+  equalObservationProseV2,
   equalSafePageSemanticsV2,
   encodeV2Delta,
   encodeV2Page,
@@ -61,6 +62,7 @@ import {
   safeDescriptionV2,
   safeOriginV2,
   safePageSemanticsV2,
+  screenObservationProseV2,
   sealRetainedInteractiveElementsV2,
   safeStageV2,
   type SafeControlV2,
@@ -263,7 +265,9 @@ export interface Observation {
   // a skill exists for the service. The host agent reads it before driving.
   hint?: string;
   // V1 layout-aware page prose (innerText), capped to keep tool payloads
-  // bounded. Compact V2 deliberately emits an empty string.
+  // bounded. Compact V2 emits bounded SCREENED page prose: headings, copy,
+  // errors, and selected-state text, redacted through the shared secret-shape
+  // primitive and degraded item-by-item — never at the action map's expense.
   text: string;
   // Domain-aware steering for the host planner. This is not a script; it is
   // guardrail context for states the raw page text routinely misleads agents on.
@@ -1985,24 +1989,12 @@ export function buildScreenOutline(
     }
     if (region.children.length < 10) {
       region.children.push({
-        ref:
-          el.screenPath !== null && el.screenPath !== undefined
-            ? el.screenPath
-            : elementRef(el),
-        role:
-          el.role === null
-            ? null
-            : el.role,
+        ref: el.screenPath !== null && el.screenPath !== undefined ? el.screenPath : elementRef(el),
+        role: el.role === null ? null : el.role,
         text: elementRef(el),
-        href:
-          el.href === null || el.href === undefined
-            ? null
-            : el.href,
+        href: el.href === null || el.href === undefined ? null : el.href,
         topmost: el.topmost ?? null,
-        occluded_by:
-          el.occludedBy === null || el.occludedBy === undefined
-            ? null
-            : el.occludedBy,
+        occluded_by: el.occludedBy === null || el.occludedBy === undefined ? null : el.occludedBy,
       });
     }
     byRegion.set(id, region);
@@ -2047,23 +2039,16 @@ export function buildAccessibilitySnapshot(
   for (const [region, group] of entries.slice(0, 24)) {
     lines.push(`  region "${region}"`);
     for (const el of group.slice(0, 16)) {
-      const label = elementRef(el).replace(
-        /"/g,
-        '\\"',
-      );
+      const label = elementRef(el).replace(/"/g, '\\"');
       const role = roleForAccessibility(el);
-      const shownValue = (el.value ?? null);
+      const shownValue = el.value ?? null;
       const flags = [
         el.value !== undefined && el.value !== null
           ? `value="${(shownValue ?? "").slice(0, 60)}"`
           : null,
         el.checked !== undefined && el.checked !== null ? `checked=${el.checked}` : null,
-        el.href !== undefined && el.href !== null
-          ? `href="${el.href.slice(0, 120)}"`
-          : null,
-        el.topmost === false
-          ? `occluded_by="${el.occludedBy ?? "unknown"}"`
-          : null,
+        el.href !== undefined && el.href !== null ? `href="${el.href.slice(0, 120)}"` : null,
+        el.topmost === false ? `occluded_by="${el.occludedBy ?? "unknown"}"` : null,
       ].filter((v): v is string => v !== null);
       lines.push(
         `    ${role} "${label}" ref=${refs.get(el) ?? provisionElementRef(el)}` +
@@ -3401,16 +3386,11 @@ export function buildCompactObservation(args: {
   const fileElements: ObservedElement[] = [];
   for (const el of elements) {
     const ref = refOf(el);
-    fullByRef.set(
-      ref,
-      toCompactElement(el, ref, false, elide),
-    );
+    fullByRef.set(ref, toCompactElement(el, ref, false, elide));
     serializedByRef.set(ref, JSON.stringify(fullByRef.get(ref)));
     // The persisted file keeps FULL fidelity (path included, no elision) so a
     // re-expansion after a host compaction loses nothing.
-    fileElements.push(
-      toCompactElement(el, ref, true, false),
-    );
+    fileElements.push(toCompactElement(el, ref, true, false));
   }
   const nextState: ObserveDeltaState = { url, byRef: serializedByRef, text };
 
@@ -3834,6 +3814,24 @@ export interface CompactV2StartMetadata {
   userEmail?: string;
 }
 
+/**
+ * Last index in `page` at which a split leaves complete whitespace-delimited
+ * tokens on both sides (the position right after the final whitespace run), or
+ * -1 when the page holds no interior token boundary.
+ */
+function lastUtf8TokenBoundary(page: string): number {
+  const match = /\s(?=\S*$)/.exec(page);
+  return match === null ? -1 : match.index + 1;
+}
+
+/**
+ * Split `value` into byte-bounded pages LOSSLESSLY (concatenating the pages
+ * reproduces the input) and at TOKEN boundaries: an overflow never cuts a word
+ * or URL mid-token when an interior boundary exists — the ipinfo dogfood read
+ * "- entry: https://ipin" off page 0 and had to spend an extra paging call to
+ * reassemble trusted routing metadata. Only a single token longer than a whole
+ * page falls back to the old character split.
+ */
 function splitUtf8Pages(value: string, maxBytes: number): string[] {
   if (value.length === 0) return [];
   const pages: string[] = [];
@@ -3842,9 +3840,17 @@ function splitUtf8Pages(value: string, maxBytes: number): string[] {
   for (const character of value) {
     const characterBytes = Buffer.byteLength(character, "utf8");
     if (bytes + characterBytes > maxBytes && page.length > 0) {
-      pages.push(page);
-      page = "";
-      bytes = 0;
+      const boundary = lastUtf8TokenBoundary(page);
+      if (boundary > 0) {
+        const rest = page.slice(boundary);
+        pages.push(page.slice(0, boundary));
+        page = rest;
+        bytes = Buffer.byteLength(rest, "utf8");
+      } else {
+        pages.push(page);
+        page = "";
+        bytes = 0;
+      }
     }
     page += character;
     bytes += characterBytes;
@@ -4130,6 +4136,7 @@ function compactV2Observation(
   generation: number,
   elements: readonly InteractiveElement[],
   semanticSource: ObservationSemanticSourceV2,
+  proseSource?: readonly string[],
   startMetadata?: CompactV2StartMetadata,
 ): Observation {
   if (startMetadata?.hintPages !== undefined) {
@@ -4137,6 +4144,10 @@ function compactV2Observation(
   }
   const stage = safeStageV2(session.browser.currentUrl(), elements);
   const semantics = safePageSemanticsV2(semanticSource);
+  // The text channel is screened through the same shared redactor as label
+  // aliases (screenObservationProseV2 → looksLikeSecretShapedName shapes +
+  // run entropy); an unavailability here never touches the action map.
+  const prose = proseSource === undefined ? undefined : screenObservationProseV2(proseSource);
   const epochDoc = compactV2EpochDoc(session);
   const previous = session.compactV2Previous;
   const sameDocument = previous !== null && previous.epoch.doc === epochDoc;
@@ -4182,6 +4193,15 @@ function compactV2Observation(
     byRef: new Map(safe.rows.map((row) => [row.ref, row])),
   };
   session.prevObserve = null;
+  // The baseline records the prose the consumer ACTUALLY received (the encode
+  // may have degraded the text channel to a subset under the wire budget), so
+  // a repeat observation re-offers the text whenever the consumer holds less
+  // than the page currently renders — sticky only up to what was emitted.
+  const recordEmittedProse = (payload: { text?: unknown }): void => {
+    const text = typeof payload.text === "string" ? payload.text : "";
+    if (text.length === 0 || session.compactV2Previous === null) return;
+    session.compactV2Previous.prose = text.split("\n");
+  };
   if (previous !== null && !requiresResync && delta !== null) {
     const encodedDelta = encodeV2Delta({
       sessionId: session.id,
@@ -4191,11 +4211,18 @@ function compactV2Observation(
       // are sticky, so resend only a sealed semantic change rather than the
       // same title/heading on every harmless re-observe.
       semantics: equalSafePageSemanticsV2(previous.semantics, semantics) ? undefined : semantics,
+      // Sticky like semantics: resend prose only when its screened form changed.
+      ...(prose !== undefined && prose.length > 0 && !equalObservationProseV2(previous.prose, prose)
+        ? { pageText: prose }
+        : {}),
       delta,
     });
     // A high-churn delta is less useful than a fresh paged map.  This also
     // guarantees any overflow remains in the MCP cursor protocol.
-    if (encodedDelta !== null) return encodedDelta as unknown as Observation;
+    if (encodedDelta !== null) {
+      recordEmittedProse(encodedDelta);
+      return encodedDelta as unknown as Observation;
+    }
   }
   const page = encodeV2Page({
     sessionId: session.id,
@@ -4203,6 +4230,9 @@ function compactV2Observation(
     pageUrl: session.browser.currentUrl(),
     semantics,
     rows: index.rows,
+    // Full pages re-establish the whole view; the text channel rides along
+    // and degrades item-by-item inside the encode, never at the map's expense.
+    ...(prose === undefined || prose.length === 0 ? {} : { pageText: prose }),
     cursorFor: (offset) =>
       compactV2Cursor(session, epoch.rev, offset, compactV2ControlCursorScope(session)),
     ...(startMetadata === undefined
@@ -4231,6 +4261,7 @@ function compactV2Observation(
           },
         }),
   });
+  recordEmittedProse(page.payload);
   return page.payload as unknown as Observation;
 }
 
@@ -4347,6 +4378,13 @@ export async function observeQuery(
       stage: pagingStage,
       semantics: index.semantics,
       byRef: new Map(liveSafe.rows.map((row) => [row.ref, row])),
+      // A query page carries no text channel, so the consumer keeps whatever
+      // prose it already holds for this same document; carry it forward
+      // rather than forcing one spurious full prose resend on the next
+      // observe.
+      ...(session.compactV2Previous?.prose === undefined
+        ? {}
+        : { prose: session.compactV2Previous.prose }),
     };
   }
   const liveByLegacy = new Map<string, InteractiveElement>();
@@ -4447,12 +4485,27 @@ async function observeSession(
       // Semantic context is optional availability-wise; it is independently
       // sealed below and never changes action-map safety.
     }
+    // Same for the text channel's prose source: availability-optional, and it
+    // fills only the wire budget the action map leaves unused.
+    let proseSource: string[] = [];
+    try {
+      proseSource = await session.browser.extractObservationProse();
+    } catch {
+      // text stays ""; the map is unaffected.
+    }
     // Native TypeScript compact serializer over TS's own CDP-derived DOM
     // inventory. Its allowlist seal runs before any retained/emitted view; no
     // Python subprocess or externally provisioned runtime participates.
     const v2Mode = session.compactV2Mode;
     if (v2Mode === "on") {
-      return compactV2Observation(session, generation, elements, semanticSource, startMetadata);
+      return compactV2Observation(
+        session,
+        generation,
+        elements,
+        semanticSource,
+        proseSource,
+        startMetadata,
+      );
     }
     if (v2Mode === "shadow") exerciseCompactV2Shadow(session, generation, elements, semanticSource);
     session.compactV2Active = false;
@@ -4569,41 +4622,19 @@ async function observeSession(
             ref: refOf(el),
             label: elementRef(el),
             tag: el.tag,
-            role:
-              el.role === null
-                ? null
-                : el.role,
-            type:
-              el.type === null
-                ? null
-                : el.type,
-            value: (el.value ?? null),
+            role: el.role === null ? null : el.role,
+            type: el.type === null ? null : el.type,
+            value: el.value ?? null,
             checked: el.checked ?? null,
-            href:
-              el.href === null || el.href === undefined
-                ? null
-                : el.href,
-            testId:
-              el.testId === null || el.testId === undefined
-                ? null
-                : el.testId,
-            path:
-              el.screenPath === null || el.screenPath === undefined
-                ? null
-                : el.screenPath,
-            container:
-              el.container === null || el.container === undefined
-                ? null
-                : el.container,
+            href: el.href === null || el.href === undefined ? null : el.href,
+            testId: el.testId === null || el.testId === undefined ? null : el.testId,
+            path: el.screenPath === null || el.screenPath === undefined ? null : el.screenPath,
+            container: el.container === null || el.container === undefined ? null : el.container,
             topmost: el.topmost ?? null,
             occluded_by:
-              el.occludedBy === null || el.occludedBy === undefined
-                ? null
-                : el.occludedBy,
+              el.occludedBy === null || el.occludedBy === undefined ? null : el.occludedBy,
             frame_origin:
-              el.frameOrigin === null || el.frameOrigin === undefined
-                ? null
-                : el.frameOrigin,
+              el.frameOrigin === null || el.frameOrigin === undefined ? null : el.frameOrigin,
           };
           annotatePaymentControl(observed, el);
           return observed;
