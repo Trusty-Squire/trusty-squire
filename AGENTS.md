@@ -673,7 +673,8 @@ virgin signup succeeds on an UNCOVERED service (no active skill in registry)
   (`apps/mcp/src/bot/browser.ts`); the evidence is in `STATE.md`.
 - `BrowserController` local launches are new-headless only; do not reintroduce
   virtual-display selection or `DISPLAY` plumbing into automated operator runs.
-  `apps/mcp/src/bot/browser.ts` owns the supported local-headless and remote-CDP
+  `apps/mcp/src/bot/browser-process-owner.ts` (launch helpers in
+  `browser-process-runtime.ts`) owns the supported local-headless and remote-CDP
   operator paths.
 - Interactive human login is the deliberate exception. When `connect` (the one
   onboarding and re-auth pathway, including `--force-relogin`) runs without a

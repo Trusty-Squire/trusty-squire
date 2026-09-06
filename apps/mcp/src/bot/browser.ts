@@ -22,10 +22,26 @@
 // captchas still need the click-and-wait pattern (the Tier 2 captcha
 // gate).
 
-import { chromium as baseChromium } from "playwright";
-import { OwnedPages } from "./owned-pages.js";
+import {
+  childProcessIsRunning,
+  closeLocalBrowserLaunch,
+  markLocalBrowserLaunchTerminal,
+  profileCollisionFromStderr,
+  registerLocalBrowserLaunch,
+  registerSelfManagedChrome,
+  resolveAttachedProfileChildIdentity,
+  selfManagedChromes,
+  signalOwnedChromeProcessTree,
+  spawnLocalBrowser,
+  trackOwnedChromeProcessTree,
+  withChromeStartupLock,
+  type StealthProfile,
+} from "./browser-process-runtime.js";
+
+import { isSameRecipeDomain } from "@trusty-squire/recipe-schema";
+import { type ChildProcess } from "node:child_process";
+import { existsSync, statSync } from "node:fs";
 import type {
-  Browser,
   BrowserContext,
   CDPSession,
   ElementHandle,
@@ -35,149 +51,19 @@ import type {
   Page,
   Request,
 } from "playwright";
-import { createRequire } from "node:module";
-import { Socket } from "node:net";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
-import { spawn, type ChildProcess } from "node:child_process";
-import { isSameRecipeDomain } from "@trusty-squire/recipe-schema";
+import { BrowserProcessOwner } from "./browser-process-owner.js";
+import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
+import type { OAuthProviderId } from "./oauth-providers.js";
+import { bindOwnerBrowserLaunch, untrackOwnerBrowserLaunch } from "./owner-process-reaper.js";
+import { PageDriver } from "./page-driver.js";
 import {
   clearStaleSingletonLock,
-  closeProfileWithProof,
-  currentProfileHolderPid,
-  processBirthIdentity,
-  processBirthIdentityState,
   profileProcessIdentity,
-  profileProcessIdentityState,
-  profileProcessMatches,
-  PROFILE_BUSY_MESSAGE,
-  ProfileBusyError,
   reapProfileHolderIfOwned,
   signalProfileProcess,
-  type ProfileProcessIdentity,
-  type ProcessIdentityState,
   type ProfileCloseState,
+  type ProfileProcessIdentity,
 } from "./profile.js";
-import type { OAuthProviderId } from "./oauth-providers.js";
-import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
-import {
-  createOperatorBrowserMarker,
-  OPERATOR_BROWSER_MARKER_ENV,
-  operatorBrowserProcessMarker,
-  operatorBrowserProcessMatchesMarker,
-  startGlobalOperatorBrowserProcessWatchdog,
-} from "./operator-browser-watchdog.js";
-import {
-  bindOwnerBrowserLaunch,
-  markOwnerBrowserLaunchTerminal,
-  reconcileOwnerBrowserLaunchAfterLeaderExit,
-  terminateOwnerBrowserLaunch,
-  trackOwnerBrowserLaunch,
-  trackOwnerProcess,
-  untrackOwnerBrowserLaunch,
-  untrackOwnerProcess,
-} from "./owner-process-reaper.js";
-import type { RemoteLoginRig } from "./remote-login-display.js";
-
-// Lazy registration: installing the plugin mutates the chromium singleton
-// from playwright-extra so we only do it once per process. We require()
-// the CJS modules lazily (the stealth toolchain only ships CJS) and treat
-// stealth as best-effort — a missing dep should never crash the bot.
-const require = createRequire(import.meta.url);
-export type StealthProfile = "baseline" | "cdp_hardened";
-
-// Operator signup runs are deliberately headed. Google, Stytch, and Cloudflare
-// routinely reject a headless Chrome even when it is otherwise self-launched.
-const OPERATOR_BROWSER_HEADLESS = false;
-
-export function registerLocalBrowserLaunch(
-  profileDir: string,
-  baseEnv: NodeJS.ProcessEnv = process.env,
-  marker = createOperatorBrowserMarker(),
-): { marker: string; env: NodeJS.ProcessEnv } {
-  trackOwnerBrowserLaunch(marker, profileDir);
-  return {
-    marker,
-    env: { ...baseEnv, [OPERATOR_BROWSER_MARKER_ENV]: marker },
-  };
-}
-
-export async function closeBrowserContextWithin(
-  context: { close(): Promise<unknown> },
-  timeoutMs = 2_000,
-): Promise<boolean> {
-  let timer: NodeJS.Timeout | undefined;
-  const outcome = await Promise.race([
-    Promise.resolve()
-      .then(() => context.close())
-      .then(
-        () => true,
-        () => false,
-      ),
-    new Promise<false>((resolveTimeout) => {
-      timer = setTimeout(() => resolveTimeout(false), timeoutMs);
-    }),
-  ]);
-  if (timer !== undefined) clearTimeout(timer);
-  return outcome;
-}
-
-function spawnLocalBrowser(
-  binary: string,
-  args: readonly string[],
-  profileDir: string,
-  options: {
-    env: NodeJS.ProcessEnv;
-    stdio: ["ignore", "ignore", "pipe"];
-    detached: boolean;
-    marker?: string;
-  },
-): ChildProcess {
-  const ownership = registerLocalBrowserLaunch(profileDir, options.env, options.marker);
-  try {
-    const child = spawn(binary, [...args], {
-      env: ownership.env,
-      stdio: options.stdio,
-      detached: options.detached,
-    });
-    localBrowserLaunchMarkers.set(child, ownership.marker);
-    child.once("exit", () => {
-      setTimeout(() => {
-        reconcileOwnerBrowserLaunchAfterLeaderExit(ownership.marker, profileDir);
-      }, 0).unref();
-    });
-    return child;
-  } catch (error) {
-    untrackOwnerBrowserLaunch(ownership.marker);
-    throw error;
-  }
-}
-
-const localBrowserLaunchMarkers = new WeakMap<ChildProcess, string>();
-
-function markLocalBrowserLaunchTerminal(child: ChildProcess | null): void {
-  if (child === null) return;
-  const marker = localBrowserLaunchMarkers.get(child);
-  if (marker !== undefined) markOwnerBrowserLaunchTerminal(marker);
-}
-
-export async function closeLocalBrowserLaunch(
-  marker: string | undefined,
-  profileDir: string,
-  runtime: {
-    markTerminal?: typeof markOwnerBrowserLaunchTerminal;
-    terminate?: typeof terminateOwnerBrowserLaunch;
-    untrack?: typeof untrackOwnerBrowserLaunch;
-  } = {},
-): Promise<void> {
-  if (marker === undefined) return;
-  (runtime.markTerminal ?? markOwnerBrowserLaunchTerminal)(marker);
-  if (!(await (runtime.terminate ?? terminateOwnerBrowserLaunch)(marker, profileDir))) {
-    throw new Error("local login browser closure unproven");
-  }
-  (runtime.untrack ?? untrackOwnerBrowserLaunch)(marker);
-}
 
 export type ContextInitScriptId = "evaluate-name-shim" | "navigator-webdriver" | "webgl-spoof";
 
@@ -215,88 +101,6 @@ export type ResolvedPageTarget =
       frameTarget: FrameTarget | null;
     }
   | { ok: false; reason: "none" | "ambiguous"; candidates: string[] };
-
-// Whether to use the CDP-hardened launcher (patchright, which runs
-// evaluations in an isolated world and removes the automation tells —
-// mainWorldExecution, navigator.webdriver, viewport — that Turnstile /
-// reCAPTCHA-v3 / Google's consent SPA score on). See
-// docs/ARCHITECTURE.md.
-//
-// 2026-06-08 — DEFAULT FLIPPED ON. The baseline (playwright-extra +
-// stealth) self-inflicts a detectable navigator.webdriver via its manual
-// defineProperty patch, so it is strictly WORSE on the fingerprint. The
-// hardened launcher is all-green on the rebrowser bot-detector and was
-// live-A/B'd: meilisearch's Google consent-SPA block became a (handleable)
-// FedCM path, and render still signed up + extracted a key cleanly — no
-// crash on either (the old crash was the retired rebrowser fork, not
-// patchright). Default to hardened; opt out with BOT_CDP_HARDENED=0 for
-// the baseline. If patchright isn't installed, getChromium() falls back to
-// baseline gracefully.
-function cdpHardeningRequested(): boolean {
-  const v = process.env.BOT_CDP_HARDENED;
-  if (v === "0" || v === "false" || v === "off") return false;
-  return true;
-}
-
-let cachedChromium: typeof baseChromium | null = null;
-// The stealth profile the cached launcher actually represents. Set the
-// first time getChromium() resolves a launcher and read back via
-// BrowserController.stealthProfile for the CaptchaEvent A/B tag. A
-// patchright load failure degrades it to "baseline" truthfully rather
-// than over-claiming "cdp_hardened" on a run that never got the patch.
-let activeStealthProfile: StealthProfile = "baseline";
-
-function activeStealthProfileValue(): StealthProfile {
-  return activeStealthProfile;
-}
-
-function getChromium(): typeof baseChromium {
-  if (cachedChromium !== null) return cachedChromium;
-  const hardened = cdpHardeningRequested();
-  try {
-    if (hardened) {
-      // patchright — a maintained Playwright fork that runs every
-      // evaluation in an ISOLATED world (so the bot's DOM probing is
-      // invisible to a page that traps DOM methods → closes the
-      // `mainWorldExecution` tell) and handles `navigator.webdriver`
-      // natively + correctly. Verified ALL-GREEN against the maintained
-      // rebrowser bot-detector (mainWorldExecution, navigatorWebdriver,
-      // viewport, runtimeEnableLeak all clean). It drives real Chrome
-      // (channel) directly — the earlier rebrowser fork couldn't, which is
-      // why the old hardened arm was forced onto bundled chromium and then
-      // crashed the OAuth flow. NO playwright-extra/stealth wrap here: the
-      // stealth plugin's manual `navigator.webdriver` defineProperty
-      // RE-ADDS a detectable property (proven counterproductive) — patchright
-      // does it right. See docs/ARCHITECTURE.md.
-      const patchright = require("patchright") as { chromium: typeof baseChromium };
-      cachedChromium = patchright.chromium;
-      activeStealthProfile = "cdp_hardened";
-      return cachedChromium;
-    }
-    // Baseline: playwright-extra + stealth (unchanged). addExtra(baseChromium)
-    // is exactly what playwright-extra's default `chromium` export already is.
-    const { addExtra } = require("playwright-extra") as {
-      addExtra: (launcher: unknown) => { use: (plugin: unknown) => unknown };
-    };
-    const stealth = require("puppeteer-extra-plugin-stealth") as () => unknown;
-    activeStealthProfile = "baseline";
-    const extra = addExtra(baseChromium);
-    extra.use(stealth());
-    cachedChromium = extra as unknown as typeof baseChromium;
-  } catch (err) {
-    // Fall back to vanilla playwright if stealth (or the rebrowser fork)
-    // isn't installed. The bot still works, it's just easier to
-    // fingerprint as a bot — and the A/B tag stays truthfully "baseline".
-    console.warn(
-      `[operator] hardened launcher unavailable, falling back to vanilla chromium: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-    cachedChromium = baseChromium;
-    activeStealthProfile = "baseline";
-  }
-  return cachedChromium;
-}
 
 export interface BrowserAction {
   type: "goto" | "click" | "type" | "screenshot" | "extract" | "wait";
@@ -2424,744 +2228,6 @@ function pngDimensions(buf: Buffer): { width: number; height: number } | null {
   }
   return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
 }
-
-// Real-Chromium-family browser channels we'll prefer over the bundled
-// Chromium binary when available. Chromium ships without Widevine,
-// without proprietary codecs, with an empty navigator.plugins array,
-// and with a chrome.runtime API surface that bot-detection scripts
-// know to look for. Using a *real* installation papers over ~6 of
-// those fingerprint bits at zero engineering cost.
-//
-// Order matters: pick the channel most likely to be present *and*
-// hardest to fingerprint as automation. Stable Chrome > Edge >
-// Beta/Canary > Brave. Brave isn't a Playwright channel but its
-// binary path is well-known; we resolve it explicitly below.
-const PREFERRED_CHANNELS: readonly string[] = ["chrome", "msedge", "chrome-beta", "chrome-canary"];
-
-// Per-channel binary search paths. Playwright's `executablePath()` is
-// argumentless (returns the bundled Chromium path), so we can't ask it
-// "is Chrome installed?" — we have to look ourselves. These are the
-// canonical install locations on each platform; the first hit wins.
-//
-// Limitation: this misses sideloaded installs (Chrome installed via
-// the user's package manager to a non-default path, dev-builds in
-// home directories, etc.). For those, the user can set
-// UNIVERSAL_BOT_CHANNEL=chrome to force Playwright to find it
-// through its own resolution. We accept the false-negative because
-// the alternative (asking Playwright to launch and seeing if it
-// succeeds) costs ~1s of process startup per probe.
-const CHANNEL_PATHS: Record<string, readonly string[]> = {
-  chrome: [
-    // macOS
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    // Linux
-    "/usr/bin/google-chrome",
-    "/usr/bin/google-chrome-stable",
-    "/opt/google/chrome/chrome",
-    // Windows — Playwright resolves these via channel anyway, but list
-    // for completeness on cross-platform Node runs.
-    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-  ],
-  msedge: [
-    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-    "/usr/bin/microsoft-edge",
-    "/usr/bin/microsoft-edge-stable",
-    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-  ],
-  "chrome-beta": [
-    "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
-    "/usr/bin/google-chrome-beta",
-  ],
-  "chrome-canary": [
-    "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
-    "/usr/bin/google-chrome-unstable",
-  ],
-};
-
-// Detect a real-Chromium-family browser channel without launching it.
-// Returns the channel name (passable as `channel:` to .launch) or null
-// to mean "use bundled Chromium." Logs the selection to stderr so the
-// telemetry path can see which browser the run ended up on without
-// having to thread it through the agent state machine.
-async function detectChromiumChannel(): Promise<string | null> {
-  // Skip detection in tests / when explicitly opting out. The unit tests
-  // launch hundreds of browsers and shouldn't probe the filesystem each
-  // time; they also can't rely on real Chrome being present.
-  if (process.env.UNIVERSAL_BOT_CHANNEL === "bundled") return null;
-  if (process.env.UNIVERSAL_BOT_CHANNEL !== undefined) {
-    // Explicit override — caller knows what they want.
-    return process.env.UNIVERSAL_BOT_CHANNEL;
-  }
-
-  const fsMod = await import("node:fs");
-  for (const channel of PREFERRED_CHANNELS) {
-    const candidatePaths = CHANNEL_PATHS[channel] ?? [];
-    for (const candidate of candidatePaths) {
-      try {
-        if (fsMod.existsSync(candidate)) return channel;
-      } catch {
-        // permission errors etc. — skip this candidate, try the next
-      }
-    }
-  }
-  return null;
-}
-
-// Resolve the on-disk Chrome binary for a detected channel, for the
-// self-launch path (see launchSelfManagedContext). Playwright launches a
-// channel by name; we have to spawn the binary ourselves, so we need the
-// path. Returns null when the channel is unknown / not found on disk
-// (caller falls back to launchPersistentContext).
-export function resolveChannelBinary(channel: string | null): string | null {
-  if (channel === null) return null; // bundled Chromium — no self-launch
-  const explicit = process.env.UNIVERSAL_BOT_CHROME_BINARY;
-  if (explicit !== undefined && explicit.length > 0) {
-    return existsSync(explicit) ? explicit : null;
-  }
-  const candidates = CHANNEL_PATHS[channel] ?? [];
-  for (const c of candidates) {
-    try {
-      if (existsSync(c)) return c;
-    } catch {
-      // skip unreadable candidate
-    }
-  }
-  return null;
-}
-
-// Whether to launch Chrome ourselves and attach over CDP, instead of
-// Playwright's launchPersistentContext.
-//
-// WHY THIS EXISTS — the single decisive finding (2026-06-12, fully
-// reproduced + falsifiable; see STATE.md "Cloudflare-Turnstile wall").
-// Cloudflare Turnstile's interactive challenge FAILS a Playwright/patchright
-// launchPersistentContext-driven Chrome and PASSES a Chrome the operator
-// launches itself and then attaches to over CDP — every other variable held
-// constant (same box, same datacenter IP, same headed display, same Chrome 148
-// binary, same software-WebGL, same humanized click). The discriminator
-// matrix:
-//   launchPersistentContext + CDP click   → "Verification failed"
-//   launchPersistentContext + OS click     → "Verification failed"
-//   plain google-chrome      + OS click     → "Success!"
-//   plain google-chrome + connectOverCDP + page.mouse → token issued (len816)
-// So the tell is NEITHER the live CDP attachment NOR the click mechanism —
-// it is specifically the launch flags/instrumentation Playwright injects at
-// launchPersistentContext time. Self-launching the binary (no
-// --enable-automation et al.) and attaching with connectOverCDP avoids it.
-// Default-ON; opt out with BOT_SELF_LAUNCH=0 for the persistent-context path. Exported for tests.
-export function selfLaunchEnabled(): boolean {
-  const v = process.env.BOT_SELF_LAUNCH;
-  return v !== "0" && v !== "false" && v !== "off";
-}
-
-const PERSISTENT_CONTEXT_LAUNCH_TIMEOUT_MS = 30_000;
-const PERSISTENT_CONTEXT_CANCELLATION_SETTLE_MS = 2_000;
-const PERSISTENT_CONTEXT_CANCELLATION_POLL_MS = 25;
-const PROFILE_IDENTITY_PROOF_TIMEOUT_MS = 2_000;
-const PROFILE_IDENTITY_POLL_MS = 25;
-const PROFILE_HOLDER_ABSENCE_GRACE_MS = 100;
-
-export type PersistentFallbackIdentityProof =
-  | { state: "owned"; identity: ProfileProcessIdentity }
-  | { state: "absent" }
-  | { state: "unknown" };
-
-export async function resolvePersistentFallbackIdentity(opts: {
-  profileDir: string;
-  platform?: NodeJS.Platform;
-  timeoutMs?: number;
-  pollMs?: number;
-  absenceGraceMs?: number;
-  currentHolderPid?: (profileDir: string) => number | null;
-  readIdentity?: (pid: number, profileDir: string) => ProfileProcessIdentity | null;
-  clearStaleLock?: (profileDir: string) => boolean;
-}): Promise<PersistentFallbackIdentityProof> {
-  if ((opts.platform ?? process.platform) !== "linux") return { state: "unknown" };
-  const timeoutMs = opts.timeoutMs ?? PROFILE_IDENTITY_PROOF_TIMEOUT_MS;
-  const pollMs = opts.pollMs ?? PROFILE_IDENTITY_POLL_MS;
-  const absenceGraceMs = opts.absenceGraceMs ?? PROFILE_HOLDER_ABSENCE_GRACE_MS;
-  const readHolder = opts.currentHolderPid ?? currentProfileHolderPid;
-  const readIdentity = opts.readIdentity ?? profileProcessIdentity;
-  const clearStaleLock = opts.clearStaleLock ?? clearStaleSingletonLock;
-  const deadline = Date.now() + timeoutMs;
-  let absentSince: number | null = null;
-  for (;;) {
-    const holderPid = readHolder(opts.profileDir);
-    if (holderPid === null) {
-      absentSince ??= Date.now();
-      if (Date.now() - absentSince >= absenceGraceMs) return { state: "absent" };
-    } else {
-      absentSince = null;
-      const identity = readIdentity(holderPid, opts.profileDir);
-      if (identity !== null) return { state: "owned", identity };
-      if (clearStaleLock(opts.profileDir)) return { state: "absent" };
-    }
-    if (Date.now() >= deadline) return { state: "unknown" };
-    await new Promise<void>((resolveWait) => {
-      const timer = setTimeout(resolveWait, Math.min(pollMs, Math.max(1, deadline - Date.now())));
-      timer.unref();
-    });
-  }
-}
-
-export async function launchCancellablePersistentContext<T, O extends object>(opts: {
-  launch: (options: O & { timeout: number }) => Promise<T>;
-  options: O;
-  cancellation: Promise<void>;
-  cleanupCancelled: (value: T) => Promise<ProfileCloseState>;
-  cleanupRejected: () => Promise<ProfileCloseState>;
-  launchTimeoutMs?: number;
-  cancellationSettleMs?: number;
-  cancellationPollMs?: number;
-}): Promise<
-  { status: "launched"; value: T } | { status: "cancelled"; closeState: ProfileCloseState }
-> {
-  const launchTimeoutMs = opts.launchTimeoutMs ?? PERSISTENT_CONTEXT_LAUNCH_TIMEOUT_MS;
-  const launchDeadline = Date.now() + launchTimeoutMs;
-  const launch = Promise.resolve().then(() =>
-    opts.launch({ ...opts.options, timeout: launchTimeoutMs }),
-  );
-  const outcome = await Promise.race([
-    launch.then((value) => ({ status: "launched" as const, value })),
-    opts.cancellation.then(() => ({ status: "cancelled" as const })),
-  ]);
-  if (outcome.status === "launched") return outcome;
-  let rejectedCleanup: Promise<ProfileCloseState> | null = null;
-  const cleanupRejected = (): Promise<ProfileCloseState> => {
-    if (rejectedCleanup !== null) return rejectedCleanup;
-    const cleanup = Promise.resolve()
-      .then(opts.cleanupRejected)
-      .catch(() => "unknown" as const)
-      .finally(() => {
-        if (rejectedCleanup === cleanup) rejectedCleanup = null;
-      });
-    rejectedCleanup = cleanup;
-    return cleanup;
-  };
-  const lateCleanup = launch
-    .then(opts.cleanupCancelled, cleanupRejected)
-    .catch(() => "unknown" as const);
-  const settleMs = opts.cancellationSettleMs ?? PERSISTENT_CONTEXT_CANCELLATION_SETTLE_MS;
-  const pollMs = opts.cancellationPollMs ?? PERSISTENT_CONTEXT_CANCELLATION_POLL_MS;
-  const cancellationDeadline = Math.max(Date.now(), launchDeadline) + settleMs;
-  let settledCloseState: ProfileCloseState | null = null;
-  void lateCleanup.then((closeState) => {
-    settledCloseState = closeState;
-  });
-  while (settledCloseState === null && Date.now() < cancellationDeadline) {
-    await cleanupRejected();
-    if (settledCloseState !== null) break;
-    const remaining = cancellationDeadline - Date.now();
-    if (remaining <= 0) break;
-    await Promise.race([
-      lateCleanup,
-      new Promise<void>((resolveWait) => {
-        const timer = setTimeout(resolveWait, Math.min(pollMs, remaining));
-        timer.unref();
-      }),
-    ]);
-  }
-  if (settledCloseState !== null) {
-    return { status: "cancelled", closeState: settledCloseState };
-  }
-  await cleanupRejected();
-  void lateCleanup;
-  return { status: "cancelled", closeState: "unknown" };
-}
-
-const DEVTOOLS_ACTIVE_PORT_FILE = "DevToolsActivePort";
-
-export async function waitForOwnedDevtoolsEndpoint(
-  profileDir: string,
-  deadlineMs: number,
-  child: ChildProcess,
-): Promise<string> {
-  const activePortPath = join(profileDir, DEVTOOLS_ACTIVE_PORT_FILE);
-  const deadline = Date.now() + deadlineMs;
-  let lastErr = "";
-  while (Date.now() < deadline) {
-    if (!childProcessIsRunning(child)) {
-      throw new Error("Chrome exited before its owned DevTools endpoint became available");
-    }
-    try {
-      const [portText, browserPath] = (await readFile(activePortPath, "utf8")).split(/\r?\n/);
-      const port = Number(portText);
-      if (
-        !Number.isInteger(port) ||
-        port < 1 ||
-        port > 65_535 ||
-        browserPath === undefined ||
-        !/^\/devtools\/browser\/[A-Za-z0-9-]+$/.test(browserPath)
-      ) {
-        throw new Error("invalid DevToolsActivePort contents");
-      }
-      return `ws://127.0.0.1:${port}${browserPath}`;
-    } catch (error) {
-      lastErr = error instanceof Error ? error.message : String(error);
-    }
-    await new Promise<void>((resolveWait) => {
-      const timer = setTimeout(resolveWait, 200);
-      timer.unref();
-    });
-  }
-  throw new Error(`Owned Chrome DevTools endpoint was not published (${lastErr})`);
-}
-
-export async function withChromeStartupLock<T>(
-  fn: () => Promise<T>,
-  opts: { deadlineMs?: number; lockDir?: string } = {},
-): Promise<T> {
-  const lockDir = opts.lockDir ?? "/tmp/trusty-squire-chrome-start.lock";
-  const deadlineMs = opts.deadlineMs ?? 60_000;
-  const deadline = Date.now() + deadlineMs;
-  for (;;) {
-    try {
-      mkdirSync(lockDir);
-      break;
-    } catch (err) {
-      try {
-        const ageMs = Date.now() - statSync(lockDir).mtimeMs;
-        if (ageMs > 120_000) {
-          rmSync(lockDir, { recursive: true, force: true });
-          continue;
-        }
-      } catch {
-        rmSync(lockDir, { recursive: true, force: true });
-        continue;
-      }
-      if (Date.now() >= deadline) {
-        if (deadlineMs === 0) throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
-        throw new Error(
-          `Timed out waiting for Chrome startup lock at ${lockDir}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      }
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  }
-  try {
-    return await fn();
-  } finally {
-    rmSync(lockDir, { recursive: true, force: true });
-  }
-}
-
-interface SelfManagedChrome {
-  identity: ProfileProcessIdentity;
-  // A detached POSIX child becomes the leader of a dedicated process group.
-  // Chrome's renderer/GPU descendants stay in that group, so a verified group
-  // signal tears down the entire browser rather than only its profile root.
-  processGroup: boolean;
-  proof: OwnedChromeProcessTreeProof;
-}
-
-export interface OwnedChromeProcessTreeProof {
-  identity: ProfileProcessIdentity;
-  processGroup: boolean;
-  members: Array<Pick<ProfileProcessIdentity, "pid" | "start_time">>;
-}
-
-const selfManagedChromes = new Map<number, SelfManagedChrome>();
-const ownedChromeProcessTrees = new Set<OwnedChromeProcessTreeProof>();
-let selfManagedCleanupInstalled = false;
-let selfManagedTerminationSignalExitEnabled = true;
-
-function cleanupSelfManagedChromes(): void {
-  for (const proof of ownedChromeProcessTrees) {
-    signalOwnedChromeProcessTree(proof.identity, proof.processGroup, "SIGKILL", { proof });
-    untrackOwnerProcess(proof.identity);
-  }
-  selfManagedChromes.clear();
-}
-
-const exitForSelfManagedSignal = (code: number): void => {
-  cleanupSelfManagedChromes();
-  process.exit(128 + code);
-};
-const onSelfManagedSigint = (): void => exitForSelfManagedSignal(2);
-const onSelfManagedSigterm = (): void => exitForSelfManagedSignal(15);
-const onSelfManagedSighup = (): void => exitForSelfManagedSignal(1);
-
-const selfManagedTerminationSignalHandlers = [
-  ["SIGHUP", onSelfManagedSighup],
-  ["SIGINT", onSelfManagedSigint],
-  ["SIGTERM", onSelfManagedSigterm],
-] as const;
-
-type SelfManagedSignalRuntime = Pick<NodeJS.Process, "once" | "removeListener">;
-
-export function synchronizeSelfManagedChromeTerminationSignalHandlers(
-  enabled: boolean,
-  runtime: SelfManagedSignalRuntime = process,
-): void {
-  for (const [signal, handler] of selfManagedTerminationSignalHandlers) {
-    if (enabled) runtime.once(signal, handler);
-    else runtime.removeListener(signal, handler);
-  }
-}
-
-// Whether the self-managed termination-signal handlers may exit the process.
-// False means another shutdown owner (the MCP server's disconnect coordinator,
-// or an in-flight interactive login) holds process-exit responsibility.
-export function isSelfManagedChromeTerminationSignalExitEnabled(): boolean {
-  return selfManagedTerminationSignalExitEnabled;
-}
-
-export function setSelfManagedChromeTerminationSignalExitEnabled(enabled: boolean): void {
-  if (selfManagedTerminationSignalExitEnabled === enabled) return;
-  selfManagedTerminationSignalExitEnabled = enabled;
-  if (!selfManagedCleanupInstalled) return;
-  synchronizeSelfManagedChromeTerminationSignalHandlers(enabled);
-}
-
-function installSelfManagedChromeCleanup(): void {
-  if (selfManagedCleanupInstalled) return;
-  selfManagedCleanupInstalled = true;
-  process.once("exit", cleanupSelfManagedChromes);
-  if (selfManagedTerminationSignalExitEnabled) {
-    synchronizeSelfManagedChromeTerminationSignalHandlers(true);
-  }
-}
-
-function registerSelfManagedChrome(
-  child: ChildProcess,
-  profileDir: string,
-  processGroup = false,
-): ProfileProcessIdentity | null {
-  installSelfManagedChromeCleanup();
-  const identity = child.pid === undefined ? null : profileProcessIdentity(child.pid, profileDir);
-  if (identity !== null) {
-    const proof = trackOwnedChromeProcessTree(identity, processGroup);
-    if (proof !== null) {
-      const marker = proof.identity.process_marker;
-      if (marker !== undefined && !bindOwnerBrowserLaunch(marker, proof.identity)) {
-        releaseOwnedChromeProcessTree(proof);
-        throw new Error("local browser launch identity could not be bound to owner custody");
-      }
-      selfManagedChromes.set(identity.pid, { identity, processGroup, proof });
-    }
-  }
-  child.once("exit", () => {
-    if (child.pid === undefined) return;
-    const tracked = selfManagedChromes.get(child.pid);
-    if (tracked === undefined) return;
-    if (ownedChromeProcessTreeState(tracked.proof) === "stale") {
-      releaseOwnedChromeProcessTree(tracked.proof);
-      selfManagedChromes.delete(child.pid);
-    }
-  });
-  return identity;
-}
-
-async function waitForTrackedProfileChildIdentity(
-  child: ChildProcess,
-  profileDir: string,
-  readIdentity: (pid: number, profileDir: string) => ProfileProcessIdentity | null,
-  timeoutMs: number,
-  pollMs: number,
-  processGroup = false,
-): Promise<ProfileProcessIdentity | null> {
-  const deadline = Date.now() + timeoutMs;
-  while (childProcessIsRunning(child)) {
-    const identity = child.pid === undefined ? null : readIdentity(child.pid, profileDir);
-    if (identity !== null) {
-      const existing = selfManagedChromes.get(identity.pid);
-      const proof =
-        existing?.identity.start_time === identity.start_time
-          ? existing.proof
-          : trackOwnedChromeProcessTree(identity, processGroup);
-      if (proof !== null) selfManagedChromes.set(identity.pid, { identity, processGroup, proof });
-      return identity;
-    }
-    if (Date.now() >= deadline) return null;
-    await new Promise<void>((resolveWait) => {
-      const timer = setTimeout(resolveWait, Math.min(pollMs, Math.max(1, deadline - Date.now())));
-      timer.unref();
-    });
-  }
-  return null;
-}
-
-export async function resolveAttachedProfileChildIdentity(
-  child: ChildProcess,
-  profileDir: string,
-  identity: ProfileProcessIdentity | null,
-  options: {
-    platform?: NodeJS.Platform;
-    readIdentity?: (pid: number, profileDir: string) => ProfileProcessIdentity | null;
-    identityTimeoutMs?: number;
-    identityPollMs?: number;
-    processGroup?: boolean;
-  } = {},
-): Promise<ProfileProcessIdentity | null> {
-  if (identity !== null || (options.platform ?? process.platform) !== "linux") return identity;
-  return await waitForTrackedProfileChildIdentity(
-    child,
-    profileDir,
-    options.readIdentity ?? profileProcessIdentity,
-    options.identityTimeoutMs ?? PROFILE_IDENTITY_PROOF_TIMEOUT_MS,
-    options.identityPollMs ?? PROFILE_IDENTITY_POLL_MS,
-    options.processGroup ?? false,
-  );
-}
-
-// Call this ONLY for a Chrome child spawned with detached:true. The identity
-// check protects against PID reuse, then POSIX negative-PID signalling reaches
-// Chrome's renderer/GPU/helper tree in one operation. A normal profile-root
-// signal remains the portable fallback for launchPersistentContext and Windows.
-export function signalOwnedChromeProcessTree(
-  identity: ProfileProcessIdentity,
-  processGroup: boolean,
-  signal: NodeJS.Signals,
-  options: {
-    platform?: NodeJS.Platform;
-    profileMatches?: (identity: ProfileProcessIdentity, profileDir: string) => boolean;
-    kill?: (pid: number, signal: NodeJS.Signals) => unknown;
-    processTreePids?: (rootPid: number) => number[];
-    readBirthIdentity?: typeof processBirthIdentity;
-    memberState?: typeof processBirthIdentityState;
-    processGroupId?: (pid: number) => number | null;
-    proof?: OwnedChromeProcessTreeProof;
-  } = {},
-): boolean {
-  const profileMatches = options.profileMatches ?? profileProcessMatches;
-  const kill = options.kill ?? process.kill;
-  const proof =
-    options.proof ??
-    captureOwnedChromeProcessTreeProof(identity, processGroup, {
-      profileMatches,
-      ...(options.platform === undefined ? {} : { platform: options.platform }),
-      ...(options.processTreePids === undefined
-        ? {}
-        : { processTreePids: options.processTreePids }),
-      ...(options.readBirthIdentity === undefined
-        ? {}
-        : { readBirthIdentity: options.readBirthIdentity }),
-    });
-  if (proof === null) return false;
-  const platform = options.platform ?? process.platform;
-  const memberState = options.memberState ?? processBirthIdentityState;
-  const matchingMembers = proof.members.filter((member) => memberState(member) === "matching");
-  const matchingGroupMember =
-    proof.processGroup && platform !== "win32"
-      ? matchingMembers.some(
-          (member) =>
-            platform !== "linux" ||
-            (options.processGroupId ?? linuxProcessGroupId)(member.pid) === proof.identity.pid,
-        )
-      : false;
-  if (matchingGroupMember) {
-    try {
-      kill(-proof.identity.pid, signal);
-      return true;
-    } catch {
-      // A process may exit between the proof and the signal. Fall through to
-      // the root PID only while it is still identity-proven.
-    }
-  }
-  let signalled = false;
-  // Signal leaves first. This covers the Playwright persistent-context fallback
-  // (including chrome-headless-shell), whose child is not a detached process
-  // group leader but whose renderer tree is still rooted at the identity-proven
-  // browser PID.
-  for (const member of [...proof.members].reverse()) {
-    if (memberState(member) !== "matching") continue;
-    try {
-      kill(member.pid, signal);
-      signalled = true;
-    } catch {
-      // A child can naturally exit while the tree is being walked.
-    }
-  }
-  return signalled;
-}
-
-export function captureOwnedChromeProcessTreeProof(
-  identity: ProfileProcessIdentity,
-  processGroup: boolean,
-  options: {
-    platform?: NodeJS.Platform;
-    profileMatches?: (identity: ProfileProcessIdentity, profileDir: string) => boolean;
-    processTreePids?: (rootPid: number) => number[];
-    readBirthIdentity?: typeof processBirthIdentity;
-  } = {},
-): OwnedChromeProcessTreeProof | null {
-  const profileMatches = options.profileMatches ?? profileProcessMatches;
-  if (!profileMatches(identity, identity.user_data_dir)) return null;
-  const platform = options.platform ?? process.platform;
-  const pids =
-    platform === "linux"
-      ? (options.processTreePids ?? linuxProcessTreePids)(identity.pid)
-      : [identity.pid];
-  const readBirthIdentity = options.readBirthIdentity ?? processBirthIdentity;
-  const members = pids.flatMap((pid) => {
-    if (pid === identity.pid) return [{ pid, start_time: identity.start_time }];
-    const member = readBirthIdentity(pid);
-    return member === null ? [] : [member];
-  });
-  if (!members.some((member) => member.pid === identity.pid)) {
-    members.unshift({ pid: identity.pid, start_time: identity.start_time });
-  }
-  return { identity, processGroup, members };
-}
-
-function trackOwnedChromeProcessTree(
-  identity: ProfileProcessIdentity,
-  processGroup: boolean,
-): OwnedChromeProcessTreeProof | null {
-  installSelfManagedChromeCleanup();
-  const marker = operatorBrowserProcessMarker(identity.pid);
-  const trackedIdentity = marker === null ? identity : { ...identity, process_marker: marker };
-  const proof = captureOwnedChromeProcessTreeProof(trackedIdentity, processGroup);
-  if (proof === null) return null;
-  ownedChromeProcessTrees.add(proof);
-  trackOwnerProcess(proof.identity);
-  return proof;
-}
-
-function releaseOwnedChromeProcessTree(proof: OwnedChromeProcessTreeProof | null): void {
-  if (proof === null) return;
-  ownedChromeProcessTrees.delete(proof);
-  untrackOwnerProcess(proof.identity);
-}
-
-export function ownedChromeProcessTreeState(
-  proof: OwnedChromeProcessTreeProof,
-  options: {
-    platform?: NodeJS.Platform;
-    profileMatches?: (identity: ProfileProcessIdentity, profileDir: string) => boolean;
-    memberState?: typeof processBirthIdentityState;
-  } = {},
-): ProcessIdentityState {
-  const memberState = options.memberState ?? processBirthIdentityState;
-  let sawUnknown = false;
-  for (const member of proof.members) {
-    const state = memberState(member);
-    if (state === "matching") return "matching";
-    if (state === "unknown") sawUnknown = true;
-  }
-  return sawUnknown ? "unknown" : "stale";
-}
-
-function linuxProcessGroupId(pid: number): number | null {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const closeParen = stat.lastIndexOf(")");
-    if (closeParen < 0) return null;
-    const processGroupId = Number(
-      stat
-        .slice(closeParen + 2)
-        .trim()
-        .split(/\s+/)[2],
-    );
-    return Number.isSafeInteger(processGroupId) ? processGroupId : null;
-  } catch {
-    return null;
-  }
-}
-
-function linuxProcessTreePids(rootPid: number): number[] {
-  try {
-    const childrenByParent = new Map<number, number[]>();
-    for (const entry of readdirSync("/proc")) {
-      if (!/^\d+$/.test(entry)) continue;
-      const pid = Number(entry);
-      try {
-        const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-        const closeParen = stat.lastIndexOf(")");
-        if (closeParen < 0) continue;
-        const parentPid = Number(
-          stat
-            .slice(closeParen + 2)
-            .trim()
-            .split(/\s+/)[1],
-        );
-        if (!Number.isSafeInteger(parentPid)) continue;
-        const children = childrenByParent.get(parentPid) ?? [];
-        children.push(pid);
-        childrenByParent.set(parentPid, children);
-      } catch {
-        // Processes leave /proc constantly; a partial tree is still safer than
-        // abandoning the profile-root browser after a failed close.
-      }
-    }
-    const pids: number[] = [];
-    const pending = [rootPid];
-    const seen = new Set<number>();
-    while (pending.length > 0) {
-      const pid = pending.pop()!;
-      if (seen.has(pid)) continue;
-      seen.add(pid);
-      pids.push(pid);
-      for (const child of childrenByParent.get(pid) ?? []) pending.push(child);
-    }
-    return pids;
-  } catch {
-    return [rootPid];
-  }
-}
-
-export async function terminateTrackedProfileChild(
-  child: ChildProcess,
-  profileDir: string,
-  options: {
-    identity?: ProfileProcessIdentity | null;
-    platform?: NodeJS.Platform;
-    readIdentity?: (pid: number, profileDir: string) => ProfileProcessIdentity | null;
-    terminate?: (identity: ProfileProcessIdentity, profileDir: string) => boolean;
-    identityTimeoutMs?: number;
-    identityPollMs?: number;
-    processGroup?: boolean;
-  } = {},
-): Promise<ProfileProcessIdentity | null> {
-  const readIdentity = options.readIdentity ?? profileProcessIdentity;
-  const terminate =
-    options.terminate ??
-    ((ownedIdentity: ProfileProcessIdentity, ownedProfileDir: string): boolean => {
-      const signalled = signalProfileProcess(ownedIdentity, ownedProfileDir, "SIGKILL");
-      reapProfileHolderIfOwned(ownedProfileDir, ownedIdentity);
-      return signalled;
-    });
-  let identity = options.identity ?? null;
-  if (identity === null && (options.platform ?? process.platform) !== "linux") return null;
-  while (childProcessIsRunning(child)) {
-    identity ??= await waitForTrackedProfileChildIdentity(
-      child,
-      profileDir,
-      readIdentity,
-      options.identityTimeoutMs ?? PROFILE_IDENTITY_PROOF_TIMEOUT_MS,
-      options.identityPollMs ?? PROFILE_IDENTITY_POLL_MS,
-      options.processGroup ?? false,
-    );
-    if (identity === null) break;
-    const existing = selfManagedChromes.get(identity.pid);
-    const proof =
-      existing?.identity.start_time === identity.start_time
-        ? existing.proof
-        : trackOwnedChromeProcessTree(identity, options.processGroup ?? false);
-    if (proof !== null) {
-      selfManagedChromes.set(identity.pid, {
-        identity,
-        processGroup: options.processGroup ?? false,
-        proof,
-      });
-    }
-    const terminated = terminate(identity, profileDir);
-    if (!terminated) {
-      identity = null;
-      continue;
-    }
-    while (childProcessIsRunning(child)) {
-      await new Promise<void>((resolveWait) => {
-        const timer = setTimeout(resolveWait, 25);
-        timer.unref();
-      });
-    }
-  }
-  return identity;
-}
 // Classify an anti-bot interstitial page from its (title + body) text.
 // `onInterstitial` matches the static Cloudflare/Turnstile challenge copy.
 // `verificationPassed` is the signal the challenge SUCCEEDED — but
@@ -3213,16 +2279,6 @@ export function stripCloudflareChallengeParams(rawUrl: string): string | null {
     }
   }
   return changed ? u.toString() : null;
-}
-
-export function childProcessIsRunning(child: ChildProcess | null): boolean {
-  return child !== null && child.exitCode === null && child.signalCode === null;
-}
-
-function profileCollisionFromStderr(stderr: string): ProfileBusyError | null {
-  return /ProcessSingleton|SingletonLock|profile.*in use/i.test(stderr)
-    ? new ProfileBusyError(PROFILE_BUSY_MESSAGE)
-    : null;
 }
 
 export interface PlainLoginBrowser {
@@ -3450,79 +2506,70 @@ export async function launchPlainLoginBrowser(params: {
 }
 
 export class BrowserController {
-  // A persistent browser context backed by the user's real Chrome profile.
-  private context: BrowserContext | null = null;
-  private page: Page | null = null;
+  private get context(): BrowserContext | null {
+    return this.processOwner.context;
+  }
+  private set context(value: BrowserContext | null) {
+    this.processOwner.context = value;
+  }
+
+  private get page(): Page | null {
+    return this.pageDriver.page;
+  }
+  private set page(value: Page | null) {
+    this.pageDriver.page = value;
+  }
+
+  private get primaryPage(): Page | null {
+    return this.pageDriver.primaryPage;
+  }
+  private set primaryPage(value: Page | null) {
+    this.pageDriver.primaryPage = value;
+  }
+
+  private get oauthProductPage(): Page | null {
+    return this.pageDriver.oauthProductPage;
+  }
+  private set oauthProductPage(value: Page | null) {
+    this.pageDriver.oauthProductPage = value;
+  }
+
+  private get oauthProviderPage(): Page | null {
+    return this.pageDriver.oauthProviderPage;
+  }
+  private set oauthProviderPage(value: Page | null) {
+    this.pageDriver.oauthProviderPage = value;
+  }
+
+  private get oauthProviderPageClosed(): boolean {
+    return this.pageDriver.oauthProviderPageClosed;
+  }
+  private set oauthProviderPageClosed(value: boolean) {
+    this.pageDriver.oauthProviderPageClosed = value;
+  }
+
+  private get harnessAttachedPage(): boolean {
+    return this.pageDriver.harnessAttachedPage;
+  }
+  private set harnessAttachedPage(value: boolean) {
+    this.pageDriver.harnessAttachedPage = value;
+  }
+
+  private get ownedPages() {
+    return this.pageDriver.ownedPages;
+  }
+
   private checkoutCardGroupScope: CheckoutCardGroupScope | undefined;
   private checkoutOutcomeBaseline: CheckoutOutcomeBaseline | undefined;
   private paymentInstrumentExpectation: PaymentInstrumentExpectation | undefined;
   private observedPaymentInstrumentMismatch: PaymentInstrumentMismatch | undefined;
   private checkoutSubmitSequence = 0;
   private clickDispatchSequence = 0;
-  private mainDocumentSequence = 0;
-  private readonly mainDocumentIdentities = new WeakMap<Page, number>();
-  private readonly trackedMainDocumentPages = new WeakSet<Page>();
-  // The page start() configured with the controller's navigation/captcha
-  // handlers. OAuth may temporarily switch `this.page` to a popup, but session
-  // reuse must always restore this original page rather than adopting a popup
-  // whose lifecycle handlers were never installed.
-  private primaryPage: Page | null = null;
-  // Tabs the PAGE opened (target=_blank / window.open) since the operator armed
-  // adoption for an action, oldest first. A real user lands on the tab their
-  // click opened — an email magic-link button in Gmail is the case this exists
-  // for — so the operator has to follow it too. Reading the link's href instead
-  // is not an option: a single-use login token is sealed and must never be
-  // handed to the model as text.
-  private openedTabs: Page[] = [];
-  private readonly ownedPages = new OwnedPages((page) => {
-    this.trackMainDocument(page);
-    this.openedTabs.push(page);
-    if (this.openedTabs.length > 8) this.openedTabs.splice(0, this.openedTabs.length - 8);
-  });
-  private readonly documentSubscriptions = new Map<Page, () => void>();
-  // Self-launch path (Turnstile-safe; see selfLaunchEnabled). When we spawn
-  // Chrome ourselves and attach over CDP, these hold the child process and
-  // the connected Browser so close() can tear both down.
-  private childChrome: ChildProcess | null = null;
-  private childChromeIdentity: ProfileProcessIdentity | null = null;
-  private childChromeProcessGroup = false;
-  private ownedDisplayRig: RemoteLoginRig | null = null;
-  private ownedChromeProcessTreeProof: OwnedChromeProcessTreeProof | null = null;
-  private operatorProcessMarker: string | null = null;
-  private ownerLaunchTracked = false;
-  private cdpBrowser: Browser | null = null;
-  // True once a local browser context launched this session.
-  private launchedContext = false;
-  private launchedProfileHolderIdentity: ProfileProcessIdentity | null = null;
-  private startPromise: Promise<void> | null = null;
-  private closePromise: Promise<ProfileCloseState> | null = null;
-  private startCancellationRequested = false;
-  private startLaunchCommitted = false;
-  private startSettled = false;
-  private persistentFallbackLaunchInFlight = false;
-  private persistentFallbackOwnershipMonitor: Promise<void> | null = null;
-  private persistentFallbackCancellationState: ProfileCloseState | null = null;
-  private resolveStartCancellation: (() => void) | null = null;
-  private readonly startCancellation = new Promise<void>((resolveCancellation) => {
-    this.resolveStartCancellation = resolveCancellation;
-  });
-  private cancelledStartReaper: Promise<void> | null = null;
   private readonly humanize: boolean;
   // Tracks the simulated mouse position so successive clicks can move
   // along a continuous path (humans don't teleport between clicks).
   private mouseX = 100;
   private mouseY = 100;
-  // Records the browser channel that .start() actually launched. Set
-  // post-launch so telemetry can surface "this run
-  // used real Chrome" vs "this run used bundled Chromium." Useful for
-  // separating fingerprint regressions from network regressions when
-  // a service starts failing.
-  private launchedChannel: string | null = null;
-  // The proxy server this run egressed through, or null for a direct
-  // connection. Set by .start(); surfaced via the `proxied` getter —
-  // a captcha failure behind a residential proxy is materially
-  // different signal from the same failure on a raw datacenter IP.
-  private proxyServer: string | null = null;
 
   // Optional live provider of the session's current allowed hosts, used by the
   // fail-fast request-scope guard. Set by provision-session once a session
@@ -3607,754 +2654,27 @@ export class BrowserController {
       }
     });
   }
-
-  private readonly profileDir: string;
-
-  // The replay harness owns this context so it can route the storefront from a
-  // HAR, then remove that route before checkout becomes live.
-  private harnessAttachedPage = false;
-
-  // T6/T7 — OAuth handshake bookkeeping. Legacy startOAuth() adopts a
-  // popup window as the active page, so keep the product tab parked here
-  // until settleAfterOAuth() restores it. The operator's oauth_login action
-  // keeps the observed product page active for the click and opens a recovery
-  // tab before the provider can redirect or close either OAuth transport.
-  private oauthProductPage: Page | null = null;
-  private oauthProviderPage: Page | null = null;
-  private oauthProviderPageClosed = false;
-
-  // Surfaced in the run trail so operators can distinguish local headed,
-  // remote, and headless launches.
-  private launchedMode: "headed" | "headless" | "remote" | "unknown" = "unknown";
-
   get launchMode(): "headed" | "headless" | "remote" | "unknown" {
-    return this.launchedMode;
+    return this.processOwner.launchMode;
   }
+  private readonly processOwner: BrowserProcessOwner;
+  private readonly pageDriver: PageDriver;
 
   constructor(opts: BrowserControllerOptions = {}) {
     this.humanize = opts.humanize ?? true;
-    this.profileDir = opts.profileDir ?? "";
-    this.proxyOverride =
-      opts.proxyUrl !== undefined && opts.proxyUrl.trim().length > 0 ? opts.proxyUrl.trim() : null;
-  }
-
-  private trackMainDocument(page: Page): void {
-    if (page.isClosed() || this.trackedMainDocumentPages.has(page)) return;
-    this.trackedMainDocumentPages.add(page);
-    this.mainDocumentIdentities.set(page, ++this.mainDocumentSequence);
-    // A REPLACED main document advances the identity; a same-document History
-    // API navigation does not. Playwright emits `framenavigated` for both, so
-    // keying on it made every `history.replaceState` inside an SPA checkout
-    // retire every operator ref mid-form — the identity churned faster than a
-    // multi-field address block could be filled. `domcontentloaded` fires once
-    // per real main-frame document (playwright's client `Frame` gates it on
-    // `!this._parentFrame`), which is exactly the document-replacement signal.
-    // A same-document route change to a genuinely different logical page is
-    // still caught by the observation epoch's normalized origin+pathname fold
-    // (compactV2EpochDoc), which is the backstop this narrowing relies on.
-    const onDocument = (): void => {
-      this.mainDocumentIdentities.set(page, ++this.mainDocumentSequence);
-    };
-    const dispose = (): void => {
-      page.off("domcontentloaded", onDocument);
-      page.off("close", dispose);
-      this.documentSubscriptions.delete(page);
-      this.trackedMainDocumentPages.delete(page);
-    };
-    this.documentSubscriptions.set(page, dispose);
-    page.on("domcontentloaded", onDocument);
-    page.on("close", dispose);
-  }
-
-  mainDocumentIdentity(): string {
-    const page = this.page;
-    if (page === null) return "none";
-    this.trackMainDocument(page);
-    return String(this.mainDocumentIdentities.get(page));
-  }
-
-  /** Attach normal controller behavior to a harness-owned Playwright page. */
-  static fromHarnessPage(page: Page): BrowserController {
-    const controller = new BrowserController({ humanize: false });
-    controller.context = page.context();
-    controller.page = page;
-    controller.primaryPage = page;
-    controller.trackOpenedTabs(page);
-    controller.harnessAttachedPage = true;
-    controller.launchedMode = "headless";
-    return controller;
-  }
-
-  // Register only explicitly created primary/recovery pages. Popup enrollment
-  // follows their creation-time opener events, never context-wide page events.
-  private trackOpenedTabs(page: Page): void {
-    this.ownedPages.register(page);
-    this.trackMainDocument(page);
-  }
-
-  // Per-launch egress override. null means direct egress. Explicit overrides
-  // are never subject to host-network classification.
-  private readonly proxyOverride: string | null;
-
-  operatorBrowserMarker(): string {
-    this.operatorProcessMarker ??= createOperatorBrowserMarker();
-    return this.operatorProcessMarker;
-  }
-
-  private async ownedHeadedBrowserEnvironment(): Promise<NodeJS.ProcessEnv> {
-    if (this.ownedDisplayRig === null) {
-      const { createXvfbDisplayRig, startRemoteLoginDisplay } =
-        await import("./remote-login-display.js");
-      const rig = createXvfbDisplayRig();
-      this.ownedDisplayRig = rig;
-      await startRemoteLoginDisplay(rig);
-    }
-    const { remoteLoginEnvironment } = await import("./remote-login-display.js");
-    const rig = this.ownedDisplayRig;
-    if (rig === null) throw new Error("headed operator display did not start");
-    return remoteLoginEnvironment(rig, process.env);
-  }
-
-  private async teardownOwnedDisplay(): Promise<void> {
-    const rig = this.ownedDisplayRig;
-    this.ownedDisplayRig = null;
-    if (rig === null) return;
-    const { teardownRemoteLoginRig } = await import("./remote-login-display.js");
-    await teardownRemoteLoginRig(rig);
-  }
-
-  private adoptOwnedChromeProcessTree(
-    identity: ProfileProcessIdentity,
-    processGroup: boolean,
-  ): OwnedChromeProcessTreeProof | null {
-    if (
-      this.ownedChromeProcessTreeProof?.identity.pid === identity.pid &&
-      this.ownedChromeProcessTreeProof.identity.start_time === identity.start_time
-    ) {
-      return this.ownedChromeProcessTreeProof;
-    }
-    const tracked = selfManagedChromes.get(identity.pid);
-    const proof =
-      tracked?.identity.start_time === identity.start_time
-        ? tracked.proof
-        : trackOwnedChromeProcessTree(identity, processGroup);
-    if (proof !== null && this.ownerLaunchTracked) {
-      if (!bindOwnerBrowserLaunch(this.operatorBrowserMarker(), proof.identity)) {
-        releaseOwnedChromeProcessTree(proof);
-        throw new Error("local browser launch identity could not be bound to owner custody");
-      }
-    }
-    if (proof !== null) this.ownedChromeProcessTreeProof = proof;
-    return proof;
-  }
-
-  private signalCurrentSelfManagedChrome(
-    identity: ProfileProcessIdentity,
-    signal: NodeJS.Signals,
-  ): boolean {
-    return signalOwnedChromeProcessTree(identity, this.childChromeProcessGroup, signal, {
-      ...(this.ownedChromeProcessTreeProof === null
-        ? {}
-        : { proof: this.ownedChromeProcessTreeProof }),
-    });
-  }
-
-  // Required health gate for a live session browser. BrowserContext alone is not a
-  // sufficient signal: a dead CDP transport can leave stale JS objects behind.
-  isConnected(): boolean {
-    const browser = this.cdpBrowser ?? this.context?.browser() ?? null;
-    return browser?.isConnected() === true;
-  }
-
-  // Which browser channel the most recent .start() actually used.
-  // `null` means bundled Chromium; a string like "chrome" means a
-  // real installed browser of that channel. Throws if .start() hasn't
-  // been called yet — there's no sensible default to return.
-  get channel(): string | null {
-    if (this.context === null) {
-      throw new Error("BrowserController.channel read before .start()");
-    }
-    return this.launchedChannel;
-  }
-
-  // The proxy server the most recent .start() routed egress through,
-  // or null for a direct connection. Useful telemetry alongside
-  // `channel`. Throws if .start() hasn't run — same reason as channel.
-  get proxied(): string | null {
-    if (this.context === null) {
-      throw new Error("BrowserController.proxied read before .start()");
-    }
-    return this.proxyServer;
-  }
-
-  // The stealth profile the most recent .start() launched under:
-  // "cdp_hardened" when the patchright launcher actually loaded
-  // (BOT_CDP_HARDENED set + patchright present), else "baseline". Surfaced
-  // for the CaptchaEvent A/B tag. Throws before .start() — same reason
-  // as channel/proxied.
-  get stealthProfile(): StealthProfile {
-    if (this.context === null) {
-      throw new Error("BrowserController.stealthProfile read before .start()");
-    }
-    return activeStealthProfileValue();
-  }
-
-  // Launch Chrome ourselves and attach over CDP — the Turnstile-safe launch
-  // (see selfLaunchEnabled for the proof). The profile dir is the SAME shared
-  // profile launchPersistentContext would use, so the OAuth session carries
-  // over. Options that a default connectOverCDP context can't take at creation
-  // are applied differently:
-  //   • timezone  → TZ env on the child (more authentic than a CDP override)
-  //   • proxy     → --proxy-server flag, with credentials applied post-connect
-  //   • viewport  → --window-size (with viewport:null-equivalent: we never set
-  //                 an emulated viewport on the connected context)
-  //   • locale/geo/permissions → applied post-connect by start()
-  private async launchSelfManagedContext(params: {
-    binary: string;
-    args: readonly string[];
-    proxy: ProxySettings | null;
-    env: NodeJS.ProcessEnv;
-    window: { width: number; height: number };
-  }): Promise<BrowserContext> {
-    this.throwIfStartCancelled();
-    // Remote-CDP attach: BOT_CDP_ENDPOINT points at a Chrome already running on
-    // another host (e.g. a real-GPU Mac), reachable over Tailscale. We do NOT
-    // spawn or own the binary — the remote host launched it with its own
-    // profile, real GPU, and (residential) egress. Just attach over CDP. This
-    // is the real-GPU path: software-WebGL output (llvmpipe) is what
-    // hCaptcha-Enterprise-class anti-bot scores, and only real hardware fixes
-    // the rendered-pixel fingerprint that JS spoofing can't.
-    const remoteEndpoint = (process.env.BOT_CDP_ENDPOINT ?? "").trim();
-    if (remoteEndpoint.length > 0) {
-      const launcher = getChromium();
-      const browser = await launcher.connectOverCDP(remoteEndpoint);
-      this.cdpBrowser = browser;
-      this.launchedMode = "remote";
-      const ctx = browser.contexts()[0];
-      if (ctx === undefined) {
-        throw new Error(
-          `remote Chrome (BOT_CDP_ENDPOINT=${remoteEndpoint}) exposed no default browser context`,
-        );
-      }
-      return ctx;
-    }
-    const endpoint = await (async () => {
-      this.throwIfStartCancelled();
-      clearStaleSingletonLock(this.profileDir);
-      rmSync(join(this.profileDir, DEVTOOLS_ACTIVE_PORT_FILE), { force: true });
-      const argv = [
-        "--remote-debugging-port=0",
-        "--remote-debugging-address=127.0.0.1",
-        `--user-data-dir=${this.profileDir}`,
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--password-store=basic",
-        "--window-position=0,0",
-        `--window-size=${params.window.width},${params.window.height}`,
-        "--lang=en-US",
-        ...params.args,
-        ...(params.proxy !== null ? [`--proxy-server=${params.proxy.server}`] : []),
-        "about:blank",
-      ];
-      this.commitProfileLaunch();
-      const child = spawnLocalBrowser(params.binary, argv, this.profileDir, {
-        env: params.env,
-        stdio: ["ignore", "ignore", "pipe"],
-        // A dedicated process group gives the session a single, identity-
-        // proven teardown target for Chrome plus every renderer/GPU helper.
-        detached: process.platform !== "win32",
-        marker: this.operatorBrowserMarker(),
-      });
-      this.childChrome = child;
-      this.childChromeProcessGroup = process.platform !== "win32";
-      this.childChromeIdentity = registerSelfManagedChrome(
-        child,
-        this.profileDir,
-        this.childChromeProcessGroup,
-      );
-      if (this.childChromeIdentity !== null) {
-        this.adoptOwnedChromeProcessTree(this.childChromeIdentity, this.childChromeProcessGroup);
-      }
-      let chromeStderr = "";
-      let chromeExit = "";
-      child.stderr?.on("data", (chunk: Buffer) => {
-        chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
-      });
-      child.on("exit", (code, signal) => {
-        chromeExit = ` exit=${code ?? "null"} signal=${signal ?? "none"}`;
-      });
-      if (this.startCancellationRequested) {
-        await this.cancelSpawnedSelfManagedChrome(child);
-        throw new Error("BrowserController start cancelled");
-      }
-      try {
-        const endpoint = await waitForOwnedDevtoolsEndpoint(this.profileDir, 30_000, child);
-        this.childChromeIdentity = await resolveAttachedProfileChildIdentity(
-          child,
-          this.profileDir,
-          this.childChromeIdentity,
-          { processGroup: this.childChromeProcessGroup },
-        );
-        if (process.platform === "linux" && this.childChromeIdentity === null) {
-          throw new Error("self-launched Chrome exited before identity was proven");
-        }
-        if (this.childChromeIdentity !== null) {
-          this.adoptOwnedChromeProcessTree(this.childChromeIdentity, this.childChromeProcessGroup);
-        }
-        return endpoint;
-      } catch (err) {
-        const alive =
-          this.childChromeIdentity !== null &&
-          profileProcessMatches(this.childChromeIdentity, this.profileDir);
-        this.childChromeIdentity = await terminateTrackedProfileChild(child, this.profileDir, {
-          identity: this.childChromeIdentity,
-          terminate: (identity, profileDir) => {
-            const signalled = signalOwnedChromeProcessTree(
-              identity,
-              this.childChromeProcessGroup,
-              "SIGKILL",
-              {
-                ...(this.ownedChromeProcessTreeProof === null
-                  ? {}
-                  : { proof: this.ownedChromeProcessTreeProof }),
-              },
-            );
-            reapProfileHolderIfOwned(profileDir, identity);
-            return signalled;
-          },
-          processGroup: this.childChromeProcessGroup,
-        });
-        this.childChrome = null;
-        this.childChromeIdentity = null;
-        this.childChromeProcessGroup = false;
-        const detail = chromeStderr.trim();
-        throw new Error(
-          `${err instanceof Error ? err.message : String(err)}; Chrome pid=${child.pid ?? "unknown"} alive=${alive ? 1 : 0}` +
-            `${chromeExit}${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
-        );
-      }
-    })();
-    // Use the patchright launcher's connectOverCDP — it's the exact path the
-    // falsification experiment validated (its connect avoids Runtime.enable,
-    // which a plain attach would emit). The anti-detection that matters here
-    // is the LAUNCH (which we now own), not the connect.
-    const launcher = getChromium();
-    const browser = await launcher.connectOverCDP(endpoint);
-    this.cdpBrowser = browser;
-    const ctx = browser.contexts()[0];
-    if (ctx === undefined) {
-      throw new Error("self-launched Chrome exposed no default browser context");
-    }
-    return ctx;
-  }
-
-  private async cancelSpawnedSelfManagedChrome(child: ChildProcess): Promise<void> {
-    this.childChromeIdentity = await terminateTrackedProfileChild(child, this.profileDir, {
-      identity: this.childChromeIdentity,
-      terminate: (identity, profileDir) => {
-        const signalled = signalOwnedChromeProcessTree(
-          identity,
-          this.childChromeProcessGroup,
-          "SIGKILL",
-          {
-            ...(this.ownedChromeProcessTreeProof === null
-              ? {}
-              : { proof: this.ownedChromeProcessTreeProof }),
-          },
-        );
-        reapProfileHolderIfOwned(profileDir, identity);
-        return signalled;
-      },
-      processGroup: this.childChromeProcessGroup,
-    });
-    if (this.childChrome === child) this.childChrome = null;
-    this.childChromeIdentity = null;
-    this.childChromeProcessGroup = false;
-  }
-
-  // Resource blocking for speed (BOT_BLOCK_RESOURCES, default OFF). Aborts
-  // image/media/font requests + known analytics/tracker hosts to cut page-load
-  // wall-clock (3-5x on byte-heavy pages; also stops trackers from holding the
-  // network "busy"). HARD ALLOW-GUARD first for captcha/challenge + payment
-  // scripts (blocking those breaks the Turnstile/hCaptcha token poll and the
-  // signup form). CSS + first-party JS are never blocked (not in BLOCK_TYPES) —
-  // the SPA form renders from them and the vision planner reads the styled
-  // render. DUAL RISK, hence default-OFF + an OF#2 A/B before flipping on:
-  //   (1) a browser that loads ZERO images is itself an anti-bot fingerprint;
-  //   (2) the screenshot the vision planner reads loses detail — mitigated
-  //       because the DOM inventory is the authoritative action space, but
-  //       still a regression risk on image-only affordances.
-  // Registered on the CONTEXT so it covers OAuth popups + iframes.
-  private async installResourceBlocking(): Promise<void> {
-    const ctx = this.context;
-    if (ctx === null) return;
-    if (!/^(1|true|on)$/i.test(process.env.BOT_BLOCK_RESOURCES ?? "")) return;
-    const BLOCK_TYPES = new Set(["image", "media", "font"]);
-    const BLOCK_HOSTS = [
-      "google-analytics.com",
-      "googletagmanager.com",
-      "analytics.google.com",
-      "doubleclick.net",
-      "static.hotjar.com",
-      "script.hotjar.com",
-      "segment.com",
-      "segment.io",
-      "cdn.segment.com",
-      "fullstory.com",
-      "mixpanel.com",
-      "bugsnag.com",
-      "intercom.io",
-      "intercomcdn.com",
-      "widget.intercom.io",
-      "connect.facebook.net",
-      "analytics.tiktok.com",
-      "clarity.ms",
-      "cdn.heapanalytics.com",
-      "wistia.com",
-    ];
-    // NEVER block — these break signup (captcha/challenge widgets + payment SDK).
-    const ALWAYS_ALLOW = [
-      "challenges.cloudflare.com",
-      "turnstile",
-      "hcaptcha.com",
-      "newassets.hcaptcha.com",
-      "recaptcha",
-      "gstatic.com/recaptcha",
-      "js.stripe.com",
-    ];
-    await ctx.route("**/*", async (route) => {
-      try {
-        const url = route.request().url();
-        if (ALWAYS_ALLOW.some((h) => url.includes(h))) {
-          await route.continue();
-          return;
-        }
-        const type = route.request().resourceType();
-        if (BLOCK_TYPES.has(type) || BLOCK_HOSTS.some((h) => url.includes(h))) {
-          await route.abort();
-          return;
-        }
-        await route.continue();
-      } catch {
-        // Routing race / already-handled — never let a decision crash nav.
-      }
-    });
-    console.error(
-      "[operator] resource blocking ON (image/media/font + analytics aborted; captcha/CSS/JS allowed)",
+    this.pageDriver = new PageDriver(() => this.processOwner.context, this.humanize);
+    this.processOwner = new BrowserProcessOwner(
+      opts,
+      this.pageDriver,
+      (context, hardened, remoteMode) => this.initializePages(context, hardened, remoteMode),
     );
   }
 
-  async start(): Promise<void> {
-    if (this.profileDir.length === 0) {
-      throw new Error("BrowserController.start requires a per-session profile directory");
-    }
-    if (this.closePromise !== null) throw new Error("BrowserController is already closing");
-    this.startPromise ??= this.startOnce();
-    await this.startPromise;
-  }
-
-  private async startOnce(): Promise<void> {
-    const remoteMode = (process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0;
-    if (!remoteMode) startGlobalOperatorBrowserProcessWatchdog();
-    try {
-      await this.startBrowser();
-      if (this.startCancellationRequested) {
-        await this.closeBrowser();
-        throw new Error("BrowserController start cancelled");
-      }
-    } catch (err) {
-      await this.teardownOwnedDisplay().catch(() => undefined);
-      if (this.startCancellationRequested && this.persistentFallbackCancellationState === null) {
-        await this.closeBrowser().catch(() => undefined);
-      }
-      throw err;
-    } finally {
-      this.startSettled = true;
-    }
-  }
-
-  private throwIfStartCancelled(): void {
-    if (this.startCancellationRequested) throw new Error("BrowserController start cancelled");
-  }
-
-  private commitProfileLaunch(): void {
-    this.throwIfStartCancelled();
-    this.startLaunchCommitted = true;
-  }
-
-  private async startBrowser(): Promise<void> {
-    this.throwIfStartCancelled();
-    const channel = await detectChromiumChannel();
-    this.throwIfStartCancelled();
-    this.launchedChannel = channel;
-    const proxy = await this.resolveProxy();
-    this.throwIfStartCancelled();
-    this.proxyServer = proxy?.server ?? null;
-    // Stderr so the MCP stdio transport's framing stays clean (the
-    // module's existing logging convention).
-    console.error(
-      `[operator] launching browser channel=${channel ?? "bundled-chromium"} ` +
-        `proxy=${proxy === null ? "direct" : "configured"}`,
-    );
-    // Remote-CDP mode (BOT_CDP_ENDPOINT): the browser runs on a REMOTE host
-    // (e.g. a Mac with a real GPU + residential egress) and we attach over CDP
-    // across Tailscale. The remote machine IS a real device, so we spoof
-    // NOTHING — no WebGL/device fingerprint patch (a fake-Intel string over a
-    // real Apple-GPU output would be its own mismatch tell), no local display, no
-    // egress-geo override (the remote host's real timezone + residential IP are
-    // authentic). software-WebGL output is exactly what the toughest anti-bot
-    // (hCaptcha Enterprise) scores; only real hardware fixes the pixel
-    // fingerprint, which is the whole point of this path.
-    const remoteMode = (process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0;
-    if (remoteMode) {
-      console.error(
-        `[operator] REMOTE-CDP mode — attaching to ${(process.env.BOT_CDP_ENDPOINT ?? "").trim()} ` +
-          `(real-host GPU + egress; local fingerprint spoof + display setup disabled)`,
-      );
-    }
-    if (!remoteMode && !this.ownerLaunchTracked) {
-      registerLocalBrowserLaunch(this.profileDir, process.env, this.operatorBrowserMarker());
-      this.ownerLaunchTracked = true;
-    }
-    const browserEnv = remoteMode ? process.env : await this.ownedHeadedBrowserEnvironment();
-    // T3.1: probe where this run's traffic actually exits so the
-    // browser's declared timezone matches its egress IP (a US-timezone
-    // browser on a foreign proxy IP is itself an anti-bot signal).
-    // Done before the real launch: launchPersistentContext bakes the
-    // timezone in at creation, with no way to set it afterward. Skipped in
-    // remote mode — the remote host's own clock/IP are the authentic truth.
-    const geo = remoteMode ? null : await this.probeEgressGeo(channel, proxy, browserEnv);
-    this.throwIfStartCancelled();
-    if (geo !== null) {
-      console.error(
-        `[operator] egress geo: timezone=${geo.timezoneId}` +
-          (geo.geolocation !== undefined
-            ? ` loc=${geo.geolocation.latitude},${geo.geolocation.longitude}`
-            : ""),
-      );
-    }
-    // Keep the operator browser headed: the browser runs on the operator's
-    // Xvfb display, preserving the normal Chrome surface OAuth providers see.
-    this.launchedMode = "headed";
-
-    // T3: a PERSISTENT context backed by this operator session's unique
-    // profile. launchPersistentContext takes launch + context options in one
-    // call.
-    // Resolve the launcher first so activeStealthProfile is set before we
-    // decide on executablePath below.
-    const launcher = getChromium();
-    const hardened = activeStealthProfileValue() === "cdp_hardened";
-    // Both launchers drive real Chrome via `channel`: baseline through
-    // playwright+stealth, hardened through patchright. patchright closes
-    // the automation tells at the protocol layer and drives real Chrome
-    // directly — so it no longer needs the bundled-chromium pin the old
-    // rebrowser fork required (the pin is what crashed the OAuth flow and
-    // confounded the A/B). One binary for both arms.
-    this.launchedChannel = channel;
-    // Launch args shared by BOTH paths (launchPersistentContext and the
-    // self-launch). See the per-flag rationale: swiftshader gives a real
-    // (software) WebGL context on GPU-less hosts; the others are the
-    // standard headless/sandbox flags. The three background-throttling disables
-    // are payment correctness controls: a backgrounded CardinalCommerce ACS
-    // frame must keep running its timers long enough to finish the issuer's OOB
-    // post-approval handshake with Stripe. Keep them paired with bringToFront()
-    // before payment submission and in waitForThreeDsResolution(). NOTE we
-    // deliberately do NOT include Playwright's automation flags
-    // (--enable-automation et al.) — on the self-launch path their ABSENCE is
-    // the whole fix.
-    const launchArgs: readonly string[] = [
-      "--disable-blink-features=AutomationControlled",
-      "--disable-background-timer-throttling",
-      "--disable-backgrounding-occluded-windows",
-      "--disable-renderer-backgrounding",
-      "--no-sandbox",
-      "--disable-dev-shm-usage",
-      "--enable-unsafe-swiftshader",
-      "--ignore-gpu-blocklist",
-    ];
-    // F10 clipboard + egress-matched geolocation permission, built once for
-    // either path. Typed as string[] (Playwright's grantPermissions /
-    // permissions option both accept it).
-    const grantedPermissions: string[] = [
-      ...(geo?.geolocation !== undefined ? ["geolocation"] : []),
-      "clipboard-read",
-      "clipboard-write",
-    ];
-    const selfLaunchBinary = selfLaunchEnabled()
-      ? (resolveChannelBinary(channel) ?? (channel === null ? launcher.executablePath() : null))
-      : null;
-    const useSelfLaunch =
-      selfLaunchBinary !== null && existsSync(selfLaunchBinary) && canSelfLaunchWithProxy(proxy);
-    let context: BrowserContext;
-    this.throwIfStartCancelled();
-    if (useSelfLaunch && selfLaunchBinary !== null) {
-      console.error(
-        `[operator] self-launch + connectOverCDP (Turnstile-safe launch) binary=${selfLaunchBinary}`,
-      );
-      const window = { width: 1280, height: 1024 };
-      const selfEnv: NodeJS.ProcessEnv = {
-        ...browserEnv,
-        TZ: geo?.timezoneId ?? "America/New_York",
-        [OPERATOR_BROWSER_MARKER_ENV]: this.operatorBrowserMarker(),
-      };
-      const launch = () => {
-        this.throwIfStartCancelled();
-        return this.launchSelfManagedContext({
-          binary: selfLaunchBinary,
-          args: launchArgs,
-          proxy,
-          env: selfEnv,
-          window,
-        });
-      };
-      context = await launch();
-      try {
-        await context.grantPermissions(grantedPermissions);
-        if (geo?.geolocation !== undefined) {
-          await context.setGeolocation(geo.geolocation);
-        }
-      } catch (err) {
-        console.error(
-          `[operator] post-connect context setup partial: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      }
-    } else {
-      this.persistentFallbackLaunchInFlight = true;
-      this.startPersistentFallbackOwnershipMonitor();
-      const cleanupProfileHolder = async (): Promise<ProfileCloseState> => {
-        const proof = await this.waitForPersistentFallbackIdentity();
-        if (proof.state === "absent") return "closed";
-        if (proof.state === "unknown") return "unknown";
-        const { identity } = proof;
-        const treeProof = this.adoptOwnedChromeProcessTree(identity, false);
-        signalOwnedChromeProcessTree(identity, false, "SIGKILL", {
-          ...(treeProof === null ? {} : { proof: treeProof }),
-        });
-        return (await this.waitForOwnedProfileExit(identity, treeProof)) ? "closed" : "unknown";
-      };
-      const cleanupCancelled = async (lateContext: BrowserContext): Promise<ProfileCloseState> => {
-        const proof = await this.waitForPersistentFallbackIdentity().catch(
-          () => ({ state: "unknown" }) as const,
-        );
-        if (proof.state !== "owned") {
-          await lateContext.close().catch(() => undefined);
-          return proof.state === "absent" ? "closed" : "unknown";
-        }
-        const { identity } = proof;
-        const treeProof = this.adoptOwnedChromeProcessTree(identity, false);
-        const closeState = await closeProfileWithProof({
-          profileDir: this.profileDir,
-          identity,
-          close: () => lateContext.close(),
-          forceClose: () => {
-            signalOwnedChromeProcessTree(identity, false, "SIGKILL", {
-              ...(treeProof === null ? {} : { proof: treeProof }),
-            });
-            reapProfileHolderIfOwned(this.profileDir, identity);
-          },
-          ...(treeProof === null
-            ? {}
-            : { identityState: () => ownedChromeProcessTreeState(treeProof) }),
-        });
-        if (closeState === "closed") return closeState;
-        return (await this.waitForOwnedProfileExit(identity, treeProof)) ? "closed" : "unknown";
-      };
-      const outcome = await (async () => {
-        try {
-          return await launchCancellablePersistentContext({
-            launch: (options) => launcher.launchPersistentContext(this.profileDir, options),
-            options: {
-              headless: OPERATOR_BROWSER_HEADLESS,
-              env: {
-                ...browserEnv,
-                [OPERATOR_BROWSER_MARKER_ENV]: this.operatorBrowserMarker(),
-              },
-              ...(channel !== null ? { channel } : {}),
-              ...persistentProxyOptions(proxy),
-              args: [...launchArgs],
-              viewport: null,
-              locale: "en-US",
-              timezoneId: geo?.timezoneId ?? "America/New_York",
-              permissions: grantedPermissions,
-              ...(geo?.geolocation !== undefined ? { geolocation: geo.geolocation } : {}),
-            },
-            cancellation: this.startCancellation,
-            cleanupCancelled,
-            cleanupRejected: cleanupProfileHolder,
-          });
-        } catch (error) {
-          if (!this.startCancellationRequested) {
-            this.persistentFallbackLaunchInFlight = false;
-            throw error;
-          }
-          this.persistentFallbackCancellationState = await cleanupProfileHolder().catch(
-            () => "unknown" as const,
-          );
-          this.persistentFallbackLaunchInFlight = false;
-          throw new Error("BrowserController start cancelled");
-        }
-      })();
-      if (outcome.status === "cancelled") {
-        this.persistentFallbackCancellationState = outcome.closeState;
-        this.persistentFallbackLaunchInFlight = false;
-        throw new Error("BrowserController start cancelled");
-      }
-      context = outcome.value;
-      if (this.startCancellationRequested) {
-        this.persistentFallbackCancellationState = await cleanupCancelled(context).catch(
-          () => "unknown" as const,
-        );
-        this.persistentFallbackLaunchInFlight = false;
-        throw new Error("BrowserController start cancelled");
-      }
-      this.context = context;
-      this.launchedContext = true;
-      this.launchedProfileHolderIdentity = await this.requirePersistentFallbackOwnership(
-        async () => {
-          markOwnerBrowserLaunchTerminal(this.operatorBrowserMarker());
-          await Promise.race([
-            context.close().catch(() => undefined),
-            new Promise<void>((resolveWait) => {
-              const timer = setTimeout(resolveWait, PERSISTENT_CONTEXT_CANCELLATION_SETTLE_MS);
-              timer.unref();
-            }),
-          ]);
-          const markerClosed = await terminateOwnerBrowserLaunch(
-            this.operatorBrowserMarker(),
-            this.profileDir,
-          );
-          if (markerClosed) {
-            untrackOwnerBrowserLaunch(this.operatorBrowserMarker());
-            this.ownerLaunchTracked = false;
-          }
-          this.context = null;
-          this.launchedContext = false;
-        },
-      );
-      this.commitProfileLaunch();
-      this.persistentFallbackLaunchInFlight = false;
-    }
-    this.context = context;
-    // We own the profile now — close() may reap a leaked Chrome.
-    this.launchedContext = true;
-    if (!remoteMode) {
-      const holderPid = this.childChrome?.pid ?? currentProfileHolderPid(this.profileDir);
-      this.launchedProfileHolderIdentity =
-        this.childChromeIdentity ??
-        (holderPid === null ? null : profileProcessIdentity(holderPid, this.profileDir));
-      if (this.launchedProfileHolderIdentity !== null) {
-        this.adoptOwnedChromeProcessTree(
-          this.launchedProfileHolderIdentity,
-          this.childChromeIdentity !== null && this.childChromeProcessGroup,
-        );
-      }
-    }
-    if (this.startCancellationRequested) {
-      await this.closeBrowser();
-      throw new Error("BrowserController start cancelled");
-    }
+  private async initializePages(
+    context: BrowserContext,
+    hardened: boolean,
+    remoteMode: boolean,
+  ): Promise<void> {
     // Speed: optionally abort heavy/irrelevant requests before any navigation.
     await this.installResourceBlocking();
     // Dev-runtime guard: when the bot is run through `tsx`, esbuild may inject
@@ -4615,77 +2935,119 @@ export class BrowserController {
     }
   }
 
-  // Probe the run's actual egress geo by loading ipinfo.io. Launches a
-  // throwaway browser: the persistent context isn't up yet, and its
-  // timezone has to be known before it is. The throwaway inherits the
-  // same channel + proxy so it reports the real egress. Best-effort —
-  // any failure returns null and start() keeps a default timezone.
-  private async probeEgressGeo(
-    channel: string | null,
-    proxy: ProxySettings | null,
-    browserEnv: NodeJS.ProcessEnv,
-  ): Promise<EgressGeo | null> {
-    if (proxy === null) {
+  private trackMainDocument(page: Page): void {
+    return this.pageDriver.trackMainDocument(page);
+  }
+  mainDocumentIdentity(): string {
+    return this.pageDriver.mainDocumentIdentity();
+  }
+
+  /** Attach normal controller behavior to a harness-owned Playwright page. */
+  static fromHarnessPage(page: Page): BrowserController {
+    const controller = new BrowserController({ humanize: false });
+    controller.processOwner.context = page.context();
+    controller.page = page;
+    controller.primaryPage = page;
+    controller.trackOpenedTabs(page);
+    controller.harnessAttachedPage = true;
+    controller.processOwner.launchedMode = "headless";
+    return controller;
+  }
+  private trackOpenedTabs(page: Page): void {
+    return this.pageDriver.trackOpenedTabs(page);
+  }
+  operatorBrowserMarker(): string {
+    return this.processOwner.operatorBrowserMarker();
+  }
+  isConnected(): boolean {
+    return this.processOwner.isConnected();
+  }
+  get channel(): string | null {
+    return this.processOwner.channel;
+  }
+  get proxied(): string | null {
+    return this.processOwner.proxied;
+  }
+  get stealthProfile(): StealthProfile {
+    return this.processOwner.stealthProfile;
+  }
+
+  // Resource blocking for speed (BOT_BLOCK_RESOURCES, default OFF). Aborts
+  // image/media/font requests + known analytics/tracker hosts to cut page-load
+  // wall-clock (3-5x on byte-heavy pages; also stops trackers from holding the
+  // network "busy"). HARD ALLOW-GUARD first for captcha/challenge + payment
+  // scripts (blocking those breaks the Turnstile/hCaptcha token poll and the
+  // signup form). CSS + first-party JS are never blocked (not in BLOCK_TYPES) —
+  // the SPA form renders from them and the vision planner reads the styled
+  // render. DUAL RISK, hence default-OFF + an OF#2 A/B before flipping on:
+  //   (1) a browser that loads ZERO images is itself an anti-bot fingerprint;
+  //   (2) the screenshot the vision planner reads loses detail — mitigated
+  //       because the DOM inventory is the authoritative action space, but
+  //       still a regression risk on image-only affordances.
+  // Registered on the CONTEXT so it covers OAuth popups + iframes.
+  private async installResourceBlocking(): Promise<void> {
+    const ctx = this.context;
+    if (ctx === null) return;
+    if (!/^(1|true|on)$/i.test(process.env.BOT_BLOCK_RESOURCES ?? "")) return;
+    const BLOCK_TYPES = new Set(["image", "media", "font"]);
+    const BLOCK_HOSTS = [
+      "google-analytics.com",
+      "googletagmanager.com",
+      "analytics.google.com",
+      "doubleclick.net",
+      "static.hotjar.com",
+      "script.hotjar.com",
+      "segment.com",
+      "segment.io",
+      "cdn.segment.com",
+      "fullstory.com",
+      "mixpanel.com",
+      "bugsnag.com",
+      "intercom.io",
+      "intercomcdn.com",
+      "widget.intercom.io",
+      "connect.facebook.net",
+      "analytics.tiktok.com",
+      "clarity.ms",
+      "cdn.heapanalytics.com",
+      "wistia.com",
+    ];
+    // NEVER block — these break signup (captcha/challenge widgets + payment SDK).
+    const ALWAYS_ALLOW = [
+      "challenges.cloudflare.com",
+      "turnstile",
+      "hcaptcha.com",
+      "newassets.hcaptcha.com",
+      "recaptcha",
+      "gstatic.com/recaptcha",
+      "js.stripe.com",
+    ];
+    await ctx.route("**/*", async (route) => {
       try {
-        const resp = await fetch("https://ipinfo.io/json", { signal: AbortSignal.timeout(10_000) });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        return parseEgressGeo(await resp.text());
-      } catch (err) {
-        console.error(
-          `[operator] egress geo probe failed — using default ` +
-            `timezone: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        return null;
+        const url = route.request().url();
+        if (ALWAYS_ALLOW.some((h) => url.includes(h))) {
+          await route.continue();
+          return;
+        }
+        const type = route.request().resourceType();
+        if (BLOCK_TYPES.has(type) || BLOCK_HOSTS.some((h) => url.includes(h))) {
+          await route.abort();
+          return;
+        }
+        await route.continue();
+      } catch {
+        // Routing race / already-handled — never let a decision crash nav.
       }
-    }
-
-    let probe: Browser | undefined;
-    try {
-      probe = await getChromium().launch({
-        headless: OPERATOR_BROWSER_HEADLESS,
-        env: browserEnv,
-        ...(channel !== null ? { channel } : {}),
-        ...(proxy !== null ? { proxy } : {}),
-        args: ["--no-sandbox", "--disable-dev-shm-usage"],
-      });
-      const page = await probe.newPage();
-      await page.goto("https://ipinfo.io/json", {
-        timeout: 10000,
-        waitUntil: "domcontentloaded",
-      });
-      const body = await page.evaluate(() => document.body.innerText);
-      return parseEgressGeo(body);
-    } catch (err) {
-      console.error(
-        `[operator] egress geo probe failed — using default ` +
-          `timezone: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return null;
-    } finally {
-      if (probe !== undefined) await probe.close();
-    }
+    });
+    console.error(
+      "[operator] resource blocking ON (image/media/font + analytics aborted; captcha/CSS/JS allowed)",
+    );
   }
-
-  // Resolve the deliberate per-session egress selection. A session proxy is
-  // not an optimization hint: falling back to the host's IP could submit a
-  // geo-gated flow from the wrong country, so malformed or unreachable values
-  // abort startup rather than silently egressing directly.
-  private async resolveProxy(): Promise<ProxySettings | null> {
-    if (this.proxyOverride === null) return null;
-    return resolveExplicitProxy(this.proxyOverride);
+  async start(): Promise<void> {
+    return await this.processOwner.start();
   }
-
-  // Reload the current page. Used by the post-verify flow to make a SPA
-  // re-read a server-side state change (email verified) that the client
-  // hasn't picked up yet. Best-effort: a reload failure is non-fatal — the
-  // caller re-reads the page state regardless.
   async reload(): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    try {
-      await this.page.reload({ waitUntil: "domcontentloaded", timeout: 20_000 });
-    } catch {
-      // reload failed (slow SPA / transient) — caller re-inspects anyway
-    }
+    return await this.pageDriver.reload();
   }
 
   // Open the first conversation in a Gmail search-results list so the email
@@ -4721,103 +3083,8 @@ export class BrowserController {
     }
     return false;
   }
-
   async goto(url: string): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    // Retry transient network/proxy drops. A residential SOCKS tunnel
-    // intermittently resets a connection mid-navigation (Chrome surfaces
-    // net::ERR_SOCKS_CONNECTION_FAILED / ERR_CONNECTION_RESET / ERR_NETWORK_
-    // CHANGED / ERR_TIMED_OUT), especially on heavy onboarding pages that
-    // open many subresource connections at once (algolia's dashboard_setup).
-    // The host is reachable on the next attempt — a single goto failure
-    // shouldn't fail the whole signup. Only retry these connection-level
-    // errors; HTTP statuses and selector/logic errors fall straight through.
-    // net::ERR_ABORTED — a navigation superseded by a redirect/JS-nav during
-    // the domcontentloaded wait. Usually transient (a redirect race on the
-    // first hit of an auth-gated portal — MEASURED 2026-06-11: defang's
-    // portal.defang.io aborted on the initial goto); a retry lands the
-    // settled page. Distinct from ERR_CONNECTION_ABORTED (a dropped socket).
-    const TRANSIENT_NET =
-      /ERR_SOCKS_CONNECTION_FAILED|ERR_CONNECTION_(?:RESET|CLOSED|FAILED|ABORTED)|ERR_NETWORK_CHANGED|ERR_TIMED_OUT|ERR_NAME_NOT_RESOLVED|net::ERR_EMPTY_RESPONSE|net::ERR_ABORTED/i;
-    const MAX_GOTO_ATTEMPTS = 3;
-    const sameOriginPathAndSearch = (a: string, b: string): boolean => {
-      try {
-        const left = new URL(a);
-        const right = new URL(b);
-        return (
-          left.origin === right.origin &&
-          left.pathname === right.pathname &&
-          left.search === right.search
-        );
-      } catch {
-        return false;
-      }
-    };
-    const landedAuthGateForTarget = (landedRaw: string, targetRaw: string): boolean => {
-      try {
-        const landed = new URL(landedRaw);
-        const target = new URL(targetRaw);
-        if (landed.origin !== target.origin) return false;
-        return /\/(?:sign[_-]?in|login|log[_-]?in|auth)(?:\/|$)/i.test(landed.pathname);
-      } catch {
-        return false;
-      }
-    };
-    for (let attempt = 1; ; attempt++) {
-      try {
-        await this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-        // A SOCKS/connection drop does NOT always throw: Chrome resolves
-        // domcontentloaded on its own `chrome-error://chromewebdata/`
-        // interstitial and goto returns cleanly. The bot then ran the whole
-        // planner on a dead error page and gave up after one round (MEASURED
-        // 2026-06-11: galileo/lancedb landed on chrome-error with the app
-        // host as the title, never retried). Treat a chrome-error landing as
-        // the same transient class and retry it like a thrown net error.
-        const landed = this.page.url();
-        if (landed.startsWith("chrome-error://")) {
-          if (attempt >= MAX_GOTO_ATTEMPTS) {
-            throw new Error(
-              `net::navigation landed on a Chrome error page for ${url} ` +
-                `after ${attempt} attempts (transient proxy/host failure)`,
-            );
-          }
-          await this.sleep(1500 * attempt);
-          continue;
-        }
-        break;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        // Some client-routed apps commit the address bar to the requested SPA
-        // route but never fire the lifecycle event Playwright is waiting for.
-        // Treat that as a successful navigation: callers immediately inspect
-        // the DOM and have their own element-level waits.
-        if (/Timeout \d+ms exceeded/i.test(msg)) {
-          await this.sleep(500);
-          if (sameOriginPathAndSearch(this.page.url(), url)) break;
-          if (landedAuthGateForTarget(this.page.url(), url)) break;
-          await this.page
-            .waitForURL((landed) => sameOriginPathAndSearch(landed.toString(), url), {
-              timeout: 5000,
-            })
-            .then(() => undefined)
-            .catch(() => undefined);
-          if (sameOriginPathAndSearch(this.page.url(), url)) break;
-          if (landedAuthGateForTarget(this.page.url(), url)) break;
-        }
-        if (attempt >= MAX_GOTO_ATTEMPTS || !TRANSIENT_NET.test(msg)) throw err;
-        // Linear backoff — give the tunnel a moment to recover a slot.
-        await this.sleep(1500 * attempt);
-      }
-    }
-    // Post-load dwell. Cloudflare/reCAPTCHA scoring runs JS that
-    // collects behavior signals over a window (typically 500-2000ms);
-    // landing on a page and immediately interacting reads as bot-like.
-    // The "dwell" gives the scoring window enough wall-clock to settle
-    // and also gives any deferred JS time to register event listeners
-    // we'll later fire.
-    if (this.humanize) {
-      await this.sleep(rand(800, 2000));
-    }
+    return await this.pageDriver.goto(url);
   }
 
   // Pre-warm a domain by visiting its root. Useful before navigating
@@ -15251,97 +13518,20 @@ export class BrowserController {
     );
     return { ok: false, via: "none" };
   }
-
-  // URL of the active page (the OAuth page mid-handshake, the product
-  // page otherwise). Cheap — no screenshot, unlike getState().
   currentUrl(): string {
-    return this.page !== null ? this.page.url() : "";
+    return this.pageDriver.currentUrl();
   }
-
   recoverActivePage(): boolean {
-    return this.adoptLivePage();
+    return this.pageDriver.recoverActivePage();
   }
-
-  // ───────────── new-tab adoption ─────────────
-  //
-  // Arm adoption immediately BEFORE an action that may open a tab. Anything
-  // already queued belonged to an earlier action and is not this action's to
-  // follow.
   armOpenedTabAdoption(): void {
-    this.openedTabs.length = 0;
+    return this.pageDriver.armOpenedTabAdoption();
   }
-
-  // Adopt the newest live tab opened since armOpenedTabAdoption() as the active
-  // page, so the next observe/act reads the tab the click actually opened.
-  // Returns the adopted URL, or null when the action opened no followable tab.
-  //
-  // `graceMs` covers the window between the click returning and Playwright
-  // delivering the context "page" event; a caller that has already waited for
-  // the page to settle passes 0 and just drains what arrived.
   async adoptOpenedTab(graceMs = 0): Promise<string | null> {
-    const deadline = Date.now() + Math.max(0, graceMs);
-    let candidate = this.takeFollowableTab();
-    while (candidate === null && Date.now() < deadline) {
-      await this.sleep(50);
-      candidate = this.takeFollowableTab();
-    }
-    if (candidate === null) return null;
-    this.openedTabs.length = 0;
-    // A window.open target starts at about:blank and is navigated a tick later.
-    // Adopting it while blank would report an empty page to the host, so wait
-    // (bounded) for the document it was opened for.
-    const blank = (url: string): boolean =>
-      url === "" || url === "about:blank" || url === "about:srcdoc";
-    for (let i = 0; i < 40 && !candidate.isClosed() && blank(candidate.url()); i++) {
-      await this.sleep(50);
-    }
-    if (!this.ownedPages.has(candidate)) return null;
-    this.page = candidate;
-    this.trackMainDocument(candidate);
-    await candidate.bringToFront().catch(() => undefined);
-    await candidate
-      .waitForLoadState("domcontentloaded", { timeout: 15_000 })
-      .catch(() => undefined);
-    return candidate.isClosed() ? null : candidate.url();
+    return await this.pageDriver.adoptOpenedTab(graceMs);
   }
-
-  // Newest owned popup the operator may follow. Explicit primary/recovery
-  // pages never enter the queue; the active page and OAuth transports retain
-  // their existing lifecycle handling.
-  private takeFollowableTab(): Page | null {
-    for (let i = this.openedTabs.length - 1; i >= 0; i--) {
-      const tab = this.openedTabs[i]!;
-      if (!this.ownedPages.has(tab)) continue;
-      if (
-        tab === this.page ||
-        tab === this.primaryPage ||
-        tab === this.oauthProductPage ||
-        tab === this.oauthProviderPage
-      ) {
-        continue;
-      }
-      return tab;
-    }
-    return null;
-  }
-
   private adoptLivePage(): boolean {
-    if (this.page !== null && this.ownedPages.has(this.page)) return true;
-    if (this.context === null) return false;
-    const pages = this.ownedPages.live();
-    if (pages.length === 0) return false;
-    const product =
-      this.oauthProductPage !== null && this.ownedPages.has(this.oauthProductPage)
-        ? this.oauthProductPage
-        : null;
-    const nonAuth = [...pages]
-      .reverse()
-      .find(
-        (p) =>
-          !/accounts\.google\.com|github\.com\/login|login\.microsoftonline\.com/i.test(p.url()),
-      );
-    this.page = nonAuth ?? product ?? pages[pages.length - 1] ?? null;
-    return this.page !== null;
+    return this.pageDriver.adoptLivePage();
   }
 
   // Press a keyboard key (e.g. "Escape" to dismiss a focus-trapped modal that
@@ -16003,312 +14193,14 @@ export class BrowserController {
       this.oauthProviderPageClosed = false;
     }
   }
-
   async close(options: { cancelStart?: boolean } = {}): Promise<ProfileCloseState> {
-    if (options.cancelStart === true) {
-      this.startCancellationRequested = true;
-      this.resolveStartCancellation?.();
-      this.resolveStartCancellation = null;
-    }
-    this.closePromise ??= this.closeAfterStart();
-    return await this.closePromise;
+    return await this.processOwner.close(options);
   }
-
   async waitForCancelledStartQuiescence(): Promise<void> {
-    if (!this.startCancellationRequested) return;
-    await Promise.allSettled([
-      this.startPromise ?? Promise.resolve(),
-      this.reapCancelledStartProcess(),
-    ]);
-    await this.persistentFallbackOwnershipMonitor?.catch(() => undefined);
+    return await this.processOwner.waitForCancelledStartQuiescence();
   }
-
   async forceCloseOwnedProcessTree(): Promise<ProfileCloseState> {
-    this.startCancellationRequested = true;
-    this.resolveStartCancellation?.();
-    this.resolveStartCancellation = null;
-    const marker = this.operatorBrowserMarker();
-    if (this.ownerLaunchTracked) markOwnerBrowserLaunchTerminal(marker);
-    const proof = this.ownedChromeProcessTreeProof;
-    const identity = proof?.identity ?? this.currentOwnedProfileIdentity();
-    if (identity !== null) {
-      signalOwnedChromeProcessTree(identity, proof?.processGroup ?? false, "SIGKILL", {
-        ...(proof === null ? {} : { proof }),
-      });
-      reapProfileHolderIfOwned(this.profileDir, identity);
-    }
-    const closed =
-      identity === null
-        ? this.startSettled && !this.launchedContext
-        : await this.waitForOwnedProfileExit(identity, proof);
-    if (closed && proof !== null) {
-      releaseOwnedChromeProcessTree(proof);
-      const tracked = selfManagedChromes.get(proof.identity.pid);
-      if (tracked?.proof === proof) selfManagedChromes.delete(proof.identity.pid);
-      if (this.ownedChromeProcessTreeProof === proof) this.ownedChromeProcessTreeProof = null;
-    }
-    const markerClosed =
-      !this.ownerLaunchTracked || (await terminateOwnerBrowserLaunch(marker, this.profileDir));
-    if (closed && markerClosed && this.ownerLaunchTracked) {
-      untrackOwnerBrowserLaunch(marker);
-      this.ownerLaunchTracked = false;
-    }
-    await this.teardownOwnedDisplay().catch(() => undefined);
-    return closed && markerClosed ? "closed" : "unknown";
-  }
-
-  private async closeCancelledStart(): Promise<ProfileCloseState> {
-    void this.reapCancelledStartProcess().catch(() => undefined);
-    if (this.persistentFallbackCancellationState !== null) {
-      return this.persistentFallbackCancellationState;
-    }
-    if (!this.startLaunchCommitted) {
-      const closeState = await this.closeBrowser();
-      return this.startSettled ? closeState : "unknown";
-    }
-    return await this.closeBrowser();
-  }
-
-  private async reapCancelledStartProcess(): Promise<void> {
-    this.cancelledStartReaper ??= this.monitorCancelledStartProcess();
-    await this.cancelledStartReaper;
-  }
-
-  private async monitorCancelledStartProcess(): Promise<void> {
-    while (!this.startSettled) {
-      const identity = this.currentOwnedProfileIdentity();
-      if (identity !== null) {
-        this.signalCurrentSelfManagedChrome(identity, "SIGKILL");
-        reapProfileHolderIfOwned(this.profileDir, identity);
-      }
-      await new Promise<void>((resolveWait) => {
-        const timer = setTimeout(resolveWait, 25);
-        timer.unref();
-      });
-    }
-  }
-
-  private currentOwnedProfileIdentity(): ProfileProcessIdentity | null {
-    const known =
-      this.ownedChromeProcessTreeProof?.identity ??
-      this.childChromeIdentity ??
-      this.launchedProfileHolderIdentity;
-    if (known !== null) return known;
-    const holderPid = currentProfileHolderPid(this.profileDir);
-    if (holderPid === null) return null;
-    const identity = profileProcessIdentity(holderPid, this.profileDir);
-    if (identity === null) return null;
-    if (!this.startCancellationRequested) return identity;
-    return operatorBrowserProcessMatchesMarker(identity.pid, this.operatorBrowserMarker())
-      ? identity
-      : null;
-  }
-
-  private async waitForPersistentFallbackIdentity(): Promise<PersistentFallbackIdentityProof> {
-    if (this.ownedChromeProcessTreeProof !== null) {
-      return { state: "owned", identity: this.ownedChromeProcessTreeProof.identity };
-    }
-    const proof = await resolvePersistentFallbackIdentity({ profileDir: this.profileDir });
-    if (
-      proof.state === "owned" &&
-      this.startCancellationRequested &&
-      !operatorBrowserProcessMatchesMarker(proof.identity.pid, this.operatorBrowserMarker())
-    ) {
-      return { state: "unknown" };
-    }
-    if (proof.state === "owned") this.adoptOwnedChromeProcessTree(proof.identity, false);
-    return proof;
-  }
-
-  private async requirePersistentFallbackOwnership(
-    cleanupUnproven: () => Promise<void>,
-  ): Promise<ProfileProcessIdentity> {
-    try {
-      const proof = await this.waitForPersistentFallbackIdentity();
-      if (proof.state !== "owned" || this.ownedChromeProcessTreeProof === null) {
-        throw new Error("persistent browser launch identity could not be bound to owner custody");
-      }
-      return proof.identity;
-    } catch (error) {
-      await cleanupUnproven().catch(() => undefined);
-      this.persistentFallbackLaunchInFlight = false;
-      throw error;
-    }
-  }
-
-  private startPersistentFallbackOwnershipMonitor(): void {
-    if (this.persistentFallbackOwnershipMonitor !== null) return;
-    this.persistentFallbackOwnershipMonitor = (async () => {
-      while (this.persistentFallbackLaunchInFlight && this.ownedChromeProcessTreeProof === null) {
-        const holderPid = currentProfileHolderPid(this.profileDir);
-        const identity =
-          holderPid === null ? null : profileProcessIdentity(holderPid, this.profileDir);
-        const controllerOwnsIdentity =
-          identity !== null &&
-          (!this.startCancellationRequested ||
-            operatorBrowserProcessMatchesMarker(identity.pid, this.operatorBrowserMarker()));
-        if (identity !== null && controllerOwnsIdentity) {
-          this.launchedProfileHolderIdentity = identity;
-          try {
-            this.adoptOwnedChromeProcessTree(identity, false);
-          } catch {}
-          return;
-        }
-        await new Promise<void>((resolveWait) => {
-          const timer = setTimeout(resolveWait, PROFILE_IDENTITY_POLL_MS);
-          timer.unref();
-        });
-      }
-    })();
-  }
-
-  private async waitForOwnedProfileExit(
-    identity: ProfileProcessIdentity,
-    existingProof?: OwnedChromeProcessTreeProof | null,
-  ): Promise<boolean> {
-    const deadline = Date.now() + PROFILE_IDENTITY_PROOF_TIMEOUT_MS;
-    const proof = existingProof ?? captureOwnedChromeProcessTreeProof(identity, false);
-    let state =
-      proof === null
-        ? profileProcessIdentityState(identity, this.profileDir)
-        : ownedChromeProcessTreeState(proof);
-    while (state !== "stale" && Date.now() < deadline) {
-      if (proof !== null) {
-        signalOwnedChromeProcessTree(identity, false, "SIGKILL", { proof });
-      } else if (profileProcessMatches(identity, this.profileDir)) {
-        signalOwnedChromeProcessTree(identity, false, "SIGKILL");
-      }
-      await new Promise<void>((resolveWait) => {
-        const timer = setTimeout(resolveWait, PROFILE_IDENTITY_POLL_MS);
-        timer.unref();
-      });
-      state =
-        proof === null
-          ? profileProcessIdentityState(identity, this.profileDir)
-          : ownedChromeProcessTreeState(proof);
-    }
-    if (state !== "stale") return false;
-    reapProfileHolderIfOwned(this.profileDir, identity);
-    return true;
-  }
-
-  private async closeAfterStart(): Promise<ProfileCloseState> {
-    if (this.startPromise !== null && !this.startSettled) {
-      await Promise.race([this.startPromise.catch(() => undefined), this.startCancellation]);
-    }
-    if (this.startCancellationRequested) return await this.closeCancelledStart();
-    return await this.closeBrowser();
-  }
-
-  private async closeBrowser(): Promise<ProfileCloseState> {
-    this.ownedPages.dispose();
-    for (const dispose of this.documentSubscriptions.values()) dispose();
-    this.openedTabs.length = 0;
-    if (this.harnessAttachedPage) {
-      this.page = null;
-      this.primaryPage = null;
-      this.oauthProductPage = null;
-      this.oauthProviderPage = null;
-      this.oauthProviderPageClosed = false;
-      this.context = null;
-      return "closed";
-    }
-    const marker = this.operatorBrowserMarker();
-    if (this.ownerLaunchTracked) markOwnerBrowserLaunchTerminal(marker);
-    // Each step is best-effort and independent: a throw closing the page
-    // or context must NOT skip the browser reap below, or an un-closed Chrome
-    // keeps the profile's
-    // SingletonLock held — bricking the next signup + `mcp connect`).
-    //
-    // EVERY close call is timeout-capped. On a wedged headed Chrome (e.g. a
-    // run that crashed mid-captcha-click), BOTH page.close() AND
-    // context.close() can hang INDEFINITELY — and an un-capped page.close()
-    // blocked the reap below from ever running, so the browser leaked for
-    // minutes and bricked the next 3 services (MEASURED 2026-06-09: supabase
-    // crash → cockroachdb/weaviate/honeycomb all "profile held"). The cap
-    // guarantees we always reach the SIGKILL reap.
-    const page = this.page;
-    const context = this.context;
-    const cdpBrowser = this.cdpBrowser;
-    const childIdentity = this.childChromeIdentity;
-    const childChromeProcessGroup = this.childChromeProcessGroup;
-    const holderIdentity = this.launchedProfileHolderIdentity ?? this.currentOwnedProfileIdentity();
-    const identity = this.ownedChromeProcessTreeProof?.identity ?? childIdentity ?? holderIdentity;
-    const treeProof =
-      identity === null
-        ? null
-        : (this.ownedChromeProcessTreeProof ??
-          this.adoptOwnedChromeProcessTree(
-            identity,
-            childIdentity !== null ? childChromeProcessGroup : false,
-          ));
-    this.page = null;
-    this.primaryPage = null;
-    this.oauthProductPage = null;
-    this.oauthProviderPage = null;
-    this.oauthProviderPageClosed = false;
-    this.context = null;
-    this.cdpBrowser = null;
-    this.childChrome = null;
-    this.childChromeIdentity = null;
-    this.childChromeProcessGroup = false;
-    this.launchedContext = false;
-    this.launchedProfileHolderIdentity = null;
-    const closeState = await closeProfileWithProof({
-      profileDir: this.profileDir,
-      identity,
-      close: async () => {
-        if (identity !== null) {
-          signalOwnedChromeProcessTree(
-            identity,
-            treeProof?.processGroup ?? (childIdentity !== null ? childChromeProcessGroup : false),
-            "SIGTERM",
-            { ...(treeProof === null ? {} : { proof: treeProof }) },
-          );
-        }
-        // A process-tree SIGTERM can close the CDP target before Playwright
-        // observes it. That is successful teardown, not a reason to skip the
-        // proof/reap path or retain a cleanly closed ephemeral profile.
-        if (page !== null) await page.close().catch(() => undefined);
-        if (context !== null) await context.close().catch(() => undefined);
-        if (cdpBrowser !== null) await cdpBrowser.close().catch(() => undefined);
-      },
-      forceClose: () => {
-        if (identity !== null) {
-          signalOwnedChromeProcessTree(
-            identity,
-            treeProof?.processGroup ?? (childIdentity !== null ? childChromeProcessGroup : false),
-            "SIGKILL",
-            { ...(treeProof === null ? {} : { proof: treeProof }) },
-          );
-        }
-        reapProfileHolderIfOwned(this.profileDir, identity);
-      },
-      ...(treeProof === null
-        ? {}
-        : { identityState: () => ownedChromeProcessTreeState(treeProof) }),
-    });
-    // Self-launch path: disconnect the CDP browser and SIGKILL the Chrome we
-    // spawned. context.close() on a connectOverCDP context only disconnects —
-    // it does NOT necessarily exit the browser process, which would leak the
-    // SingletonLock and brick the next run (the reap below is the backstop, but
-    // killing our own child directly is cleaner and faster).
-    if (treeProof !== null && ownedChromeProcessTreeState(treeProof) === "stale") {
-      releaseOwnedChromeProcessTree(treeProof);
-      const tracked = selfManagedChromes.get(treeProof.identity.pid);
-      if (tracked?.proof === treeProof) selfManagedChromes.delete(treeProof.identity.pid);
-      if (this.ownedChromeProcessTreeProof === treeProof) {
-        this.ownedChromeProcessTreeProof = null;
-      }
-    }
-    const markerClosed =
-      !this.ownerLaunchTracked || (await terminateOwnerBrowserLaunch(marker, this.profileDir));
-    if (markerClosed && this.ownerLaunchTracked) {
-      untrackOwnerBrowserLaunch(marker);
-      this.ownerLaunchTracked = false;
-    }
-    await this.teardownOwnedDisplay().catch(() => undefined);
-    return closeState === "closed" && !markerClosed ? "force_closed_unproven" : closeState;
+    return await this.processOwner.forceCloseOwnedProcessTree();
   }
 }
 
@@ -16539,176 +14431,6 @@ export function isSafeSignupChoiceText(text: string): boolean {
     !AGREEMENT_TEXT_RE.test(text) &&
     !MARKETING_TEXT_RE.test(text)
   );
-}
-
-// ───────────── residential proxy (S1) ─────────────
-
-// Playwright proxy settings, narrowed to the fields we set. Structurally
-// assignable to Playwright's launch `proxy` option (which also has an
-// optional `bypass`).
-export interface ProxySettings {
-  server: string;
-  username?: string;
-  password?: string;
-}
-
-export function proxyHasCredentials(proxy: ProxySettings | null): boolean {
-  return (
-    proxy !== null &&
-    ((typeof proxy.username === "string" && proxy.username.length > 0) ||
-      (typeof proxy.password === "string" && proxy.password.length > 0))
-  );
-}
-
-// Parse a per-session proxy URL — e.g. "http://user:pass@host:8080" or
-// "socks5://host:1080" — into Playwright's proxy option shape. Playwright
-// wants credentials separate from `server`, so we split them out and
-// percent-decode them (residential providers embed session IDs with
-// reserved characters in the username, which arrive %-encoded).
-//
-// Throws on a URL the WHATWG parser rejects, or one with no host (a bare
-// "host:port" parses as a scheme with an empty host).
-//
-// Exported for unit testing — URL parsing is the error-prone bit.
-// Cheap TCP liveness probe for a proxy `server` string ("socks5://host:port").
-// A SOCKS5 proxy listens on TCP; if a connect succeeds within the timeout the
-// proxy is up. Resolves false on connect error / timeout / a malformed server.
-// Pure (no class state) so resolveProxy can call it before launching Chrome.
-export async function isProxyReachable(server: string, timeoutMs = 4000): Promise<boolean> {
-  let host: string;
-  let port: number;
-  try {
-    const u = new URL(server);
-    host = u.hostname;
-    port = Number(u.port) || proxyDefaultPort(u.protocol);
-  } catch {
-    return false;
-  }
-  if (host.length === 0 || !Number.isFinite(port)) return false;
-  return await new Promise<boolean>((resolve) => {
-    const sock = new Socket();
-    let settled = false;
-    const finish = (ok: boolean): void => {
-      if (settled) return;
-      settled = true;
-      try {
-        sock.destroy();
-      } catch {
-        // already closed
-      }
-      resolve(ok);
-    };
-    sock.setTimeout(timeoutMs);
-    sock.once("connect", () => finish(true));
-    sock.once("timeout", () => finish(false));
-    sock.once("error", () => finish(false));
-    sock.connect(port, host);
-  });
-}
-
-export function proxyDefaultPort(protocol: string): number {
-  if (protocol === "http:") return 80;
-  if (protocol === "https:") return 443;
-  if (protocol.startsWith("socks")) return 1080;
-  return 8080;
-}
-
-export function parseProxyUrl(raw: string): ProxySettings {
-  const u = new URL(raw.trim());
-  if (u.hostname.length === 0) {
-    throw new Error("proxy URL has no host");
-  }
-  // `host` includes the port; `protocol` keeps its trailing ":".
-  const settings: ProxySettings = { server: `${u.protocol}//${u.host}` };
-  if (u.username.length > 0) settings.username = decodeURIComponent(u.username);
-  if (u.password.length > 0) settings.password = decodeURIComponent(u.password);
-  return settings;
-}
-
-/** Resolve an explicit session proxy, refusing an unsafe direct fallback. */
-export async function resolveExplicitProxy(
-  raw: string,
-  probe: (server: string) => Promise<boolean> = isProxyReachable,
-): Promise<ProxySettings> {
-  let proxy: ProxySettings;
-  try {
-    proxy = parseProxyUrl(raw);
-  } catch (err) {
-    throw new Error(
-      `explicit session proxy is malformed; refusing direct egress: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-  }
-  if (!(await probe(proxy.server))) {
-    throw new Error(
-      `explicit session proxy ${proxy.server} is unreachable; refusing direct egress`,
-    );
-  }
-  return proxy;
-}
-
-/** Self-launched Chrome cannot authenticate an HTTP/SOCKS proxy. */
-export function canSelfLaunchWithProxy(proxy: ProxySettings | null): boolean {
-  return !proxyHasCredentials(proxy);
-}
-
-/** Options passed to launchPersistentContext, including proxy credentials. */
-export function persistentProxyOptions(proxy: ProxySettings | null): { proxy?: ProxySettings } {
-  return proxy === null ? {} : { proxy };
-}
-
-// ───────────── egress geo match (T3.1) ─────────────
-
-// Browser-context geo derived from the run's actual egress IP. Set on
-// newContext() so the browser's declared timezone matches where its
-// traffic exits — a US-timezone browser on a foreign proxy IP is
-// itself a signal anti-bot scorers check for.
-export interface EgressGeo {
-  timezoneId: string;
-  geolocation?: { latitude: number; longitude: number };
-}
-
-// Parse an ipinfo.io/json response body into EgressGeo. Returns null
-// when the timezone is absent or not a plausible IANA zone — the
-// caller then keeps a default rather than handing Playwright a bad
-// timezoneId (which would throw inside newContext()).
-//
-// geolocation is optional: a valid `loc` ("lat,long") sets it; a
-// missing or malformed one leaves a timezone-only result. Exported
-// for unit testing — JSON-shape handling is the error-prone bit.
-export function parseEgressGeo(text: string): EgressGeo | null {
-  let data: unknown;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    return null;
-  }
-  if (data === null || typeof data !== "object") return null;
-  const d = data as Record<string, unknown>;
-
-  const tz = typeof d.timezone === "string" ? d.timezone : null;
-  // IANA zones look like "Asia/Seoul" or "America/Argentina/Buenos_Aires".
-  // Reject anything else so a garbage value never reaches newContext().
-  if (tz === null || !/^[A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+$/.test(tz)) return null;
-
-  const geo: EgressGeo = { timezoneId: tz };
-  if (typeof d.loc === "string") {
-    const parts = d.loc.split(",");
-    if (parts.length === 2) {
-      const latitude = Number(parts[0]);
-      const longitude = Number(parts[1]);
-      if (
-        Number.isFinite(latitude) &&
-        Number.isFinite(longitude) &&
-        Math.abs(latitude) <= 90 &&
-        Math.abs(longitude) <= 180
-      ) {
-        geo.geolocation = { latitude, longitude };
-      }
-    }
-  }
-  return geo;
 }
 
 // ───────────── element inventory (F3) ─────────────
@@ -17022,3 +14744,37 @@ export function rankAndCapInventory(
     buttonsDropped: Math.max(0, ranked.length - keptButtons.length),
   };
 }
+
+export {
+  canSelfLaunchWithProxy,
+  captureOwnedChromeProcessTreeProof,
+  childProcessIsRunning,
+  closeBrowserContextWithin,
+  closeLocalBrowserLaunch,
+  isProxyReachable,
+  isSelfManagedChromeTerminationSignalExitEnabled,
+  launchCancellablePersistentContext,
+  ownedChromeProcessTreeState,
+  parseEgressGeo,
+  parseProxyUrl,
+  persistentProxyOptions,
+  proxyDefaultPort,
+  proxyHasCredentials,
+  registerLocalBrowserLaunch,
+  resolveAttachedProfileChildIdentity,
+  resolveChannelBinary,
+  resolveExplicitProxy,
+  resolvePersistentFallbackIdentity,
+  selfLaunchEnabled,
+  setSelfManagedChromeTerminationSignalExitEnabled,
+  signalOwnedChromeProcessTree,
+  synchronizeSelfManagedChromeTerminationSignalHandlers,
+  terminateTrackedProfileChild,
+  waitForOwnedDevtoolsEndpoint,
+  withChromeStartupLock,
+  type EgressGeo,
+  type OwnedChromeProcessTreeProof,
+  type PersistentFallbackIdentityProof,
+  type ProxySettings,
+  type StealthProfile,
+} from "./browser-process-runtime.js";
