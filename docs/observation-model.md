@@ -111,7 +111,8 @@ accessible name emitted the live token as the label `@f9a062f02fadf5` (and its
 first four characters again inside `@curl-h-authorization-bearer-f9a0`), putting
 the secret into the transcript. `controlLabelV2` now screens the accessible
 name for credential shape (vendor anchors, JWT shape, length + character-class
-+ entropy over unbroken runs — `looksLikeSecretShapedName` in
++ entropy over unbroken runs and over hyphen/underscore-grouped bodies with all
+segments ≥4 chars scored as one joined run — `looksLikeSecretShapedName` in
 `compact-observation-v2.ts`) and emits `@redacted-secret` instead, keeping the
 row's ref, role, and every non-secret fact so the control stays actionable.
 Values, screenshots, and extracts remain verbatim, and ordinary labels
@@ -138,7 +139,10 @@ Finding 1 made the map safe; Finding 2 makes it *comprehensible*:
   copied to the clipboard" keeps its context. Prose fills whatever wire
   budget the action map leaves over (rows pack first — the map is never
   starved for text's sake), degrades item-by-item from the tail, and is
-  sticky: a delta resends prose only when it changed. Prose extraction is
+  sticky: a delta resends prose only when it differs from what was last
+  actually emitted (the degraded subset, not the full screened list), so a
+  degraded page is re-sent whole on the next unchanged-rows observe rather
+  than leaving the consumer with a permanent subset. Prose extraction is
   availability-optional; a harness or older browser without it degrades to
   the old empty `text` silently.
 - **Duplicate-label ordinals.** Two controls legitimately sharing an
