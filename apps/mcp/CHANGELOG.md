@@ -1,5 +1,11 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.14-rc.2 (2026-09-06)
+
+- fix(mcp): make every actionable control reachable in compact-v2 observation (#676)
+- fix(mcp): honest OAuth terminal-state detection with non-throwing awaiting_human (#675)
+- feat(mcp): flag-gated experimental concurrent multisession on the shared IdentityRuntime Chrome (#674)
+
 ## 1.1.14-rc.1 (2026-09-06)
 
 - _summarize the changes_
