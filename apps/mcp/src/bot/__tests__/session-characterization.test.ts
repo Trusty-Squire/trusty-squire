@@ -484,10 +484,21 @@ describe("characterization: session lifecycle ordering", () => {
 
 // The COMPLETE agent-visible key set of each observation payload. Asserted as
 // a whole set (not "contains") so a silently added or dropped field fails.
-const FIRST_V2_KEYS = ["format", "safe_table", "session_id", "stage", "text", "url"];
+// `text_unavailable` is the 2026-09-06 diagnostic: this harness's browser stub
+// has no `extractObservationProse`, so the availability-optional prose channel
+// surfaces its concrete failure reason on both full and delta payloads.
+const FIRST_V2_KEYS = [
+  "format",
+  "safe_table",
+  "session_id",
+  "stage",
+  "text",
+  "text_unavailable",
+  "url",
+];
 // A repeat compact-v2 read on an unchanged page collapses to a delta: no
 // safe_table and no stage.
-const REOBSERVE_V2_KEYS = ["delta", "format", "session_id", "text", "url"];
+const REOBSERVE_V2_KEYS = ["delta", "format", "session_id", "text", "text_unavailable", "url"];
 const V1_COMPACT_KEYS = [
   "delta",
   "elements_total",
