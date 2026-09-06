@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.14-rc.1 (2026-09-06)
+
+- _summarize the changes_
+
 ## 1.1.13-rc.32 (2026-09-06)
 
 - refactor(mcp): add IdentityRuntime to own Chrome's lifetime independent of any one session (#671)
