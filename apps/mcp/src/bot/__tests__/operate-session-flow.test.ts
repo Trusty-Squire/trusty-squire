@@ -3628,7 +3628,13 @@ describe("operate session — OAuth lifecycle", () => {
       state: "awaiting_human",
       next_action: "operate_observe",
     });
-    expect(pending.url).toBe("https://accounts.google.com");
+    // The live challenge URL is reported as-is, length-capped only as far as
+    // the compact-v2 byte budget requires — never reduced to its origin.
+    expect(h.oauthResultUrl.startsWith(pending.url)).toBe(true);
+    expect(pending.url).toContain("https://accounts.google.com/signin/challenge/dp/2?continue=");
+    expect(pending.url.length).toBeGreaterThan(300);
+    expect(pending.guidance).toMatch(/operate_observe/);
+    expect(pending.guidance).not.toMatch(/oauth_settle|oauth_login/);
     expect(Buffer.byteLength(JSON.stringify(pending), "utf8")).toBeLessThanOrEqual(1_024);
     await finishProvisionSession(started.session_id);
   });
@@ -3667,6 +3673,7 @@ describe("operate session — OAuth lifecycle", () => {
       expect(queued.oauth.reason).toMatch(/has not been attempted yet/);
       expect(queued.oauth.reason).not.toMatch(/challenge|consent/i);
     }
+    expect(queued.url).toBe(h.currentUrl);
     expect(h.oauthLoginCalls).toHaveLength(1);
     releaseFirst();
     await finishProvisionSession(started.session_id);

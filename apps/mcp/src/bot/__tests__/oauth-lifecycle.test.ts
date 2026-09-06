@@ -429,12 +429,14 @@ describe("BrowserController OAuth popup lifecycle", () => {
         message: expect.stringMatching(/has not returned to https:\/\/product\.test/i),
       });
       await expect(rejected).rejects.not.toMatchObject({
-        message: expect.stringMatching(/expired|force-relogin/i),
+        message: expect.stringMatching(/expired|force-relogin|oauth_settle|retry oauth_login/i),
+      });
+      await expect(rejected).rejects.toMatchObject({
+        message: expect.stringMatching(/operate_observe/),
       });
       expect(Date.now() - startedAt).toBeLessThan(5_000);
       // The pending challenge must stay reachable: the provider popup is still
-      // open and is the controller's active page, so operate_observe reads it
-      // and oauth_settle can resume from it.
+      // open and is the controller's active page, so operate_observe reads it.
       const popup = context
         .pages()
         .find((page) => page.url().startsWith("https://accounts.google.com/"));
@@ -443,6 +445,68 @@ describe("BrowserController OAuth popup lifecycle", () => {
       expect(controller.currentUrl()).toBe("https://accounts.google.com/provider");
       expect(product.isClosed()).toBe(false);
       expect(await controller.extractVisibleText()).toContain("Provider did not settle");
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("reports failed when a popup carries the denial to the callback and then closes itself", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/**", async (route) => {
+      const callback = route.request().url().includes("/callback");
+      await route.fulfill({
+        contentType: "text/html",
+        body: callback
+          ? "<main>Login cancelled</main><script>setTimeout(() => window.close(), 20)</script>"
+          : '<button id="oauth" onclick="window.open(\'https://provider.test/oauth\')">Login with Provider</button>',
+      });
+    });
+    await context.route("https://provider.test/oauth", async (route) => {
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<script>setTimeout(() => location.href="https://product.test/callback?error=access_denied", 20)</script>',
+      });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+
+    try {
+      const rejected = controller.loginWithOAuth("#oauth", 3_000);
+      await expect(rejected).rejects.toBeInstanceOf(OAuthFailedError);
+      await expect(rejected).rejects.toMatchObject({
+        message: expect.stringMatching(/error=access_denied/),
+      });
+      expect(product.isClosed()).toBe(false);
+      expect(controller.currentUrl()).toBe("https://product.test/login");
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("never reports failed when the same-tab product page closes at the deadline", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    await context.route("https://product.test/**", async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await route.fulfill({
+        contentType: "text/html",
+        body: '<button id="oauth" onclick="location.href=\'https://provider.test/oauth\'">Login with Provider</button>',
+      });
+    });
+    await context.route("https://provider.test/oauth", async (route) => {
+      await route.fulfill({ contentType: "text/html", body: "<main>Provider challenge</main>" });
+    });
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    const budgetMs = 1_500;
+
+    try {
+      const login = controller.loginWithOAuth("#oauth", budgetMs);
+      setTimeout(() => void product.close().catch(() => undefined), budgetMs - 50);
+      await login;
+      expect(product.isClosed()).toBe(true);
+      expect(controller.currentUrl()).toBe("https://product.test/login");
     } finally {
       await context.close().catch(() => undefined);
     }

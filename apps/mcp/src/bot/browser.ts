@@ -437,8 +437,7 @@ export function oauthAwaitingHumanMessage(productOrigin: string, budgetMs: numbe
   return (
     `OAuth has not returned to ${productOrigin} within ${Math.ceil(budgetMs / 1000)} seconds. ` +
     "A consent screen or a 2FA/verification challenge may still be showing on the provider; " +
-    "call operate_observe to read it, or retry oauth_login or oauth_settle, rather than " +
-    "treating this as a failure."
+    "call operate_observe to check whether it has resolved, rather than treating this as a failure."
   );
 }
 
@@ -13163,6 +13162,8 @@ export class BrowserController {
     let providerPage: Page | null = null;
     let productDeparted = false;
     let pendingOnProvider = false;
+    let lastTransientUrl = productUrl;
+    let onTransientNavigation: ((frame: Frame) => void) | null = null;
     let resolveProductDeparture: () => void = () => undefined;
     const productDeparturePromise = new Promise<void>((resolve) => {
       resolveProductDeparture = resolve;
@@ -13227,6 +13228,11 @@ export class BrowserController {
         resolveProductDeparture();
       }
       const transient = providerPage ?? product;
+      lastTransientUrl = transient.url();
+      onTransientNavigation = (frame: Frame): void => {
+        if (frame === transient.mainFrame()) lastTransientUrl = frame.url();
+      };
+      transient.on("framenavigated", onTransientNavigation);
       productDeparted = productDeparted || !this.isOAuthProductUrl(transient.url(), productUrl);
       const durableProduct = providerPage === null ? recovery : product;
       this.oauthProductPage = durableProduct;
@@ -13266,6 +13272,23 @@ export class BrowserController {
           if (!advanced) await this.sleep(Math.min(250, remainingBudgetMs()));
         }
       }
+      const observedUrls = [
+        transient.isClosed() ? lastTransientUrl : transient.url(),
+        ...(durableProduct !== null &&
+        !durableProduct.isClosed() &&
+        durableProduct.url() !== productUrl
+          ? [durableProduct.url()]
+          : []),
+      ];
+      for (const observedUrl of observedUrls) {
+        const denial = oauthErrorFromReturnUrl(observedUrl);
+        if (denial === null) continue;
+        throw oauthFailedError(
+          `OAuth returned to ${safeOrigin(observedUrl)} with error=${denial.error}` +
+            (denial.description === null ? "" : ` (${denial.description})`) +
+            ".",
+        );
+      }
       if (settled === null) {
         // Timed out without a confirmed origin-return. Re-check honestly
         // rather than assume failure — see classifyOAuthTimeout's doc comment
@@ -13283,35 +13306,27 @@ export class BrowserController {
         }
         settled = outcome;
       }
-      const returnUrl =
-        settled === "returned"
-          ? transient.url()
-          : durableProduct !== null &&
-              !durableProduct.isClosed() &&
-              durableProduct.url() !== productUrl
-            ? durableProduct.url()
-            : null;
-      const denial = returnUrl === null ? null : oauthErrorFromReturnUrl(returnUrl);
-      if (denial !== null) {
-        throw oauthFailedError(
-          `OAuth returned to ${safeOrigin(returnUrl ?? productUrl)} with error=${denial.error}` +
-            (denial.description === null ? "" : ` (${denial.description})`) +
-            ".",
-        );
-      }
       if (providerPage === null && product.isClosed()) {
-        if (Date.now() >= oauthDeadline) {
-          throw oauthFailedError(
-            `${safeOrigin(productUrl)} closed and there was no remaining budget to reload it.`,
+        const reloaded = await recovery
+          .reload({
+            waitUntil: "domcontentloaded",
+            timeout: Math.max(remainingBudgetMs(), 500),
+          })
+          .then(() => true)
+          .catch(() => false);
+        if (!reloaded) {
+          throw new OAuthAwaitingHumanError(
+            `${safeOrigin(productUrl)} closed during OAuth and could not be reloaded within the ` +
+              "budget, so completion could not be confirmed. Call operate_observe to check the " +
+              "current page.",
           );
         }
-        await recovery.reload({
-          waitUntil: "domcontentloaded",
-          timeout: remainingBudgetMs(),
-        });
       }
     } finally {
       product.off("framenavigated", onProductNavigation);
+      if (onTransientNavigation !== null) {
+        (providerPage ?? product).off("framenavigated", onTransientNavigation);
+      }
       const providerStillShowing =
         pendingOnProvider && providerPage !== null && !providerPage.isClosed();
       if (providerStillShowing) {

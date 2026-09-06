@@ -46,6 +46,7 @@ import {
   checkoutStageFromUrlV2,
   compactV2LegacyRefForHandle,
   compactV2PayloadWithinBudget,
+  OBSERVE_V2_MAX_TOKENS,
   COMPACT_V2_HANDLE_LENGTH,
   isCompactV2Handle,
   isCompactV2Label,
@@ -607,7 +608,8 @@ function oauthActionDeadlineError(
       ? "OAuth has not been attempted yet: it was still waiting behind a prior OAuth call " +
           `on this browser after ${seconds} seconds. Retry oauth_login.`
       : `OAuth action did not complete within ${seconds} seconds. ` +
-          "Retry oauth_login or oauth_settle rather than treating this as a failure.",
+          "Call operate_observe to check whether the pending step has resolved, rather than " +
+          "treating this as a failure.",
   );
 }
 
@@ -4101,6 +4103,10 @@ function compactV2PublicObservation(
     ...(fields.oauth === undefined ? {} : { oauth: fields.oauth }),
     ...(fields.observed === undefined ? {} : { observed: fields.observed }),
   };
+  if (fields.url !== undefined && !compactV2PayloadWithinBudget(payload)) {
+    const overflow = Buffer.byteLength(JSON.stringify(payload), "utf8") - OBSERVE_V2_MAX_TOKENS;
+    payload.url = fields.url.slice(0, Math.max(0, fields.url.length - overflow));
+  }
   if (!compactV2PayloadWithinBudget(payload)) {
     throw new Error("compact-v2 budget metadata exceeded");
   }
@@ -4716,8 +4722,9 @@ interface InternalActResult {
 function oauthAwaitingHumanObservation(session: Session, reason: string): Observation {
   session.prevObserve = null;
   invalidateCompactV2Snapshot(session);
-  const url = safeOriginV2(session.browser.currentUrl()) ?? "";
-  const guidance = "Not a failure: call operate_observe, or retry oauth_login/oauth_settle.";
+  const url = session.browser.currentUrl();
+  const guidance =
+    "Not a failure: call operate_observe to check whether the pending challenge has resolved.";
   const oauth: NonNullable<Observation["oauth"]> = {
     state: "awaiting_human",
     reason,
