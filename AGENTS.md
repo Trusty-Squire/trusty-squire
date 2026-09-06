@@ -793,6 +793,8 @@ double on such a method verifies nothing about the page side. A capability
 whose failure is availability-optional must still surface a concrete reason
 (e.g. the `text_unavailable` field) — never fail open with an empty result.
 
+---
+
 ## Never touch the operator's live local state from a test or a check
 
 Manual checks must use an isolated `HOME` and `XDG_CONFIG_HOME`, never the

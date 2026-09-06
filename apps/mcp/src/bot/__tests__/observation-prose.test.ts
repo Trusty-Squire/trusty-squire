@@ -88,9 +88,7 @@ describe.skipIf(!chromiumAvailable)("compact-v2 text channel (real extractor)", 
     const items = await page.evaluate(extractObservationProseItems);
     expect(items.length).toBeGreaterThan(0);
     expect(items).toContain("API Tokens");
-    expect(items).toContain(
-      "Treat your token like a password: anyone holding it can act as you.",
-    );
+    expect(items).toContain("Treat your token like a password: anyone holding it can act as you.");
     expect(items).toContain("Free plan includes 50,000 requests per month.");
     expect(items).toContain("Rate limit nearly reached.");
     // Interactive-control labels are the action map's job, not the channel's.

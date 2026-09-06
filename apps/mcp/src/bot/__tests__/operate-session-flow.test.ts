@@ -4981,7 +4981,9 @@ describe("Compact V2 action-map boundary", () => {
       elem({ tag: "button", role: "button", visibleText: "Cancel", selector: "#cancel" }),
     ];
     const delta = await observe(started.session_id, "compact");
-    expect((delta as unknown as Record<string, unknown>).text_unavailable).toContain("ReferenceError");
+    expect((delta as unknown as Record<string, unknown>).text_unavailable).toContain(
+      "ReferenceError",
+    );
     // Recovery: the channel comes back and the reason disappears.
     h.proseError = null;
     h.prose = ["Extraction recovered."];
