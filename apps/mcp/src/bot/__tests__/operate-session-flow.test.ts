@@ -201,7 +201,11 @@ const h = vi.hoisted(() => ({
   locatorClickCalls: 0,
   locatorTypeCalls: [] as Array<{ text: string; sealed: boolean }>,
   screenshotCalls: [] as unknown[],
-  labeledCredentialCandidates: [] as Array<{ label: string | null; value: string; isMasked: boolean }>,
+  labeledCredentialCandidates: [] as Array<{
+    label: string | null;
+    value: string;
+    isMasked: boolean;
+  }>,
   locatorResolveIntents: [] as string[],
   locatorDisposeCalls: 0,
   isPayPalHostedCheckout: false,
@@ -945,17 +949,9 @@ vi.mock("../profile.js", async (importOriginal) => {
   };
 });
 
-import {
-  chmodSync,
-  existsSync,
-  mkdtempSync,
-  writeFileSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-} from "node:fs";
+import { chmodSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import canonicalize from "canonicalize";
 import { exportJWK, SignJWT } from "jose";
@@ -980,21 +976,15 @@ import {
   captchaGate,
   finishProvisionSession,
   finishProvisionSessionWithPreparation,
-  withPaymentSessionCall,
-  withProvisionSessionCall,
   paymentSession,
   closeAllProvisionSessions,
   activeSessionCount,
-  getSessionUserEmail,
   parseElementsTable,
   replayOperatorRecipe,
   activeProvisionBrowserForPayment,
   activeCartCheckoutForOrigin,
-  armPaymentDispatchHandoff,
   cartAdd,
   cartClear,
-  coordinatePaymentDispatchAudit,
-  finishPaymentDispatchHandoff,
   formSelectMany,
   recordActivePaymentProvenance,
   setActivePendingCardFill,
@@ -1004,7 +994,6 @@ import {
   completeActivePaymentLeaseWithTerminalApproval,
   getActivePendingApproval,
   getTerminalPaymentApproval,
-  getActivePendingCardFill,
   releaseActivePaymentLease,
   markActivePendingCardFillSubmitStarted,
   restoreActivePendingCardFillAfterConfirmThrow,
@@ -1014,7 +1003,6 @@ import {
   captureObserved,
   getActivePendingThreeDs,
   setActivePendingThreeDs,
-  clearActivePendingThreeDsIfCurrent,
   captureScreenshot,
   captureAndPromoteSession,
   observeQuery,
@@ -4781,8 +4769,7 @@ describe("Compact V2 action-map boundary", () => {
   it("exposes the live URL (path and query included) while V2 text stays budgeted", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.visibleText = "Review order";
-    const serviceUrl =
-      "https://shop.example.com/checkout/review?token=private-url-token-123456789";
+    const serviceUrl = "https://shop.example.com/checkout/review?token=private-url-token-123456789";
     const started = await startProvisionSession({ serviceUrl });
     expect(started).toMatchObject({ format: "compact-v2", url: serviceUrl, text: "" });
     await expect(
@@ -5771,7 +5758,7 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     expect(JSON.stringify(full)).toContain(secret);
   });
 
-  it("keeps a reflected slot value ON the compact-v2 wire, label, and query", async () => {
+  it("keeps a reflected slot value on the compact-v2 wire and query; its credential-shaped label redacts", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const secret = "stored-credential-7f3d9a";
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
@@ -5794,8 +5781,12 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     const table = (observation as unknown as { safe_table: Array<[string, string, string?]> })
       .safe_table;
     expect(table).toHaveLength(2);
-    // The row carries the page's own label, reflected value included.
-    expect(table[0]![2] ?? "").toContain("@saved-value");
+    // The row is NOT dropped — but its accessible name is credential-shaped
+    // (a reflected vault value), so the label alias redacts per the 2026-09-06
+    // ipinfo screen. The value itself stays readable via full observe/extract
+    // (see "shows a slotted value the page reflected back").
+    expect(table[0]![2] ?? "").toContain("@redacted-secret");
+    expect(table[0]![2] ?? "").not.toContain("stored-credential");
 
     const query = await observeQuery(started.session_id, "saved value");
     expect(query.safe_table).toHaveLength(1);
@@ -6623,7 +6614,12 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     const trackingHref = "https://click.mailtrack.example.net/wf/click?upn=abc123opaque";
     h.visibleText = "Xata wants to link your Google account. No code needed.";
     h.elements = [
-      elem({ tag: "a", role: "link", href: "https://xata.io/unsubscribe?u=1", visibleText: "Unsubscribe" }),
+      elem({
+        tag: "a",
+        role: "link",
+        href: "https://xata.io/unsubscribe?u=1",
+        visibleText: "Unsubscribe",
+      }),
       elem({ tag: "a", role: "link", href: trackingHref, visibleText: "Link your Google account" }),
     ];
     h.openFirstMailResult = true;
@@ -8281,10 +8277,7 @@ describe("pending card-fill charge guard", () => {
     expect(JSON.stringify(full)).toContain("4242424242424242");
     expect(full.text).toContain("Card preview 4242·4242·4242·4242");
     expect(full.text).toContain("CVV 123");
-    expect(full.elements?.map((element) => element.value)).toEqual([
-      "4242424242424242",
-      "123",
-    ]);
+    expect(full.elements?.map((element) => element.value)).toEqual(["4242424242424242", "123"]);
   });
 
   it("shows a multiline PAN preview without a surviving payment input", async () => {

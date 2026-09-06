@@ -616,7 +616,11 @@ card material, and rendered API keys alike. The masking layer
 content screens, and `provision-drive.ts`'s compact-v2 tool-result seal
 (`compactV2ThickResult`) are deleted. Compact-v2 still omits page `text` and
 field values from its rows — that is a payload SIZE budget, not a seal. §4.5 of
-the doc and `AGENTS.md` §16 own the rule; do not add a seal back.
+the doc and `AGENTS.md` §16 own the rule; do not add a seal back. One narrow
+label-alias carve-out (2026-09-06): compact-v2's `controlLabelV2` screens
+credential-shaped accessible names into `@redacted-secret` (the ipinfo run
+emitted a live token as a copy button's label); that fixes the alias's own
+contract, not a read — see §4.5 and `AGENTS.md` §16.
 
 ### Operator Recipe registry (replay-serve-live-domainlock)
 

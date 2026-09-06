@@ -90,7 +90,8 @@ actually renders:
   `screenshot_unavailable_sealed_context` refusal — the error code no longer
   exists.
 - Observation text, element values, labels, hrefs, test ids, paths, and frame
-  origins are verbatim. A password field's value, an operator-injected vault
+  origins are verbatim — except the compact-v2 label alias, which the
+  label-alias carve-out below screens. A password field's value, an operator-injected vault
   value, a filled card number and CVV, a rendered API key, recovery code, TOTP,
   or JWT are all ordinary page content.
 - Compact-v2's `url` is the live page URL, path and query included. Its rows
@@ -100,6 +101,24 @@ actually renders:
   still looks masked (it is ranked behind a revealed sibling, never refused).
   The `no_legit_credential` and "the secret is still masked/hidden" refusals are
   gone.
+
+**One label-alias carve-out (2026-09-06, ipinfo dogfood Finding 1).** The
+compact-v2 label alias is a code-derived target, not a read, and its documented
+contract was always "screened … never a value." The ipinfo run caught that
+contract being false: a site that renders an API key as its copy button's
+accessible name emitted the live token as the label `@f9a062f02fadf5` (and its
+first four characters again inside `@curl-h-authorization-bearer-f9a0`), putting
+the secret into the transcript. `controlLabelV2` now screens the accessible
+name for credential shape (vendor anchors, JWT shape, length + character-class
++ entropy over unbroken runs and over hyphen/underscore-grouped bodies scored
+as one joined run — `looksLikeSecretShapedName` in `compact-observation-v2.ts`)
+and emits `@redacted-secret` instead — with a stable per-observation
+`@redacted-secret-N` discriminator when several rows redact on one page —
+keeping the row's ref, role, and every non-secret fact so the control stays
+actionable.
+Nothing else on the read path changes: page text, values, screenshots, and
+extracts remain verbatim, and ordinary labels (`@as15169`, `@8-8-8-8`,
+`@bmbmlite`) are tuned to survive verbatim.
 
 **Why.** The seal and the extractor contradicted each other in production: on
 BrowserStack's settings page, with the Access Key revealed, `operate_screenshot`

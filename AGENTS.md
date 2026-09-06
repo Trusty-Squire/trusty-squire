@@ -522,6 +522,15 @@ file-by-file map live in
 [`docs/observation-model.md`](docs/observation-model.md) §4.5 — read it before
 touching this area.
 
+One narrow label-alias carve-out (2026-09-06, ipinfo Finding 1): the compact-v2
+label alias screens credential-shaped accessible names into `@redacted-secret`
+(`looksLikeSecretShapedName` in `compact-observation-v2.ts`) — a site that
+renders an API key as its copy button's accessible name had emitted the live
+token as the label. This fixes the alias's own documented "screened … never a
+value" contract; it is NOT a read seal. Do not extend it to page text, values,
+screenshots, or extracts, and do not use it to justify any other shape-matching
+screen.
+
 ### 17. `await_verification` must score link-picking on anchor TEXT too, and must retry through Gmail's own transient backend error
 
 Two failure modes measured live during a Xata Keycloak account-link signup

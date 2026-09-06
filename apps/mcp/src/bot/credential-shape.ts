@@ -160,6 +160,13 @@ export function pickRelaxedNearCopyCredential(nearCopyTokens: readonly string[])
 // this file exist for credential EXTRACTION (deciding WHICH on-page string is
 // the key to vault), never for hiding page content — do not wire them into a
 // presentation path.
+//
+// ONE narrow exception lives elsewhere and stays there: the compact-v2 label
+// ALIAS (`controlLabelV2`, compact-observation-v2.ts) screens credential-shaped
+// accessible names into `@redacted-secret` (2026-09-06 ipinfo Finding 1 — the
+// live token was emitted as the copy button's label). That is a code-derived
+// alias fixing its own documented "never a value" contract, not a read seal;
+// keep it out of this file and out of every read path.
 
 // The TIGHT host-side gate: is this string a credential VALUE we'd surface/store?
 // (Distinct from browser.ts's loose in-page collector — see the TIERS note above.)
