@@ -35,7 +35,9 @@ export function compactV2DegradeMetadata(
     if (compactV2PayloadWithinBudget(candidate)) return candidate;
   }
   if ("semantic" in candidate) {
-    candidate = { ...candidate, semantic: undefined };
+    const rest = { ...candidate };
+    delete rest.semantic;
+    candidate = rest;
     if (compactV2PayloadWithinBudget(candidate)) return candidate;
   }
   if ("hint" in candidate || "user_email" in candidate || "hint_overflow" in candidate) {
