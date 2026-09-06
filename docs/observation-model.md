@@ -300,8 +300,13 @@ and where it is deliberately narrower or more conservative than §4.1 above.
   embedded frame can never hash onto a main-page ref.
 - **Label** — `@continue-with-google`, slugified from the already-screened
   control description. It is an addressable alias: `operate_act` accepts it and
-  resolves it to a ref. A label naming more than one observed control raises
-  `ambiguous_target` listing the candidate refs; it never guesses.
+  resolves it to a ref. Duplicate labels are disambiguated deterministically at
+  map-build time (`disambiguateDuplicateLabelsV2`): the first occurrence keeps
+  the base slug, later ones gain `-2`/`-3` ordinals in the map's own row order,
+  so two controls sharing an accessible name are individually addressable
+  instead of permanently ambiguous. `resolveCompactV2Label` still refuses with
+  `ambiguous_target` if a label ever names more than one observed row — a
+  fail-closed backstop, not the expected path; it never guesses.
 - **Epoch** — `{ doc, rev }`. `doc` is an HMAC of the browser's stable
   main-document identity; `rev` is a monotonic counter that advances only when
   the serialized skeleton actually changed. `doc` is the authorization boundary

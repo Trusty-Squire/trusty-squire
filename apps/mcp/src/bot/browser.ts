@@ -2061,7 +2061,10 @@ function extractObservationProseItems(): string[] {
   const body = document.body;
   if (!body) return [];
   const clean = (value: string | null | undefined): string =>
-    (value ?? "").replace(/[\p{Cc}\p{Cf}]/gu, " ").replace(/\s+/g, " ").trim();
+    (value ?? "")
+      .replace(/[\p{Cc}\p{Cf}]/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
   const visible = (el: Element): boolean => {
     try {
       if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
@@ -2077,10 +2080,24 @@ function extractObservationProseItems(): string[] {
   // ("which plan is selected"). Interactive-control descendants are excluded
   // — their text is the action map's job, not the prose channel's.
   const selector = [
-    "h1", "h2", "h3", "h4", "h5", "h6", '[role="heading"]',
-    "p", "li", "dd", "dt",
-    '[role="alert"]', '[role="status"]', '[aria-live="polite"]', '[aria-live="assertive"]',
-    '[aria-selected="true"]', '[aria-pressed="true"]', '[aria-checked="true"]',
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    '[role="heading"]',
+    "p",
+    "li",
+    "dd",
+    "dt",
+    '[role="alert"]',
+    '[role="status"]',
+    '[aria-live="polite"]',
+    '[aria-live="assertive"]',
+    '[aria-selected="true"]',
+    '[aria-pressed="true"]',
+    '[aria-checked="true"]',
   ].join(",");
   const seen = new Set<string>();
   const items: string[] = [];
@@ -2094,7 +2111,12 @@ function extractObservationProseItems(): string[] {
     // Control labels are the map's job. A <li> that IS a menu item, an
     // <option> inside a select, a clickable selected card's own label — all
     // stay out of the prose channel.
-    if (el.closest("button, a, label, select, option, summary, [role=button], [role=menuitem], [role=option], [role=tab]") !== null) continue;
+    if (
+      el.closest(
+        "button, a, label, select, option, summary, [role=button], [role=menuitem], [role=option], [role=tab]",
+      ) !== null
+    )
+      continue;
     const text = clean(el.textContent);
     if (text.length === 0) continue;
     const key = text.toLowerCase();

@@ -1310,7 +1310,13 @@ describe("compact observation v2 text channel", () => {
       byRef: new Map(),
     };
     const delta = diffSafeControlsV2(previous, "browse", [
-      { ref: "@e:new", role: "button", label: "@new-button", visibility: "viewport", frame: "main" },
+      {
+        ref: "@e:new",
+        role: "button",
+        label: "@new-button",
+        visibility: "viewport",
+        frame: "main",
+      },
     ]);
     const withText = encodeV2Delta({
       sessionId: "session",

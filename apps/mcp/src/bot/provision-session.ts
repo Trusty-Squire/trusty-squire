@@ -1989,24 +1989,12 @@ export function buildScreenOutline(
     }
     if (region.children.length < 10) {
       region.children.push({
-        ref:
-          el.screenPath !== null && el.screenPath !== undefined
-            ? el.screenPath
-            : elementRef(el),
-        role:
-          el.role === null
-            ? null
-            : el.role,
+        ref: el.screenPath !== null && el.screenPath !== undefined ? el.screenPath : elementRef(el),
+        role: el.role === null ? null : el.role,
         text: elementRef(el),
-        href:
-          el.href === null || el.href === undefined
-            ? null
-            : el.href,
+        href: el.href === null || el.href === undefined ? null : el.href,
         topmost: el.topmost ?? null,
-        occluded_by:
-          el.occludedBy === null || el.occludedBy === undefined
-            ? null
-            : el.occludedBy,
+        occluded_by: el.occludedBy === null || el.occludedBy === undefined ? null : el.occludedBy,
       });
     }
     byRegion.set(id, region);
@@ -2051,23 +2039,16 @@ export function buildAccessibilitySnapshot(
   for (const [region, group] of entries.slice(0, 24)) {
     lines.push(`  region "${region}"`);
     for (const el of group.slice(0, 16)) {
-      const label = elementRef(el).replace(
-        /"/g,
-        '\\"',
-      );
+      const label = elementRef(el).replace(/"/g, '\\"');
       const role = roleForAccessibility(el);
-      const shownValue = (el.value ?? null);
+      const shownValue = el.value ?? null;
       const flags = [
         el.value !== undefined && el.value !== null
           ? `value="${(shownValue ?? "").slice(0, 60)}"`
           : null,
         el.checked !== undefined && el.checked !== null ? `checked=${el.checked}` : null,
-        el.href !== undefined && el.href !== null
-          ? `href="${el.href.slice(0, 120)}"`
-          : null,
-        el.topmost === false
-          ? `occluded_by="${el.occludedBy ?? "unknown"}"`
-          : null,
+        el.href !== undefined && el.href !== null ? `href="${el.href.slice(0, 120)}"` : null,
+        el.topmost === false ? `occluded_by="${el.occludedBy ?? "unknown"}"` : null,
       ].filter((v): v is string => v !== null);
       lines.push(
         `    ${role} "${label}" ref=${refs.get(el) ?? provisionElementRef(el)}` +
@@ -3405,16 +3386,11 @@ export function buildCompactObservation(args: {
   const fileElements: ObservedElement[] = [];
   for (const el of elements) {
     const ref = refOf(el);
-    fullByRef.set(
-      ref,
-      toCompactElement(el, ref, false, elide),
-    );
+    fullByRef.set(ref, toCompactElement(el, ref, false, elide));
     serializedByRef.set(ref, JSON.stringify(fullByRef.get(ref)));
     // The persisted file keeps FULL fidelity (path included, no elision) so a
     // re-expansion after a host compaction loses nothing.
-    fileElements.push(
-      toCompactElement(el, ref, true, false),
-    );
+    fileElements.push(toCompactElement(el, ref, true, false));
   }
   const nextState: ObserveDeltaState = { url, byRef: serializedByRef, text };
 
@@ -4522,7 +4498,14 @@ async function observeSession(
     // Python subprocess or externally provisioned runtime participates.
     const v2Mode = session.compactV2Mode;
     if (v2Mode === "on") {
-      return compactV2Observation(session, generation, elements, semanticSource, proseSource, startMetadata);
+      return compactV2Observation(
+        session,
+        generation,
+        elements,
+        semanticSource,
+        proseSource,
+        startMetadata,
+      );
     }
     if (v2Mode === "shadow") exerciseCompactV2Shadow(session, generation, elements, semanticSource);
     session.compactV2Active = false;
@@ -4639,41 +4622,19 @@ async function observeSession(
             ref: refOf(el),
             label: elementRef(el),
             tag: el.tag,
-            role:
-              el.role === null
-                ? null
-                : el.role,
-            type:
-              el.type === null
-                ? null
-                : el.type,
-            value: (el.value ?? null),
+            role: el.role === null ? null : el.role,
+            type: el.type === null ? null : el.type,
+            value: el.value ?? null,
             checked: el.checked ?? null,
-            href:
-              el.href === null || el.href === undefined
-                ? null
-                : el.href,
-            testId:
-              el.testId === null || el.testId === undefined
-                ? null
-                : el.testId,
-            path:
-              el.screenPath === null || el.screenPath === undefined
-                ? null
-                : el.screenPath,
-            container:
-              el.container === null || el.container === undefined
-                ? null
-                : el.container,
+            href: el.href === null || el.href === undefined ? null : el.href,
+            testId: el.testId === null || el.testId === undefined ? null : el.testId,
+            path: el.screenPath === null || el.screenPath === undefined ? null : el.screenPath,
+            container: el.container === null || el.container === undefined ? null : el.container,
             topmost: el.topmost ?? null,
             occluded_by:
-              el.occludedBy === null || el.occludedBy === undefined
-                ? null
-                : el.occludedBy,
+              el.occludedBy === null || el.occludedBy === undefined ? null : el.occludedBy,
             frame_origin:
-              el.frameOrigin === null || el.frameOrigin === undefined
-                ? null
-                : el.frameOrigin,
+              el.frameOrigin === null || el.frameOrigin === undefined ? null : el.frameOrigin,
           };
           annotatePaymentControl(observed, el);
           return observed;
