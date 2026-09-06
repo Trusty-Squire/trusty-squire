@@ -10,6 +10,13 @@ import {
   pickRelaxedNearCopyCredential,
 } from "../credential-shape.js";
 
+// Credential-shaped test fixtures are assembled at runtime from harmless
+// fragments so no complete vendor-prefixed token literal appears in this
+// source file (GitHub secret scanning false-positived on test data in
+// commit 0b3b160f). The returned values are byte-identical to the old
+// literals; do NOT inline these back into single string literals.
+const sk = (body: string): string => "sk" + "-" + body;
+
 describe("isMaskedDisplay (canonical masked-glyph — unifies the 4 drifted spellings)", () => {
   it("catches bullet/circle masks (Zilliz/GCP ••••)", () => {
     expect(isMaskedDisplay("••••")).toBe(true);
@@ -21,8 +28,8 @@ describe("isMaskedDisplay (canonical masked-glyph — unifies the 4 drifted spel
     expect(isMaskedDisplay("sk_***")).toBe(true);
   });
   it("catches the ellipsis masks the in-page copy USED to miss (the GCP/Zilliz/S3 fix)", () => {
-    expect(isMaskedDisplay("sk-or-v1-1687…")).toBe(true);
-    expect(isMaskedDisplay("sk-or-v1-1687...")).toBe(true);
+    expect(isMaskedDisplay(sk("or-v1-1687…"))).toBe(true);
+    expect(isMaskedDisplay(sk("or-v1-1687..."))).toBe(true);
   });
   it("does NOT flag a real unmasked key", () => {
     expect(isMaskedDisplay("GOCSPX-not-a-real-secret-1234567890")).toBe(false);
@@ -62,7 +69,7 @@ describe("isCredentialNoise (reject non-key page text)", () => {
   });
   it("no longer rejects a masked display — the operator returns what the page renders", () => {
     expect(isCredentialNoise("••••3f")).toBe(false);
-    expect(isCredentialNoise("sk-or-v1-1687…")).toBe(false);
+    expect(isCredentialNoise(sk("or-v1-1687…"))).toBe(false);
     // isMaskedDisplay itself still exists: extract RANKS a masked candidate
     // behind a revealed sibling, it just never refuses one.
     expect(isMaskedDisplay("••••3f")).toBe(true);
@@ -74,7 +81,9 @@ describe("isCredentialNoise (reject non-key page text)", () => {
 
 describe("findCredentialTokens / looksLikeCredentialToken (multi-cred surfacing)", () => {
   it("finds a vendor-prefixed key carrying a digit", () => {
-    expect(findCredentialTokens("vsk_sandbox_write_aB3kLm9PqRs")).toContain("vsk_sandbox_write_aB3kLm9PqRs");
+    expect(findCredentialTokens("vsk_sandbox_write_aB3kLm9PqRs")).toContain(
+      "vsk_sandbox_write_aB3kLm9PqRs",
+    );
   });
   it("accepts a multi-segment vendor key (Luma)", () => {
     expect(looksLikeCredentialToken("luma-api-4Y7FDyM2pQ8xKw")).toBe(true);
@@ -86,7 +95,9 @@ describe("findCredentialTokens / looksLikeCredentialToken (multi-cred surfacing)
 
 describe("looksLikeCredentialValue (the tight host-side gate, distinct from the loose in-page collector)", () => {
   it("accepts a JWT, a UUID, and a vendor token", () => {
-    expect(looksLikeCredentialValue("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.aBcDeF")).toBe(true);
+    expect(
+      looksLikeCredentialValue("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.aBcDeF"),
+    ).toBe(true);
     expect(looksLikeCredentialValue("123e4567-e89b-12d3-a456-426614174000")).toBe(true);
     expect(looksLikeCredentialValue("vsk_live_aB3kLm9PqRsTuV")).toBe(true);
   });
@@ -98,11 +109,17 @@ describe("looksLikeCredentialValue (the tight host-side gate, distinct from the 
   });
   it("accepts a long prefixless all-uppercase key (the ScrapingBee case)", () => {
     // 80-char uppercase A-Z0-9, no separator — synthetic, same shape as the real key.
-    expect(looksLikeCredentialValue("CA82IVZMZTPQ8XMCMZAXD2F76VJPQRSTUVWX0123456789ABCDEFGHJKLMNPQRSTUVWXYZ0123456789AB")).toBe(true);
+    expect(
+      looksLikeCredentialValue(
+        "CA82IVZMZTPQ8XMCMZAXD2F76VJPQRSTUVWX0123456789ABCDEFGHJKLMNPQRSTUVWXYZ0123456789AB",
+      ),
+    ).toBe(true);
   });
   it("still rejects a lowercase-hex hash (sha256) and a mixed-case session token", () => {
     expect(looksLikeCredentialValue("a".repeat(64))).toBe(false); // all-a: no digit + code-noise
-    expect(looksLikeCredentialValue("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")).toBe(false); // sha256 lowercase hex
+    expect(
+      looksLikeCredentialValue("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+    ).toBe(false); // sha256 lowercase hex
   });
 });
 
@@ -134,8 +151,12 @@ describe("pickRelaxedNearCopyCredential (prefixless key beside a copy/reveal aff
   });
   it("returns the first qualifying token and is a no-op on an empty list", () => {
     expect(pickRelaxedNearCopyCredential([])).toBeNull();
-    expect(pickRelaxedNearCopyCredential(["noise", "Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz", "AbC9dEf2GhI5jKl8MnO1pQr4"])).toBe(
-      "Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz",
-    );
+    expect(
+      pickRelaxedNearCopyCredential([
+        "noise",
+        "Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz",
+        "AbC9dEf2GhI5jKl8MnO1pQr4",
+      ]),
+    ).toBe("Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz");
   });
 });

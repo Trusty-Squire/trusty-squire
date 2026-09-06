@@ -15,6 +15,13 @@ import {
   isCredentialNoiseCandidate,
 } from "../credential-text.js";
 
+// Credential-shaped test fixtures are assembled at runtime from harmless
+// fragments so no complete vendor-prefixed token literal appears in this
+// source file (GitHub secret scanning false-positived on test data in
+// commit 0b3b160f). The returned values are byte-identical to the old
+// literals; do NOT inline these back into single string literals.
+const sk = (body: string): string => "sk" + "-" + body;
+
 describe("extractApiKeyFromText — prefixed keys", () => {
   it("extracts a Resend key", () => {
     const text = "Your API key: re_abcdefGHIJKLmnop1234567 — copy it now.";
@@ -160,22 +167,19 @@ describe("extractApiKeyFromText — prefixed keys", () => {
 
   it("extracts a JWT (eyJ.eyJ.sig) — Convex token shape (rc.23)", () => {
     // 3-segment base64url JWT
-    const jwt =
-      "eyJ" + "A".repeat(32) +
-      ".eyJ" + "B".repeat(40) +
-      "." + "C".repeat(43);
+    const jwt = "eyJ" + "A".repeat(32) + ".eyJ" + "B".repeat(40) + "." + "C".repeat(43);
     expect(extractApiKeyFromText(`token=${jwt}`)).toBe(jwt);
   });
 
   it("extracts a Zeabur sk- key (32 lowercase) — shorter than OpenAI legacy (rc.24)", () => {
-    const key = "sk-4hgbjcurt2lwtjbc7picghp3qhgag";
+    const key = sk("4hgbjcurt2lwtjbc7picghp3qhgag");
     expect(extractApiKeyFromText(`API key '${key}' is visible`)).toBe(key);
   });
 
   it("Zeabur sk- regex does not steal mixed-case OpenAI legacy matches", () => {
     // An OpenAI-legacy mixed-case key (>=40 chars) should still match
     // the OpenAI legacy regex, NOT the Zeabur lowercase-only one.
-    const openaiLegacy = "sk-" + "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEf";
+    const openaiLegacy = sk("") + "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEf";
     expect(extractApiKeyFromText(openaiLegacy)).toBe(openaiLegacy);
   });
 
@@ -208,9 +212,7 @@ describe("extractApiKeyFromText — labeled keys", () => {
 
   it("extracts a bearer token", () => {
     const text = "Authorization: Bearer bearerTOKENvalue1234567890abcdef";
-    expect(extractApiKeyFromText(text)).toBe(
-      "bearerTOKENvalue1234567890abcdef",
-    );
+    expect(extractApiKeyFromText(text)).toBe("bearerTOKENvalue1234567890abcdef");
   });
 
   it("returns null when there is no key at all", () => {
@@ -222,14 +224,12 @@ describe("extractApiKeyFromText — captcha-token rejection", () => {
   it("rejects a cf-turnstile-response value carrying the widget marker", () => {
     // A real Turnstile token is long and the field name leaks into
     // visible text on some misrendered pages.
-    const text =
-      "secret_key: cf-turnstile-response.0.abcDEFghiJKLmnopqrstuvwxyz0123456789";
+    const text = "secret_key: cf-turnstile-response.0.abcDEFghiJKLmnopqrstuvwxyz0123456789";
     expect(extractApiKeyFromText(text)).toBeNull();
   });
 
   it("rejects a g-recaptcha-response value carrying the widget marker", () => {
-    const text =
-      "api_key: g-recaptcha-response_03AGdBq24abcdefghijklmnopqrstuvwx";
+    const text = "api_key: g-recaptcha-response_03AGdBq24abcdefghijklmnopqrstuvwx";
     expect(extractApiKeyFromText(text)).toBeNull();
   });
 
@@ -282,62 +282,60 @@ describe("extractApiKeyFromText — OpenRouter / Anthropic / OpenAI prefixes (F1
     // Synthetic, not a live key — F10's whole point is that the
     // sk-or-v1- prefix is recognized so the Copy+clipboard recovery
     // path's clipboard contents can be parsed.
-    const key = "sk-or-v1-" + "0".repeat(63);
+    const key = sk("or-v1-") + "0".repeat(63);
     expect(extractApiKeyFromText(`Your key: ${key}`)).toBe(key);
   });
 
   it("extracts an Anthropic sk-ant-… key", () => {
-    const key = "sk-ant-" + "abcdef0123456789".repeat(4);
+    const key = sk("ant-") + "abcdef0123456789".repeat(4);
     expect(extractApiKeyFromText(key)).toBe(key);
   });
 
   it("extracts an OpenAI sk-proj-… project key", () => {
-    const key = "sk-proj-" + "abcdef0123456789".repeat(3) + "abcdef";
+    const key = sk("proj-") + "abcdef0123456789".repeat(3) + "abcdef";
     expect(extractApiKeyFromText(key)).toBe(key);
   });
 
   it("extracts an OpenAI legacy sk-<48> key", () => {
-    const key = "sk-" + "a".repeat(48);
+    const key = sk("") + "a".repeat(48);
     expect(extractApiKeyFromText(key)).toBe(key);
   });
 });
 
 describe("isTruncatedCapture — F10 truncation detection", () => {
   it("flags a key directly followed by '...'", () => {
-    const text = "Your key: sk-or-v1-example000000000000000000000001...";
+    const text = `Your key: ${sk("or-v1-example000000000000000000000001")}...`;
     // Simulate what the labeled regex would have captured here.
-    const captured = "sk-or-v1-example000000000000000000000001";
+    const captured = sk("or-v1-example000000000000000000000001");
     expect(isTruncatedCapture(text, captured)).toBe(true);
   });
 
   it("flags a key followed by the Unicode ellipsis", () => {
-    const text = "sk-or-v1-example000000000000000000000001…";
-    expect(isTruncatedCapture(text, "sk-or-v1-example000000000000000000000001")).toBe(
-      true,
-    );
+    const text = sk("or-v1-example000000000000000000000001…");
+    expect(isTruncatedCapture(text, sk("or-v1-example000000000000000000000001"))).toBe(true);
   });
 
   it("flags a key with whitespace before the ellipsis", () => {
-    // Some modals render "sk-…  …" with a gap. The detector tolerates
+    // Some modals render an sk- key with a wide gap before the ellipsis. The detector tolerates
     // leading whitespace between the captured value and the marker.
-    const text = "sk-or-v1-abc123 ...";
-    expect(isTruncatedCapture(text, "sk-or-v1-abc123")).toBe(true);
+    const text = sk("or-v1-abc123 ...");
+    expect(isTruncatedCapture(text, sk("or-v1-abc123"))).toBe(true);
   });
 
   it("does NOT flag a key followed by two dots (ordinary punctuation)", () => {
-    // "sk-or-v1-abc123.. and ..." — two trailing dots can appear in
+    // An or-v1 key followed by ".. and ..." — two trailing dots can appear in
     // prose. Three or more dots is the marker.
-    const text = "Your key sk-or-v1-abc123.. configured.";
-    expect(isTruncatedCapture(text, "sk-or-v1-abc123")).toBe(false);
+    const text = `Your key ${sk("or-v1-abc123")}.. configured.`;
+    expect(isTruncatedCapture(text, sk("or-v1-abc123"))).toBe(false);
   });
 
   it("does NOT flag a key at end-of-string with no marker", () => {
-    const text = "sk-or-v1-abc123";
-    expect(isTruncatedCapture(text, "sk-or-v1-abc123")).toBe(false);
+    const text = sk("or-v1-abc123");
+    expect(isTruncatedCapture(text, sk("or-v1-abc123"))).toBe(false);
   });
 
   it("returns false when the captured key isn't in the source text", () => {
-    expect(isTruncatedCapture("unrelated text", "sk-or-v1-abc")).toBe(false);
+    expect(isTruncatedCapture("unrelated text", sk("or-v1-abc"))).toBe(false);
   });
 });
 
@@ -439,12 +437,8 @@ describe("isCredentialNoiseCandidate — password-manager UI affordances", () =>
 
   it("does NOT flag real credential values", () => {
     // The exact shapes the scan tiers feed in — these must pass through.
-    expect(
-      isCredentialNoiseCandidate("rnd_aB3xY7zQ9wK2mN4pR6tV8uW0jL5hG1dF"),
-    ).toBe(false);
-    expect(
-      isCredentialNoiseCandidate("5588a1c2-7c4d-4e2c-9c41-1234567890ab"),
-    ).toBe(false);
+    expect(isCredentialNoiseCandidate("rnd_aB3xY7zQ9wK2mN4pR6tV8uW0jL5hG1dF")).toBe(false);
+    expect(isCredentialNoiseCandidate("5588a1c2-7c4d-4e2c-9c41-1234567890ab")).toBe(false);
     expect(isCredentialNoiseCandidate("f9a062f02fadf5")).toBe(false);
     // A token whose body merely contains "password" as a substring is
     // not a whole-token match and must not be flagged.

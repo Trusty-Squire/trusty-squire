@@ -8,7 +8,8 @@
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
+import type * as nodeFs from "node:fs";
 import {
   CAPTURE_FORMAT_VERSION,
   captureOnboardingRound,
@@ -26,6 +27,13 @@ import {
 } from "../onboarding-capture.js";
 import { inferSemanticTransition } from "../semantic-transition.js";
 import type { PostVerifyStep, SignupResult } from "../provision-types.js";
+
+// Credential-shaped test fixtures are assembled at runtime from harmless
+// fragments so no complete vendor-prefixed token literal appears in this
+// source file (GitHub secret scanning false-positived on test data in
+// commit 0b3b160f). The returned values are byte-identical to the old
+// literals; do NOT inline these back into single string literals.
+const sk = (body: string): string => "sk" + "-" + body;
 
 // Synthetic test fixtures — never any real captures.
 
@@ -101,9 +109,7 @@ describe("captureOnboardingRound — format", () => {
 
       const files = readdirSync(dir);
       expect(files).toHaveLength(1);
-      const written = JSON.parse(
-        readFileSync(join(dir, files[0]!), "utf8"),
-      ) as OnboardingCaseFile;
+      const written = JSON.parse(readFileSync(join(dir, files[0]!), "utf8")) as OnboardingCaseFile;
 
       expect(written.capture_format_version).toBe(CAPTURE_FORMAT_VERSION);
       expect(written.prev_hash).toBeNull();
@@ -122,12 +128,8 @@ describe("captureOnboardingRound — format", () => {
       const files = readdirSync(dir).sort();
       expect(files).toHaveLength(2);
 
-      const r0 = JSON.parse(
-        readFileSync(join(dir, files[0]!), "utf8"),
-      ) as OnboardingCaseFile;
-      const r1 = JSON.parse(
-        readFileSync(join(dir, files[1]!), "utf8"),
-      ) as OnboardingCaseFile;
+      const r0 = JSON.parse(readFileSync(join(dir, files[0]!), "utf8")) as OnboardingCaseFile;
+      const r1 = JSON.parse(readFileSync(join(dir, files[1]!), "utf8")) as OnboardingCaseFile;
 
       expect(r1.prev_hash).toBe(r0.content_hash);
       expect(r1.content_hash).not.toBe(r0.content_hash);
@@ -181,17 +183,13 @@ describe("captureOnboardingRound — format", () => {
         (f) => f.startsWith(`${aSlug}-`) && f.endsWith("r1.json"),
       );
       expect(aR1Files).toHaveLength(1);
-      const aR1 = JSON.parse(
-        readFileSync(join(dir, aR1Files[0]!), "utf8"),
-      ) as OnboardingCaseFile;
+      const aR1 = JSON.parse(readFileSync(join(dir, aR1Files[0]!), "utf8")) as OnboardingCaseFile;
 
       const aR0Files = readdirSync(dir).filter(
         (f) => f.startsWith(`${aSlug}-`) && f.endsWith("r0.json"),
       );
       expect(aR0Files).toHaveLength(1);
-      const aR0 = JSON.parse(
-        readFileSync(join(dir, aR0Files[0]!), "utf8"),
-      ) as OnboardingCaseFile;
+      const aR0 = JSON.parse(readFileSync(join(dir, aR0Files[0]!), "utf8")) as OnboardingCaseFile;
 
       expect(aR1.prev_hash).toBe(aR0.content_hash);
     });
@@ -404,7 +402,7 @@ describe("verifyCaptureChain", () => {
     const { dir, slug, runId } = setupRounds(3);
     // Delete r1 to create a gap.
     const r1Path = join(dir, `${slug}-${runId}-r1.json`);
-    const { unlinkSync } = require("node:fs") as typeof import("node:fs");
+    const { unlinkSync } = require("node:fs") as typeof nodeFs;
     unlinkSync(r1Path);
 
     const v = verifyCaptureChain(dir, slug, runId);
@@ -417,10 +415,7 @@ describe("verifyCaptureChain", () => {
 
   it("rejects malformed JSON with a parse_error", () => {
     const { dir, slug, runId } = setupRounds(1);
-    writeFileSync(
-      join(dir, `${slug}-${runId}-r0.json`),
-      "{ not valid json",
-    );
+    writeFileSync(join(dir, `${slug}-${runId}-r0.json`), "{ not valid json");
 
     const v = verifyCaptureChain(dir, slug, runId);
     expect(v.ok).toBe(false);
@@ -485,7 +480,7 @@ function mockResult(over: Partial<SignupResult> = {}): SignupResult {
 describe("summarizeRunOutcome — redaction (R3)", () => {
   it("records credential FIELD NAMES, never values", () => {
     const out = summarizeRunOutcome(
-      mockResult({ success: true, credentials: { api_key: "sk-secret-123", username: "" } }),
+      mockResult({ success: true, credentials: { api_key: sk("secret-123"), username: "" } }),
       true,
       2,
     );
@@ -493,7 +488,7 @@ describe("summarizeRunOutcome — redaction (R3)", () => {
     expect(out.credential_present).toBe(true);
     // empty-string field dropped; secret value never serialized
     expect(out.credential_fields).toEqual(["api_key"]);
-    expect(JSON.stringify(out)).not.toContain("sk-secret-123");
+    expect(JSON.stringify(out)).not.toContain(sk("secret-123"));
     expect(out.terminal_round).toBe(2);
   });
 
@@ -515,19 +510,26 @@ describe("captureRunOutcome — sidecar file", () => {
         const service = uniqueService();
         captureOnboardingRound(mockRound(0, service));
         captureOnboardingRound(mockRound(1, service));
-        captureRunOutcome(service, mockResult({ success: true, credentials: { api_key: "sk-live-xyz" } }));
+        captureRunOutcome(
+          service,
+          mockResult({ success: true, credentials: { api_key: sk("live-xyz") } }),
+        );
 
         const outcomeFiles = readdirSync(dir).filter((f) => f.endsWith(".outcome.json"));
         expect(outcomeFiles).toHaveLength(1);
 
         const slug = service.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-        const roundFiles = readdirSync(dir).filter((f) => f.endsWith(".json") && !f.endsWith(".outcome.json"));
+        const roundFiles = readdirSync(dir).filter(
+          (f) => f.endsWith(".json") && !f.endsWith(".outcome.json"),
+        );
         // the sidecar shares the <slug>-<runId> stem with the round files
         const stem = outcomeFiles[0]!.slice(0, -".outcome.json".length);
         expect(stem.startsWith(`${slug}-`)).toBe(true);
         expect(roundFiles.every((f) => f.startsWith(`${stem}-r`))).toBe(true);
 
-        const written = JSON.parse(readFileSync(join(dir, outcomeFiles[0]!), "utf8")) as OnboardingOutcomeFile;
+        const written = JSON.parse(
+          readFileSync(join(dir, outcomeFiles[0]!), "utf8"),
+        ) as OnboardingOutcomeFile;
         expect(written.capture_format_version).toBe(CAPTURE_FORMAT_VERSION);
         expect(written.service).toBe(service);
         expect(written.source_commit).toBe("test-source-commit");
@@ -539,7 +541,7 @@ describe("captureRunOutcome — sidecar file", () => {
         expect(verified.ok).toBe(true);
         if (verified.ok) expect(verified.rounds).toHaveLength(2);
         // secret never lands on disk
-        expect(readFileSync(join(dir, outcomeFiles[0]!), "utf8")).not.toContain("sk-live-xyz");
+        expect(readFileSync(join(dir, outcomeFiles[0]!), "utf8")).not.toContain(sk("live-xyz"));
       });
     } finally {
       if (previousCommit === undefined) {
@@ -554,13 +556,18 @@ describe("captureRunOutcome — sidecar file", () => {
     withCaptureDir((dir) => {
       resetCaptureChain();
       const service = uniqueService();
-      captureRunOutcome(service, mockResult({ success: true, credentials: { api_key: "sk-fast" } }));
+      captureRunOutcome(
+        service,
+        mockResult({ success: true, credentials: { api_key: sk("fast") } }),
+      );
       const outcomeFiles = readdirSync(dir).filter((f) => f.endsWith(".outcome.json"));
       expect(outcomeFiles).toHaveLength(1);
-      const written = JSON.parse(readFileSync(join(dir, outcomeFiles[0]!), "utf8")) as OnboardingOutcomeFile;
+      const written = JSON.parse(
+        readFileSync(join(dir, outcomeFiles[0]!), "utf8"),
+      ) as OnboardingOutcomeFile;
       expect(written.outcome.ok).toBe(true);
       expect(written.outcome.terminal_round).toBeNull();
-      expect(readFileSync(join(dir, outcomeFiles[0]!), "utf8")).not.toContain("sk-fast");
+      expect(readFileSync(join(dir, outcomeFiles[0]!), "utf8")).not.toContain(sk("fast"));
     });
   });
 });
