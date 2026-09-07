@@ -40,6 +40,27 @@ describe("interleaved observation DOM", () => {
       await page.close();
     }
   });
+  it("keeps capture geometry in CSS pixels on a scaled display after scrolling", async () => {
+    const context = await browser.newContext({
+      viewport: { width: 800, height: 600 },
+      deviceScaleFactor: 2,
+    });
+    const page = await context.newPage();
+    try {
+      await page.setContent(
+        '<!doctype html><html><body><div style="height:1800px"></div><button id="below">Still below the fold</button><div style="height:1200px"></div></body></html>',
+      );
+      await page.evaluate(() => window.scrollTo(0, 600));
+      const capture = await captureBrowserUseDOM(page, [], () => null);
+      const below = capture.elements.find((element) => element.id === "below");
+      expect(below?.inViewport).toBe(false);
+      expect(serializeBrowserUseDOM(capture.root).dom).not.toContain("Still below the fold");
+      expect(capture.moreAbove).toBe(true);
+      expect(capture.moreBelow).toBe(true);
+    } finally {
+      await context.close();
+    }
+  });
   it("binds controls in same-origin and cross-origin frames to their own documents", async () => {
     const server = createServer((request, response) => {
       response.setHeader("content-type", "text/html");

@@ -1018,9 +1018,18 @@ export function sealRetainedInteractiveElementsV2(
 }
 
 export function safePageSemanticsV2(source: ObservationSemanticSourceV2): SafePageSemanticsV2 {
-  const title = safeDescriptionV2(source.title);
+  const screenDescription = (value: string): string | undefined => {
+    const normalized = normalizeDescriptionV2(value);
+    if (normalized === undefined) return undefined;
+    const description = safeDescriptionV2(normalized)!;
+    if (normalized.length <= SAFE_DESCRIPTION_MAX_CHARS)
+      return screenBrowserUseValueV2(normalized);
+    const visible = description.slice(0, -1);
+    return screenBrowserUseValueV2(normalized, Array.from(visible).length) + "…";
+  };
+  const title = screenDescription(source.title);
   const headings = source.headings
-    .map((heading) => safeDescriptionV2(heading))
+    .map(screenDescription)
     .filter((value): value is string => value !== undefined)
     .filter((value, index, all) => all.indexOf(value) === index)
     .slice(0, 1);

@@ -136,6 +136,7 @@ const h = vi.hoisted(() => ({
   // When non-null, canonical DOM capture throws this concrete error.
   proseError: null as string | null,
   captureOverride: null as BrowserUseCapture | null,
+  observationSemantics: { title: "", headings: [] as string[] },
   openFirstMailResult: false,
   // fill_card cart-total-carry-forward (Session.lastCartCheckout): null means
   // "no total on this page" (readCheckoutSummary rejects, the common case).
@@ -349,6 +350,9 @@ vi.mock("../browser.js", async (importOriginal) => ({
       if (h.proseError !== null) throw new Error(h.proseError);
       const text = h.proseQueue.length > 0 ? (h.proseQueue.shift() ?? h.prose) : h.prose;
       return mockBrowserUseCapture(elements as InteractiveElement[], text);
+    }
+    async extractObservationSemantics(): Promise<{ title: string; headings: string[] }> {
+      return h.observationSemantics;
     }
     async revealMaskedCredentials(): Promise<void> {}
     async extractLabeledCredentialCandidates(): Promise<unknown[]> {
@@ -1220,6 +1224,7 @@ beforeEach(() => {
   h.proseExtractCalls = 0;
   h.proseError = null;
   h.captureOverride = null;
+  h.observationSemantics = { title: "", headings: [] };
   h.openFirstMailResult = false;
   h.checkoutSummary = null;
   h.cartLineItems = [];
@@ -4331,6 +4336,34 @@ describe("Compact V2 action-map boundary", () => {
         expect.stringContaining("@continue"),
       ]),
     ]);
+  });
+
+  it("screens a page title in query semantic metadata without changing its action map", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const token = "f9a062f02fadf5";
+    h.observationSemantics = {
+      title: `Developer ${token} Resource`,
+      headings: ["Getting started"],
+    };
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://developer.example.com/" });
+
+    const query = await observeQuery(started.session_id, "");
+
+    expect(query.semantic).toEqual({
+      title: "Developer [redacted] Resource",
+      headings: ["Getting started"],
+    });
+    expect(query.safe_table).toEqual([
+      expect.arrayContaining([
+        expect.stringMatching(/^@e:/),
+        "b",
+        expect.stringContaining("@continue"),
+      ]),
+    ]);
+    expect(JSON.stringify(query)).not.toContain(token);
   });
 
   it("queries and re-resolves Resend's existing Google control", async () => {

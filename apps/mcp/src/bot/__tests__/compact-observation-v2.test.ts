@@ -806,6 +806,31 @@ describe("compact observation v2", () => {
     expect(safe.rows).toContainEqual(expect.objectContaining({ label: "@4111111111111111" }));
   });
 
+  it("screens a page title in query semantic metadata without changing the query response", () => {
+    const title = "Developer f9a062f02fadf5 Resource";
+    const semantics = safePageSemanticsV2({ title, headings: ["Getting started"] });
+    const page = encodeV2QueryPage({
+      sessionId: "session",
+      stage: "browse",
+      semantics,
+      rows: [],
+      cursorFor: (offset) => `cursor-${offset}`,
+    }).payload;
+    expect(semantics).toEqual({
+      title: "Developer [redacted] Resource",
+      headings: ["Getting started"],
+    });
+    expect(page).toEqual({
+      format: "compact-v2",
+      url: "",
+      session_id: "session",
+      stage: "browse",
+      semantic: semantics,
+      safe_table: [],
+    });
+    expect(JSON.stringify(page)).not.toContain(title);
+  });
+
   it("redacts a prefixless high-entropy token rendered as the accessible name", () => {
     const button = element({
       visibleText: "abcdefghijklmnopqrstuvwxyz123456",

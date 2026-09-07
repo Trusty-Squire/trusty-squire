@@ -668,7 +668,7 @@ export function serializeBrowserUseDOM(
           `${indent}... (${o.hiddenElements.length} more elements below - scroll to reveal):`,
         );
         for (const e of o.hiddenElements)
-          lines.push(`${indent}    <${e.tag}> "${screen(e.text)}" ~${e.pages} pages down`);
+          lines.push(`${indent}    <${e.tag}> "${screen(e.text, 40)}" ~${e.pages} pages down`);
       } else if (o.hiddenContent)
         lines.push(`${indent}... (more content below viewport - scroll to reveal)`);
     }

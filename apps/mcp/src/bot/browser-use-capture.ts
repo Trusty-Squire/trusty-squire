@@ -51,9 +51,9 @@ export interface BrowserUseCapture {
   moreAbove: boolean;
   moreBelow: boolean;
 }
-const rect = (v: number[] | undefined, scale = 1): DOMBounds | null =>
+const rect = (v: number[] | undefined): DOMBounds | null =>
   v && v.length >= 4
-    ? { x: v[0]! / scale, y: v[1]! / scale, width: v[2]! / scale, height: v[3]! / scale }
+    ? { x: v[0]!, y: v[1]!, width: v[2]!, height: v[3]! }
     : null;
 const pathKey = (frame: string | null | undefined, selector: string): string =>
   `${frame ?? ""}\0${selector}`;
@@ -80,17 +80,12 @@ export async function captureBrowserUseDOM(
     prefix: string,
     owningFrame: Frame,
   ): Promise<BrowserUseNode> => {
-    const [dom, snapshot, ax, metrics, frames] = await Promise.all([
+    const [dom, snapshot, ax, frames] = await Promise.all([
       client.send("DOM.getDocument", { depth: -1, pierce: true }),
       client.send("DOMSnapshot.captureSnapshot", { computedStyles: STYLES, includeDOMRects: true }),
       client.send("Accessibility.getFullAXTree"),
-      client.send("Runtime.evaluate", {
-        expression: "window.devicePixelRatio",
-        returnByValue: true,
-      }),
       client.send("Page.getFrameTree"),
     ]);
-    const ratio = Number(metrics.result.value) || 1;
     const layouts = new Map<number, Layout>();
     for (const document of snapshot.documents) {
       const nodes = document.nodes,
@@ -106,7 +101,7 @@ export async function captureBrowserUseDOM(
       nodes.backendNodeId?.forEach((id, i) => {
         const li = layoutIndices.get(i);
         layouts.set(id, {
-          bounds: li === undefined ? null : rect(layout.bounds[li], ratio),
+          bounds: li === undefined ? null : rect(layout.bounds[li]),
           client: li === undefined ? null : rect(layout.clientRects?.[li]),
           scroll: li === undefined ? null : rect(layout.scrollRects?.[li]),
           styles:
@@ -462,7 +457,7 @@ export async function captureBrowserUseDOM(
                 c.attributes.title ||
                 c.attributes["aria-label"] ||
                 "(no label)"
-              ).slice(0, 40),
+              ),
               pages: viewportHeight > 0 ? (c.bounds!.y / viewportHeight).toFixed(1) : 0,
             });
           c.children.forEach(collect);

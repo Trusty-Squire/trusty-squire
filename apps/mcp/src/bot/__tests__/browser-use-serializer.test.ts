@@ -122,4 +122,38 @@ describe("canonical browser-use 0.13.10 fixture oracle", () => {
     expect(browserUseContained({ x: 1.01, y: 0, width: 100, height: 100 }, parent)).toBe(false);
     expect(browserUseContained({ x: 0, y: 0, width: 0, height: 100 }, parent)).toBe(false);
   });
+  it("screens a hidden iframe control against its full name before applying the hint cutoff", () => {
+    const token = "f9a062f02fadf5";
+    const dom = serializeBrowserUseDOM(
+      {
+        id: "iframe",
+        nodeType: 1,
+        nodeName: "IFRAME",
+        value: "",
+        attributes: {},
+        visible: true,
+        snapshot: true,
+        bounds: { x: 0, y: 0, width: 400, height: 300 },
+        cursor: null,
+        scrollable: false,
+        showScroll: false,
+        scrollText: "",
+        clickListener: false,
+        axRole: null,
+        axProperties: [],
+        axChildIds: null,
+        shadowType: null,
+        hiddenElements: [
+          { tag: "button", text: `Copy access token to clipboard: ${token}`, pages: 1 },
+        ],
+        hiddenContent: false,
+        children: [],
+        contentDocument: null,
+      },
+      { screen: screenBrowserUseValueV2 },
+    ).dom;
+    expect(dom).toContain('"Copy access token to clipboard: [redacted]"');
+    expect(dom).not.toContain(token);
+    expect(dom).not.toContain(token.slice(0, 8));
+  });
 });
