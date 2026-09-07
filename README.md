@@ -319,8 +319,8 @@ Operate sessions default to `browser-use-dom` observations: a
 `format:"browser-use-dom"` response with the live page URL, stage, stable `@e:`
 refs, and a tab-indented
 `dom` tree that interleaves visible page text with interactive controls. Names
-and text are page content except for the narrow secret-shaped substring screen;
-it preserves the DOM structure and refs (see
+and text are page content: no secret-shaped substring screen rewrites them.
+The canonical DOM structure and refs are preserved (see
 [observation-model.md §4.5](docs/observation-model.md)). Each observation says
 whether more content is reachable above or below the viewport. Use
 `operate_observe` with `query` to find controls anywhere in the live document,

@@ -256,8 +256,8 @@ export interface ScreenOutline {
 
 export interface Observation {
   session_id: string;
-  // V1 emits the full page location. Compact V2 emits only a screened origin;
-  // its path/query remain inside the sealed page identity.
+  // V1 and Compact V2 start with the live page location. Compact V2 can shorten
+  // fixed metadata only when necessary to fit its wire budget.
   url: string;
   // Registry route guidance, present ONLY on the first (start) observation when
   // a skill exists for the service. The host agent reads it before driving.
@@ -316,8 +316,9 @@ export interface Observation {
   // collapsed chrome links that remain in snapshot_file. If persistence fails,
   // snapshot_file is absent and `el_table` is instead complete and uncollapsed.
   // A full snapshot is emitted on the first observe, a URL change, or high churn
-  // (SPA re-render). Compact V2 also uses `delta:true`, but only for its sealed
-  // safe map; it never exposes the V1 snapshot or inventory recovery fields.
+  // (SPA re-render). Compact V2 also uses `delta:true`, but only for its
+  // session-bound action map; it never exposes the V1 snapshot or inventory
+  // recovery fields.
   delta?: boolean;
   unchanged?: number;
   removed?: string[];
@@ -1292,7 +1293,7 @@ function sameCompactV2Intent(left: SafeControlV2, right: SafeControlV2): boolean
   );
 }
 
-/** Row equality over the sealed representation only — never raw page data. */
+/** Row equality over the normalized action-map representation. */
 function sameCompactV2Control(left: SafeControlV2, right: SafeControlV2): boolean {
   return (
     left.role === right.role &&
@@ -4162,8 +4163,8 @@ function compactV2Observation(
     },
     ...(sameDocument ? { previous: new Set(previous.renderedRefs ?? []) } : {}),
   });
-  // Screen emitted names and text lines. Preserve whitespace,
-  // line ordering and indentation; no prose extraction or byte-budget pruning.
+  // Emit canonical names and text verbatim, preserving whitespace, line order
+  // and indentation; no prose extraction or byte-budget pruning.
   const dom = rendered.dom;
   const changed = !sameDocument || previous.dom !== dom;
   const epoch = { doc: epochDoc, rev: changed ? generation : previous.epoch.rev };
@@ -4252,7 +4253,7 @@ export async function observeQuery(
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const index = session.compactV2Index;
   if (index === null || index.expiresAt < Date.now()) throw new Error("stale_cursor");
-  // Query/paging is part of the same sealed action-map protocol: never return
+  // Query/paging is part of the same session-bound action-map protocol: never return
   // rows from a page whose private binding no longer matches the live page.
   if (index.epoch.doc !== compactV2EpochDoc(session)) {
     invalidateCompactV2Snapshot(session);

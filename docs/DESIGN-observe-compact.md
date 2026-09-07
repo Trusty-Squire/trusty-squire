@@ -72,7 +72,7 @@ cursor contract this section once described are replaced by the canonical
 browser-use DOM port. The current `browser-use-dom` contract is owned by
 [`browser-use-serializer-port.md`](browser-use-serializer-port.md), including
 the interleaved tree, stable refs, whole-document query, viewport signals,
-screening boundary, and fixture oracle. This document retains the original
+and fixture oracle. This document retains the original
 design rationale and the V1 history below; it is not a second current wire
 reference.
 

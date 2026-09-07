@@ -1,7 +1,7 @@
 # Design: Trusty Squire operator observation model — skeleton + resident DOM + descriptive refs
 
 **Status:** Current authority for the observation no-seal policy. The browser-use DOM
-wire, identity, screening, query, and fixture contract is owned by
+wire, identity, query, and fixture contract is owned by
 [`browser-use-serializer-port.md`](browser-use-serializer-port.md); the remaining
 roadmap material is historical.
 **Scope:** `@trusty-squire/mcp` operator observation/serialization layer (`operate_observe`, `operate_screenshot`, `operate_extract`, the flat acting verbs, and the browser-use DOM serializer)
@@ -26,13 +26,14 @@ The through-line: the layer is tuned for **payload size** and **secret-safety**,
 
 1. An agent can reliably locate and fill a multi-field dynamic form (checkout, signup) without thrashing.
 2. An agent can inspect visual pages (shopping grids, product images) in a bounded number of calls.
-3. Preserve the vault guarantee: a value the operator injected from the vault — and any card value — never enters the agent's context. (Narrowed 2026-09-03: a secret the PAGE renders is ordinary content and does enter it.)
+3. Preserve the vault's write-only delivery boundary and the payment approval
+   fences while treating content rendered by the page as observable.
 4. Never reintroduce the "serialize everything and paginate" explosion.
 
 ## 3. Non-goals
 
 - A browser-native autofill or a vault shipping-address feature (separate decision; the actual form-writing is this layer regardless).
-- Rewriting the seal/vault security model — this reuses it, pushed down to individual nodes.
+- Rewriting the vault or payment security model.
 
 ## 4. Design
 
@@ -61,7 +62,7 @@ Because the source of truth (loaded DOM) never leaves the browser, every detail 
 Instead of paginating a serialized whole page, the agent pulls detail on a specific ref:
 
 - `expand @ref` → that node's neighborhood (parents / siblings / children) to disambiguate ("which of these five buttons").
-- `read @ref` → the element's text subtree, redacted.
+- `read @ref` → the element's text subtree, verbatim.
 
 Requests are scoped to a stable ref and return a bounded local view, so navigation is deterministic and cannot explode — the agent only pulls the neighborhood it is inspecting. This replaces `overflow` + cursor paging entirely.
 
