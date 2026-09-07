@@ -91,9 +91,8 @@ the `format` label, OAuth, vault behavior and payment approval are unchanged.
   core `86 passed`, `1458 passed | 1 skipped`; required behavior `16 passed`,
   `587 passed | 3 skipped`; payment safety `9 passed`, `469 passed`.
 - 2026-09-07 — package TypeScript check and ESLint on all changed bot TypeScript
-  files: exit 0. Pagination fixtures increased from 150 to 250 controls because
-  the shorter refs put the old fixture entirely on one page; cursor assertions
-  remain intact.
+  files: exit 0. Pagination fixtures increased from 150 to 250 controls to keep
+  cursor assertions exercised with accepted 11-character capability refs.
 - 2026-09-07 — final core rerun after serializer/context edits: exit 0,
   `Test Files 86 passed (86)`; `Tests 1459 passed | 1 skipped (1460)`.
 - 2026-09-07 — final full session suite after the `dom_unchanged` addition:
@@ -106,7 +105,9 @@ the `format` label, OAuth, vault behavior and payment approval are unchanged.
 
 Production emits authored `aria-pressed`, `aria-selected` and `data-state` values.
 Actionable controls with an actual selection class expose its full screened `state_class`; controls with a visible
-check, selected, or tick child expose `state_icons`. These facts describe the DOM, not a guessed boolean
+check, selected, or tick child expose `state_icons`; this includes SVGs, image-role nodes,
+check spans, icon-font elements, ARIA state elements, and genuine check glyphs. Logos,
+chevrons, spinners, and other glyphs expose no selection state. These facts describe the DOM, not a guessed boolean
 selection state. The class list is intentionally not truncated: a distinguishing
 utility class may occur at its end. Opaque capability refs deliberately outweigh
 the prior counter-based corpus reductions; the table above was rerun after restoring them.

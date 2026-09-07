@@ -780,20 +780,32 @@ export function serializeBrowserUseDOM(
   if (efficient) contextualize(tree);
   const emittedTargets = new Set<string>();
   const stateIconCache = new Map<BrowserUseNode, string[]>();
+  const selectionToken = (value: string | undefined): boolean =>
+    /(?:^|[-_\s])(?:check(?:mark)?|selected|tick)(?:$|[-_\s])/i.test(value ?? "");
+  const stateIconEvidence = (child: BrowserUseNode): string | null => {
+    const namedEvidence = [
+      child.attributes["aria-label"],
+      child.attributes["data-icon"],
+      child.attributes.class,
+    ].find(selectionToken);
+    if (namedEvidence) return namedEvidence;
+    const ariaState = ["aria-checked", "aria-pressed", "aria-selected"]
+      .map((attribute) => [attribute, child.attributes[attribute]?.trim()] as const)
+      .find(([, value]) => value);
+    if (ariaState) return `${ariaState[0]}=${ariaState[1]}`;
+    const dataState = child.attributes["data-state"]?.trim();
+    if (selectionToken(dataState)) return `data-state=${dataState}`;
+    const glyph = browserUseBoundedContextText(child, 4)?.replace(/\s+/g, "");
+    return glyph && /^[✓✔☑✅]+$/.test(glyph) ? glyph : null;
+  };
   const stateIcons = (node: BrowserUseNode): string[] => {
     if (!stateIconCache.has(node)) {
       const icons: string[] = [];
       const collect = (child: BrowserUseNode): void => {
         if (!child.visible || child.contentDocument) return;
-        if (tag(child) === "svg" || child.attributes.role === "img") {
-          const evidence = [
-            child.attributes["aria-label"],
-            child.attributes["data-icon"],
-            child.attributes.class,
-          ].find((value) =>
-            /(?:^|[-_\s])(?:check(?:mark)?|selected|tick)(?:$|[-_\s])/i.test(value ?? ""),
-          );
-          if (evidence) icons.push(evidence);
+        const evidence = stateIconEvidence(child);
+        if (evidence) {
+          icons.push(evidence);
           return;
         }
         if (child.clickListener || ["button", "input", "select", "a"].includes(tag(child))) return;

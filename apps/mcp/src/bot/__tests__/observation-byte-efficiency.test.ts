@@ -295,6 +295,26 @@ describe("observation byte efficiency", () => {
     const selected = iconCard("Selected", "check-icon");
     expect(serializeBrowserUseDOM(selected).dom).toContain('state_icons=["Selected"]');
   });
+  it("emits check spans and icon-font glyphs but not decorative descendants", () => {
+    const card = (icon: BrowserUseNode) =>
+      node("ARTICLE", {
+        clickListener: true,
+        children: [text("Product Analytics"), icon],
+      });
+    expect(
+      serializeBrowserUseDOM(card(node("SPAN", { attributes: { class: "check-icon" } }))).dom,
+    ).toContain('state_icons=["check-icon"]');
+    expect(
+      serializeBrowserUseDOM(card(node("I", { children: [text("✓")] }))).dom,
+    ).toContain('state_icons=["✓"]');
+    for (const icon of [
+      node("SPAN", { attributes: { class: "brand-logo" } }),
+      node("I", { attributes: { class: "chevron" } }),
+      node("SPAN", { attributes: { class: "spinner" } }),
+      node("I", { children: [text("★")] }),
+    ])
+      expect(serializeBrowserUseDOM(card(icon)).dom).not.toContain("state_icons=");
+  });
   it("emits selection evidence for reachable controls without card tag heuristics", () => {
     const link = node("A", {
       attributes: { href: "#", class: "option border-selected" },
