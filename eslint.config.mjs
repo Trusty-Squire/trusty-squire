@@ -42,15 +42,4 @@ export default [
       },
     },
   },
-  {
-    // Root maintenance scripts are outside the app source roots but still use
-    // the typed lint rules above.
-    files: ["scripts/**/*.ts"],
-    languageOptions: {
-      parserOptions: {
-        project: "./tsconfig.eslint.json",
-        tsconfigRootDir: repoRoot,
-      },
-    },
-  },
 ];

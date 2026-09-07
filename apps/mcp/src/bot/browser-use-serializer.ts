@@ -901,7 +901,7 @@ export function serializeBrowserUseDOM(
       t = tag(o),
       indent = "\t".repeat(depth);
     if (n.code !== undefined) {
-      const code = codeText(o, paintedOver)?.value;
+      const code = codeText(o, paintedOver)?.value || (paintedOver.has(o) ? "" : n.code);
       const actions = n.codeActions
         ? n.children
             .map((child) => render(child, depth + 1))

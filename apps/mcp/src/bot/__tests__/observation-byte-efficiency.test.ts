@@ -204,6 +204,17 @@ describe("observation byte efficiency", () => {
       });
     const selfPainted = highlighted();
     expect(serializeBrowserUseDOM(selfPainted).dom).toBe(`<pre> ${JSON.stringify(source)}`);
+    const selfCoveredSyntax = node("PRE", {
+      paintOrder: 2,
+      computedStyles: opaque,
+      children: [
+        node("CODE", {
+          paintOrder: 1,
+          children: [text(source)],
+        }),
+      ],
+    });
+    expect(serializeBrowserUseDOM(selfCoveredSyntax).dom).toBe(`<pre> ${JSON.stringify(source)}`);
     const externallyCovered = node("BODY", {
       children: [highlighted(), node("DIV", { paintOrder: 3, computedStyles: opaque })],
     });

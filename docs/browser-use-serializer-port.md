@@ -57,7 +57,9 @@ but successful observation.
 
 ## Filters and follow-up
 
-Viewport visibility is computed before tree simplification and containment.
+Viewport visibility is computed before tree simplification and containment. A
+node without layout metrics defaults to rendered so absent geometry cannot hide
+possibly actionable content.
 The containment threshold is exactly 0.99; text, form fields/labels, nested
 propagating controls, explicit onclick handlers, meaningful aria-labels and
 interactive roles retain canonical carve-outs.
@@ -85,15 +87,17 @@ Distinct checkboxes survive regardless of how similar they look. This does not
 infer that a second checkbox is a proxy from appearance alone.
 
 Plain `pre`/`code` syntax markup becomes one quoted text row, preserving original
-spaces, line breaks and punctuation (including single-character tokens). Explicit
-controls, listeners, focusability and scrolling prevent coalescing their action
-surface. The canonical small-icon class/geometry heuristic is not evidence that
-a syntax-highlight span is a control.
+spaces, line breaks and punctuation (including single-character tokens). Internal
+paint coverage from syntax markup cannot empty a visible code root; external
+occlusion still suppresses it. Explicit controls, listeners, focusability and
+scrolling prevent coalescing their action surface. The canonical small-icon
+class/geometry heuristic is not evidence that a syntax-highlight span is a control.
 
 Selectable controls emit authored `aria-pressed`/`aria-selected` and existing
-`data-state` values, plus raw `state_class` for selection classes and visible
-check, selected, tick, or authored ARIA-state child `state_icons` evidence. These are
-DOM facts, not inferred selected booleans.
+`data-state` values, plus raw `state_class` for selection classes and directly-owned,
+noninteractive visible check, selected, tick, or authored ARIA-state `state_icons`
+evidence. These are DOM facts, not inferred selected booleans. Ambiguous nested
+controls retain their own refs and do not establish state for a parent.
 Stateless cards keep stable action refs but selection is undetectable by design;
 an unrelated button enabling cannot establish which card is selected.
 
