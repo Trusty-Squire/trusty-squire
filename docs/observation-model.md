@@ -308,7 +308,12 @@ and where it is deliberately narrower or more conservative than §4.1 above.
   embedded frame can never hash onto a main-page ref.
 - **Label** — `@continue-with-google`, slugified from the already-screened
   control description. It is an addressable alias: `operate_act` accepts it and
-  resolves it to a ref. Duplicate labels are disambiguated deterministically at
+  resolves it to a ref. Over-length names stay legible: when the accessible
+  name is a heading glued to a longer description, the leading title is kept
+  and the description dropped (the seam is detected in the original name, and
+  the secret screen still sees the full untruncated name first); any remaining
+  over-length slug is cut on a word boundary, never mid-word. Duplicate labels
+  are disambiguated deterministically at
   map-build time (`disambiguateDuplicateLabelsV2`): the first occurrence keeps
   the base slug, later ones gain `-2`/`-3` ordinals in the map's own row order,
   so two controls sharing an accessible name are individually addressable

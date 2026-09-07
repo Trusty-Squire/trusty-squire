@@ -664,18 +664,9 @@ describe("compact observation v2", () => {
           "Database DownloadsDownload IP-address databases for every use case",
           "@database-downloads",
         ],
-        [
-          "API ReferenceComplete documentation for every endpoint and field",
-          "@api-reference",
-        ],
-        [
-          "Client LibrariesOfficial SDKs for every major programming language",
-          "@client-libraries",
-        ],
-        [
-          "IntegrationsConnect IPinfo with the tools you already use",
-          "@integrations",
-        ],
+        ["API ReferenceComplete documentation for every endpoint and field", "@api-reference"],
+        ["Client LibrariesOfficial SDKs for every major programming language", "@client-libraries"],
+        ["IntegrationsConnect IPinfo with the tools you already use", "@integrations"],
         ["C (Search Ctrl+K)Navigation Getting started with the docs", "@c-search-ctrl-k"],
       ]);
       for (const [name, expected] of real) {
@@ -690,9 +681,7 @@ describe("compact observation v2", () => {
     });
 
     it("cuts an over-length title on a word boundary, never mid-word", () => {
-      const label = controlLabelV2(
-        "International Standard Organization Members List Directory",
-      );
+      const label = controlLabelV2("International Standard Organization Members List Directory");
       // The old behavior sliced at 32 chars: "...organizat".
       expect(label).toBe("@international-standard");
     });
