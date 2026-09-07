@@ -5733,7 +5733,7 @@ async function executeAct(
     internalAccess && collectCheckoutState ? await capturePrivateCheckoutState(session) : undefined;
   const terminalOAuthCompletionUrl = browser.takeOAuthTerminalCompletionUrl();
   const actionObservationPage =
-    action.kind === "oauth_login"
+    action.kind === "oauth_login" || action.kind === "oauth_click"
       ? (oauthCompletionSourcePage(session) ?? compactV2ActionPage)
       : compactV2ActionPage;
   const observation =

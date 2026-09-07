@@ -13403,7 +13403,7 @@ export class BrowserController {
     let expectedReturnUrl: string | null = null;
     let pendingOnProvider = false;
     let lastTransientUrl = productUrl;
-    let observedClosedReturnUrl: string | null = null;
+    let observedReturn: { page: Page; url: string } | null = null;
     let onTransientNavigation: ((frame: Frame) => void) | null = null;
     const popupCapture: {
       page: Page | null;
@@ -13429,9 +13429,18 @@ export class BrowserController {
     const productNavigationPromise = new Promise<void>((resolve) => {
       resolveProductNavigation = resolve;
     });
+    const recordTopLevelNavigation = (page: Page, frame: Frame): void => {
+      if (!actionStarted || frame !== page.mainFrame()) return;
+      const url = frame.url();
+      captureExpectedReturnUrl(url);
+      observedReturn =
+        this.isOAuthReturnUrl(url, expectedReturnUrl) && oauthErrorFromReturnUrl(url) === null
+          ? { page, url }
+          : null;
+    };
     const onProductNavigation = (frame: Frame): void => {
       if (!actionStarted || frame !== product.mainFrame()) return;
-      captureExpectedReturnUrl(frame.url());
+      recordTopLevelNavigation(product, frame);
       productNavigated = true;
       resolveProductNavigation();
     };
@@ -13463,8 +13472,8 @@ export class BrowserController {
           return { page: returnedPage };
         }
       }
-      if (providerPage !== null && providerPage.isClosed() && observedClosedReturnUrl !== null) {
-        return { page: providerPage, terminal: true, url: observedClosedReturnUrl };
+      if (observedReturn !== null && observedReturn.page.isClosed()) {
+        return { page: observedReturn.page, terminal: true, url: observedReturn.url };
       }
       return null;
     };
@@ -13486,19 +13495,7 @@ export class BrowserController {
       const onPopup = (page: Page): void => {
         if (!this.ownedPages.has(page)) return;
         popupCapture.page = page;
-        popupCapture.onNavigation = (frame: Frame): void => {
-          if (frame !== page.mainFrame()) return;
-          const url = frame.url();
-          captureExpectedReturnUrl(url);
-          if (
-            this.isOAuthReturnUrl(url, expectedReturnUrl) &&
-            oauthErrorFromReturnUrl(url) === null
-          ) {
-            observedClosedReturnUrl = url;
-          } else {
-            observedClosedReturnUrl = null;
-          }
-        };
+        popupCapture.onNavigation = (frame: Frame): void => recordTopLevelNavigation(page, frame);
         page.on("framenavigated", popupCapture.onNavigation);
         popupCapture.onNavigation(page.mainFrame());
         product.off("popup", onPopup);
@@ -13549,28 +13546,15 @@ export class BrowserController {
       onTransientNavigation = (frame: Frame): void => {
         if (frame === transient.mainFrame()) {
           lastTransientUrl = frame.url();
-          expectedReturnUrl ??= oauthRedirectUri(frame.url());
+          recordTopLevelNavigation(transient, frame);
           if (transient !== product) transientNavigated = true;
-          if (
-            transient !== product &&
-            this.isOAuthReturnUrl(lastTransientUrl, expectedReturnUrl) &&
-            oauthErrorFromReturnUrl(lastTransientUrl) === null
-          ) {
-            observedClosedReturnUrl = lastTransientUrl;
-          } else {
-            observedClosedReturnUrl = null;
-          }
         }
       };
       transient.on("framenavigated", onTransientNavigation);
       expectedReturnUrl ??= oauthRedirectUri(transient.url());
-      if (
-        transient !== product &&
-        this.isOAuthReturnUrl(lastTransientUrl, expectedReturnUrl) &&
-        oauthErrorFromReturnUrl(lastTransientUrl) === null
-      ) {
+      if (transient !== product) {
         transientNavigated = true;
-        observedClosedReturnUrl = lastTransientUrl;
+        recordTopLevelNavigation(transient, transient.mainFrame());
       }
       const durableProduct = providerPage === null ? recovery : product;
       this.oauthProductPage = durableProduct;
@@ -13579,7 +13563,7 @@ export class BrowserController {
       this.restoreProductPageWhenOAuthPageCloses(transient, durableProduct);
       this.page = transient;
       const hasTerminalCompletion = (): boolean =>
-        providerPage !== null && providerPage.isClosed() && observedClosedReturnUrl !== null;
+        observedReturn !== null && observedReturn.page.isClosed();
       let settled: Page | null = null;
       if (consentProvider === undefined) {
         settled = await this.waitForOAuthLifecycle(
