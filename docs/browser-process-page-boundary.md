@@ -33,8 +33,11 @@ remote attach remain the existing paths.
 Close first disposes page ownership and document subscriptions. Harness teardown
 only drops its references. Normal teardown marks the launch terminal, captures
 identity and page/context/transport references, clears active references, and
-runs `closeProfileWithProof`: identity-proven SIGTERM, page close, context close,
-transport close, with the existing bounded SIGKILL/proof fallback. It then
+runs `closeProfileWithProof`: bounded page and context close first (1s each),
+then, if the identity-proven local browser survives, `quitBrowserGracefully`
+sends SIGINT and waits up to 10s for exit. CDP transport close has its own 2s
+bound; the existing 15s overall close cap and SIGKILL/proof fallback remain.
+No SIGTERM or reaper escalation precedes that graceful window. It then
 releases stale process proof, checks marked orphans, untracks only proven closure,
 and tears down the owned display. Cancellation and late-start reaping use the
 same state machine and retain the late-context cleanup path.
@@ -42,7 +45,9 @@ same state machine and retain the late-context cleanup path.
 `profile.ts` remains authoritative for canonical path resolution, operation leases,
 birth identity, and argv checks. `owner-process-reaper.ts` and
 `operator-browser-watchdog.ts` retain manifests, orphan reconciliation, and
-containment. Plain login's launch and SIGINT graceful-quit bodies are unchanged.
+containment. Plain login's launch and CDP boundary are unchanged. Its SIGINT quit helper now
+lives in `browser-process-runtime.ts`, with the original plain-login exports
+preserved by `browser.ts`, so both local owners share the same grace period.
 
 `browser-process-page-boundary.test.ts` executes the facade against controlled
 transports to pin close ordering, orphan failure, late attachment cancellation,
@@ -96,6 +101,31 @@ still-live Chrome) is the follow-up: it additionally requires resetting
 `BrowserController`/`PageDriver` per-session state (page references, host-scope
 guard routes, checkout/payment scratch fields) to a clean baseline before
 reuse, which this PR deliberately does not attempt.
+
+## Cross-process broker groundwork: first increment
+
+The first independently shippable increment fixes cookie persistence at ordinary
+browser shutdown. `browser-close-cookie.test.ts` executes real
+`BrowserProcessOwner.start()`/`close()` in both self-launch/CDP and persistent
+context modes against a fresh profile and a localhost login. It immediately
+closes after receiving a persistent HttpOnly cookie, relaunches with the same
+profile, and requires the server to see an authenticated request. No storage
+snapshot is injected. Both cases failed before the ordering fix. Boundary tests
+also cover hung page/context closes, the SIGINT grace period, and forced fallback.
+
+This does **not** retain Chrome across session finish or introduce broker
+admission. `releaseWarmBrowserPage` still closes the browser and releases the
+profile-operation lease; `IdentityRuntime` still forgets it after shutdown.
+Single-active production admission and the experimental scaffold are unchanged.
+
+The next coherent increment is sequential page release plus persistent runtime
+custody: close only the session's tab family, verify its target IDs are gone,
+reset session-local routes/references/state, and hold the profile lease for the
+browser's lifetime. It must pair that reuse with per-operation cancellation
+fences/deadlines, page-first recovery, and bounded admission/session drains with
+shutdown diagnostics. Preserve payment audit before teardown, and do not retarget
+a timed-out operation to the next session. Cross-process attachment remains a
+later increment; none of this builds on the experimental satellite/refcount path.
 
 ## Experimental concurrent multisession (Step 4/5 — audit slice)
 

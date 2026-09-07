@@ -226,10 +226,11 @@ complete the Google sign-in.
   owner reaper escalates SIGTERM → SIGKILL, so handing over mid-flush would
   reintroduce the abrupt exit. Never SIGTERM a Chrome whose profile state you
   still need.
-- **? OPEN (same defect class, not fixed here):** `BrowserController.close()`
-  also SIGTERMs the process tree before `context.close()`, so cookies an
-  operator run establishes can be lost the same way. On-disk cookies already
-  flushed by `connect` are unaffected, which is why this is a separate ticket.
+- **✓ FIXED (operator browser):** `BrowserProcessOwner.closeBrowser()` now
+  gives page and context closes independent bounds, then sends SIGINT and waits
+  before its force fallback. The current lifecycle contract and its real-browser
+  regression coverage are owned by
+  [`docs/browser-process-page-boundary.md`](docs/browser-process-page-boundary.md#cross-process-broker-groundwork-first-increment).
 
 ---
 

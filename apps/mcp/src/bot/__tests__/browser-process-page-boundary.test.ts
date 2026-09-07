@@ -1,6 +1,5 @@
 import type * as Reaper from "../owner-process-reaper.js";
 import type * as Runtime from "../browser-process-runtime.js";
-import type * as Profile from "../profile.js";
 import { EventEmitter } from "node:events";
 import type { Browser, BrowserContext, Page } from "playwright";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,7 +9,12 @@ import type { OwnedChromeProcessTreeProof } from "../browser-process-runtime.js"
 import type { PageDriver } from "../page-driver.js";
 import type { ProfileProcessIdentity } from "../profile.js";
 
-const h = vi.hoisted(() => ({ events: [] as string[], markerClosed: true }));
+const h = vi.hoisted(() => ({
+  events: [] as string[],
+  markerClosed: true,
+  treeState: "stale" as "stale" | "matching",
+  signalExits: true,
+}));
 vi.mock("../owner-process-reaper.js", async (original) => ({
   ...(await original<typeof Reaper>()),
   markOwnerBrowserLaunchTerminal: () => h.events.push("terminal"),
@@ -24,19 +28,12 @@ vi.mock("../browser-process-runtime.js", async (original) => ({
   ...(await original<typeof Runtime>()),
   signalOwnedChromeProcessTree: (_identity: unknown, _group: boolean, signal: string) => {
     h.events.push(signal);
+    if (h.signalExits) h.treeState = "stale";
     return true;
   },
-  ownedChromeProcessTreeState: () => "stale",
+  ownedChromeProcessTreeState: () => h.treeState,
   releaseOwnedChromeProcessTree: () => h.events.push("release-proof"),
 }));
-vi.mock("../profile.js", async (original) => ({
-  ...(await original<typeof Profile>()),
-  closeProfileWithProof: async (opts: { close(): Promise<void> }) => {
-    await opts.close();
-    return "closed";
-  },
-}));
-
 // The fixture supplies only the Playwright transport methods exercised by close.
 // Private custody is seeded so these tests cannot launch or signal real Chrome.
 function fixture() {
@@ -94,8 +91,11 @@ function fixture() {
 beforeEach(() => {
   h.events = [];
   h.markerClosed = true;
+  h.treeState = "stale";
+  h.signalExits = true;
 });
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
 });
@@ -111,13 +111,12 @@ describe("exclusive process/page boundary through BrowserController", () => {
     expect(h.events).toEqual(["dispose-pages"]);
   });
 
-  it("preserves disposal, terminal marking, SIGTERM, page/context/transport close, proof and orphan cleanup order", async () => {
+  it("closes handles before proving exit and reaping orphans, without signalling a closed browser", async () => {
     const { controller, pages } = fixture();
     await expect(controller.close()).resolves.toBe("closed");
     expect(h.events).toEqual([
       "dispose-pages",
       "terminal",
-      "SIGTERM",
       "page-close",
       "context-close",
       "transport-close",
@@ -130,6 +129,64 @@ describe("exclusive process/page boundary through BrowserController", () => {
     expect(controller.isConnected()).toBe(false);
     await controller.close();
     expect(h.events.filter((event) => event === "orphan-cleanup")).toHaveLength(1);
+  });
+
+  it("waits for graceful SIGINT exit before transport close or reaper escalation", async () => {
+    vi.useFakeTimers();
+    const { controller } = fixture();
+    h.treeState = "matching";
+    h.signalExits = false;
+    const closing = controller.close();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(h.events).toEqual([
+      "dispose-pages",
+      "terminal",
+      "page-close",
+      "context-close",
+      "SIGINT",
+    ]);
+    h.treeState = "stale";
+    await vi.advanceTimersByTimeAsync(25);
+    await expect(closing).resolves.toBe("closed");
+    expect(h.events.slice(-4)).toEqual([
+      "transport-close",
+      "release-proof",
+      "orphan-cleanup",
+      "untrack-launch",
+    ]);
+    expect(h.events).not.toContain("SIGTERM");
+    expect(h.events).not.toContain("SIGKILL");
+  });
+
+  it("bounds hung page and context closes independently before graceful quit", async () => {
+    vi.useFakeTimers();
+    const { controller, page, context } = fixture();
+    h.treeState = "matching";
+    vi.mocked(page.close).mockImplementation(() => new Promise(() => undefined));
+    vi.mocked(context.close).mockImplementation(() => new Promise(() => undefined));
+    const closing = controller.close();
+    await vi.advanceTimersByTimeAsync(2_001);
+    await expect(closing).resolves.toBe("closed");
+    expect(context.close).toHaveBeenCalledOnce();
+    expect(h.events).toContain("SIGINT");
+    expect(h.events).not.toContain("SIGKILL");
+    expect(h.events).toContain("orphan-cleanup");
+  });
+
+  it("bounds a hung graceful quit before invoking the force/proof fallback", async () => {
+    vi.useFakeTimers();
+    const { controller } = fixture();
+    h.treeState = "matching";
+    h.signalExits = false;
+    const closing = controller.close();
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(h.events).toContain("SIGINT");
+    expect(h.events).not.toContain("SIGKILL");
+    expect(h.events).not.toContain("orphan-cleanup");
+    await vi.advanceTimersByTimeAsync(2_026);
+    await expect(closing).resolves.toBe("force_closed_unproven");
+    expect(h.events.indexOf("SIGKILL")).toBeGreaterThan(h.events.indexOf("SIGINT"));
+    expect(h.events.indexOf("orphan-cleanup")).toBeGreaterThan(h.events.indexOf("SIGKILL"));
   });
 
   it("still checks orphan custody after a page close rejects and retains an unproven launch", async () => {
