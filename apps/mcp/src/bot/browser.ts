@@ -5331,7 +5331,7 @@ export class BrowserController {
           tagName = "select";
         }
       } else {
-        const rowControl = await this.page
+        const rowControl = await page
           .locator(activeSelector)
           .first()
           .evaluate((label) => {
@@ -13404,6 +13404,11 @@ export class BrowserController {
     const captureExpectedReturnUrl = (url: string): void => {
       expectedReturnUrl ??= oauthRedirectUri(url);
     };
+    const onContextRequest = (request: Request): void => {
+      if (!actionStarted || !request.isNavigationRequest()) return;
+      if (request.frame().parentFrame() !== null) return;
+      captureExpectedReturnUrl(request.url());
+    };
     let resolveProductNavigation: () => void = () => undefined;
     const productNavigationPromise = new Promise<void>((resolve) => {
       resolveProductNavigation = resolve;
@@ -13449,6 +13454,7 @@ export class BrowserController {
     };
     registerCompletionCheck?.(completionEvidence);
     product.on("framenavigated", onProductNavigation);
+    context.on("request", onContextRequest);
     try {
       recovery = await context.newPage();
       this.trackOpenedTabs(recovery);
@@ -13631,6 +13637,7 @@ export class BrowserController {
       }
     } finally {
       product.off("framenavigated", onProductNavigation);
+      context.off("request", onContextRequest);
       if (onTransientNavigation !== null) {
         (providerPage ?? product).off("framenavigated", onTransientNavigation);
       }

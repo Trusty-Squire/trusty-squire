@@ -5733,6 +5733,10 @@ async function executeAct(
   const checkoutState =
     internalAccess && collectCheckoutState ? await capturePrivateCheckoutState(session) : undefined;
   const terminalOAuthCompletionUrl = browser.takeOAuthTerminalCompletionUrl();
+  const actionObservationPage =
+    action.kind === "oauth_login"
+      ? (oauthCompletionSourcePage(session) ?? compactV2ActionPage)
+      : compactV2ActionPage;
   const observation =
     terminalOAuthCompletionUrl !== null
       ? terminalOAuthCompletionObservation(session, terminalOAuthCompletionUrl)
@@ -5741,25 +5745,25 @@ async function executeAct(
           session,
           () => ({
             session_id: session.id,
-            url: compactV2ActionPage?.url() ?? browser.currentUrl(),
+            url: actionObservationPage?.url() ?? browser.currentUrl(),
             text: "",
             elements: [],
             observed: "none" as const,
           }),
           {
             stage: safeStageV2(
-              compactV2ActionPage?.url() ?? browser.currentUrl(),
+              actionObservationPage?.url() ?? browser.currentUrl(),
               session.lastElements,
             ),
             observed: "none",
-            url: compactV2ActionPage?.url() ?? browser.currentUrl(),
+            url: actionObservationPage?.url() ?? browser.currentUrl(),
           },
         )
       : await observeSession(
           session,
           detail === "none" ? "compact" : detail,
           undefined,
-          compactV2ActionPage,
+          actionObservationPage,
         );
   return {
     observation:
