@@ -130,11 +130,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BrowserController } from "../browser.js";
 import { TOOLS } from "../../tools/index.js";
-import {
-  provisionObserveTool,
-  provisionObserveQueryTool,
-  provisionStartTool,
-} from "../../tools/provision-drive.js";
+import { provisionObserveTool, provisionStartTool } from "../../tools/provision-drive.js";
 import {
   startProvisionSession,
   startHarnessProvisionSession,
@@ -201,31 +197,33 @@ describe("characterization: registered operator tool surface", () => {
       "operate_pay",
       "operate_payment_status",
       "operate_start",
+      "operate_finish",
       "operate_observe",
       "operate_screenshot",
-      "operate_observe_query",
-      "operate_act",
+      "operate_navigate",
+      "operate_click",
+      "operate_type",
+      "operate_select",
+      "operate_press",
+      "operate_scroll",
+      "operate_allow_host",
+      "operate_login",
+      "operate_fill_credential",
+      "operate_extract",
       "operate_recipe_save",
       "operate_recipe_run",
-      "operate_finish",
     ]);
   });
 
-  it("declares the observation tools' JSON input schemas unchanged", () => {
+  it("merges query and cursor into the observation schema", () => {
     expect(provisionObserveTool.jsonInputSchema).toEqual({
       type: "object",
       required: ["session_id"],
       properties: {
         session_id: { type: "string" },
         detail: { type: "string", enum: ["compact", "full"] },
-      },
-    });
-    expect(provisionObserveQueryTool.jsonInputSchema).toEqual({
-      type: "object",
-      required: ["session_id"],
-      properties: {
-        session_id: { type: "string" },
         query: { type: "string" },
+        cursor: { type: "string" },
         role: {
           type: "string",
           enum: [
@@ -240,7 +238,6 @@ describe("characterization: registered operator tool surface", () => {
             "file",
           ],
         },
-        cursor: { type: "string" },
       },
     });
     expect(provisionStartTool.name).toBe("operate_start");

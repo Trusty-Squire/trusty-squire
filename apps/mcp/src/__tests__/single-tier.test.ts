@@ -131,16 +131,16 @@ describe("MCP tool argument validation", () => {
 
     try {
       const badKind = await client.callTool({
-        name: "operate_act",
-        arguments: { session_id: "session_1", kind: "set_value", target: "@e:field", text: "x" },
+        name: "operate_select",
+        arguments: { session_id: "session_1", ref: "@e:field", values: [] },
       });
       const missingSlot = await client.callTool({
-        name: "operate_act",
-        arguments: { session_id: "session_1", kind: "type_secret", target: "@e:field" },
+        name: "operate_type",
+        arguments: { session_id: "session_1", ref: "@e:field" },
       });
       const missingTypeTarget = await client.callTool({
-        name: "operate_act",
-        arguments: { session_id: "session_1", kind: "type", text: "x" },
+        name: "operate_type",
+        arguments: { session_id: "session_1", text: "x" },
       });
       const cardConflict = await client.callTool({
         name: "operate_pay",
@@ -155,26 +155,15 @@ describe("MCP tool argument validation", () => {
         expect(result.isError).toBe(true);
         const { error } = JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
         expect(error.code).toBe("invalid_arguments");
-        expect(error.guidance).toEqual(
-          expect.objectContaining({
-            allowed_kinds: expect.any(Array),
-            missing: expect.any(Array),
-            example: expect.any(Object),
-            safe_alternative: expect.any(String),
-          }),
-        );
       }
-      const badKindRepair = JSON.parse((badKind.content as Array<{ text: string }>)[0]!.text).error
-        .guidance;
-      expect(badKindRepair.allowed_kinds).toContain("select");
-      const missingSlotRepair = JSON.parse(
+      const missingSlotError = JSON.parse(
         (missingSlot.content as Array<{ text: string }>)[0]!.text,
-      ).error.guidance;
-      expect(missingSlotRepair.missing).toContain("slot");
-      const missingTypeTargetRepair = JSON.parse(
+      ).error;
+      expect(missingSlotError.message).toContain("text or slot");
+      const missingTypeTargetError = JSON.parse(
         (missingTypeTarget.content as Array<{ text: string }>)[0]!.text,
-      ).error.guidance;
-      expect(missingTypeTargetRepair.missing).toContain("target");
+      ).error;
+      expect(missingTypeTargetError.message).toContain("ref");
       const cardRepair = JSON.parse((cardConflict.content as Array<{ text: string }>)[0]!.text)
         .error.guidance;
       expect(cardRepair.safe_alternative).toMatch(/only one of card_ref or card_label/i);

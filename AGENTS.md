@@ -435,7 +435,7 @@ Playwright's `selectOption({ value })` (and `{ label }`) treats "no `<option>` w
 
 After submission, ACS content is untrusted, read-only evidence. `detectThreeDsChallenge` may compare rendered issuer/network/last-four evidence with the released card and return `payment_instrument_mismatch`, but it must never mutate, cancel, or add an approval gate to the challenge. `PendingThreeDsWait` preserves the first mismatch across `operate_payment_status` polls of the same live browser. See `"warns when a top-level token-override ACS names another issuer"` in `browser-payment.test.ts` and `"keeps an ACS instrument-mismatch warning visible across 3DS status waits"` in `operate-session-flow.test.ts`.
 
-Post-submit outcome tracking remains resumable for 20 minutes without becoming a second authorization or charge path. `PendingThreeDsWait.outcome` must stay `unknown` until concrete 3DS evidence appears; neither timeout nor missing merchant confirmation may relabel uncertainty as 3DS. While `pendingThreeDs` exists, new `operate_pay` calls and guarded `operate_act` charge clicks are refused; session close performs one final live check and audit before clearing it. A charge click issued through `operate_act` during `operate_pay`'s own in-progress outcome wait is still governed by the existing `activePayment: "operating"` lease rather than `pendingThreeDs`.
+Post-submit outcome tracking remains resumable for 20 minutes without becoming a second authorization or charge path. `PendingThreeDsWait.outcome` must stay `unknown` until concrete 3DS evidence appears; neither timeout nor missing merchant confirmation may relabel uncertainty as 3DS. While `pendingThreeDs` exists, new `operate_pay` calls and guarded `operate_click` charge clicks are refused; session close performs one final live check and audit before clearing it. A charge click issued through `operate_click` during `operate_pay`'s own in-progress outcome wait is still governed by the existing `activePayment: "operating"` lease rather than `pendingThreeDs`.
 
 ### 12. An operator browser is session-scoped: never remove its watchdog or containment
 
@@ -448,7 +448,7 @@ containment follow-up is `ts-operator-browser-cgroup-containment` in `TODOS.md`.
 
 ### 13. OAuth identity uses the real profile and a narrow lease
 
-Every `oauth_login` and legacy `oauth_click` stays in the single real
+Every OAuth action routed through `operate_login` stays in the single real
 `CHROME_PROFILE_DIR` browser context. The serialized boundary preserves the
 authorized target and delegates to `loginWithOAuth`; never copy cookies, restore
 storage state, swap browsers, or add a parallel OAuth driver.
@@ -496,8 +496,8 @@ see CLAUDE.md's "Operator session model" for what may not be reordered.
 
 Owner's order (2026-09-05, stated three times, after twice declining an offered
 card-number carve-out): **remove ALL seals.** `operate_observe`,
-`operate_observe_query`, `operate_screenshot`, and `operate_act { kind:
-"extract" }` return what the page actually renders. There is no mask pass, no
+`operate_screenshot`, and `operate_extract` return what the page actually
+renders. There is no mask pass, no
 `screenshot_unavailable_sealed_context` (the code no longer exists), no
 observation value/label masking, no compact-v2 tool-result seal, and no
 "the secret is still masked/hidden" extract refusal.
@@ -803,6 +803,11 @@ developer's real state. The test suite enforces this through
 `vitest.shared.ts`; preserve that setup and do not resolve the default session
 or profile path from a test. The session-storage compatibility contract lives
 in `apps/mcp/src/session.ts`.
+
+## Operator tool surface
+
+The public operator contract and capability migration are owned by
+[`docs/operator-tool-surface.md`](docs/operator-tool-surface.md).
 
 ## Maintaining this file
 

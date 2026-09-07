@@ -53,7 +53,7 @@ so it cannot run on an arbitrary page. It is useless for masking on read.
 Two write-side guards. Both already exist. Neither has ever blocked a read.
 
 1. **The model never authors a card number.** `operate_pay` fills it from the
-   vault. `operate_act` refuses model-supplied card-shaped text.
+   vault. `operate_type` refuses model-supplied card-shaped text.
 2. **The vault is the boundary.** Secrets kept in it are injected server-side
    via `use_credential` and egress grants. The model uses them without seeing
    them.

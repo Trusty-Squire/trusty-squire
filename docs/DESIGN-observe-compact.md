@@ -4,7 +4,7 @@
 
 Before compact observations shipped, every `operate_*` turn returned a full
 perception payload from `observeSession` (provision-session.ts). It was 30–50 KB
-per turn, and `operate_act` re-emitted it after *every* action — so a single
+per turn, and every action response re-emitted it — so a single
 form-fill flow spent hundreds of KB of host context on mostly repeated
 perception.
 
@@ -36,8 +36,8 @@ Inside `elements`:
 3. `container` is 100% redundant with `path` (`path` = `<container> > <kind>:<label>`).
 4. In legacy V1, the planner normally drives off `text` (read state) + the
    element inventory (pick `ref`). If a visible clickable or typeable control has no inventory
-   row, `operate_act` has a live `text=…`/`css=…` fallback for `click`,
-   `js_click`, `type`, and `type_secret`. The `screen` region-tree and
+   row, `operate_click` and `operate_type` have a live `text=…`/`css=…`
+   fallback. The `screen` region-tree and
    `accessibility` flat-tree are not needed to choose an action.
    `occluded_by`/`topmost`/`href` ARE load-bearing — keep them (per-element).
 
@@ -59,8 +59,8 @@ detail:  none  <  compact  <  full
          ack       default     rich V1 (compact + screen + accessibility + raw fields)
 ```
 
-`operate_observe({ detail })` accepts `compact|full`; `operate_act({ detail })`
-also accepts `none` (a bare ack). Default everywhere is **compact**. In V1, a
+`operate_observe({ detail })` accepts `compact|full`. Flat action verbs return
+their normal action result; there is no public action-detail union. In V1, a
 genuinely ambiguous step can escalate to `detail:"full"` for that one call. In
 V2, ambiguity is resolved through its paging/query protocol instead of
 restoring legacy fields.
@@ -84,7 +84,7 @@ results are otherwise the page's own copy, card material and rendered API keys
 included.
 `text` carries only the bounded, budget-degraded screened prose channel (rows
 pack first); rows carry no field values purely as a payload SIZE budget — read
-a value with `operate_screenshot`, `operate_act { kind: "extract" }`, or a V1
+a value with `operate_screenshot`, `operate_extract`, or a V1
 session. The audit trail and the
 registry-bound recipe trace keep the closed-vocabulary screen
 (`recordableTokenV2`), because neither is a read by the agent. V2 does not add a payment
@@ -107,8 +107,9 @@ The public observation contains:
   code-owned fields. `overflow.next_cursor` pages the remaining action map
   through the MCP, never through a persisted snapshot file.
 
-`operate_observe_query` performs named-control lookup privately against the live
-browser. The query, optional role filter, and HMAC-bound cursor stay inside the
+`operate_observe` performs named-control lookup privately against the live
+browser when given `query`, `role`, or `cursor`. The query, optional role filter,
+and HMAC-bound cursor stay inside the
 session; results remain screened `safe_table` tuples. An empty query consumes an
 `overflow.next_cursor`, and also consumes `hint_overflow.next_cursor` when the
 trusted start hint spans more than one page. Map cursors (the default
@@ -197,10 +198,8 @@ re-minted 0.00% of refs.
 
 - In V1, `operate_observe({ detail: "compact" | "full" })` — `full` restores the
   legacy screen+accessibility+raw-field payload for an ambiguous step.
-- In V1, `operate_act({ detail: "none" | "compact" | "full" })` — `none` returns a
-  minimal ack (action ran; no page dump) so chained fills don't each echo the
-  page (call `operate_observe` before the next ref-targeted act). Same vocabulary
-  as `operate_observe`, plus the bottom rung.
+- In V1, actions return their normal result. Call `operate_observe` before the
+  next ref-targeted action when the state changed.
 
 deferred (Phase 2.5, only if evidence demands): an `include` partial-escalation
 (re-add just one heavy view) was considered and dropped — it breaks the linear
@@ -218,7 +217,7 @@ V1 compact observations minimize repeated context without making the stream loss
   with distinct stable selectors get distinct refs and identical selectors in
   different documents cannot collide. After one is removed, its old ref resolves
   to `null` instead of retargeting its sibling or another frame. Public
-  `operate_act` calls translate that miss into `target_stale`, carrying the last
+  flat action calls translate that miss into `target_stale`, carrying the last
   completed observation generation, `reobserve_required: true`, best-effort
   semantic-label-keyed replacement candidates, and
   `retry_policy: "do_not_retry_old_ref"`. The candidates are hints rather than a

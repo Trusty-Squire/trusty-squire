@@ -15,13 +15,9 @@ import {
   captureScreenshot,
   observeQuery,
   act,
-  cartAdd,
-  cartClear,
   formSelectMany,
   TargetStaleError,
   extractCredentials,
-  captchaGate,
-  awaitVerification,
   finishProvisionSession,
   finishProvisionSessionWithPreparation,
   observedHostsForSession,
@@ -40,6 +36,8 @@ import {
   type ProvisionAction,
   type ExtractResult,
   manualCardEntryBlockReason,
+  hostAllowed,
+  validateAllowHost,
 } from "../bot/provision-session.js";
 import { signSkillForPublish } from "../skill-cli/signing.js";
 import {
@@ -55,7 +53,6 @@ import {
   isCheckoutShapeKey,
   isSameRecipeDomain,
   OperatorVerbSchema,
-  RecipeHoleSchema,
   PostconditionSchema,
   type OperatorVerb,
   type OperatorRecipe,
@@ -65,6 +62,8 @@ import { renderSkillHint, serviceSlugFromUrl } from "../bot/skill-hint.js";
 import { clientFromEnv, generateProvisionId } from "../skill-registry-client.js";
 import { openSessionStorage } from "../session.js";
 import { servingAccountId } from "../session-guard.js";
+import { sessionForCall } from "../bot/session/lifecycle.js";
+import { clickDispatchStatusForError } from "../bot/browser.js";
 
 // Read the install-time inbox-read preference. Inbox reads default on; an
 // explicit false in the saved advanced configuration remains an opt-out.
@@ -118,7 +117,7 @@ async function resolveRouteHint(serviceUrl: string): Promise<string | undefined>
 // Verified success → synthesize the run into a pending-review skill and publish
 // it so the next provision of this service gets a hint. The registry gates
 // activation on the verifier replay, so this upload is best-effort: every
-// outcome is recorded in the finish_task result trail, nothing is thrown.
+// outcome is recorded in the operate_finish result trail, nothing is thrown.
 async function autoPromoteProvision(sessionId: string): Promise<string> {
   try {
     const promoted = await captureAndPromoteSession(sessionId);
@@ -348,9 +347,9 @@ const OBSERVE_DELTA_CONTRACT =
   "with path). An empty delta (no el_table) means nothing changed, not an empty page. " +
   'In V1, detail:"full" instead returns the legacy `elements` JSON array (every field), never el_table. ' +
   "If a control you can see in `text`/the screenshot has NO row in el_table (a bare unlabeled clickable " +
-  'div — e.g. some SPA "Add To Cart" buttons), it has no ref: click it with operate_act click/js_click ' +
-  'target=`text="…"` or `css=…` (see operate_act). `click` respects actionability and throws if an overlay ' +
-  "intercepts; dismiss the overlay or deliberately use `js_click`, which directly dispatches through a " +
+  'div — e.g. some SPA "Add To Cart" buttons), it has no ref: click it with operate_click ' +
+  'ref=`text="…"` or `css=…` (see operate_click). `click` respects actionability and throws if an overlay ' +
+  "intercepts; dismiss the overlay; operate_click may internally dispatch through a " +
   "transparent overlay. Under default compact-v2, only refs and @labels from the current action map are " +
   "accepted. A ref is a durable element fingerprint: it stays valid across acts and benign re-renders on the same " +
   "document, so one observation can drive several acts. On opaque `stale_ref`, call operate_observe and choose a " +
@@ -361,7 +360,7 @@ const COMPACT_V2_CONTRACT =
   "semantic carries the page title and primary visible heading; safe_table rows use [ref,role,facts?], where role is " +
   "b=button,l=link,t=textbox,s=select,c=checkbox,r=radio,tb=tab,m=menuitem,f=file. ref is an opaque durable " +
   "element handle. facts is a pipe-delimited string: an optional first unkeyed segment is the row's @label alias, " +
-  "a slug of its short label that operate_act also accepts as a target. " +
+  "a slug of its short label accepted by the acting verbs as ref. " +
   "The label is followed by any present s=<state bitset>, a=<action>, " +
   "f=<field>, q=<choice position>/<choice total>, and x=<frame> segments. Fact-only rows begin with a keyed segment. " +
   "State bitset codes are c=checked,u=unchecked,d=disabled,r=required; frame codes are x=s for a same-origin child " +
@@ -371,7 +370,7 @@ const COMPACT_V2_CONTRACT =
   "labels are exactly what the page renders. The row form omits field " +
   "values purely as a size budget: read a value off the page with operate_screenshot, or with an explicitly " +
   "selected V1 session. For a named product/control from the task, " +
-  "call operate_observe_query with those task words; it returns matching actionable refs with labels " +
+  "call operate_observe with query set to those task words; it returns matching actionable refs with labels " +
   "and code-owned facts. Use overflow.next_cursor to page. `detail:full` keeps the V2 format while V2 is enabled; " +
   "set TRUSTY_SQUIRE_OBSERVE_V2=off for the legacy format. A delta:true delta retains the preceding V2 table, then upserts tuple rows in safe_table, " +
   "removes refs in removed, and updates stage or semantic only when either changed. Omitted semantic title/heading remains from the preceding V2 page. " +
@@ -386,8 +385,8 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
     COMPACT_V2_CONTRACT +
     OBSERVE_DELTA_CONTRACT +
     "YOU are the planner — read the observation, then drive the signup, setup, or " +
-    "checkout with operate_act (and operate_pay for a purchase), re-read with " +
-    'operate_observe, and call operate_act { kind: "extract" } ' +
+    "checkout with operate_click, operate_type, operate_select, operate_navigate, operate_scroll, and operate_login (operate_pay for a purchase), re-read with " +
+    "operate_observe, and call operate_extract " +
     "when you reach the credentials. Always operate_finish when done. The " +
     "browser is domain-scoped to the target + its identity providers. If the " +
     "registry knows this service, the first observation includes a `hint` — the " +
@@ -426,6 +425,11 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
 
 const observeSchema = z.object({
   session_id: z.string().min(1),
+  query: z.string().max(160).optional(),
+  cursor: z.string().max(1024).optional(),
+  role: z
+    .enum(["button", "link", "textbox", "select", "checkbox", "radio", "tab", "menuitem", "file"])
+    .optional(),
   // Payload verbosity within the selected observation mode. In V2 both values
   // return the compact action map; in V1, full requests the legacy expanded payload.
   detail: z.enum(["compact", "full"]).optional(),
@@ -434,7 +438,7 @@ const observeSchema = z.object({
 export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
   name: "operate_observe",
   description:
-    "Re-read the current page of an operate session. The default compact-v2 mode returns the compact " +
+    "Re-read the current page of an operate session. Supply query to find controls or cursor to page overflow. The default compact-v2 mode returns the compact " +
     'safe_table action map; `detail:"full"` stays in that format and does not restore legacy fields. ' +
     COMPACT_V2_CONTRACT +
     "Only explicitly selected V1 modes use el_table, reusable stable refs, locator fallbacks, snapshot_file, " +
@@ -447,10 +451,29 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
     required: ["session_id"],
     properties: {
       session_id: { type: "string" },
+      query: { type: "string" },
+      cursor: { type: "string" },
+      role: {
+        type: "string",
+        enum: [
+          "button",
+          "link",
+          "textbox",
+          "select",
+          "checkbox",
+          "radio",
+          "tab",
+          "menuitem",
+          "file",
+        ],
+      },
       detail: { type: "string", enum: ["compact", "full"] },
     },
   },
   async handler(args) {
+    if (args.query !== undefined || args.cursor !== undefined || args.role !== undefined) {
+      return await observeQuery(args.session_id, args.query ?? "", args.role, args.cursor);
+    }
     return await observe(args.session_id, args.detail ?? "compact");
   },
 };
@@ -476,7 +499,7 @@ export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
   description:
     "WARNING: EXPENSIVE — a screenshot is a full image and costs far more context than any " +
     "observation. Reach for it ONLY when the DOM serialization (Compact V2 safe_table, " +
-    "operate_observe, operate_observe_query) is NOT sufficient to determine the page state; " +
+    "operate_observe with query/cursor) is NOT sufficient to determine the page state; " +
     "if the tables already tell you what the page is doing, do not take one. " +
     "Debugging tool: capture a screenshot of what the operate session's browser actually RENDERS — " +
     "the whole page (default: viewport; full_page:true for the whole scrollable page) or ONE specific " +
@@ -509,55 +532,7 @@ export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
   },
 };
 
-const observeQuerySchema = z.object({
-  session_id: z.string().min(1),
-  // This string is matched only inside the live session; returned rows remain
-  // the compact-v2 enum-only action map.
-  query: z.string().max(160).default(""),
-  role: z
-    .enum(["button", "link", "textbox", "select", "checkbox", "radio", "tab", "menuitem", "file"])
-    .optional(),
-  cursor: z.string().max(1_024).optional(),
-});
-
-export const provisionObserveQueryTool: Tool<z.infer<typeof observeQuerySchema>> = {
-  name: "operate_observe_query",
-  description:
-    "Page compact-v2 overflow or named-control lookup. Supply the product/control words already in the task; " +
-    "matching happens only inside the live browser and returns actionable opaque refs plus finite role/state/action " +
-    "enums. Use overflow.next_cursor to page controls, or hint_overflow.next_cursor with an empty query to page " +
-    "trusted start routing metadata; never read a snapshot file.",
-  inputSchema: observeQuerySchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id"],
-    properties: {
-      session_id: { type: "string" },
-      query: { type: "string" },
-      role: {
-        type: "string",
-        enum: [
-          "button",
-          "link",
-          "textbox",
-          "select",
-          "checkbox",
-          "radio",
-          "tab",
-          "menuitem",
-          "file",
-        ],
-      },
-      cursor: { type: "string" },
-    },
-  },
-  async handler(args) {
-    return await observeQuery(args.session_id, args.query, args.role, args.cursor);
-  },
-};
-
-// Shared credential destination shape. Both operate_act(kind:"extract") and
-// the legacy operate_extract alias validate and execute this exact contract.
+// Shared credential destination shape for extraction and completion.
 // The credentials terminal also reuses it below.
 const storeShape = z.object({
   service: z.string().min(1).max(120),
@@ -594,550 +569,11 @@ const formSelectionsSchema = z
     "Map each current Compact V2 @e: ref or @label, or V1 observed label/ref, to its visible option text.",
   );
 
-interface CartAddArgs {
-  session_id: string;
-  product_identity: string;
-  options_hash: string;
-  idempotency_key: string;
-}
-
-interface CartClearArgs {
-  session_id: string;
-}
-
-interface FormSelectManyArgs {
-  session_id: string;
-  selections: Record<string, string>;
-}
-
 interface ExtractArgs {
   session_id: string;
   into_slot?: string | undefined;
   secret_label?: string | undefined;
   store?: StoreSpec | undefined;
-}
-
-interface CaptchaArgs {
-  session_id: string;
-}
-
-interface AwaitVerificationArgs {
-  session_id: string;
-  sender?: string | undefined;
-  into_slot?: string | undefined;
-  grant_inbox_consent?: boolean | undefined;
-}
-
-interface LoginPrepareSignupArgs {
-  session_id: string;
-  login_slot?: string | undefined;
-  password_slot?: string | undefined;
-  password_length?: number | undefined;
-}
-
-interface LoginStoreSignupArgs {
-  session_id: string;
-  service: string;
-  login_slot?: string | undefined;
-  password_slot?: string | undefined;
-  label?: string | undefined;
-  signin_url?: string | undefined;
-  login_hosts: string[];
-}
-
-interface LoginLoadSavedArgs {
-  session_id: string;
-  reference?: string | undefined;
-  service?: string | undefined;
-  fields: string[];
-  slot_prefix: string;
-}
-
-const actSchema = z
-  .object({
-    session_id: z.string().min(1),
-    kind: z.enum([
-      "click",
-      "js_click",
-      "type",
-      "select",
-      "set_phone_country",
-      "goto",
-      "press",
-      "oauth_login",
-      "oauth_click",
-      "oauth_settle",
-      "allow_host",
-      "type_secret",
-      "scroll",
-      "upload",
-      "cart_add",
-      "cart_clear",
-      "select_many",
-      "extract",
-      "solve_captcha",
-      "await_verification",
-      "login_prepare_signup",
-      "login_store_signup",
-      "login_load_saved",
-    ]),
-    target: z.string().min(1).max(200).optional(),
-    text: z.string().max(4096).optional(),
-    // set_phone_country supports phone-local native country <select> controls.
-    country: z.string().min(1).max(60).optional(),
-    // upload: absolute path to a LOCAL file to attach to `target` (the upload
-    // button/menu-item, or the file <input>).
-    path: z.string().min(1).max(4096).optional(),
-    url: z.string().url().optional(),
-    key: z.string().min(1).max(40).optional(),
-    provider: z.enum(["google", "github"]).optional(),
-    // allow_host: a bare hostname to cross into mid-session.
-    host: z.string().min(1).max(253).optional(),
-    // type_secret: the sealed slot whose value to type into `target`.
-    slot: z.string().min(1).max(60).optional(),
-    product_identity: z.string().trim().min(1).max(500).optional(),
-    options_hash: z.string().trim().min(1).max(128).optional(),
-    idempotency_key: z.string().trim().min(1).max(256).optional(),
-    selections: formSelectionsSchema.optional(),
-    into_slot: z.string().min(1).max(60).optional(),
-    secret_label: z.string().min(1).max(60).optional(),
-    store: storeShape.optional(),
-    sender: z.string().min(1).max(120).optional(),
-    grant_inbox_consent: z.boolean().optional(),
-    // login_prepare_signup / login_store_signup: sealed username/password
-    // signup slots (never raw values).
-    login_slot: z.string().min(1).max(60).optional(),
-    password_slot: z.string().min(1).max(60).optional(),
-    password_length: z.number().int().min(16).max(64).optional(),
-    // login_store_signup: vault the prepared signup as a username_password
-    // credential. login_load_saved: fetch an existing one instead.
-    service: z.string().min(1).max(120).optional(),
-    label: z.string().min(1).max(120).optional(),
-    signin_url: z.string().url().optional(),
-    login_hosts: z.array(z.string().min(1).max(253)).min(1).max(20).optional(),
-    // login_load_saved: which saved credential + which fields to seal.
-    reference: z.string().min(1).max(400).optional(),
-    fields: z.array(z.string().min(1).max(120)).min(1).max(20).optional(),
-    slot_prefix: z.string().min(1).max(60).optional(),
-    provenance: RecipeHoleSchema.shape.hole.optional(),
-    replay_step_index: z.number().int().min(0).optional(),
-    replay_hole: RecipeHoleSchema.shape.hole.optional(),
-    // scroll: which way to move the viewport (default "down").
-    direction: z.enum(["down", "up", "bottom", "top"]).optional(),
-    // How much perception to return AFTER the action (the same ladder as
-    // operate_observe, plus "none"). "none" = a minimal ack (action ran; no page
-    // dump) for chained fills — call operate_observe before the next ref-targeted
-    // act. "full" = the legacy payload. Default "compact".
-    detail: z.enum(["none", "compact", "full"]).optional(),
-  })
-  .superRefine((value, ctx) => {
-    if ((value.product_identity === undefined) !== (value.options_hash === undefined)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "product_identity and options_hash must be provided together",
-      });
-    }
-    const requiredByKind: Record<string, readonly string[]> = {
-      click: ["target"],
-      js_click: ["target"],
-      type: ["target"],
-      oauth_login: ["target"],
-      oauth_click: ["target"],
-      select: ["target", "text"],
-      set_phone_country: ["country"],
-      goto: ["url"],
-      press: ["key"],
-      allow_host: ["host"],
-      type_secret: ["slot", "target"],
-      upload: ["target", "path"],
-      cart_add: ["product_identity", "options_hash", "idempotency_key"],
-    };
-    const actionValue = value as Record<string, unknown>;
-    for (const field of requiredByKind[value.kind] ?? []) {
-      const supplied = actionValue[field];
-      if (typeof supplied !== "string" || supplied.trim().length === 0) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [field],
-          message: `Required for kind="${value.kind}"`,
-        });
-      }
-    }
-    if (value.kind === "select_many" && value.selections === undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["selections"],
-        message: 'Required for kind="select_many"',
-      });
-    }
-    if (value.kind === "login_store_signup") {
-      if (value.service === undefined) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["service"],
-          message: 'Required for kind="login_store_signup"',
-        });
-      }
-      if (value.login_hosts === undefined) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["login_hosts"],
-          message: 'Required for kind="login_store_signup"',
-        });
-      }
-    }
-    if (
-      value.kind === "login_load_saved" &&
-      value.reference === undefined &&
-      value.service === undefined
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["reference"],
-        message: 'kind="login_load_saved" requires one of reference or service',
-      });
-    }
-    if ((value.replay_step_index === undefined) !== (value.replay_hole === undefined)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "replay_step_index and replay_hole must be provided together",
-      });
-    }
-    if (
-      value.replay_hole !== undefined &&
-      value.provenance !== undefined &&
-      value.replay_hole !== value.provenance
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "replay_hole and provenance must identify the same source",
-      });
-    }
-    if (
-      value.replay_step_index !== undefined &&
-      value.kind !== "type" &&
-      value.kind !== "select" &&
-      value.kind !== "set_phone_country"
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "replay repair binding requires a value action",
-      });
-    }
-    const provenance = value.provenance ?? value.replay_hole;
-    if (provenance === undefined) return;
-    if (
-      value.kind !== "type" &&
-      value.kind !== "select" &&
-      value.kind !== "set_phone_country" &&
-      value.kind !== "type_secret"
-    ) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "provenance requires a value action" });
-    } else if (value.kind === "type_secret" && !/^credential(?:\.|$)/.test(provenance)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "type_secret provenance must be credential",
-      });
-    } else if (value.kind !== "type_secret" && /^(?:credential|card)(?:\.|$)/.test(provenance)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "credential/card provenance requires type_secret or operate_pay",
-      });
-    }
-  });
-
-const ACTION_KINDS = [
-  "click",
-  "js_click",
-  "type",
-  "select",
-  "set_phone_country",
-  "goto",
-  "press",
-  "oauth_login",
-  "oauth_click",
-  "oauth_settle",
-  "allow_host",
-  "type_secret",
-  "scroll",
-  "upload",
-  "cart_add",
-  "cart_clear",
-  "select_many",
-  "extract",
-  "solve_captcha",
-  "await_verification",
-  "login_prepare_signup",
-  "login_store_signup",
-  "login_load_saved",
-] as const;
-
-type ActionKind = (typeof ACTION_KINDS)[number];
-
-interface ActionRepair {
-  example: Record<string, unknown>;
-  safe_alternative: string;
-}
-
-const manualCardRecovery = " Never enter card values with operate_act; use operate_pay.";
-
-const ACTION_REPAIR_BY_KIND: Partial<Record<ActionKind, ActionRepair>> = {
-  cart_add: {
-    example: {
-      session_id: "<session_id>",
-      kind: "cart_add",
-      product_identity: "<canonical-product-identity>",
-      options_hash: "<selected-options-hash>",
-      idempotency_key: "<stable-idempotency-key>",
-    },
-    safe_alternative:
-      "Retry cart_add with the same stable idempotency_key for the same product_identity and options_hash. Do not replace it with click: cart_add reserves the mutation and exact-line post-verifies the cart." +
-      manualCardRecovery,
-  },
-  cart_clear: {
-    example: {
-      session_id: "<session_id>",
-      kind: "cart_clear",
-    },
-    safe_alternative:
-      "Retry cart_clear with only session_id — it empties the cart so a following cart_add reaches a known quantity, regardless of what accumulated in the persistent browser profile's cart across earlier sessions." +
-      manualCardRecovery,
-  },
-  select_many: {
-    example: {
-      session_id: "<session_id>",
-      kind: "select_many",
-      selections: { "@e:<current-handle>": "Visible option label" },
-    },
-    safe_alternative:
-      "Retry select_many with selections in the intended order. Compact V2 requires current @e: handles; V1 accepts observed labels or refs. It selects sequentially, re-observes after each success, and returns partial results; do not replace it with parallel select calls." +
-      manualCardRecovery,
-  },
-  extract: {
-    example: {
-      session_id: "<session_id>",
-      kind: "extract",
-      into_slot: "sealed_secret",
-      secret_label: "API key",
-    },
-    safe_alternative:
-      "Retry extract after navigating to the credential page. Use into_slot with optional secret_label to hold a value in a session slot for a later type_secret, or store with a service to vault it; never put credential values in arguments." +
-      manualCardRecovery,
-  },
-  solve_captcha: {
-    example: {
-      session_id: "<session_id>",
-      kind: "solve_captcha",
-    },
-    safe_alternative:
-      "Retry solve_captcha so the dedicated solver handles the gate. If it returns needs_user, relay the exact remedy and stop driving; do not bypass the gate or keep churning." +
-      manualCardRecovery,
-  },
-  await_verification: {
-    example: {
-      session_id: "<session_id>",
-      kind: "await_verification",
-      sender: "service.example",
-      into_slot: "otp",
-      grant_inbox_consent: true,
-    },
-    safe_alternative:
-      "Retry await_verification with sender scoped to the service and prefer into_slot so the OTP stays sealed. Inbox reading is on by default; pass grant_inbox_consent:false to opt out for this session." +
-      manualCardRecovery,
-  },
-  login_prepare_signup: {
-    example: {
-      session_id: "<session_id>",
-      kind: "login_prepare_signup",
-    },
-    safe_alternative:
-      "Retry login_prepare_signup to seal the user's captured email and a generated password into session slots, then fill the signup form with type_secret using the returned login/password slots." +
-      manualCardRecovery,
-  },
-  login_store_signup: {
-    example: {
-      session_id: "<session_id>",
-      kind: "login_store_signup",
-      service: "<service-name>",
-      login_hosts: ["service.example"],
-    },
-    safe_alternative:
-      "Retry login_store_signup with service and login_hosts (the hosts where this login may be filled) after the account is created — it vaults the prepared login_prepare_signup slots server-side." +
-      manualCardRecovery,
-  },
-  login_load_saved: {
-    example: {
-      session_id: "<session_id>",
-      kind: "login_load_saved",
-      service: "<service-name>",
-    },
-    safe_alternative:
-      "Retry login_load_saved with reference or service to fetch an allowed saved login and seal its fields into session slots, then fill with type_secret." +
-      manualCardRecovery,
-  },
-};
-
-function actionSchemaRepair(args: unknown, issues: readonly { path: (string | number)[] }[]) {
-  const input = args !== null && typeof args === "object" ? (args as Record<string, unknown>) : {};
-  const kind =
-    typeof input.kind === "string" && ACTION_KINDS.includes(input.kind as ActionKind)
-      ? (input.kind as ActionKind)
-      : undefined;
-  const missing = [
-    ...new Set(
-      issues
-        .map((issue) => issue.path[0])
-        .filter((field): field is string => typeof field === "string"),
-    ),
-  ];
-  const kindRepair = kind === undefined ? undefined : ACTION_REPAIR_BY_KIND[kind];
-  const example =
-    kindRepair !== undefined
-      ? kindRepair.example
-      : kind === "oauth_login"
-        ? {
-            session_id: "<session_id>",
-            kind: "oauth_login",
-            target: "@e:<observed-provider-button-ref>",
-          }
-        : kind === "type_secret"
-          ? {
-              session_id: "<session_id>",
-              kind: "type_secret",
-              slot: "sealed_secret",
-              target: "@e:<observed-ref>",
-            }
-          : kind === "select"
-            ? {
-                session_id: "<session_id>",
-                kind: "select",
-                target: "@e:<observed-ref>",
-                text: "Option label",
-              }
-            : {
-                session_id: "<session_id>",
-                kind: "type",
-                target: "@e:<observed-ref>",
-                text: "Text to enter",
-              };
-  const safe_alternative =
-    kindRepair !== undefined
-      ? kindRepair.safe_alternative
-      : kind === "type_secret" && missing.includes("slot")
-        ? 'First capture the value with operate_act { kind: "extract", into_slot: "sealed_secret" }, then retry with that slot and a ref from operate_observe. Never enter card values with operate_act; use operate_pay.'
-        : 'Use kind "type" for text fields or "select" for options, and take target refs from operate_observe. Never enter card values with operate_act; use operate_pay.';
-  return {
-    error: "invalid_action_arguments",
-    ...(typeof input.kind === "string" ? { supplied_kind: input.kind } : {}),
-    allowed_kinds: ACTION_KINDS,
-    missing,
-    example,
-    safe_alternative,
-  };
-}
-
-function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
-  const need = (v: string | undefined, name: string): string => {
-    if (v === undefined || v.length === 0) {
-      throw new Error(`operate_act kind="${args.kind}" requires "${name}"`);
-    }
-    return v;
-  };
-  const replayRepair =
-    args.replay_step_index !== undefined && args.replay_hole !== undefined
-      ? { replayRepair: { stepIndex: args.replay_step_index, hole: args.replay_hole } }
-      : {};
-  const provenance = args.provenance ?? args.replay_hole;
-  switch (args.kind) {
-    case "click":
-      return { kind: "click", target: need(args.target, "target") };
-    case "js_click":
-      return { kind: "js_click", target: need(args.target, "target") };
-    case "oauth_click":
-      return {
-        kind: "oauth_click",
-        target: need(args.target, "target"),
-        ...(args.provider === undefined ? {} : { provider: args.provider }),
-      };
-    case "oauth_login":
-      return {
-        kind: "oauth_login",
-        target: need(args.target, "target"),
-        ...(args.provider === undefined ? {} : { provider: args.provider }),
-      };
-    case "type":
-      return {
-        kind: "type",
-        target: need(args.target, "target"),
-        text: args.text ?? "",
-        ...(provenance !== undefined ? { provenance: { hole: provenance } } : {}),
-        ...replayRepair,
-      };
-    case "select":
-      return {
-        kind: "select",
-        target: need(args.target, "target"),
-        text: need(args.text, "text"),
-        ...(provenance !== undefined ? { provenance: { hole: provenance } } : {}),
-        ...replayRepair,
-      };
-    case "set_phone_country":
-      return {
-        kind: "set_phone_country",
-        country: need(args.country, "country"),
-        ...(provenance !== undefined ? { provenance: { hole: provenance } } : {}),
-        ...replayRepair,
-      };
-    case "goto":
-      return { kind: "goto", url: need(args.url, "url") };
-    case "press":
-      return { kind: "press", key: need(args.key, "key") };
-    case "oauth_settle":
-      return { kind: "oauth_settle" };
-    case "allow_host":
-      return { kind: "allow_host", host: need(args.host, "host") };
-    case "type_secret":
-      return {
-        kind: "type_secret",
-        slot: need(args.slot, "slot"),
-        target: need(args.target, "target"),
-        ...(args.provenance !== undefined ? { provenance: { hole: args.provenance } } : {}),
-      };
-    case "scroll":
-      return {
-        kind: "scroll",
-        ...(args.direction !== undefined ? { direction: args.direction } : {}),
-      };
-    case "upload":
-      return { kind: "upload", target: need(args.target, "target"), path: need(args.path, "path") };
-    case "cart_add":
-    case "cart_clear":
-    case "select_many":
-    case "extract":
-    case "solve_captcha":
-    case "await_verification":
-    case "login_prepare_signup":
-    case "login_store_signup":
-    case "login_load_saved":
-      throw new Error(`operate_act kind="${args.kind}" must use its delegated handler`);
-  }
-}
-
-async function handleCartAdd(args: CartAddArgs) {
-  return await cartAdd(
-    args.session_id,
-    args.product_identity,
-    args.options_hash,
-    args.idempotency_key,
-  );
-}
-
-async function handleCartClear(args: CartClearArgs) {
-  return await cartClear(args.session_id);
-}
-
-async function handleFormSelectMany(args: FormSelectManyArgs) {
-  return await formSelectMany(args.session_id, args.selections);
 }
 
 async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
@@ -1174,7 +610,7 @@ async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
         slot: null,
         blocked_reason:
           "no credential value was found on this page — navigate to the keys/settings " +
-          'page, then operate_act { kind: "extract" } again',
+          "page, then operate_extract again",
       };
     }
     const handle = stashSecretSlot(args.session_id, args.into_slot, full);
@@ -1191,342 +627,11 @@ async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
     return extracted;
   }
   if (api === null) {
-    throw new Error(
-      'operate_act { kind: "extract" } store requires an active Trusty Squire session',
-    );
+    throw new Error("operate_extract store requires an active Trusty Squire session");
   }
   const stored = await persistExtracted(args.session_id, extracted.credentials, args.store, api);
   return storedExtractResult(extracted, stored);
 }
-
-async function handleCaptcha(args: CaptchaArgs) {
-  return await captchaGate(args.session_id);
-}
-
-async function handleAwaitVerification(args: AwaitVerificationArgs) {
-  return await awaitVerification(args.session_id, {
-    ...(args.sender !== undefined ? { sender: args.sender } : {}),
-    ...(args.into_slot !== undefined ? { intoSlot: args.into_slot } : {}),
-    ...(args.grant_inbox_consent !== undefined ? { grantConsent: args.grant_inbox_consent } : {}),
-  });
-}
-
-export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
-  name: "operate_act",
-  description:
-    "Take one action in an operate session. Under compact-v2 the default follow-up is a compact delta " +
-    "when its action map is unchanged; call operate_observe or operate_observe_query when you need a new map. " +
-    "kinds: click (target=element ref, preferably a safe_table row's ref), " +
-    "type (target + text; model-supplied card-number-shaped text is refused — card payment " +
-    "must use operate_pay, which fills a vaulted card without exposing it to the model), " +
-    "" +
-    "V1-ONLY TARGET FALLBACK (clicking or typing only) — when a control you can SEE (in the " +
-    "V1 observation text or screenshot) has NO ref in el_table (a bare click-handler " +
-    '<div> with no role/label, e.g. a SPA "Add To Cart"), pass target as a locator ' +
-    'instead of a ref: `text="Add To Cart"` (a matching clickable or typeable ' +
-    "element, case-insensitive, hidden descendants ignored, open shadow roots " +
-    "pierced) or `css=<selector>` (a raw CSS selector). Only for click / js_click / " +
-    "type / type_secret. Resolved against the LIVE main document and ordinary " +
-    "child frames, not el_table, so it reaches controls the inventory never emitted. It " +
-    "refuses an ambiguous match (returns the candidate texts — narrow with an " +
-    "exact text= or a css= selector). `click` is actionability-checked and throws " +
-    "if an overlay intercepts; dismiss the overlay or deliberately use `js_click`, " +
-    "the explicit direct DOM dispatch that fires through a transparent overlay. " +
-    "Prefer a real ref when one exists; reach for text=/css= only when none does. Compact V2 never " +
-    "accepts locator fallback: it requires an opaque handle from the current snapshot/page/generation-" +
-    "scoped action map, with membership as the sole action boundary. " +
-    "Observed child-frame refs and locator matches retain their frame origin. " +
-    "Same-registrable-domain frames are reachable; other frame actions must pass " +
-    "the goto/allow_host domain scope, opaque frames are refused, and type_secret " +
-    "never targets a cross-domain frame. Frame-scoped select supports native " +
-    "<select> controls only; drive a custom framed widget with click. " +
-    "upload/oauth_click/oauth_login refuse frame refs. " +
-    "select (target + text — pick an option in a native <select> or custom listbox " +
-    "by its visible text, e.g. a country/state dropdown that `type` can't drive), " +
-    "set_phone_country (country — set the dial-code country on a phone field's " +
-    "native <select>, including react-phone-number-input's hidden country select; " +
-    "other phone widget families are not yet supported and throw; no target needed), " +
-    "goto (url — domain-scoped), press (key, e.g. Enter), oauth_login (target — " +
-    "the ONLY action for a Login/Continue with provider button: it runs the OAuth " +
-    "popup/redirect atomically, retains the product tab if the provider closes its " +
-    "window, and returns the post-login observation in this call), oauth_click and " +
-    "oauth_settle are legacy replay compatibility actions; do not use them for new " +
-    "operator work, " +
-    "allow_host (host — cross into another app's domain mid-task, e.g. from the " +
-    "GCP console into Firebase), type_secret (slot + target — type a secret you " +
-    'captured into a sealed slot via operate_act { kind: "extract", into_slot: "<slot>" } into a field ' +
-    "on the current site; the value never leaves the browser), scroll (direction " +
-    "down/up/bottom/top, default down — reveal below-the-fold controls on a long " +
-    "form, then operate_observe to pick up the newly-visible elements), " +
-    "upload (target + path — attach a LOCAL file: target is the visible upload " +
-    "button/menu-item (or the file <input>), path is an absolute local file " +
-    "path. The bot sets the file via the browser's file chooser, so no OS dialog " +
-    "is driven and no API credential is needed — it uses the session you're " +
-    "already signed into). " +
-    "cart_add (product_identity + options_hash + idempotency_key — reserve an " +
-    "idempotent cart mutation, exact-line post-verify it, and return its postcondition), " +
-    "cart_clear (no arguments beyond session_id — empty the cart so a following cart_add " +
-    "reaches a KNOWN quantity; the browser profile persists across sessions, so a cart " +
-    "can carry quantity over from an earlier run. Call cart_clear before the first cart_add " +
-    "whenever the cart's starting quantity is not already known to be zero), " +
-    "select_many (ordered selections map — select sequentially, re-observe after " +
-    "each success, and retain partial results; Compact V2 keys are current safe_table @e: refs or @labels, " +
-    "while V1 keys may be observed labels or refs), extract (into_slot/secret_label/store — " +
-    "reveal masked keys and extract credentials from the current page, sealed slot or vaulted), " +
-    "solve_captcha (detect and drive the in-session captcha gate; settled=false carries a " +
-    "needs_user{gate,message,remedy} — FAIL FAST and relay it to the user), " +
-    "await_verification (sender/into_slot/grant_inbox_consent — read the user's OWN inbox " +
-    "through their signed-in browser session for an email verification code/link; pass into_slot " +
-    "to seal the code into a slot and fill it with type_secret instead of handling it yourself). " +
-    "Sealed username/password login lifecycle, never exposing raw " +
-    "values: login_prepare_signup (login_slot/password_slot/password_length — seal the user's " +
-    "captured email and a generated strong password into session slots; fill the signup form " +
-    "with type_secret using the returned slots), login_store_signup (service + login_hosts, " +
-    "optional label/signin_url — after the account is created, vault the prepared signup slots " +
-    "as a username_password credential so the user can sign back in; the signin_url host, if " +
-    "given, is always included in login_hosts), login_load_saved (reference or service, " +
-    "optional fields/slot_prefix — for a sign-in page, fetch a saved username/password " +
-    "credential only if the current browser host is allowed for login, then seal its fields " +
-    "into session slots; fill with type_secret). " +
-    "For type/select/set_phone_country, pass provenance when the value came from a " +
-    "Squire-known address, contact, product_query, or quantity input; type_secret and " +
-    "operate_pay record credential and card provenance from their sealed sources. " +
-    "When repairing a replay fallback field, pass its replay_step_index and replay_hole. " +
-    "Under default compact-v2, target is either an @e: ref from the current action map or the @label alias " +
-    "of exactly one of its rows; a @label matching several rows returns ambiguous_target listing their refs, never " +
-    "a guess. Refs survive acts and benign re-renders on the same document; a real navigation retires them. On " +
-    "opaque `stale_ref`, call operate_observe and choose a new ref; do not retry the old one. " +
-    "In V1, stable target refs remain reusable while their element exists; a stale @e: " +
-    "ref returns {status:target_stale, replacement_candidates, retry_policy:do_not_retry_old_ref}. " +
-    'detail (default "compact") controls the returned payload: "none" skips it ' +
-    "entirely for chained fills (then operate_observe before the next ref action), " +
-    'in V1, "full" returns the legacy screen+accessibility payload. ' +
-    "For legible product/variant hints on a cart-affecting action, pass product_identity and options_hash together; returned checkout_state is best-effort informational state and never a payment charge input. " +
-    OBSERVE_DELTA_CONTRACT,
-  inputSchema: actSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id", "kind"],
-    properties: {
-      session_id: { type: "string" },
-      kind: {
-        type: "string",
-        enum: [
-          "click",
-          "js_click",
-          "type",
-          "select",
-          "set_phone_country",
-          "goto",
-          "press",
-          "oauth_login",
-          "oauth_click",
-          "oauth_settle",
-          "allow_host",
-          "type_secret",
-          "scroll",
-          "upload",
-          "cart_add",
-          "cart_clear",
-          "select_many",
-          "extract",
-          "solve_captcha",
-          "await_verification",
-          "login_prepare_signup",
-          "login_store_signup",
-          "login_load_saved",
-        ],
-      },
-      target: { type: "string" },
-      text: { type: "string" },
-      country: { type: "string" },
-      path: { type: "string" },
-      url: { type: "string" },
-      key: { type: "string" },
-      provider: {
-        type: "string",
-        enum: ["google", "github"],
-        description:
-          "OAuth provider for oauth_login/oauth_click. Declare it for JavaScript-driven controls whose label or destination does not identify the provider.",
-      },
-      host: { type: "string" },
-      slot: { type: "string" },
-      product_identity: { type: "string", minLength: 1 },
-      options_hash: { type: "string", minLength: 1 },
-      idempotency_key: { type: "string", minLength: 1 },
-      selections: {
-        type: "object",
-        minProperties: 1,
-        maxProperties: 12,
-        additionalProperties: { type: "string" },
-        description:
-          "Map each current Compact V2 @e: ref or @label, or V1 observed label/ref, to its visible option text.",
-      },
-      into_slot: { type: "string" },
-      secret_label: { type: "string" },
-      store: {
-        type: "object",
-        required: ["service"],
-        properties: storeJsonProps,
-      },
-      sender: { type: "string" },
-      grant_inbox_consent: { type: "boolean" },
-      login_slot: { type: "string" },
-      password_slot: { type: "string" },
-      password_length: { type: "number" },
-      service: { type: "string" },
-      label: { type: "string" },
-      signin_url: { type: "string" },
-      login_hosts: { type: "array", items: { type: "string" } },
-      reference: { type: "string" },
-      fields: { type: "array", items: { type: "string" } },
-      slot_prefix: { type: "string" },
-      provenance: {
-        type: "string",
-        pattern:
-          "^(?:address|contact|credential|card)(?:\\.[a-zA-Z0-9_-]+)?$|^(?:product_query|quantity)$",
-      },
-      replay_step_index: { type: "integer", minimum: 0 },
-      replay_hole: {
-        type: "string",
-        pattern:
-          "^(?:address|contact|credential|card)(?:\\.[a-zA-Z0-9_-]+)?$|^(?:product_query|quantity)$",
-      },
-      direction: { type: "string", enum: ["down", "up", "bottom", "top"] },
-      detail: { type: "string", enum: ["none", "compact", "full"] },
-    },
-  },
-  schemaRepair: actionSchemaRepair,
-  async handler(args, api) {
-    const result = await (async () => {
-      switch (args.kind) {
-        case "cart_add":
-          return await handleCartAdd(args as CartAddArgs);
-        case "cart_clear":
-          return await handleCartClear(args as CartClearArgs);
-        case "select_many":
-          return await handleFormSelectMany(args as FormSelectManyArgs);
-        case "extract":
-          return await handleExtract(args, api);
-        case "solve_captcha":
-          return await handleCaptcha(args);
-        case "await_verification":
-          return await handleAwaitVerification(args);
-        case "login_prepare_signup":
-          return await handlePrepareLogin(args as LoginPrepareSignupArgs);
-        case "login_store_signup":
-          return await handleStoreLogin(args as LoginStoreSignupArgs, api);
-        case "login_load_saved":
-          return await handleSealVaultCredential(
-            {
-              ...(args as LoginLoadSavedArgs),
-              fields: args.fields ?? ["login", "password"],
-              slot_prefix: args.slot_prefix ?? "vault",
-            },
-            api,
-          );
-      }
-      // Keep the defense-in-depth guard in act() for internal/replay callers,
-      // while this public tool surface makes the safe recovery explicit at the
-      // exact point a small model tried a forbidden manual PAN entry.
-      if (args.kind === "type") {
-        const reason = manualCardEntryBlockReason(args.text ?? "");
-        if (reason !== null) {
-          return {
-            status: "manual_card_entry_refused",
-            reason,
-            safe_alternative: "operate_pay",
-            missing_prerequisite: "verified_cart_total",
-          };
-        }
-      }
-      try {
-        return await act(
-          args.session_id,
-          buildAction(args),
-          args.detail ?? "compact",
-          args.product_identity !== undefined && args.options_hash !== undefined
-            ? { productIdentity: args.product_identity, optionsHash: args.options_hash }
-            : undefined,
-        );
-      } catch (err) {
-        if (err instanceof TargetStaleError) return err.result;
-        throw err;
-      }
-    })();
-    return result;
-  },
-};
-
-// The former standalone tool objects in the following sections are NOT part of
-// the default MCP surface (they were dropped from OPERATE_TOOLS in the
-// bare-essentials cut). They remain as internal implementation objects: each
-// `handler` is the exact function operate_act's matching `kind` calls, so tests
-// exercise the same code path without a second live registration. See
-// OPERATE_TOOLS at the bottom of this file for what a host agent actually sees.
-const cartAddSchema = z.object({
-  session_id: z.string().min(1),
-  product_identity: z.string().trim().min(1).max(500),
-  options_hash: z.string().trim().min(1).max(128),
-  idempotency_key: z.string().trim().min(1).max(256),
-});
-
-export const operateCartAddTool: Tool<z.infer<typeof cartAddSchema>> = {
-  name: "operate_cart_add",
-  description:
-    "Idempotently add the current product to cart. Pass the canonical product_identity, " +
-    "the selected-variant options_hash, and a stable idempotency_key. The tool post-verifies " +
-    "the cart state and returns checkout_state, cart_delta, and canonical cart_url. Retrying the " +
-    "same product/variant never clicks again: it returns already_in_cart with cart_delta '0'. " +
-    "checkout_state is a best-effort informational hint; operate_pay independently verifies the charge total.",
-  inputSchema: cartAddSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id", "product_identity", "options_hash", "idempotency_key"],
-    properties: {
-      session_id: { type: "string" },
-      product_identity: { type: "string", minLength: 1 },
-      options_hash: { type: "string", minLength: 1 },
-      idempotency_key: { type: "string", minLength: 1 },
-    },
-  },
-  annotations: { readOnlyHint: false, idempotentHint: true },
-  handler: handleCartAdd,
-};
-
-const formSelectManySchema = z.object({
-  session_id: z.string().min(1),
-  selections: formSelectionsSchema,
-});
-
-export const operateFormSelectManyTool: Tool<z.infer<typeof formSelectManySchema>> = {
-  name: "operate_form_select_many",
-  description:
-    "Select several related form options sequentially from a target-to-option map. " +
-    "Compact V2 requires current @e: handles; V1 accepts observed labels or refs. " +
-    "Selections run in order; after every successful selection the browser is re-observed " +
-    "before the next one resolves, so variant changes cannot poison later refs. Each field " +
-    "reports selected or failed independently; successful selections are not rolled back when " +
-    "another field fails. Returns the per-field results plus the final observation. Use this for " +
-    "coupled variant or shipping selectors instead of parallel operate_act select calls.",
-  inputSchema: formSelectManySchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id", "selections"],
-    properties: {
-      session_id: { type: "string" },
-      selections: {
-        type: "object",
-        minProperties: 1,
-        maxProperties: 12,
-        additionalProperties: { type: "string" },
-        description:
-          "Map each current Compact V2 @e: ref or @label, or V1 observed label/ref, to its visible option text.",
-      },
-    },
-  },
-  handler: handleFormSelectMany,
-};
 
 const extractSchema = z.object({
   session_id: z.string().min(1),
@@ -1577,73 +682,6 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
   handler: handleExtract,
 };
 
-const captchaSchema = z.object({ session_id: z.string().min(1) });
-
-export const provisionCaptchaGateTool: Tool<z.infer<typeof captchaSchema>> = {
-  name: "operate_captcha_gate",
-  description:
-    "Detect a captcha and drive the in-session captcha gate: returns {found, variant, " +
-    "settled, needs_user?}. The gate attempts visible checkbox widgets and invisible " +
-    "reCAPTCHA execution itself, then requires a real response token before " +
-    "settled=true. settled=false means it couldn't be cleared and carries a " +
-    "`needs_user` {gate, message, remedy} — FAIL FAST: relay that exact remedy to " +
-    "the user and stop driving, don't keep churning. gate='captcha_solver' means " +
-    "set up 2Captcha in settings; gate='captcha_wall' means a proxy or manual signup.",
-  inputSchema: captchaSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id"],
-    properties: { session_id: { type: "string" } },
-  },
-  handler: handleCaptcha,
-};
-
-const verifySchema = z.object({
-  session_id: z.string().min(1),
-  sender: z.string().min(1).max(120).optional(),
-  into_slot: z.string().min(1).max(60).optional(),
-  grant_inbox_consent: z.boolean().optional(),
-});
-
-export const provisionAwaitVerificationTool: Tool<z.infer<typeof verifySchema>> = {
-  name: "operate_await_verification",
-  description:
-    "Read the user's OWN inbox through their signed-in browser session (no IMAP, " +
-    "no mail token) to complete email verification: returns {found, code, link, " +
-    "source_from, needs_user?}. ALWAYS pass `sender` (e.g. 'brave.com') to scope " +
-    "the search — a no-sender search can grab a code from an UNRELATED email; the " +
-    "returned `source_from` is the sender the code/link came from, so verify it " +
-    "matches the service before using the code. On found=true, type the code with " +
-    "operate_act, or — for a magic/verification LINK — `goto` the returned link " +
-    "directly (do NOT click it inside Gmail; Gmail opens external links in a new " +
-    "tab that won't drive the session). PREFER passing " +
-    "`into_slot` (e.g. 'otp'): the code is sealed into a slot (you get a masked " +
-    "handle, not the digits) and you enter it with operate_act{type_secret, slot} " +
-    "— the code never round-trips through you. On found=false a `needs_user` " +
-    "object is returned (wall='verification_code') — the code came by SMS/" +
-    "authenticator or hasn't arrived: ASK THE USER for it, then type it with " +
-    "operate_act and continue. The session stays live; this is a resumable " +
-    "hand-back, not a failure. Scoped search-and-extract — reads only the matching " +
-    "recent mail, never the whole inbox. If a needs_user(verification_code) says " +
-    "inbox reading is disabled, ask the user; on an explicit yes retry with " +
-    "grant_inbox_consent:true. Pass grant_inbox_consent:false to disable inbox reading " +
-    "for the current session.",
-  inputSchema: verifySchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id"],
-    properties: {
-      session_id: { type: "string" },
-      sender: { type: "string" },
-      into_slot: { type: "string" },
-      grant_inbox_consent: { type: "boolean" },
-    },
-  },
-  handler: handleAwaitVerification,
-};
-
-// Vault-store an extracted credential. Shared by extract + the credentials
-// terminal so the stored record is byte-identical regardless of entry point.
 export interface StoredCredentialMetadata {
   reference: string;
   service: string;
@@ -1706,7 +744,7 @@ export function storedExtractResult(extracted: ExtractResult, stored: StoredCred
 }
 
 // Change 2 — the pluggable terminal. Two outcome kinds: `credentials` (the
-// signup case — extract + vault-store, byte-identical to operate_act's extract kind's
+// signup case — extract + vault-store, using the extraction tool's
 // store path) and `result` (any operate task — a summary + optional structured
 // data: design-review findings, "task done" with confirmed in data, etc.).
 // operate_finish is the single terminal. `outcome.kind` picks the shape.
@@ -1789,140 +827,6 @@ async function handleFinishOutcome(
   return { ...prepared, url: finish.url };
 }
 
-// Not part of the default MCP tool surface (dropped from OPERATE_TOOLS). Kept
-// as an internal object — operate_finish{outcome} is the strict superset (also
-// covers outcome.kind='none'). handleFinishOutcome is the shared implementation.
-const finishTaskSchema = z.object({
-  session_id: z.string().min(1),
-  kind: z.enum(["credentials", "result"]),
-  store: storeShape.optional(),
-  summary: z.string().max(4000).optional(),
-  data: finishDataSchema.optional(),
-  verify_recipe: z.string().min(1).max(80).optional(),
-});
-
-export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
-  name: "operate_finish_task",
-  description:
-    "Finish an operate task with its OUTCOME, then close the session. kind=" +
-    "'credentials' extracts + vault-stores the key (pass `store`; same as " +
-    "operate_extract's store), for signups/key-provisioning. kind='result' " +
-    "reports a `summary` (+ optional `data` map) for any other task — a design " +
-    "review's findings, extracted data, or 'task done' (put confirmed:true in " +
-    "data only after a clean success; false or omitted preserves prior login state). " +
-    "Use operate_finish instead to abort without an outcome. For a soft " +
-    "no-match with kind='result' (for example, no exact or authentic item in " +
-    "stock), first relay the closest candidates and why they were rejected, then " +
-    "let the user choose a substitute, broader search, or another site before " +
-    "finishing. Hard blockers such as anti-bot, CAPTCHA, 3-D Secure, or unsupported " +
-    "payment should still be surfaced to the user immediately rather than worked around.",
-  inputSchema: finishTaskSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id", "kind"],
-    properties: {
-      session_id: { type: "string" },
-      kind: { type: "string", enum: ["credentials", "result"] },
-      store: { type: "object", required: ["service"], properties: storeJsonProps },
-      summary: { type: "string" },
-      data: { type: "object" },
-      verify_recipe: { type: "string" },
-    },
-  },
-  async handler(args, api) {
-    if (args.kind === "credentials") {
-      if (args.store === undefined) {
-        throw new Error("operate_finish_task kind=credentials requires `store`");
-      }
-      if (api === null) {
-        throw new Error("operate_finish_task credentials requires an active Trusty Squire session");
-      }
-      return await handleFinishOutcome(
-        args.session_id,
-        { kind: "credentials", store: args.store },
-        api,
-      );
-    }
-    return await handleFinishOutcome(
-      args.session_id,
-      {
-        kind: "result",
-        ...(args.summary !== undefined ? { summary: args.summary } : {}),
-        ...(args.data !== undefined ? { data: args.data } : {}),
-        ...(args.verify_recipe !== undefined ? { verify_recipe: args.verify_recipe } : {}),
-      },
-      api as ApiClient,
-    );
-  },
-};
-
-const finishSchema = z.object({
-  session_id: z.string().min(1),
-  outcome: finishOutcomeSchema.optional(),
-});
-
-export const provisionFinishTool: Tool<z.infer<typeof finishSchema>> = {
-  name: "operate_finish",
-  description:
-    "Finish an operate task and close its session. outcome.kind='none' closes " +
-    "without a reported outcome (and remains the default for compatibility); " +
-    "'credentials' extracts and vault-stores a credential using required `store`; " +
-    "'result' reports required `summary` or `data`; it succeeds only when verify_recipe " +
-    "confirms or data.confirmed is true. " +
-    "All credential values remain server-side; after Chrome closes, its private per-session " +
-    "profile is destroyed. An explicit successful outcome atomically saves portable login state " +
-    "for a later task; no-outcome and failed closes preserve the prior snapshot.",
-  inputSchema: finishSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id"],
-    properties: {
-      session_id: { type: "string" },
-      outcome: {
-        oneOf: [
-          {
-            type: "object",
-            required: ["kind"],
-            properties: { kind: { const: "none" } },
-            additionalProperties: false,
-          },
-          {
-            type: "object",
-            required: ["kind", "store"],
-            properties: {
-              kind: { const: "credentials" },
-              store: { type: "object", required: ["service"], properties: storeJsonProps },
-            },
-            additionalProperties: false,
-          },
-          {
-            type: "object",
-            required: ["kind"],
-            anyOf: [{ required: ["summary"] }, { required: ["data"] }],
-            properties: {
-              kind: { const: "result" },
-              summary: { type: "string" },
-              data: { type: "object" },
-              verify_recipe: { type: "string" },
-            },
-            additionalProperties: false,
-          },
-        ],
-      },
-    },
-  },
-  async handler(args, api) {
-    const outcome = args.outcome ?? { kind: "none" as const };
-    if (outcome.kind === "none") {
-      return await finishProvisionSession(args.session_id);
-    }
-    if (outcome.kind === "credentials" && api === null) {
-      throw new Error("operate_finish credentials requires an active Trusty Squire session");
-    }
-    return await handleFinishOutcome(args.session_id, outcome, api as ApiClient);
-  },
-};
-
 // ── operator-recipe tools (Phase A — docs/ARCHITECTURE.md) ──
 
 const rememberSchema = z.object({
@@ -1943,8 +847,8 @@ const rememberSchema = z.object({
   postcondition: PostconditionSchema,
 });
 
-export const provisionRememberTool: Tool<z.infer<typeof rememberSchema>> = {
-  name: "operate_remember",
+export const operateRecipeSaveTool: Tool<z.infer<typeof rememberSchema>> = {
+  name: "operate_recipe_save",
   description:
     "Save the CURRENT successful operate session as a replayable local recipe. " +
     "Pass the host-classified closed-enum `verb` and the complete authoritative `inputs` " +
@@ -2092,8 +996,8 @@ const useSchema = z
     { message: "session_id and resume_from must be provided together" },
   );
 
-export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
-  name: "operate_use",
+export const operateRecipeRunTool: Tool<z.infer<typeof useSchema>> = {
+  name: "operate_recipe_run",
   description:
     "Replay a local prepared-statement recipe selected by the host-classified closed-enum " +
     "verb plus service_url. Lookup uses eTLD+1 plus an allow-listed action path derived from " +
@@ -2102,7 +1006,7 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
     "saved workflow as a planning hint without deterministic replay. Binds " +
     "hole values and executes each step through ordered target fallback. A single miss " +
     "returns replay.status='fallback_required' with that step and next_index; repair only " +
-    "that step, then call operate_use again with the same params plus session_id + " +
+    "that step, then call operate_recipe_run again with the same params plus session_id + " +
     "resume_from=next_index. A recipe whose entry or declared hosts would leave its own " +
     "site (a tampered or malicious shared recipe) is refused outright: " +
     "replay.status='domain_lock_violation', and driving continues cold. " +
@@ -2248,23 +1152,6 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
   },
 };
 
-export const operateRecipeSaveTool: Tool<z.infer<typeof rememberSchema>> = {
-  ...provisionRememberTool,
-  name: "operate_recipe_save",
-  description: provisionRememberTool.description.replaceAll(
-    "operate_remember",
-    "operate_recipe_save",
-  ),
-};
-
-export const operateRecipeRunTool: Tool<z.infer<typeof useSchema>> = {
-  ...provisionUseTool,
-  name: "operate_recipe_run",
-  description: provisionUseTool.description
-    .replaceAll("operate_use", "operate_recipe_run")
-    .replaceAll("operate_remember", "operate_recipe_save"),
-};
-
 // PR3c — username/password signup credential lifecycle (no Trusty Squire alias).
 const prepareLoginSchema = z.object({
   session_id: z.string().min(1),
@@ -2301,31 +1188,6 @@ async function handlePrepareLogin(args: z.infer<typeof prepareLoginSchema>) {
   };
 }
 
-export const provisionPrepareLoginTool: Tool<z.infer<typeof prepareLoginSchema>> = {
-  name: "operate_prepare_login",
-  description:
-    "Prepare username/password signup fields from the user's OWN email (captured " +
-    "at login) and a freshly generated strong password. Both are sealed into " +
-    "session slots — you get only masked handles, never the raw values. Fill the " +
-    "signup form with operate_act{kind:'type_secret'} using the returned login/" +
-    "password slots, then after the account is created call operate_store_login to " +
-    "vault them. This never uses a Trusty Squire alias — the account is the user's. " +
-    "If no user email was captured, a needs_user hand-back asks the user to run " +
-    "`connect` so the operator has their Google identity.",
-  inputSchema: prepareLoginSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id"],
-    properties: {
-      session_id: { type: "string" },
-      login_slot: { type: "string" },
-      password_slot: { type: "string" },
-      password_length: { type: "number" },
-    },
-  },
-  handler: handlePrepareLogin,
-};
-
 // The signin_url's host is, by definition, where this login gets filled back —
 // but the agent's login_hosts don't always include it (it stored the apex while
 // the form lives on app.<domain>, so browser-fill 403'd login_host_not_allowed).
@@ -2355,7 +1217,7 @@ const storeLoginSchema = z.object({
 
 async function handleStoreLogin(args: z.infer<typeof storeLoginSchema>, api: ApiClient | null) {
   if (api === null) {
-    throw new Error("operate_store_login requires an active Trusty Squire session");
+    throw new Error("operate_login store_signup requires an active Trusty Squire session");
   }
   const login = readSecretSlotValue(args.session_id, args.login_slot ?? "login");
   const password = readSecretSlotValue(args.session_id, args.password_slot ?? "password");
@@ -2381,33 +1243,6 @@ async function handleStoreLogin(args: z.infer<typeof storeLoginSchema>, api: Api
     updated: stored.updated,
   };
 }
-
-export const provisionStoreLoginTool: Tool<z.infer<typeof storeLoginSchema>> = {
-  name: "operate_store_login",
-  description:
-    "After the service account is created, vault the sealed signup login (the " +
-    "user's email + the generated password from operate_prepare_login) as a " +
-    "username_password credential so the user can sign back in. Reads the sealed " +
-    "slots server-side; raw values are never returned to you. Pass the exact " +
-    "login hosts where this credential may be filled; use *.example.com only " +
-    "when subdomains are intentionally allowed. The signin_url host (if given) is " +
-    "always included, so the credential can be filled at its own sign-in page.",
-  inputSchema: storeLoginSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["session_id", "service", "login_hosts"],
-    properties: {
-      session_id: { type: "string" },
-      service: { type: "string" },
-      login_slot: { type: "string" },
-      password_slot: { type: "string" },
-      label: { type: "string" },
-      signin_url: { type: "string" },
-      login_hosts: { type: "array", items: { type: "string" } },
-    },
-  },
-  handler: handleStoreLogin,
-};
 
 const sealVaultCredentialBaseSchema = z.object({
   session_id: z.string().min(1),
@@ -2463,12 +1298,12 @@ async function handleSealVaultCredential(
   };
 }
 
-export const provisionSealVaultCredentialTool: Tool<z.infer<typeof sealVaultCredentialSchema>> = {
-  name: "operate_seal_vault_credential",
+export const operateFillCredentialTool: Tool<z.infer<typeof sealVaultCredentialSchema>> = {
+  name: "operate_fill_credential",
   description:
     "For a sign-in page, retrieve a username/password credential only if the " +
     "current browser host is allowed for login, then seal requested fields into " +
-    "session slots. Raw values are never returned; use operate_act type_secret " +
+    "session slots. Raw values are never returned; use operate_type with slot " +
     "with the returned slot names to fill the page.",
   inputSchema: sealVaultCredentialSchema,
   jsonInputSchema: {
@@ -2497,7 +1332,14 @@ const loginLoadSavedSchema = sealVaultCredentialBaseSchema
   .refine((b) => b.reference !== undefined || b.service !== undefined, {
     message: "one of reference or service is required",
   });
+const loginOAuthSchema = z.object({
+  session_id: z.string().min(1),
+  action: z.literal("oauth").optional(),
+  provider: z.enum(["google", "github"]),
+  ref: z.string().min(1).max(200),
+});
 const loginSchema = z.union([
+  loginOAuthSchema,
   loginPrepareSignupSchema,
   loginStoreSignupSchema,
   loginLoadSavedSchema,
@@ -2506,15 +1348,25 @@ const loginSchema = z.union([
 export const operateLoginTool: Tool<z.infer<typeof loginSchema>> = {
   name: "operate_login",
   description:
+    "Log in with provider + ref using the atomic OAuth flow; awaiting-human state is returned in this call. " +
     "Drive the sealed username/password login lifecycle without exposing raw values. " +
     "action='prepare_signup' seals the user's captured email and a generated password; " +
     "'store_signup' vaults those prepared slots with the same login-host safeguards; " +
     "'load_saved' fetches an allowed saved login through encrypted browser-fill and seals " +
-    "its fields into session slots. Use operate_act kind='type_secret' to fill returned slots.",
+    "its fields into session slots. Use operate_type with slot to fill returned slots.",
   inputSchema: loginSchema,
   jsonInputSchema: {
     type: "object",
     oneOf: [
+      {
+        required: ["session_id", "provider", "ref"],
+        properties: {
+          session_id: { type: "string" },
+          action: { const: "oauth" },
+          provider: { type: "string", enum: ["google", "github"] },
+          ref: { type: "string" },
+        },
+      },
       {
         required: ["action", "session_id"],
         properties: {
@@ -2553,6 +1405,13 @@ export const operateLoginTool: Tool<z.infer<typeof loginSchema>> = {
     ],
   },
   async handler(args, api) {
+    if ("provider" in args) {
+      return await runAction(args.session_id, {
+        kind: "oauth_login",
+        provider: args.provider,
+        target: args.ref,
+      });
+    }
     switch (args.action) {
       case "prepare_signup":
         return await handlePrepareLogin(args);
@@ -2564,26 +1423,330 @@ export const operateLoginTool: Tool<z.infer<typeof loginSchema>> = {
   },
 };
 
-// Bare-essentials cut (captain's decision 2026-08-15): the operator surface is
-// these 6 plus operate_pay and operate_payment_status, which are wired separately
-// in tools/index.ts. diagnostics remain behind the opt-in profile.
-// Every dropped alias's behavior remains reachable: cart_add/select_many/
-// extract/solve_captcha/await_verification/login_prepare_signup/login_store_signup/
-// login_load_saved as operate_act kinds; operate_finish_task as operate_finish{outcome}.
-// The alias Tool objects above stay defined (unregistered) as the shared implementation
-// operate_act's kinds and operate_recipe_save/run delegate to, and as direct handles
-// for tests that pin down that folded behavior.
-// operate_screenshot (2026-08-23) is a deliberate, narrow addition to this cut: a
-// read-only debugging instrument (the page's or one frame's real pixels) with no
-// alias/kind it could fold into — operate_act's kinds all DO something; this only
-// looks.
+// Every public verb delegates directly to the guarded session executor.
+// This is a function, not a second Tool definition or public union schema.
+async function runAction(sessionId: string, action: ProvisionAction) {
+  if (action.kind === "type") {
+    const reason = manualCardEntryBlockReason(action.text);
+    if (reason !== null)
+      return {
+        status: "manual_card_entry_refused",
+        reason,
+        safe_alternative: "operate_pay",
+        missing_prerequisite: "verified_cart_total",
+      };
+  }
+  try {
+    return await act(sessionId, action);
+  } catch (error) {
+    if (error instanceof TargetStaleError) return error.result;
+    throw error;
+  }
+}
+
+const sessionShape = { session_id: z.string().min(1) };
+const refSchema = z.string().min(1).max(200);
+const sessionJson = { session_id: { type: "string" } };
+const refJson = { ref: { type: "string" } };
+
+const navigateSchema = z.object({ ...sessionShape, url: z.string().url() });
+export const operateNavigateTool: Tool<z.infer<typeof navigateSchema>> = {
+  name: "operate_navigate",
+  description:
+    "Navigate to a URL within this session's allowed hosts. On a scope refusal, the error names the host and remedy.",
+  inputSchema: navigateSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id", "url"],
+    properties: { ...sessionJson, url: { type: "string", format: "uri" } },
+  },
+  handler: async (args) => await runAction(args.session_id, { kind: "goto", url: args.url }),
+};
+
+const clickSchema = z.object({ ...sessionShape, ref: refSchema });
+export const operateClickTool: Tool<z.infer<typeof clickSchema>> = {
+  name: "operate_click",
+  description:
+    "Click a control using its current observation ref or unique @label. Re-observe after stale_ref. Card charges require operate_pay. A pointer-interception failure may use guarded DOM dispatch internally only when the executor proves no click was dispatched.",
+  inputSchema: clickSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id", "ref"],
+    properties: { ...sessionJson, ...refJson },
+  },
+  async handler(args) {
+    const action = { kind: "click" as const, target: args.ref };
+    try {
+      return await runAction(args.session_id, action);
+    } catch (error) {
+      // Require positive executor evidence: old interception log lines can remain
+      // in an error even after a later click dispatched. Text alone is not proof.
+      // Unknown failures, stale refs and payment refusals must never double-click.
+      if (
+        !(error instanceof Error) ||
+        clickDispatchStatusForError(error) !== "not_dispatched" ||
+        !/intercepts pointer events/.test(error.message)
+      )
+        throw error;
+      return await runAction(args.session_id, { ...action, kind: "js_click" });
+    }
+  },
+};
+
+const typeSchema = z
+  .object({
+    ...sessionShape,
+    ref: refSchema,
+    text: z.string().max(4096).optional(),
+    slot: z.string().min(1).max(60).optional(),
+    submit: z.boolean().optional(),
+  })
+  .refine((args) => (args.text !== undefined) !== (args.slot !== undefined), {
+    message: "Provide exactly one of text or slot",
+  });
+export const operateTypeTool: Tool<z.infer<typeof typeSchema>> = {
+  name: "operate_type",
+  description:
+    "Fill a control with text, or a session slot returned by operate_login, operate_fill_credential, or operate_extract. Provide exactly one of text or slot. submit presses Enter after a successful fill. Model-supplied card-number-shaped text is refused; use operate_pay.",
+  inputSchema: typeSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id", "ref"],
+    oneOf: [
+      { required: ["text"], not: { required: ["slot"] } },
+      { required: ["slot"], not: { required: ["text"] } },
+    ],
+    properties: {
+      ...sessionJson,
+      ...refJson,
+      text: { type: "string" },
+      slot: { type: "string" },
+      submit: { type: "boolean" },
+    },
+  },
+  async handler(args) {
+    const result = await runAction(args.session_id, {
+      target: args.ref,
+      ...(args.slot !== undefined
+        ? { kind: "type_secret" as const, slot: args.slot }
+        : { kind: "type" as const, text: args.text! }),
+    });
+    if (
+      args.submit !== true ||
+      (typeof result === "object" &&
+        result !== null &&
+        ("status" in result || "needs_user" in result))
+    )
+      return result;
+    return await runAction(args.session_id, { kind: "press", key: "Enter" });
+  },
+};
+
+const selectSchema = z
+  .object({
+    ...sessionShape,
+    ref: refSchema.optional(),
+    values: z.array(z.string().min(1).max(4096)).length(1).optional(),
+    selections: formSelectionsSchema.optional(),
+    country: z.string().min(1).max(60).optional(),
+  })
+  .superRefine((args, ctx) => {
+    const modes =
+      Number(args.ref !== undefined || args.values !== undefined) +
+      Number(args.selections !== undefined) +
+      Number(args.country !== undefined);
+    if (modes !== 1 || (args.ref !== undefined) !== (args.values !== undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Provide ref + values, selections, or country",
+      });
+    }
+  });
+export const operateSelectTool: Tool<z.infer<typeof selectSchema>> = {
+  name: "operate_select",
+  description:
+    "Choose an option by visible text with ref + values (one value per control). For several controls, supply an ordered selections map of ref to option; partial results are retained. country selects the phone field's native country dropdown.",
+  inputSchema: selectSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id"],
+    oneOf: [
+      {
+        required: ["ref", "values"],
+        not: { anyOf: [{ required: ["selections"] }, { required: ["country"] }] },
+      },
+      {
+        required: ["selections"],
+        not: {
+          anyOf: [{ required: ["ref"] }, { required: ["values"] }, { required: ["country"] }],
+        },
+      },
+      {
+        required: ["country"],
+        not: {
+          anyOf: [{ required: ["ref"] }, { required: ["values"] }, { required: ["selections"] }],
+        },
+      },
+    ],
+    properties: {
+      ...sessionJson,
+      ...refJson,
+      values: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 1 },
+      selections: { type: "object", additionalProperties: { type: "string" } },
+      country: { type: "string" },
+    },
+  },
+  async handler(args) {
+    if (args.selections !== undefined)
+      return await formSelectMany(args.session_id, args.selections);
+    if (args.country !== undefined)
+      return await runAction(args.session_id, { kind: "set_phone_country", country: args.country });
+    return await runAction(args.session_id, {
+      kind: "select",
+      target: args.ref!,
+      text: args.values![0]!,
+    });
+  },
+};
+
+const pressSchema = z.object({ ...sessionShape, key: z.string().min(1).max(40) });
+export const operatePressTool: Tool<z.infer<typeof pressSchema>> = {
+  name: "operate_press",
+  description: "Press a keyboard key in the current session, such as Enter, Tab, or Escape.",
+  inputSchema: pressSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id", "key"],
+    properties: { ...sessionJson, key: { type: "string" } },
+  },
+  handler: async (args) => await runAction(args.session_id, { kind: "press", key: args.key }),
+};
+
+const scrollSchema = z.object({
+  ...sessionShape,
+  direction: z.enum(["down", "up", "bottom", "top"]).default("down"),
+});
+export const operateScrollTool: Tool<z.infer<typeof scrollSchema>> = {
+  name: "operate_scroll",
+  description:
+    "Scroll the page viewport down, up, to the bottom, or to the top. Observe again to discover newly visible controls.",
+  inputSchema: scrollSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id"],
+    properties: {
+      ...sessionJson,
+      direction: { type: "string", enum: ["down", "up", "bottom", "top"], default: "down" },
+    },
+  },
+  handler: async (args) =>
+    await runAction(args.session_id, { kind: "scroll", direction: args.direction }),
+};
+
+const allowHostSchema = z.object({ ...sessionShape, host: z.string().min(1).max(253) });
+export const operateAllowHostTool: Tool<z.infer<typeof allowHostSchema>> = {
+  name: "operate_allow_host",
+  description:
+    "Allow a host only within this session's startup host scope and existing auth-provider allowance. To add an unrelated host, start a new session declaring it in allowed_hosts. Hostname and control-plane checks still apply.",
+  inputSchema: allowHostSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id", "host"],
+    properties: { ...sessionJson, host: { type: "string" } },
+  },
+  async handler(args) {
+    const session = sessionForCall(args.session_id);
+    if (session === undefined) throw new Error(`unknown provision session ${args.session_id}`);
+    const checked = validateAllowHost(args.host);
+    // Invalid names still go through the original validation/refusal path.
+    if (
+      !("error" in checked) &&
+      !hostAllowed(
+        `https://${checked.host}`,
+        session.allowedHosts.filter((entry) => entry.source === "start").map((entry) => entry.host),
+      )
+    ) {
+      throw new Error(
+        `target_not_allowed: operate_allow_host rejected "${args.host}": outside this session's startup host scope. Start a new operate_start session declaring "${args.host}" in allowed_hosts.`,
+      );
+    }
+    return await runAction(args.session_id, { kind: "allow_host", host: args.host });
+  },
+};
+
+// A flat completion schema retains terminal preparation and teardown.
+const publicFinishSchema = z
+  .object({
+    ...sessionShape,
+    outcome: z.enum(["none", "credentials", "result"]).default("none"),
+    store: storeShape.optional(),
+    summary: z.string().max(4000).optional(),
+    data: finishDataSchema.optional(),
+    verify_recipe: z.string().min(1).max(80).optional(),
+  })
+  .superRefine((args, ctx) => {
+    if (args.outcome === "credentials" && args.store === undefined)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "credentials outcome requires store" });
+    if (args.outcome === "result" && args.summary === undefined && args.data === undefined)
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "result outcome requires summary or data",
+      });
+  });
+export const operateFinishTool: Tool<z.infer<typeof publicFinishSchema>> = {
+  name: "operate_finish",
+  description:
+    "Finish the task and close its session. outcome='none' closes without a reported outcome; 'credentials' extracts and vault-stores using store; 'result' reports summary or data. Success requires verified recipe evidence or data.confirmed=true. Successful completion saves eligible login state through the existing teardown.",
+  inputSchema: publicFinishSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id"],
+    properties: {
+      ...sessionJson,
+      outcome: { type: "string", enum: ["none", "credentials", "result"], default: "none" },
+      store: { type: "object", required: ["service"], properties: storeJsonProps },
+      summary: { type: "string" },
+      data: { type: "object" },
+      verify_recipe: { type: "string" },
+    },
+    allOf: [
+      {
+        if: { required: ["outcome"], properties: { outcome: { const: "credentials" } } },
+        then: { required: ["store"] },
+      },
+      {
+        if: { required: ["outcome"], properties: { outcome: { const: "result" } } },
+        then: { anyOf: [{ required: ["summary"] }, { required: ["data"] }] },
+      },
+    ],
+  },
+  async handler(args, api) {
+    const outcome = finishOutcomeSchema.parse({ ...args, kind: args.outcome });
+    if (outcome.kind === "none") return await finishProvisionSession(args.session_id);
+    if (outcome.kind === "credentials" && api === null)
+      throw new Error("operate_finish credentials requires an active Trusty Squire session");
+    return await handleFinishOutcome(args.session_id, outcome, api as ApiClient);
+  },
+};
+
+// The named target contains 18 tools including the two payment and two vault
+// tools registered in index.ts. Recipe tools and the rest of the vault surface
+// are unchanged and are outside that target set.
 export const OPERATE_TOOLS: Tool[] = [
   provisionStartTool,
+  operateFinishTool,
   provisionObserveTool,
   provisionScreenshotTool,
-  provisionObserveQueryTool,
-  provisionActTool,
+  operateNavigateTool,
+  operateClickTool,
+  operateTypeTool,
+  operateSelectTool,
+  operatePressTool,
+  operateScrollTool,
+  operateAllowHostTool,
+  operateLoginTool,
+  operateFillCredentialTool,
+  provisionExtractTool,
   operateRecipeSaveTool,
   operateRecipeRunTool,
-  provisionFinishTool,
 ] as Tool[];

@@ -140,10 +140,10 @@ filled fields while the agent advances to the review step and places the order;
 those fields are ordinary page content in `operate_observe` and
 `operate_screenshot`, not masked. Verify the live final total against the approved
 `amount_cents`/currency yourself before placing the order; Trusty Squire no longer
-re-reads the total or submits anything. For `click` and `js_click`, a control whose
+re-reads the total or submits anything. For `operate_click`, a control whose
 label looks like pay/place-order may fire only once for that approval. A second
 recognized attempt is refused and requires a fresh `operate_pay` approval in a new
-session. Non-charge-labeled clicks, key presses, and `oauth_click` remain ungated.
+session. Non-charge-labeled clicks, key presses, and OAuth controls remain ungated.
 After a recognized click dispatches, Trusty Squire best-effort records a secret-free
 `payment_place_order_attempted` Activity event bound to the approval, optional
 mandate, approved amount/currency, merchant, and opaque card reference. This records
@@ -215,7 +215,7 @@ remote CDP, macOS, and Windows operator sessions are not supported in this migra
    opens its own fresh browser profile and restores the snapshot's non-Google
    signed-in state, so independent sessions can run concurrently without opening
    the canonical login profile. Google state is restored inside the serialized
-   `oauth_login` or legacy `oauth_click` boundary; sanctioned Gmail verification
+   `operate_login` boundary; sanctioned Gmail verification
    uses a separate temporary identity browser.
 3. If the flow produces an API key or client secret, Trusty Squire captures it
    into the vault without returning the raw value through its credential tools.
@@ -293,13 +293,16 @@ for the system and data flows.
 
 ## MCP tools
 
-The default MCP registry exposes 20 tools. The essential operator surface is
-`operate_start`, `operate_observe`, `operate_observe_query`, `operate_act`,
-`operate_pay`, `operate_payment_status`, `operate_finish`,
-`operate_recipe_run`, and `operate_recipe_save` — every former standalone
-workflow/lifecycle/login tool name was dropped and its behavior folded into
-`operate_act` as a `kind` (or into `operate_finish`'s `outcome`); no delegating
-aliases remain. Continue a pending pre-charge approval by re-calling
+The default MCP registry exposes 29 tools (31 when maintainer diagnostics are
+enabled). The 18-tool operator driving surface uses flat, single-purpose verbs:
+`operate_start`, `operate_finish`, `operate_observe`, `operate_screenshot`,
+`operate_navigate`, `operate_click`, `operate_type`, `operate_select`,
+`operate_press`, `operate_scroll`, `operate_allow_host`, `operate_login`,
+`operate_fill_credential`, `operate_extract`, `operate_pay`,
+`operate_payment_status`, `list_credentials`, and `list_payment_cards`.
+Recipe and vault/account tools remain separate surfaces. The complete migration
+table and input contracts are in [operator-tool-surface.md](docs/operator-tool-surface.md).
+Continue a pending pre-charge approval by re-calling
 `operate_pay` with the same arguments; use
 `operate_payment_status(wait_seconds)` as a non-charging alternative and for
 post-submit outcome checks. `operate_screenshot(session_id,
@@ -319,10 +322,10 @@ semantics, and page content are the page's own copy, unscreened — the one
 exception is the label alias, which screens credential-shaped accessible names
 to `@redacted-secret` (see [observation-model.md §4.5](docs/observation-model.md)).
 Page text, DOM values, and snapshot files are omitted as a SIZE budget,
-not as a seal; read a value off the page with `operate_screenshot`, `operate_act
-{ kind: "extract" }`, or a V1 session. Use
-`operate_observe_query` with task words or `overflow.next_cursor` to retrieve a
-named or paged control while matching stays inside the live browser. A browser
+not as a seal; read a value off the page with `operate_screenshot`,
+`operate_extract`, or a V1 session. Use `operate_observe` with `query` or
+`cursor` to retrieve a named or paged control while matching stays inside the
+live browser. A browser
 action invalidates the current handles; on `reobserve_required`, observe again
 and select a new handle. Exact cursorless `Google` and `GitHub` queries briefly
 refresh controls that hydrate or gain labels after the initial observation, but
@@ -336,31 +339,20 @@ still return only a current handle. `detail:"full"` keeps the V2 format. Maintai
   the shared stdio process or discard its active in-memory operator session.
   `server_unavailable` includes `retry.max_attempts: 1`: retry once, and never
   kill or restart the shared operator process.
-- `operate_start`, `operate_observe`, `operate_observe_query`, and `operate_act`
-  open a website, inspect the current state, and perform one browser action at a time. Ordinary controls
-  inside same- and cross-origin frames are included in observations (as finite
-  frame facts in Compact V2 and `frame_origin` in V1); known captcha challenge
-  frames stay behind the dedicated captcha flow. Same-registrable-domain frames
-  are reachable, cross-domain frames
-  must pass the same domain scope as `goto`/`allow_host`, opaque frames are
-  refused, and `type_secret` never targets any cross-domain frame. Frame refs
-  currently support `click`, `js_click`, `type`, `type_secret`, and `select`;
-  `upload`, `oauth_click`, and `oauth_login` fail closed. If a visible control
-  has no observed ref, explicitly selected V1 sessions let the four
-  locator-capable actions (`click`, `js_click`, `type`, and `type_secret`) use a
-  live `text=…`/`css=…` locator; that one-off fallback is not replayable.
-  Compact V2 accepts only a handle from its current sealed action map.
-  When a `click` or `js_click` opens a new tab or popup (`target=_blank`, a
-  `window.open` control), the operator follows it the way a person would only
-  when the browser attributes its creation to the session's active page. That
-  owned popup becomes the active page, so the next `operate_observe` or
-  `operate_act` reads it. An unrelated or no-opener page in the browser context
-  stays unassigned and cannot become the working page. This is how an emailed
-  verification or magic link is followed. Do not try to `extract` the link's href
-  instead — a single-use login token is sealed and is never returned as text;
-  following the tab navigates the browser without exposing it. Payment is
-  excluded: during a sealed card fill or a live place-order/3-D Secure approval
-  the active page never changes.
+- `operate_start` opens a scoped website session and `operate_observe` reads its
+  current state. Drive ordinary controls with `operate_click`, `operate_type`,
+  `operate_select`, `operate_press`, and `operate_scroll`; use
+  `operate_navigate` for scoped navigation. Acting tools target a current `ref`.
+  `operate_type` accepts either literal `text` or a protected session `slot`,
+  never both. `operate_click` alone may use its guarded internal DOM-dispatch
+  fallback after a proven non-dispatch; it is not a public alternative action.
+  Frame scope and stale-ref handling remain fail-closed. An owned popup becomes
+  the active page; unrelated/no-opener pages do not. Use `operate_login` for
+  atomic OAuth and the username/password lifecycle, `operate_extract` to capture
+  credentials, and `operate_fill_credential` to load protected slots. CAPTCHA
+  solving, inbox polling, local upload, and specialized cart mutation are not
+  operator verbs; inspect and drive the page's ordinary UI or hand the task back
+  to the user.
   In a live operator session, in-page XHR/fetch calls to merchant API sibling
   subdomains are automatically in scope only when they share the registrable
   domain of a host trusted at session start. Calls outside the session scope fail
@@ -383,13 +375,12 @@ still return only a current handle. `detail:"full"` keeps the V2 format. Maintai
   current handle. Under V1, DOM churn returns `target_stale` with the last
   observation generation, `reobserve_required: true`, best-effort label-keyed
   `replacement_candidates`, and `retry_policy: "do_not_retry_old_ref"`.
-  Malformed `operate_act` calls return `error.code: "invalid_arguments"` and an
-  `error.guidance` repair object with the allowed kinds, missing fields, a valid
-  example, and a safe alternative instead of only a validation string.
-  For a provider login, pass the observed provider-button ref to the atomic
-  `oauth_login` action. It retains the product tab across provider-owned popup
+  Malformed flat-verb calls return `error.code: "invalid_arguments"` without
+  ending the shared server process or discarding the active session. For a
+  provider login, pass the observed provider-button ref to `operate_login`.
+  It retains the product tab across provider-owned popup
   redirects and closes, then returns the post-login product observation even if
-  `detail` is `none`. Every `oauth_login` and legacy `oauth_click` is serialized
+  `detail` is `none`. Every OAuth login is serialized
   from action start through completion and a short release cooldown; other
   session work remains parallel. The whole serialized action has a 30-second
   deadline. If the provider has not handed control back in time, the call does
@@ -399,48 +390,13 @@ still return only a current handle. `detail:"full"` keeps the V2 format. Maintai
   2FA/verification challenge is usually still showing, so re-observe and drive
   it; the session stays open and usable. A denial the provider actually
   reported (an OAuth `error=` code on the return URL) is the one case that
-  fails the action, with that code in the message. `oauth_click` and
-  `oauth_settle` remain for
-  legacy replay compatibility. If an observation races that legacy transition,
-  the response reports `oauth.state: "in_progress"` and directs the host to
+  fails the action, with that code in the message. If an observation races the
+  transition, it reports `oauth.state: "in_progress"` and directs the host to
   observe again.
-- `operate_act` also owns eight consolidated workflow/lifecycle kinds — the
-  entire operator surface beyond navigation, payment, finish, and recipe
-  replay is reached through `operate_act`'s `kind`:
-  - `select_many` accepts an ordered label/ref-to-option map for coupled
-    variant, shipping, or similar selectors. It applies selections
-    sequentially, re-observes after every success, tolerates partial failure,
-    and returns each field's `selected` or `failed` outcome plus a current
-    observation.
-  - `cart_add` is the retry-safe add-to-cart path. Give it the canonical
-    product identity, selected-variant options hash, and a stable idempotency
-    key; it post-verifies the exact cart line and returns `added` or
-    `already_in_cart`, `cart_delta` (`+1`, `0`, or `unknown`), and the canonical
-    cart URL when observable, without clicking again for the same product and
-    variant. Cart and checkout observations expose an informational,
-    best-effort `checkout_state` with stage, product and variant identity,
-    quantity, separately observed subtotal and shipping, payable total when
-    known, canonical cart URL, and one `next_action`. The `single` and
-    `fill_card` payment phases derive their authoritative approval amount
-    independently of this state, preferring live checkout data according to the
-    payment guide above.
-  - `extract` captures a generated credential into a sealed slot or the vault.
-  - `solve_captcha` drives the in-session captcha gate and returns the
-    fail-fast `needs_user` handoff when it cannot be cleared.
-  - `await_verification` reads the user's own inbox for an email verification
-    code/link by default, with sender-scoped search and sealed-OTP transfer
-    through `into_slot`. Advanced configuration or
-    `grant_inbox_consent:false` can opt out.
-  - `login_prepare_signup`, `login_store_signup`, and `login_load_saved` own
-    the sealed username/password lifecycle. `login_prepare_signup` seals the
-    user's captured email and a generated password, `login_store_signup`
-    vaults those slots with explicit login-host policy, and `login_load_saved`
-    retrieves an allowed saved login through encrypted browser-fill into
-    sealed session slots. Raw values never enter the tool result.
 - Observed card controls are marked `payment_field` and
   `interaction: "vaulted_card_only"`, with `operate_pay { phase: "fill_card" }`
   as the recommended action. Typing a Luhn-valid, card-number-shaped value
-  manually through `operate_act` is refused with `safe_alternative: "operate_pay"`
+  manually through `operate_type` is refused with `safe_alternative: "operate_pay"`
   and the missing prerequisite `verified_cart_total`.
 - `operate_finish` closes the session and optionally accepts a nested `outcome`.
   `none` only closes; `credentials` requires `store` and preserves credential
@@ -479,8 +435,7 @@ still return only a current handle. `detail:"full"` keeps the V2 format. Maintai
   `operate_payment_status` follows the [payment guide](#one-prompt) bounded-wait
   contract. It returns the session ID and includes it in every follow-up tool
   hint, so an approval or submitted outcome is always observed in its originating
-  browser. Malformed calls return the same
-  `error.guidance` repair fields as `operate_act`, including a safe resolution
+  browser. Malformed calls return normal `invalid_arguments` handling, including a safe resolution
   when `card_ref` and `card_label` conflict.
 - `list_credentials` and `use_credential` find saved credentials and make authenticated API calls without returning raw values.
 - `fetch_credential` returns a credential's raw value to the agent — the one path that does. It first returns an approval link and no value; you open it and sign with your passkey; the agent resumes with the returned `approval_id` and receives the value once. Denial or expiry releases nothing, and a mutation or payment approval cannot be used here. Reach for it only when the key must land somewhere the agent controls (a GitHub Actions secret, a `.env`) with no server-side injection path — `use_credential` is the right tool for calling an API.

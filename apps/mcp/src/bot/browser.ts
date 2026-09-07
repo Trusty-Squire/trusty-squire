@@ -4522,6 +4522,7 @@ export class BrowserController {
   async clickWithDispatchTracking(
     target: TrackedClickTarget,
     shouldTrack: (labels: readonly string[]) => boolean = () => true,
+    performClick?: () => Promise<void>,
   ): Promise<ClickDispatchStatus> {
     // Accepted residual: aria-labelledby-only names can escape this final probe;
     // closing it would broaden shared click instrumentation again.
@@ -4560,8 +4561,11 @@ export class BrowserController {
       } catch (error) {
         throw new BrowserClickDispatchError("not_dispatched", error);
       }
-      const click = () =>
-        target.method === "click" ? this.clickHandle(handle) : this.jsClickHandle(handle);
+      // Ordinary operator clicks retain their checkbox, modal and widget semantics.
+      // Payment callers omit this callback and keep their existing handle-bound path.
+      const click =
+        performClick ??
+        (() => (target.method === "click" ? this.clickHandle(handle) : this.jsClickHandle(handle)));
       if (!shouldTrack(labels)) {
         await click();
         return "dispatched";

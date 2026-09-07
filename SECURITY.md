@@ -191,16 +191,16 @@ operator's. The operator never re-reads a live total for a split checkout, never
 clicks a charge control, and never submits anything after the fill: the fill-time
 approval already authorizes a charge up to the approved amount, and the caller is
 responsible for checking the live final total against that approved amount before
-placing the order itself through `operate_act`. At fill time, the session snapshots
+placing the order itself through `operate_click`. At fill time, the session snapshots
 the approval ID, optional mandate ID,
 merchant, approved amount and currency, opaque card reference, and last four digits.
-A `click` or `js_click` whose resolved control label matches the shared
+A `operate_click` whose resolved control label matches the shared
 checkout-submit heuristic consumes that snapshot before dispatch. The first
 recognized click may fire; a second recognized click for the same approval is refused
 before dispatch and requires a fresh `operate_pay` approval, which also requires a
 fresh session because same-session refill is forbidden. If dispatch is positively
 known not to have occurred, the attempt marker is rolled back. Non-charge-labeled
-clicks, key presses, and `oauth_click` remain outside this heuristic and are not gated
+clicks, key presses, and OAuth controls remain outside this heuristic and are not gated
 by it. No merchant hostname or CSS selector participates in the decision.
 
 After a recognized place-order click dispatches, the MCP server best-effort writes a

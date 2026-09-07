@@ -357,13 +357,14 @@ import {
   findTool,
   TOOLS,
 } from "../tools/index.js";
+import * as OperatorSurface from "../tools/provision-drive.js";
 import {
   operateLoginTool,
   operateRecipeRunTool,
   operateRecipeSaveTool,
-  provisionActTool,
-  provisionFinishTool,
+  operateFinishTool,
   provisionStartTool,
+  operateTypeTool,
 } from "../tools/provision-drive.js";
 
 function stubBrowser(): PaymentBrowser {
@@ -603,13 +604,14 @@ describe("operate_pay card selection", () => {
 
 describe("operate_act manual card refusal", () => {
   it("returns the vaulted-card alternative and its verified-total prerequisite", async () => {
-    const args = provisionActTool.inputSchema.parse({
+    const args = operateTypeTool.inputSchema.parse({
       session_id: "session_1",
-      kind: "type",
-      target: "Card number",
       text: "5555 5555 5555 4444",
+      ref: "Card number",
     });
-    await expect(provisionActTool.handler(args, null)).resolves.toMatchObject({
+    await expect(
+      operateTypeTool.handler(operateTypeTool.inputSchema.parse(args), null),
+    ).resolves.toMatchObject({
       status: "manual_card_entry_refused",
       safe_alternative: "operate_pay",
       missing_prerequisite: "verified_cart_total",
@@ -1732,52 +1734,48 @@ describe("TOOLS registry", () => {
     }
   });
 
-  it("exposes the essential 10-operator, 21-tool default surface without maintainer diagnostics", () => {
-    // Credential read/write tools (write-only sink; rotation = re-store,
-    // metadata edit/delete = passkey-vouched) + grant_app_access
-    // (egress grants: a deployed app uses a vaulted credential via the proxy).
-    // The old read-back get_credential tool stays removed: no tool returns a
-    // raw secret on the agent's own authority. fetch_credential (below) is the
-    // approval-gated replacement, not a revival of it.
-    // Bare-essentials cut (captain's decision 2026-08-15): every legacy
-    // delegating alias was dropped from the registry. Their behavior remains
-    // reachable as operate_act kinds (cart_add/select_many/extract/solve_captcha/
-    // await_verification/login_prepare_signup/login_store_signup/login_load_saved)
-    // or as operate_finish{outcome} (operate_finish_task) / operate_recipe_run
-    // and operate_recipe_save (operate_use/operate_remember).
-    // operate_payment_await dropped (captain's decision 2026-08-15): the last
-    // remaining alias, folded into operate_payment_status(wait_seconds).
-    // operate_screenshot added (2026-08-23): a read-only debugging capture
-    // with no alias/kind to fold into — operate_act's kinds all DO something;
-    // this only looks.
-    // fetch_credential added (2026-09-05): the ONE approval-gated raw-value
-    // path. The sink model is unchanged for everything the agent can do alone
-    // — this tool returns a value only after the user signs that exact fetch
-    // with their passkey, and delivers it once.
-    expect(TOOLS).toHaveLength(21);
-    expect(TOOLS.map((t) => t.name).sort()).toEqual([
+  it("exposes exactly the named flat target plus unchanged vault and recipe tools", () => {
+    const target = [
+      "operate_start",
+      "operate_finish",
+      "operate_observe",
+      "operate_screenshot",
+      "operate_navigate",
+      "operate_click",
+      "operate_type",
+      "operate_select",
+      "operate_press",
+      "operate_scroll",
+      "operate_allow_host",
+      "operate_login",
+      "operate_fill_credential",
+      "operate_extract",
+      "operate_pay",
+      "operate_payment_status",
+      "list_credentials",
+      "list_payment_cards",
+    ];
+    const unchanged = [
       "audit_log",
       "delete_credential",
       "edit_credential",
       "fetch_credential",
       "grant_app_access",
       "list_app_access",
-      "list_credentials",
-      "list_payment_cards",
-      "operate_act",
-      "operate_finish",
-      "operate_observe",
-      "operate_observe_query",
-      "operate_pay",
-      "operate_payment_status",
-      "operate_recipe_run",
-      "operate_recipe_save",
-      "operate_screenshot",
-      "operate_start",
       "revoke_app_access",
       "store_credential",
       "use_credential",
-    ]);
+      "operate_recipe_run",
+      "operate_recipe_save",
+    ];
+    expect(target).toHaveLength(18); // The brief's named list, despite its 17-tool heading.
+    expect(TOOLS.map((tool) => tool.name).sort()).toEqual([...target, ...unchanged].sort());
+    const assertNoKind = (schema: unknown): void => {
+      if (typeof schema !== "object" || schema === null) return;
+      if (!Array.isArray(schema)) expect(Object.keys(schema)).not.toContain("kind");
+      for (const child of Object.values(schema)) assertNoKind(child);
+    };
+    for (const name of target) assertNoKind(findTool(name)!.jsonInputSchema);
   });
 
   it("drops the operate_payment_await alias entirely; polling is reachable only via operate_payment_status", () => {
@@ -1791,14 +1789,14 @@ describe("TOOLS registry", () => {
       const tools = buildToolRegistry(
         disabled === undefined ? {} : { TRUSTY_SQUIRE_DIAGNOSTICS: disabled },
       );
-      expect(tools).toHaveLength(21);
+      expect(tools).toHaveLength(29);
       expect(tools.map((tool) => tool.name)).not.toEqual(
         expect.arrayContaining(["list_extract_failures", "get_extract_failure"]),
       );
     }
 
     const tools = buildToolRegistry({ TRUSTY_SQUIRE_DIAGNOSTICS: "1" });
-    expect(tools).toHaveLength(23);
+    expect(tools).toHaveLength(31);
     expect(tools.map((tool) => tool.name)).toEqual(
       expect.arrayContaining(["list_extract_failures", "get_extract_failure"]),
     );
@@ -1839,72 +1837,66 @@ describe("TOOLS registry", () => {
     expect(names).not.toContain("check_provision_status");
   });
 
-  it("exposes consolidated operate_act kinds and drops their former standalone tool names", () => {
-    const properties = provisionActTool.jsonInputSchema.properties as Record<string, unknown>;
-    const kinds = (properties.kind as { enum: string[] }).enum;
-    expect(kinds).toEqual(
-      expect.arrayContaining([
-        "cart_add",
-        "select_many",
-        "extract",
-        "solve_captcha",
-        "await_verification",
-        "login_prepare_signup",
-        "login_store_signup",
-        "login_load_saved",
-      ]),
+  it("exports only the registered operator tool definitions, without duplicates", () => {
+    const exported = Object.values(OperatorSurface).filter(
+      (value): value is (typeof TOOLS)[number] =>
+        typeof value === "object" &&
+        value !== null &&
+        "name" in value &&
+        "inputSchema" in value &&
+        "handler" in value,
     );
-    expect(properties.provider).toMatchObject({
-      type: "string",
-      enum: ["google", "github"],
-    });
-
-    const names = TOOLS.map((tool) => tool.name);
-    expect(names).not.toEqual(
-      expect.arrayContaining([
-        "operate_cart_add",
-        "operate_form_select_many",
-        "operate_extract",
-        "operate_captcha_gate",
-        "operate_await_verification",
+    const names = exported.map((tool) => tool.name);
+    expect(names.length).toBe(new Set(names).size);
+    expect(names.sort()).toEqual(
+      [
+        "operate_start",
+        "operate_finish",
+        "operate_observe",
+        "operate_screenshot",
+        "operate_navigate",
+        "operate_click",
+        "operate_type",
+        "operate_select",
+        "operate_press",
+        "operate_scroll",
+        "operate_allow_host",
         "operate_login",
-        "operate_prepare_login",
-        "operate_store_login",
-        "operate_seal_vault_credential",
-      ]),
+        "operate_fill_credential",
+        "operate_extract",
+        // Recipe tools are a separate preserved surface; no alias definitions remain.
+        "operate_recipe_save",
+        "operate_recipe_run",
+      ].sort(),
     );
+    expect(OperatorSurface.OPERATE_TOOLS.map((tool) => tool.name).sort()).toEqual(names);
   });
 
-  it("operate_login's former action variants map onto the operate_act login_* kinds", () => {
-    // operateLoginTool is no longer registered (folded into operate_act), but the
-    // object stays defined as the internal handle for this equivalence check.
-    const loginVariants = operateLoginTool.jsonInputSchema.oneOf as {
-      properties: { action: { const: string } };
-    }[];
-    expect(loginVariants.map((variant) => variant.properties.action.const)).toEqual([
-      "prepare_signup",
-      "store_signup",
-      "load_saved",
-    ]);
-
-    const properties = provisionActTool.jsonInputSchema.properties as Record<string, unknown>;
-    const kinds = (properties.kind as { enum: string[] }).enum;
-    expect(kinds).toEqual(
-      expect.arrayContaining(["login_prepare_signup", "login_store_signup", "login_load_saved"]),
-    );
+  it("does not register removed aliases or the action union", () => {
+    for (const name of [
+      "operate_act",
+      "operate_observe_query",
+      "operate_cart_add",
+      "operate_form_select_many",
+      "operate_captcha_gate",
+      "operate_await_verification",
+      "operate_prepare_login",
+      "operate_store_login",
+      "operate_seal_vault_credential",
+    ]) {
+      expect(findTool(name)).toBeNull();
+    }
+    expect(findTool("operate_login")).toBe(operateLoginTool);
   });
 
   it("exposes consolidated lifecycle/recipe schemas and drops their former standalone tool names", () => {
-    const finishProperties = provisionFinishTool.jsonInputSchema.properties as Record<
+    const finishProperties = operateFinishTool.jsonInputSchema.properties as Record<
       string,
       unknown
     >;
-    const finishVariants = (finishProperties.outcome as { oneOf: Record<string, unknown>[] }).oneOf;
-    expect(finishVariants).toHaveLength(3);
-    expect(finishVariants[1]).toMatchObject({ required: ["kind", "store"] });
-    expect(finishVariants[2]).toMatchObject({
-      required: ["kind"],
-      anyOf: [{ required: ["summary"] }, { required: ["data"] }],
+    expect(finishProperties.outcome).toMatchObject({
+      type: "string",
+      enum: ["none", "credentials", "result"],
     });
 
     expect(operateRecipeRunTool.name).toBe("operate_recipe_run");
@@ -1932,7 +1924,7 @@ describe("TOOLS registry", () => {
   });
 
   it("documents compact observation reconstruction on every operator entry point", () => {
-    for (const name of ["operate_start", "operate_observe", "operate_act"]) {
+    for (const name of ["operate_start", "operate_observe"]) {
       const description = TOOLS.find((tool) => tool.name === name)?.description ?? "";
       expect(description).toContain("stable refs");
       expect(description).toContain("delta:true");

@@ -158,7 +158,8 @@ A target observed inside a child frame also records `frame_origin` and its
 nested `frame_path`. Replay first restricts the fresh inventory to that exact
 frame scope, then applies the same ordered target resolver. The action still
 passes the live frame-origin domain guard; recording frame scope never grants a
-host or permits `type_secret` to cross the page's registrable domain.
+host or permits a protected `operate_type(slot=...)` action to cross the page's
+registrable domain.
 
 Before every deterministic target action, replay refreshes the live inventory
 and resolves the target structurally. Provenance-bearing money fields use the

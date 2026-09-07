@@ -21,6 +21,7 @@ import { Buffer } from "node:buffer";
 import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  BrowserClickDispatchError,
   CHECKOUT_SUBMIT_LABEL_RE,
   clickDispatchStatusForError,
   parseCheckoutAmount,
@@ -4885,6 +4886,19 @@ export async function act(
       return oauthAwaitingHumanObservation(session, error);
     }
     if (session?.compactV2Active === true) {
+      // Preserve only the retry evidence consumed by operate_click. Raw browser
+      // diagnostics and every other action failure keep the existing mapping.
+      if (
+        action.kind === "click" &&
+        clickDispatchStatusForError(error) === "not_dispatched" &&
+        error instanceof Error &&
+        /intercepts pointer events/.test(error.message)
+      ) {
+        throw new BrowserClickDispatchError(
+          "not_dispatched",
+          new Error("click failed: intercepts pointer events"),
+        );
+      }
       throw new Error(compactV2ActionFailureReason(error, action.kind));
     }
     throw error;
@@ -5241,7 +5255,12 @@ async function executeAct(
             } else if (action.kind === "click" || action.kind === "js_click") {
               const method = action.kind;
               await adoptTabOpenedByClick(session, browser, async () => {
-                if (method === "click") await browser.clickHandle(resolved.handle);
+                if (method === "click")
+                  await browser.clickWithDispatchTracking({
+                    kind: "handle",
+                    handle: resolved.handle,
+                    method,
+                  });
                 else await browser.jsClickHandle(resolved.handle);
               });
             } else await browser.typeHandle(resolved.handle, action.text);
@@ -5307,8 +5326,16 @@ async function executeAct(
             );
           } else if (action.kind === "click") {
             await adoptTabOpenedByClick(session, browser, async () => {
-              if (target !== null) await browser.clickInFrame(target, el.selector);
-              else await browser.click(el.selector);
+              await browser.clickWithDispatchTracking(
+                target !== null
+                  ? { kind: "frame", frame: target, selector: el.selector, method: "click" }
+                  : { kind: "selector", selector: el.selector, method: "click" },
+                undefined,
+                async () => {
+                  if (target !== null) await browser.clickInFrame(target, el.selector);
+                  else await browser.click(el.selector);
+                },
+              );
             });
           } else {
             await adoptTabOpenedByClick(session, browser, async () => {

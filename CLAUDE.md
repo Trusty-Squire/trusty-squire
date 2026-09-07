@@ -14,8 +14,8 @@ handles persistence and orchestration.
 **One provisioning path:**
 
 **Interactive operator driver** — the host agent plans each step with
-`operate_start`, `operate_observe`, `operate_act` (which owns `extract` and
-every other workflow/lifecycle kind), and `operate_finish`; Trusty Squire supplies
+`operate_start`, `operate_observe`, the flat interaction verbs, and
+`operate_finish`; Trusty Squire supplies
 the scoped browser, DOM/screenshot observations, vault extraction, and registry
 hints.
 Account-bound, vault-backed. Provisioning is free during beta (no signup quota).
@@ -71,8 +71,8 @@ silent failures.
   v16+ shipped.
 - **Email verification — the user's own inbox.** Signups are user-owned:
   the operator reads the verification code/link from the user's own Gmail
-  through their signed-in browser session
-  (`operate_act { kind: "await_verification" }`), behind a JIT consent gate. The
+  through their signed-in browser session, as ordinary page state rather than a
+  dedicated operator tool. The
   Squire-alias inbound-mail subsystem (`packages/inbox`, the resend-inbound
   webhook) was retired in 1.0.1 —
   no aliases are minted and nothing receives inbound mail server-side.
@@ -116,10 +116,9 @@ silent failures.
     (`cf-turnstile-response` or `g-recaptcha-response`) populated, up
     to 30s timeout. Returns `captcha_blocked` on timeout so the MCP
     tool can surface a clear status to the user.
-  - User-inbox verification read (`operate_act { kind: "await_verification" }`
-    reads the code/link from the user's own signed-in Gmail behind a JIT consent
-    gate), verification-link click, and post-verify navigation
-    primitives the host agent drives via `operate_*`.
+  - Verification-link click and post-verify navigation primitives the host agent
+    drives through the flat `operate_*` tools; there is no public inbox-polling
+    operator verb.
   - DOM/screenshot observation + vault-backed credential extraction +
     operator-recipe replay (`operate_recipe_run`) the host agent composes per step.
   - **`operate_screenshot` (2026-08-23) — a dedicated debugging capture,**
