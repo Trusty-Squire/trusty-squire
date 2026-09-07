@@ -14,7 +14,7 @@ launch reader.
 - [DESIGN-replay-eval-harness.md](DESIGN-replay-eval-harness.md) owns the replay-engine evaluation
   predicate, frozen-corpus contract, all-cold baseline, and current known gaps.
 - [browser-use-serializer-port.md](browser-use-serializer-port.md) owns Compact
-  V2's canonical DOM serializer, stable-ref, screening, and fixture contracts.
+  V2's canonical DOM serializer, stable-ref, query, and fixture contracts.
 - [ephemeral-profile-revert-spec.md](ephemeral-profile-revert-spec.md) records the accepted
   migration from shared operator profiles to per-session profiles; the current lifecycle contract
   remains in [DESIGN-warm-browser-reuse.md](DESIGN-warm-browser-reuse.md).

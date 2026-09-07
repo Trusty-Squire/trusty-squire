@@ -1,22 +1,18 @@
-import { screenBrowserUseValueV2 } from "../compact-observation-v2.js";
 import { Buffer } from "node:buffer";
 import { describe, expect, it } from "vitest";
 import {
   OBSERVE_V2_MAX_WIRE_BYTES,
-  REDACTED_SECRET_LABEL_V2,
   buildSafeControlsV2,
   compactV2LegacyRefForHandle,
   controlLabelV2,
   isCompactV2Handle,
   isCompactV2Label,
-  looksLikeSecretShapedName,
   controlMatchesPrivateQueryV2,
   disambiguateDuplicateLabelsV2,
   encodeV2QueryPage,
   safePageSemanticsV2,
   safeDescriptionV2,
   safeOriginV2,
-  redactObservationProseV2,
   sealRetainedInteractiveElementsV2,
   safeStageV2,
 } from "../compact-observation-v2.js";
@@ -153,177 +149,27 @@ describe("compact observation v2", () => {
     ]);
   });
 
-  it("redacts a credential-shaped accessible name but keeps the row actionable", () => {
-    const button = element({ visibleText: "Copy api_1234567890123" });
+  it.each([
+    ["Copy api_1234567890123", "@copy-api-1234567890123"],
+    ["f9a062f02fadf5", "@f9a062f02fadf5"],
+    ["usernametaken29", "@usernametaken29"],
+    ["Copy 3kR9xQ2m-7LpW4vZn", "@copy-3k"],
+    ["Bearer f9a062f02f", "@bearer-f9a062f02f"],
+  ])("keeps the page label %s actionable without redaction", (visibleText, label) => {
+    const button = element({ visibleText });
     const safe = safeControls({
       elements: [button],
-      legacyRefs: new Map([[button, "@e:copy-secret"]]),
+      legacyRefs: new Map([[button, "@e:copy"]]),
       pageOrigin: "https://merchant.invalid",
     });
-    expect(safe.rows).toEqual([
-      expect.objectContaining({
-        ref: "@e:hhhhhhhhh1",
-        role: "button",
-        label: REDACTED_SECRET_LABEL_V2,
-      }),
-    ]);
-  });
-
-  // Live evidence (2026-09-06 ipinfo dogfood, Finding 1): on /dashboard and
-  // /dashboard/token the action map emitted the account's LIVE api token as
-  // the copy button's label — `["@e:6b3eXuaBV7","b","@f9a062f02fadf5"]` — and
-  // a curl example's label carried its first four characters. Both labels are
-  // reproduced below verbatim from the captured maps; the token itself is
-  // reconstructed to the same 14-lowercase-hex shape.
-  describe("ipinfo captured-map regression", () => {
-    const token = "f9a062f02fadf5"; // 14 lowercase hex — ipinfo's live token shape
-
-    it("redacts the copy-token button's label and keeps ref + role + actionability", () => {
-      const copyToken = element({ visibleText: token });
-      const safe = buildSafeControlsV2({
-        elements: [copyToken],
-        legacyRefs: new Map([[copyToken, "@e:6b3eXuaBV7"]]),
-        handles: new Map([[copyToken, "@e:6b3eXuaBV7"]]),
-        pageOrigin: "https://ipinfo.invalid",
-      });
-      expect(safe.rows).toHaveLength(1);
-      expect(safe.rows[0]).toEqual(
-        expect.objectContaining({ ref: "@e:6b3eXuaBV7", role: "button" }),
-      );
-      expect(safe.rows[0]?.label).toBe(REDACTED_SECRET_LABEL_V2);
-      const page = encodeV2QueryPage({
-        sessionId: "session",
-        stage: "browse",
-        rows: safe.rows,
-        cursorFor: (offset) => `cursor-${offset}`,
-      });
-      expect(page.payload.safe_table).toEqual([["@e:6b3eXuaBV7", "b", REDACTED_SECRET_LABEL_V2]]);
-      expect(JSON.stringify(page.payload)).not.toContain(token);
+    expect(safe.rows[0]).toMatchObject({ ref: "@e:hhhhhhhhh1", role: "button", label });
+    const { payload } = encodeV2QueryPage({
+      sessionId: "session",
+      stage: "browse",
+      rows: safe.rows,
+      cursorFor: () => "cursor",
     });
-
-    it("redacts the curl example whose truncated label carried the token fragment", () => {
-      const curlExample = element({
-        visibleText: `curl -H "Authorization: Bearer ${token}"`,
-      });
-      const safe = safeControls({
-        elements: [curlExample],
-        legacyRefs: new Map([[curlExample, "@e:curl-ex"]]),
-        pageOrigin: "https://ipinfo.invalid",
-      });
-      expect(safe.rows[0]?.label).toBe(REDACTED_SECRET_LABEL_V2);
-      const page = encodeV2QueryPage({
-        sessionId: "session",
-        stage: "browse",
-        rows: safe.rows,
-        cursorFor: (offset) => `cursor-${offset}`,
-      });
-      const wire = JSON.stringify(page.payload);
-      expect(wire).not.toContain(token);
-      expect(wire).not.toContain("f9a0");
-    });
-
-    it("screens the full name when the description budget would cut the token short", () => {
-      // A 28-31 char preamble pushes the bare token across the 40-char
-      // description cut, leaving fewer than the entropy screen's minimum run;
-      // the label must be screened on the untruncated name so no leading
-      // fragment survives into the slug.
-      for (const visibleText of [
-        `Your ipinfo access token is: ${token}`,
-        `Copy access token to clipboard: ${token}`,
-      ]) {
-        const control = element({ visibleText });
-        const safe = buildSafeControlsV2({
-          elements: [control],
-          legacyRefs: new Map([[control, "@e:preamble"]]),
-          handles: new Map([[control, "@e:preamble"]]),
-          pageOrigin: "https://ipinfo.invalid",
-        });
-        expect(safe.rows[0]?.label, visibleText).toBe(REDACTED_SECRET_LABEL_V2);
-        expect(safe.rows[0], visibleText).toEqual(
-          expect.objectContaining({ ref: "@e:preamble", role: "button" }),
-        );
-        const page = encodeV2QueryPage({
-          sessionId: "session",
-          stage: "browse",
-          rows: safe.rows,
-          cursorFor: (offset) => `cursor-${offset}`,
-        });
-        const wire = JSON.stringify(page.payload);
-        expect(wire, visibleText).not.toContain(token);
-        expect(wire, visibleText).not.toContain("f9a0");
-      }
-    });
-
-    it("keeps a redacted query result actionable", () => {
-      const copyToken = element({ visibleText: token });
-      const safe = buildSafeControlsV2({
-        elements: [copyToken],
-        legacyRefs: new Map([[copyToken, "@e:6b3eXuaBV7"]]),
-        handles: new Map([[copyToken, "@e:6b3eXuaBV7"]]),
-        pageOrigin: "https://ipinfo.invalid",
-      });
-      const { payload } = encodeV2QueryPage({
-        sessionId: "session",
-        stage: "browse",
-        rows: safe.rows,
-        cursorFor: () => "cursor",
-      });
-      expect(payload).not.toBeNull();
-      expect(payload!.safe_table).toEqual([["@e:6b3eXuaBV7", "b", REDACTED_SECRET_LABEL_V2]]);
-      expect(JSON.stringify(payload)).not.toContain(token);
-    });
-
-    it("keeps every legitimate captured label verbatim", () => {
-      const expected: Readonly<Record<string, string>> = {
-        "View Plans & Pricing": "@view-plans-pricing",
-        AS15169: "@as15169",
-        "8.8.8.8": "@8-8-8-8",
-        "1.1.1.1": "@1-1-1-1",
-        bmbmlite: "@bmbmlite",
-        "curl example": "@curl-example",
-      };
-      for (const [visibleText, label] of Object.entries(expected)) {
-        const control = element({ visibleText });
-        const safe = safeControls({
-          elements: [control],
-          legacyRefs: new Map([[control, "@e:legit"]]),
-          pageOrigin: "https://ipinfo.invalid",
-        });
-        expect(safe.rows[0]?.label, visibleText).toBe(label);
-      }
-    });
-
-    it("gives each redacted row a stable per-observation discriminator", () => {
-      const first = element({ visibleText: "550e8400-e29b-41d4-a716-446655440000" });
-      const second = element({ visibleText: "Copy 3kR9xQ2m-7LpW4vZn" });
-      const safe = buildSafeControlsV2({
-        elements: [first, second],
-        legacyRefs: new Map([
-          [first, "@e:legit1"],
-          [second, "@e:legit2"],
-        ]),
-        handles: new Map([
-          [first, "@e:legit1"],
-          [second, "@e:legit2"],
-        ]),
-        pageOrigin: "https://ipinfo.invalid",
-      });
-      const labels = safe.rows.map((row) => row.label).sort();
-      expect(labels).toEqual(["@redacted-secret", "@redacted-secret-2"]);
-      // Both rows survive with ref, role, and label — clickable by ref.
-      expect(safe.rows.map((row) => row.ref).sort()).toEqual(["@e:legit1", "@e:legit2"]);
-      expect(safe.rows.every((row) => row.role === "button")).toBe(true);
-    });
-  });
-
-  it("screens the derived composite label even when only the slug would leak", () => {
-    // The description survives truncation intact but the SLUG truncates at 32
-    // chars, carrying the token's first four characters; the marker replaces
-    // the whole slug, so no fragment leaks either way.
-    expect(controlLabelV2(`curl -H "Authorization: Bearer f9a062f02fadf5"`)).toBe(
-      REDACTED_SECRET_LABEL_V2,
-    );
-    expect(controlLabelV2("Bearer f9a062f02f")).toBe(REDACTED_SECRET_LABEL_V2);
+    expect(payload.safe_table).toEqual([["@e:hhhhhhhhh1", "b", label]]);
   });
 
   it("keeps every page-derived description, card material included", () => {
@@ -561,7 +407,7 @@ describe("compact observation v2", () => {
     expect(JSON.stringify(safe.rows)).not.toContain("private@example.test");
   });
 
-  it("keeps native submit inputs actionable and screens their value as a label", () => {
+  it("keeps native submit inputs actionable and uses their value as a label", () => {
     const submit = element({
       tag: "input",
       type: "submit",
@@ -637,7 +483,7 @@ describe("compact observation v2", () => {
     expect(compactV2LegacyRefForHandle(current, "@private-merchant-copy")).toBeNull(); // a label
   });
 
-  it("slugs a label only from a screened description", () => {
+  it("slugs a label from the page description", () => {
     expect(controlLabelV2("Continue with Google")).toBe("@continue-with-google");
     expect(controlLabelV2(undefined)).toBeUndefined();
     expect(controlLabelV2("!!!")).toBeUndefined();
@@ -696,16 +542,13 @@ describe("compact observation v2", () => {
       expect(controlLabelV2("U.S. Government cloud documentation")).toBe("@u-s-government-cloud");
     });
 
-    it("stays secret-screened FIRST: a bare token behind a heading still redacts", () => {
-      // The title-preference change must not let a secret-shaped name slip
-      // through as a tidy title: the screen runs on the UNTRUNCATED name
-      // before any splitting or cutting.
+    it("keeps title selection independent of credential shapes in its description", () => {
       expect(
         controlLabelV2("Database DownloadsDownload API key f9a062f02fadf5 for production"),
-      ).toBe(REDACTED_SECRET_LABEL_V2);
+      ).toBe("@database-downloads");
       expect(
-        controlLabelV2(`IntegrationsConnect curl -H "Authorization: Bearer f9a062f02fadf5"`),
-      ).toBe(REDACTED_SECRET_LABEL_V2);
+        controlLabelV2('IntegrationsConnect curl -H "Authorization: Bearer f9a062f02fadf5"'),
+      ).toBe("@integrations");
     });
 
     it("composes with duplicate-label ordinals: links differing only in description stay distinguishable", () => {
@@ -775,6 +618,16 @@ describe("compact observation v2", () => {
     ]);
   });
 
+  it.each(["usernametaken29", "trusty-squire-dogfood-20260625", "f9a062f02fadf5"])(
+    "emits semantic titles and headings verbatim: %s",
+    (value) => {
+      expect(safePageSemanticsV2({ title: value, headings: [value] })).toEqual({
+        title: value,
+        headings: [value],
+      });
+    },
+  );
+
   it("preserves short semantic essentials without rejecting card or secret-shaped text", () => {
     expect(
       safePageSemanticsV2({
@@ -806,7 +659,7 @@ describe("compact observation v2", () => {
     expect(safe.rows).toContainEqual(expect.objectContaining({ label: "@4111111111111111" }));
   });
 
-  it("screens a page title in query semantic metadata without changing the query response", () => {
+  it("preserves a page title in query semantic metadata without changing the query response", () => {
     const title = "Developer f9a062f02fadf5 Resource";
     const semantics = safePageSemanticsV2({ title, headings: ["Getting started"] });
     const page = encodeV2QueryPage({
@@ -817,7 +670,7 @@ describe("compact observation v2", () => {
       cursorFor: (offset) => `cursor-${offset}`,
     }).payload;
     expect(semantics).toEqual({
-      title: "Developer [redacted] Resource",
+      title,
       headings: ["Getting started"],
     });
     expect(page).toEqual({
@@ -828,10 +681,10 @@ describe("compact observation v2", () => {
       semantic: semantics,
       safe_table: [],
     });
-    expect(JSON.stringify(page)).not.toContain(title);
+    expect(JSON.stringify(page)).toContain(title);
   });
 
-  it("redacts a prefixless high-entropy token rendered as the accessible name", () => {
+  it("preserves a prefixless high-entropy token rendered as the accessible name", () => {
     const button = element({
       visibleText: "abcdefghijklmnopqrstuvwxyz123456",
       ariaLabel: "Copy API key",
@@ -841,7 +694,9 @@ describe("compact observation v2", () => {
       legacyRefs: new Map([[button, "@e:copy"]]),
       pageOrigin: "https://merchant.invalid",
     });
-    expect(safe.rows).toEqual([expect.objectContaining({ label: REDACTED_SECRET_LABEL_V2 })]);
+    expect(safe.rows).toEqual([
+      expect.objectContaining({ label: "@abcdefghijklmnopqrstuvwxyz123456" }),
+    ]);
   });
 
   it("keeps word-like pure-alpha and low-entropy digit labels unscreened", () => {
@@ -852,8 +707,8 @@ describe("compact observation v2", () => {
     expect(controlLabelV2("deadbeefcafe")).toBe("@deadbeefcafe");
   });
 
-  describe("secret-shaped-name screen (vendor prefixes and shapes)", () => {
-    const redacted: readonly string[] = [
+  describe("rendered credential-shaped names are page content", () => {
+    const values: readonly string[] = [
       sk("proj-abcdefghijklmnop1234567890"),
       sk("ant-api03-xyz"),
       sk("lw-0123456789abcdef"),
@@ -876,67 +731,10 @@ describe("compact observation v2", () => {
       "Your ipinfo access token is: f9a062f02fadf5",
       "Copy access token to clipboard: f9a062f02fadf5",
     ];
-    const kept: readonly string[] = [
-      "View plans & pricing",
-      "AS15169",
-      "8.8.8.8",
-      "1.1.1.1",
-      "bmbmlite",
-      "curl example",
-      "Copy API key",
-      "authorization",
-      "authentication",
-      "xoxo gossip girl club",
-      "task-management-101",
-      "standard-bearer of the fleet",
-      "user@example.com",
-      "4111 1111 1111 1111",
-      "SKU-12345",
-      "v1.2.3",
-    ];
-
-    it("redacts every vendor-prefixed or token-shaped name", () => {
-      for (const value of redacted) expect(looksLikeSecretShapedName(value), value).toBe(true);
-    });
-
-    it("keeps ordinary UI copy", () => {
-      for (const value of kept) expect(looksLikeSecretShapedName(value), value).toBe(false);
-    });
-
-    it("scores a hyphen/underscore-grouped credential as one joined run", () => {
-      // Grouped credential bodies (base64url grouping, license keys) would
-      // otherwise slip through as short segments.
-      expect(looksLikeSecretShapedName("Copy f9a062f0-2fadf5ab-9c1d2e3f"), "hex groups").toBe(true);
-      expect(looksLikeSecretShapedName("Copy 3kR9xQ2m-7LpW4vZn"), "base62 groups").toBe(true);
-      expect(
-        looksLikeSecretShapedName("550e8400-e29b-41d4-a716-446655440000"),
-        "canonical v4 UUID",
-      ).toBe(true);
-      expect(looksLikeSecretShapedName("key_3kR9xQ2m_7LpW4vZn"), "underscore groups").toBe(true);
-      // Ordinary hyphenated copy never produces a joined candidate: segments
-      // shorter than 4 chars, pure-alpha joins, and letterless digit joins stay.
-      expect(looksLikeSecretShapedName("SKU-12345")).toBe(false);
-      expect(looksLikeSecretShapedName("task-management-101")).toBe(false);
-      expect(looksLikeSecretShapedName("8.8.8.8")).toBe(false);
-    });
-
-    it("is length + character-class + entropy: a bare hex run needs entropy, not a prefix", () => {
-      expect(looksLikeSecretShapedName("f9a062f02fadf5")).toBe(true);
-      expect(looksLikeSecretShapedName("a1b2c3d4e5f6a7b8")).toBe(true);
-      // Low-entropy digit runs (dates, Luhn-valid PANs, counters) stay.
-      expect(looksLikeSecretShapedName("4111111111111111")).toBe(false);
-      expect(looksLikeSecretShapedName("111111111111")).toBe(false);
-      // High-entropy digit-bearing base62 run with no prefix.
-      expect(looksLikeSecretShapedName("Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz")).toBe(true);
-    });
-
-    it("fails toward redaction on ambiguous truncations of anchored shapes", () => {
-      // A 40-char description budget can cut a key mid-body; the anchored
-      // shapes must still screen on the visible fragment.
-      expect(looksLikeSecretShapedName(sk("live-12345678"))).toBe(true);
-      expect(looksLikeSecretShapedName(akia("IOSFODNN7EXAM"))) /* truncated */
-        .toBe(true);
-      expect(looksLikeSecretShapedName("Bearer f9a062")).toBe(true);
+    it.each(values)("preserves %s verbatim in page descriptions", (value) => {
+      // These fixtures fit the existing description limit; no shape-based rewrite is allowed.
+      const expected = value.length <= 40 ? value : value.slice(0, 39) + "…";
+      expect(safeDescriptionV2(value)).toBe(expected);
     });
   });
 
@@ -1170,7 +968,7 @@ describe("compact observation v2", () => {
   });
 });
 
-describe("compact-v2 query pages and shared substring screen", () => {
+describe("compact-v2 query pages and region context", () => {
   const pageWithRows = (overrides: Partial<Parameters<typeof encodeV2QueryPage>[0]> = {}) => {
     const el = element({ visibleText: "Continue" });
     const safe = safeControls({
@@ -1192,7 +990,7 @@ describe("compact-v2 query pages and shared substring screen", () => {
     expect(pageWithRows().payload).not.toHaveProperty("text_unavailable");
   });
 
-  it("attaches a screened region context to uninformative label slugs", () => {
+  it("attaches page region context to uninformative label slugs", () => {
     // The ipinfo dogfood's /dashboard/token read "@as15169" — an opaque ASN
     // fragment. The region's own name gives the agent something to act on.
     const el = element({ visibleText: "as15169", container: "section:as-details" });
@@ -1204,7 +1002,7 @@ describe("compact-v2 query pages and shared substring screen", () => {
     expect(safe.rows[0]!.label).toBe("@as15169-as-details");
   });
 
-  it("keeps informative labels untouched and never uses a secret-shaped region as context", () => {
+  it("keeps informative labels untouched and includes credential-shaped region context", () => {
     const informative = element({
       visibleText: "Continue checkout",
       container: "main:checkout",
@@ -1220,50 +1018,7 @@ describe("compact-v2 query pages and shared substring screen", () => {
     });
     // A legible label gains nothing from context — bytes stay on the map.
     expect(safe.rows[0]!.label).toBe("@continue-checkout");
-    // The region heading is vendor-key-shaped: the shared screen keeps it out.
-    expect(safe.rows[1]!.label).toBe("@1w");
-  });
-
-  it("redactObservationProseV2 redacts grouped credentials exactly when the label screen would", () => {
-    // Hyphen/underscore-grouped credentials (UUIDs, grouped base64url) must
-    // not survive prose because grouping kept every plain run under the
-    // 12-char floor — the same strings screen as labels.
-    const grouped = [
-      "Your key: 3kR9xQ2m-7LpW4vZn — keep it safe.",
-      "Token 550e8400-e29b-41d4-a716-446655440000 has been created.",
-      "License AAAE2F9K-Q2m7LpW4-vZn3kR9x expired.",
-    ];
-    for (const item of grouped) {
-      expect(looksLikeSecretShapedName(item)).toBe(true);
-    }
-    expect(grouped.map(redactObservationProseV2)).toEqual([
-      "Your key: [redacted] — keep it safe.",
-      "Token [redacted] has been created.",
-      "License [redacted] expired.",
-    ]);
-    // Ordinary grouped copy with short or low-entropy segments survives.
-    expect(["See SKU-12345 and task-management-101."].map(redactObservationProseV2)).toEqual([
-      "See SKU-12345 and task-management-101.",
-    ]);
-  });
-
-  it("retains original cutoff positions across multiple redactions without leaking partial tokens", () => {
-    const token = "f9a062f02fadf5";
-    const first = `Already [redacted] ${token} `;
-    const bearer = "Bearer\tAb1234567890cD1234567890";
-    const value = first + bearer + " trailing ordinary words";
-    expect(screenBrowserUseValueV2(value)).toBe(redactObservationProseV2(value));
-    expect(screenBrowserUseValueV2(value, first.length + 3)).toBe(
-      "Already [redacted] [redacted] [redacted]",
-    );
-    expect(screenBrowserUseValueV2(value, first.length)).toBe("Already [redacted] [redacted] ");
-    expect(screenBrowserUseValueV2(value, 0)).toBe("");
-    expect(screenBrowserUseValueV2(value, value.length)).toBe(redactObservationProseV2(value));
-  });
-
-  it("preserves whitespace and repeated text for the canonical renderer", () => {
-    expect(redactObservationProseV2("\tRepeated  words\n\tRepeated  words")).toBe(
-      "\tRepeated  words\n\tRepeated  words",
-    );
+    // Region headings are page content, including vendor-key-shaped text.
+    expect(safe.rows[1]!.label).toBe("@1w-sk-proj-abcdefghij");
   });
 });

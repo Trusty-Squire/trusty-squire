@@ -4334,7 +4334,7 @@ describe("Compact V2 action-map boundary", () => {
     ]);
   });
 
-  it("screens a page title in query semantic metadata without changing its action map", async () => {
+  it("preserves a page title in query semantic metadata without changing its action map", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const token = "f9a062f02fadf5";
     h.observationSemantics = {
@@ -4349,7 +4349,7 @@ describe("Compact V2 action-map boundary", () => {
     const query = await observeQuery(started.session_id, "");
 
     expect(query.semantic).toEqual({
-      title: "Developer [redacted] Resource",
+      title: `Developer ${token} Resource`,
       headings: ["Getting started"],
     });
     expect(query.safe_table).toEqual([
@@ -4359,7 +4359,7 @@ describe("Compact V2 action-map boundary", () => {
         expect.stringContaining("@continue"),
       ]),
     ]);
-    expect(JSON.stringify(query)).not.toContain(token);
+    expect(JSON.stringify(query)).toContain(token);
   });
 
   it("queries and re-resolves Resend's existing Google control", async () => {
@@ -4968,7 +4968,7 @@ describe("Compact V2 action-map boundary", () => {
     }
   });
 
-  it("interleaves screened text, preserves refs and omits the deleted text channel", async () => {
+  it("interleaves verbatim text, preserves refs and omits the deleted text channel", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
@@ -4982,7 +4982,7 @@ describe("Compact V2 action-map boundary", () => {
     });
     expect(started).not.toHaveProperty("text");
     expect(started).not.toHaveProperty("safe_table");
-    expect(started.dom).toContain("Your token [redacted] was created.");
+    expect(started.dom).toContain(`Your token ${token} was created.`);
     expect(started.dom).toContain("\n\tContinue");
     const ref = domRefs(started)[0]!;
     expect(ref).toMatch(/^@e:/);
@@ -6001,7 +6001,7 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     expect(JSON.stringify(full)).toContain(secret);
   });
 
-  it("keeps a reflected slot value on the compact-v2 wire and query; its credential-shaped label redacts", async () => {
+  it("keeps a reflected slot value on the compact-v2 wire and query; its credential-shaped label remains readable", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     const secret = "stored-credential-7f3d9a";
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
@@ -6025,12 +6025,7 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
       [string, string, string?]
     >;
     expect(table).toHaveLength(2);
-    // The row is NOT dropped — but its accessible name is credential-shaped
-    // (a reflected vault value), so the label alias redacts per the 2026-09-06
-    // ipinfo screen. The value itself stays readable via full observe/extract
-    // (see "shows a slotted value the page reflected back").
-    expect(table[0]![2] ?? "").toContain("@redacted-secret");
-    expect(table[0]![2] ?? "").not.toContain("stored-credential");
+    expect(table[0]![2] ?? "").toContain("@saved-value-stored-credential");
 
     const query = await observeQuery(started.session_id, "saved value");
     expect(query.safe_table).toHaveLength(1);

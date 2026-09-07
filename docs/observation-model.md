@@ -1,7 +1,7 @@
 # Design: Trusty Squire operator observation model — skeleton + resident DOM + descriptive refs
 
 **Status:** Current authority for the observation no-seal policy. The browser-use DOM
-wire, identity, screening, query, and fixture contract is owned by
+wire, identity, query, and fixture contract is owned by
 [`browser-use-serializer-port.md`](browser-use-serializer-port.md); the remaining
 roadmap material is historical.
 **Scope:** `@trusty-squire/mcp` operator observation/serialization layer (`operate_observe`, `operate_screenshot`, `operate_extract`, the flat acting verbs, and the browser-use DOM serializer)
@@ -26,13 +26,14 @@ The through-line: the layer is tuned for **payload size** and **secret-safety**,
 
 1. An agent can reliably locate and fill a multi-field dynamic form (checkout, signup) without thrashing.
 2. An agent can inspect visual pages (shopping grids, product images) in a bounded number of calls.
-3. Preserve the vault guarantee: a value the operator injected from the vault — and any card value — never enters the agent's context. (Narrowed 2026-09-03: a secret the PAGE renders is ordinary content and does enter it.)
+3. Preserve the vault's write-only delivery boundary and the payment approval
+   fences while treating content rendered by the page as observable.
 4. Never reintroduce the "serialize everything and paginate" explosion.
 
 ## 3. Non-goals
 
 - A browser-native autofill or a vault shipping-address feature (separate decision; the actual form-writing is this layer regardless).
-- Rewriting the seal/vault security model — this reuses it, pushed down to individual nodes.
+- Rewriting the vault or payment security model.
 
 ## 4. Design
 
@@ -61,7 +62,7 @@ Because the source of truth (loaded DOM) never leaves the browser, every detail 
 Instead of paginating a serialized whole page, the agent pulls detail on a specific ref:
 
 - `expand @ref` → that node's neighborhood (parents / siblings / children) to disambiguate ("which of these five buttons").
-- `read @ref` → the element's text subtree, redacted.
+- `read @ref` → the element's text subtree, verbatim.
 
 Requests are scoped to a stable ref and return a bounded local view, so navigation is deterministic and cannot explode — the agent only pulls the neighborhood it is inspecting. This replaces `overflow` + cursor paging entirely.
 
@@ -95,9 +96,7 @@ actually renders:
 - Observation text, element values, labels, hrefs, test ids, paths, and frame
   origins are verbatim. A password field's value, an operator-injected vault
   value, a filled card number and CVV, a rendered API key, recovery code, TOTP,
-  or JWT are all ordinary page content. (One bounded exception, owner's
-  2026-09-07 serializer order: the browser-use DOM format's emitted names and interleaved text
-  rewrite secret-shaped substrings — see the carve-outs below.)
+  or JWT are all ordinary page content.
 - The browser-use DOM format's `url` is the live page URL, path and query included. Its DOM
   attributes follow canonical browser-use's selection and ordering; see the
   pinned serializer contract in `browser-use-serializer-port.md`.
@@ -106,12 +105,13 @@ actually renders:
   The `no_legit_credential` and "the secret is still masked/hidden" refusals are
   gone.
 
-**One browser-use DOM screening carve-out (2026-09-07).** The browser-use DOM format screens only
-secret-shaped substrings in emitted names and interleaved DOM text. This is a
-wire-shape contract, not a read seal: it preserves surrounding text, line shape,
-and refs, while screenshots, extracts, and field values remain verbatim. The
-canonical DOM serializer, its exact screening boundary, and its fixture oracle
-are owned by [`browser-use-serializer-port.md`](browser-use-serializer-port.md).
+**Standing directive restated (2026-09-07).** The read-path screening introduced
+in #678 and extended in #685 contradicted this directive and is removed:
+control labels, region context, semantic titles/headings and interleaved DOM text
+have no secret-shape redactor. There is no vendor-prefix table, entropy detector
+or screening hook. Payment fences and vault/credential-slot boundaries are
+untouched. The canonical DOM and fixture contracts are owned by
+[`browser-use-serializer-port.md`](browser-use-serializer-port.md).
 
 **Why.** The seal and the extractor contradicted each other in production: on
 BrowserStack's settings page, with the Access Key revealed, `operate_screenshot`
@@ -250,12 +250,12 @@ and where it is deliberately narrower or more conservative than §4.1 above.
   an autocomplete re-render that merely reorders an address block used to
   change every fingerprint in it. Every tier is frame-scoped so a control in an
   embedded frame can never hash onto a main-page ref.
-- **Label** — `@continue-with-google`, slugified from the already-screened
+- **Label** — `@continue-with-google`, slugified from the page
   control description. It is an addressable alias: the flat acting verbs accept it and
   resolves it to a ref. Over-length names stay legible: when the accessible
   name is a heading glued to a longer description, the leading title is kept
-  and the description dropped (the seam is detected in the original name, and
-  the secret screen still sees the full untruncated name first); any remaining
+  and the description dropped (the seam is detected in the original name, without
+  screening the original name); any remaining
   over-length slug is cut on a word boundary, never mid-word. Duplicate labels
   are disambiguated deterministically at
   map-build time (`disambiguateDuplicateLabelsV2`): the first occurrence keeps

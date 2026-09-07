@@ -140,9 +140,6 @@ const interactiveRoles = new Set([
 ]);
 const cap = (s: string, n = 100): string =>
   Array.from(s).length <= n ? s : Array.from(s).slice(0, n).join("") + "...";
-type ScreenValue = (value: string, visibleCodePoints?: number) => string;
-const screenCapped = (value: string, screen: ScreenValue): string =>
-  screen(value, 100) + (Array.from(value).length > 100 ? "..." : "");
 const pyString = (v: unknown): string =>
   v === null ? "None" : typeof v === "boolean" ? (v ? "True" : "False") : String(v);
 
@@ -271,7 +268,7 @@ function exclude(n: BrowserUseNode, bounds: DOMBounds): boolean {
     !["button", "link", "checkbox", "radio", "tab", "menuitem", "option"].includes(a.role ?? "")
   );
 }
-function attributes(n: BrowserUseNode, screen: ScreenValue): string {
+function attributes(n: BrowserUseNode): string {
   const a: Record<string, string> = {};
   for (const [k, v] of Object.entries(n.attributes))
     if (ATTRIBUTES.has(k) && v.trim()) a[k] = v.trim();
@@ -340,18 +337,7 @@ function attributes(n: BrowserUseNode, screen: ScreenValue): string {
   if ("expanded" in a && "aria-expanded" in a) delete a["aria-expanded"];
   return Object.entries(a)
     .map(([k, v]) => {
-      // The mandatory name screen covers human-readable naming attributes.
-      // IDs, URLs and form values keep canonical semantics; they are not names.
-      const named = [
-        "title",
-        "name",
-        "placeholder",
-        "alt",
-        "aria-label",
-        "aria-placeholder",
-        "ax_name",
-      ].includes(k);
-      return `${k}=${(named ? screenCapped(v, screen) : cap(v)) || "''"}`;
+      return `${k}=${cap(v) || "''"}`;
     })
     .join(" ");
 }
@@ -458,7 +444,7 @@ function compounds(n: BrowserUseNode): string {
     ...(t === "video" ? [c("Fullscreen", "button")] : []),
   ].join(",");
 }
-function imageContext(n: Simplified, screen: ScreenValue): string {
+function imageContext(n: Simplified): string {
   const result: string[] = [];
   let visited = 0;
   const walk = (s: Simplified, root = false): void => {
@@ -473,7 +459,7 @@ function imageContext(n: Simplified, screen: ScreenValue): string {
         ["aria-label", "image_label"],
       ] as const)
         if ((a[key] ?? "").length <= 4096 && a[key]?.trim())
-          parts.push(`${name}=${screenCapped(a[key]!.trim(), screen)}`);
+          parts.push(`${name}=${cap(a[key]!.trim())}`);
       let src = a.src ?? "";
       if (src.length <= 4096) {
         src = src.replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, "").replace(/[\t\n\r]/g, "");
@@ -499,14 +485,8 @@ export function serializeBrowserUseDOM(
   options: {
     ref?: (node: BrowserUseNode) => string | { ref: string; targetable: boolean };
     previous?: ReadonlySet<string>;
-    // Receives the full source; an optional limit selects ORIGINAL code points.
-    // Return screened prefix text without an ellipsis (the renderer owns it).
-    screen?: ScreenValue;
   } = {},
 ): { dom: string; refs: string[] } {
-  const screen: ScreenValue =
-    options.screen ??
-    ((value, limit) => (limit === undefined ? value : Array.from(value).slice(0, limit).join("")));
   const targets = new Map<Simplified, { ref: string; targetable: boolean }>();
   const simplify = (n: BrowserUseNode): Simplified | null => {
     if (n.nodeType === 9) {
@@ -627,7 +607,7 @@ export function serializeBrowserUseDOM(
       ? `${n.isNew ? "*" : ""}${o.showScroll && t !== "svg" ? "|scroll element[" : "["}${targets.get(n)!.ref}]`
       : "";
     if (o.nodeType === 1) {
-      let attrs = attributes(o, screen);
+      let attrs = attributes(o);
       if (n.interactive && targets.get(n)?.targetable === false)
         attrs += (attrs ? " " : "") + "not-targetable=true";
       if (t === "svg")
@@ -635,10 +615,10 @@ export function serializeBrowserUseDOM(
       if (n.interactive || o.scrollable || t === "iframe" || t === "frame") {
         next++;
         if (n.interactive) {
-          const img = imageContext(n, screen);
+          const img = imageContext(n);
           if (img) attrs += (attrs ? " " : "") + img;
         }
-        if (n.compound) attrs += (attrs ? " " : "") + `compound_components=${screen(n.compound)}`;
+        if (n.compound) attrs += (attrs ? " " : "") + `compound_components=${n.compound}`;
         const prefix =
           o.showScroll && !n.interactive
             ? "|scroll element|"
@@ -659,7 +639,7 @@ export function serializeBrowserUseDOM(
       );
       next++;
     } else if (o.nodeType === 3 && o.snapshot && o.visible && o.value.trim().length > 1)
-      lines.push(indent + screen(o.value.trim()));
+      lines.push(indent + o.value.trim());
     lines.push(...n.children.map((c) => render(c, next)).filter(Boolean));
     if (o.nodeType === 11 && n.children.length) lines.push(indent + "Shadow End");
     if (t === "iframe" || t === "frame") {
@@ -668,7 +648,9 @@ export function serializeBrowserUseDOM(
           `${indent}... (${o.hiddenElements.length} more elements below - scroll to reveal):`,
         );
         for (const e of o.hiddenElements)
-          lines.push(`${indent}    <${e.tag}> "${screen(e.text, 40)}" ~${e.pages} pages down`);
+          lines.push(
+            `${indent}    <${e.tag}> "${Array.from(e.text).slice(0, 40).join("")}" ~${e.pages} pages down`,
+          );
       } else if (o.hiddenContent)
         lines.push(`${indent}... (more content below viewport - scroll to reveal)`);
     }

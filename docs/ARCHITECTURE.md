@@ -65,7 +65,7 @@ layout, and accessibility trees, then emits a viewport-scoped, interleaved DOM
 representation with document-scoped stable refs. Its live query inventory can
 find controls outside the viewport; a visible but unbindable node stays in the
 tree with an explicit non-targetable marker. The detailed wire, identity,
-screening, query, and fixture contract is owned by
+query, and fixture contract is owned by
 [`browser-use-serializer-port.md`](browser-use-serializer-port.md).
 
 **Payment approval**

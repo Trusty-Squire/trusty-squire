@@ -523,8 +523,8 @@ file-by-file map live in
 touching this area.
 
 Compact-v2's serializer now uses the canonical browser-use DOM port. Its
-secret-shaped substring screen applies to emitted names and text, preserving
-indentation and structural refs. The separate page-text field and prose extractor
+names and text are emitted without read-path redaction, per the standing captain
+directive restated 2026-09-07. Payment fences and vault boundaries remain untouched. The separate page-text field and prose extractor
 are deleted. The capture, identity, query and fixture contracts are documented in
 [`docs/browser-use-serializer-port.md`](docs/browser-use-serializer-port.md).
 

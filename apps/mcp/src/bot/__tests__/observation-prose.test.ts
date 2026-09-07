@@ -2,13 +2,13 @@ import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 // The former separate-prose-channel tests now exercise its replacement through
-// real Chrome: CDP capture -> canonical serializer -> shared substring screen.
+// real Chrome: CDP capture -> canonical serializer with verbatim page content.
 import { chromium, type Browser, type Frame, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { BrowserController, type InteractiveElement } from "../browser.js";
 import { captureBrowserUseDOM } from "../browser-use-capture.js";
 import { serializeBrowserUseDOM } from "../browser-use-serializer.js";
-import { buildSafeControlsV2, screenBrowserUseValueV2 } from "../compact-observation-v2.js";
+import { buildSafeControlsV2 } from "../compact-observation-v2.js";
 let browser: Browser;
 const transparentFrameSecurity = async (): Promise<{ opaque: boolean }> => ({ opaque: false });
 const captureThroughController = async (page: Page) => {
@@ -23,6 +23,47 @@ afterAll(async () => {
   await browser?.close();
 });
 describe("interleaved observation DOM", () => {
+  it("returns rendered API keys, app slugs, key names and documentation JSON verbatim", async () => {
+    const page = await browser.newPage();
+    // The first two are exact reported false positives. Key names and requestId
+    // are synthetic representatives: the brief did not supply their literals.
+    const values = [
+      "usernametaken29",
+      "trusty-squire-dogfood-20260625",
+      "resend-dogfood-20260907",
+      "trusty-squire-resend-20260907",
+      '"requestId": "550e8400-e29b-41d4-a716-446655440000"',
+      "sk" + "-proj-0123456789abcdefghijklmnop",
+      "f9a062f0-2fadf5ab-9c1d2e3f",
+      "key_3kR9xQ2m_7LpW4vZn",
+    ];
+    try {
+      await page.setContent("<main></main>");
+      await page.locator("main").evaluate((main, values) => {
+        for (const value of values) {
+          const paragraph = document.createElement("p");
+          paragraph.textContent = value;
+          const button = document.createElement("button");
+          button.setAttribute("aria-label", value);
+          button.textContent = value;
+          const input = document.createElement("input");
+          input.type = "text";
+          input.value = value;
+          main.append(paragraph, button, input);
+        }
+      }, values);
+      const capture = await captureThroughController(page);
+      const { dom } = serializeBrowserUseDOM(capture.root);
+      for (const value of values) {
+        expect(dom).toContain(value);
+        expect(dom).toContain(`aria-label=${value}`);
+        expect(dom).toContain(`value=${value}`);
+      }
+      expect(dom).not.toContain("[redacted]");
+    } finally {
+      await page.close();
+    }
+  });
   it("keeps hierarchy and prose and retrieves a below-the-fold control from the whole document", async () => {
     const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
     try {
@@ -670,7 +711,7 @@ describe("interleaved observation DOM", () => {
       await page.close();
     }
   });
-  it("preserves contained input, onclick, aria-label and text; screens every rendered line", async () => {
+  it("preserves contained input, onclick, aria-label and text; keeps rendered names and text verbatim", async () => {
     const page = await browser.newPage();
     try {
       const token = "f9a062f02fad" + "f5";
@@ -679,24 +720,12 @@ describe("interleaved observation DOM", () => {
       );
       const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
       const ref = (node: { id: string }): string => `@e:f9a062f02fadf5_${node.id}`;
-      const original = serializeBrowserUseDOM(capture.root, { ref });
-      const screened = serializeBrowserUseDOM(capture.root, {
-        ref,
-        screen: screenBrowserUseValueV2,
-      });
-      const dom = screened.dom;
-      // The synthetic token occurs in both a naming attribute and a text node.
-      // Structural refs deliberately contain the same shape and must survive.
-      expect(screened.refs).toEqual(original.refs);
-      const withoutRefs = (value: string): string => value.replace(/\[@e:[^\]]+\]</g, "[REF]<");
-      expect(withoutRefs(dom)).toBe(withoutRefs(original.dom).replaceAll(token, "[redacted]"));
-      expect(dom.split("\n")).toHaveLength(original.dom.split("\n").length);
+      const { dom } = serializeBrowserUseDOM(capture.root, { ref });
       expect(dom).toContain("Context text");
       expect(dom).toContain("<input");
       expect(dom).toContain("Separate action");
-      expect(dom).toContain("aria-label=Copy [redacted]");
-      expect(dom).toContain("Token [redacted]");
-      expect(withoutRefs(dom)).not.toContain(token);
+      expect(dom).toContain(`aria-label=Copy ${token}`);
+      expect(dom).toContain(`Token ${token}`);
     } finally {
       await page.close();
     }
