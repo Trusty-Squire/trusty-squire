@@ -13,13 +13,13 @@ meet one. The exact output contract is the mechanically generated corpus in
 
 ## Identity, deltas and query
 
-`[@e:1]` uses session-allocated base36 identities instead of canonical
-browser-use's per-observation indices. `StableObservationRefs` maps the existing
-fingerprint to a short ref for the lifetime of its document; a session-long
-counter never reuses a ref, including after navigation. Display-only refs use
-a separate identity namespace in that same allocator. Action authorization still
-requires the observed map and live fingerprint match; refs are lookup keys, not
-credentials. Those refs remain actionable after another
+`[@e:<11 base64url characters>]` uses session-secret HMAC identities instead of
+canonical browser-use's per-observation indices. `StableObservationRefs` maps the
+existing fingerprint to a 66-bit opaque capability for the lifetime of its document;
+the document identity and collision retry are part of its HMAC input. Display-only
+refs use a separate identity namespace in that same allocator. Action authorization
+requires the observed map and live fingerprint match in addition to possession of
+the capability. Those refs remain actionable after another
 observation of the same document. A changed view sends its complete `dom` tree;
 `delta: true` identifies an existing document, and `removed` names refs that left
 the rendered view. An unchanged view emits `dom_unchanged: true` and omits `dom`, retaining the

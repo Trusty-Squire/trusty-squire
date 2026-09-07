@@ -13,25 +13,25 @@ pnpm --filter @trusty-squire/mcp test:fast
 
 The measurement command loads the actual baseline serializer from git and runs
 both implementations on the **same newly captured DOM input**. Baseline refs are
-10-character opaque hashes; new refs use the production stable allocator. Numbers
+10-character opaque hashes; new refs are 11-character production capabilities. Numbers
 are UTF-8 bytes of the emitted `dom`, before the unchanged text screen, excluding
 the common response envelope. The measurement allocates refs by captured node
 identity when rendered; it does not simulate whole-document query inventory or
-a long-running session's counter. They are not comparisons between different live
+a long-running session's document invalidation. They are not comparisons between different live
 page loads. Numeric backend IDs in the Python oracle are normalized only by the
 fixture comparison, not used as the baseline runtime refs.
 
 | Page / reproduction | Before bytes | After bytes | Saved | Reduction |
 | --- | ---: | ---: | ---: | ---: |
-| ipinfo | 7627 | 7166 | 461 | 6.0% |
-| mdn | 5390 | 4965 | 425 | 7.9% |
-| hacker-news | 19376 | 15025 | 4351 | 22.5% |
-| wikipedia | 6422 | 5878 | 544 | 8.5% |
-| github | 4431 | 3800 | 631 | 14.2% |
-| gov-uk | 1434 | 1303 | 131 | 9.1% |
+| ipinfo | 7627 | 13211 | -5584 | -73.2% |
+| mdn | 5390 | 6094 | -704 | -13.1% |
+| hacker-news | 19376 | 20001 | -625 | -3.2% |
+| wikipedia | 6422 | 7068 | -646 | -10.1% |
+| github | 4431 | 5823 | -1392 | -31.4% |
+| gov-uk | 1434 | 1842 | -408 | -28.5% |
 | Highlighted code (synthetic Vouchflow case) | 515 | 73 | 442 | 85.8% |
-| 12 repeated checkbox bindings (synthetic Resend case) | 1151 | 467 | 684 | 59.4% |
-| 24 distinct unlabelled checkboxes (reachability control) | 1151 | 935 | 216 | 18.8% |
+| 12 repeated checkbox bindings (synthetic Resend case) | 1151 | 587 | 564 | 49.0% |
+| 24 distinct unlabelled checkboxes (reachability control) | 1151 | 1175 | -24 | -2.1% |
 | Six hero cards and decorative SVGs (synthetic Xata case) | 653 | 84 | 569 | 87.1% |
 
 The six named pages are the pinned live corpus, regenerated with
@@ -49,6 +49,12 @@ no raw captures. The duplicate-checkbox case demonstrates repeated bindings to
 controls have been proven to share bindings. Distinct unlabelled controls are
 preserved, as the 24-control row demonstrates. Deleting apparent proxy checkboxes
 without an identity relationship could remove an independent action.
+
+Production refs use 11 base64url characters, preserving 66 bits of session-secret
+HMAC output. A million arbitrary capability guesses succeeds with probability below
+1 in 70 trillion, and a million independently minted refs has collision probability
+below 1 in 100 million; a collision is retried before emission. The extra character
+is deliberately retained over a shorter counter because refs authorize actions.
 
 ## Deliberate divergence from canonical browser-use
 
@@ -95,11 +101,11 @@ the `format` label, OAuth, vault behavior and payment approval are unchanged.
 ## Multi-select card evidence (PostHog follow-up)
 
 Production emits authored `aria-pressed`, `aria-selected` and `data-state` values.
-Actionable generic cards also expose their full screened `state_class` and visible
+Actionable generic cards and native buttons also expose their full screened `state_class` and visible
 child `state_icons` evidence. These facts describe the DOM, not a guessed boolean
 selection state. The class list is intentionally not truncated: a distinguishing
-utility class may occur at its end. This additional evidence changes corpus
-reductions to 6.0–22.5%; the table above was rerun after adding it.
+utility class may occur at its end. Opaque capability refs deliberately outweigh
+the prior counter-based corpus reductions; the table above was rerun after restoring them.
 
 A stateless card is **undetectable by design**: clicking it may be reachable via a
 stable ref, but no local selection state can be inferred when its DOM is unchanged.

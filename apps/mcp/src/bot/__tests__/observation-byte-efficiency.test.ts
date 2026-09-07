@@ -210,11 +210,41 @@ describe("observation byte efficiency", () => {
     expect(result.dom).toContain("context=Build service key");
     expect(result.dom.match(/<input /g)).toHaveLength(2);
   });
+  it("uses only short local generic containers as unlabelled form context", () => {
+    const compact = node("DIV", {
+      children: [
+        node("INPUT", { attributes: { type: "checkbox" } }),
+        node("SPAN", { children: [text("Marketing emails")] }),
+      ],
+    });
+    expect(serializeBrowserUseDOM(compact).dom).toContain("context=Marketing emails");
+    const broad = node("DIV", {
+      children: [
+        node("INPUT", { attributes: { type: "checkbox" } }),
+        node("SPAN", { children: [text("Announcement ".repeat(20))] }),
+      ],
+    });
+    const inputLine = serializeBrowserUseDOM(broad).dom.split("\n").find((line) => line.includes("<input"));
+    expect(inputLine).not.toContain("context=");
+  });
+  it("emits native button class evidence without inferring selection", () => {
+    const card = node("BUTTON", {
+      attributes: { class: "card border-neutral" },
+      children: [text("Product Analytics")],
+    });
+    const before = serializeBrowserUseDOM(card).dom;
+    card.attributes.class = "card border-selected";
+    const after = serializeBrowserUseDOM(card).dom;
+    expect(before).toContain('state_class="card border-neutral"');
+    expect(after).toContain('state_class="card border-selected"');
+    expect(after).not.toContain("selected=true");
+  });
   it("never reassigns ids after insertions, removals or navigation", () => {
     const refs = new StableObservationRefs();
     const first = refs.get("doc1", "action:first");
     const second = refs.get("doc1", "action:second");
-    expect(first).toBe("@e:1");
+    expect(first).toMatch(/^@e:[A-Za-z0-9_-]{11}$/);
+    expect(second).not.toBe(first);
     for (let i = 0; i < 100; i++) refs.get("doc1", `new:${i}`);
     expect(refs.get("doc1", "action:second")).toBe(second);
     expect(refs.get("doc1", "action:first")).toBe(first);

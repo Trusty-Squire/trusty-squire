@@ -3995,7 +3995,7 @@ const observationRefs = new WeakMap<Session, StableObservationRefs>();
 function compactV2StableRef(session: Session, doc: string, identity: string): string {
   let refs = observationRefs.get(session);
   if (!refs) {
-    refs = new StableObservationRefs();
+    refs = new StableObservationRefs(session.compactV2Secret);
     observationRefs.set(session, refs);
   }
   return refs.get(doc, identity);

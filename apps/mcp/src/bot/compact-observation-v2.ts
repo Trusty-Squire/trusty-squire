@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { createHmac, randomBytes } from "node:crypto";
 import type { InteractiveElement } from "./browser.js";
 
 export const OBSERVE_V2_MAX_WIRE_BYTES = 4_096;
@@ -159,27 +160,42 @@ export interface SafeObservationBaselineV2 {
   renderedRefs?: string[];
 }
 
-/** Session-allocated base36 identities; never observation positions. */
-const COMPACT_V2_HANDLE_RE = /^@e:[a-z0-9]+$/;
+export const COMPACT_V2_HANDLE_LENGTH = 11;
+const COMPACT_V2_HANDLE_RE = new RegExp(`^@e:[A-Za-z0-9_-]{${COMPACT_V2_HANDLE_LENGTH}}$`);
 
-/** Holds only the current document's identities, with a session-long counter.
- * Clearing a document never recycles a ref, including a return to an old URL.
- * These are lookup keys, not credentials; action authorization still requires
- * membership in the observed map and live fingerprint re-resolution.
- */
 export class StableObservationRefs {
   private document: string | undefined;
-  private next = 0;
+  private generation = 0;
   private refs = new Map<string, string>();
+  private identities = new Map<string, string>();
+  constructor(private readonly secret = randomBytes(32)) {}
   get(document: string, identity: string): string {
     if (this.document !== document) {
       this.document = document;
+      this.generation++;
       this.refs.clear();
+      this.identities.clear();
     }
     let ref = this.refs.get(identity);
     if (ref === undefined) {
-      if (this.next >= Number.MAX_SAFE_INTEGER) throw new Error("observation_ref_exhausted");
-      ref = `@e:${(++this.next).toString(36)}`;
+      for (let collision = 0; ; collision++) {
+        const candidate = `@e:${createHmac("sha256", this.secret)
+          .update(document)
+          .update("\u0000")
+          .update(String(this.generation))
+          .update("\u0000")
+          .update(identity)
+          .update("\u0000")
+          .update(String(collision))
+          .digest("base64url")
+          .slice(0, COMPACT_V2_HANDLE_LENGTH)}`;
+        const owner = this.identities.get(candidate);
+        if (owner === undefined || owner === identity) {
+          ref = candidate;
+          this.identities.set(ref, identity);
+          break;
+        }
+      }
       this.refs.set(identity, ref);
     }
     return ref;

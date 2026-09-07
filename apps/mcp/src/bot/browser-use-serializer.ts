@@ -681,6 +681,7 @@ export function serializeBrowserUseDOM(
   };
   const contexts = new Map<Simplified, string>();
   const textCache = new Map<Simplified, string>();
+  const genericContextMaxChars = 120;
   const contextualText = (n: Simplified): string => {
     if (!textCache.has(n))
       textCache.set(
@@ -692,9 +693,15 @@ export function serializeBrowserUseDOM(
   const contextualize = (n: Simplified, enclosing = ""): void => {
     const o = n.original,
       t = tag(o);
-    const container = ["tr", "li", "fieldset", "label"].includes(t) || o.attributes.role === "row";
+    const text = contextualText(n).replace(/\s+/g, " ").trim();
+    const container =
+      ["tr", "li", "fieldset", "label"].includes(t) ||
+      o.attributes.role === "row" ||
+      (t === "div" &&
+        n.children.some((child) => formTags.has(tag(child.original))) &&
+        Array.from(text).length <= genericContextMaxChars);
     let context = container
-      ? contextualText(n).replace(/\s+/g, " ").trim() || enclosing
+      ? text || enclosing
       : enclosing;
     contexts.set(n, context);
     if (["iframe", "frame"].includes(t)) context = "";
@@ -748,8 +755,9 @@ export function serializeBrowserUseDOM(
       if (
         efficient &&
         n.interactive &&
-        ["div", "span", "li"].includes(t) &&
-        (o.clickListener ||
+        ["div", "span", "li", "button"].includes(t) &&
+        (t === "button" ||
+          o.clickListener ||
           o.cursor === "pointer" ||
           "tabindex" in o.attributes ||
           ["button", "option", "checkbox", "radio"].includes(o.attributes.role ?? ""))

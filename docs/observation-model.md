@@ -235,11 +235,10 @@ and where it is deliberately narrower or more conservative than §4.1 above.
 
 ### Identity
 
-- **Ref** — `@e:<base36 counter>`, allocated once per document fingerprint by
-  `StableObservationRefs` in `compact-observation-v2.ts`. The allocator is owned
-  by the session and its counter never resets across navigation. It is a stable
-  lookup key, not an observation position or credential; the observed-map and
-  live-fingerprint checks remain the authorization boundary. See
+- **Ref** — `@e:<11 base64url characters>`, minted once per document fingerprint by
+  `StableObservationRefs` in `compact-observation-v2.ts` from a session-secret HMAC.
+  Its 66 bits are an opaque action capability, not an observation position; the
+  observed-map and live-fingerprint checks remain additional authorization boundaries. See
   [`browser-use-serializer-port.md`](browser-use-serializer-port.md).
 - **Fingerprint** — four tiers, each consulted only when the one above it does
   not identify the element uniquely within the inventory: (1) the DOM `id` when
