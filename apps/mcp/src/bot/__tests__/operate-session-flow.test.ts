@@ -4227,7 +4227,10 @@ describe("Compact V2 action-map boundary", () => {
     h.currentUrl = "https://shop.example.com/checkouts/c/token?_r=revalidated";
     const nextPage = await observeQuery(started.session_id, "", undefined, pageCursor);
     expect((nextPage.safe_table as unknown[]).length).toBeGreaterThan(0);
-    expect(nextPage.overflow).toBeUndefined();
+    const finalCursor = (nextPage.overflow as { next_cursor: string }).next_cursor;
+    const finalPage = await observeQuery(started.session_id, "", undefined, finalCursor);
+    expect((finalPage.safe_table as unknown[]).length).toBe(28);
+    expect(finalPage.overflow).toBeUndefined();
   });
 
   it("pages across a benign form re-render, retiring cursors but not refs", async () => {

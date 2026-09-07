@@ -490,6 +490,7 @@ describe("characterization: session lifecycle ordering", () => {
 const FIRST_V2_KEYS = ["dom", "format", "more_above", "more_below", "session_id", "stage", "url"];
 const REOBSERVE_V2_KEYS = [
   "delta",
+  "dom_unchanged",
   "format",
   "more_above",
   "more_below",
@@ -653,6 +654,7 @@ describe("characterization: agent-facing observation payload shapes", () => {
     const again = await observe(start.session_id);
     expect(again.format).toBe("browser-use-dom");
     expect(Object.keys(again).sort()).toEqual(REOBSERVE_V2_KEYS);
+    expect(again.dom_unchanged).toBe(true);
   });
 
   it("V1 compact operate_observe returns exactly these payload keys", async () => {

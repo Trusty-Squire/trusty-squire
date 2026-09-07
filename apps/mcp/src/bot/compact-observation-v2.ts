@@ -168,7 +168,7 @@ export class StableObservationRefs {
   private generation = 0;
   private refs = new Map<string, string>();
   private identities = new Map<string, string>();
-  constructor(private readonly secret = randomBytes(32)) {}
+  constructor(private readonly secret: Buffer<ArrayBufferLike> = randomBytes(32)) {}
   get(document: string, identity: string): string {
     if (this.document !== document) {
       this.document = document;
