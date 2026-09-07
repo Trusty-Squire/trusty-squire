@@ -18,7 +18,7 @@ from browser_use.dom.service import DomService
 PIN = "0.13.10"
 URLS = {
     "ipinfo": "https://ipinfo.io/developers",
-    "stripe": "https://docs.stripe.com/api",
+    "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API",
     "hacker-news": "https://news.ycombinator.com",
     "wikipedia": "https://en.wikipedia.org/wiki/Certificate_authority",
     "github": "https://github.com/anthropics",

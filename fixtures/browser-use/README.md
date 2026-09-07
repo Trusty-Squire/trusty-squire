@@ -11,6 +11,19 @@ version, URL, viewport, output SHA-256, and enhanced DOM inputs. The JSON record
 capture/view properties, not the serializer's inclusion or rendering decisions.
 Both files must be committed together. Never hand-edit expected output.
 
+The fixed corpus is IPinfo developers, MDN Fetch API documentation, Hacker News,
+Wikipedia's Certificate authority article, Anthropic's GitHub organization, and
+GOV.UK benefits. Exact URLs live in `scripts/capture-browser-use.py`. MDN fills
+the content-dense, framework-rendered documentation slot.
+
+Canonical corpus URLs must be pages that render no credentials, including in
+embedded frames and DOM attributes, the same principle as PR #681. Stripe was
+rejected: `/api` displays a test API key, and `/payments` and
+`/payments/payment-methods` retain test keys in iframe URLs. Do not re-add Stripe
+or bypass push protection. Never redact or hand-edit a captured oracle to make
+it pass a scan; select a credential-free page and regenerate it instead.
+Regenerate only MDN with `bash scripts/capture-browser-use.sh --slug mdn`.
+
 `bash scripts/capture-browser-use.sh --check` compares a fresh live capture to
 the stored output and reports **STALE FIXTURES** on drift. `--slug ipinfo` limits
 a capture or check to one site. Offline tests feed the recorded input to the
