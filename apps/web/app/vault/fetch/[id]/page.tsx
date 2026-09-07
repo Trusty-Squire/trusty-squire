@@ -199,7 +199,7 @@ export default function CredentialFetchApprovalPage() {
                 >
                   {busy ? "Approving…" : "Approve reveal"}
                 </button>
-                <button type="button" onClick={() => void deny()} disabled={busy}>
+                <button className="btn-deny" type="button" onClick={() => void deny()} disabled={busy}>
                   Deny
                 </button>
               </div>
