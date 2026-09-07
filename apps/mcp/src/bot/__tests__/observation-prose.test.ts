@@ -7,7 +7,7 @@ import { chromium, type Browser, type Frame, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { BrowserController, type InteractiveElement } from "../browser.js";
 import { captureBrowserUseDOM } from "../browser-use-capture.js";
-import { serializeBrowserUseDOM } from "../browser-use-serializer.js";
+import { serializeBrowserUseDOM, type BrowserUseNode } from "../browser-use-serializer.js";
 import { buildSafeControlsV2, StableObservationRefs } from "../compact-observation-v2.js";
 let browser: Browser;
 const transparentFrameSecurity = async (): Promise<{ opaque: boolean }> => ({ opaque: false });
@@ -75,8 +75,7 @@ describe("interleaved observation DOM", () => {
       );
       const refs = new StableObservationRefs();
       const capture = await captureThroughController(page);
-      const ref = (n: import("../browser-use-serializer.js").BrowserUseNode): string =>
-        refs.get("doc", n.id);
+      const ref = (n: BrowserUseNode): string => refs.get("doc", n.id);
       const before = serializeBrowserUseDOM(capture.root, { ref });
       const row = (dom: string, id: string): string =>
         dom.split("\n").find((line) => line.includes(`id=${id} `))!;
