@@ -604,7 +604,7 @@ index: it survives acts and benign re-renders on the same document, so one
 observation can drive a whole multi-field fill. Do not reintroduce
 per-act/per-observe ref churn.
 [`docs/browser-use-serializer-port.md`](docs/browser-use-serializer-port.md)
-owns the canonical DOM rendering, stable-ref, screening, query, and fixture
+owns the canonical DOM rendering, stable-ref, query, and fixture
 contracts. [`docs/observation-model.md`](docs/observation-model.md) §4.5 owns
 the no-seal policy; its remaining roadmap is historical.
 
@@ -614,8 +614,8 @@ card material, and rendered API keys alike. The masking layer
 (`redactObservationText` / `present*` / `Session.sealedFieldKeys`), compact-v2's
 content screens, and `provision-drive.ts`'s compact-v2 tool-result seal
 (`compactV2ThickResult`) are deleted. Compact-v2 follows the pinned canonical
-DOM serializer. Its narrow name/text substring screen and the deleted separate
-page-text field are documented in
+DOM serializer. Read-path redaction is removed by the standing captain directive,
+restated 2026-09-07; payment fences and vault boundaries are untouched. See
 [`docs/browser-use-serializer-port.md`](docs/browser-use-serializer-port.md);
 §4.5 and `AGENTS.md` §16 own the no-seal rule.
 

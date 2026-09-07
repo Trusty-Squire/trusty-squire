@@ -39,16 +39,11 @@ captain-authorized exception for unbindable nodes, not a change to canonical
 rendering of bindable nodes. The shadow fixture and session regression cover
 complete surrounding text, working sibling controls and stable fallback refs.
 
-The existing secret-shaped substring redactor screens human-readable naming
-attributes, image names, compound-control descriptions and visible text before
-rendering. Machine identifiers, source URLs and field values retain canonical
-attribute semantics. It does not rewrite structural ref markers or collapse whitespace.
-For truncated names, screening examines the full original name and tracks the
-original positions of replaced spans. The canonical 100-code-point cutoff and
-ellipsis stay fixed even if a redaction shortens the prefix or spans that cutoff;
-no extra trailing words or partial secret fragments can become visible. The
-detector expressions, order and entropy rules remain unchanged.
-Screenshots, extracts, vault behavior, payments and OAuth are outside this change.
+Read-path redaction is removed by the standing captain directive, restated on
+2026-09-07. Names, visible text, semantic headings and revealed field values are
+page content; no vendor-prefix, entropy or secret-shape screen rewrites them.
+Canonical attribute and length semantics remain. Payment fences, the vault's
+write-only boundary and sealed credential-slot injection are untouched.
 A failed DOM capture raises a concrete error; it cannot masquerade as an empty
 but successful observation.
 
@@ -75,15 +70,12 @@ or quarantined. Unrelated behavior and payment suites remain required.
 - `browser-use-serializer.test.ts` compares the six generated captures, allowing
   only identity substitution.
 - `observation-prose.test.ts` now exercises the replacement through real Chrome,
-  including hierarchy, containment, redaction, frame bindings and below-fold reachability.
+  including hierarchy, containment, verbatim page content, frame bindings and below-fold reachability.
 - `operate-session-flow.test.ts` covers whole-document query, scroll reachability,
   stable refs, changed interleaved text, and explicit capture failures.
 - `pnpm --filter @trusty-squire/mcp test:fast` runs the static required tier.
 
-Canonical equality is checked **before screening**, normalizing identity only.
-The unchanged secret-shape detection rules are tested separately. Corpus-wide
-structural-invariance assertions require screening to change only redacted spans,
-with identical line counts, indentation and refs. The HN fixture explicitly pins
-`usernametaken29` becoming `[redacted]`: redacting this plain lowercase-plus-digits
-username is a **redactor false positive** worth tuning in a separate task, not in
-this port. This limitation must also be recorded in the PR body.
+Canonical equality is checked directly, normalizing identity only. The HN fixture
+pins `usernametaken29` verbatim. Browser regressions also cover the reported
+`trusty-squire-dogfood-20260625` slug, synthetic key names and documentation JSON,
+and rendered API-key-shaped text in names, prose and revealed input values.

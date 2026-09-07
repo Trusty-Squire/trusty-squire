@@ -189,212 +189,6 @@ export function compactV2LegacyRefForHandle(
   return handles.get(target) ?? null;
 }
 
-// ---- Accessible-name secret screen ----------------------------------------
-// A control's accessible name is page-rendered text, and sites routinely render
-// an API key as the accessible name of its copy/reveal button (ipinfo's token
-// button, cloud consoles). When they do, the derived label alias IS the secret:
-// the 2026-09-06 ipinfo dogfood emitted the account's live 14-hex-char token as
-// `@f9a062f02fadf5`, and its first four characters again inside a curl
-// example's `@curl-h-authorization-bearer-f9a0`, putting the credential into
-// the model's context and transcript — precisely the exposure the write-only
-// vault exists to prevent.
-//
-// This screen is deliberately LABEL-ONLY and does not reopen the read-seal
-// order of 2026-09-05 (docs/observation-model.md §4.5): page text, semantics,
-// screenshots, extracts, and field values are untouched. The label alias is a
-// code-derived target whose documented contract was always "screened ... never
-// a value" — the screen below is what makes that contract true for sites that
-// display a key as clickable text. A redacted row keeps its ref, role, and
-// every non-secret fact (state/action/field/choice/frame) so the control stays
-// clickable; only the value is replaced, with a marker that says why.
-// Detection fails toward redaction on ambiguous shapes but must not eat
-// ordinary UI copy: measured-live legitimate labels — @view-plans-pricing,
-// @as15169, @8-8-8-8, @1-1-1-1, @bmbmlite, @curl-example — survive verbatim.
-
-/** The label emitted when an accessible name screened as secret-shaped. */
-export const REDACTED_SECRET_LABEL_V2 = "@redacted-secret";
-
-/** Shannon entropy of the character distribution, in bits per character. */
-export function shannonEntropyBitsPerChar(value: string): number {
-  if (value.length === 0) return 0;
-  const counts = new Map<string, number>();
-  for (const character of value) counts.set(character, (counts.get(character) ?? 0) + 1);
-  let bits = 0;
-  for (const count of counts.values()) {
-    const probability = count / value.length;
-    bits -= probability * Math.log2(probability);
-  }
-  return bits;
-}
-
-const SECRET_NAME_MIN_RUN_CHARS = 12;
-// A credential may be PRESENTED in hyphen/underscore groups (base64url
-// grouping, UUIDs, license keys): "f9a062f0-2fadf5ab-9c1d2e3f". The run scan
-// therefore also scores each such group joined into one candidate — but only
-// when every segment is ≥4 chars, so ordinary copy like "SKU-12345",
-// "8-8-8-8", "1-1-1-1", and "task-management-101" never produces a candidate.
-const SECRET_NAME_MIN_GROUP_SEGMENT_CHARS = 4;
-// Entropy floors per character. Hex runs get the lower floor (a 16-symbol
-// alphabet rarely exceeds ~3.3 bits/char even at full randomness; the live
-// ipinfo token measured ~3.17). Other digit-bearing runs (base32/62/64url
-// shapes) get the higher floor.
-const SECRET_NAME_HEX_MIN_ENTROPY_BITS = 2.5;
-const SECRET_NAME_MIXED_MIN_ENTROPY_BITS = 2.8;
-
-// Vendor-anchored shapes. Each redacts on a prefix plus a bounded run, so a
-// description truncated before the key's end still screens (a 40-char budget
-// cuts an "Authorization: Bearer <key>" example mid-key — the curl-example
-// leak rode exactly that truncation into the label slug).
-const SECRET_NAME_SHAPE_RES: readonly RegExp[] = [
-  /\bsk-[A-Za-z0-9_-]{8,}/, // OpenAI-style
-  /\bgh[pousr]_[A-Za-z0-9]{16,}/, // GitHub classic PATs
-  /\bgithub_pat_[A-Za-z0-9_]{16,}/, // GitHub fine-grained PATs
-  /\bA[KS]IA[0-9A-Z]{8,}/, // AWS access key ids
-  /\bxox[bposr]-(?=[A-Za-z-]*\d)[A-Za-z0-9-]{8,}/, // Slack tokens (digit-bearing)
-  /\bglpat-[A-Za-z0-9_-]{16,}/, // GitLab PATs
-  /\bAIza[0-9A-Za-z_-]{16,}/, // Google API keys
-  /\beyJ[A-Za-z0-9_-]{12,}/, // JWT header segment (base64url of `{"`)
-  /\b[A-Za-z][A-Za-z0-9]{1,9}_(?=[A-Za-z_]*\d)[A-Za-z0-9_]{12,}/, // snake-prefixed keys (api_…, key_…)
-  /\b[Bb]earer[ \t]+[A-Za-z0-9_.\-=]{6,}/, // composite auth/curl examples
-];
-
-// JWT header.payload.signature: three dot-separated base64url segments. Real
-// hostnames never present three consecutive 8+-char alphanumeric segments.
-const SECRET_NAME_JWT_RE = /\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/;
-
-/**
- * Alnum runs of the description, plus each hyphen/underscore-separated group
- * (all segments ≥4 chars) joined into one run, so a grouped credential is
- * scored as a whole instead of slipping through as short segments.
- */
-const SECRET_NAME_GROUP_RUN_RE = /[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)+/g;
-
-/**
- * The joined candidate a hyphen/underscore group is scored as when every
- * segment is ≥4 chars; `undefined` for ordinary copy like "SKU-12345".
- */
-function secretShapedGroupCandidate(group: string): string | undefined {
-  const segments = group.split(/[-_]/);
-  if (!segments.every((segment) => segment.length >= SECRET_NAME_MIN_GROUP_SEGMENT_CHARS)) {
-    return undefined;
-  }
-  return segments.join("");
-}
-
-function secretShapedCandidateRuns(description: string): string[] {
-  const candidates = [...(description.match(/[A-Za-z0-9]+/g) ?? [])];
-  for (const group of description.match(SECRET_NAME_GROUP_RUN_RE) ?? []) {
-    const candidate = secretShapedGroupCandidate(group);
-    if (candidate !== undefined) candidates.push(candidate);
-  }
-  return candidates;
-}
-
-/**
- * Whether a control's accessible name reads as a credential rather than a
- * word. Combines vendor anchors, JWT shape, and LENGTH + CHARACTER-CLASS +
- * ENTROPY over unbroken alnum runs (and joined hyphen/underscore groups — a
- * UUID- or license-key-shaped body must not survive as short segments). The
- * live leak was a bare 14-char lowercase hex string with no vendor prefix, so
- * a prefix allowlist alone is insufficient and entropy is load-bearing.
- * Pure-alpha runs are ordinary words and never screen (this is what spares
- * @authorization-style labels).
- */
-export function looksLikeSecretShapedName(description: string): boolean {
-  if (SECRET_NAME_SHAPE_RES.some((shape) => shape.test(description))) return true;
-  if (SECRET_NAME_JWT_RE.test(description)) return true;
-  return secretShapedCandidateRuns(description).some(isSecretShapedRun);
-}
-
-/**
- * The length + character-class + entropy arm of the secret screen, shared by
- * the boolean predicate and the prose redactor so both call sites can never
- * drift apart on what counts as a credential.
- */
-function isSecretShapedRun(run: string): boolean {
-  if (run.length < SECRET_NAME_MIN_RUN_CHARS) return false;
-  if (!/[0-9]/.test(run)) return false;
-  const entropy = shannonEntropyBitsPerChar(run);
-  if (/^[0-9a-f]+$/i.test(run)) {
-    // A hex run still needs a hex LETTER: pure-digit runs are compact
-    // timestamps, order ids, and PANs (low-entropy anyway) — ordinary UI
-    // copy that must survive; credential-shaped hex carries both classes.
-    return /[a-f]/i.test(run) && entropy >= SECRET_NAME_HEX_MIN_ENTROPY_BITS;
-  }
-  return entropy >= SECRET_NAME_MIXED_MIN_ENTROPY_BITS;
-}
-
-const OBSERVATION_PROSE_REDACTION_MARKER = "[redacted]";
-
-/**
- * Substring redaction of one prose item through the SAME primitive that
- * screens label aliases: the vendor/JWT shape regexes and the shared run
- * predicate above. Page prose is sentences, not slugs, so instead of
- * replacing the whole item with a marker, only the secret-shaped substrings
- * are — the surrounding sentence ("Your API key was created") survives so
- * the channel stays comprehensible. Idempotent, and fails toward redaction:
- * anything the boolean predicate would have caught is rewritten here.
- */
-export function redactObservationProseV2(item: string): string {
-  return redactObservationValueV2(item);
-}
-
-/** Screen the FULL name, retaining only its original canonical prefix. */
-export function screenBrowserUseValueV2(item: string, visibleCodePoints?: number): string {
-  return redactObservationValueV2(item, visibleCodePoints);
-}
-
-function redactObservationValueV2(item: string, visibleCodePoints?: number): string {
-  let redacted = item;
-  const boundary =
-    visibleCodePoints === undefined
-      ? item.length
-      : Array.from(item).slice(0, visibleCodePoints).join("").length;
-  // Track original UTF-16 offsets only for truncated names. Every replacement
-  // character inherits the matched span's start, so a token crossing the cutoff
-  // becomes one complete marker, while text after the cutoff stays absent.
-  let origins =
-    boundary < item.length ? Array.from({ length: item.length }, (_, i) => i) : undefined;
-  const replace = (pattern: RegExp, replacement: (match: string) => string): void => {
-    const prior = origins;
-    const next: number[] = [];
-    let consumed = 0;
-    redacted = redacted.replace(pattern, (match: string, offset: number) => {
-      const value = replacement(match);
-      if (prior) {
-        for (let i = consumed; i < offset; i++) next.push(prior[i]!);
-        for (let i = 0; i < value.length; i++)
-          next.push(value === match ? prior[offset + i]! : prior[offset]!);
-        consumed = offset + match.length;
-      }
-      return value;
-    });
-    if (prior) {
-      for (let i = consumed; i < prior.length; i++) next.push(prior[i]!);
-      origins = next;
-    }
-  };
-  // The detector expressions, order and predicates are unchanged.
-  for (const shape of SECRET_NAME_SHAPE_RES) {
-    replace(new RegExp(shape.source, "g"), () => OBSERVATION_PROSE_REDACTION_MARKER);
-  }
-  replace(new RegExp(SECRET_NAME_JWT_RE.source, "g"), () => OBSERVATION_PROSE_REDACTION_MARKER);
-  replace(SECRET_NAME_GROUP_RUN_RE, (group) => {
-    const candidate = secretShapedGroupCandidate(group);
-    return candidate !== undefined && isSecretShapedRun(candidate)
-      ? OBSERVATION_PROSE_REDACTION_MARKER
-      : group;
-  });
-  replace(/[A-Za-z0-9]+/g, (run) =>
-    isSecretShapedRun(run) ? OBSERVATION_PROSE_REDACTION_MARKER : run,
-  );
-  if (origins) {
-    const end = origins.findIndex((offset) => offset >= boundary);
-    return end === -1 ? redacted : redacted.slice(0, end);
-  }
-  return redacted;
-}
-
 const LABEL_MAX_CHARS = 32;
 
 /**
@@ -449,28 +243,9 @@ function leadingTitleFromAccessibleName(name: string): string {
   return name;
 }
 
-/**
- * The addressable alias for a screened control description. Slugified so the
- * agent can type it back verbatim; `undefined` when the description screened
- * out or carries no alphanumeric content. A description that reads as a
- * credential (including one whose truncation carried only a secret FRAGMENT —
- * the curl-bearer example) yields the redaction marker instead of the slug,
- * so no part of the secret, not even its leading characters, reaches the wire.
- * Callers pass the UNTRUNCATED name: screening after the 40-char description
- * cut let a bare token behind a long preamble slip past the run-length floor.
- *
- * Legibility (2026-09-06 dogfood): when the name is a heading glued to a
- * longer description (no whitespace between them in the DOM), the leading
- * title is kept and the description dropped rather than truncating the glued
- * pair; remaining over-length slugs are cut on a word boundary (the trailing
- * partial segment is dropped), never mid-word. `LABEL_MAX_CHARS` is unchanged.
- * Both steps run AFTER the secret screen, which still sees the full name, so
- * a bare token behind a long preamble still redacts instead of slipping past
- * as a tidy title.
- */
+/** Addressable slug of the page's control description, with the existing title and length limits. */
 export function controlLabelV2(description: string | undefined): string | undefined {
   if (description === undefined) return undefined;
-  if (looksLikeSecretShapedName(description)) return REDACTED_SECRET_LABEL_V2;
   const titled = leadingTitleFromAccessibleName(description);
   let slug = titled
     .toLowerCase()
@@ -744,12 +519,7 @@ export function safeDescriptionV2(value: string | null | undefined): string | un
     : `${normalized.slice(0, SAFE_DESCRIPTION_MAX_CHARS - 1)}…`;
 }
 
-/**
- * The whitespace/control-character normalization half of `safeDescriptionV2`,
- * without the length budget. The label alias screens THIS text: the 40-char
- * cut can slice a bare token below the entropy screen's minimum run and leave
- * its leading characters for the slug, so the screen must see the whole name.
- */
+/** Normalize page descriptions without applying the query row's length limit. */
 export function normalizeDescriptionV2(value: string | null | undefined): string | undefined {
   if (typeof value !== "string") return undefined;
   // Control characters would break the positional wire encoding; they are not
@@ -1018,17 +788,9 @@ export function sealRetainedInteractiveElementsV2(
 }
 
 export function safePageSemanticsV2(source: ObservationSemanticSourceV2): SafePageSemanticsV2 {
-  const screenDescription = (value: string): string | undefined => {
-    const normalized = normalizeDescriptionV2(value);
-    if (normalized === undefined) return undefined;
-    const description = safeDescriptionV2(normalized)!;
-    if (normalized.length <= SAFE_DESCRIPTION_MAX_CHARS) return screenBrowserUseValueV2(normalized);
-    const visible = description.slice(0, -1);
-    return screenBrowserUseValueV2(normalized, Array.from(visible).length) + "…";
-  };
-  const title = screenDescription(source.title);
+  const title = safeDescriptionV2(source.title);
   const headings = source.headings
-    .map(screenDescription)
+    .map(safeDescriptionV2)
     .filter((value): value is string => value !== undefined)
     .filter((value, index, all) => all.indexOf(value) === index)
     .slice(0, 1);
@@ -1096,20 +858,13 @@ function candidateText(el: InteractiveElement): string {
 function controlDescription(el: InteractiveElement): string | undefined {
   // Labels are chosen from visible/accessibility naming sources only. Native
   // button values are names; field values, `name`, and `id` stay excluded.
-  // The name is NOT length-budgeted here: `controlLabelV2` screens the full
-  // text and its slug carries the label's own budget.
+  // The name is not length-budgeted here; its slug has a separate budget.
   const chosen = controlNamingTexts(el)
     .map((candidate) => normalizeDescriptionV2(candidate))
     .find((candidate) => candidate !== undefined);
   if (chosen === undefined) return undefined;
-  // Reduce label lossiness: a slug-only accessible name the agent cannot act
-  // on (@as15169, @1w, @f9a062f02fadf5 in the 2026-09-06 ipinfo dogfood)
-  // gains the short SCREENED context of the region it sits in, so the label
-  // reads "@as15169-as-details" instead of a bare opaque token. The context
-  // is page-derived copy, so it goes through the same seal as any naming
-  // source AND the shared secret-shape screen — a region that displays a key
-  // as its heading never rides into a label as "context".
-  const context = screenedRegionContextV2(el.container, chosen);
+  // Add the page's region context to otherwise opaque labels (such as @as15169).
+  const context = regionContextV2(el.container, chosen);
   return context === undefined ? chosen : `${chosen} ${context}`;
 }
 
@@ -1118,17 +873,14 @@ function isUninformativeDescriptionV2(description: string): boolean {
   return !/[a-zA-Z]{3,}/.test(description);
 }
 
-function screenedRegionContextV2(
-  container: string | null | undefined,
-  chosen: string,
-): string | undefined {
+function regionContextV2(container: string | null | undefined, chosen: string): string | undefined {
   if (container === null || container === undefined) return undefined;
   if (!isUninformativeDescriptionV2(chosen)) return undefined;
   // `container` is "kind:slug" (e.g. "section:api-tokens"); the kind adds no
   // information for the agent and only spends label bytes.
   const rawSlug = container.includes(":") ? container.slice(container.indexOf(":") + 1) : container;
   const context = safeDescriptionV2(rawSlug);
-  if (context === undefined || looksLikeSecretShapedName(context)) return undefined;
+  if (context === undefined) return undefined;
   return context.slice(0, 24).replace(/-+$/, "") || undefined;
 }
 

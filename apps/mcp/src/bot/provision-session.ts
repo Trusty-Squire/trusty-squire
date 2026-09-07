@@ -61,7 +61,6 @@ import {
   safeDescriptionV2,
   safeOriginV2,
   safePageSemanticsV2,
-  screenBrowserUseValueV2,
   sealRetainedInteractiveElementsV2,
   safeStageV2,
   type SafeControlV2,
@@ -4148,7 +4147,6 @@ function compactV2Observation(
   const safe = compactV2LiveControls(session, elements);
   const handles = compactV2Handles(session, elements);
   const rendered = serializeBrowserUseDOM(capture.root, {
-    screen: screenBrowserUseValueV2,
     ref: (node) => {
       const element = capture.nodeElements.get(node.id);
       const ref = element === undefined ? undefined : handles.get(element);
