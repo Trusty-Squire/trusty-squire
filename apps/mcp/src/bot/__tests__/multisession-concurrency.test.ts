@@ -30,6 +30,7 @@ interface FakeInstance {
 const h = vi.hoisted(() => ({
   providers: ["google"] as string[] | null,
   workerEmail: "operator@example.com" as string | null,
+  oauthTerminalCompletionUrl: null as string | null,
   nextId: 0,
   instances: [] as FakeInstance[],
   // Test levers: park the primary's real close, park a satellite attach, or
@@ -97,6 +98,17 @@ vi.mock("../browser.js", async (importOriginal) => {
     mainDocumentIdentity(): string {
       return "1";
     }
+    isActivePage(): boolean {
+      return true;
+    }
+    completedOAuthPage(): null {
+      return null;
+    }
+    takeOAuthTerminalCompletionUrl(): string | null {
+      const url = h.oauthTerminalCompletionUrl;
+      h.oauthTerminalCompletionUrl = null;
+      return url;
+    }
     recoverActivePage(): void {}
     armOpenedTabAdoption(): void {}
     async adoptOpenedTab(): Promise<string | null> {
@@ -163,6 +175,7 @@ let profileDir: string;
 beforeEach(() => {
   h.providers = ["google"];
   h.workerEmail = "operator@example.com";
+  h.oauthTerminalCompletionUrl = null;
   h.nextId = 0;
   h.instances = [];
   h.primaryCloseGate = null;
