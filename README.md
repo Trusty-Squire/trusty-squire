@@ -379,20 +379,24 @@ without emitting it with `shadow`; the detailed DOM-tree contract lives in
   ending the shared server process or discarding the active session. For a
   provider login, pass the observed provider-button ref to `operate_login`.
   It retains the product tab across provider-owned popup
-  redirects and closes, then returns the post-login product observation even if
-  `detail` is `none`. Every OAuth login is serialized
+  redirects and closes. When it observes the authorized return destination still
+  open, it returns the normal post-login product observation even if `detail` is
+  `none`; if that observed destination closes before handoff, it returns a
+  terminal `oauth_completed` snapshot with refs unavailable and directs the host
+  to `operate_observe`. Every OAuth login is serialized
   from action start through completion and a short release cooldown; other
   session work remains parallel. The whole serialized action has a 30-second
-  deadline. If the provider has not handed control back in time, the call does
-  not error and does not close the session: it returns a normal observation
-  with `oauth.state: "awaiting_human"`, a `reason` naming only what was
-  observed, and `next_action: "operate_observe"`. A consent screen or a
-  2FA/verification challenge is usually still showing, so re-observe and drive
-  it; the session stays open and usable. A denial the provider actually
-  reported (an OAuth `error=` code on the return URL) is the one case that
-  fails the action, with that code in the message. If an observation races the
-  transition, it reports `oauth.state: "in_progress"` and directs the host to
-  observe again.
+  deadline. At that boundary it rechecks captured, attempt-local return evidence:
+  an observed return completes the action rather than being reported as pending.
+  Only when no such completion evidence exists does the call return a normal
+  observation with `oauth.state: "awaiting_human"`, a `reason` naming only what
+  was observed, and `next_action: "operate_observe"`; it does not error or close
+  the session. A consent screen or a 2FA/verification challenge is usually still
+  showing, so re-observe and drive it; the session stays open and usable. A
+  denial the provider actually reported (an OAuth `error=` code on the return
+  URL) is the one case that fails the action, with that code in the message. If
+  an observation races the transition, it reports `oauth.state: "in_progress"`
+  and directs the host to observe again.
 - Observed card controls are marked `payment_field` and
   `interaction: "vaulted_card_only"`, with `operate_pay { phase: "fill_card" }`
   as the recommended action. Typing a Luhn-valid, card-number-shaped value

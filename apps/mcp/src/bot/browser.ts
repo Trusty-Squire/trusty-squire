@@ -3482,7 +3482,12 @@ export class BrowserController {
     await this.sleep(500);
   }
 
-  private async typeInner(page: Page, selector: string, text: string, sealed = false): Promise<void> {
+  private async typeInner(
+    page: Page,
+    selector: string,
+    text: string,
+    sealed = false,
+  ): Promise<void> {
     // Wait for element to be visible and enabled before typing.
     await page.waitForSelector(selector, { state: "visible", timeout: 10000 });
     const locator = page.locator(selector);
@@ -5286,13 +5291,10 @@ export class BrowserController {
     return await this.selectOptionOnPage(this.page, selector, optionMatcher);
   }
 
-  async selectOptionOnPage(
-    page: Page,
-    selector: string,
-    optionMatcher?: string,
-  ): Promise<string> {
-    return await this.withModalInertNeutralized(selector, () =>
-      this.selectOptionInner(page, selector, optionMatcher),
+  async selectOptionOnPage(page: Page, selector: string, optionMatcher?: string): Promise<string> {
+    return await this.withModalInertNeutralized(
+      selector,
+      () => this.selectOptionInner(page, selector, optionMatcher),
       page,
     );
   }
@@ -5321,7 +5323,7 @@ export class BrowserController {
     if (tagName === "label") {
       const resolved = await this.resolveLabelToInput(activeSelector, page);
       if (resolved !== activeSelector) {
-          const resolvedTag = await page
+        const resolvedTag = await page
           .locator(resolved)
           .first()
           .evaluate((node) => node.tagName.toLowerCase())
@@ -13045,7 +13047,11 @@ export class BrowserController {
   // for (a merchant's own same-domain checkout options rendered in an
   // iframe), the same primitives fillAndSubmitCheckout already relies on for
   // cross-origin PSP fields.
-  async clickInFrame(target: FrameTarget, selector: string, page: Page | null = this.page): Promise<void> {
+  async clickInFrame(
+    target: FrameTarget,
+    selector: string,
+    page: Page | null = this.page,
+  ): Promise<void> {
     const handle = await this.resolveFrameElement(target, selector, 0, page);
     if (handle === null) {
       throw new Error(
@@ -13700,7 +13706,9 @@ export class BrowserController {
   }
 
   private isOAuthReturnUrl(candidateUrl: string, expectedReturnUrl: string | null): boolean {
-    return expectedReturnUrl !== null && oauthRedirectTargetMatches(candidateUrl, expectedReturnUrl);
+    return (
+      expectedReturnUrl !== null && oauthRedirectTargetMatches(candidateUrl, expectedReturnUrl)
+    );
   }
 
   private async waitForOAuthLifecycle(

@@ -83,9 +83,9 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
       expect(meta.image).toBeUndefined();
       expect(textBlock?.text ?? "").not.toContain(TINY_JPEG_BASE64);
 
-      expect(
-        (browser.captureOperatorScreenshot as ReturnType<typeof vi.fn>).mock.calls[0],
-      ).toEqual([{}]);
+      expect((browser.captureOperatorScreenshot as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual(
+        [{}],
+      );
     } finally {
       await client.close();
       await closeAllProvisionSessions();
@@ -125,9 +125,9 @@ describe("operate_screenshot — real MCP protocol round trip", () => {
           full_page: true,
         },
       });
-      expect(
-        (browser.captureOperatorScreenshot as ReturnType<typeof vi.fn>).mock.calls[0],
-      ).toEqual([{ frameUrlContains: "cardinalcommerce.com", fullPage: true }]);
+      expect((browser.captureOperatorScreenshot as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual(
+        [{ frameUrlContains: "cardinalcommerce.com", fullPage: true }],
+      );
     } finally {
       await client.close();
       await closeAllProvisionSessions();
