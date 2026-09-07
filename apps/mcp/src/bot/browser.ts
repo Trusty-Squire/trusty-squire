@@ -385,6 +385,21 @@ export class OAuthFailedError extends Error {
 // query; §4.2.2.1 in the fragment for implicit flows). The code is reported
 // verbatim — it is a fact the provider stated, not a guess.
 const OAUTH_ERROR_CODE_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
+const OAUTH_RESPONSE_FRAGMENT_NAMES = new Set([
+  "access_token",
+  "code",
+  "error",
+  "error_description",
+  "error_uri",
+  "expires_in",
+  "id_token",
+  "iss",
+  "scope",
+  "session_state",
+  "state",
+  "token_type",
+]);
+const OAUTH_RESPONSE_FRAGMENT_SIGNALS = new Set(["access_token", "code", "error", "id_token"]);
 
 export function oauthErrorFromReturnUrl(
   url: string,
@@ -426,10 +441,17 @@ function oauthRedirectTargetMatches(candidateUrl: string, expectedReturnUrl: str
     const candidate = new URL(candidateUrl);
     const expected = new URL(expectedReturnUrl);
     const expectedNames = [...new Set(expected.searchParams.keys())];
+    const candidateFragment = new URLSearchParams(candidate.hash.slice(1));
+    const hasOAuthResponseFragment =
+      expected.hash.length === 0 &&
+      candidate.hash.length > 1 &&
+      [...candidateFragment.keys()].every((name) => OAUTH_RESPONSE_FRAGMENT_NAMES.has(name)) &&
+      [...candidateFragment.keys()].some((name) => OAUTH_RESPONSE_FRAGMENT_SIGNALS.has(name));
     return (
       candidate.protocol === expected.protocol &&
       candidate.host === expected.host &&
       candidate.pathname === expected.pathname &&
+      (candidate.hash === expected.hash || hasOAuthResponseFragment) &&
       expectedNames.every(
         (name) =>
           JSON.stringify(candidate.searchParams.getAll(name)) ===
@@ -3439,9 +3461,12 @@ export class BrowserController {
    * dispatching change and moving focus away mirrors the user's Tab action.
    * This is intentionally not a generic post-type event mechanism.
    */
-  async commitRequiredShippingAddressLine1(selector: string): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    await this.page
+  async commitRequiredShippingAddressLine1(
+    selector: string,
+    page: Page | null = this.page,
+  ): Promise<void> {
+    if (page === null) throw new Error("Browser not started");
+    await page
       .locator(selector)
       .first()
       .evaluate((field) => {
@@ -3679,48 +3704,6 @@ export class BrowserController {
       );
     }
     await chooser.setFiles(filePath);
-  }
-
-  async uploadFileInFrame(
-    target: FrameTarget,
-    selector: string,
-    filePath: string,
-    page: Page | null = this.page,
-  ): Promise<void> {
-    if (!existsSync(filePath) || !statSync(filePath).isFile()) {
-      throw new Error(`upload: local file not found or not a regular file: ${filePath}`);
-    }
-    if (page === null) throw new Error("Browser not started");
-    const handle = await this.resolveFrameElement(target, selector, 0, page);
-    if (handle === null) {
-      throw new Error(
-        `upload: the target's frame is no longer present (${this.frameLabel(target)})`,
-      );
-    }
-    try {
-      const isFileInput = await handle
-        .evaluate((el) => el instanceof HTMLInputElement && el.type === "file")
-        .catch(() => false);
-      if (isFileInput) {
-        await handle.setInputFiles(filePath);
-        return;
-      }
-      const chooserPromise = page
-        .waitForEvent("filechooser", { timeout: 15_000 })
-        .then((chooser) => chooser)
-        .catch(() => null);
-      await handle.click({ timeout: 8000 });
-      const chooser = await chooserPromise;
-      if (chooser === null) {
-        throw new Error(
-          `upload: clicking "${selector}" did not open a file picker within 15s. ` +
-            `Target the upload button (or the file <input>) and retry.`,
-        );
-      }
-      await chooser.setFiles(filePath);
-    } finally {
-      await handle.dispose().catch(() => undefined);
-    }
   }
 
   // Ancestors marked `inert` for a "hide the background while a modal is

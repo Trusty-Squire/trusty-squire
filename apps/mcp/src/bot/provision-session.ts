@@ -5589,14 +5589,12 @@ async function executeAct(
               await browser.discardTypeSuggestionPopup(dismissPopupWithEscape);
             }
             if (isRequiredShippingAddressLine1(el)) {
-              await browser.commitRequiredShippingAddressLine1(el.selector);
+              await browser.commitRequiredShippingAddressLine1(el.selector, compactV2ActionPage);
             }
           }
         } else if (action.kind === "upload") {
-          const target = frameTargetFor(el);
-          if (target !== null) {
-            await browser.uploadFileInFrame(target, el.selector, action.path, compactV2ActionPage);
-          } else if (compactV2ActionPage !== undefined) {
+          assertNoFrameTarget(el, "upload");
+          if (compactV2ActionPage !== undefined) {
             await browser.uploadFileOnPage(compactV2ActionPage, el.selector, action.path);
           } else {
             await browser.uploadFile(el.selector, action.path);
