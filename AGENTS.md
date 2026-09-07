@@ -680,10 +680,11 @@ virgin signup succeeds on an UNCOVERED service (no active skill in registry)
   the operator owner shares that bounded graceful quit after page/context close.
   `browser-close-cookie.test.ts` proves fresh login cookies survive both local
   launch modes; the original plain-login evidence is in `STATE.md`.
-- `BrowserController` local launches are new-headless only; do not reintroduce
-  virtual-display selection or `DISPLAY` plumbing into automated operator runs.
+- `BrowserController` local launches remain headed on their owned display; do
+  not reintroduce virtual-display selection or `DISPLAY` plumbing into
+  automated operator runs.
   `apps/mcp/src/bot/browser-process-owner.ts` (launch helpers in
-  `browser-process-runtime.ts`) owns the supported local-headless and remote-CDP
+  `browser-process-runtime.ts`) owns the supported local and remote-CDP
   operator paths.
 - `apps/mcp/src/bot/identity-runtime.ts` owns Chrome's lifetime independent of
   any one session (single-flight launch + epoch + tab acquire/release, wired
