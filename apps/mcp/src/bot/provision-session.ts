@@ -721,7 +721,10 @@ async function withOAuthActionBoundary(
         if (error instanceof OAuthAwaitingHumanError && error.phase !== "not_attempted") {
           const completion = await deadline.completionCheck?.();
           if (completion !== undefined && completion !== null) {
-            return { observation: oauthCompletionObservation(session, completion), outcome: {} };
+            return {
+              observation: await observeSession(session, "compact", undefined, completion.page),
+              outcome: {},
+            };
           }
         }
         throw error;
@@ -2125,8 +2128,8 @@ export function isInboxReadHost(url: string): boolean {
   return host !== null && INBOX_READ_HOSTS.has(host);
 }
 
-function widenAllowedHostsFromCurrentUrl(session: Session): void {
-  const host = registrableHost(session.browser.currentUrl());
+function widenAllowedHostsFromUrl(session: Session, url: string): void {
+  const host = registrableHost(url);
   if (host === null || session.allowedHosts.some((e) => e.host === host)) return;
   const currentBase = baseDomain(host);
   // Chain ONLY off START-sourced hosts: an organic redirect that shares a base
@@ -2209,7 +2212,7 @@ export async function captureScreenshot(
 export function observedHostsForSession(sessionId: string): string[] {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  widenAllowedHostsFromCurrentUrl(session);
+  widenAllowedHostsFromUrl(session, session.browser.currentUrl());
   return [...new Set(egressSeedHosts(session))];
 }
 
@@ -4405,6 +4408,7 @@ async function observeSession(
   session: Session,
   detail: "compact" | "full" = "compact",
   startMetadata?: CompactV2StartMetadata,
+  sourcePage?: OAuthCompletionEvidence["page"],
 ): Promise<Observation> {
   const oauthInProgress = (): Observation => {
     session.prevObserve = null;
@@ -4433,25 +4437,32 @@ async function observeSession(
     );
   };
   try {
-    session.browser.recoverActivePage();
-    const transition = session.browser.oauthTransitionStatus?.();
-    if (
-      transition?.providerPageClosed === true &&
-      transition.productPageViable &&
-      transition.browserConnected
-    ) {
-      return oauthInProgress();
+    if (sourcePage === undefined) {
+      session.browser.recoverActivePage();
+      const transition = session.browser.oauthTransitionStatus?.();
+      if (
+        transition?.providerPageClosed === true &&
+        transition.productPageViable &&
+        transition.browserConnected
+      ) {
+        return oauthInProgress();
+      }
     }
-    widenAllowedHostsFromCurrentUrl(session);
+    if (sourcePage === undefined) {
+      widenAllowedHostsFromUrl(session, session.browser.currentUrl());
+    }
     session.generation += 1;
     const generation = session.generation;
     const capture =
-      session.compactV2Mode === "on" ? await session.browser.extractBrowserUseObservation() : null;
-    const elements = capture?.elements ?? (await session.browser.extractInteractiveElements());
+      session.compactV2Mode === "on"
+        ? await session.browser.extractBrowserUseObservation(sourcePage)
+        : null;
+    const elements =
+      capture?.elements ?? (await session.browser.extractInteractiveElements(sourcePage));
     retainSessionElements(session, elements);
     let semanticSource: ObservationSemanticSourceV2 = { title: "", headings: [] };
     try {
-      semanticSource = await session.browser.extractObservationSemantics();
+      semanticSource = await session.browser.extractObservationSemantics(sourcePage);
     } catch {
       // Semantic context is optional availability-wise; it is independently
       // sealed below and never changes action-map safety.
@@ -4465,12 +4476,13 @@ async function observeSession(
       await exerciseCompactV2Shadow(session, generation, elements, semanticSource);
     session.compactV2Active = false;
     invalidateCompactV2Snapshot(session);
-    const text = await session.browser.extractVisibleText();
+    const text = await session.browser.extractVisibleText(sourcePage);
     const normalizedFull = text.replace(/\s+/g, " ").trim();
     const normalizedText = normalizedFull.slice(0, 4000);
     const guidance = provisionPerceptionGuidance(normalizedText);
-    const url = session.browser.currentUrl();
-    const liveCheckout = await captureCartCheckoutForFillCardFallback(session, url);
+    const url = sourcePage?.url() ?? session.browser.currentUrl();
+    const liveCheckout =
+      sourcePage === undefined ? await captureCartCheckoutForFillCardFallback(session, url) : null;
     const checkoutState = checkoutStateForObservation(
       session,
       url,
@@ -4760,22 +4772,6 @@ function oauthAwaitingHumanObservation(
       oauth,
     }),
     { stage: "auth", guidance, oauth, url },
-  );
-}
-
-function oauthCompletionObservation(session: Session, completion: OAuthCompletionEvidence): Observation {
-  session.prevObserve = null;
-  invalidateCompactV2Snapshot(session);
-  const text = completion.text.replace(/\s+/g, " ").trim().slice(0, 4000);
-  return compactV2PublicObservation(
-    session,
-    () => ({
-      session_id: session.id,
-      url: completion.url,
-      text,
-      elements: [],
-    }),
-    { stage: safeStageV2(completion.url, []), url: completion.url },
   );
 }
 

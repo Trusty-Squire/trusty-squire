@@ -425,10 +425,19 @@ function oauthRedirectTargetMatches(candidateUrl: string, expectedReturnUrl: str
   try {
     const candidate = new URL(candidateUrl);
     const expected = new URL(expectedReturnUrl);
+    const expectedParams = [...expected.searchParams];
     return (
       candidate.protocol === expected.protocol &&
       candidate.host === expected.host &&
-      candidate.pathname === expected.pathname
+      candidate.pathname === expected.pathname &&
+      expectedParams.every(
+        ([name, value]) =>
+          candidate.searchParams.getAll(name).filter((candidateValue) => candidateValue === value)
+            .length >=
+          expectedParams.filter(
+            ([expectedName, expectedValue]) => expectedName === name && expectedValue === value,
+          ).length,
+      )
     );
   } catch {
     return false;
@@ -436,7 +445,7 @@ function oauthRedirectTargetMatches(candidateUrl: string, expectedReturnUrl: str
 }
 
 export interface OAuthCompletionEvidence {
-  text: string;
+  page: Page;
   url: string;
 }
 
@@ -7475,17 +7484,17 @@ export class BrowserController {
   // would actually see. Use this for the SHELL decision ONLY — credential/key
   // extraction and wall-text checks deliberately read RAW text via
   // extractText() and must stay byte-identical, so this is purely additive.
-  async extractVisibleText(): Promise<string> {
-    if (!this.page) throw new Error("Browser not started");
-    return await this.page.evaluate(extractObservationVisibleText);
+  async extractVisibleText(page: Page | null = this.page): Promise<string> {
+    if (page === null) throw new Error("Browser not started");
+    return await page.evaluate(extractObservationVisibleText);
   }
 
   /** Canonical tree capture, with the existing whole-document action bindings. */
-  async extractBrowserUseObservation(): Promise<BrowserUseCapture> {
-    if (!this.page) throw new Error("Browser not started");
-    const elements = await this.extractInteractiveElements();
+  async extractBrowserUseObservation(page: Page | null = this.page): Promise<BrowserUseCapture> {
+    if (page === null) throw new Error("Browser not started");
+    const elements = await this.extractInteractiveElements(page);
     return captureBrowserUseDOM(
-      this.page,
+      page,
       elements,
       (frame) => this.framePath(frame),
       (frame) => this.frameSecurity(frame),
@@ -7497,9 +7506,11 @@ export class BrowserController {
    * provision session: compact-observation-v2 applies its allowlist seal
    * before the result is stored, delta'd, or emitted.
    */
-  async extractObservationSemantics(): Promise<{ title: string; headings: string[] }> {
-    if (!this.page) throw new Error("Browser not started");
-    return await this.page.evaluate(() => {
+  async extractObservationSemantics(
+    page: Page | null = this.page,
+  ): Promise<{ title: string; headings: string[] }> {
+    if (page === null) throw new Error("Browser not started");
+    return await page.evaluate(() => {
       const visible = (element: Element): boolean => {
         const html = element as HTMLElement;
         const style = window.getComputedStyle(html);
@@ -13081,9 +13092,8 @@ export class BrowserController {
     }
   }
 
-  async extractInteractiveElements(): Promise<InteractiveElement[]> {
-    if (!this.page) throw new Error("Browser not started");
-    const page = this.page;
+  async extractInteractiveElements(page: Page | null = this.page): Promise<InteractiveElement[]> {
+    if (page === null) throw new Error("Browser not started");
     const mainRaw = await this.extractElementsFromContext(page);
     const mainGroups = assignCardRadioGroups(mainRaw.clusterMeta);
     const mainElements = mainRaw.out.map((e, i) => ({
@@ -13297,12 +13307,10 @@ export class BrowserController {
         return null;
       }
       const url = returnedPage.url();
-      const text = await returnedPage.evaluate(extractObservationVisibleText).catch(() => null);
-      return text !== null &&
-        !returnedPage.isClosed() &&
+      return !returnedPage.isClosed() &&
         returnedPage.url() === url &&
         this.isOAuthReturnUrl(url, expectedReturnUrl)
-        ? { url, text }
+        ? { page: returnedPage, url }
         : null;
     };
     registerCompletionCheck?.(completionEvidence);
@@ -13422,7 +13430,7 @@ export class BrowserController {
             ".",
         );
       }
-      if (settled === null) {
+      if (settled === null && (await completionEvidence()) === null) {
         pendingOnProvider = true;
         throw awaitingHumanError();
       }

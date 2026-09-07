@@ -486,6 +486,14 @@ describe("BrowserController OAuth popup lifecycle", () => {
       expect(result.url).toBe("https://console.product.test/projects");
       expect(result.oauth).toBeUndefined();
       expect(result.text).toContain("Projects");
+      expect(result.el_table).toContain("New project");
+      releaseConsent();
+      await vi.waitFor(() =>
+        expect((controller as unknown as { page: Page }).page.url()).toBe(expectedReturnUrl),
+      );
+      const settled = await observe(sessionId);
+      expect(settled.url).toBe(expectedReturnUrl);
+      expect(settled.text).toContain("Projects");
     } finally {
       releaseConsent();
       if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
@@ -550,6 +558,64 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await expect(controller.loginWithOAuth("#oauth", 800, "google")).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("keeps a return with mismatched fixed redirect query pending", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects?organization=expected";
+    const mismatchedReturnUrl =
+      "https://console.product.test/projects?organization=other&code=oauth-code";
+    await context.route("**/*", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body:
+          route.request().url() === "https://product.test/login"
+            ? `<button id="oauth" onclick='location.href=${JSON.stringify(
+                `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+              )}'>Continue</button>`
+            : route.request().url().startsWith("https://accounts.google.com/")
+              ? `<script>setTimeout(() => location.href=${JSON.stringify(mismatchedReturnUrl)}, 50)</script>`
+              : "<main>Approve sign-in</main>",
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 800, "google")).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("accepts OAuth response parameters after matching fixed redirect query", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects?organization=expected";
+    const returnedUrl = `${expectedReturnUrl}&code=oauth-code&state=oauth-state`;
+    await context.route("**/*", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body:
+          route.request().url() === "https://product.test/login"
+            ? `<button id="oauth" onclick='location.href=${JSON.stringify(
+                `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+              )}'>Continue</button>`
+            : route.request().url().startsWith("https://accounts.google.com/")
+              ? `<script>setTimeout(() => location.href=${JSON.stringify(returnedUrl)}, 50)</script>`
+              : "<main>Projects</main>",
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 800, "google")).resolves.toBeUndefined();
+      expect(controller.currentUrl()).toBe(returnedUrl);
     } finally {
       await context.close();
     }
