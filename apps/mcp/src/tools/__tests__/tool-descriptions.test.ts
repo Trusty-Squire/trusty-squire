@@ -79,7 +79,7 @@ describe("the screenshot path is steered as expensive, not forbidden", () => {
   });
 
   it("names DOM serialization as the route to try first", () => {
-    expect(description).toMatch(/safe_table/);
+    expect(description).toMatch(/DOM tree/);
     expect(description).toContain("operate_observe");
     expect(description).toContain("query/cursor");
     expect(description).toMatch(/ONLY when/);
@@ -142,5 +142,31 @@ describe("descriptions do not promise guards that #663 removed", () => {
         expect(tool.description).not.toMatch(pattern);
       });
     }
+  }
+});
+
+// Registered descriptions are the protocol documentation delivered to callers.
+describe("current observation protocol documentation", () => {
+  for (const name of ["operate_start", "operate_observe"]) {
+    it(`${name} documents the DOM tree without retired table instructions`, () => {
+      const description = OPERATE_TOOLS.find((tool) => tool.name === name)!.description;
+      for (const token of [
+        "browser-use-dom",
+        "dom",
+        "tab-indented",
+        "|SHADOW(open)|",
+        "not-targetable=true",
+        "more_above",
+        "more_below",
+        "*",
+        "removed",
+        "delta:true",
+      ]) {
+        expect(description).toContain(token);
+      }
+      expect(description).not.toMatch(/safe_table|observe_query|\[ref,role,facts/);
+      expect(description).not.toMatch(/\b[qfaxsbltcrm]=/);
+      expect(description).not.toMatch(/state bitset|detail:full|card\/secret-shaped|never emitted/);
+    });
   }
 });

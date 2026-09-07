@@ -641,9 +641,9 @@ describe("characterization: agent-facing observation payload shapes", () => {
     const start = await startHarnessProvisionSession({
       serviceUrl: "https://app.example.com/signup",
       browser: new BrowserController({}),
-      observationFormat: "compact-v2",
+      observationFormat: "browser-use-dom",
     });
-    expect(start.format).toBe("compact-v2");
+    expect(start.format).toBe("browser-use-dom");
     expect(Object.keys(start).sort()).toEqual(FIRST_V2_KEYS);
     // V1-only fields must be ABSENT from a compact-v2 payload, never null.
     for (const legacy of ["elements", "el_table", "snapshot_file", "screen", "accessibility"]) {
@@ -651,7 +651,7 @@ describe("characterization: agent-facing observation payload shapes", () => {
     }
 
     const again = await observe(start.session_id);
-    expect(again.format).toBe("compact-v2");
+    expect(again.format).toBe("browser-use-dom");
     expect(Object.keys(again).sort()).toEqual(REOBSERVE_V2_KEYS);
   });
 
@@ -685,7 +685,7 @@ describe("characterization: agent-facing observation payload shapes", () => {
     const start = await startHarnessProvisionSession({
       serviceUrl: "https://app.example.com/signup",
       browser: new BrowserController({}),
-      observationFormat: "compact-v2",
+      observationFormat: "browser-use-dom",
     });
     const result = await observeQuery(start.session_id, "sign up");
     expect(Object.keys(result).sort()).toEqual(QUERY_KEYS);

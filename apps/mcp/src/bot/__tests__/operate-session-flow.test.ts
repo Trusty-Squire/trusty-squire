@@ -2321,15 +2321,9 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
   it("uses canonical public tools in operator recovery guidance", async () => {
     expect(operateTypeTool.description).toContain("operate_extract");
     expect(operateClickTool.description).toContain("stale_ref");
-    expect(provisionObserveTool.description).toContain("default compact-v2 mode");
-    expect(provisionObserveTool.description).toContain("[ref,role,facts?]");
-    expect(provisionObserveTool.description).toContain("s=<state bitset>");
-    expect(provisionObserveTool.description).toContain(
-      "c=checked,u=unchecked,d=disabled,r=required",
-    );
-    expect(provisionObserveTool.description).toContain("x=s for a same-origin child");
-    expect(provisionObserveTool.description).toContain("Fact-only rows begin with a keyed segment");
-    expect(provisionObserveTool.description).toContain("In V1 only, pass detail");
+    expect(provisionObserveTool.description).toContain("browser-use-dom");
+    expect(provisionObserveTool.description).toContain("tab-indented tree");
+    expect(provisionObserveTool.description).toContain("not-targetable=true");
 
     const dir = mkdtempSync(join(tmpdir(), "recipe-guidance-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
@@ -3782,10 +3776,10 @@ describe("Compact V2 action-map boundary", () => {
     ).toBe(true);
     expect(operateSelectTool.description).toContain("selections map");
     expect(provisionObserveTool.description).toContain(
-      "the row's @label alias, a slug of its short label",
+      "`[@e:...]<tag attributes />` identifies a control",
     );
     expect(provisionObserveTool.description).toContain(
-      "matching actionable refs with labels and code-owned facts",
+      "control inventory, including off-viewport controls",
     );
   });
 
@@ -4080,7 +4074,7 @@ describe("Compact V2 action-map boundary", () => {
       hint: "Complete the storefront form.",
     });
     expect(started).toMatchObject({
-      format: "compact-v2",
+      format: "browser-use-dom",
       hint: expect.stringContaining("Complete the storefront form."),
       user_email: "operator@example.test",
     });
@@ -4736,7 +4730,7 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout/confirm",
     });
-    expect(started).toMatchObject({ format: "compact-v2", stage: "checkout" });
+    expect(started).toMatchObject({ format: "browser-use-dom", stage: "checkout" });
   });
 
   it("requires auth actions and fields to share a container", async () => {
@@ -4765,7 +4759,7 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/products",
     });
-    expect(started).toMatchObject({ format: "compact-v2", stage: "form" });
+    expect(started).toMatchObject({ format: "browser-use-dom", stage: "form" });
 
     h.elements = (h.elements as Array<Record<string, unknown>>).map((element) => ({
       ...element,
@@ -4815,7 +4809,7 @@ describe("Compact V2 action-map boundary", () => {
     ];
 
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/order" });
-    expect(started).toMatchObject({ format: "compact-v2", stage: "checkout" });
+    expect(started).toMatchObject({ format: "browser-use-dom", stage: "checkout" });
   });
 
   it("invalidates handles before postcondition probe navigation", async () => {
@@ -4844,7 +4838,7 @@ describe("Compact V2 action-map boundary", () => {
     h.visibleText = "Review order";
     const serviceUrl = "https://shop.example.com/checkout/review?token=private-url-token-123456789";
     const started = await startProvisionSession({ serviceUrl });
-    expect(started).toMatchObject({ format: "compact-v2", url: serviceUrl });
+    expect(started).toMatchObject({ format: "browser-use-dom", url: serviceUrl });
     await expect(
       verifyPostcondition(started.session_id, {
         kind: "execute_capability",
@@ -4904,7 +4898,7 @@ describe("Compact V2 action-map boundary", () => {
       OBSERVE_V2_MAX_WIRE_BYTES,
     );
     expect(started).toMatchObject({
-      format: "compact-v2",
+      format: "browser-use-dom",
       user_email: "operator@example.test",
     });
     // The first page holds the composed hint's head (the login guidance line
@@ -4980,7 +4974,7 @@ describe("Compact V2 action-map boundary", () => {
     h.prose = [`Your token ${token} was created.`];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "compact-v2",
+      observationFormat: "browser-use-dom",
       serviceUrl: "https://app.example.com/dashboard",
     });
     expect(started).not.toHaveProperty("text");
@@ -5007,7 +5001,7 @@ describe("Compact V2 action-map boundary", () => {
     ];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "compact-v2",
+      observationFormat: "browser-use-dom",
       serviceUrl: "https://app.example.com/dashboard",
     });
     const [first, second] = domRefs(started);
@@ -5045,7 +5039,7 @@ describe("Compact V2 action-map boundary", () => {
     h.captureOverride = capture;
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "compact-v2",
+      observationFormat: "browser-use-dom",
       serviceUrl: "https://app.example.com/dashboard",
     });
     expect(started.dom).toContain("Complete surrounding page");
@@ -5078,7 +5072,7 @@ describe("Compact V2 action-map boundary", () => {
     h.elements = [elem({ visibleText: "Continue", selector: "#continue" })];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "compact-v2",
+      observationFormat: "browser-use-dom",
       serviceUrl: "https://app.example.com/dashboard",
     });
     h.proseError = "DOMSnapshot.captureSnapshot failed";
@@ -5094,7 +5088,7 @@ describe("Compact V2 action-map boundary", () => {
     h.prose = ["Long readable content. ".repeat(600)];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "compact-v2",
+      observationFormat: "browser-use-dom",
       serviceUrl: "https://app.example.com/dashboard",
     });
     expect(started.dom).toContain(h.prose[0]!.trim());
@@ -5123,10 +5117,10 @@ describe("Compact V2 action-map boundary", () => {
     const compact = await startHarnessProvisionSession({
       browser: new BrowserController(),
       serviceUrl: "https://shop.example.com/checkout",
-      observationFormat: "compact-v2",
+      observationFormat: "browser-use-dom",
       hint: "route-🧭".repeat(600),
     });
-    expect(compact.format).toBe("compact-v2");
+    expect(compact.format).toBe("browser-use-dom");
     expect(compact.hint_overflow?.next_cursor).toBeDefined();
     expect(Buffer.byteLength(JSON.stringify(compact), "utf8")).toBeLessThanOrEqual(
       OBSERVE_V2_MAX_WIRE_BYTES,
@@ -5144,7 +5138,7 @@ describe("Compact V2 action-map boundary", () => {
 
     const ack = await act(started.session_id, { kind: "scroll", direction: "down" }, "none");
     expect(ack).toMatchObject({
-      format: "compact-v2",
+      format: "browser-use-dom",
       url: secretUrl,
       observed: "none",
     });
@@ -5165,7 +5159,7 @@ describe("Compact V2 action-map boundary", () => {
     };
     const transition = await observe(started.session_id);
     expect(transition).toMatchObject({
-      format: "compact-v2",
+      format: "browser-use-dom",
       url: secretUrl,
       stage: "auth",
       oauth: {
@@ -5274,7 +5268,7 @@ describe("Compact V2 action-map boundary", () => {
     expect(
       JSON.stringify([...paymentSession(started.session_id).committedSelectValues]),
     ).not.toContain("#country");
-    expect(result.observation.format).toBe("compact-v2");
+    expect(result.observation.format).toBe("browser-use-dom");
   });
 
   it("keeps a later bulk target actionable when the preceding mutation spares it", async () => {
@@ -6023,7 +6017,7 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     ];
 
     const observation = await observe(started.session_id);
-    expect(observation.format).toBe("compact-v2");
+    expect(observation.format).toBe("browser-use-dom");
     const table = (await observeQuery(observation.session_id, "")).safe_table as Array<
       [string, string, string?]
     >;
@@ -6521,7 +6515,7 @@ describe("operate session — live-profile precondition gate", () => {
     });
     expect(obs.needs_user).toBeDefined();
     expect(obs.needs_user?.wall).toBe("google_session");
-    expect(obs).toMatchObject({ format: "compact-v2", stage: "auth", url: "" });
+    expect(obs).toMatchObject({ format: "browser-use-dom", stage: "auth", url: "" });
     expect(obs).not.toHaveProperty("text");
     expect(obs.elements).toBeUndefined();
     expect(h.startCalls).toBe(1);
@@ -10175,7 +10169,7 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
       string,
       unknown
     >;
-    expect(observation.format).toBe("compact-v2");
+    expect(observation.format).toBe("browser-use-dom");
     const wire = JSON.stringify(observation);
     expect(wire).toContain("Fresh CTA");
     expect(firstRef === undefined || typeof firstRef === "string").toBe(true);
@@ -10281,14 +10275,14 @@ describe("flat operator verbs", () => {
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-    expect(started.format).toBe("compact-v2");
+    expect(started.format).toBe("browser-use-dom");
     h.trackedClickFailure = {
       dispatchStatus: "not_dispatched",
       message: "overlay intercepts pointer events",
     };
     await expect(
       operateClickTool.handler({ session_id: started.session_id, ref: "@continue" }, null),
-    ).resolves.toMatchObject({ format: "compact-v2" });
+    ).resolves.toMatchObject({ format: "browser-use-dom" });
     expect(h.clickCalls).toBe(0);
     expect(h.jsClickCalls).toBe(1);
   });
