@@ -22,6 +22,7 @@ import { createHash, createHmac, randomInt } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { Page } from "playwright";
 import {
   BrowserClickDispatchError,
   CHECKOUT_SUBMIT_LABEL_RE,
@@ -1511,17 +1512,26 @@ function frameTargetFor(el: FrameScopedTarget): FrameTarget | null {
   };
 }
 
-function frameTargetAllowed(session: Session, el: FrameScopedTarget): boolean {
+function frameTargetAllowed(
+  session: Session,
+  el: FrameScopedTarget,
+  page: Page | undefined = undefined,
+): boolean {
   const target = frameTargetFor(el);
   if (target === null) return true;
   if (target.frameOpaque === true) return false;
-  const pageUrl = session.browser.currentUrl();
+  const pageUrl = page?.url() ?? session.browser.currentUrl();
   if (isSameRecipeDomain(target.frameOrigin, pageUrl)) return true;
   return hostAllowed(target.frameOrigin, hostStrings(session));
 }
 
-function assertFrameTargetAllowed(session: Session, el: FrameScopedTarget, kind: string): void {
-  if (frameTargetAllowed(session, el)) return;
+function assertFrameTargetAllowed(
+  session: Session,
+  el: FrameScopedTarget,
+  kind: string,
+  page: Page | undefined = undefined,
+): void {
+  if (frameTargetAllowed(session, el, page)) return;
   // An opaque (null-origin) frame gets its own TERMINAL refusal: the generic
   // message below suggests allow_host, which can never succeed for a null
   // origin — a remedy the model would loop on forever.
@@ -1547,7 +1557,11 @@ function assertFrameTargetAllowed(session: Session, el: FrameScopedTarget, kind:
 // for navigation/click via hostAllowed's auth-provider carve-outs. A weak
 // model must never be able to type a credential into a rogue or payment
 // iframe just because that host happens to be allow-listed for OAuth.
-function assertSecretFrameTargetAllowed(session: Session, el: FrameScopedTarget): void {
+function assertSecretFrameTargetAllowed(
+  session: Session,
+  el: FrameScopedTarget,
+  page: Page | undefined = undefined,
+): void {
   const target = frameTargetFor(el);
   if (target === null) return;
   if (target.frameOpaque === true) {
@@ -1556,7 +1570,7 @@ function assertSecretFrameTargetAllowed(session: Session, el: FrameScopedTarget)
         "typed into the main frame or a frame on the page's own domain.",
     );
   }
-  const pageUrl = session.browser.currentUrl();
+  const pageUrl = page?.url() ?? session.browser.currentUrl();
   if (isSameRecipeDomain(target.frameOrigin, pageUrl)) return;
   throw new ProvisionTargetNotAllowedError(
     `type_secret refused: the target lives in a cross-domain frame ` +
@@ -5003,7 +5017,7 @@ async function executeAct(
   // currentUrl() after the action recorded the POST-navigation URL (an OAuth
   // click that redirected turned round 0's URL into the post-login dashboard,
   // corrupting the skill's entry_url and the login step).
-  const urlBeforeAction = browser.currentUrl();
+  const urlBeforeAction = compactV2ActionPage?.url() ?? browser.currentUrl();
 
   // Defense-in-depth for the confused-deputy guard: if an ORGANIC redirect (not
   // gated by hostAllowed) has landed the operator browser on Squire's own
@@ -5087,7 +5101,12 @@ async function executeAct(
         };
         const locator = parseLocatorTarget(resolutionTarget!);
         if (locator !== null) {
-          const resolved = await browser.resolvePageTarget(locator.mode, locator.value, "type");
+          const resolved = await browser.resolvePageTarget(
+            locator.mode,
+            locator.value,
+            "type",
+            compactV2ActionPage,
+          );
           if (!resolved.ok) {
             if (resolved.reason === "none") {
               throw new Error(`type_secret: no element matched locator "${action.target}".`);
@@ -5096,7 +5115,7 @@ async function executeAct(
           }
           try {
             if (resolved.frameTarget !== null) {
-              assertSecretFrameTargetAllowed(session, resolved.frameTarget);
+              assertSecretFrameTargetAllowed(session, resolved.frameTarget, compactV2ActionPage);
             }
             session.usedLocatorFallback = true;
             await browser.typeHandle(resolved.handle, value, true);
@@ -5106,14 +5125,14 @@ async function executeAct(
           audit(sessionId, "type_secret", {
             slot: action.slot,
             locator_mode: locator.mode,
-            host: registrableHost(browser.currentUrl()),
+            host: registrableHost(urlBeforeAction),
           });
           break;
         }
         const fresh =
           session.compactV2Mode === "on"
-            ? (await browser.extractBrowserUseObservation()).elements
-            : await browser.extractInteractiveElements();
+            ? (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements
+            : await browser.extractInteractiveElements(compactV2ActionPage);
         retainSessionElements(session, fresh);
         // resolveTarget recomputes identities (incl. volatile positional-group
         // fingerprints) from these FRESH elements, so a ref whose group fingerprint
@@ -5136,16 +5155,19 @@ async function executeAct(
         // into a rogue/third-party (e.g. payment) iframe. See
         // assertSecretFrameTargetAllowed; a main-frame or same-domain-frame
         // target is unaffected.
-        assertSecretFrameTargetAllowed(session, el);
+        assertSecretFrameTargetAllowed(session, el, compactV2ActionPage);
         // Type the REAL value into the page. It crosses only browser↔page; the
         // value is never returned to the host and never logged.
         const target = frameTargetFor(el);
-        if (target !== null) await browser.typeInFrame(target, el.selector, value, true);
+        if (target !== null)
+          await browser.typeInFrame(target, el.selector, value, true, compactV2ActionPage);
+        else if (compactV2ActionPage !== undefined)
+          await browser.typeOnPage(compactV2ActionPage, el.selector, value, true);
         else await browser.type(el.selector, value, true);
         audit(sessionId, "type_secret", {
           slot: action.slot,
           target: auditTarget,
-          host: registrableHost(browser.currentUrl()),
+          host: registrableHost(urlBeforeAction),
         });
         break;
       }
@@ -5155,8 +5177,8 @@ async function executeAct(
         // uses selectInFrame. text is the fuzzy option matcher in both paths.
         const fresh =
           session.compactV2Mode === "on"
-            ? (await browser.extractBrowserUseObservation()).elements
-            : await browser.extractInteractiveElements();
+            ? (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements
+            : await browser.extractInteractiveElements(compactV2ActionPage);
         retainSessionElements(session, fresh);
         const el =
           compactV2Authorization === undefined
@@ -5182,19 +5204,23 @@ async function executeAct(
         // click/type passes; see frameTargetAllowed. A native <select> is not a
         // secret field, so the stricter type_secret cross-origin rule does not
         // apply, but the ordinary domain lock does.
-        assertFrameTargetAllowed(session, el, "select");
+        assertFrameTargetAllowed(session, el, "select", compactV2ActionPage);
         bindCartIdentity(isCartAffectingAction(action, el));
         const selectFrame = frameTargetFor(el);
         const committedText =
           selectFrame !== null
-            ? await browser.selectInFrame(selectFrame, el.selector, action.text)
-            : await browser.selectOption(el.selector, action.text);
+            ? await browser.selectInFrame(selectFrame, el.selector, action.text, compactV2ActionPage)
+            : compactV2ActionPage !== undefined
+              ? await browser.selectOptionOnPage(compactV2ActionPage, el.selector, action.text)
+              : await browser.selectOption(el.selector, action.text);
         session.committedSelectValues.set(
           compactV2CommittedSelectKey(session, el.selector),
           compactV2CommittedSelectValue(session, committedText),
         );
         completedAction = { ...action, text: committedText };
-        await settleAfterStateChange(browser);
+        if (compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage)) {
+          await settleAfterStateChange(browser);
+        }
         break;
       }
       case "set_phone_country": {
@@ -5213,14 +5239,6 @@ async function executeAct(
         const pageText = await browser.extractVisibleText(compactV2ActionPage);
         const blockReason = shouldBlockUnsafeProvisionAction(pageText, action);
         if (blockReason !== null) throw new Error(blockReason);
-        if (
-          compactV2ActionPage !== undefined &&
-          !browser.isActivePage(compactV2ActionPage) &&
-          action.kind !== "click" &&
-          action.kind !== "js_click"
-        ) {
-          throwCompactV2StaleRef();
-        }
         // Locator-form target (`text=…` / `css=…`): the host is pointing at a
         // control that has NO `@e:` ref because the inventory never emitted it (a
         // bare click-handler <div> with no role/label, e.g. a SPA "Add To Cart"
@@ -5238,6 +5256,7 @@ async function executeAct(
             locator.mode,
             locator.value,
             action.kind === "type" ? "type" : "click",
+            compactV2ActionPage,
           );
           if (!resolved.ok) {
             if (resolved.reason === "none") {
@@ -5266,7 +5285,7 @@ async function executeAct(
             );
             if (resolvedBlock !== null) throw new Error(resolvedBlock);
             if (resolved.frameTarget !== null) {
-              assertFrameTargetAllowed(session, resolved.frameTarget, action.kind);
+              assertFrameTargetAllowed(session, resolved.frameTarget, action.kind, compactV2ActionPage);
             }
             bindCartIdentity(isCartAffectingAction(action, null, resolved.labels));
             session.usedLocatorFallback = true;
@@ -5291,29 +5310,41 @@ async function executeAct(
               );
             } else if (action.kind === "click" || action.kind === "js_click") {
               const method = action.kind;
-              await adoptTabOpenedByClick(session, browser, async () => {
-                if (method === "click")
-                  await browser.clickWithDispatchTracking({
-                    kind: "handle",
-                    handle: resolved.handle,
-                    method,
-                  });
+              if (
+                compactV2ActionPage !== undefined &&
+                !browser.isActivePage(compactV2ActionPage)
+              ) {
+                if (method === "click") await browser.clickHandle(resolved.handle);
                 else await browser.jsClickHandle(resolved.handle);
-              });
+              } else {
+                await adoptTabOpenedByClick(session, browser, async () => {
+                  if (method === "click")
+                    await browser.clickWithDispatchTracking({
+                      kind: "handle",
+                      handle: resolved.handle,
+                      method,
+                    });
+                  else await browser.jsClickHandle(resolved.handle);
+                });
+              }
             } else await browser.typeHandle(resolved.handle, action.text);
           } finally {
             await resolved.handle.dispose().catch(() => undefined);
           }
           audit(sessionId, action.kind, {
             locator_mode: locator.mode,
-            host: registrableHost(browser.currentUrl()),
+            host: registrableHost(urlBeforeAction),
           });
           if (action.kind !== "type") {
-            await settleAfterStateChange(browser);
+            if (compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage)) {
+              await settleAfterStateChange(browser);
+            }
             // A tab opened by JS a tick after the click lands during the
             // settle above, not inside the click's own grace window. Drain it
             // here — the queue is already populated, so this costs nothing.
-            await adoptOpenedTab(session, browser, 0);
+            if (compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage)) {
+              await adoptOpenedTab(session, browser, 0);
+            }
           }
           break;
         }
@@ -5348,7 +5379,7 @@ async function executeAct(
         resolvedEl = el;
         // Frame domain-lock (operator-frame-support) — see frameTargetAllowed.
         // A main-frame or same-domain-frame target is unaffected.
-        assertFrameTargetAllowed(session, el, action.kind);
+        assertFrameTargetAllowed(session, el, action.kind, compactV2ActionPage);
         bindCartIdentity(isCartAffectingAction(action, el));
         if (action.kind === "click" || action.kind === "js_click") {
           const target = frameTargetFor(el);
@@ -5366,8 +5397,14 @@ async function executeAct(
                 shouldTrack,
               ),
             );
-          } else if (!sourcePageIsActive && compactV2ActionPage !== undefined && target === null) {
-            if (action.kind === "click") {
+          } else if (!sourcePageIsActive && compactV2ActionPage !== undefined) {
+            if (target !== null) {
+              if (action.kind === "click") {
+                await browser.clickInFrame(target, el.selector, compactV2ActionPage);
+              } else {
+                await browser.clickViaJsInFrame(target, el.selector, 0, compactV2ActionPage);
+              }
+            } else if (action.kind === "click") {
               await browser.clickOnPage(compactV2ActionPage, el.selector);
             } else {
               await browser.clickViaJsOnPage(compactV2ActionPage, el.selector);
@@ -5398,16 +5435,28 @@ async function executeAct(
           // are page-scoped). Out of scope for the checkout-option case frame
           // support exists for; a plain frame-scoped fill covers it.
           clearCommittedSelectValue(session, el.selector);
-          await browser.typeInFrame(frameTargetFor(el)!, el.selector, action.text);
+          await browser.typeInFrame(
+            frameTargetFor(el)!,
+            el.selector,
+            action.text,
+            false,
+            compactV2ActionPage,
+          );
         } else if (action.kind === "type") {
           clearCommittedSelectValue(session, el.selector);
-          if (!isAutocompleteScopedTypeField(action.provenance, el)) {
+          const sourcePageIsActive =
+            compactV2ActionPage === undefined || browser.isActivePage(compactV2ActionPage);
+          if (!sourcePageIsActive || !isAutocompleteScopedTypeField(action.provenance, el)) {
             // Free text only — e.g. a site-search/catalog-search box, which
             // can legitimately open its own suggestion listbox too. 3.1 only
             // applies to a form/recipe field where a committed value is
             // actually required; forcing every incidental popup into
             // commit-or-stop would break ordinary search typing.
-            await browser.type(el.selector, action.text);
+            if (compactV2ActionPage !== undefined) {
+              await browser.typeOnPage(compactV2ActionPage, el.selector, action.text);
+            } else {
+              await browser.type(el.selector, action.text);
+            }
           } else {
             // 3.1 — a Google-Places-style address field or a react-select/cmdk/
             // Radix combobox can open a suggestion popup as a side effect of
@@ -5505,15 +5554,27 @@ async function executeAct(
             }
           }
         } else if (action.kind === "upload") {
-          assertNoFrameTarget(el, "upload");
-          await browser.uploadFile(el.selector, action.path);
+          const target = frameTargetFor(el);
+          if (target !== null) {
+            await browser.uploadFileInFrame(target, el.selector, action.path, compactV2ActionPage);
+          } else if (compactV2ActionPage !== undefined) {
+            await browser.uploadFileOnPage(compactV2ActionPage, el.selector, action.path);
+          } else {
+            await browser.uploadFile(el.selector, action.path);
+          }
           audit(sessionId, "upload", {
             target: auditTarget,
             path: session.compactV2Active ? "<local-file>" : action.path,
-            host: registrableHost(browser.currentUrl()),
+            host: registrableHost(urlBeforeAction),
           });
         } else {
           assertNoFrameTarget(el, "oauth_click");
+          if (
+            compactV2ActionPage !== undefined &&
+            !browser.isActivePage(compactV2ActionPage)
+          ) {
+            throwCompactV2StaleRef();
+          }
           if (oauthDeadline === undefined) {
             throw new Error("OAuth action deadline was not established");
           }
@@ -5543,16 +5604,22 @@ async function executeAct(
         break;
       }
       case "oauth_login": {
-        const pageText = await browser.extractVisibleText();
+        const pageText = await browser.extractVisibleText(compactV2ActionPage);
         const blockReason = shouldBlockUnsafeProvisionAction(pageText, action);
         if (blockReason !== null) throw new Error(blockReason);
+        if (
+          compactV2ActionPage !== undefined &&
+          !browser.isActivePage(compactV2ActionPage)
+        ) {
+          throwCompactV2StaleRef();
+        }
         // Atomic OAuth deliberately accepts only the observed stable ref. A raw
         // locator would lose the same stale-reference guarantees as every other
         // action before the provider transition begins.
         const fresh =
           session.compactV2Mode === "on"
-            ? (await browser.extractBrowserUseObservation()).elements
-            : await browser.extractInteractiveElements();
+            ? (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements
+            : await browser.extractInteractiveElements(compactV2ActionPage);
         retainSessionElements(session, fresh);
         const el =
           compactV2Authorization === undefined

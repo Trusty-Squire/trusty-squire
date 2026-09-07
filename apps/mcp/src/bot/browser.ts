@@ -3407,7 +3407,15 @@ export class BrowserController {
 
   async type(selector: string, text: string, sealed = false): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
-    await this.withModalInertNeutralized(selector, () => this.typeInner(selector, text, sealed));
+    await this.typeOnPage(this.page, selector, text, sealed);
+  }
+
+  async typeOnPage(page: Page, selector: string, text: string, sealed = false): Promise<void> {
+    await this.withModalInertNeutralized(
+      selector,
+      () => this.typeInner(page, selector, text, sealed),
+      page,
+    );
   }
 
   /**
@@ -3430,11 +3438,10 @@ export class BrowserController {
     await this.sleep(500);
   }
 
-  private async typeInner(selector: string, text: string, sealed = false): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
+  private async typeInner(page: Page, selector: string, text: string, sealed = false): Promise<void> {
     // Wait for element to be visible and enabled before typing.
-    await this.page.waitForSelector(selector, { state: "visible", timeout: 10000 });
-    const locator = this.page.locator(selector);
+    await page.waitForSelector(selector, { state: "visible", timeout: 10000 });
+    const locator = page.locator(selector);
     // The marker is payment machinery — the card-clearing and saved-card
     // resolution passes find the fields they filled through it. It is not a
     // read seal: nothing masks or refuses a read because of it.
@@ -3444,7 +3451,7 @@ export class BrowserController {
 
     if (!this.humanize) {
       // Fast path for tests / non-humanized runs.
-      await this.page.fill(selector, text);
+      await page.fill(selector, text);
       return;
     }
 
@@ -3466,7 +3473,8 @@ export class BrowserController {
     // maxlength=1), every character landed in the FIRST input and got
     // discarded after char 1. Switching to a single pressSequentially
     // call lets the browser's auto-advance handler move focus naturally.
-    await this.humanClick(selector);
+    if (page === this.page) await this.humanClick(selector);
+    else await locator.click({ timeout: 8000 }).catch(() => undefined);
     // Clear any prefilled value before typing. Only meaningful for
     // single-input fields; multi-input OTP forms ignore this since
     // each box is its own input.
@@ -3623,10 +3631,13 @@ export class BrowserController {
   // domain scope, so a file can only reach the site the task is already on.
   async uploadFile(selector: string, filePath: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
+    await this.uploadFileOnPage(this.page, selector, filePath);
+  }
+
+  async uploadFileOnPage(page: Page, selector: string, filePath: string): Promise<void> {
     if (!existsSync(filePath) || !statSync(filePath).isFile()) {
       throw new Error(`upload: local file not found or not a regular file: ${filePath}`);
     }
-    const page = this.page;
     const locator = page.locator(selector).first();
     const isFileInput = await locator
       .evaluate((el) => el instanceof HTMLInputElement && el.type === "file")
@@ -3655,6 +3666,48 @@ export class BrowserController {
     await chooser.setFiles(filePath);
   }
 
+  async uploadFileInFrame(
+    target: FrameTarget,
+    selector: string,
+    filePath: string,
+    page: Page | null = this.page,
+  ): Promise<void> {
+    if (!existsSync(filePath) || !statSync(filePath).isFile()) {
+      throw new Error(`upload: local file not found or not a regular file: ${filePath}`);
+    }
+    if (page === null) throw new Error("Browser not started");
+    const handle = await this.resolveFrameElement(target, selector, 0, page);
+    if (handle === null) {
+      throw new Error(
+        `upload: the target's frame is no longer present (${this.frameLabel(target)})`,
+      );
+    }
+    try {
+      const isFileInput = await handle
+        .evaluate((el) => el instanceof HTMLInputElement && el.type === "file")
+        .catch(() => false);
+      if (isFileInput) {
+        await handle.setInputFiles(filePath);
+        return;
+      }
+      const chooserPromise = page
+        .waitForEvent("filechooser", { timeout: 15_000 })
+        .then((chooser) => chooser)
+        .catch(() => null);
+      await handle.click({ timeout: 8000 });
+      const chooser = await chooserPromise;
+      if (chooser === null) {
+        throw new Error(
+          `upload: clicking "${selector}" did not open a file picker within 15s. ` +
+            `Target the upload button (or the file <input>) and retry.`,
+        );
+      }
+      await chooser.setFiles(filePath);
+    } finally {
+      await handle.dispose().catch(() => undefined);
+    }
+  }
+
   // Ancestors marked `inert` for a "hide the background while a modal is
   // open" trick are meant to sit OUTSIDE a truly-portaled dialog (Angular
   // CDK/Material's overlay container is a sibling of the app root, and only
@@ -3675,11 +3728,12 @@ export class BrowserController {
   private async withModalInertNeutralized<T>(
     selector: string,
     fn: (modalActive: boolean) => Promise<T>,
+    page: Page | null = this.page,
   ): Promise<T> {
-    if (!this.page) throw new Error("Browser not started");
+    if (page === null) throw new Error("Browser not started");
     const marker = "data-ts-inert-neutralized";
     const anchorMarker = "data-ts-inert-region-anchor";
-    const modalActive = await this.page
+    const modalActive = await page
       .$eval(
         selector,
         (el, markers) => {
@@ -3721,7 +3775,7 @@ export class BrowserController {
     try {
       return await fn(modalActive);
     } finally {
-      await this.page
+      await page
         .evaluate(
           (markers) => {
             const { marker, anchorMarker } = markers;
@@ -4245,9 +4299,9 @@ export class BrowserController {
     mode: "text" | "css",
     value: string,
     intent: "click" | "type" = "click",
+    page: Page | null = this.page,
   ): Promise<ResolvedPageTarget> {
-    if (!this.page) throw new Error("Browser not started");
-    const page = this.page;
+    if (page === null) throw new Error("Browser not started");
     const matches: Array<{
       handle: ElementHandle<Element>;
       text: string;
@@ -5226,16 +5280,28 @@ export class BrowserController {
   // selects whose contents are interchangeable (country pickers).
   async selectOption(selector: string, optionMatcher?: string): Promise<string> {
     if (!this.page) throw new Error("Browser not started");
+    return await this.selectOptionOnPage(this.page, selector, optionMatcher);
+  }
+
+  async selectOptionOnPage(
+    page: Page,
+    selector: string,
+    optionMatcher?: string,
+  ): Promise<string> {
     return await this.withModalInertNeutralized(selector, () =>
-      this.selectOptionInner(selector, optionMatcher),
+      this.selectOptionInner(page, selector, optionMatcher),
+      page,
     );
   }
 
-  private async selectOptionInner(selector: string, optionMatcher?: string): Promise<string> {
-    if (!this.page) throw new Error("Browser not started");
-    await this.page.waitForSelector(selector, { state: "attached", timeout: 10000 });
+  private async selectOptionInner(
+    page: Page,
+    selector: string,
+    optionMatcher?: string,
+  ): Promise<string> {
+    await page.waitForSelector(selector, { state: "attached", timeout: 10000 });
     let activeSelector = selector;
-    let tagName = await this.page
+    let tagName = await page
       .locator(activeSelector)
       .first()
       .evaluate((node) => node.tagName.toLowerCase());
@@ -5250,9 +5316,9 @@ export class BrowserController {
     // this redirect, every captured Railway/legacy-form `<select>`
     // step replays as "no options found after click."
     if (tagName === "label") {
-      const resolved = await this.resolveLabelToInput(activeSelector);
+      const resolved = await this.resolveLabelToInput(activeSelector, page);
       if (resolved !== activeSelector) {
-        const resolvedTag = await this.page
+          const resolvedTag = await page
           .locator(resolved)
           .first()
           .evaluate((node) => node.tagName.toLowerCase())
@@ -5289,7 +5355,7 @@ export class BrowserController {
           .catch(() => null);
         if (rowControl !== null) {
           activeSelector = rowControl;
-          tagName = await this.page
+          tagName = await page
             .locator(activeSelector)
             .first()
             .evaluate((node) => node.tagName.toLowerCase())
@@ -5304,7 +5370,7 @@ export class BrowserController {
       // those strings changes the chain's meaning (`... >> nth=1 option`) and
       // makes a full select appear option-less. Descendant lookup, selection,
       // and verification must all stay anchored to the same resolved element.
-      const selectLocator = this.page.locator(activeSelector).first();
+      const selectLocator = page.locator(activeSelector).first();
       const optionLocator = selectLocator.locator("option");
       // Native path. rc.15 — keep value="" options selectable. The
       // Railway workspace dropdown's "No workspace" option is value=""
@@ -5373,7 +5439,7 @@ export class BrowserController {
 
     // Custom combobox path. Sentry, Radix, Headless UI, React Aria
     // — every modern React picker emits role=option on its items.
-    return await this.selectFromCombobox(activeSelector, optionMatcher);
+    return await this.selectFromCombobox(activeSelector, optionMatcher, page);
   }
 
   // Set the country on a phone-number field backed by a phone-local native
@@ -5577,9 +5643,8 @@ export class BrowserController {
       .catch(() => {});
   }
 
-  private async markComboboxPreexistingElements(): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    await this.page.evaluate(() => {
+  private async markComboboxPreexistingElements(page: Page = this.page!): Promise<void> {
+    await page.evaluate(() => {
       const visible = (el: Element): boolean => {
         const rect = el.getBoundingClientRect();
         if (rect.width < 2 || rect.height < 2) return false;
@@ -5598,9 +5663,11 @@ export class BrowserController {
     });
   }
 
-  private async refreshComboboxMarkers(triggerSelector: string): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    await this.page
+  private async refreshComboboxMarkers(
+    triggerSelector: string,
+    page: Page = this.page!,
+  ): Promise<void> {
+    await page
       .locator(triggerSelector)
       .first()
       .evaluate((trigger) => {
@@ -5673,9 +5740,8 @@ export class BrowserController {
       });
   }
 
-  private async clearComboboxMarkers(): Promise<void> {
-    if (!this.page) return;
-    await this.page
+  private async clearComboboxMarkers(page: Page = this.page!): Promise<void> {
+    await page
       .evaluate(() => {
         document
           .querySelectorAll(
@@ -5693,8 +5759,8 @@ export class BrowserController {
   private async selectFromCombobox(
     triggerSelector: string,
     optionMatcher?: string,
+    page: Page = this.page!,
   ): Promise<string> {
-    if (!this.page) throw new Error("Browser not started");
     // 0.8.2-rc.11 — selector normalization. The planner sometimes
     // emits a selector pointing at a `<label for="X">` instead of the
     // associated `<input id="X">` — the label has the visible text
@@ -5705,21 +5771,22 @@ export class BrowserController {
     // react-select control, so the menu never opens. Resolve the
     // label to its associated input here so downstream tiers (the
     // keyboard fallback in particular) actually see an input target.
-    const normalizedSelector = await this.resolveLabelToInput(triggerSelector);
-    await this.markComboboxPreexistingElements();
+    const normalizedSelector = await this.resolveLabelToInput(triggerSelector, page);
+    await this.markComboboxPreexistingElements(page);
     try {
-      await this.humanClick(normalizedSelector);
-      await this.refreshComboboxMarkers(normalizedSelector);
-      let popup = this.page.locator('[data-ts-select-popup="1"]').first();
+      if (page === this.page) await this.humanClick(normalizedSelector);
+      else await page.locator(normalizedSelector).first().click({ timeout: 8000 });
+      await this.refreshComboboxMarkers(normalizedSelector, page);
+      let popup = page.locator('[data-ts-select-popup="1"]').first();
       if ((await popup.count()) === 0) {
-        await this.openComboboxWithKeyboard(normalizedSelector);
-        await this.refreshComboboxMarkers(normalizedSelector);
-        popup = this.page.locator('[data-ts-select-popup="1"]').first();
+        await this.openComboboxWithKeyboard(normalizedSelector, page);
+        await this.refreshComboboxMarkers(normalizedSelector, page);
+        popup = page.locator('[data-ts-select-popup="1"]').first();
       }
       if ((await popup.count()) === 0) {
         throw new Error(`combobox ${triggerSelector}: no single opened popup could be resolved`);
       }
-      const options = this.page.locator("[data-ts-select-option-tier]");
+      const options = page.locator("[data-ts-select-option-tier]");
       let target = options.first();
       if (optionMatcher !== undefined) {
         const matching = options.filter({ hasText: optionMatcher });
@@ -5733,10 +5800,10 @@ export class BrowserController {
         throw new Error(`combobox ${triggerSelector}: opened popup has no actionable options`);
       }
       const committedText = (await target.innerText()).replace(/\s+/g, " ").trim();
-      await this.clickComboboxOption(target);
+      await this.clickComboboxOption(target, page);
       return committedText;
     } finally {
-      await this.clearComboboxMarkers();
+      await this.clearComboboxMarkers(page);
     }
   }
 
@@ -5749,10 +5816,9 @@ export class BrowserController {
   // open a react-select menu. Returns the original selector unchanged
   // when the resolution doesn't apply (target isn't a label, has no
   // `for`, or the `for`-id doesn't resolve to an input).
-  private async resolveLabelToInput(selector: string): Promise<string> {
-    if (!this.page) throw new Error("Browser not started");
+  private async resolveLabelToInput(selector: string, page: Page = this.page!): Promise<string> {
     try {
-      const resolvedId = await this.page
+      const resolvedId = await page
         .locator(selector)
         .first()
         .evaluate((node) => {
@@ -5786,20 +5852,22 @@ export class BrowserController {
     }
   }
 
-  private async openComboboxWithKeyboard(triggerSelector: string): Promise<void> {
-    if (!this.page) throw new Error("Browser not started");
-    const trigger = this.page.locator(triggerSelector).first();
+  private async openComboboxWithKeyboard(
+    triggerSelector: string,
+    page: Page = this.page!,
+  ): Promise<void> {
+    const trigger = page.locator(triggerSelector).first();
     try {
       if ((await trigger.evaluate((node) => node.tagName.toLowerCase())) !== "input") return;
       await trigger.focus({ timeout: 1500 });
-      await this.page.keyboard.press("Alt+ArrowDown");
+      await page.keyboard.press("Alt+ArrowDown");
       await this.wait(0.4);
     } catch {
       return;
     }
   }
 
-  private async clickComboboxOption(target: Locator): Promise<void> {
+  private async clickComboboxOption(target: Locator, page: Page = this.page!): Promise<void> {
     // cmdk (the command-menu library) does NOT commit a selection from the
     // bot's humanized page.mouse.click(x, y): cmdk re-renders + re-orders its
     // list as the search filters, so the cached click coordinates land on the
@@ -5830,7 +5898,8 @@ export class BrowserController {
       await this.wait(0.5);
       return;
     }
-    await this.humanClickLocator(target);
+    if (page === this.page) await this.humanClickLocator(target);
+    else await target.click({ timeout: 5000 });
     await this.wait(0.5);
   }
 
@@ -12809,9 +12878,9 @@ export class BrowserController {
   // picks up whatever replaced it); the
   // caller surfaces that as a normal "target not found" error, never a
   // silent wrong-frame action.
-  private resolveFrame(target: FrameTarget): Frame | null {
-    if (!this.page) return null;
-    let frame = this.page.mainFrame();
+  private resolveFrame(target: FrameTarget, page: Page | null = this.page): Frame | null {
+    if (page === null) return null;
+    let frame = page.mainFrame();
     for (const part of target.framePath.split("/")) {
       if (!/^\d+$/.test(part)) return null;
       const child = frame.childFrames()[Number.parseInt(part, 10)];
@@ -12826,8 +12895,9 @@ export class BrowserController {
     target: FrameTarget,
     selector: string,
     index = 0,
+    page: Page | null = this.page,
   ): Promise<ElementHandle<Element> | null> {
-    const frame = this.resolveFrame(target);
+    const frame = this.resolveFrame(target, page);
     if (frame === null || this.frameWithinCaptcha(frame)) return null;
     const handle = await frame
       .locator(selector)
@@ -12963,8 +13033,8 @@ export class BrowserController {
   // for (a merchant's own same-domain checkout options rendered in an
   // iframe), the same primitives fillAndSubmitCheckout already relies on for
   // cross-origin PSP fields.
-  async clickInFrame(target: FrameTarget, selector: string): Promise<void> {
-    const handle = await this.resolveFrameElement(target, selector);
+  async clickInFrame(target: FrameTarget, selector: string, page: Page | null = this.page): Promise<void> {
+    const handle = await this.resolveFrameElement(target, selector, 0, page);
     if (handle === null) {
       throw new Error(
         `click: the target's frame is no longer present (${this.frameLabel(target)})`,
@@ -12988,8 +13058,13 @@ export class BrowserController {
     }
   }
 
-  async clickViaJsInFrame(target: FrameTarget, selector: string, index = 0): Promise<void> {
-    const handle = await this.resolveFrameElement(target, selector, index);
+  async clickViaJsInFrame(
+    target: FrameTarget,
+    selector: string,
+    index = 0,
+    page: Page | null = this.page,
+  ): Promise<void> {
+    const handle = await this.resolveFrameElement(target, selector, index, page);
     if (handle === null) {
       throw new Error(
         `js_click: the target's frame is no longer present (${this.frameLabel(target)})`,
@@ -13011,8 +13086,9 @@ export class BrowserController {
     selector: string,
     text: string,
     sealed = false,
+    page: Page | null = this.page,
   ): Promise<void> {
-    const handle = await this.resolveFrameElement(target, selector);
+    const handle = await this.resolveFrameElement(target, selector, 0, page);
     if (handle === null) {
       throw new Error(`type: the target's frame is no longer present (${this.frameLabel(target)})`);
     }
@@ -13046,8 +13122,9 @@ export class BrowserController {
     target: FrameTarget,
     selector: string,
     optionMatcher?: string,
+    page: Page | null = this.page,
   ): Promise<string> {
-    const handle = await this.resolveFrameElement(target, selector);
+    const handle = await this.resolveFrameElement(target, selector, 0, page);
     if (handle === null) {
       throw new Error(
         `select: the target's frame is no longer present (${this.frameLabel(target)})`,

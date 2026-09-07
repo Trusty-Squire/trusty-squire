@@ -436,6 +436,70 @@ describe("BrowserController OAuth popup lifecycle", () => {
   });
 
   it.each(["compact-v2", "legacy"])(
+    "binds type and select refs to a same-tab OAuth return (%s)",
+    async (format) => {
+      const context = await browser.newContext();
+      const product = await context.newPage();
+      const expectedReturnUrl = "https://console.product.test/projects";
+      await context.route("https://product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<button id="oauth" onclick='location.href=${JSON.stringify(
+            `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+          )}'>Continue</button>`,
+        }),
+      );
+      await context.route("https://accounts.google.com/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<script>setTimeout(() => location.href=${JSON.stringify(expectedReturnUrl)}, 50)</script>`,
+        }),
+      );
+      await context.route("https://console.product.test/**", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: '<main>Projects</main><input id="project-name" value=""><select id="region"><option>Provider</option><option>Product</option></select>',
+        }),
+      );
+      await product.goto("https://product.test/login");
+      const controller = BrowserController.fromHarnessPage(product);
+      let sessionId: string | undefined;
+      try {
+        const started = await startHarnessProvisionSession({
+          browser: controller,
+          serviceUrl: "https://product.test/login",
+          ...(format === "compact-v2" ? { observationFormat: "compact-v2" as const } : {}),
+        });
+        sessionId = started.session_id;
+        const oauthRef =
+          format === "compact-v2"
+            ? started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0]
+            : parseElementsTable(started.el_table ?? "")[0]?.ref;
+        expect(oauthRef).toBeDefined();
+        const result = await act(sessionId, {
+          kind: "oauth_login",
+          target: oauthRef!,
+          provider: "google",
+        });
+        const refs =
+          format === "compact-v2"
+            ? [...(result.dom ?? "").matchAll(/\[(@e:[^\]]+)\]</g)].map((match) => match[1]!)
+            : parseElementsTable(result.el_table ?? "").map((element) => element.ref);
+        const [typeRef, selectRef] = refs;
+        expect(typeRef).toBeDefined();
+        expect(selectRef).toBeDefined();
+        await act(sessionId, { kind: "type", target: typeRef!, text: "product" });
+        await act(sessionId, { kind: "select", target: selectRef!, text: "Product" });
+        expect(await product.locator("#project-name").inputValue()).toBe("product");
+        expect(await product.locator("#region").inputValue()).toBe("Product");
+      } finally {
+        if (sessionId) await finishProvisionSession(sessionId);
+        await context.close();
+      }
+    },
+  );
+
+  it.each(["compact-v2", "legacy"])(
     "rechecks completion when the outer action deadline wins during consent work (%s)",
     async (format) => {
     const context = await browser.newContext();
@@ -454,13 +518,13 @@ describe("BrowserController OAuth popup lifecycle", () => {
     await context.route("https://accounts.google.com/**", (route) =>
       route.fulfill({
         contentType: "text/html",
-        body: "<main>Consent</main>",
+        body: '<main>Consent</main><input id="project-name" value="provider"><select id="region"><option>Provider</option><option>Product</option></select>',
       }),
     );
     await context.route("https://console.product.test/**", (route) =>
       route.fulfill({
         contentType: "text/html",
-        body: '<main>Projects</main><button id="new-project" onclick="document.body.dataset.projectClicked=\'yes\'">New project</button>',
+        body: '<main>Projects</main><input id="project-name" value=""><select id="region"><option>Provider</option><option>Product</option></select><button id="new-project" onclick="document.body.dataset.projectClicked=\'yes\'">New project</button>',
       }),
     );
     await product.goto("https://product.test/login");
@@ -496,9 +560,22 @@ describe("BrowserController OAuth popup lifecycle", () => {
       expect(result.oauth).toBeUndefined();
       if (format === "compact-v2") expect(result).toMatchObject({ format: "compact-v2" });
       else expect(result.format).toBeUndefined();
-      const productRef = refFrom(result);
+      const productRefs =
+        format === "compact-v2"
+          ? [...(result.dom ?? "").matchAll(/\[(@e:[^\]]+)\]</g)].map((match) => match[1]!)
+          : parseElementsTable(result.el_table ?? "").map((element) => element.ref);
+      const [typeRef, selectRef, productRef] = productRefs;
+      expect(typeRef).toBeDefined();
+      expect(selectRef).toBeDefined();
       expect(productRef).toBeDefined();
+      await act(sessionId, { kind: "type", target: typeRef!, text: "product" });
+      await act(sessionId, { kind: "select", target: selectRef!, text: "Product" });
       await act(sessionId, { kind: "click", target: productRef! });
+      expect(await product.locator("#project-name").inputValue()).toBe("product");
+      expect(await product.locator("#region").inputValue()).toBe("Product");
+      const provider = (controller as unknown as { page: Page }).page;
+      expect(await provider.locator("#project-name").inputValue()).toBe("provider");
+      expect(await provider.locator("#region").inputValue()).toBe("Provider");
       expect(await product.locator("body").getAttribute("data-project-clicked")).toBe("yes");
       expect((controller as unknown as { page: Page }).page.url()).toBe(
         "https://accounts.google.com/provider",
