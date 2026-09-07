@@ -228,7 +228,7 @@ describe("launched through a bin symlink", () => {
     await expect(exited).resolves.toEqual({ code: 0, signal: null });
   }, 30_000);
 
-  it("stdio survives every malformed action shape captured in the operator incident", async () => {
+  it("stdio survives malformed flat-verb arguments and a deleted action union", async () => {
     const link = await linkTo("mcp-server-malformed-actions.js");
     const home = path.join(tmpDir, "malformed-actions-home");
     await fs.mkdir(path.join(home, ".config", "trusty-squire"), { recursive: true });
@@ -242,15 +242,16 @@ describe("launched through a bin symlink", () => {
     );
 
     const replies = await mcpConversation(link, home, [
-      // Exact audit shapes: set_value rather than select, type_secret without
-      // its sealed slot, and the mutually-exclusive card selectors together.
+      // The replacement flat verbs retain malformed-input handling: an invalid
+      // select shape, a type call without text or a sealed slot, conflicting
+      // card selectors, and a click without its ref.
       {
-        name: "operate_act",
-        arguments: { session_id: "s1", kind: "set_value", target: "この商品のみ注文", text: "2" },
+        name: "operate_select",
+        arguments: { session_id: "s1", ref: "@e:quantity", values: [] },
       },
       {
-        name: "operate_act",
-        arguments: { session_id: "s1", kind: "type_secret", target: "pv-card-number" },
+        name: "operate_type",
+        arguments: { session_id: "s1", ref: "@e:card-number" },
       },
       {
         name: "operate_pay",
@@ -261,6 +262,9 @@ describe("launched through a bin symlink", () => {
           card_label: "Personal",
         },
       },
+      { name: "operate_click", arguments: { session_id: "s1" } },
+      // The removed union remains unavailable rather than being retained as a
+      // compatibility adapter.
       { name: "operate_act", arguments: { session_id: "s1", kind: "click" } },
       // A real post-error request proves the child remains reachable, and its
       // recovery guidance must teach retry-once rather than process killing.
@@ -275,14 +279,18 @@ describe("launched through a bin symlink", () => {
       };
       expect(error.error?.code).toBe("invalid_arguments");
     }
-    const unavailable = JSON.parse(replies[4]?.result?.content?.[0]?.text ?? "{}") as {
+    const removed = JSON.parse(replies[4]?.result?.content?.[0]?.text ?? "{}") as {
+      error?: { code?: string };
+    };
+    expect(removed.error?.code).toBe("unknown_tool");
+    const unavailable = JSON.parse(replies[5]?.result?.content?.[0]?.text ?? "{}") as {
       error?: { code?: string; message?: string; retry?: { max_attempts?: number } };
     };
     expect(unavailable.error?.code).toBe("server_unavailable");
     expect(unavailable.error?.retry?.max_attempts).toBe(1);
     expect(unavailable.error?.message).toMatch(/retry once/i);
     expect(unavailable.error?.message).toMatch(/never kill or restart/i);
-    expect(replies[5]?.result?.tools?.length).toBeGreaterThan(0);
+    expect(replies[6]?.result?.tools?.length).toBeGreaterThan(0);
   }, 30_000);
 
   it("`mcp connect` reaches the setup flow", async () => {
