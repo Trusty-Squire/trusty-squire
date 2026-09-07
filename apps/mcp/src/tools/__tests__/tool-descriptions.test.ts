@@ -170,24 +170,24 @@ describe("current observation protocol documentation", () => {
 
   it("operate_observe documents both reachable response grammars", () => {
     const description = OPERATE_TOOLS.find((tool) => tool.name === "operate_observe")!.description;
-      for (const token of [
-        "browser-use-dom",
-        "browser-use-control-query",
-        "dom",
-        "tab-indented",
-        "|SHADOW(open)|",
-        "not-targetable=true",
-        "more_above",
-        "more_below",
-        "*",
-        "removed",
-        "delta:true",
-      ]) {
-        expect(description).toContain(token);
-      }
-      expect(description).toContain("safe_table");
-      expect(description).toContain("[ref,role,facts?]");
-      expect(description).not.toMatch(/observe_query/);
-      expect(description).not.toMatch(/detail:full|card\/secret-shaped|never emitted/);
+    for (const token of [
+      "browser-use-dom",
+      "browser-use-control-query",
+      "dom",
+      "tab-indented",
+      "|SHADOW(open)|",
+      "not-targetable=true",
+      "more_above",
+      "more_below",
+      "*",
+      "removed",
+      "delta:true",
+    ]) {
+      expect(description).toContain(token);
+    }
+    expect(description).toContain("safe_table");
+    expect(description).toContain("[ref,role,facts?]");
+    expect(description).not.toMatch(/observe_query/);
+    expect(description).not.toMatch(/detail:full|card\/secret-shaped|never emitted/);
   });
 });

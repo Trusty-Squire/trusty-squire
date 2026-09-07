@@ -535,7 +535,7 @@ const formSelectionsSchema = z
   .refine((value) => Object.keys(value).length > 0, "Provide at least one selection")
   .refine((value) => Object.keys(value).length <= 12, "At most 12 selections per call")
   .describe(
-    "Map each current Compact V2 @e: ref or @label, or V1 observed label/ref, to its visible option text.",
+    "Map each current browser-use DOM @e: ref or @label, or V1 observed label/ref, to its visible option text.",
   );
 
 interface ExtractArgs {
