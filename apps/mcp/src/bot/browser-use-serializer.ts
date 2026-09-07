@@ -264,8 +264,10 @@ export function browserUseLocalContextContainer(
 export function browserUseBoundedContextText(n: BrowserUseNode, limit: number): string | null {
   const characters: string[] = [];
   let textStarted = false,
-    pendingSpace = false;
+    pendingSpace = false,
+    traversed = 0;
   const append = (character: string): boolean => {
+    if (++traversed > limit) return false;
     if (/\s/.test(character)) {
       pendingSpace ||= textStarted;
       return true;
@@ -623,19 +625,19 @@ export function serializeBrowserUseDOM(
   };
   const simplify = (
     n: BrowserUseNode,
-    preserveCodeText = false,
+    preserveActionText = false,
     insideCode = false,
   ): Simplified | null => {
     if (n.nodeType === 9) {
       for (const c of n.children) {
-        const s = simplify(c, preserveCodeText, insideCode);
+        const s = simplify(c, preserveActionText, insideCode);
         if (s) return s;
       }
       return null;
     }
     if (n.nodeType === 3)
-      return n.snapshot && (n.visible || (preserveCodeText && /^\s*$/.test(n.value))) &&
-          (preserveCodeText || n.value.trim().length > 1)
+      return n.snapshot && (n.visible || (preserveActionText && /^\s*$/.test(n.value))) &&
+          (preserveActionText || n.value.trim().length > 1)
         ? {
             original: n,
             children: [],
@@ -644,7 +646,7 @@ export function serializeBrowserUseDOM(
             shadowHost: false,
             compound: "",
             isNew: false,
-            verbatim: preserveCodeText,
+            verbatim: preserveActionText,
           }
         : null;
     if (n.nodeType !== 1 && n.nodeType !== 11) return null;
@@ -661,7 +663,13 @@ export function serializeBrowserUseDOM(
         ? n.contentDocument.children
         : n.children
     )
-      .map((child) => simplify(child, preserveCodeText || code?.actionable === true, insideCode || code !== null))
+      .map((child) =>
+        simplify(
+          child,
+          preserveActionText || code?.actionable === true || browserUseInteractive(n),
+          insideCode || code !== null,
+        ),
+      )
       .filter((c): c is Simplified => c !== null);
     const actionContent = (s: Simplified): Simplified | null => {
       if (codeAction(s.original))
@@ -794,9 +802,9 @@ export function serializeBrowserUseDOM(
   const contextualize = (n: Simplified, enclosing = ""): string | null => {
     const o = n.original,
       t = tag(o);
-    const text = browserUseBoundedContextText(o, genericContextMaxChars);
-    const container =
-      browserUseLocalContextContainer(o, containsActionableDescendant(n)) && text !== null;
+    const eligible = browserUseLocalContextContainer(o, containsActionableDescendant(n));
+    const text = eligible ? browserUseBoundedContextText(o, genericContextMaxChars) : null;
+    const container = eligible && text !== null;
     const directHeading = headingContext(n);
     let context = container ? text || enclosing : directHeading || enclosing;
     contexts.set(n, context);
@@ -964,9 +972,9 @@ export function serializeBrowserUseDOM(
     } else if (
       o.nodeType === 3 &&
       o.snapshot &&
-      o.visible &&
+      (o.visible || n.verbatim) &&
       !paintedOver.has(o) &&
-      o.value.trim().length > 1
+      (n.verbatim || o.value.trim().length > 1)
     )
       lines.push(indent + (n.verbatim ? o.value : o.value.trim()));
     for (let i = 0; i < n.children.length; i++) {

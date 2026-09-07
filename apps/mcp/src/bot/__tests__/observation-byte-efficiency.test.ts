@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { serializeBrowserUseDOM, type BrowserUseNode } from "../browser-use-serializer.js";
+import {
+  browserUseBoundedContextText,
+  serializeBrowserUseDOM,
+  type BrowserUseNode,
+} from "../browser-use-serializer.js";
 import { StableObservationRefs } from "../compact-observation-v2.js";
 let sequence = 0;
 function node(name: string, props: Partial<BrowserUseNode> = {}): BrowserUseNode {
@@ -162,6 +166,20 @@ describe("observation byte efficiency", () => {
     expect(withCopy.dom).toContain("Copy sample");
     expect(withCopy.refs).toContain(copy.id);
   });
+  it("preserves exact single-character action labels in and outside code", () => {
+    for (const label of ["+", " ", "{"]) {
+      const button = node("BUTTON", { children: [text(label)] });
+      const dom = serializeBrowserUseDOM(button).dom;
+      expect(dom).toContain(`[${button.id}]<button`);
+      expect(dom).toContain(`\n\t${label}`);
+    }
+    const action = node("BUTTON", { children: [text("{")] });
+    const code = serializeBrowserUseDOM(node("PRE", { children: [action] }));
+    expect(code.dom).toContain(`<pre> ${JSON.stringify("{")}`);
+    expect(code.dom).toContain(`[${action.id}]<button`);
+    expect(code.dom).toContain("\n\t\t{");
+    expect(code.refs).toContain(action.id);
+  });
   it("keeps code visible through its opaque wrapper while suppressing externally occluded code", () => {
     const source = "const mandate = await sign();";
     const highlighted = () =>
@@ -254,6 +272,21 @@ describe("observation byte efficiency", () => {
       ],
     });
     expect(serializeBrowserUseDOM(nestedHeading).dom).toContain("context=Billing");
+  });
+  it("rejects ineligible and whitespace-only context before unbounded collection", () => {
+    const whitespace = text(" ");
+    let reads = 0;
+    Object.defineProperty(whitespace, "value", {
+      get: () => {
+        if (++reads > 1) throw new Error("ineligible context was collected");
+        return " ".repeat(121);
+      },
+    });
+    const button = node("BUTTON");
+    const dom = serializeBrowserUseDOM(node("SECTION", { children: [whitespace, button] })).dom;
+    expect(dom).toContain(`[${button.id}]<button`);
+    expect(reads).toBe(1);
+    expect(browserUseBoundedContextText(text(" ".repeat(121)), 120)).toBeNull();
   });
   it("emits native button class evidence without inferring selection", () => {
     const card = node("BUTTON", {
