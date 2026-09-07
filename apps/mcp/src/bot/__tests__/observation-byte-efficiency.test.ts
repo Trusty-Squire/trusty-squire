@@ -210,7 +210,7 @@ describe("observation byte efficiency", () => {
     expect(result.dom).toContain("context=Build service key");
     expect(result.dom.match(/<input /g)).toHaveLength(2);
   });
-  it("uses only short local generic containers as unlabelled form context", () => {
+  it("uses only bounded local generic containers as unlabelled form context", () => {
     const compact = node("DIV", {
       children: [
         node("INPUT", { attributes: { type: "checkbox" } }),

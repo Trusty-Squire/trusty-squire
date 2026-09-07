@@ -173,6 +173,26 @@ describe("interleaved observation DOM", () => {
       await page.close();
     }
   });
+  it("inherits a bounded preceding heading for an unlabelled iframe control", async () => {
+    const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
+    try {
+      await page.setContent('<iframe id="support" style="width: 400px; height: 100px"></iframe>');
+      const frame = await (await page.locator("#support").elementHandle())!.contentFrame();
+      await frame!.setContent(
+        '<section><h2>Billing</h2><div style="margin-top: 800px"><span><button id="below"> </button></span></div></section>',
+      );
+      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const findFrame = (node: BrowserUseNode): BrowserUseNode | undefined =>
+        node.nodeName === "IFRAME"
+          ? node
+          : node.children.map(findFrame).find((value) => value !== undefined) ||
+            (node.contentDocument ? findFrame(node.contentDocument) : undefined);
+      const hint = findFrame(capture.root)?.hiddenElements.find((element) => element.tag === "button");
+      expect(hint?.text).toBe("Billing");
+    } finally {
+      await page.close();
+    }
+  });
   it("keeps capture geometry in CSS pixels on a scaled display after scrolling", async () => {
     const context = await browser.newContext({
       viewport: { width: 800, height: 600 },

@@ -19,6 +19,7 @@ interface FrameTree {
 }
 import type { InteractiveElement } from "./browser.js";
 import {
+  browserUseBoundedContextText,
   browserUseInteractive,
   browserUseLocalContextContainer,
   type BrowserUseNode,
@@ -528,8 +529,6 @@ export async function captureBrowserUseDOM(
       if (["IFRAME", "FRAME"].includes(n.nodeName) && n.contentDocument) {
         const viewportHeight = viewMetadata.get(n.id)?.layout?.client?.height ?? 0;
         let anyHidden = false;
-        const textContent = (c: BrowserUseNode): string =>
-          c.nodeType === 3 ? c.value : c.children.map(textContent).join(" ");
         const actionableDescendants = new Map<BrowserUseNode, boolean>();
         const actionableDescendant = (c: BrowserUseNode): boolean => {
           if (!actionableDescendants.has(c))
@@ -541,42 +540,15 @@ export async function captureBrowserUseDOM(
             );
           return actionableDescendants.get(c)!;
         };
-        const fitsContextBudget = (c: BrowserUseNode): boolean => {
-          let length = 0,
-            textStarted = false,
-            pendingSpace = false;
-          const visit = (current: BrowserUseNode): boolean => {
-            if (current.nodeType === 3) {
-              for (const character of current.value) {
-                if (/\s/.test(character)) {
-                  pendingSpace ||= textStarted;
-                  continue;
-                }
-                if (pendingSpace) {
-                  length++;
-                  pendingSpace = false;
-                }
-                length++;
-                textStarted = true;
-                if (length > iframeHintContextMaxChars) return false;
-              }
-              return true;
-            }
-            return current.children.every(visit);
-          };
-          return visit(c);
-        };
         const localContext = (c: BrowserUseNode): string | null => {
-          if (
-            !browserUseLocalContextContainer(c, actionableDescendant(c)) ||
-            !fitsContextBudget(c)
-          )
+          if (!browserUseLocalContextContainer(c, actionableDescendant(c)))
             return null;
-          const value = textContent(c).replace(/\s+/g, " ").trim();
-          return value
-            ? Array.from(value).slice(0, iframeHintContextMaxChars).join("")
-            : null;
+          return browserUseBoundedContextText(c, iframeHintContextMaxChars);
         };
+        const headingContext = (c: BrowserUseNode): string | null =>
+          /^H[1-6]$/.test(c.nodeName)
+            ? browserUseBoundedContextText(c, iframeHintContextMaxChars)
+            : null;
         const collect = (c: BrowserUseNode, context = ""): void => {
           const meta = viewMetadata.get(c.id),
             l = meta?.layout;
@@ -600,8 +572,13 @@ export async function captureBrowserUseDOM(
                 "(no label)",
               pages: viewportHeight > 0 ? (c.bounds!.y / viewportHeight).toFixed(1) : 0,
             });
-          const nearby = localContext(c) || context;
-          c.children.forEach((child) => collect(child, nearby));
+          const nearby = localContext(c) || headingContext(c) || context;
+          let siblingContext = nearby;
+          for (const child of c.children) {
+            const heading = headingContext(child);
+            collect(child, heading || siblingContext);
+            if (heading) siblingContext = heading;
+          }
         };
         collect(n.contentDocument);
         n.hiddenElements.sort((a, b) => Number(a.pages) - Number(b.pages));

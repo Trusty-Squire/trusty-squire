@@ -259,6 +259,38 @@ export function browserUseLocalContextContainer(
     (hasActionableDescendant && !broadContextTags.has(t))
   );
 }
+export function browserUseBoundedContextText(n: BrowserUseNode, limit: number): string | null {
+  const characters: string[] = [];
+  let textStarted = false,
+    pendingSpace = false;
+  const append = (character: string): boolean => {
+    if (/\s/.test(character)) {
+      pendingSpace ||= textStarted;
+      return true;
+    }
+    if (pendingSpace) {
+      characters.push(" ");
+      pendingSpace = false;
+    }
+    characters.push(character);
+    textStarted = true;
+    return characters.length <= limit;
+  };
+  const visit = (current: BrowserUseNode): boolean => {
+    if (current.nodeType === 3) {
+      for (const character of current.value) if (!append(character)) return false;
+      return true;
+    }
+    let sawChild = false;
+    for (const child of current.children) {
+      if (sawChild && textStarted) pendingSpace = true;
+      sawChild = true;
+      if (!visit(child)) return false;
+    }
+    return true;
+  };
+  return visit(n) ? characters.join("") : null;
+}
 function propagates(n: BrowserUseNode): boolean {
   const t = tag(n),
     r = n.attributes.role;
@@ -702,25 +734,16 @@ export function serializeBrowserUseDOM(
     return keyCache.get(n)!;
   };
   const contexts = new Map<Simplified, string>();
-  const textCache = new Map<Simplified, string>();
   const genericContextMaxChars = 120;
   const containsActionableDescendant = (n: Simplified): boolean =>
     n.children.some((child) => containsAction(child.original));
-  const contextualText = (n: Simplified): string => {
-    if (!textCache.has(n))
-      textCache.set(
-        n,
-        n.original.nodeType === 3 ? n.original.value : n.children.map(contextualText).join(" "),
-      );
-    return textCache.get(n)!;
-  };
   const contextualize = (n: Simplified, enclosing = ""): void => {
     const o = n.original,
       t = tag(o);
-    const text = contextualText(n).replace(/\s+/g, " ").trim();
+    const text = browserUseBoundedContextText(o, genericContextMaxChars);
     const container =
       browserUseLocalContextContainer(o, containsActionableDescendant(n)) &&
-      Array.from(text).length <= genericContextMaxChars;
+      text !== null;
     let context = container
       ? text || enclosing
       : enclosing;
@@ -728,7 +751,7 @@ export function serializeBrowserUseDOM(
     if (["iframe", "frame"].includes(t)) context = "";
     for (const child of n.children) {
       if (/^h[1-6]$/.test(tag(child.original)))
-        context = contextualText(child).replace(/\s+/g, " ").trim() || context;
+        context = browserUseBoundedContextText(child.original, genericContextMaxChars) || context;
       contextualize(child, context);
     }
   };
@@ -828,7 +851,7 @@ export function serializeBrowserUseDOM(
         contexts.get(n) &&
         !["aria-label", "title", "placeholder", "ax_name"].some((key) => o.attributes[key]?.trim())
         &&
-        !contextualText(n).replace(/\s+/g, " ").trim()
+        browserUseBoundedContextText(o, 1) === ""
       )
         attrs += (attrs ? " " : "") + `context=${cap(contexts.get(n)!)}`;
       if (n.interactive && targets.get(n)?.targetable === false)

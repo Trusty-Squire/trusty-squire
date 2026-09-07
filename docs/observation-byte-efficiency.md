@@ -24,11 +24,11 @@ fixture comparison, not used as the baseline runtime refs.
 
 | Page / reproduction | Baseline bytes | Current with 10-char refs | Current with 11-char refs | Ref-width change | Other serializer change | Total change |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| ipinfo | 7627 | 8232 | 8368 | 136 | 605 | 741 |
-| mdn | 5390 | 5613 | 5693 | 80 | 223 | 303 |
-| hacker-news | 19376 | 26020 | 26569 | 549 | 6644 | 7193 |
-| wikipedia | 6422 | 6813 | 6896 | 83 | 391 | 474 |
-| github | 4431 | 4498 | 4580 | 82 | 67 | 149 |
+| ipinfo | 7627 | 8097 | 8233 | 136 | 470 | 606 |
+| mdn | 5390 | 5542 | 5622 | 80 | 152 | 232 |
+| hacker-news | 19376 | 26350 | 26899 | 549 | 6974 | 7523 |
+| wikipedia | 6422 | 6758 | 6841 | 83 | 336 | 419 |
+| github | 4431 | 4477 | 4559 | 82 | 46 | 128 |
 | gov-uk | 1434 | 1720 | 1742 | 22 | 286 | 308 |
 | Highlighted code (synthetic Vouchflow case) | 515 | 73 | 73 | 0 | -442 | -442 |
 | 12 repeated checkbox bindings (synthetic Resend case) | 1151 | 575 | 587 | 12 | -576 | -564 |
@@ -58,7 +58,7 @@ below 1 in 100 million; a collision is retried before emission. The one-byte inc
 over the baseline's 10-character payload is deliberately retained because refs authorize actions.
 The per-page table attributes 136, 80, 549, 83, 82, and 22 bytes respectively to that
 width change; the remaining growth is serializer output, principally Hacker News's
-6,644-byte difference, rather than the capability length.
+6,974-byte difference, rather than the capability length.
 
 ## Deliberate divergence from canonical browser-use
 
