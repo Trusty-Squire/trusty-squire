@@ -79,7 +79,7 @@ export function shouldIdleExit(
 // the right credential tool without the user spelling it out.
 export const SERVER_INSTRUCTIONS = `This is Trusty Squire — it drives a real browser through signup, provisioning,
 and checkout flows on the user's behalf (\`operate_start\`/\`operate_observe\`/
-\`operate_act\`/\`operate_pay\`/\`operate_finish\`, plus recipe replay), and backs it
+\`operate_click\`/\`operate_type\`/\`operate_pay\`/\`operate_finish\`, plus recipe replay), and backs it
 with a write-only credential vault.
 The user's secrets (API keys, tokens, passwords) live in the vault encrypted;
 they are NOT in the conversation context. Reading one back is possible but

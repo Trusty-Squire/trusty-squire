@@ -804,6 +804,13 @@ developer's real state. The test suite enforces this through
 or profile path from a test. The session-storage compatibility contract lives
 in `apps/mcp/src/session.ts`.
 
+## Operator tool surface
+
+The public operator verbs and complete capability migration are documented in
+[`docs/operator-tool-surface.md`](docs/operator-tool-surface.md).
+`OPERATE_TOOLS` in `apps/mcp/src/tools/provision-drive.ts` is the registration
+contract; the old union Tool object is an unregistered internal adapter.
+
 ## Maintaining this file
 
 This file is a living contract, not a historical record. Keep it for durable,

@@ -103,7 +103,7 @@ describe("the screenshot path is steered as expensive, not forbidden", () => {
   it("names DOM serialization as the route to try first", () => {
     expect(description).toMatch(/safe_table/);
     expect(description).toContain("operate_observe");
-    expect(description).toContain("operate_observe_query");
+    expect(description).toContain("query/cursor");
     expect(description).toMatch(/ONLY when/);
     expect(description).toMatch(/NOT sufficient/);
   });
@@ -124,7 +124,7 @@ describe("still-true contracts survive the cleanup", () => {
       "retrieve a username/password credential only if the current browser host is allowed for login",
     );
     expect(description).toContain("Raw values are never returned");
-    expect(description).toContain("operate_act type_secret");
+    expect(description).toContain("operate_type with slot");
   });
 
   it("operate_login still describes all three sealed lifecycle actions", () => {
@@ -133,7 +133,7 @@ describe("still-true contracts survive the cleanup", () => {
     for (const action of ["prepare_signup", "store_signup", "load_saved"]) {
       expect(description).toContain(action);
     }
-    expect(description).toContain("kind='type_secret'");
+    expect(description).toContain("operate_type with slot");
   });
 
   it("await_verification still tells the agent to seal the OTP into a slot", () => {

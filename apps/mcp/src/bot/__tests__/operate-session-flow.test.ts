@@ -58,6 +58,7 @@ const h = vi.hoisted(() => ({
   autocompleteDiscardCalls: 0,
   autocompleteDiscardEscapeCalls: [] as boolean[],
   clickCalls: 0,
+  jsClickCalls: 0,
   clickError: null as Error | null,
   frameClicks: [] as string[],
   frameJsClicks: [] as string[],
@@ -556,7 +557,9 @@ vi.mock("../browser.js", () => ({
       if (h.clearElementsOnClick) h.elements = [];
       if (h.clickError !== null) throw h.clickError;
     }
-    async clickViaJs(): Promise<void> {}
+    async clickViaJs(): Promise<void> {
+      h.jsClickCalls += 1;
+    }
     async clickInFrame(target: { frameUrl: string }, selector: string): Promise<void> {
       h.frameClicks.push(`${target.frameUrl}|${selector}`);
     }
@@ -1035,6 +1038,15 @@ import {
   type OperatorRecipe,
 } from "../operator-recipe.js";
 import {
+  operateAllowHostTool,
+  operateNavigateTool,
+  operateClickTool,
+  operateTypeTool,
+  operateSelectTool,
+  operatePressTool,
+  operateScrollTool,
+  operateFinishTool,
+  provisionExtractTool,
   provisionRememberTool,
   provisionUseTool,
   provisionFinishTaskTool,
@@ -1146,6 +1158,7 @@ beforeEach(() => {
   h.autocompleteDiscardEscapeCalls = [];
   h.clickCalls = 0;
   h.clickError = null;
+  h.jsClickCalls = 0;
   h.frameClicks = [];
   h.frameJsClicks = [];
   h.frameTypes = [];
@@ -3522,10 +3535,10 @@ describe("operate session — OAuth lifecycle", () => {
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
-    const result = await act(started.session_id, {
-      kind: "oauth_login",
-      target: "Continue with Google",
-    });
+    const result = (await operateLoginTool.handler(
+      { session_id: started.session_id, provider: "google", ref: "Continue with Google" },
+      null,
+    )) as Awaited<ReturnType<typeof act>>;
     expect(h.oauthLoginCalls).toEqual(["#google-oauth"]);
     expect(h.startCalls).toBe(1);
     expect(h.profileDirs).toHaveLength(1);
@@ -3589,10 +3602,10 @@ describe("operate session — OAuth lifecycle", () => {
       }),
     );
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
-    const timedOut = await act(started.session_id, {
-      kind: "oauth_login",
-      target: "Continue with Google",
-    });
+    const timedOut = (await operateLoginTool.handler(
+      { session_id: started.session_id, provider: "google", ref: "Continue with Google" },
+      null,
+    )) as Awaited<ReturnType<typeof act>>;
     expect(timedOut.oauth).toMatchObject({
       state: "awaiting_human",
       next_action: "operate_observe",
@@ -4173,7 +4186,10 @@ describe("Compact V2 action-map boundary", () => {
     // A filter riding on the MAP cursor means "search the whole map for this":
     // it resolves the filtered lookup instead of rejecting with invalid_cursor
     // (the live Xata failure).
-    const byQuery = (await observeQuery(started.session_id, "Item 149", undefined, pageCursor)) as {
+    const byQuery = (await provisionObserveTool.handler(
+      { session_id: started.session_id, query: "Item 149", cursor: pageCursor },
+      null,
+    )) as {
       safe_table: unknown[];
     };
     expect(byQuery.safe_table).toHaveLength(1);
@@ -4185,7 +4201,10 @@ describe("Compact V2 action-map boundary", () => {
     // A cursor minted on a FILTERED page continues that filtered list.
     const queryPage = await observeQuery(started.session_id, "Item");
     const queryCursor = (queryPage.overflow as { next_cursor: string }).next_cursor;
-    const continued = (await observeQuery(started.session_id, "Item", undefined, queryCursor)) as {
+    const continued = (await provisionObserveTool.handler(
+      { session_id: started.session_id, query: "Item", cursor: queryCursor },
+      null,
+    )) as {
       safe_table: unknown[];
     };
     expect(continued.safe_table.length).toBeGreaterThan(0);
@@ -5543,7 +5562,10 @@ describe("Compact V2 checkout copy stays unredacted", () => {
     // operate_observe_query resolves the shipping methods — previously EMPTY
     // when the radios were redacted out of the map.
     retainActivePaymentFieldSeal();
-    const queried = (await observeQuery(started.session_id, "shipping", "radio")) as {
+    const queried = (await provisionObserveTool.handler(
+      { session_id: started.session_id, query: "shipping", role: "radio" },
+      null,
+    )) as {
       safe_table: Array<[string, string, string?]>;
     };
     expect(queried.safe_table).toHaveLength(2);
@@ -6418,7 +6440,7 @@ describe("operate_extract — vault-store response", () => {
     expect(result.stored_credential.reference).toBe("cred_123");
   });
 
-  it("keeps vault-store extraction reachable through operate_act without returning the secret", async () => {
+  it("keeps vault-store extraction reachable through operate_extract without returning the secret", async () => {
     const rawSecret = sk("live-folded-extract-secret-123456789");
     h.visibleText = `API key ${rawSecret}`;
     const started = await startProvisionSession({
@@ -6435,10 +6457,9 @@ describe("operate_extract — vault-store response", () => {
     });
     const api = { storeCredential } as unknown as ApiClient;
 
-    const result = (await provisionActTool.handler(
-      provisionActTool.inputSchema.parse({
+    const result = (await provisionExtractTool.handler(
+      provisionExtractTool.inputSchema.parse({
         session_id: started.session_id,
-        kind: "extract",
         store: { service: "example" },
       }),
       api,
@@ -7075,10 +7096,11 @@ describe("operate_finish lifecycle consolidation", () => {
     });
 
     try {
-      const finishing = provisionFinishTool.handler(
+      const finishing = operateFinishTool.handler(
         {
           session_id: started.session_id,
-          outcome: { kind: "credentials", store: { service: "example" } },
+          outcome: "credentials",
+          store: { service: "example" },
         },
         api,
       );
@@ -10173,5 +10195,131 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
     const wire = JSON.stringify(observation);
     expect(wire).toContain("Fresh CTA".toLowerCase().replace(" ", "-"));
     expect(firstRef === undefined || typeof firstRef === "string").toBe(true);
+  });
+});
+
+describe("flat operator verbs", () => {
+  it("cannot grant an unrelated host, even if an internal action added it mid-session", async () => {
+    const { session_id } = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    await expect(
+      operateAllowHostTool.handler({ session_id, host: "unrelated.net" }, null),
+    ).rejects.toThrow(/target_not_allowed:.*unrelated.net.*operate_start.*allowed_hosts/);
+    await expect(
+      operateNavigateTool.handler({ session_id, url: "https://unrelated.net/" }, null),
+    ).rejects.toThrow(/unrelated.net.*allow_host/);
+    expect(h.gotos).not.toContain("https://unrelated.net/");
+    await act(session_id, { kind: "allow_host", host: "unrelated.net" });
+    await expect(
+      operateAllowHostTool.handler({ session_id, host: "unrelated.net" }, null),
+    ).rejects.toThrow(/startup host scope/);
+  });
+
+  it("allows startup-declared hosts and preserves malformed-host validation", async () => {
+    const { session_id } = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      extraAllowedHosts: ["other.net"],
+    });
+    await operateAllowHostTool.handler({ session_id, host: "other.net" }, null);
+    await operateNavigateTool.handler({ session_id, url: "https://other.net/settings" }, null);
+    expect(h.gotos).toContain("https://other.net/settings");
+    await expect(
+      operateAllowHostTool.handler({ session_id, host: "xn--80ak6aa92e.com" }, null),
+    ).rejects.toThrow(/punycode/);
+  });
+
+  it("fills text and then submits, and fills a secret slot without returning its value", async () => {
+    h.elements = [elem({ labelText: "Name", selector: "#name" })];
+    const { session_id } = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    await operateTypeTool.handler({ session_id, ref: "Name", text: "Ada", submit: true }, null);
+    expect(h.typed).toContainEqual({ selector: "#name", text: "Ada" });
+    expect(h.pressedKeys).toEqual(["Enter"]);
+    stashSecretSlot(session_id, "key", "private-slot-value");
+    const result = await operateTypeTool.handler({ session_id, ref: "Name", slot: "key" }, null);
+    expect(h.typed).toContainEqual({ selector: "#name", text: "private-slot-value", sealed: true });
+    expect(JSON.stringify(result)).not.toContain("private-slot-value");
+  });
+
+  it("does not submit after a manual-card refusal or a stale target", async () => {
+    const { session_id } = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    const result = await operateTypeTool.handler(
+      { session_id, ref: "Card", text: "5555555555554444", submit: true },
+      null,
+    );
+    expect(result).toMatchObject({
+      status: "manual_card_entry_refused",
+      safe_alternative: "operate_pay",
+    });
+    await operateTypeTool
+      .handler({ session_id, ref: "@e:missing", text: "Ada", submit: true }, null)
+      .catch(() => undefined);
+    expect(h.typed).toEqual([]);
+    expect(h.pressedKeys).toEqual([]);
+  });
+
+  it("clicks, presses keys, and exposes viewport scrolling as its own verb", async () => {
+    h.elements = [elem({ role: "button", visibleText: "Continue", selector: "#continue" })];
+    const { session_id } = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    await operateClickTool.handler({ session_id, ref: "Continue" }, null);
+    expect(h.clickCalls).toBe(1);
+    await operatePressTool.handler({ session_id, key: "Tab" }, null);
+    expect(h.pressedKeys).toEqual(["Tab"]);
+    await operateScrollTool.handler({ session_id, direction: "bottom" }, null);
+    expect(h.scrolls).toEqual(["bottom"]);
+  });
+
+  it("uses guarded DOM fallback only for a pre-dispatch pointer interception", async () => {
+    h.elements = [elem({ role: "button", visibleText: "Continue", selector: "#continue" })];
+    const { session_id } = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    h.clickError = Object.assign(new Error("overlay intercepts pointer events"), {
+      dispatchStatus: "not_dispatched",
+    });
+    await operateClickTool.handler({ session_id, ref: "Continue" }, null);
+    expect(h.jsClickCalls).toBe(1);
+    h.clickError = Object.assign(
+      new Error("overlay intercepts pointer events; later dispatch failed"),
+      { dispatchStatus: "dispatched" },
+    );
+    await expect(operateClickTool.handler({ session_id, ref: "Continue" }, null)).rejects.toThrow(
+      "later dispatch failed",
+    );
+    expect(h.jsClickCalls).toBe(1);
+    h.clickError = new Error("overlay intercepts pointer events; dispatch unknown");
+    await expect(operateClickTool.handler({ session_id, ref: "Continue" }, null)).rejects.toThrow(
+      "dispatch unknown",
+    );
+    expect(h.jsClickCalls).toBe(1);
+  });
+
+  it("selects one option, several fields, and the phone country through operate_select", async () => {
+    h.elements = [
+      elem({ tag: "select", labelText: "Country", selector: "#country" }),
+      elem({ tag: "select", labelText: "State", selector: "#state" }),
+    ];
+    const { session_id } = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    await operateSelectTool.handler({ session_id, ref: "Country", values: ["Japan"] }, null);
+    expect(h.selected).toContainEqual({ selector: "#country", matcher: "Japan" });
+    const result = await operateSelectTool.handler(
+      { session_id, selections: { Country: "Japan", State: "Tokyo" } },
+      null,
+    );
+    expect(result).toMatchObject({ fields: [{ status: "selected" }, { status: "selected" }] });
+    await operateSelectTool.handler({ session_id, country: "JP" }, null);
+    expect(h.phoneCountries).toEqual(["JP"]);
+  });
+
+  it("finishes a reported result through the flat completion schema", async () => {
+    const { session_id } = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    const result = await operateFinishTool.handler(
+      operateFinishTool.inputSchema.parse({
+        session_id,
+        outcome: "result",
+        summary: "Account ready",
+        data: { confirmed: true },
+      }),
+      null,
+    );
+    expect(result).toMatchObject({ kind: "result", summary: "Account ready" });
+    expect(activeSessionCount()).toBe(0);
+    expect(h.closeCalls).toBe(1);
   });
 });

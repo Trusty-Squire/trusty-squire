@@ -40,6 +40,8 @@ import {
   type ProvisionAction,
   type ExtractResult,
   manualCardEntryBlockReason,
+  hostAllowed,
+  validateAllowHost,
 } from "../bot/provision-session.js";
 import { signSkillForPublish } from "../skill-cli/signing.js";
 import {
@@ -65,6 +67,8 @@ import { renderSkillHint, serviceSlugFromUrl } from "../bot/skill-hint.js";
 import { clientFromEnv, generateProvisionId } from "../skill-registry-client.js";
 import { openSessionStorage } from "../session.js";
 import { servingAccountId } from "../session-guard.js";
+import { sessionForCall } from "../bot/session/lifecycle.js";
+import { clickDispatchStatusForError } from "../bot/browser.js";
 
 // Read the install-time inbox-read preference. Inbox reads default on; an
 // explicit false in the saved advanced configuration remains an opt-out.
@@ -348,9 +352,9 @@ const OBSERVE_DELTA_CONTRACT =
   "with path). An empty delta (no el_table) means nothing changed, not an empty page. " +
   'In V1, detail:"full" instead returns the legacy `elements` JSON array (every field), never el_table. ' +
   "If a control you can see in `text`/the screenshot has NO row in el_table (a bare unlabeled clickable " +
-  'div — e.g. some SPA "Add To Cart" buttons), it has no ref: click it with operate_act click/js_click ' +
-  'target=`text="…"` or `css=…` (see operate_act). `click` respects actionability and throws if an overlay ' +
-  "intercepts; dismiss the overlay or deliberately use `js_click`, which directly dispatches through a " +
+  'div — e.g. some SPA "Add To Cart" buttons), it has no ref: click it with operate_click ' +
+  'ref=`text="…"` or `css=…` (see operate_click). `click` respects actionability and throws if an overlay ' +
+  "intercepts; dismiss the overlay; operate_click may internally dispatch through a " +
   "transparent overlay. Under default compact-v2, only refs and @labels from the current action map are " +
   "accepted. A ref is a durable element fingerprint: it stays valid across acts and benign re-renders on the same " +
   "document, so one observation can drive several acts. On opaque `stale_ref`, call operate_observe and choose a " +
@@ -361,7 +365,7 @@ const COMPACT_V2_CONTRACT =
   "semantic carries the page title and primary visible heading; safe_table rows use [ref,role,facts?], where role is " +
   "b=button,l=link,t=textbox,s=select,c=checkbox,r=radio,tb=tab,m=menuitem,f=file. ref is an opaque durable " +
   "element handle. facts is a pipe-delimited string: an optional first unkeyed segment is the row's @label alias, " +
-  "a slug of its short label that operate_act also accepts as a target. " +
+  "a slug of its short label accepted by the acting verbs as ref. " +
   "The label is followed by any present s=<state bitset>, a=<action>, " +
   "f=<field>, q=<choice position>/<choice total>, and x=<frame> segments. Fact-only rows begin with a keyed segment. " +
   "State bitset codes are c=checked,u=unchecked,d=disabled,r=required; frame codes are x=s for a same-origin child " +
@@ -371,7 +375,7 @@ const COMPACT_V2_CONTRACT =
   "labels are exactly what the page renders. The row form omits field " +
   "values purely as a size budget: read a value off the page with operate_screenshot, or with an explicitly " +
   "selected V1 session. For a named product/control from the task, " +
-  "call operate_observe_query with those task words; it returns matching actionable refs with labels " +
+  "call operate_observe with query set to those task words; it returns matching actionable refs with labels " +
   "and code-owned facts. Use overflow.next_cursor to page. `detail:full` keeps the V2 format while V2 is enabled; " +
   "set TRUSTY_SQUIRE_OBSERVE_V2=off for the legacy format. A delta:true delta retains the preceding V2 table, then upserts tuple rows in safe_table, " +
   "removes refs in removed, and updates stage or semantic only when either changed. Omitted semantic title/heading remains from the preceding V2 page. " +
@@ -386,8 +390,8 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
     COMPACT_V2_CONTRACT +
     OBSERVE_DELTA_CONTRACT +
     "YOU are the planner — read the observation, then drive the signup, setup, or " +
-    "checkout with operate_act (and operate_pay for a purchase), re-read with " +
-    'operate_observe, and call operate_act { kind: "extract" } ' +
+    "checkout with operate_click, operate_type, operate_select, operate_navigate, operate_scroll, and operate_login (operate_pay for a purchase), re-read with " +
+    "operate_observe, and call operate_extract " +
     "when you reach the credentials. Always operate_finish when done. The " +
     "browser is domain-scoped to the target + its identity providers. If the " +
     "registry knows this service, the first observation includes a `hint` — the " +
@@ -426,6 +430,11 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
 
 const observeSchema = z.object({
   session_id: z.string().min(1),
+  query: z.string().max(160).optional(),
+  cursor: z.string().max(1024).optional(),
+  role: z
+    .enum(["button", "link", "textbox", "select", "checkbox", "radio", "tab", "menuitem", "file"])
+    .optional(),
   // Payload verbosity within the selected observation mode. In V2 both values
   // return the compact action map; in V1, full requests the legacy expanded payload.
   detail: z.enum(["compact", "full"]).optional(),
@@ -434,7 +443,7 @@ const observeSchema = z.object({
 export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
   name: "operate_observe",
   description:
-    "Re-read the current page of an operate session. The default compact-v2 mode returns the compact " +
+    "Re-read the current page of an operate session. Supply query to find controls or cursor to page overflow. The default compact-v2 mode returns the compact " +
     'safe_table action map; `detail:"full"` stays in that format and does not restore legacy fields. ' +
     COMPACT_V2_CONTRACT +
     "Only explicitly selected V1 modes use el_table, reusable stable refs, locator fallbacks, snapshot_file, " +
@@ -447,10 +456,29 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
     required: ["session_id"],
     properties: {
       session_id: { type: "string" },
+      query: { type: "string" },
+      cursor: { type: "string" },
+      role: {
+        type: "string",
+        enum: [
+          "button",
+          "link",
+          "textbox",
+          "select",
+          "checkbox",
+          "radio",
+          "tab",
+          "menuitem",
+          "file",
+        ],
+      },
       detail: { type: "string", enum: ["compact", "full"] },
     },
   },
   async handler(args) {
+    if (args.query !== undefined || args.cursor !== undefined || args.role !== undefined) {
+      return await observeQuery(args.session_id, args.query ?? "", args.role, args.cursor);
+    }
     return await observe(args.session_id, args.detail ?? "compact");
   },
 };
@@ -476,7 +504,7 @@ export const provisionScreenshotTool: Tool<z.infer<typeof screenshotSchema>> = {
   description:
     "WARNING: EXPENSIVE — a screenshot is a full image and costs far more context than any " +
     "observation. Reach for it ONLY when the DOM serialization (Compact V2 safe_table, " +
-    "operate_observe, operate_observe_query) is NOT sufficient to determine the page state; " +
+    "operate_observe with query/cursor) is NOT sufficient to determine the page state; " +
     "if the tables already tell you what the page is doing, do not take one. " +
     "Debugging tool: capture a screenshot of what the operate session's browser actually RENDERS — " +
     "the whole page (default: viewport; full_page:true for the whole scrollable page) or ONE specific " +
@@ -1174,7 +1202,7 @@ async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
         slot: null,
         blocked_reason:
           "no credential value was found on this page — navigate to the keys/settings " +
-          'page, then operate_act { kind: "extract" } again',
+          "page, then operate_extract again",
       };
     }
     const handle = stashSecretSlot(args.session_id, args.into_slot, full);
@@ -1191,9 +1219,7 @@ async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
     return extracted;
   }
   if (api === null) {
-    throw new Error(
-      'operate_act { kind: "extract" } store requires an active Trusty Squire session',
-    );
+    throw new Error("operate_extract store requires an active Trusty Squire session");
   }
   const stored = await persistExtracted(args.session_id, extracted.credentials, args.store, api);
   return storedExtractResult(extracted, stored);
@@ -1215,7 +1241,7 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
   name: "operate_act",
   description:
     "Take one action in an operate session. Under compact-v2 the default follow-up is a compact delta " +
-    "when its action map is unchanged; call operate_observe or operate_observe_query when you need a new map. " +
+    "when its action map is unchanged; call operate_observe with optional query or cursor when you need a new map. " +
     "kinds: click (target=element ref, preferably a safe_table row's ref), " +
     "type (target + text; model-supplied card-number-shaped text is refused — card payment " +
     "must use operate_pay, which fills a vaulted card without exposing it to the model), " +
@@ -2464,11 +2490,11 @@ async function handleSealVaultCredential(
 }
 
 export const provisionSealVaultCredentialTool: Tool<z.infer<typeof sealVaultCredentialSchema>> = {
-  name: "operate_seal_vault_credential",
+  name: "operate_fill_credential",
   description:
     "For a sign-in page, retrieve a username/password credential only if the " +
     "current browser host is allowed for login, then seal requested fields into " +
-    "session slots. Raw values are never returned; use operate_act type_secret " +
+    "session slots. Raw values are never returned; use operate_type with slot " +
     "with the returned slot names to fill the page.",
   inputSchema: sealVaultCredentialSchema,
   jsonInputSchema: {
@@ -2497,7 +2523,14 @@ const loginLoadSavedSchema = sealVaultCredentialBaseSchema
   .refine((b) => b.reference !== undefined || b.service !== undefined, {
     message: "one of reference or service is required",
   });
+const loginOAuthSchema = z.object({
+  session_id: z.string().min(1),
+  action: z.literal("oauth").optional(),
+  provider: z.enum(["google", "github"]),
+  ref: z.string().min(1).max(200),
+});
 const loginSchema = z.union([
+  loginOAuthSchema,
   loginPrepareSignupSchema,
   loginStoreSignupSchema,
   loginLoadSavedSchema,
@@ -2506,15 +2539,25 @@ const loginSchema = z.union([
 export const operateLoginTool: Tool<z.infer<typeof loginSchema>> = {
   name: "operate_login",
   description:
+    "Log in with provider + ref using the atomic OAuth flow; awaiting-human state is returned in this call. " +
     "Drive the sealed username/password login lifecycle without exposing raw values. " +
     "action='prepare_signup' seals the user's captured email and a generated password; " +
     "'store_signup' vaults those prepared slots with the same login-host safeguards; " +
     "'load_saved' fetches an allowed saved login through encrypted browser-fill and seals " +
-    "its fields into session slots. Use operate_act kind='type_secret' to fill returned slots.",
+    "its fields into session slots. Use operate_type with slot to fill returned slots.",
   inputSchema: loginSchema,
   jsonInputSchema: {
     type: "object",
     oneOf: [
+      {
+        required: ["session_id", "provider", "ref"],
+        properties: {
+          session_id: { type: "string" },
+          action: { const: "oauth" },
+          provider: { type: "string", enum: ["google", "github"] },
+          ref: { type: "string" },
+        },
+      },
       {
         required: ["action", "session_id"],
         properties: {
@@ -2553,6 +2596,17 @@ export const operateLoginTool: Tool<z.infer<typeof loginSchema>> = {
     ],
   },
   async handler(args, api) {
+    if ("provider" in args) {
+      return await provisionActTool.handler(
+        {
+          session_id: args.session_id,
+          kind: "oauth_login",
+          provider: args.provider,
+          target: args.ref,
+        },
+        api,
+      );
+    }
     switch (args.action) {
       case "prepare_signup":
         return await handlePrepareLogin(args);
@@ -2564,26 +2618,325 @@ export const operateLoginTool: Tool<z.infer<typeof loginSchema>> = {
   },
 };
 
-// Bare-essentials cut (captain's decision 2026-08-15): the operator surface is
-// these 6 plus operate_pay and operate_payment_status, which are wired separately
-// in tools/index.ts. diagnostics remain behind the opt-in profile.
-// Every dropped alias's behavior remains reachable: cart_add/select_many/
-// extract/solve_captcha/await_verification/login_prepare_signup/login_store_signup/
-// login_load_saved as operate_act kinds; operate_finish_task as operate_finish{outcome}.
-// The alias Tool objects above stay defined (unregistered) as the shared implementation
-// operate_act's kinds and operate_recipe_save/run delegate to, and as direct handles
-// for tests that pin down that folded behavior.
-// operate_screenshot (2026-08-23) is a deliberate, narrow addition to this cut: a
-// read-only debugging instrument (the page's or one frame's real pixels) with no
-// alias/kind it could fold into — operate_act's kinds all DO something; this only
-// looks.
+// Public verbs share the existing action executor so target, card, OAuth, and
+// stale-reference guards remain at the same dispatch boundary. The old union
+// Tool object is an internal adapter only; it is never registered.
+const sessionShape = { session_id: z.string().min(1) };
+const refSchema = z.string().min(1).max(200);
+const sessionJson = { session_id: { type: "string" } };
+const refJson = { ref: { type: "string" } };
+
+const navigateSchema = z.object({ ...sessionShape, url: z.string().url() });
+export const operateNavigateTool: Tool<z.infer<typeof navigateSchema>> = {
+  name: "operate_navigate",
+  description:
+    "Navigate to a URL within this session's allowed hosts. On a scope refusal, the error names the host and remedy.",
+  inputSchema: navigateSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id", "url"],
+    properties: { ...sessionJson, url: { type: "string", format: "uri" } },
+  },
+  handler: async (args, api) =>
+    await provisionActTool.handler(
+      { session_id: args.session_id, kind: "goto", url: args.url },
+      api,
+    ),
+};
+
+const clickSchema = z.object({ ...sessionShape, ref: refSchema });
+export const operateClickTool: Tool<z.infer<typeof clickSchema>> = {
+  name: "operate_click",
+  description:
+    "Click a control using its current observation ref or unique @label. Re-observe after stale_ref. Card charges require operate_pay. A pointer-interception failure may use guarded DOM dispatch internally only when the executor proves no click was dispatched.",
+  inputSchema: clickSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id", "ref"],
+    properties: { ...sessionJson, ...refJson },
+  },
+  async handler(args, api) {
+    const action = { session_id: args.session_id, kind: "click" as const, target: args.ref };
+    try {
+      return await provisionActTool.handler(action, api);
+    } catch (error) {
+      // Require positive executor evidence: old interception log lines can remain
+      // in an error even after a later click dispatched. Text alone is not proof.
+      // Unknown failures, stale refs and payment refusals must never double-click.
+      if (
+        !(error instanceof Error) ||
+        clickDispatchStatusForError(error) !== "not_dispatched" ||
+        !/intercepts pointer events/.test(error.message)
+      )
+        throw error;
+      return await provisionActTool.handler({ ...action, kind: "js_click" }, api);
+    }
+  },
+};
+
+const typeSchema = z
+  .object({
+    ...sessionShape,
+    ref: refSchema,
+    text: z.string().max(4096).optional(),
+    slot: z.string().min(1).max(60).optional(),
+    submit: z.boolean().optional(),
+  })
+  .refine((args) => (args.text !== undefined) !== (args.slot !== undefined), {
+    message: "Provide exactly one of text or slot",
+  });
+export const operateTypeTool: Tool<z.infer<typeof typeSchema>> = {
+  name: "operate_type",
+  description:
+    "Fill a control with text, or a session slot returned by operate_login, operate_fill_credential, or operate_extract. Provide exactly one of text or slot. submit presses Enter after a successful fill. Model-supplied card-number-shaped text is refused; use operate_pay.",
+  inputSchema: typeSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id", "ref"],
+    oneOf: [
+      { required: ["text"], not: { required: ["slot"] } },
+      { required: ["slot"], not: { required: ["text"] } },
+    ],
+    properties: {
+      ...sessionJson,
+      ...refJson,
+      text: { type: "string" },
+      slot: { type: "string" },
+      submit: { type: "boolean" },
+    },
+  },
+  async handler(args, api) {
+    const result = await provisionActTool.handler(
+      {
+        session_id: args.session_id,
+        target: args.ref,
+        ...(args.slot !== undefined
+          ? { kind: "type_secret" as const, slot: args.slot }
+          : { kind: "type" as const, text: args.text! }),
+      },
+      api,
+    );
+    if (
+      args.submit !== true ||
+      (typeof result === "object" &&
+        result !== null &&
+        ("status" in result || "needs_user" in result))
+    )
+      return result;
+    return await provisionActTool.handler(
+      { session_id: args.session_id, kind: "press", key: "Enter" },
+      api,
+    );
+  },
+};
+
+const selectSchema = z
+  .object({
+    ...sessionShape,
+    ref: refSchema.optional(),
+    values: z.array(z.string().min(1).max(4096)).length(1).optional(),
+    selections: formSelectionsSchema.optional(),
+    country: z.string().min(1).max(60).optional(),
+  })
+  .superRefine((args, ctx) => {
+    const modes =
+      Number(args.ref !== undefined || args.values !== undefined) +
+      Number(args.selections !== undefined) +
+      Number(args.country !== undefined);
+    if (modes !== 1 || (args.ref !== undefined) !== (args.values !== undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Provide ref + values, selections, or country",
+      });
+    }
+  });
+export const operateSelectTool: Tool<z.infer<typeof selectSchema>> = {
+  name: "operate_select",
+  description:
+    "Choose an option by visible text with ref + values (one value per control). For several controls, supply an ordered selections map of ref to option; partial results are retained. country selects the phone field's native country dropdown.",
+  inputSchema: selectSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id"],
+    oneOf: [
+      {
+        required: ["ref", "values"],
+        not: { anyOf: [{ required: ["selections"] }, { required: ["country"] }] },
+      },
+      {
+        required: ["selections"],
+        not: {
+          anyOf: [{ required: ["ref"] }, { required: ["values"] }, { required: ["country"] }],
+        },
+      },
+      {
+        required: ["country"],
+        not: {
+          anyOf: [{ required: ["ref"] }, { required: ["values"] }, { required: ["selections"] }],
+        },
+      },
+    ],
+    properties: {
+      ...sessionJson,
+      ...refJson,
+      values: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 1 },
+      selections: { type: "object", additionalProperties: { type: "string" } },
+      country: { type: "string" },
+    },
+  },
+  async handler(args, api) {
+    if (args.selections !== undefined)
+      return await handleFormSelectMany({
+        session_id: args.session_id,
+        selections: args.selections,
+      });
+    if (args.country !== undefined)
+      return await provisionActTool.handler(
+        { session_id: args.session_id, kind: "set_phone_country", country: args.country },
+        api,
+      );
+    return await provisionActTool.handler(
+      { session_id: args.session_id, kind: "select", target: args.ref!, text: args.values![0]! },
+      api,
+    );
+  },
+};
+
+const pressSchema = z.object({ ...sessionShape, key: z.string().min(1).max(40) });
+export const operatePressTool: Tool<z.infer<typeof pressSchema>> = {
+  name: "operate_press",
+  description: "Press a keyboard key in the current session, such as Enter, Tab, or Escape.",
+  inputSchema: pressSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id", "key"],
+    properties: { ...sessionJson, key: { type: "string" } },
+  },
+  handler: async (args, api) => await provisionActTool.handler({ ...args, kind: "press" }, api),
+};
+
+const scrollSchema = z.object({
+  ...sessionShape,
+  direction: z.enum(["down", "up", "bottom", "top"]).default("down"),
+});
+export const operateScrollTool: Tool<z.infer<typeof scrollSchema>> = {
+  name: "operate_scroll",
+  description:
+    "Scroll the page viewport down, up, to the bottom, or to the top. Observe again to discover newly visible controls.",
+  inputSchema: scrollSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id"],
+    properties: {
+      ...sessionJson,
+      direction: { type: "string", enum: ["down", "up", "bottom", "top"], default: "down" },
+    },
+  },
+  handler: async (args, api) => await provisionActTool.handler({ ...args, kind: "scroll" }, api),
+};
+
+const allowHostSchema = z.object({ ...sessionShape, host: z.string().min(1).max(253) });
+export const operateAllowHostTool: Tool<z.infer<typeof allowHostSchema>> = {
+  name: "operate_allow_host",
+  description:
+    "Allow a host only within this session's startup host scope and existing auth-provider allowance. To add an unrelated host, start a new session declaring it in allowed_hosts. Hostname and control-plane checks still apply.",
+  inputSchema: allowHostSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id", "host"],
+    properties: { ...sessionJson, host: { type: "string" } },
+  },
+  async handler(args, api) {
+    const session = sessionForCall(args.session_id);
+    if (session === undefined) throw new Error(`unknown provision session ${args.session_id}`);
+    const checked = validateAllowHost(args.host);
+    // Invalid names still go through the original validation/refusal path.
+    if (
+      !("error" in checked) &&
+      !hostAllowed(
+        `https://${checked.host}`,
+        session.allowedHosts.filter((entry) => entry.source === "start").map((entry) => entry.host),
+      )
+    ) {
+      throw new Error(
+        `target_not_allowed: operate_allow_host rejected "${args.host}": outside this session's startup host scope. Start a new operate_start session declaring "${args.host}" in allowed_hosts.`,
+      );
+    }
+    return await provisionActTool.handler({ ...args, kind: "allow_host" }, api);
+  },
+};
+
+// A flat completion schema translates to the existing terminal preparation and
+// teardown contract. Internal callers can still use provisionFinishTool.
+const publicFinishSchema = z
+  .object({
+    ...sessionShape,
+    outcome: z.enum(["none", "credentials", "result"]).default("none"),
+    store: storeShape.optional(),
+    summary: z.string().max(4000).optional(),
+    data: finishDataSchema.optional(),
+    verify_recipe: z.string().min(1).max(80).optional(),
+  })
+  .superRefine((args, ctx) => {
+    if (args.outcome === "credentials" && args.store === undefined)
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "credentials outcome requires store" });
+    if (args.outcome === "result" && args.summary === undefined && args.data === undefined)
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "result outcome requires summary or data",
+      });
+  });
+export const operateFinishTool: Tool<z.infer<typeof publicFinishSchema>> = {
+  name: "operate_finish",
+  description:
+    "Finish the task and close its session. outcome='none' closes without a reported outcome; 'credentials' extracts and vault-stores using store; 'result' reports summary or data. Success requires verified recipe evidence or data.confirmed=true. Successful completion saves eligible login state through the existing teardown.",
+  inputSchema: publicFinishSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id"],
+    properties: {
+      ...sessionJson,
+      outcome: { type: "string", enum: ["none", "credentials", "result"], default: "none" },
+      store: { type: "object", required: ["service"], properties: storeJsonProps },
+      summary: { type: "string" },
+      data: { type: "object" },
+      verify_recipe: { type: "string" },
+    },
+    allOf: [
+      {
+        if: { required: ["outcome"], properties: { outcome: { const: "credentials" } } },
+        then: { required: ["store"] },
+      },
+      {
+        if: { required: ["outcome"], properties: { outcome: { const: "result" } } },
+        then: { anyOf: [{ required: ["summary"] }, { required: ["data"] }] },
+      },
+    ],
+  },
+  async handler(args, api) {
+    const outcome = finishOutcomeSchema.parse({ ...args, kind: args.outcome });
+    return await provisionFinishTool.handler({ session_id: args.session_id, outcome }, api);
+  },
+};
+
+// The named target contains 18 tools including the two payment and two vault
+// tools registered in index.ts. Recipe tools and the rest of the vault surface
+// are unchanged and are outside that target set.
 export const OPERATE_TOOLS: Tool[] = [
   provisionStartTool,
+  operateFinishTool,
   provisionObserveTool,
   provisionScreenshotTool,
-  provisionObserveQueryTool,
-  provisionActTool,
+  operateNavigateTool,
+  operateClickTool,
+  operateTypeTool,
+  operateSelectTool,
+  operatePressTool,
+  operateScrollTool,
+  operateAllowHostTool,
+  operateLoginTool,
+  provisionSealVaultCredentialTool,
+  provisionExtractTool,
   operateRecipeSaveTool,
   operateRecipeRunTool,
-  provisionFinishTool,
 ] as Tool[];

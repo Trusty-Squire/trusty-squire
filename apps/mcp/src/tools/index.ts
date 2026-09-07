@@ -97,8 +97,8 @@ export function buildToolRegistry(env: NodeJS.ProcessEnv = process.env): Tool[] 
     // Non-charging bounded status for pre-charge approval and post-submit
     // outcomes; operate_pay owns approval continuation and charge execution.
     operatePaymentStatusTool,
-    // Interactive host-driven provisioning (operate_start/observe/act/finish
-    // plus recipe save/run; workflow kinds are consolidated under operate_act).
+    // Interactive host-driven provisioning through discoverable flat verbs,
+    // plus the unchanged recipe save/run tools.
     ...OPERATE_TOOLS,
   ] as Tool[];
 }
