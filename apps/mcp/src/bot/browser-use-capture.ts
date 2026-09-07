@@ -78,6 +78,16 @@ export async function captureBrowserUseDOM(
   const existingBySelector = new Map(elements.map((e) => [pathKey(e.framePath, e.selector), e]));
   const sandboxIsOpaque = (sandbox: string | undefined): boolean =>
     sandbox !== undefined && !sandbox.toLowerCase().split(/\s+/).includes("allow-same-origin");
+  const frameUrlIsOpaque = (frame: Frame): boolean => {
+    if (frame === page.mainFrame()) return false;
+    const url = frame.url();
+    if (url === "" || url === "about:blank" || url === "about:srcdoc") return true;
+    try {
+      return new URL(url).origin === "null";
+    } catch {
+      return true;
+    }
+  };
   const capture = async (
     client: CDPSession,
     prefix: string,
@@ -200,7 +210,7 @@ export async function captureBrowserUseDOM(
     const rawById = new Map<string, RawNode>();
     const nodeFrame = new Map<string, Frame>();
     const selectorsById = new Map<string, string>();
-    opaqueFrames.set(owningFrame, owningFrameOpaque);
+    opaqueFrames.set(owningFrame, owningFrameOpaque || frameUrlIsOpaque(owningFrame));
     const build = (
       raw: RawNode,
       parents: Array<{ raw: RawNode; layout: Layout }>,
@@ -342,7 +352,9 @@ export async function captureBrowserUseDOM(
         const contentFrame = frameById.get(raw.frameId ?? "") ?? frame;
         opaqueFrames.set(
           contentFrame,
-          (opaqueFrames.get(frame) ?? false) || sandboxIsOpaque(a.sandbox),
+          (opaqueFrames.get(frame) ?? frameUrlIsOpaque(frame)) ||
+            sandboxIsOpaque(a.sandbox) ||
+            frameUrlIsOpaque(contentFrame),
         );
         n.contentDocument = build(
           raw.contentDocument,
@@ -443,7 +455,9 @@ export async function captureBrowserUseDOM(
             child,
             `${framePath(frame)}:`,
             frame,
-            (opaqueFrames.get(frame) ?? false) || sandboxIsOpaque(n.attributes.sandbox),
+            (opaqueFrames.get(frame) ?? frameUrlIsOpaque(frame)) ||
+              sandboxIsOpaque(n.attributes.sandbox) ||
+              frameUrlIsOpaque(frame),
           );
         }
       }

@@ -67,7 +67,9 @@ describe("interleaved observation DOM", () => {
       response.end(
         request.url === "/child"
           ? '<button id="child">Cross origin action</button>'
-          : `<iframe srcdoc='<button id="same">Same origin action</button>'></iframe><iframe src="http://localhost:${(server.address() as AddressInfo).port}/child"></iframe>`,
+          : request.url === "/same"
+            ? '<button id="same">Same origin action</button>'
+            : `<iframe src="/same"></iframe><iframe src="http://localhost:${(server.address() as AddressInfo).port}/child"></iframe>`,
       );
     });
     await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -87,7 +89,7 @@ describe("interleaved observation DOM", () => {
       const child = capture.elements.find((element) => element.id === "child")!;
       const same = capture.elements.find((element) => element.id === "same")!;
       expect(child.frameUrl).toContain("http://localhost:");
-      expect(same.frameUrl).toBe("about:srcdoc");
+      expect(same.frameUrl).toContain("http://127.0.0.1:");
       await page
         .frames()
         .find((frame) => frame.url() === child.frameUrl)!
@@ -111,7 +113,9 @@ describe("interleaved observation DOM", () => {
       response.end(
         request.url === "/child"
           ? '<span id="cross" onclick="window.clicked = true">Permitted cross-origin action</span>'
-          : `<iframe srcdoc='<span id="same" onclick="window.clicked = true">Same-origin action</span>'></iframe><iframe sandbox="allow-scripts" srcdoc='<span id="opaque" onclick="window.clicked = true">Opaque sandbox action</span>'></iframe><iframe src="http://localhost:${(server.address() as AddressInfo).port}/child"></iframe>`,
+          : request.url === "/same"
+            ? '<span id="same" onclick="window.clicked = true">Same-origin action</span>'
+            : `<iframe src="/same"></iframe><iframe sandbox="allow-scripts" srcdoc='<span id="opaque" onclick="window.clicked = true">Opaque sandbox action</span>'></iframe><iframe src="http://localhost:${(server.address() as AddressInfo).port}/child"></iframe>`,
       );
     });
     await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -146,7 +150,7 @@ describe("interleaved observation DOM", () => {
       ).toEqual(expect.arrayContaining(["same", "cross"]));
       expect(output.dom).toContain("not-targetable=true");
       expect(output.dom).toContain("Opaque sandbox action");
-      const sameFrame = page.frames().find((frame) => frame.url() === "about:srcdoc");
+      const sameFrame = page.frames().find((frame) => frame.url().endsWith("/same"));
       await sameFrame!.locator("#same").click();
       await page
         .frames()
@@ -158,6 +162,57 @@ describe("interleaved observation DOM", () => {
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
       );
+    }
+  });
+  it("keeps null-origin frame controls visible but outside action and query maps", async () => {
+    const page = await browser.newPage();
+    try {
+      const dataDocument = encodeURIComponent(
+        '<span id="data-action" onclick="window.clicked = true">Data opaque action</span>',
+      );
+      await page.setContent(
+        `<iframe id="blank-frame"></iframe><iframe srcdoc='<span id="srcdoc-action" onclick="window.clicked = true">Srcdoc opaque action</span>'></iframe><iframe src="data:text/html,${dataDocument}"></iframe>`,
+      );
+      const blankHandle = await page.locator("#blank-frame").elementHandle();
+      const blankFrame = await blankHandle!.contentFrame();
+      await blankFrame!.setContent(
+        '<span id="blank-action" onclick="window.clicked = true">Blank opaque action</span>',
+      );
+
+      const capture = await captureBrowserUseDOM(page, [], (frame) => frame.url());
+      const handles = new Map(capture.elements.map((element) => [element, `@e:${element.index}`]));
+      const safe = buildSafeControlsV2({
+        elements: capture.elements,
+        legacyRefs: handles,
+        handles,
+        pageOrigin: new URL(page.url()).origin,
+        canonical: true,
+      });
+      const output = serializeBrowserUseDOM(capture.root, {
+        ref: (node) => {
+          const element = capture.nodeElements.get(node.id);
+          return element ? handles.get(element)! : { ref: `@e:unbound_${node.id}`, targetable: false };
+        },
+      });
+
+      expect(
+        capture.elements.some((element) =>
+          ["blank-action", "srcdoc-action", "data-action"].includes(element.id ?? ""),
+        ),
+      ).toBe(false);
+      expect(safe.rows).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: expect.stringContaining("Blank opaque action") }),
+          expect.objectContaining({ text: expect.stringContaining("Srcdoc opaque action") }),
+          expect.objectContaining({ text: expect.stringContaining("Data opaque action") }),
+        ]),
+      );
+      expect(output.dom).toContain("Blank opaque action");
+      expect(output.dom).toContain("Srcdoc opaque action");
+      expect(output.dom).toContain("Data opaque action");
+      expect(output.dom.match(/not-targetable=true/g)).toHaveLength(3);
+    } finally {
+      await page.close();
     }
   });
   it("keeps an unbindable closed-shadow control visible without disabling the rest of the fixture", async () => {

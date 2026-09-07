@@ -6510,7 +6510,7 @@ describe("operate_extract — vault-store response", () => {
 });
 
 describe("operate session — live-profile precondition gate", () => {
-  it("fails closed after probing the real profile with no live Google session", async () => {
+  it("omits the compact-v2 auth-gate text field after probing a profile without Google", async () => {
     const canonical = "/tmp/trusty-squire-unit-canonical-empty";
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.providers = []; // no live session
@@ -6522,6 +6522,7 @@ describe("operate session — live-profile precondition gate", () => {
     expect(obs.needs_user).toBeDefined();
     expect(obs.needs_user?.wall).toBe("google_session");
     expect(obs).toMatchObject({ format: "compact-v2", stage: "auth", url: "" });
+    expect(obs).not.toHaveProperty("text");
     expect(obs.elements).toBeUndefined();
     expect(h.startCalls).toBe(1);
     expect(h.started).toBe(0); // the rejected profile is closed before handoff

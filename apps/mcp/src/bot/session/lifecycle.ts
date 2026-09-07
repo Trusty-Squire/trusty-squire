@@ -1095,7 +1095,6 @@ export async function startProvisionSession(
             format: "compact-v2",
             stage: "auth",
             url: "",
-            text: "",
             needs_user: gate.needs_user,
           }
         : { session_id: id, url: "", text: "", elements: [], needs_user: gate.needs_user };
