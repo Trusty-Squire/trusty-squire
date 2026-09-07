@@ -32,10 +32,10 @@ Only bracketed element identities immediately followed by a tag are normalized;
 whitespace, hierarchy, text, attributes, new markers, order and scroll markers
 must match exactly.
 
-Paint-order filtering is explicitly disabled in the canonical captures for this
-phase, as authorized by the engineering review. It needs new paint-order CDP
-capture/processing and is the named follow-up in `docs/browser-use-serializer-port.md`.
-Viewport scoping and 99% containment filtering remain enabled.
+Paint-order filtering is enabled in the pinned canonical captures, alongside
+viewport scoping and 99% containment filtering. Production preserves covered
+interactive controls for reachability even though the canonical browser-use port
+suppresses them; see `docs/browser-use-serializer-port.md` for that divergence.
 
 Source: [browser-use 0.13.10 on PyPI](https://pypi.org/project/browser-use/0.13.10/).
 The port's MIT notice ships in `apps/mcp/assets/licenses/browser-use-MIT.txt`.
