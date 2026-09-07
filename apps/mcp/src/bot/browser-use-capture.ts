@@ -64,8 +64,9 @@ export async function captureBrowserUseDOM(
   existing: readonly InteractiveElement[],
   framePath: (frame: Frame) => string | null,
 ): Promise<BrowserUseCapture> {
-  const elements = existing.map((e) => ({ ...e }));
+  const elements = existing.filter((e) => e.frameOpaque !== true).map((e) => ({ ...e }));
   const nodeElements = new Map<string, InteractiveElement>();
+  const opaqueFrames = new Map<Frame, boolean>();
   const viewMetadata = new Map<
     string,
     { layout: Layout | undefined; name: string; frame?: Frame }
@@ -75,10 +76,13 @@ export async function captureBrowserUseDOM(
   const cdp = await page.context().newCDPSession(page);
   const sessions: CDPSession[] = [cdp];
   const existingBySelector = new Map(elements.map((e) => [pathKey(e.framePath, e.selector), e]));
+  const sandboxIsOpaque = (sandbox: string | undefined): boolean =>
+    sandbox !== undefined && !sandbox.toLowerCase().split(/\s+/).includes("allow-same-origin");
   const capture = async (
     client: CDPSession,
     prefix: string,
     owningFrame: Frame,
+    owningFrameOpaque = false,
   ): Promise<BrowserUseNode> => {
     const [dom, snapshot, ax, frames] = await Promise.all([
       client.send("DOM.getDocument", { depth: -1, pierce: true }),
@@ -196,6 +200,7 @@ export async function captureBrowserUseDOM(
     const rawById = new Map<string, RawNode>();
     const nodeFrame = new Map<string, Frame>();
     const selectorsById = new Map<string, string>();
+    opaqueFrames.set(owningFrame, owningFrameOpaque);
     const build = (
       raw: RawNode,
       parents: Array<{ raw: RawNode; layout: Layout }>,
@@ -333,14 +338,20 @@ export async function captureBrowserUseDOM(
         });
       for (const shadow of raw.shadowRoots ?? [])
         n.children.push(build(shadow, chain, n, selector + " >> css=", frame));
-      if (raw.contentDocument)
+      if (raw.contentDocument) {
+        const contentFrame = frameById.get(raw.frameId ?? "") ?? frame;
+        opaqueFrames.set(
+          contentFrame,
+          (opaqueFrames.get(frame) ?? false) || sandboxIsOpaque(a.sandbox),
+        );
         n.contentDocument = build(
           raw.contentDocument,
           chain,
           n,
           "",
-          frameById.get(raw.frameId ?? "") ?? frame,
+          contentFrame,
         );
+      }
       return n;
     };
     const root = build(dom.root, [], null, "", owningFrame);
@@ -353,6 +364,7 @@ export async function captureBrowserUseDOM(
       if (
         !el &&
         !inClosedShadow &&
+        opaqueFrames.get(frame) !== true &&
         n.nodeType === 1 &&
         (browserUseInteractive(n) || n.scrollable)
       ) {
@@ -427,7 +439,12 @@ export async function captureBrowserUseDOM(
           visited.add(frame);
           const child = await page.context().newCDPSession(frame);
           sessions.push(child);
-          n.contentDocument = await capture(child, `${framePath(frame)}:`, frame);
+          n.contentDocument = await capture(
+            child,
+            `${framePath(frame)}:`,
+            frame,
+            (opaqueFrames.get(frame) ?? false) || sandboxIsOpaque(n.attributes.sandbox),
+          );
         }
       }
       for (const c of n.children) await attachFrames(c, depth);

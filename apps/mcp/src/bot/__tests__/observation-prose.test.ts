@@ -7,7 +7,7 @@ import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { captureBrowserUseDOM } from "../browser-use-capture.js";
 import { serializeBrowserUseDOM } from "../browser-use-serializer.js";
-import { screenBrowserUseValueV2 } from "../compact-observation-v2.js";
+import { buildSafeControlsV2, screenBrowserUseValueV2 } from "../compact-observation-v2.js";
 let browser: Browser;
 beforeAll(async () => {
   browser = await chromium.launch({ headless: true });
@@ -97,6 +97,61 @@ describe("interleaved observation DOM", () => {
         .frames()
         .find((frame) => frame.url() === same.frameUrl)!
         .locator(same.selector)
+        .click();
+    } finally {
+      await page.close();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+  it("keeps a sandboxed synthesized control visible but outside action and query maps", async () => {
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "text/html");
+      response.end(
+        request.url === "/child"
+          ? '<span id="cross" onclick="window.clicked = true">Permitted cross-origin action</span>'
+          : `<iframe srcdoc='<span id="same" onclick="window.clicked = true">Same-origin action</span>'></iframe><iframe sandbox="allow-scripts" srcdoc='<span id="opaque" onclick="window.clicked = true">Opaque sandbox action</span>'></iframe><iframe src="http://localhost:${(server.address() as AddressInfo).port}/child"></iframe>`,
+      );
+    });
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const page = await browser.newPage();
+    try {
+      await page.goto(`http://127.0.0.1:${(server.address() as AddressInfo).port}/`);
+      const capture = await captureBrowserUseDOM(page, [], (frame) => frame.url());
+      const handles = new Map(capture.elements.map((element) => [element, `@e:${element.index}`]));
+      const safe = buildSafeControlsV2({
+        elements: capture.elements,
+        legacyRefs: handles,
+        handles,
+        pageOrigin: new URL(page.url()).origin,
+        canonical: true,
+      });
+      const output = serializeBrowserUseDOM(capture.root, {
+        ref: (node) => {
+          const element = capture.nodeElements.get(node.id);
+          return element ? handles.get(element)! : { ref: `@e:unbound_${node.id}`, targetable: false };
+        },
+      });
+
+      expect(capture.elements.map((element) => element.id)).toEqual(
+        expect.arrayContaining(["same", "cross"]),
+      );
+      expect(capture.elements.some((element) => element.id === "opaque")).toBe(false);
+      expect(safe.rows.map((row) => row.ref)).toEqual([...safe.byRef.keys()]);
+      expect(
+        safe.rows.map((row) =>
+          capture.elements.find((element) => handles.get(element) === row.ref)?.id,
+        ),
+      ).toEqual(expect.arrayContaining(["same", "cross"]));
+      expect(output.dom).toContain("not-targetable=true");
+      expect(output.dom).toContain("Opaque sandbox action");
+      const sameFrame = page.frames().find((frame) => frame.url() === "about:srcdoc");
+      await sameFrame!.locator("#same").click();
+      await page
+        .frames()
+        .find((frame) => frame.url().includes("localhost:"))!
+        .locator("#cross")
         .click();
     } finally {
       await page.close();
