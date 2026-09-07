@@ -400,16 +400,19 @@ describe("BrowserController OAuth popup lifecycle", () => {
   it("completes a same-tab OAuth return to the product console on a sibling host", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects";
     await context.route("https://product.test/**", (route) =>
       route.fulfill({
         contentType: "text/html",
-        body: '<button id="oauth" onclick="location.href=\'https://accounts.google.com/provider\'">Continue</button>',
+        body: `<button id="oauth" onclick='location.href=${JSON.stringify(
+          `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+        )}'>Continue</button>`,
       }),
     );
     await context.route("https://accounts.google.com/**", (route) =>
       route.fulfill({
         contentType: "text/html",
-        body: '<script>setTimeout(() => location.href="https://console.product.test/projects", 50)</script>',
+        body: `<script>setTimeout(() => location.href=${JSON.stringify(expectedReturnUrl)}, 50)</script>`,
       }),
     );
     await context.route("https://console.product.test/**", (route) =>
@@ -431,12 +434,15 @@ describe("BrowserController OAuth popup lifecycle", () => {
   it("rechecks completion when the outer action deadline wins during consent work", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects";
     const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
     process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1600";
     await context.route("https://product.test/**", (route) =>
       route.fulfill({
         contentType: "text/html",
-        body: '<button id="oauth" onclick="location.href=\'https://accounts.google.com/provider\'">Continue</button>',
+        body: `<button id="oauth" onclick='window.open(${JSON.stringify(
+          `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+        )})'>Continue</button>`,
       }),
     );
     await context.route("https://accounts.google.com/**", (route) =>
@@ -501,6 +507,34 @@ describe("BrowserController OAuth popup lifecycle", () => {
             ? '<button id="oauth" onclick="location.href=\'https://accounts.google.com/provider\'">Continue</button>'
             : route.request().url().startsWith("https://accounts.google.com/")
               ? `<script>setTimeout(() => location.href=${JSON.stringify(destination)}, 50)</script>`
+              : "<main>Approve sign-in</main>",
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 800, "google")).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("keeps a same-domain MFA sibling pending despite a different initiated destination", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects";
+    await context.route("**/*", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body:
+          route.request().url() === "https://product.test/login"
+            ? `<button id="oauth" onclick='location.href=${JSON.stringify(
+                `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+              )}'>Continue</button>`
+            : route.request().url().startsWith("https://accounts.google.com/")
+              ? '<script>setTimeout(() => location.href="https://identity.product.test/mfa", 50)</script>'
               : "<main>Approve sign-in</main>",
       }),
     );
