@@ -13412,15 +13412,26 @@ export class BrowserController {
     const captureExpectedReturnUrl = (url: string): void => {
       expectedReturnUrl ??= oauthRedirectUri(url);
     };
+    const attemptPage = (page: Page): boolean =>
+      page === product || page === popupCapture.page;
     const onContextRequest = (request: Request): void => {
       if (!actionStarted || !request.isNavigationRequest()) return;
       try {
-        if (request.frame().parentFrame() !== null) return;
+        const frame = request.frame();
+        if (
+          frame.parentFrame() !== null ||
+          !attemptPage(frame.page()) ||
+          !this.ownedPages.has(frame.page())
+        ) {
+          return;
+        }
       } catch {
         // Playwright emits a popup's first navigation request before it
         // creates the frame. This is precisely where a fast HTTP redirect
         // still carries the authorization request's redirect_uri.
-        captureExpectedReturnUrl(request.url());
+        if (popupCapture.page !== null && this.ownedPages.has(popupCapture.page)) {
+          captureExpectedReturnUrl(request.url());
+        }
         return;
       }
       captureExpectedReturnUrl(request.url());

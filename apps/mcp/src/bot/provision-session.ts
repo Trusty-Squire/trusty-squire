@@ -1305,12 +1305,7 @@ function rememberCompactV2SourcePage(
 }
 
 function oauthCompletionSourcePage(session: object): OAuthCompletionEvidence["page"] | undefined {
-  const page = oauthCompletionSourcePages.get(session);
-  if (page?.isClosed()) {
-    oauthCompletionSourcePages.delete(session);
-    return undefined;
-  }
-  return page;
+  return oauthCompletionSourcePages.get(session);
 }
 
 function rememberOAuthCompletionSourcePage(
@@ -5005,8 +5000,9 @@ async function executeAct(
     if (cardBlock !== null) throw new ManualCardEntryBlockedError(cardBlock);
   }
   let browser = session.browser;
+  const oauthCompletionSource = oauthCompletionSourcePage(session);
   const compactV2ActionPage =
-    oauthCompletionSourcePage(session) ??
+    oauthCompletionSource ??
     (session.compactV2Active ? compactV2SourcePage(session) : undefined);
   let completedAction: ProvisionAction = action;
   let sensitiveSource: RecordedValueSource | undefined;
@@ -5041,6 +5037,16 @@ async function executeAct(
             ? "<mode>=<redacted>"
             : action.target;
     }
+  }
+  if (oauthCompletionSource?.isClosed() && "target" in action) {
+    if (session.compactV2Active) throwCompactV2StaleRef();
+    throw new TargetStaleError({
+      status: "target_stale",
+      target: action.target,
+      after_generation: session.generation,
+      reobserve_required: true,
+      replacement_candidates: [],
+    });
   }
   audit(sessionId, "act", {
     kind: action.kind,
