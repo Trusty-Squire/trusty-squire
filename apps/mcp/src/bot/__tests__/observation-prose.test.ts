@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 // real Chrome: CDP capture -> canonical serializer -> shared substring screen.
 import { chromium, type Browser, type Frame, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { BrowserController } from "../browser.js";
+import { BrowserController, type InteractiveElement } from "../browser.js";
 import { captureBrowserUseDOM } from "../browser-use-capture.js";
 import { serializeBrowserUseDOM } from "../browser-use-serializer.js";
 import { buildSafeControlsV2, screenBrowserUseValueV2 } from "../compact-observation-v2.js";
