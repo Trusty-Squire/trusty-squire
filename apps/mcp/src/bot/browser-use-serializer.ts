@@ -50,6 +50,8 @@ interface Simplified {
   compound: string;
   isNew: boolean;
   code?: string;
+  codeActions?: boolean;
+  verbatim?: boolean;
 }
 export const DEFAULT_CONTAINMENT_THRESHOLD = 0.99;
 const DISABLED = new Set(["style", "script", "head", "meta", "link", "title"]);
@@ -564,8 +566,25 @@ function imageContext(n: Simplified): string {
   return result.join(" ");
 }
 
+function codeAction(c: BrowserUseNode): boolean {
+  const plainMarkup =
+    ["pre", "code", "span", "div"].includes(tag(c)) &&
+    Object.keys(c.attributes).every((k) => ["class", "style", "id"].includes(k));
+  const actual = plainMarkup ? { ...c, bounds: null } : c;
+  return (
+    c.nodeType === 11 ||
+    browserUseInteractive(actual) ||
+    c.scrollable ||
+    c.shadowType !== null ||
+    c.contentDocument !== null
+  );
+}
+
 /** Syntax markup is presentation. Explicit action semantics always win. */
-function codeText(n: BrowserUseNode, paintedOver?: ReadonlySet<BrowserUseNode>): string | null {
+function codeText(
+  n: BrowserUseNode,
+  paintedOver?: ReadonlySet<BrowserUseNode>,
+): { value: string; actionable: boolean } | null {
   if (!["pre", "code"].includes(tag(n)) || !n.visible) return null;
   let actionable = false;
   const collect = (c: BrowserUseNode, root = false): string => {
@@ -574,17 +593,11 @@ function codeText(n: BrowserUseNode, paintedOver?: ReadonlySet<BrowserUseNode>):
     if (c.nodeType === 11) actionable = true;
     if (c.nodeType !== 1 || DISABLED.has(tag(c))) return "";
     if (!root && paintedOver?.has(c)) return "";
-    // Neutralize only the canonical small-icon class/id heuristic on markup.
-    const plainMarkup =
-      ["pre", "code", "span", "div"].includes(tag(c)) &&
-      Object.keys(c.attributes).every((k) => ["class", "style", "id"].includes(k));
-    const actual = plainMarkup ? { ...c, bounds: null } : c;
-    if (browserUseInteractive(actual) || c.scrollable || c.shadowType || c.contentDocument)
-      actionable = true;
+    if (codeAction(c)) actionable = true;
     return c.children.map((child) => collect(child)).join("");
   };
   const value = collect(n, true);
-  return actionable ? null : value;
+  return { value, actionable };
 }
 
 /** No text budget or reordering: filtering preserves the original DOM sequence. */
@@ -608,16 +621,21 @@ export function serializeBrowserUseDOM(
       );
     return actionDescendants.get(node)!;
   };
-  const simplify = (n: BrowserUseNode): Simplified | null => {
+  const simplify = (
+    n: BrowserUseNode,
+    preserveCodeText = false,
+    insideCode = false,
+  ): Simplified | null => {
     if (n.nodeType === 9) {
       for (const c of n.children) {
-        const s = simplify(c);
+        const s = simplify(c, preserveCodeText, insideCode);
         if (s) return s;
       }
       return null;
     }
     if (n.nodeType === 3)
-      return n.snapshot && n.visible && n.value.trim().length > 1
+      return n.snapshot && (n.visible || (preserveCodeText && /^\s*$/.test(n.value))) &&
+          (preserveCodeText || n.value.trim().length > 1)
         ? {
             original: n,
             children: [],
@@ -626,6 +644,7 @@ export function serializeBrowserUseDOM(
             shadowHost: false,
             compound: "",
             isNew: false,
+            verbatim: preserveCodeText,
           }
         : null;
     if (n.nodeType !== 1 && n.nodeType !== 11) return null;
@@ -636,14 +655,26 @@ export function serializeBrowserUseDOM(
       n.attributes["data-browser-use-exclude"]?.toLowerCase() === "true"
     )
       return null;
-    const code = efficient ? codeText(n) : null;
-    const children = (
+    const code = efficient && !insideCode ? codeText(n) : null;
+    let children = (
       (t === "iframe" || t === "frame") && n.contentDocument
         ? n.contentDocument.children
         : n.children
     )
-      .map(simplify)
+      .map((child) => simplify(child, preserveCodeText || code?.actionable === true, insideCode || code !== null))
       .filter((c): c is Simplified => c !== null);
+    const actionContent = (s: Simplified): Simplified | null => {
+      if (codeAction(s.original))
+        return s;
+      const actionChildren = s.children
+        .map(actionContent)
+        .filter((child): child is Simplified => child !== null);
+      return actionChildren.length ? { ...s, children: actionChildren } : null;
+    };
+    if (code?.actionable)
+      children = children
+        .map(actionContent)
+        .filter((child): child is Simplified => child !== null);
     const shadowHost = n.children.some((c) => c.nodeType === 11);
     if (
       !(
@@ -660,7 +691,7 @@ export function serializeBrowserUseDOM(
       excluded: false,
       interactive: false,
       shadowHost,
-      ...(code === null ? {} : { code }),
+      ...(code === null ? {} : { code: code.value, codeActions: code.actionable }),
       compound: compounds(n),
       isNew: false,
     };
@@ -709,7 +740,8 @@ export function serializeBrowserUseDOM(
       if (!refs.includes(ref)) refs.push(ref);
       n.isNew = !!n.compound || (!!options.previous?.size && !options.previous.has(ref));
     }
-    if (n.code === undefined) n.children.forEach((c) => assign(c, inShadow || o.nodeType === 11));
+    if (n.code === undefined || n.codeActions)
+      n.children.forEach((c) => assign(c, inShadow || o.nodeType === 11));
   };
   assign(tree, false);
   // Compare unscreened content, never let redaction make different rows identical.
@@ -834,8 +866,15 @@ export function serializeBrowserUseDOM(
       t = tag(o),
       indent = "\t".repeat(depth);
     if (n.code !== undefined) {
-      const code = codeText(o, paintedOver);
-      return code ? `${indent}<${t}> ${JSON.stringify(code)}` : "";
+      const code = codeText(o, paintedOver)?.value;
+      const actions = n.codeActions
+        ? n.children
+            .map((child) => render(child, depth + 1))
+            .filter(Boolean)
+            .join("\n")
+        : "";
+      if (!code) return actions;
+      return [`${indent}<${t}> ${JSON.stringify(code)}`, actions].filter(Boolean).join("\n");
     }
     // A duplicate binding cannot add reachability. Only omit an empty form row
     // when its exact action identity was already emitted; never infer equivalence
@@ -929,7 +968,7 @@ export function serializeBrowserUseDOM(
       !paintedOver.has(o) &&
       o.value.trim().length > 1
     )
-      lines.push(indent + o.value.trim());
+      lines.push(indent + (n.verbatim ? o.value : o.value.trim()));
     for (let i = 0; i < n.children.length; i++) {
       const child = n.children[i]!;
       const line = render(child, next);

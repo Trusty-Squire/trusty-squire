@@ -42,6 +42,7 @@ The port's MIT notice ships in `apps/mcp/assets/licenses/browser-use-MIT.txt`.
 
 Canonical equality runs in the serializer's canonical mode, normalizing identity
 only. Read-path redaction is removed: fixture text and attributes are the page's
-content, not a screened rendering. The HN fixture pins `usernametaken29`
-verbatim, guarding against a return of secret-shape screening while preserving
-line counts, indentation, attributes, and refs exactly.
+content, not a screened rendering. The volatile HN capture does not pin
+`usernametaken29`; its regression injects that value into visible fixture text
+before serialization, guarding against a return of secret-shape screening while
+preserving line counts, indentation, attributes, and refs exactly.

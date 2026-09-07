@@ -154,10 +154,13 @@ describe("observation byte efficiency", () => {
     expect(output.dom).toBe(`<pre> ${JSON.stringify(source)}`);
     expect(output.dom.split("\n")).toHaveLength(1);
     expect(output.refs).toEqual([]);
-    pre.children.push(node("BUTTON", { children: [text("Copy sample")] }));
+    const copy = node("BUTTON", { children: [text("Copy sample")] });
+    pre.children.push(copy);
     const withCopy = serializeBrowserUseDOM(pre);
+    expect(withCopy.dom).toContain(`<pre> ${JSON.stringify(source + "Copy sample")}`);
+    expect(withCopy.dom).toContain(`[${copy.id}]<button`);
     expect(withCopy.dom).toContain("Copy sample");
-    expect(withCopy.refs.length).toBeGreaterThan(0);
+    expect(withCopy.refs).toContain(copy.id);
   });
   it("keeps code visible through its opaque wrapper while suppressing externally occluded code", () => {
     const source = "const mandate = await sign();";
