@@ -694,7 +694,8 @@ export function serializeBrowserUseDOM(
       .map((child) =>
         simplify(
           child,
-          preserveActionText || code?.actionable === true || browserUseInteractive(n),
+          preserveActionText ||
+            (efficient && (code?.actionable === true || browserUseInteractive(n))),
           insideCode || code !== null,
         ),
       )
