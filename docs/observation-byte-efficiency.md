@@ -24,12 +24,12 @@ fixture comparison, not used as the baseline runtime refs.
 
 | Page / reproduction | Baseline bytes | Current with 10-char refs | Current with 11-char refs | Ref-width change | Other serializer change | Total change |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| ipinfo | 7627 | 8131 | 8267 | 136 | 504 | 640 |
+| ipinfo | 7627 | 8081 | 8217 | 136 | 454 | 590 |
 | mdn | 5390 | 5542 | 5622 | 80 | 152 | 232 |
-| hacker-news | 19376 | 26350 | 26899 | 549 | 6974 | 7523 |
-| wikipedia | 6422 | 6758 | 6841 | 83 | 336 | 419 |
-| github | 4431 | 4477 | 4559 | 82 | 46 | 128 |
-| gov-uk | 1434 | 1720 | 1742 | 22 | 286 | 308 |
+| hacker-news | 19376 | 27015 | 27564 | 549 | 7639 | 8188 |
+| wikipedia | 6422 | 6802 | 6885 | 83 | 380 | 463 |
+| github | 4431 | 5149 | 5231 | 82 | 718 | 800 |
+| gov-uk | 1434 | 1744 | 1766 | 22 | 310 | 332 |
 | Highlighted code (synthetic Vouchflow case) | 515 | 73 | 73 | 0 | -442 | -442 |
 | 12 repeated checkbox bindings (synthetic Resend case) | 1151 | 575 | 587 | 12 | -576 | -564 |
 | 24 distinct unlabelled checkboxes (reachability control) | 1151 | 1151 | 1175 | 24 | 0 | 24 |
@@ -58,7 +58,7 @@ below 1 in 100 million; a collision is retried before emission. The one-byte inc
 over the baseline's 10-character payload is deliberately retained because refs authorize actions.
 The per-page table attributes 136, 80, 549, 83, 82, and 22 bytes respectively to that
 width change; the remaining growth is serializer output, principally Hacker News's
-6,974-byte difference, rather than the capability length.
+7,639-byte difference, rather than the capability length.
 
 ## Deliberate divergence from canonical browser-use
 
