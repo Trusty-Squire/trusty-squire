@@ -9,6 +9,8 @@
 //   - credential egress seed excludes mid_session task scope
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { constants, publicEncrypt } from "node:crypto";
+import { BrowserClickDispatchError } from "../browser.js";
+import type * as BrowserModule from "../browser.js";
 import type * as GoogleLoginModule from "../google-login.js";
 import type * as ProfileModule from "../profile.js";
 
@@ -246,7 +248,9 @@ const h = vi.hoisted(() => ({
 // protocols independently testable while V2 is the production default.
 let compactV2ModeBeforeTest: string | undefined;
 
-vi.mock("../browser.js", () => ({
+vi.mock("../browser.js", async (importOriginal) => ({
+  BrowserClickDispatchError: (await importOriginal<typeof BrowserModule>())
+    .BrowserClickDispatchError,
   registerLocalBrowserLaunch: (
     _profileDir: string,
     baseEnv: NodeJS.ProcessEnv = process.env,
@@ -574,6 +578,7 @@ vi.mock("../browser.js", () => ({
         method: "click" | "js_click";
       },
       shouldTrack: (labels: readonly string[]) => boolean = () => true,
+      performClick?: () => Promise<void>,
     ): Promise<"not_dispatched" | "dispatched" | "unknown"> {
       const element =
         target.kind === "handle"
@@ -592,8 +597,11 @@ vi.mock("../browser.js", () => ({
       const tracked = shouldTrack(labels);
       const failure = h.trackedClickFailure;
       if (failure?.dispatchStatus !== "not_dispatched") {
-        if (target.kind === "handle") {
-          h.locatorClickCalls += 1;
+        if (performClick !== undefined) {
+          await performClick();
+        } else if (target.kind === "handle") {
+          if (target.method === "click") await this.clickHandle();
+          else await this.jsClickHandle();
         } else if (target.kind === "frame") {
           const destination = `${target.frame!.frameUrl}|${target.selector!}`;
           if (target.method === "click") h.frameClicks.push(destination);
@@ -604,7 +612,7 @@ vi.mock("../browser.js", () => ({
       }
       if (failure !== null) {
         const error = new Error(failure.message);
-        throw tracked ? Object.assign(error, { dispatchStatus: failure.dispatchStatus }) : error;
+        throw tracked ? new BrowserClickDispatchError(failure.dispatchStatus, error) : error;
       }
       return "dispatched";
     }
@@ -874,15 +882,8 @@ vi.mock("../browser.js", () => ({
     inputValue?: string | null;
     textContent?: string | null;
   }) => (signals.ariaLabel || signals.inputValue || signals.textContent || "").trim(),
-  clickDispatchStatusForError: (error: unknown) => {
-    if (error instanceof Error && "dispatchStatus" in error) {
-      const status = error.dispatchStatus;
-      if (status === "not_dispatched" || status === "dispatched" || status === "unknown") {
-        return status;
-      }
-    }
-    return "unknown";
-  },
+  clickDispatchStatusForError: (await importOriginal<typeof BrowserModule>())
+    .clickDispatchStatusForError,
   parseCheckoutAmount: (texts: readonly string[], fallbackCurrency?: string) => {
     for (const text of texts) {
       const match = text.match(
@@ -10234,14 +10235,15 @@ describe("flat operator verbs", () => {
   it("uses guarded DOM fallback only for a pre-dispatch pointer interception", async () => {
     h.elements = [elem({ role: "button", visibleText: "Continue", selector: "#continue" })];
     const { session_id } = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
-    h.clickError = Object.assign(new Error("overlay intercepts pointer events"), {
-      dispatchStatus: "not_dispatched",
-    });
+    h.clickError = new BrowserClickDispatchError(
+      "not_dispatched",
+      new Error("overlay intercepts pointer events"),
+    );
     await operateClickTool.handler({ session_id, ref: "Continue" }, null);
     expect(h.jsClickCalls).toBe(1);
-    h.clickError = Object.assign(
+    h.clickError = new BrowserClickDispatchError(
+      "dispatched",
       new Error("overlay intercepts pointer events; later dispatch failed"),
-      { dispatchStatus: "dispatched" },
     );
     await expect(operateClickTool.handler({ session_id, ref: "Continue" }, null)).rejects.toThrow(
       "later dispatch failed",
@@ -10251,6 +10253,24 @@ describe("flat operator verbs", () => {
     await expect(operateClickTool.handler({ session_id, ref: "Continue" }, null)).rejects.toThrow(
       "dispatch unknown",
     );
+    expect(h.jsClickCalls).toBe(1);
+  });
+
+  it("reaches DOM fallback through compact-v2 after a proven non-dispatch", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    expect(started.format).toBe("compact-v2");
+    h.trackedClickFailure = {
+      dispatchStatus: "not_dispatched",
+      message: "overlay intercepts pointer events",
+    };
+    await expect(
+      operateClickTool.handler({ session_id: started.session_id, ref: "@continue" }, null),
+    ).resolves.toMatchObject({ format: "compact-v2" });
+    expect(h.clickCalls).toBe(0);
     expect(h.jsClickCalls).toBe(1);
   });
 

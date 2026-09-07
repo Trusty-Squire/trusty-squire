@@ -79,11 +79,27 @@ and OAuth mechanics are out of scope. In particular, serializer-owned guidance
 may still mention the legacy union while the concurrent serializer task replaces
 it; this change does not edit `compact-observation-v2.ts` or rewrite its output.
 
+## Click fallback validation follow-up
+
+Ordinary click dispatch tracking wraps the original click operation, retaining
+checkbox/toggle, widget and modal behavior. Compact-v2 carries only a sanitized,
+proven pre-dispatch pointer-interception signal to the internal `operate_click`
+fallback. Other failures retain their existing mapping; payment callers retain
+the existing handle-bound tracking path.
+
+Reachability is tested deterministically through the compact-v2 session and tool
+seam using the production dispatch error class and classifier. A legacy
+real-Chromium overlay case also proves a failed plain click reaches DOM dispatch
+and activates the control exactly once. The optional compact-v2 browser fixture
+was dropped after stale-ref failures before dispatch, as explicitly authorized;
+it did not exercise the intended failure path. No existing flow assertions were
+weakened or skipped to fix tracking regressions.
+
 ## Validation
 
 - MCP typecheck, ESLint for changed TypeScript files, Prettier checks, and `git diff --check` passed.
-- The complete static `test:fast` run passed all 108 files: 84 fast-core files
-  (1,431 tests, 1 existing skip), 15 required behavior files (582 tests,
+- The complete static `test:fast` run passed all 109 files: 84 fast-core files
+  (1,431 tests, 1 existing skip), 16 required behavior files (584 tests,
   3 existing skips), and 9 payment-safety files (469 tests).
   Required behavior/payment files were not filtered or moved to the slow tier.
 - The operator export test checks the literal name set, uniqueness, registration
