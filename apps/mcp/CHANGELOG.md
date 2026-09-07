@@ -1,5 +1,13 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.14-rc.4 (2026-09-07)
+
+- feat(mcp): reduce the operator tool surface to 16 single-purpose verbs,
+  removing the 23-kind `operate_act` union and duplicate tools (#684).
+- feat(bot): replace compact-v2 serialization with the browser-use DOM port,
+  restoring hierarchy and interleaved text, removing the separate page-text
+  field, and adding six canonical fixtures from a pinned browser-use (#685).
+
 ## 1.1.14-rc.3 (2026-09-06)
 
 - fix(mcp): screen credential-shaped accessible names out of the compact-v2 observation map (#678).
