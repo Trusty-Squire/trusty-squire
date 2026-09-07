@@ -2717,6 +2717,13 @@ export class BrowserController {
     this.pageDriver.oauthProviderPageClosed = value;
   }
 
+  private get oauthCompletionPage(): Page | null {
+    return this.pageDriver.oauthCompletionPage;
+  }
+  private set oauthCompletionPage(value: Page | null) {
+    this.pageDriver.oauthCompletionPage = value;
+  }
+
   private get harnessAttachedPage(): boolean {
     return this.pageDriver.harnessAttachedPage;
   }
@@ -3134,6 +3141,11 @@ export class BrowserController {
 
   isActivePage(page: Page): boolean {
     return this.page === page;
+  }
+
+  completedOAuthPage(): Page | null {
+    const page = this.oauthCompletionPage;
+    return page === null || page.isClosed() ? null : page;
   }
 
   /** Attach normal controller behavior to a harness-owned Playwright page. */
@@ -13268,6 +13280,7 @@ export class BrowserController {
     this.oauthProductPage = product;
     this.oauthProviderPage = null;
     this.oauthProviderPageClosed = false;
+    this.oauthCompletionPage = null;
     const oauthBudgetMs = Math.max(1, settleTimeoutMs);
     const productUrl = product.url();
     const oauthDeadline = Date.now() + oauthBudgetMs;
@@ -13290,6 +13303,7 @@ export class BrowserController {
     let providerPage: Page | null = null;
     let actionStarted = false;
     let productNavigated = false;
+    let transientNavigated = false;
     let expectedReturnUrl: string | null = null;
     let pendingOnProvider = false;
     let lastTransientUrl = productUrl;
@@ -13303,17 +13317,25 @@ export class BrowserController {
       productNavigated = true;
       resolveProductNavigation();
     };
-    const completionEvidence = async (): Promise<OAuthCompletionEvidence | null> => {
-      const returnedPage = product;
-      if (
-        !actionStarted ||
-        !productNavigated ||
-        returnedPage.isClosed() ||
-        !this.isOAuthReturnUrl(returnedPage.url(), expectedReturnUrl) ||
-        oauthErrorFromReturnUrl(returnedPage.url()) !== null
-      ) {
-        return null;
+    const completionPage = (): Page | null => {
+      for (const page of [product, providerPage]) {
+        if (
+          page === null ||
+          page.isClosed() ||
+          (page === product ? !productNavigated : !transientNavigated) ||
+          !this.isOAuthReturnUrl(page.url(), expectedReturnUrl) ||
+          oauthErrorFromReturnUrl(page.url()) !== null
+        ) {
+          continue;
+        }
+        return page;
       }
+      return null;
+    };
+    const completionEvidence = async (): Promise<OAuthCompletionEvidence | null> => {
+      if (!actionStarted) return null;
+      const returnedPage = completionPage();
+      if (returnedPage === null) return null;
       const url = returnedPage.url();
       return !returnedPage.isClosed() &&
         returnedPage.url() === url &&
@@ -13382,6 +13404,7 @@ export class BrowserController {
         if (frame === transient.mainFrame()) {
           lastTransientUrl = frame.url();
           expectedReturnUrl ??= oauthRedirectUri(frame.url());
+          if (transient !== product) transientNavigated = true;
         }
       };
       transient.on("framenavigated", onTransientNavigation);
@@ -13392,23 +13415,21 @@ export class BrowserController {
       this.oauthProviderPageClosed = transient.isClosed();
       this.restoreProductPageWhenOAuthPageCloses(transient, durableProduct);
       this.page = transient;
-      let settled: "returned" | null = null;
+      let settled: Page | null = null;
       if (consentProvider === undefined) {
         settled = await this.waitForOAuthLifecycle(
-          product,
           () => expectedReturnUrl,
           remainingBudgetMs(),
-          () => productNavigated,
+          completionPage,
         );
       } else {
         const deadline = oauthDeadline;
         while (settled === null && Date.now() < deadline) {
           const remaining = deadline - Date.now();
           settled = await this.waitForOAuthLifecycle(
-            product,
             () => expectedReturnUrl,
             Math.min(1_000, remaining),
-            () => productNavigated,
+            completionPage,
           );
           if (settled !== null) break;
           if (Date.now() >= deadline) break;
@@ -13438,10 +13459,12 @@ export class BrowserController {
             ".",
         );
       }
-      if (settled === null && (await completionEvidence()) === null) {
+      const completion = settled === null ? await completionEvidence() : { page: settled };
+      if (completion === null) {
         pendingOnProvider = true;
         throw awaitingHumanError();
       }
+      this.oauthCompletionPage = completion.page;
       if (providerPage === null && product.isClosed()) {
         const reloaded = await recovery
           .reload({
@@ -13473,7 +13496,11 @@ export class BrowserController {
         this.oauthProductPage = null;
         this.oauthProviderPage = null;
         this.oauthProviderPageClosed = false;
-        if (providerPage !== null && !providerPage.isClosed()) {
+        if (
+          providerPage !== null &&
+          providerPage !== this.oauthCompletionPage &&
+          !providerPage.isClosed()
+        ) {
           await providerPage.close().catch(() => undefined);
         }
       }
@@ -13510,20 +13537,15 @@ export class BrowserController {
   }
 
   private async waitForOAuthLifecycle(
-    product: Page,
     expectedReturnUrl: () => string | null,
     timeoutMs: number,
-    productNavigated: () => boolean,
-  ): Promise<"returned" | null> {
+    completionPage: () => Page | null,
+  ): Promise<Page | null> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      const returnedPage = product;
-      const url = returnedPage.url();
-      if (
-        productNavigated() &&
-        !returnedPage.isClosed() &&
-        this.isOAuthReturnUrl(url, expectedReturnUrl())
-      ) {
+      const returnedPage = completionPage();
+      if (returnedPage !== null) {
+        const url = returnedPage.url();
         // A return to the relying party is the OAuth completion signal. A
         // dashboard can keep polling or streaming forever, so networkidle is
         // not a valid requirement for a completed OAuth redirect.
@@ -13545,7 +13567,7 @@ export class BrowserController {
         return !returnedPage.isClosed() &&
           returnedPage.url() === returnedUrl &&
           this.isOAuthReturnUrl(returnedPage.url(), expectedReturnUrl())
-          ? "returned"
+          ? returnedPage
           : null;
       }
       await this.sleep(50);

@@ -1277,9 +1277,15 @@ export function resolveTarget(
 }
 
 const compactV2SourcePages = new WeakMap<object, OAuthCompletionEvidence["page"]>();
+const oauthCompletionSourcePages = new WeakMap<object, OAuthCompletionEvidence["page"]>();
 
 function compactV2SourcePage(session: object): OAuthCompletionEvidence["page"] | undefined {
-  return compactV2SourcePages.get(session);
+  const page = compactV2SourcePages.get(session);
+  if (page?.isClosed()) {
+    compactV2SourcePages.delete(session);
+    return undefined;
+  }
+  return page;
 }
 
 function rememberCompactV2SourcePage(
@@ -1288,6 +1294,25 @@ function rememberCompactV2SourcePage(
 ): void {
   if (page === undefined) compactV2SourcePages.delete(session);
   else compactV2SourcePages.set(session, page);
+}
+
+function oauthCompletionSourcePage(
+  session: object,
+): OAuthCompletionEvidence["page"] | undefined {
+  const page = oauthCompletionSourcePages.get(session);
+  if (page?.isClosed()) {
+    oauthCompletionSourcePages.delete(session);
+    return undefined;
+  }
+  return page;
+}
+
+function rememberOAuthCompletionSourcePage(
+  session: object,
+  page: OAuthCompletionEvidence["page"] | undefined,
+): void {
+  if (page === undefined) oauthCompletionSourcePages.delete(session);
+  else oauthCompletionSourcePages.set(session, page);
 }
 
 function invalidateCompactV2Snapshot(
@@ -4435,6 +4460,13 @@ async function observeSession(
   startMetadata?: CompactV2StartMetadata,
   sourcePage?: OAuthCompletionEvidence["page"],
 ): Promise<Observation> {
+  if (sourcePage === undefined) {
+    const completedPage = oauthCompletionSourcePage(session);
+    if (completedPage !== undefined && !session.browser.isActivePage(completedPage)) {
+      sourcePage = completedPage;
+    }
+  }
+  rememberOAuthCompletionSourcePage(session, sourcePage);
   const oauthInProgress = (): Observation => {
     session.prevObserve = null;
     invalidateCompactV2Snapshot(session);
@@ -4922,7 +4954,8 @@ async function executeAct(
   }
   let browser = session.browser;
   const compactV2ActionPage =
-    session.compactV2Active ? compactV2SourcePage(session) : undefined;
+    oauthCompletionSourcePage(session) ??
+    (session.compactV2Active ? compactV2SourcePage(session) : undefined);
   let completedAction: ProvisionAction = action;
   let sensitiveSource: RecordedValueSource | undefined;
   let cartAffecting = false;
@@ -5288,7 +5321,7 @@ async function executeAct(
         const fresh =
           session.compactV2Mode === "on"
             ? (await browser.extractBrowserUseObservation(compactV2ActionPage)).elements
-            : await browser.extractInteractiveElements();
+            : await browser.extractInteractiveElements(compactV2ActionPage);
         retainSessionElements(session, fresh);
         // resolveTarget recomputes identities (incl. volatile positional-group
         // fingerprints) from these FRESH elements, so a ref whose group fingerprint
@@ -5491,6 +5524,7 @@ async function executeAct(
             action.provider,
             oauthDeadline,
           );
+          rememberOAuthCompletionSourcePage(session, browser.completedOAuthPage() ?? undefined);
         }
         if (
           action.kind !== "type" &&
@@ -5545,6 +5579,7 @@ async function executeAct(
           action.provider,
           oauthDeadline,
         );
+        rememberOAuthCompletionSourcePage(session, browser.completedOAuthPage() ?? undefined);
         break;
       }
     }
