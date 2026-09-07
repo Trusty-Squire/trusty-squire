@@ -102,7 +102,7 @@ the `format` label, OAuth, vault behavior and payment approval are unchanged.
 
 Production emits authored `aria-pressed`, `aria-selected` and `data-state` values.
 Actionable generic cards, native buttons, and card links also expose their full screened `state_class` and visible
-child `state_icons` evidence. These facts describe the DOM, not a guessed boolean
+check, selected, or tick child `state_icons` evidence. These facts describe the DOM, not a guessed boolean
 selection state. The class list is intentionally not truncated: a distinguishing
 utility class may occur at its end. Opaque capability refs deliberately outweigh
 the prior counter-based corpus reductions; the table above was rerun after restoring them.

@@ -722,12 +722,12 @@ export function serializeBrowserUseDOM(
       const collect = (child: BrowserUseNode): void => {
         if (!child.visible || child.contentDocument) return;
         if (tag(child) === "svg" || child.attributes.role === "img") {
-          icons.push(
-            child.attributes["aria-label"] ||
-              child.attributes["data-icon"] ||
-              child.attributes.class ||
-              tag(child),
-          );
+          const evidence = [
+            child.attributes["aria-label"],
+            child.attributes["data-icon"],
+            child.attributes.class,
+          ].find((value) => /(?:^|[-_\s])(?:check(?:mark)?|selected|tick)(?:$|[-_\s])/i.test(value ?? ""));
+          if (evidence) icons.push(evidence);
           return;
         }
         if (child.clickListener || ["button", "input", "select", "a"].includes(tag(child))) return;

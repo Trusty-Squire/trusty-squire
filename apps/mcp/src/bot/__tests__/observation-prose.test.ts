@@ -129,6 +129,28 @@ describe("interleaved observation DOM", () => {
       await page.close();
     }
   });
+  it("uses only capped local context for below-fold iframe controls", async () => {
+    const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
+    try {
+      await page.setContent('<iframe id="support" style="width: 400px; height: 100px"></iframe>');
+      const frame = await (await page.locator("#support").elementHandle())!.contentFrame();
+      const local = "Local support preference ".repeat(4);
+      await frame!.setContent(
+        `<section>Whole section context must not be inherited <div style="margin-top: 800px">${local}<button id="below"> </button></div></section>`,
+      );
+      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const findFrame = (node: BrowserUseNode): BrowserUseNode | undefined =>
+        node.nodeName === "IFRAME"
+          ? node
+          : node.children.map(findFrame).find((value) => value !== undefined) ||
+            (node.contentDocument ? findFrame(node.contentDocument) : undefined);
+      const hint = findFrame(capture.root)?.hiddenElements.find((element) => element.tag === "button");
+      expect(hint?.text).toBe(Array.from(local).slice(0, 40).join(""));
+      expect(hint?.text).not.toContain("Whole section context");
+    } finally {
+      await page.close();
+    }
+  });
   it("keeps capture geometry in CSS pixels on a scaled display after scrolling", async () => {
     const context = await browser.newContext({
       viewport: { width: 800, height: 600 },

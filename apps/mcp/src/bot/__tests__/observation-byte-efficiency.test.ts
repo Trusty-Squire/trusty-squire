@@ -266,6 +266,23 @@ describe("observation byte efficiency", () => {
     expect(after).toContain('state_icons=["check-icon"]');
     expect(after).not.toContain("selected=true");
   });
+  it("does not treat decorative icons as selection evidence", () => {
+    const iconCard = (label: string, className: string) =>
+      node("A", {
+        attributes: { href: "#" },
+        children: [
+          text("Product Analytics"),
+          node("SVG", { attributes: { "aria-label": label, class: className } }),
+        ],
+      });
+    for (const card of [iconCard("Brand logo", "logo"), iconCard("Expand", "chevron")]) {
+      const dom = serializeBrowserUseDOM(card).dom;
+      expect(dom).not.toContain("state_icons=");
+      expect(dom).not.toContain("state_class=");
+    }
+    const selected = iconCard("Selected", "check-icon");
+    expect(serializeBrowserUseDOM(selected).dom).toContain('state_icons=["Selected"]');
+  });
   it("never reassigns ids after insertions, removals or navigation", () => {
     const refs = new StableObservationRefs();
     const first = refs.get("doc1", "action:first");
