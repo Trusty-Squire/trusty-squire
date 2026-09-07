@@ -403,6 +403,58 @@ export function screenObservationProseV2(items: readonly string[]): string[] {
 const LABEL_MAX_CHARS = 32;
 
 /**
+ * Split a glued "Title + description" accessible name into its leading title,
+ * detected from the ORIGINAL name — by slug time the boundary is gone. The
+ * 2026-09-06 ipinfo docs dogfood produced labels like
+ * `@database-downloadsdownload-ip-da`: two headings (or a heading and its
+ * description) concatenated by the DOM with no whitespace, slugified into one
+ * unreadable run and hard-cut mid-word. The boundaries that mark that seam in
+ * the original name are:
+ * - a newline inside the accessible name,
+ * - sentence/heading punctuation (`.` `!` `?` `:` `)`) directly abutting the
+ *   next word (`(Search Ctrl+K)Navigation`, `Docs.Start here`) — a period
+ *   followed by a lowercase letter ("Node.js") is NOT a boundary,
+ * - a lowercase→uppercase case transition where two headings were joined
+ *   with no space (`DownloadsDownload`).
+ * Returns the original name when no qualifying boundary is found, so ordinary
+ * multi-word names and short glued pairs keep their full slug.
+ */
+function leadingTitleFromAccessibleName(name: string): string {
+  // A candidate title must read as a heading — multi-word, or a substantial
+  // standalone word — so camelCase identifiers ("myAccountSettings") and
+  // abbreviation fragments ("U.S. Government") keep their full slug, and a
+  // real description must remain behind the seam.
+  const readsAsHeading = (title: string): boolean =>
+    /[A-Za-z0-9]/.test(title) && (title.includes(" ") || title.length >= 5);
+  const hasDescription = (rest: string): boolean => /[A-Za-z0-9].*[A-Za-z0-9]/.test(rest);
+  for (let i = 0; i < name.length - 1; i += 1) {
+    const ch = name[i]!;
+    const next = name[i + 1]!;
+    if (ch === "\n") {
+      if (readsAsHeading(name.slice(0, i)) && hasDescription(name.slice(i + 1))) {
+        return name.slice(0, i);
+      }
+      continue;
+    }
+    if (".!?:)".includes(ch) && /[A-Za-z0-9]/.test(next)) {
+      // A period followed by a lowercase letter is an abbreviation
+      // ("Node.js"), not a heading seam; require an uppercase letter (or a
+      // closing parenthesis, which abuts a seam regardless of case).
+      if ((ch === ")" || /[A-Z]/.test(next)) && hasDescription(name.slice(i + 1))) {
+        const title = name.slice(0, i);
+        if (readsAsHeading(title)) return title;
+      }
+      continue;
+    }
+    if (/[a-z]/.test(ch) && /[A-Z]/.test(next)) {
+      const title = name.slice(0, i + 1);
+      if (readsAsHeading(title) && hasDescription(name.slice(i + 1))) return title;
+    }
+  }
+  return name;
+}
+
+/**
  * The addressable alias for a screened control description. Slugified so the
  * agent can type it back verbatim; `undefined` when the description screened
  * out or carries no alphanumeric content. A description that reads as a
@@ -411,16 +463,33 @@ const LABEL_MAX_CHARS = 32;
  * so no part of the secret, not even its leading characters, reaches the wire.
  * Callers pass the UNTRUNCATED name: screening after the 40-char description
  * cut let a bare token behind a long preamble slip past the run-length floor.
+ *
+ * Legibility (2026-09-06 dogfood): when the name is a heading glued to a
+ * longer description (no whitespace between them in the DOM), the leading
+ * title is kept and the description dropped rather than truncating the glued
+ * pair; remaining over-length slugs are cut on a word boundary (the trailing
+ * partial segment is dropped), never mid-word. `LABEL_MAX_CHARS` is unchanged.
+ * Both steps run AFTER the secret screen, which still sees the full name, so
+ * a bare token behind a long preamble still redacts instead of slipping past
+ * as a tidy title.
  */
 export function controlLabelV2(description: string | undefined): string | undefined {
   if (description === undefined) return undefined;
   if (looksLikeSecretShapedName(description)) return REDACTED_SECRET_LABEL_V2;
-  const slug = description
+  const titled = leadingTitleFromAccessibleName(description);
+  let slug = titled
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, LABEL_MAX_CHARS)
-    .replace(/-+$/g, "");
+    .replace(/^-+|-+$/g, "");
+  if (slug.length > LABEL_MAX_CHARS) {
+    slug = slug.slice(0, LABEL_MAX_CHARS);
+    // Never cut mid-word: drop the trailing partial segment at the last word
+    // boundary. A single unbroken run longer than the budget keeps its
+    // mid-run cut — there is no boundary to cut on.
+    const lastBoundary = slug.lastIndexOf("-");
+    if (lastBoundary > 0) slug = slug.slice(0, lastBoundary);
+  }
+  slug = slug.replace(/-+$/g, "");
   return slug.length === 0 ? undefined : `@${slug}`;
 }
 

@@ -5675,7 +5675,13 @@ function compactV2ActionFailureReason(error: unknown, kind: ProvisionAction["kin
   if (error instanceof CompactV2StaleRefError) return "stale_ref";
   if (error instanceof TargetStaleError) return "reobserve_required";
   if (error instanceof ProvisionTargetNotAllowedError) {
-    return "target_not_allowed";
+    // 2026-09-06 dogfood: a bare `target_not_allowed` gave the agent no host,
+    // no allowlist, and no remedy — a recoverable step died as a dead end.
+    // The thrown error already names the refused host/URL, the allowed hosts,
+    // and the `allow_host` remedy, so keep the stable leading token callers
+    // match on and append that detail. Machine-readable-first: everything
+    // before the first colon is unchanged.
+    return `target_not_allowed: ${error.message}`;
   }
   return kind === "select" ? "selection_failed" : "action_failed";
 }

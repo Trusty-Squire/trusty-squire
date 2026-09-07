@@ -647,6 +647,80 @@ describe("compact observation v2", () => {
     expect(isCompactV2Handle("@e:hhhhhhhhh1")).toBe(true);
   });
 
+  // 2026-09-06 ipinfo docs dogfood: headings glued to their descriptions by
+  // the DOM (no whitespace between them) slugified into one unreadable run
+  // and were hard-cut mid-word at LABEL_MAX_CHARS — the agent got 65 slugs it
+  // could act on but not read. The label keeps the leading title (boundary
+  // detected in the ORIGINAL name, before slugification erases it) and any
+  // remaining cut lands on a word boundary.
+  describe("label legibility for glued heading+description names", () => {
+    it("keeps the leading title of the five real glued docs-page names", () => {
+      const real = new Map<string, string>([
+        // Observed broken labels:
+        //   @database-downloadsdownload-ip-da, @api-referencecomplete-documentat,
+        //   @client-librariesofficial-sdks-fo, @integrationsconnect-ipinfo-with,
+        //   @c-search-ctrl-knavigationg
+        [
+          "Database DownloadsDownload IP-address databases for every use case",
+          "@database-downloads",
+        ],
+        ["API ReferenceComplete documentation for every endpoint and field", "@api-reference"],
+        ["Client LibrariesOfficial SDKs for every major programming language", "@client-libraries"],
+        ["IntegrationsConnect IPinfo with the tools you already use", "@integrations"],
+        ["C (Search Ctrl+K)Navigation Getting started with the docs", "@c-search-ctrl-k"],
+      ]);
+      for (const [name, expected] of real) {
+        expect(controlLabelV2(name), name).toBe(expected);
+      }
+    });
+
+    it("detects the title boundary from a newline in the accessible name", () => {
+      expect(controlLabelV2("API Reference\nComplete documentation for every endpoint")).toBe(
+        "@api-reference",
+      );
+    });
+
+    it("cuts an over-length title on a word boundary, never mid-word", () => {
+      const label = controlLabelV2("International Standard Organization Members List Directory");
+      // The old behavior sliced at 32 chars: "...organizat".
+      expect(label).toBe("@international-standard");
+    });
+
+    it("keeps ordinary names whole: camelCase stubs, abbreviations, short pairs", () => {
+      // The camelCase seam's title "my" is a stub, not a heading — no split
+      // (and the unsplit name slugs as one run).
+      expect(controlLabelV2("myAccount")).toBe("@myaccount");
+      // A period before a lowercase letter is an abbreviation ("Node.js"),
+      // not a heading seam.
+      expect(controlLabelV2("Node.js SDK")).toBe("@node-js-sdk");
+      // No single-letter title is split out of the "U.S." abbreviation.
+      expect(controlLabelV2("U.S. Government cloud documentation")).toBe("@u-s-government-cloud");
+    });
+
+    it("stays secret-screened FIRST: a bare token behind a heading still redacts", () => {
+      // The title-preference change must not let a secret-shaped name slip
+      // through as a tidy title: the screen runs on the UNTRUNCATED name
+      // before any splitting or cutting.
+      expect(
+        controlLabelV2("Database DownloadsDownload API key f9a062f02fadf5 for production"),
+      ).toBe(REDACTED_SECRET_LABEL_V2);
+      expect(
+        controlLabelV2(`IntegrationsConnect curl -H "Authorization: Bearer f9a062f02fadf5"`),
+      ).toBe(REDACTED_SECRET_LABEL_V2);
+    });
+
+    it("composes with duplicate-label ordinals: links differing only in description stay distinguishable", () => {
+      const a = controlLabelV2("Database DownloadsDownload IP geolocation accuracy data");
+      const b = controlLabelV2("Database DownloadsDownload IP-to-ASN enrichment feeds");
+      expect(a).toBe("@database-downloads");
+      expect(b).toBe("@database-downloads");
+      expect(disambiguateDuplicateLabelsV2([a, b])).toEqual([
+        "@database-downloads",
+        "@database-downloads-2",
+      ]);
+    });
+  });
+
   it("disambiguates duplicate labels with a deterministic ordinal so identical rows are distinguishable", () => {
     // The /dashboard/token dogfood returned two distinct copy buttons both
     // labelled "curl example" — a correct pick was a coin flip.

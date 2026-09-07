@@ -4037,6 +4037,25 @@ describe("Compact V2 action-map boundary", () => {
     }
   });
 
+  it("names the refused host and the allow_host remedy in the compact-v2 goto refusal", async () => {
+    // 2026-09-06 dogfood: the bare `target_not_allowed` token left the agent
+    // with no host, no allowlist, and no way to recover. The refusal stays
+    // machine-readable (stable leading token) but now carries the detail.
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/signup",
+    });
+    const refusedHost = "metrics.example.net";
+    const error = await act(started.session_id, {
+      kind: "goto",
+      url: `https://${refusedHost}/stats`,
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/^target_not_allowed: /);
+    expect((error as Error).message).toContain(refusedHost);
+    expect((error as Error).message).toContain("allow_host");
+  });
+
   it("keeps start metadata, rejects locators, and binds a handle to its current page snapshot", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.workerEmail = "operator@example.test";
@@ -5025,8 +5044,10 @@ describe("Compact V2 action-map boundary", () => {
     expect(started.text).toContain("Prose item one.");
     expect(started.text).toContain("Prose item three:");
     // A row change forces a fresh paged map whose rows consume the wire
-    // budget; the text channel degrades on that resync page.
-    h.elements = Array.from({ length: 40 }, (_, i) =>
+    // budget; the text channel degrades on that resync page. (48 rows: the
+    // 2026-09-06 word-boundary label cut shortened each slug by a few bytes,
+    // so 40 rows no longer overflow the text budget.)
+    h.elements = Array.from({ length: 48 }, (_, i) =>
       elem({
         tag: "button",
         role: "button",
@@ -5434,7 +5455,10 @@ describe("Compact V2 action-map boundary", () => {
     expect(result.fields).toEqual([
       expect.objectContaining({
         status: "failed",
-        reason: "target_not_allowed",
+        // The refusal keeps its stable leading token but now names the host
+        // and the allow_host remedy (2026-09-06 dogfood: the bare token was a
+        // dead end).
+        reason: expect.stringMatching(/^target_not_allowed: /),
       }),
       expect.objectContaining({ status: "selected" }),
     ]);
