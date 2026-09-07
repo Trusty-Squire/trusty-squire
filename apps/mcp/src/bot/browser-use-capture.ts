@@ -68,14 +68,14 @@ export async function captureBrowserUseDOM(
 ): Promise<BrowserUseCapture> {
   const nodeElements = new Map<string, InteractiveElement>();
   const opaqueFrames = new Map<Frame, boolean>();
-const viewMetadata = new Map<
-  string,
-  {
-    layout: Layout | undefined;
-    name: string;
-    frame?: Frame;
-  }
->();
+  const viewMetadata = new Map<
+    string,
+    {
+      layout: Layout | undefined;
+      name: string;
+      frame?: Frame;
+    }
+  >();
   let moreAbove = false,
     moreBelow = false;
   const classifyFrame = async (frame: Frame): Promise<void> => {
@@ -396,13 +396,13 @@ const viewMetadata = new Map<
         children: [],
         contentDocument: null,
       };
-    viewMetadata.set(id, {
-      layout: l,
-      name: String(axNode?.name?.value ?? ""),
-      ...(raw.frameId && frameById.has(raw.frameId)
-        ? { frame: frameById.get(raw.frameId)! }
-        : {}),
-    });
+      viewMetadata.set(id, {
+        layout: l,
+        name: String(axNode?.name?.value ?? ""),
+        ...(raw.frameId && frameById.has(raw.frameId)
+          ? { frame: frameById.get(raw.frameId)! }
+          : {}),
+      });
       rawById.set(id, raw);
       nodeFrame.set(id, frame);
       selectorsById.set(id, selector);

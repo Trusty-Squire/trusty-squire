@@ -68,9 +68,9 @@ evidence, and the explicit unchanged-DOM signal, are owned by
 [the serializer-port contract](browser-use-serializer-port.md). The table above
 measures production output.
 
-The screen is unchanged. `usernametaken29` remains a documented lowercase-plus-
-digits false positive, covered by the HN-based regression. Tool descriptions,
-the `format` label, OAuth, vault behavior and payment approval are unchanged.
+Visible fixture text, including `usernametaken29`, is serialized verbatim in the
+HN-based regression. Tool descriptions, the `format` label, OAuth, vault
+behavior and payment approval are unchanged.
 
 ## Evidence ledger
 

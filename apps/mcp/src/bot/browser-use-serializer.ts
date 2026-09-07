@@ -664,8 +664,9 @@ export function serializeBrowserUseDOM(
       return null;
     }
     if (n.nodeType === 3)
-      return n.snapshot && (n.visible || (preserveActionText && /^\s*$/.test(n.value))) &&
-          (preserveActionText || n.value.trim().length > 1)
+      return n.snapshot &&
+        (n.visible || (preserveActionText && /^\s*$/.test(n.value))) &&
+        (preserveActionText || n.value.trim().length > 1)
         ? {
             original: n,
             children: [],
@@ -701,17 +702,14 @@ export function serializeBrowserUseDOM(
       )
       .filter((c): c is Simplified => c !== null);
     const actionContent = (s: Simplified): Simplified | null => {
-      if (codeAction(s.original))
-        return s;
+      if (codeAction(s.original)) return s;
       const actionChildren = s.children
         .map(actionContent)
         .filter((child): child is Simplified => child !== null);
       return actionChildren.length ? { ...s, children: actionChildren } : null;
     };
     if (code?.actionable)
-      children = children
-        .map(actionContent)
-        .filter((child): child is Simplified => child !== null);
+      children = children.map(actionContent).filter((child): child is Simplified => child !== null);
     const shadowHost = n.children.some((c) => c.nodeType === 11);
     if (
       !(
@@ -957,8 +955,8 @@ export function serializeBrowserUseDOM(
         efficient &&
         n.interactive &&
         contexts.get(n) &&
-        !["aria-label", "title", "placeholder", "ax_name"].some((key) =>
-          (o.attributes[key] ?? "").length > 0,
+        !["aria-label", "title", "placeholder", "ax_name"].some(
+          (key) => (o.attributes[key] ?? "").length > 0,
         ) &&
         browserUseBoundedRawText(o, 1) === ""
       )

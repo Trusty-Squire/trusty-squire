@@ -295,8 +295,8 @@ describe("observation byte efficiency", () => {
     const generic = node("BUTTON", { children: [text(" ")] });
     const genericLine = serializeBrowserUseDOM(
       node("DIV", { children: [text("Plan settings"), generic] }),
-    ).dom
-      .split("\n")
+    )
+      .dom.split("\n")
       .find((value) => value.includes(`[${generic.id}]<button`));
     expect(genericLine).not.toContain("context=");
     const unlabeled = node("BUTTON");
