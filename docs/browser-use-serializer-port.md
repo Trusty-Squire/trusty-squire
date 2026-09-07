@@ -27,10 +27,25 @@ action remains reachable. A below-fold control can be found through
 `operate_observe_query`, then scrolled into view or targeted by its returned ref.
 Changing the viewport does not retire a control's document identity.
 
+An unbindable node never blanks the observation. Bindable controls retain their
+action refs; other interactive nodes retain a document-scoped display ref and
+`not-targetable=true` in the tree. These fallback refs are excluded from the
+action/query map, so targeting one cannot dispatch an action. Closed shadow
+roots are visible through CDP but not addressable by the current Playwright
+selectors; their controls follow this path. This explicit marker is the
+captain-authorized exception for unbindable nodes, not a change to canonical
+rendering of bindable nodes. The shadow fixture and session regression cover
+complete surrounding text, working sibling controls and stable fallback refs.
+
 The existing secret-shaped substring redactor screens human-readable naming
 attributes, image names, compound-control descriptions and visible text before
 rendering. Machine identifiers, source URLs and field values retain canonical
 attribute semantics. It does not rewrite structural ref markers or collapse whitespace.
+For truncated names, screening examines the full original name and tracks the
+original positions of replaced spans. The canonical 100-code-point cutoff and
+ellipsis stay fixed even if a redaction shortens the prefix or spans that cutoff;
+no extra trailing words or partial secret fragments can become visible. The
+detector expressions, order and entropy rules remain unchanged.
 Screenshots, extracts, vault behavior, payments and OAuth are outside this change.
 A failed DOM capture raises a concrete error; it cannot masquerade as an empty
 but successful observation.

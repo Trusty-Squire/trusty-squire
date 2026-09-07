@@ -1,0 +1,17 @@
+<!doctype html>
+<html><body>
+<p>Complete page before web components</p>
+<button id="outside">Outside action</button>
+<div id="open-host"></div>
+<div id="closed-host"></div>
+<p>Complete page after web components</p>
+<script>
+  window.clicked = [];
+  document.querySelector('#outside').onclick = () => window.clicked.push('outside');
+  for (const mode of ['open', 'closed']) {
+    const root = document.querySelector(`#${mode}-host`).attachShadow({mode});
+    root.innerHTML = `<button id="${mode}">${mode} shadow action</button>`;
+    root.querySelector('button').onclick = () => window.clicked.push(mode);
+  }
+</script>
+</body></html>

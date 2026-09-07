@@ -1,4 +1,4 @@
-import { redactObservationProseV2 } from "../compact-observation-v2.js";
+import { redactObservationProseV2, screenBrowserUseValueV2 } from "../compact-observation-v2.js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -41,7 +41,7 @@ describe("canonical browser-use 0.13.10 fixture oracle", () => {
       };
       const ref = (node: BrowserUseNode): string => `@e:${node.id}`;
       const before = serializeBrowserUseDOM(root, { ref });
-      const after = serializeBrowserUseDOM(root, { ref, screen: redactObservationProseV2 });
+      const after = serializeBrowserUseDOM(root, { ref, screen: screenBrowserUseValueV2 });
       expect(after.refs).toEqual(before.refs);
       const originalLines = before.dom.split("\n");
       const screenedLines = after.dom.split("\n");
@@ -69,7 +69,7 @@ describe("canonical browser-use 0.13.10 fixture oracle", () => {
       root: BrowserUseNode;
     };
     const before = serializeBrowserUseDOM(root).dom;
-    const after = serializeBrowserUseDOM(root, { screen: redactObservationProseV2 }).dom;
+    const after = serializeBrowserUseDOM(root, { screen: screenBrowserUseValueV2 }).dom;
     expect(before).toContain("usernametaken29");
     expect(redactObservationProseV2("usernametaken29")).toBe("[redacted]");
     expect(after).not.toContain("usernametaken29");
@@ -78,6 +78,44 @@ describe("canonical browser-use 0.13.10 fixture oracle", () => {
       before.split("\n")[line]!.replaceAll("usernametaken29", "[redacted]"),
     );
   });
+  it.each(["title", "aria-label", "image_alt"])(
+    "preserves canonical truncation around redacted spans in %s",
+    (attribute) => {
+      const { root } = JSON.parse(readFileSync(`${fixtures}hacker-news.json`, "utf8")) as {
+        root: BrowserUseNode;
+      };
+      const find = (node: BrowserUseNode, name: string): BrowserUseNode | undefined =>
+        node.nodeName === name
+          ? node
+          : node.children.map((child) => find(child, name)).find(Boolean);
+      const anchor = find(root, "A")!;
+      const source = attribute === "image_alt" ? find(anchor, "IMG")! : anchor;
+      const key = attribute === "image_alt" ? "alt" : attribute;
+      const token = "f9a062f02fadf5";
+      for (const prefix of ["", "😀 ".repeat(30), "words ".repeat(15), "words ".repeat(17)]) {
+        const value = prefix + token + " ordinary words".repeat(12);
+        source.attributes[key] = value;
+        const before = serializeBrowserUseDOM(anchor, { ref: (node) => `@e:${node.id}` });
+        const after = serializeBrowserUseDOM(anchor, {
+          ref: (node) => `@e:${node.id}`,
+          screen: screenBrowserUseValueV2,
+        });
+        const visible = Array.from(value).slice(0, 100).join("");
+        // Expected text is derived from the ORIGINAL cutoff, not from the screen.
+        // Even a tiny visible prefix of a full secret becomes a complete marker.
+        const start = prefix.length;
+        const expected =
+          visible.length > start
+            ? visible.slice(0, start) + "[redacted]" + visible.slice(start + token.length)
+            : visible;
+        expect(after.dom).toBe(
+          before.dom.replace(`${attribute}=${visible}...`, `${attribute}=${expected}...`),
+        );
+        expect(after.refs).toEqual(before.refs);
+        expect(after.dom.split("\n")).toHaveLength(before.dom.split("\n").length);
+      }
+    },
+  );
   it("keeps the 99% containment boundary exact", () => {
     const parent = { x: 0, y: 0, width: 100, height: 100 };
     expect(browserUseContained({ x: 1, y: 0, width: 100, height: 100 }, parent)).toBe(true);

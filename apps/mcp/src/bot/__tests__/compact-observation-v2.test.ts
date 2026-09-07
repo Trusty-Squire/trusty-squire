@@ -1,3 +1,4 @@
+import { screenBrowserUseValueV2 } from "../compact-observation-v2.js";
 import { Buffer } from "node:buffer";
 import { describe, expect, it } from "vitest";
 import {
@@ -1219,6 +1220,20 @@ describe("compact-v2 query pages and shared substring screen", () => {
     expect(["See SKU-12345 and task-management-101."].map(redactObservationProseV2)).toEqual([
       "See SKU-12345 and task-management-101.",
     ]);
+  });
+
+  it("retains original cutoff positions across multiple redactions without leaking partial tokens", () => {
+    const token = "f9a062f02fadf5";
+    const first = `Already [redacted] ${token} `;
+    const bearer = "Bearer\tAb1234567890cD1234567890";
+    const value = first + bearer + " trailing ordinary words";
+    expect(screenBrowserUseValueV2(value)).toBe(redactObservationProseV2(value));
+    expect(screenBrowserUseValueV2(value, first.length + 3)).toBe(
+      "Already [redacted] [redacted] [redacted]",
+    );
+    expect(screenBrowserUseValueV2(value, first.length)).toBe("Already [redacted] [redacted] ");
+    expect(screenBrowserUseValueV2(value, 0)).toBe("");
+    expect(screenBrowserUseValueV2(value, value.length)).toBe(redactObservationProseV2(value));
   });
 
   it("preserves whitespace and repeated text for the canonical renderer", () => {

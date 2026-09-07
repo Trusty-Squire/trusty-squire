@@ -1,3 +1,4 @@
+import type { BrowserUseCapture } from "../browser-use-capture.js";
 import type { InteractiveElement } from "../browser.js";
 import { mockBrowserUseCapture } from "./browser-use-test-capture.js";
 // Functional tests for the operator-surface session state machine — the
@@ -134,6 +135,7 @@ const h = vi.hoisted(() => ({
   proseExtractCalls: 0,
   // When non-null, canonical DOM capture throws this concrete error.
   proseError: null as string | null,
+  captureOverride: null as BrowserUseCapture | null,
   openFirstMailResult: false,
   // fill_card cart-total-carry-forward (Session.lastCartCheckout): null means
   // "no total on this page" (readCheckoutSummary rejects, the common case).
@@ -342,6 +344,7 @@ vi.mock("../browser.js", async (importOriginal) => ({
       return h.visibleText;
     }
     async extractBrowserUseObservation() {
+      if (h.captureOverride) return h.captureOverride;
       const elements = await this.extractInteractiveElements();
       if (h.proseError !== null) throw new Error(h.proseError);
       const text = h.proseQueue.length > 0 ? (h.proseQueue.shift() ?? h.prose) : h.prose;
@@ -1216,6 +1219,7 @@ beforeEach(() => {
   h.proseQueue = [];
   h.proseExtractCalls = 0;
   h.proseError = null;
+  h.captureOverride = null;
   h.openFirstMailResult = false;
   h.checkoutSummary = null;
   h.cartLineItems = [];
@@ -4981,6 +4985,59 @@ describe("Compact V2 action-map boundary", () => {
     expect(changed.dom).toContain("Second action");
     await act(started.session_id, { kind: "click", target: second! }, "none");
     expect(h.clickCalls).toBe(1);
+  });
+
+  it("degrades only an unbound shadow control, preserving stable refs and every actionable control", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    const elements = [
+      elem({ index: 0, tag: "button", visibleText: "Outside action", selector: "#outside" }),
+      elem({ index: 1, tag: "button", visibleText: "Unbound shadow action", selector: "#shadow" }),
+      elem({ index: 2, tag: "button", visibleText: "Other action", selector: "#other" }),
+    ] as InteractiveElement[];
+    const capture = mockBrowserUseCapture(elements, ["Complete surrounding page"]);
+    const shadowControl = capture.root.children.splice(2, 1)[0]!;
+    shadowControl.snapshot = false;
+    shadowControl.bounds = null;
+    capture.root.children.splice(2, 0, {
+      ...shadowControl,
+      id: "shadow-root",
+      nodeType: 11,
+      nodeName: "#document-fragment",
+      shadowType: "open",
+      children: [shadowControl],
+    });
+    capture.nodeElements.delete(shadowControl.id);
+    capture.elements = elements.filter((element) => element.index !== 1);
+    h.elements = capture.elements;
+    h.captureOverride = capture;
+    const started = await startHarnessProvisionSession({
+      browser: new BrowserController(),
+      observationFormat: "compact-v2",
+      serviceUrl: "https://app.example.com/dashboard",
+    });
+    expect(started.dom).toContain("Complete surrounding page");
+    expect(started.dom).toContain("Unbound shadow action");
+    const line = started.dom!.split("\n").find((value) => value.includes("not-targetable=true"))!;
+    const fallback = line.match(/\[(@e:[^\]]+)\]</)![1]!;
+    const actionable = domRefs(started).filter((ref) => ref !== fallback);
+    expect(actionable).toHaveLength(2);
+    await expect(
+      act(started.session_id, { kind: "click", target: fallback }, "none"),
+    ).rejects.toThrow("stale_ref");
+    expect(h.clickCalls).toBe(0);
+    for (const ref of actionable)
+      await act(started.session_id, { kind: "click", target: ref }, "none");
+    expect(h.clickCalls).toBe(2);
+    expect((await observe(started.session_id)).dom).toBeUndefined();
+    capture.root.children[0]!.value = "Updated surrounding page";
+    const updated = await observe(started.session_id);
+    expect(domRefs(updated)).toEqual(domRefs(started));
+    expect(updated.dom).toContain("not-targetable=true");
+    expect(updated.dom).toContain("Updated surrounding page");
+    capture.root.children.splice(2, 1);
+    const removed = await observe(started.session_id);
+    expect(removed.removed).toEqual([fallback]);
+    expect(domRefs(removed)).toEqual(actionable);
   });
 
   it("surfaces a failed DOM capture instead of silently emitting an empty observation", async () => {

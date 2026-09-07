@@ -61,7 +61,7 @@ import {
   safeDescriptionV2,
   safeOriginV2,
   safePageSemanticsV2,
-  redactObservationProseV2,
+  screenBrowserUseValueV2,
   sealRetainedInteractiveElementsV2,
   safeStageV2,
   type SafeControlV2,
@@ -4148,12 +4148,19 @@ function compactV2Observation(
   const safe = compactV2LiveControls(session, elements);
   const handles = compactV2Handles(session, elements);
   const rendered = serializeBrowserUseDOM(capture.root, {
-    screen: redactObservationProseV2,
+    screen: screenBrowserUseValueV2,
     ref: (node) => {
       const element = capture.nodeElements.get(node.id);
       const ref = element === undefined ? undefined : handles.get(element);
-      if (ref === undefined) throw new Error(`observation_node_unbound: ${node.id}`);
-      return ref;
+      if (ref !== undefined) return ref;
+      // Display-only identity: never add this ref to the action/query map.
+      // Domain separation and the document epoch keep it stable and prevent it
+      // from aliasing a real control, even if a DOM backend id is later reused.
+      const digest = createHmac("sha256", session.compactV2Secret)
+        .update(`unbound\u001f${epochDoc}\u001f${node.id}`)
+        .digest("base64url")
+        .slice(0, COMPACT_V2_HANDLE_LENGTH);
+      return { ref: `@e:${digest}`, targetable: false };
     },
     ...(sameDocument ? { previous: new Set(previous.renderedRefs ?? []) } : {}),
   });

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 // The former separate-prose-channel tests now exercise its replacement through
@@ -6,7 +7,7 @@ import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { captureBrowserUseDOM } from "../browser-use-capture.js";
 import { serializeBrowserUseDOM } from "../browser-use-serializer.js";
-import { redactObservationProseV2 } from "../compact-observation-v2.js";
+import { screenBrowserUseValueV2 } from "../compact-observation-v2.js";
 let browser: Browser;
 beforeAll(async () => {
   browser = await chromium.launch({ headless: true });
@@ -83,6 +84,39 @@ describe("interleaved observation DOM", () => {
       );
     }
   });
+  it("keeps an unbindable closed-shadow control visible without disabling the rest of the fixture", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(
+        readFileSync(new URL("./fixtures/shadow-unbound.html", import.meta.url), "utf8"),
+      );
+      const capture = await captureBrowserUseDOM(page, [], () => null);
+      const output = serializeBrowserUseDOM(capture.root, {
+        ref: (node) => {
+          const element = capture.nodeElements.get(node.id);
+          return element
+            ? `@e:${element.index}`
+            : { ref: `@e:unbound_${node.id}`, targetable: false };
+        },
+      });
+      expect(output.dom).toContain("Complete page before web components");
+      expect(output.dom).toContain("Complete page after web components");
+      expect(output.dom).toContain("closed shadow action");
+      expect(output.refs).toHaveLength(3);
+      expect(output.dom).toMatch(/\[@e:unbound_[^\]]+\]<button[^\n]*not-targetable=true/);
+      expect(capture.elements.some((element) => element.id === "closed")).toBe(false);
+      const actionable = capture.elements.filter((element) =>
+        ["outside", "open"].includes(element.id ?? ""),
+      );
+      expect(actionable).toHaveLength(2);
+      for (const element of actionable) await page.locator(element.selector).click();
+      expect(
+        await page.evaluate(() => (window as unknown as { clicked: string[] }).clicked),
+      ).toEqual(["outside", "open"]);
+    } finally {
+      await page.close();
+    }
+  });
   it("preserves contained input, onclick, aria-label and text; screens every rendered line", async () => {
     const page = await browser.newPage();
     try {
@@ -95,7 +129,7 @@ describe("interleaved observation DOM", () => {
       const original = serializeBrowserUseDOM(capture.root, { ref });
       const screened = serializeBrowserUseDOM(capture.root, {
         ref,
-        screen: redactObservationProseV2,
+        screen: screenBrowserUseValueV2,
       });
       const dom = screened.dom;
       // The synthetic token occurs in both a naming attribute and a text node.

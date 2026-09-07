@@ -336,23 +336,62 @@ const OBSERVATION_PROSE_REDACTION_MARKER = "[redacted]";
  * anything the boolean predicate would have caught is rewritten here.
  */
 export function redactObservationProseV2(item: string): string {
+  return redactObservationValueV2(item);
+}
+
+/** Screen the FULL name, retaining only its original canonical prefix. */
+export function screenBrowserUseValueV2(item: string, visibleCodePoints?: number): string {
+  return redactObservationValueV2(item, visibleCodePoints);
+}
+
+function redactObservationValueV2(item: string, visibleCodePoints?: number): string {
   let redacted = item;
+  const boundary =
+    visibleCodePoints === undefined
+      ? item.length
+      : Array.from(item).slice(0, visibleCodePoints).join("").length;
+  // Track original UTF-16 offsets only for truncated names. Every replacement
+  // character inherits the matched span's start, so a token crossing the cutoff
+  // becomes one complete marker, while text after the cutoff stays absent.
+  let origins =
+    boundary < item.length ? Array.from({ length: item.length }, (_, i) => i) : undefined;
+  const replace = (pattern: RegExp, replacement: (match: string) => string): void => {
+    const prior = origins;
+    const next: number[] = [];
+    let consumed = 0;
+    redacted = redacted.replace(pattern, (match: string, offset: number) => {
+      const value = replacement(match);
+      if (prior) {
+        for (let i = consumed; i < offset; i++) next.push(prior[i]!);
+        for (let i = 0; i < value.length; i++)
+          next.push(value === match ? prior[offset + i]! : prior[offset]!);
+        consumed = offset + match.length;
+      }
+      return value;
+    });
+    if (prior) {
+      for (let i = consumed; i < prior.length; i++) next.push(prior[i]!);
+      origins = next;
+    }
+  };
+  // The detector expressions, order and predicates are unchanged.
   for (const shape of SECRET_NAME_SHAPE_RES) {
-    redacted = redacted.replace(new RegExp(shape.source, "g"), OBSERVATION_PROSE_REDACTION_MARKER);
+    replace(new RegExp(shape.source, "g"), () => OBSERVATION_PROSE_REDACTION_MARKER);
   }
-  redacted = redacted.replace(
-    new RegExp(SECRET_NAME_JWT_RE.source, "g"),
-    OBSERVATION_PROSE_REDACTION_MARKER,
-  );
-  redacted = redacted.replace(SECRET_NAME_GROUP_RUN_RE, (group) => {
+  replace(new RegExp(SECRET_NAME_JWT_RE.source, "g"), () => OBSERVATION_PROSE_REDACTION_MARKER);
+  replace(SECRET_NAME_GROUP_RUN_RE, (group) => {
     const candidate = secretShapedGroupCandidate(group);
     return candidate !== undefined && isSecretShapedRun(candidate)
       ? OBSERVATION_PROSE_REDACTION_MARKER
       : group;
   });
-  redacted = redacted.replace(/[A-Za-z0-9]+/g, (run) =>
+  replace(/[A-Za-z0-9]+/g, (run) =>
     isSecretShapedRun(run) ? OBSERVATION_PROSE_REDACTION_MARKER : run,
   );
+  if (origins) {
+    const end = origins.findIndex((offset) => offset >= boundary);
+    return end === -1 ? redacted : redacted.slice(0, end);
+  }
   return redacted;
 }
 

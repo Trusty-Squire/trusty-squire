@@ -140,6 +140,9 @@ const interactiveRoles = new Set([
 ]);
 const cap = (s: string, n = 100): string =>
   Array.from(s).length <= n ? s : Array.from(s).slice(0, n).join("") + "...";
+type ScreenValue = (value: string, visibleCodePoints?: number) => string;
+const screenCapped = (value: string, screen: ScreenValue): string =>
+  screen(value, 100) + (Array.from(value).length > 100 ? "..." : "");
 const pyString = (v: unknown): string =>
   v === null ? "None" : typeof v === "boolean" ? (v ? "True" : "False") : String(v);
 
@@ -268,7 +271,7 @@ function exclude(n: BrowserUseNode, bounds: DOMBounds): boolean {
     !["button", "link", "checkbox", "radio", "tab", "menuitem", "option"].includes(a.role ?? "")
   );
 }
-function attributes(n: BrowserUseNode, screen: (value: string) => string): string {
+function attributes(n: BrowserUseNode, screen: ScreenValue): string {
   const a: Record<string, string> = {};
   for (const [k, v] of Object.entries(n.attributes))
     if (ATTRIBUTES.has(k) && v.trim()) a[k] = v.trim();
@@ -348,7 +351,7 @@ function attributes(n: BrowserUseNode, screen: (value: string) => string): strin
         "aria-placeholder",
         "ax_name",
       ].includes(k);
-      return `${k}=${cap(named ? screen(v) : v) || "''"}`;
+      return `${k}=${(named ? screenCapped(v, screen) : cap(v)) || "''"}`;
     })
     .join(" ");
 }
@@ -455,7 +458,7 @@ function compounds(n: BrowserUseNode): string {
     ...(t === "video" ? [c("Fullscreen", "button")] : []),
   ].join(",");
 }
-function imageContext(n: Simplified, screen: (value: string) => string): string {
+function imageContext(n: Simplified, screen: ScreenValue): string {
   const result: string[] = [];
   let visited = 0;
   const walk = (s: Simplified, root = false): void => {
@@ -470,7 +473,7 @@ function imageContext(n: Simplified, screen: (value: string) => string): string 
         ["aria-label", "image_label"],
       ] as const)
         if ((a[key] ?? "").length <= 4096 && a[key]?.trim())
-          parts.push(`${name}=${cap(screen(a[key]!.trim()))}`);
+          parts.push(`${name}=${screenCapped(a[key]!.trim(), screen)}`);
       let src = a.src ?? "";
       if (src.length <= 4096) {
         src = src.replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, "").replace(/[\t\n\r]/g, "");
@@ -494,12 +497,17 @@ function imageContext(n: Simplified, screen: (value: string) => string): string 
 export function serializeBrowserUseDOM(
   root: BrowserUseNode,
   options: {
-    ref?: (node: BrowserUseNode) => string;
+    ref?: (node: BrowserUseNode) => string | { ref: string; targetable: boolean };
     previous?: ReadonlySet<string>;
-    screen?: (value: string) => string;
+    // Receives the full source; an optional limit selects ORIGINAL code points.
+    // Return screened prefix text without an ellipsis (the renderer owns it).
+    screen?: ScreenValue;
   } = {},
 ): { dom: string; refs: string[] } {
-  const screen = options.screen ?? ((value: string) => value);
+  const screen: ScreenValue =
+    options.screen ??
+    ((value, limit) => (limit === undefined ? value : Array.from(value).slice(0, limit).join("")));
+  const targets = new Map<Simplified, { ref: string; targetable: boolean }>();
   const simplify = (n: BrowserUseNode): Simplified | null => {
     if (n.nodeType === 9) {
       for (const c of n.children) {
@@ -591,7 +599,10 @@ export function serializeBrowserUseDOM(
               ["input", "button", "select", "textarea", "a"].includes(t)));
     }
     if (n.interactive) {
-      const ref = options.ref?.(o) ?? o.id;
+      const resolved = options.ref?.(o) ?? o.id;
+      const target = typeof resolved === "string" ? { ref: resolved, targetable: true } : resolved;
+      targets.set(n, target);
+      const ref = target.ref;
       refs.push(ref);
       n.isNew = !!n.compound || (!!options.previous?.size && !options.previous.has(ref));
     }
@@ -613,10 +624,12 @@ export function serializeBrowserUseDOM(
       ? `|SHADOW(${n.children.some((c) => c.original.shadowType?.toLowerCase() === "closed") ? "closed" : "open"})|`
       : "";
     const marker = n.interactive
-      ? `${n.isNew ? "*" : ""}${o.showScroll && t !== "svg" ? "|scroll element[" : "["}${options.ref?.(o) ?? o.id}]`
+      ? `${n.isNew ? "*" : ""}${o.showScroll && t !== "svg" ? "|scroll element[" : "["}${targets.get(n)!.ref}]`
       : "";
     if (o.nodeType === 1) {
       let attrs = attributes(o, screen);
+      if (n.interactive && targets.get(n)?.targetable === false)
+        attrs += (attrs ? " " : "") + "not-targetable=true";
       if (t === "svg")
         return `${indent}${shadow}${marker}<svg${attrs ? " " + attrs : ""} /> <!-- SVG content collapsed -->`;
       if (n.interactive || o.scrollable || t === "iframe" || t === "frame") {

@@ -349,11 +349,18 @@ export async function captureBrowserUseDOM(
       return n;
     };
     const root = build(dom.root, [], null, "", owningFrame);
-    const visit = (n: BrowserUseNode): void => {
+    const visit = (n: BrowserUseNode, inClosedShadow = false): void => {
       const raw = rawById.get(n.id)!,
         frame = nodeFrame.get(n.id)!;
       let el = bindings.get(raw.backendNodeId);
-      if (!el && n.nodeType === 1 && (browserUseInteractive(n) || n.scrollable)) {
+      // Playwright selectors cannot enter closed shadow roots. Preserve their
+      // nodes for display, but do not manufacture an unusable action binding.
+      if (
+        !el &&
+        !inClosedShadow &&
+        n.nodeType === 1 &&
+        (browserUseInteractive(n) || n.scrollable)
+      ) {
         const l = layouts.get(raw.backendNodeId),
           cssVisible =
             !!l?.bounds &&
@@ -399,7 +406,8 @@ export async function captureBrowserUseDOM(
         }
       }
       if (el) nodeElements.set(n.id, el);
-      n.children.forEach(visit);
+      const closed = inClosedShadow || n.shadowType?.toLowerCase() === "closed";
+      n.children.forEach((child) => visit(child, closed));
       if (n.contentDocument) visit(n.contentDocument);
     };
     visit(root);
