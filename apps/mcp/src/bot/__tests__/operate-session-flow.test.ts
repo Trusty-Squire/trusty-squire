@@ -4219,9 +4219,8 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkouts/c/token",
     });
-    const pageCursor = (
-      (await observeQuery(started.session_id, "")).overflow as { next_cursor: string }
-    ).next_cursor;
+    const firstPage = await observeQuery(started.session_id, "");
+    const pageCursor = (firstPage.overflow as { next_cursor: string }).next_cursor;
     // Live checkouts (e.g. Shopify) rotate a query token on every step
     // re-render without a real navigation; paging must survive it.
     h.currentUrl = "https://shop.example.com/checkouts/c/token?_r=revalidated";
@@ -4229,7 +4228,11 @@ describe("Compact V2 action-map boundary", () => {
     expect((nextPage.safe_table as unknown[]).length).toBeGreaterThan(0);
     const finalCursor = (nextPage.overflow as { next_cursor: string }).next_cursor;
     const finalPage = await observeQuery(started.session_id, "", undefined, finalCursor);
-    expect((finalPage.safe_table as unknown[]).length).toBe(28);
+    const rows = [firstPage, nextPage, finalPage].flatMap(
+      (page) => page.safe_table as Array<[string, ...unknown[]]>,
+    );
+    expect(rows).toHaveLength(250);
+    expect(new Set(rows.map(([ref]) => ref)).size).toBe(250);
     expect(finalPage.overflow).toBeUndefined();
   });
 
@@ -5087,7 +5090,7 @@ describe("Compact V2 action-map boundary", () => {
     ];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "compact-v2",
+      observationFormat: "browser-use-dom",
       serviceUrl: "https://app.example.com/dashboard",
     });
     const original = domRefs(started)[0]!;
@@ -5112,7 +5115,7 @@ describe("Compact V2 action-map boundary", () => {
     h.prose = ["Waiting for the protection check"];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
-      observationFormat: "compact-v2",
+      observationFormat: "browser-use-dom",
       serviceUrl: "https://app.example.com/protect",
     });
     expect(started.dom).toContain("Waiting for the protection check");

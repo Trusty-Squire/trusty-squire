@@ -475,9 +475,10 @@ describe("compact observation v2", () => {
   });
 
   it("accepts only well-formed handles that are current snapshot members", () => {
-    const current = new Map([["@e:hhhhhhhhh1", "@e:legacy_current"]]);
-    expect(compactV2LegacyRefForHandle(current, "@e:hhhhhhhhh1")).toBe("@e:legacy_current");
-    expect(compactV2LegacyRefForHandle(current, "@e:hhhhhhhhh2")).toBeNull(); // not a member
+    const current = new Map([["@e:hhhhhhhhhhh", "@e:legacy_current"]]);
+    expect(compactV2LegacyRefForHandle(current, "@e:hhhhhhhhhhh")).toBe("@e:legacy_current");
+    expect(compactV2LegacyRefForHandle(current, "@e:iiiiiiiiiii")).toBeNull(); // not a member
+    expect(compactV2LegacyRefForHandle(current, "@e:hhhhhhhhhh")).toBeNull(); // malformed
     expect(compactV2LegacyRefForHandle(current, "@e:short")).toBeNull(); // not a member
     expect(compactV2LegacyRefForHandle(current, "@e:1.1")).toBeNull(); // legacy index form
     expect(compactV2LegacyRefForHandle(current, "@private-merchant-copy")).toBeNull(); // a label
@@ -488,8 +489,9 @@ describe("compact observation v2", () => {
     expect(controlLabelV2(undefined)).toBeUndefined();
     expect(controlLabelV2("!!!")).toBeUndefined();
     expect(isCompactV2Label("@continue-with-google")).toBe(true);
-    expect(isCompactV2Label("@e:hhhhhhhhh1")).toBe(false);
-    expect(isCompactV2Handle("@e:hhhhhhhhh1")).toBe(true);
+    expect(isCompactV2Label("@e:hhhhhhhhhhh")).toBe(false);
+    expect(isCompactV2Handle("@e:hhhhhhhhhhh")).toBe(true);
+    expect(isCompactV2Handle("@e:hhhhhhhhhh")).toBe(false);
   });
 
   // 2026-09-06 ipinfo docs dogfood: headings glued to their descriptions by
