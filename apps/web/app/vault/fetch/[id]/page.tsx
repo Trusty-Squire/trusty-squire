@@ -73,9 +73,12 @@ export default function CredentialFetchApprovalPage() {
         payload: ceremony.payload,
         minConfidence: "low",
       });
-      await apiPost(`/v1/vault/fetch-approvals/${encodeURIComponent(ceremony.approval_id)}/approve`, {
-        jws: signed.assertion,
-      });
+      await apiPost(
+        `/v1/vault/fetch-approvals/${encodeURIComponent(ceremony.approval_id)}/approve`,
+        {
+          jws: signed.assertion,
+        },
+      );
       setCeremony(await fetchCeremony());
       setNeedsPasskeySetup(false);
     } catch (caught) {
@@ -94,7 +97,10 @@ export default function CredentialFetchApprovalPage() {
     setBusy(true);
     setError(null);
     try {
-      await apiPost(`/v1/vault/fetch-approvals/${encodeURIComponent(ceremony.approval_id)}/deny`, {});
+      await apiPost(
+        `/v1/vault/fetch-approvals/${encodeURIComponent(ceremony.approval_id)}/deny`,
+        {},
+      );
       setCeremony(await fetchCeremony());
     } catch (caught) {
       if (caught instanceof ApiError && caught.status === 401) {
@@ -144,8 +150,8 @@ export default function CredentialFetchApprovalPage() {
         <div>
           <h1 className="app-title">Approve revealing a secret</h1>
           <p className="app-sub">
-            Approving hands the raw value to the agent that asked for it. Do this only if the
-            agent needs to write the key somewhere itself.
+            Approving hands the raw value to the agent that asked for it. Do this only if the agent
+            needs to write the key somewhere itself.
           </p>
         </div>
       </div>
@@ -199,7 +205,12 @@ export default function CredentialFetchApprovalPage() {
                 >
                   {busy ? "Approving…" : "Approve reveal"}
                 </button>
-                <button className="btn-deny" type="button" onClick={() => void deny()} disabled={busy}>
+                <button
+                  className="btn-deny"
+                  type="button"
+                  onClick={() => void deny()}
+                  disabled={busy}
+                >
                   Deny
                 </button>
               </div>
