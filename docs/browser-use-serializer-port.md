@@ -19,8 +19,10 @@ existing fingerprint to a 66-bit opaque capability for the lifetime of its docum
 the document identity and collision retry are part of its HMAC input. Display-only
 refs use a separate identity namespace in that same allocator. Action authorization
 requires the observed map and live fingerprint match in addition to possession of
-the capability. Those refs remain actionable after another
-observation of the same document. A changed view sends its complete `dom` tree;
+the capability. Those refs remain actionable after another observation of the same
+document while their fingerprint is unchanged. If a structural change changes a
+control's fingerprint, its earlier capability invalidates fail closed and requires
+re-observation. A changed view sends its complete `dom` tree;
 `delta: true` identifies an existing document, and `removed` names refs that left
 the rendered view. An unchanged view emits `dom_unchanged: true` and omits `dom`, retaining the
 consumer's prior view. A newly blank view still emits `dom: ""` with no unchanged
