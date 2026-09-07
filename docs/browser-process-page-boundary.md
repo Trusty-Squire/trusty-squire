@@ -1,5 +1,9 @@
 # Exclusive browser process and page ownership
 
+> **CAPTAIN DECISION 2026-09-07 — this in-process concurrency design is a dead end; do not build on it.**
+> A single client cannot usefully drive two operator sessions in parallel, so the in-process `TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION` concurrency below has no practical production use. It remains ONLY as the auth-preservation / bot-detection test scaffold described in the "Experimental concurrent multisession" section. Do not relitigate this and do not build a scheduler or broker on the in-process flag.
+> The only concurrency worth building is CROSS-PROCESS: two separate host processes sharing one authenticated browser via one shared server. That is NOT what this design provides (the satellite-join is gated on in-process signals; a second process hitting the busy profile gets `ProfileBusyError`). If ever built, it EXTENDS this design's satellite / per-page ownership / refcounted-teardown machinery with a cross-process CDP-endpoint handoff, cross-process teardown refcount, and cross-process host-scope guard.
+
 `BrowserController` composes one `BrowserProcessOwner` and one `PageDriver` for
 one session. It preserves the operator API. By default there is no broker,
 shared browser, additional admission, or detach operation; the only exception
