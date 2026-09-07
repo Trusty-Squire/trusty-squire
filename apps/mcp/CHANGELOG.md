@@ -54,8 +54,9 @@
   capture-scoped node scan, and no `screenshot_unavailable_sealed_context` (the
   error code no longer exists), including during an active card fill; its result
   drops `redacted_count`. `operate_observe` / `operate_observe_query` return
-  field values and the live page URL (path and query included) verbatim; emitted
-  Compact-v2 names and text retain their separate narrow secret-shaped screen.
+  field values, control labels, semantic headings, interleaved DOM text, and the
+  live page URL (path and query included) verbatim. The standing captain
+  directive removes Compact-v2's separate secret-shaped screen too.
   The `[sealed]` / `[sealed payment]` placeholders are gone, as is the compact-v2
   tool-result seal that blanked `credentials`, URLs, and verification codes to
   `<sealed>`. `operate_act { kind: "extract" }` returns every labeled candidate
@@ -67,12 +68,12 @@
   present" while extract refused because "nothing is revealed", leaving the
   operator unable to come away with a key the page was plainly displaying.
   Compact-v2 now emits a tab-indented DOM tree that interleaves visible text and
-  interactive controls; it has no separate page-`text` field. Its narrow
-  secret-shaped screen applies only to emitted names and text, preserving tree
-  shape and refs. Out of scope and unchanged: the vault's write-only property
-  and `use_credential`'s server-side injection, the payment approval flow / 3DS
-  / human approval, and the closed-vocabulary screen on the stderr audit trail
-  and the registry-bound recipe action trace.
+  interactive controls; it has no separate page-`text` field or read-path
+  redactor. Canonical tree shape and refs are preserved. Out of scope and
+  unchanged: the vault's write-only property and `use_credential`'s server-side
+  injection, the payment approval flow / 3DS / human approval, and the
+  closed-vocabulary screen on the stderr audit trail and the registry-bound
+  recipe action trace.
 
 - **BREAKING: the `login` subcommand is removed — `connect` is the one
   onboarding and re-auth pathway.** `npx @trusty-squire/mcp login` (and its

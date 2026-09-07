@@ -40,10 +40,8 @@ Viewport scoping and 99% containment filtering remain enabled.
 Source: [browser-use 0.13.10 on PyPI](https://pypi.org/project/browser-use/0.13.10/).
 The port's MIT notice ships in `apps/mcp/assets/licenses/browser-use-MIT.txt`.
 
-Canonical equality is checked **before screening**, normalizing identity only.
-The unchanged secret-shape detection rules are tested separately. Corpus-wide
-structural-invariance assertions require screening to change only redacted spans,
-with identical line counts, indentation and refs. The HN fixture explicitly pins
-`usernametaken29` becoming `[redacted]`: redacting this plain lowercase-plus-digits
-username is a **redactor false positive** worth tuning in a separate task, not in
-this port. This limitation must also be recorded in the PR body.
+Canonical equality is checked directly, normalizing identity only. Read-path
+redaction is removed: fixture text and attributes are the page's content, not a
+screened rendering. The HN fixture pins `usernametaken29` verbatim, guarding
+against a return of secret-shape screening while preserving line counts,
+indentation, attributes, and refs exactly.
