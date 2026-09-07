@@ -24,7 +24,7 @@ fixture comparison, not used as the baseline runtime refs.
 
 | Page / reproduction | Baseline bytes | Current with 10-char refs | Current with 11-char refs | Ref-width change | Other serializer change | Total change |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| ipinfo | 7627 | 8097 | 8233 | 136 | 470 | 606 |
+| ipinfo | 7627 | 8131 | 8267 | 136 | 504 | 640 |
 | mdn | 5390 | 5542 | 5622 | 80 | 152 | 232 |
 | hacker-news | 19376 | 26350 | 26899 | 549 | 6974 | 7523 |
 | wikipedia | 6422 | 6758 | 6841 | 83 | 336 | 419 |

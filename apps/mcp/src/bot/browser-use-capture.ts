@@ -22,6 +22,7 @@ import {
   browserUseBoundedContextText,
   browserUseInteractive,
   browserUseLocalContextContainer,
+  browserUseOrderedHeadingContext,
   type BrowserUseNode,
   type DOMBounds,
 } from "./browser-use-serializer.js";
@@ -549,7 +550,7 @@ export async function captureBrowserUseDOM(
           /^H[1-6]$/.test(c.nodeName)
             ? browserUseBoundedContextText(c, iframeHintContextMaxChars)
             : null;
-        const collect = (c: BrowserUseNode, context = ""): void => {
+        const collect = (c: BrowserUseNode, context = ""): string | null => {
           const meta = viewMetadata.get(c.id),
             l = meta?.layout;
           const hidden =
@@ -572,13 +573,15 @@ export async function captureBrowserUseDOM(
                 "(no label)",
               pages: viewportHeight > 0 ? (c.bounds!.y / viewportHeight).toFixed(1) : 0,
             });
-          const nearby = localContext(c) || headingContext(c) || context;
-          let siblingContext = nearby;
-          for (const child of c.children) {
-            const heading = headingContext(child);
-            collect(child, heading || siblingContext);
-            if (heading) siblingContext = heading;
-          }
+          const directHeading = headingContext(c);
+          const nearby = localContext(c) || directHeading || context;
+          const nestedHeading = browserUseOrderedHeadingContext(
+            c.children,
+            nearby,
+            headingContext,
+            collect,
+          );
+          return directHeading || nestedHeading;
         };
         collect(n.contentDocument);
         n.hiddenElements.sort((a, b) => Number(a.pages) - Number(b.pages));

@@ -291,6 +291,24 @@ export function browserUseBoundedContextText(n: BrowserUseNode, limit: number): 
   };
   return visit(n) ? characters.join("") : null;
 }
+export function browserUseOrderedHeadingContext<T>(
+  children: readonly T[],
+  enclosing: string,
+  heading: (node: T) => string | null,
+  visit: (node: T, context: string) => string | null,
+): string | null {
+  let context = enclosing,
+    lastHeading: string | null = null;
+  for (const child of children) {
+    const directHeading = heading(child);
+    const nestedHeading = visit(child, directHeading || context);
+    if (nestedHeading) {
+      context = nestedHeading;
+      lastHeading = nestedHeading;
+    }
+  }
+  return lastHeading;
+}
 function propagates(n: BrowserUseNode): boolean {
   const t = tag(n),
     r = n.attributes.role;
@@ -737,23 +755,28 @@ export function serializeBrowserUseDOM(
   const genericContextMaxChars = 120;
   const containsActionableDescendant = (n: Simplified): boolean =>
     n.children.some((child) => containsAction(child.original));
-  const contextualize = (n: Simplified, enclosing = ""): void => {
+  const headingContext = (n: Simplified): string | null =>
+    /^h[1-6]$/.test(tag(n.original))
+      ? browserUseBoundedContextText(n.original, genericContextMaxChars)
+      : null;
+  const contextualize = (n: Simplified, enclosing = ""): string | null => {
     const o = n.original,
       t = tag(o);
     const text = browserUseBoundedContextText(o, genericContextMaxChars);
     const container =
       browserUseLocalContextContainer(o, containsActionableDescendant(n)) &&
       text !== null;
-    let context = container
-      ? text || enclosing
-      : enclosing;
+    const directHeading = headingContext(n);
+    let context = container ? text || enclosing : directHeading || enclosing;
     contexts.set(n, context);
     if (["iframe", "frame"].includes(t)) context = "";
-    for (const child of n.children) {
-      if (/^h[1-6]$/.test(tag(child.original)))
-        context = browserUseBoundedContextText(child.original, genericContextMaxChars) || context;
-      contextualize(child, context);
-    }
+    const nestedHeading = browserUseOrderedHeadingContext(
+      n.children,
+      context,
+      headingContext,
+      contextualize,
+    );
+    return directHeading || nestedHeading;
   };
   if (efficient) contextualize(tree);
   const emittedTargets = new Set<string>();

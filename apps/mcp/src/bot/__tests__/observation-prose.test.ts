@@ -179,7 +179,7 @@ describe("interleaved observation DOM", () => {
       await page.setContent('<iframe id="support" style="width: 400px; height: 100px"></iframe>');
       const frame = await (await page.locator("#support").elementHandle())!.contentFrame();
       await frame!.setContent(
-        '<section><h2>Billing</h2><div style="margin-top: 800px"><span><button id="below"> </button></span></div></section>',
+        '<section><header><h2>Billing</h2></header><div style="margin-top: 800px"><span><button id="below"> </button></span></div></section>',
       );
       const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
       const findFrame = (node: BrowserUseNode): BrowserUseNode | undefined =>

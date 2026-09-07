@@ -246,6 +246,13 @@ describe("observation byte efficiency", () => {
       ],
     });
     expect(serializeBrowserUseDOM(wrapped).dom).toContain("context=Marketing emails");
+    const nestedHeading = node("SECTION", {
+      children: [
+        node("HEADER", { children: [node("H2", { children: [text("Billing")] })] }),
+        node("DIV", { children: [node("SPAN", { children: [node("BUTTON")] })] }),
+      ],
+    });
+    expect(serializeBrowserUseDOM(nestedHeading).dom).toContain("context=Billing");
   });
   it("emits native button class evidence without inferring selection", () => {
     const card = node("BUTTON", {

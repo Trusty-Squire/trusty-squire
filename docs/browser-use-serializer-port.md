@@ -76,7 +76,7 @@ collapse. Structural keys are interned bottom-up rather than recursively escaped
 
 Unlabelled, non-interactive SVG rows are omitted. Interactive SVG descendants
 remain visible. Unlabelled iframe hints inherit only bounded local container text or
-the nearest bounded preceding heading; oversized containers supply no inherited hint.
+the nearest bounded preceding heading in document order; oversized containers supply no inherited hint.
 Only explicitly non-interactive empty hints may be omitted. Unlabelled form rows inherit enclosing row/heading text when available. A row
 may be omitted only if its exact target ref has already been emitted.
 Distinct checkboxes survive regardless of how similar they look. This does not
