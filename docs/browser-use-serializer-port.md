@@ -23,8 +23,8 @@ the viewport, and retains its existing paged search-result format and aliases.
 Query results are not a second DOM observation serializer.
 
 Every DOM observation includes `more_above` and `more_below`. The existing scroll
-action remains reachable. A below-fold control can be found through
-`operate_observe_query`, then scrolled into view or targeted by its returned ref.
+action remains reachable. A below-fold control can be found with
+`operate_observe(query=...)`, then scrolled into view or targeted by its returned ref.
 Changing the viewport does not retire a control's document identity.
 
 An unbindable node never blanks the observation. Bindable controls retain their

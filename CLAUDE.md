@@ -603,10 +603,10 @@ A compact-v2 `@e:` ref is a DURABLE element fingerprint, not a positional
 index: it survives acts and benign re-renders on the same document, so one
 observation can drive a whole multi-field fill. Do not reintroduce
 per-act/per-observe ref churn.
-[`docs/observation-model.md`](docs/observation-model.md) owns the identity
-model (fingerprint, `@label` alias, document epoch), the fail-closed rules
-(`stale_ref` / `ambiguous_target`), the compactness invariant, and the phased
-roadmap. Implementation map is in its §9.
+[`docs/browser-use-serializer-port.md`](docs/browser-use-serializer-port.md)
+owns the canonical DOM rendering, stable-ref, screening, query, and fixture
+contracts. [`docs/observation-model.md`](docs/observation-model.md) §4.5 owns
+the no-seal policy; its remaining roadmap is historical.
 
 **No observation sealing (2026-09-05, owner's order).** Observations return what
 the page renders — field values, labels, the live URL (path and query included),

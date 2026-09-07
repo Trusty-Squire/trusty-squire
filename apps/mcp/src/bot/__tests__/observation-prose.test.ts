@@ -168,7 +168,9 @@ describe("interleaved observation DOM", () => {
       expect(lines[childTextLine - 1]).toMatch(
         /\[@e:unbound_[^\]]+\]<button[^\n]*not-targetable=true/,
       );
-      expect(capture.elements.some((element) => element.visibleText === "Child action")).toBe(false);
+      expect(capture.elements.some((element) => element.visibleText === "Child action")).toBe(
+        false,
+      );
       const main = capture.elements.find((element) => element.visibleText === "Main action")!;
       expect(main.framePath).toBeNull();
       await page.locator(main.selector).click();
@@ -218,7 +220,10 @@ describe("interleaved observation DOM", () => {
                 !navigated
               ) {
                 navigated = true;
-                await page.frames().find((frame) => frame.url() === childUrl)!.goto(childUrl);
+                await page
+                  .frames()
+                  .find((frame) => frame.url() === childUrl)!
+                  .goto(childUrl);
               }
               const result = await send(method, params);
               if (method === "Page.getFrameTree") {
@@ -250,9 +255,7 @@ describe("interleaved observation DOM", () => {
         inConsentWidget: false,
         framePath: "0",
       };
-      const newCDPSession = vi
-        .spyOn(context, "newCDPSession")
-        .mockResolvedValue(intercepted);
+      const newCDPSession = vi.spyOn(context, "newCDPSession").mockResolvedValue(intercepted);
       let capture: Awaited<ReturnType<typeof captureBrowserUseDOM>>;
       try {
         capture = await captureBrowserUseDOM(
@@ -279,12 +282,12 @@ describe("interleaved observation DOM", () => {
       expect(lines[capturedTextLine - 1]).toMatch(
         /\[@e:unbound_[^\]]+\]<button[^\n]*not-targetable=true/,
       );
-      expect(capture.elements.some((element) => element.visibleText === "Captured child action")).toBe(
-        false,
-      );
-      expect(capture.elements.some((element) => element.visibleText === "Replacement child action")).toBe(
-        false,
-      );
+      expect(
+        capture.elements.some((element) => element.visibleText === "Captured child action"),
+      ).toBe(false);
+      expect(
+        capture.elements.some((element) => element.visibleText === "Replacement child action"),
+      ).toBe(false);
       const main = capture.elements.find((element) => element.visibleText === "Main action")!;
       await page.locator(main.selector).click();
       expect(await page.locator("body").getAttribute("data-main")).toBe("clicked");
@@ -348,7 +351,9 @@ describe("interleaved observation DOM", () => {
       const output = serializeBrowserUseDOM(capture.root, {
         ref: (node) => {
           const element = capture.nodeElements.get(node.id);
-          return element ? `@e:${element.index}` : { ref: `@e:unbound_${node.id}`, targetable: false };
+          return element
+            ? `@e:${element.index}`
+            : { ref: `@e:unbound_${node.id}`, targetable: false };
         },
       });
       expect(output.dom).toContain("Main action");
@@ -393,9 +398,7 @@ describe("interleaved observation DOM", () => {
           return typeof value === "function" ? value.bind(target) : value;
         },
       });
-      const newCDPSession = vi
-        .spyOn(context, "newCDPSession")
-        .mockResolvedValue(intercepted);
+      const newCDPSession = vi.spyOn(context, "newCDPSession").mockResolvedValue(intercepted);
       const framePath = (frame: Frame): string | null => {
         const indexes: number[] = [];
         let current: Frame | null = frame;

@@ -253,8 +253,7 @@ export async function captureBrowserUseDOM(
               }),
             );
         }
-        for (const [backendNodeId, element] of frameBindings)
-          bindings.set(backendNodeId, element);
+        for (const [backendNodeId, element] of frameBindings) bindings.set(backendNodeId, element);
         for (const backendNodeId of frameListeners) listeners.add(backendNodeId);
       } catch {
         forgetFrame(frameId);
@@ -269,7 +268,9 @@ export async function captureBrowserUseDOM(
         for (const backendNodeId of document.nodes.backendNodeId ?? [])
           liveBackendNodeIds.add(backendNodeId);
     } catch {}
-    await client.send("Runtime.releaseObjectGroup", { objectGroup: "ts-observation" }).catch(() => undefined);
+    await client
+      .send("Runtime.releaseObjectGroup", { objectGroup: "ts-observation" })
+      .catch(() => undefined);
     const rawById = new Map<string, RawNode>();
     const nodeFrame = new Map<string, Frame | null>();
     const selectorsById = new Map<string, string>();
