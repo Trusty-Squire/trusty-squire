@@ -87,6 +87,12 @@ controls, listeners, focusability and scrolling prevent coalescing their action
 surface. The canonical small-icon class/geometry heuristic is not evidence that
 a syntax-highlight span is a control.
 
+Selectable generic cards emit authored `aria-pressed`/`aria-selected` and existing
+`data-state` values, plus raw screened `state_class` and visible child `state_icons`
+evidence where present. These are DOM facts, not inferred selected booleans.
+Stateless cards keep stable action refs but selection is undetectable by design;
+an unrelated button enabling cannot establish which card is selected.
+
 The internal `canonical: true` test option disables these local differences;
 production never selects it. Canonical fixtures are regenerated verbatim using
 the pinned Python script with paint-order filtering enabled. The fixture equality

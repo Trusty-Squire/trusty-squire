@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { BrowserController, type InteractiveElement } from "../browser.js";
 import { captureBrowserUseDOM } from "../browser-use-capture.js";
 import { serializeBrowserUseDOM } from "../browser-use-serializer.js";
-import { buildSafeControlsV2 } from "../compact-observation-v2.js";
+import { buildSafeControlsV2, StableObservationRefs } from "../compact-observation-v2.js";
 let browser: Browser;
 const transparentFrameSecurity = async (): Promise<{ opaque: boolean }> => ({ opaque: false });
 const captureThroughController = async (page: Page) => {
@@ -60,6 +60,48 @@ describe("interleaved observation DOM", () => {
         expect(dom).toContain(`value=${value}`);
       }
       expect(dom).not.toContain("[redacted]");
+    } finally {
+      await page.close();
+    }
+  });
+  it("surfaces actual selection evidence while a stateless card stays reachable with its original ref", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(
+        readFileSync(
+          new URL("../../../../../fixtures/observation-efficiency/selectable-cards.html", import.meta.url),
+          "utf8",
+        ),
+      );
+      const refs = new StableObservationRefs();
+      const capture = await captureThroughController(page);
+      const ref = (n: import("../browser-use-serializer.js").BrowserUseNode): string =>
+        refs.get("doc", n.id);
+      const before = serializeBrowserUseDOM(capture.root, { ref });
+      const row = (dom: string, id: string): string =>
+        dom.split("\n").find((line) => line.includes(`id=${id} `))!;
+      const stateless = row(before.dom, "stateless");
+      expect(stateless).not.toMatch(/(?:aria-pressed|aria-selected|data-state|selected|state_icons)=/);
+      const stable = stateless.match(/\[([^\]]+)\]/)![1]!;
+      const boundNode = [...capture.nodeElements].find(([id]) => refs.get("doc", id) === stable)![1];
+      await page.locator(boundNode.selector).click();
+      for (const id of ["pressed", "classified", "icon", "selected", "data"])
+        await page.locator(`#${id}`).click();
+      const after = serializeBrowserUseDOM((await captureThroughController(page)).root, { ref });
+      expect(row(after.dom, "stateless")).toBe(stateless);
+      expect(row(before.dom, "pressed")).toContain("aria-pressed=false");
+      expect(row(after.dom, "pressed")).toContain("aria-pressed=true");
+      expect(row(after.dom, "selected")).toContain("aria-selected=true");
+      expect(row(after.dom, "data")).toContain("data-state=checked");
+      expect(row(after.dom, "classified")).toContain("border-selected");
+      expect(row(after.dom, "icon")).toContain('state_icons=["check-icon"]');
+      expect(after.refs).toContain(stable);
+      expect(
+        await page.evaluate(
+          () => (window as unknown as { cardClicks: Record<string, number> }).cardClicks.stateless,
+        ),
+      ).toBe(1);
+      expect(row(after.dom, "classified")).not.toContain("selected=true");
     } finally {
       await page.close();
     }

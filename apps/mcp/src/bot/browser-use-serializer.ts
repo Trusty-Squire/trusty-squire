@@ -277,10 +277,14 @@ function exclude(n: BrowserUseNode, bounds: DOMBounds): boolean {
     !["button", "link", "checkbox", "radio", "tab", "menuitem", "option"].includes(a.role ?? "")
   );
 }
-function attributes(n: BrowserUseNode): string {
+function attributes(n: BrowserUseNode, localState = false): string {
   const a: Record<string, string> = {};
   for (const [k, v] of Object.entries(n.attributes))
-    if (ATTRIBUTES.has(k) && v.trim()) a[k] = v.trim();
+    if (
+      (ATTRIBUTES.has(k) || (localState && ["aria-pressed", "aria-selected"].includes(k))) &&
+      v.trim()
+    )
+      a[k] = v.trim();
   const t = tag(n),
     type = (n.attributes.type ?? "").toLowerCase();
   const formats: Record<string, string> = {
@@ -739,7 +743,42 @@ export function serializeBrowserUseDOM(
       ? `${n.isNew ? "*" : ""}${o.showScroll && t !== "svg" ? "|scroll element[" : "["}${targets.get(n)!.ref}]`
       : "";
     if (o.nodeType === 1) {
-      let attrs = attributes(o);
+      let attrs = attributes(o, efficient);
+      if (
+        efficient &&
+        n.interactive &&
+        ["div", "span", "li"].includes(t) &&
+        (o.clickListener ||
+          o.cursor === "pointer" ||
+          "tabindex" in o.attributes ||
+          ["button", "option", "checkbox", "radio"].includes(o.attributes.role ?? ""))
+      ) {
+        // Raw DOM evidence, never a guessed selected=true. Preserve the entire
+        // class list: a distinguishing Tailwind token may be at its very end.
+        if (o.attributes.class?.trim())
+          attrs +=
+            (attrs ? " " : "") + `state_class=${JSON.stringify(o.attributes.class.trim())}`;
+        const icons: string[] = [];
+        const collectIcons = (c: BrowserUseNode): void => {
+          if (!c.visible || c.contentDocument) return;
+          if (tag(c) === "svg" || c.attributes.role === "img") {
+            icons.push(
+              c.attributes["aria-label"] ||
+                c.attributes["data-icon"] ||
+                c.attributes.class ||
+                tag(c),
+            );
+            return;
+          }
+          if (c.clickListener || ["button", "input", "select", "a"].includes(tag(c))) return;
+          c.children.forEach(collectIcons);
+        };
+        o.children.forEach(collectIcons);
+        if (icons.length)
+          attrs +=
+            (attrs ? " " : "") +
+            `state_icons=${JSON.stringify(icons)}`;
+      }
       if (
         efficient &&
         formTags.has(t) &&

@@ -23,12 +23,12 @@ fixture comparison, not used as the baseline runtime refs.
 
 | Page / reproduction | Before bytes | After bytes | Saved | Reduction |
 | --- | ---: | ---: | ---: | ---: |
-| ipinfo | 7627 | 6459 | 1168 | 15.3% |
-| mdn | 5390 | 4733 | 657 | 12.2% |
+| ipinfo | 7627 | 7166 | 461 | 6.0% |
+| mdn | 5390 | 4965 | 425 | 7.9% |
 | hacker-news | 19376 | 15025 | 4351 | 22.5% |
-| wikipedia | 6422 | 5723 | 699 | 10.9% |
-| github | 4431 | 3368 | 1063 | 24.0% |
-| gov-uk | 1434 | 1226 | 208 | 14.5% |
+| wikipedia | 6422 | 5878 | 544 | 8.5% |
+| github | 4431 | 3800 | 631 | 14.2% |
+| gov-uk | 1434 | 1303 | 131 | 9.1% |
 | Highlighted code (synthetic Vouchflow case) | 515 | 73 | 442 | 85.8% |
 | 12 repeated checkbox bindings (synthetic Resend case) | 1151 | 467 | 684 | 59.4% |
 | 24 distinct unlabelled checkboxes (reachability control) | 1151 | 935 | 216 | 18.8% |
@@ -91,3 +91,24 @@ the `format` label, OAuth, vault behavior and payment approval are unchanged.
   checks absent `dom` plus `dom_unchanged: true`, a preserved revision, and a
   changed-to-blank `dom: ""` with the original ref in `removed`. Final TypeScript
   and changed-file lint checks also exit 0.
+
+## Multi-select card evidence (PostHog follow-up)
+
+Production emits authored `aria-pressed`, `aria-selected` and `data-state` values.
+Actionable generic cards also expose their full screened `state_class` and visible
+child `state_icons` evidence. These facts describe the DOM, not a guessed boolean
+selection state. The class list is intentionally not truncated: a distinguishing
+utility class may occur at its end. This additional evidence changes corpus
+reductions to 6.0–22.5%; the table above was rerun after adding it.
+
+A stateless card is **undetectable by design**: clicking it may be reachable via a
+stable ref, but no local selection state can be inferred when its DOM is unchanged.
+An unrelated Get started button becoming enabled is not selection evidence for a
+particular card. Include this limitation in the PR body.
+
+`fixtures/observation-efficiency/selectable-cards.html` has stateless, aria-pressed,
+aria-selected, data-state, class-change and appearing-check-icon cards. The real
+Chrome test captures before/after, clicks the stateless card using its original
+ref binding, confirms its row stays identical, and asserts each stateful row
+changes with actual DOM evidence. The canonical six-page oracle still passes
+unchanged. Targeted validation: `Test Files 3 passed (3)`; `Tests 39 passed (39)`.
