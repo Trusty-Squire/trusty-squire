@@ -60,6 +60,51 @@ export function registerLocalBrowserLaunch(
   };
 }
 
+// Shared graceful quit for plain login and locally owned operator Chrome.
+//
+// It MUST NOT be SIGTERM. Chrome routes SIGTERM to its "session ending" path,
+// which exits abruptly on the assumption the OS is tearing the machine down —
+// it does NOT flush the SQLite cookie store, and the store's own commit timer
+// is ~30s away. `connect` kills this browser within a couple of seconds of the
+// user finishing the Google OAuth dance, so a SIGTERM teardown discarded the
+// very session the ceremony existed to establish: the claim landed, the session
+// file was written, and the follow-up provider probe correctly reported "Google
+// not connected". SIGINT takes Chrome's graceful shutdown path, which flushes.
+// Measured on real Chrome 2026-09-04: cookie set 6s before the signal survives
+// SIGINT/SIGHUP and is lost on SIGTERM, deterministically, for both a bare pid
+// and a process-group signal.
+export const BROWSER_QUIT_SIGNAL: NodeJS.Signals = "SIGINT";
+
+// How long to let Chrome's graceful shutdown run before handing over to the
+// owner-launch reaper, whose own escalation starts at SIGTERM and would undo
+// the flush we just asked for.
+const BROWSER_QUIT_DEADLINE_MS = 10_000;
+
+// Quit the plain login browser and only THEN run the ownership-proving
+// teardown. Exported for tests: the ordering here is the fix, not an
+// implementation detail — `finalize` (the reaper) escalates SIGTERM →
+// SIGKILL, so running it while Chrome is still flushing reintroduces the
+// abrupt exit this signal choice exists to avoid.
+export async function quitBrowserGracefully(opts: {
+  signalQuit: (signal: NodeJS.Signals) => boolean;
+  isRunning: () => boolean;
+  finalize: () => Promise<void>;
+  deadlineMs?: number;
+  pollMs?: number;
+  wait?: (ms: number) => Promise<void>;
+}): Promise<void> {
+  const pollMs = opts.pollMs ?? 25;
+  const wait =
+    opts.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  // An undelivered quit has nothing to wait for — hand straight over to the
+  // reaper rather than burning the grace window on a process we cannot signal.
+  if (opts.signalQuit(BROWSER_QUIT_SIGNAL)) {
+    const deadline = Date.now() + (opts.deadlineMs ?? BROWSER_QUIT_DEADLINE_MS);
+    while (opts.isRunning() && Date.now() < deadline) await wait(pollMs);
+  }
+  await opts.finalize();
+}
+
 export async function closeBrowserContextWithin(
   context: { close(): Promise<unknown> },
   timeoutMs = 2_000,

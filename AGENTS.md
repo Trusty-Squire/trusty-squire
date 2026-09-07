@@ -676,7 +676,10 @@ virgin signup succeeds on an UNCOVERED service (no active skill in registry)
   established — the 2026-09-04 `connect` regression. The login browser quits with
   `PLAIN_LOGIN_BROWSER_QUIT_SIGNAL` (SIGINT) and waits for the graceful exit
   before the owner reaper's SIGTERM → SIGKILL escalation takes over
-  (`apps/mcp/src/bot/browser.ts`); the evidence is in `STATE.md`.
+  (`apps/mcp/src/bot/browser-process-runtime.ts`, re-exported by `browser.ts`);
+  the operator owner shares that bounded graceful quit after page/context close.
+  `browser-close-cookie.test.ts` proves fresh login cookies survive both local
+  launch modes; the original plain-login evidence is in `STATE.md`.
 - `BrowserController` local launches are new-headless only; do not reintroduce
   virtual-display selection or `DISPLAY` plumbing into automated operator runs.
   `apps/mcp/src/bot/browser-process-owner.ts` (launch helpers in

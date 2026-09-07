@@ -29,6 +29,7 @@ import {
   activeStealthProfileValue,
   canSelfLaunchWithProxy,
   captureOwnedChromeProcessTreeProof,
+  closeBrowserContextWithin,
   detectChromiumChannel,
   DEVTOOLS_ACTIVE_PORT_FILE,
   getChromium,
@@ -40,6 +41,7 @@ import {
   persistentProxyOptions,
   PROFILE_IDENTITY_POLL_MS,
   PROFILE_IDENTITY_PROOF_TIMEOUT_MS,
+  quitBrowserGracefully,
   registerLocalBrowserLaunch,
   registerSelfManagedChrome,
   releaseOwnedChromeProcessTree,
@@ -1058,20 +1060,33 @@ export class BrowserProcessOwner {
       profileDir: this.profileDir,
       identity,
       close: async () => {
-        if (identity !== null) {
-          signalOwnedChromeProcessTree(
-            identity,
-            treeProof?.processGroup ?? (childIdentity !== null ? childChromeProcessGroup : false),
-            "SIGTERM",
-            { ...(treeProof === null ? {} : { proof: treeProof }) },
-          );
+        // Give Playwright a bounded chance to flush persistent contexts first.
+        // A wedged page must not consume the budget for context close or SIGINT.
+        if (page !== null) await closeBrowserContextWithin(page, 1_000);
+        if (context !== null) await closeBrowserContextWithin(context, 1_000);
+        const identityState = () =>
+          treeProof !== null
+            ? ownedChromeProcessTreeState(treeProof)
+            : identity !== null
+              ? profileProcessIdentityState(identity, this.profileDir)
+              : "stale";
+        // CDP context close may only detach. Never SIGTERM the surviving browser
+        // before its cookie store has had the same grace period as plain login.
+        if (identity !== null && identityState() !== "stale") {
+          await quitBrowserGracefully({
+            signalQuit: (signal) =>
+              signalOwnedChromeProcessTree(
+                identity,
+                treeProof?.processGroup ??
+                  (childIdentity !== null ? childChromeProcessGroup : false),
+                signal,
+                { ...(treeProof === null ? {} : { proof: treeProof }) },
+              ),
+            isRunning: () => identityState() !== "stale",
+            finalize: async () => undefined,
+          });
         }
-        // A process-tree SIGTERM can close the CDP target before Playwright
-        // observes it. That is successful teardown, not a reason to skip the
-        // proof/reap path or retain a cleanly closed ephemeral profile.
-        if (page !== null) await page.close().catch(() => undefined);
-        if (context !== null) await context.close().catch(() => undefined);
-        if (cdpBrowser !== null) await cdpBrowser.close().catch(() => undefined);
+        if (cdpBrowser !== null) await closeBrowserContextWithin(cdpBrowser);
       },
       forceClose: () => {
         if (identity !== null) {
@@ -1088,11 +1103,8 @@ export class BrowserProcessOwner {
         ? {}
         : { identityState: () => ownedChromeProcessTreeState(treeProof) }),
     });
-    // Self-launch path: disconnect the CDP browser and SIGKILL the Chrome we
-    // spawned. context.close() on a connectOverCDP context only disconnects —
-    // it does NOT necessarily exit the browser process, which would leak the
-    // SingletonLock and brick the next run (the reap below is the backstop, but
-    // killing our own child directly is cleaner and faster).
+    // Only release ownership after process-tree proof establishes exit. The
+    // marker reaper below remains the backstop for descendants and failed quits.
     if (treeProof !== null && ownedChromeProcessTreeState(treeProof) === "stale") {
       releaseOwnedChromeProcessTree(treeProof);
       const tracked = selfManagedChromes.get(treeProof.identity.pid);
