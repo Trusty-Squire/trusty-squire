@@ -310,10 +310,6 @@ export function browserUseBoundedRawText(n: BrowserUseNode, limit: number): stri
   };
   return visit(n) ? characters.join("") : characters.join("") + "...";
 }
-export function browserUseCapRawText(value: string, limit: number): string {
-  const characters = Array.from(value);
-  return characters.length <= limit ? value : characters.slice(0, limit).join("") + "...";
-}
 export function browserUseOrderedHeadingContext<T>(
   children: readonly T[],
   enclosing: string,
@@ -676,7 +672,7 @@ export function serializeBrowserUseDOM(
       n.attributes["data-browser-use-exclude"]?.toLowerCase() === "true"
     )
       return null;
-    const code = efficient && !insideCode ? codeText(n) : null;
+    const code = efficient && !insideCode && !browserUseInteractive(n) ? codeText(n) : null;
     let children = (
       (t === "iframe" || t === "frame") && n.contentDocument
         ? n.contentDocument.children

@@ -184,13 +184,13 @@ describe("interleaved observation DOM", () => {
       await page.close();
     }
   });
-  it("keeps a whitespace iframe action label instead of inheriting heading context", async () => {
+  it("uses captured heading context when an iframe action has no snapshot label", async () => {
     const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
     try {
       await page.setContent('<iframe id="support" style="width: 400px; height: 100px"></iframe>');
       const frame = await (await page.locator("#support").elementHandle())!.contentFrame();
       await frame!.setContent(
-        '<section><header><h2>Billing</h2></header><div style="margin-top: 800px"><span><button id="below"> </button></span></div></section>',
+        '<section><header><h2>Billing</h2></header><div style="margin-top: 800px"><span><button id="below"></button></span></div></section>',
       );
       const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
       const findFrame = (node: BrowserUseNode): BrowserUseNode | undefined =>
@@ -201,7 +201,7 @@ describe("interleaved observation DOM", () => {
       const hint = findFrame(capture.root)?.hiddenElements.find(
         (element) => element.tag === "button",
       );
-      expect(hint?.text).toBe(" ");
+      expect(hint?.text).toBe("Billing");
     } finally {
       await page.close();
     }

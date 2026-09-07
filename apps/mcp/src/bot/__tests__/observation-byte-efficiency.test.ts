@@ -180,6 +180,14 @@ describe("observation byte efficiency", () => {
     expect(code.dom).toContain(`[${action.id}]<button`);
     expect(code.dom).toContain("\n\t\t{");
     expect(code.refs).toContain(action.id);
+    const root = node("PRE", {
+      clickListener: true,
+      children: [text("Copy")],
+    });
+    const rootCode = serializeBrowserUseDOM(root);
+    expect(rootCode.dom).toContain(`[${root.id}]<pre`);
+    expect(rootCode.dom).toContain("Copy");
+    expect(rootCode.refs).toContain(root.id);
   });
   it("keeps code visible through its opaque wrapper while suppressing externally occluded code", () => {
     const source = "const mandate = await sign();";

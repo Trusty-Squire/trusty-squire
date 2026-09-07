@@ -21,7 +21,6 @@ import type { InteractiveElement } from "./browser.js";
 import {
   browserUseBoundedContextText,
   browserUseBoundedRawText,
-  browserUseCapRawText,
   browserUseInteractive,
   browserUseLocalContextContainer,
   browserUseOrderedHeadingContext,
@@ -74,8 +73,6 @@ const viewMetadata = new Map<
   {
     layout: Layout | undefined;
     name: string;
-    selector: string;
-    ownerFrame: Frame;
     frame?: Frame;
   }
 >();
@@ -402,8 +399,6 @@ const viewMetadata = new Map<
     viewMetadata.set(id, {
       layout: l,
       name: String(axNode?.name?.value ?? ""),
-      selector,
-      ownerFrame: frame,
       ...(raw.frameId && frameById.has(raw.frameId)
         ? { frame: frameById.get(raw.frameId)! }
         : {}),
@@ -550,26 +545,6 @@ const viewMetadata = new Map<
             !(Number(l.styles.opacity ?? "1") <= 0)
           );
         };
-        const rawLabels = new Map<string, string>();
-        const collectRawLabels = async (c: BrowserUseNode): Promise<void> => {
-          if (isHidden(c) && browserUseInteractive(c)) {
-            const metadata = viewMetadata.get(c.id);
-        const frame = metadata?.ownerFrame;
-            const selector = metadata?.selector;
-            if (frame && selector)
-              try {
-                rawLabels.set(
-                  c.id,
-                  browserUseCapRawText(
-                    await frame.locator(selector).evaluate((element) => element.textContent ?? ""),
-                    iframeHintContextMaxChars,
-                  ),
-                );
-              } catch {}
-          }
-          for (const child of c.children) await collectRawLabels(child);
-        };
-        await collectRawLabels(n.contentDocument);
         const actionableDescendants = new Map<BrowserUseNode, boolean>();
         const actionableDescendant = (c: BrowserUseNode): boolean => {
           if (!actionableDescendants.has(c))
@@ -602,7 +577,6 @@ const viewMetadata = new Map<
                 c.attributes.placeholder ||
                 c.attributes.title ||
                 c.attributes["aria-label"] ||
-                rawLabels.get(c.id) ||
                 browserUseBoundedRawText(c, iframeHintContextMaxChars) ||
                 context ||
                 "(no label)",
