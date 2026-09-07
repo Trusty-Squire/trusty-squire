@@ -1219,10 +1219,15 @@ describe("BrowserController OAuth popup lifecycle", () => {
       }),
     );
     await context.route("https://console.product.test/**", (route) =>
-      route.fulfill({ contentType: "text/html", body: "<script>window.close()</script>" }),
+      route.fulfill({ contentType: "text/html", body: "<main>Projects</main>" }),
     );
     await product.goto("https://product.test/login");
     const controller = BrowserController.fromHarnessPage(product);
+    product.on("framenavigated", (frame) => {
+      if (frame === product.mainFrame() && frame.url() === expectedReturnUrl) {
+        setTimeout(() => void product.close(), 0);
+      }
+    });
     try {
       await controller.loginWithOAuth("#oauth", 1_000);
       expect(controller.takeOAuthTerminalCompletionUrl()).toBe(expectedReturnUrl);

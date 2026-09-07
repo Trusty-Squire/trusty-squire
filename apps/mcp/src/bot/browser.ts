@@ -13414,6 +13414,30 @@ export class BrowserController {
     };
     const attemptPage = (page: Page): boolean =>
       page === product || page === popupCapture.page;
+    // Playwright reports a popup's initial navigation before it can associate
+    // the request with a frame. Keep that request inert until the opener's
+    // creation-attributed popup event identifies its page; at that point the
+    // frame is available and proves the request belongs to this attempt.
+    const framelessNavigationRequests = new Set<Request>();
+    const captureFramelessRequestsForPopup = (page: Page): void => {
+      for (const request of framelessNavigationRequests) {
+        try {
+          const frame = request.frame();
+          if (
+            frame.parentFrame() === null &&
+            frame.page() === page &&
+            attemptPage(page) &&
+            this.ownedPages.has(page)
+          ) {
+            captureExpectedReturnUrl(request.url());
+            framelessNavigationRequests.delete(request);
+          }
+        } catch {
+          // The popup has not yet bound this request to its frame. Its next
+          // redirect/page event will give us another chance before teardown.
+        }
+      }
+    };
     const onContextRequest = (request: Request): void => {
       if (!actionStarted || !request.isNavigationRequest()) return;
       try {
@@ -13427,11 +13451,10 @@ export class BrowserController {
         }
       } catch {
         // Playwright emits a popup's first navigation request before it
-        // creates the frame. This is precisely where a fast HTTP redirect
-        // still carries the authorization request's redirect_uri.
-        if (popupCapture.page !== null && this.ownedPages.has(popupCapture.page)) {
-          captureExpectedReturnUrl(request.url());
-        }
+        // creates the frame. Do not capture it yet: a context-wide request
+        // has no ownership proof until it binds to the popup that the source
+        // page created for this attempt.
+        framelessNavigationRequests.add(request);
         return;
       }
       captureExpectedReturnUrl(request.url());
@@ -13506,6 +13529,7 @@ export class BrowserController {
       const onPopup = (page: Page): void => {
         if (!this.ownedPages.has(page)) return;
         popupCapture.page = page;
+        captureFramelessRequestsForPopup(page);
         popupCapture.onNavigation = (frame: Frame): void => recordTopLevelNavigation(page, frame);
         page.on("framenavigated", popupCapture.onNavigation);
         popupCapture.onNavigation(page.mainFrame());
@@ -13689,6 +13713,13 @@ export class BrowserController {
   private restoreProductPageWhenOAuthPageCloses(oauthPage: Page, product: Page | null): void {
     oauthPage.once("close", () => {
       if (this.oauthProviderPage === oauthPage) this.oauthProviderPageClosed = true;
+      // A proven completion may close during the handoff back to the caller.
+      // Its live refs are gone, but its already-validated URL remains a
+      // terminal completion snapshot until the next ordinary observation.
+      if (this.oauthCompletionPage === oauthPage) {
+        this.oauthCompletionPage = null;
+        this.oauthTerminalCompletionUrl ??= oauthPage.url();
+      }
       if (product === null || product.isClosed()) {
         this.adoptLivePage();
         return;

@@ -5045,7 +5045,8 @@ async function executeAct(
       target: action.target,
       after_generation: session.generation,
       reobserve_required: true,
-      replacement_candidates: [],
+      replacement_candidates: {} as Record<string, string[]>,
+      retry_policy: "do_not_retry_old_ref",
     });
   }
   audit(sessionId, "act", {
