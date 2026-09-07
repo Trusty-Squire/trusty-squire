@@ -19,7 +19,10 @@ interface FrameTree {
 }
 import type { InteractiveElement } from "./browser.js";
 import {
+  browserUseBoundedContextText,
   browserUseInteractive,
+  browserUseLocalContextContainer,
+  browserUseOrderedHeadingContext,
   type BrowserUseNode,
   type DOMBounds,
 } from "./browser-use-serializer.js";
@@ -36,11 +39,13 @@ const STYLES = [
   "position",
   "background-color",
 ];
+const iframeHintContextMaxChars = 40;
 interface Layout {
   bounds: DOMBounds | null;
   scroll: DOMBounds | null;
   client: DOMBounds | null;
   styles: Record<string, string>;
+  paintOrder?: number | undefined;
   inputValue?: string;
   checked?: boolean;
 }
@@ -64,7 +69,11 @@ export async function captureBrowserUseDOM(
   const opaqueFrames = new Map<Frame, boolean>();
   const viewMetadata = new Map<
     string,
-    { layout: Layout | undefined; name: string; frame?: Frame }
+    {
+      layout: Layout | undefined;
+      name: string;
+      frame?: Frame;
+    }
   >();
   let moreAbove = false,
     moreBelow = false;
@@ -98,7 +107,11 @@ export async function captureBrowserUseDOM(
   ): Promise<BrowserUseNode> => {
     const [dom, snapshot, ax, frames] = await Promise.all([
       client.send("DOM.getDocument", { depth: -1, pierce: true }),
-      client.send("DOMSnapshot.captureSnapshot", { computedStyles: STYLES, includeDOMRects: true }),
+      client.send("DOMSnapshot.captureSnapshot", {
+        computedStyles: STYLES,
+        includeDOMRects: true,
+        includePaintOrder: true,
+      }),
       client.send("Accessibility.getFullAXTree"),
       client.send("Page.getFrameTree"),
     ]);
@@ -117,6 +130,7 @@ export async function captureBrowserUseDOM(
       nodes.backendNodeId?.forEach((id, i) => {
         const li = layoutIndices.get(i);
         layouts.set(id, {
+          paintOrder: li === undefined ? undefined : layout.paintOrders?.[li],
           bounds: li === undefined ? null : rect(layout.bounds[li]),
           client: li === undefined ? null : rect(layout.clientRects?.[li]),
           scroll: li === undefined ? null : rect(layout.scrollRects?.[li]),
@@ -360,9 +374,11 @@ export async function captureBrowserUseDOM(
         value: raw.nodeValue,
         attributes: a,
         visible,
-        snapshot: !!l,
+        snapshot: l?.bounds !== null,
         bounds: l?.bounds ?? null,
         cursor: l?.styles.cursor ?? null,
+        paintOrder: l?.paintOrder ?? null,
+        computedStyles: l?.styles ?? null,
         scrollable,
         showScroll,
         scrollText: t === "iframe" ? "scroll" : scrollParts.join(" "),
@@ -514,42 +530,75 @@ export async function captureBrowserUseDOM(
       if (n.contentDocument) await attachFrames(n.contentDocument, depth + 1);
     };
     await attachFrames(root);
-    const hints = (n: BrowserUseNode): void => {
+    const hints = async (n: BrowserUseNode): Promise<void> => {
       if (["IFRAME", "FRAME"].includes(n.nodeName) && n.contentDocument) {
         const viewportHeight = viewMetadata.get(n.id)?.layout?.client?.height ?? 0;
         let anyHidden = false;
-        const collect = (c: BrowserUseNode): void => {
-          const meta = viewMetadata.get(c.id),
-            l = meta?.layout;
-          const hidden =
+        const isHidden = (c: BrowserUseNode): boolean => {
+          const l = viewMetadata.get(c.id)?.layout;
+          return (
             !c.visible &&
             !!l?.bounds &&
             l.styles.display !== "none" &&
             l.styles.visibility !== "hidden" &&
-            !(Number(l.styles.opacity ?? "1") <= 0);
+            !(Number(l.styles.opacity ?? "1") <= 0)
+          );
+        };
+        const actionableDescendants = new Map<BrowserUseNode, boolean>();
+        const actionableDescendant = (c: BrowserUseNode): boolean => {
+          if (!actionableDescendants.has(c))
+            actionableDescendants.set(
+              c,
+              c.children.some(
+                (child) => browserUseInteractive(child) || actionableDescendant(child),
+              ),
+            );
+          return actionableDescendants.get(c)!;
+        };
+        const localContext = (c: BrowserUseNode): string | null => {
+          if (!browserUseLocalContextContainer(c, actionableDescendant(c))) return null;
+          return browserUseBoundedContextText(c, iframeHintContextMaxChars);
+        };
+        const headingContext = (c: BrowserUseNode): string | null =>
+          /^H[1-6]$/.test(c.nodeName)
+            ? browserUseBoundedContextText(c, iframeHintContextMaxChars)
+            : null;
+        const collect = (c: BrowserUseNode, context = ""): string | null => {
+          const meta = viewMetadata.get(c.id);
+          const hidden = isHidden(c);
           anyHidden ||= hidden;
           if (hidden && browserUseInteractive(c))
             n.hiddenElements.push({
               tag: c.nodeName.toLowerCase(),
+              interactive: true,
               text:
                 meta?.name ||
                 c.attributes.placeholder ||
                 c.attributes.title ||
                 c.attributes["aria-label"] ||
+                context ||
                 "(no label)",
               pages: viewportHeight > 0 ? (c.bounds!.y / viewportHeight).toFixed(1) : 0,
             });
-          c.children.forEach(collect);
+          const directHeading = headingContext(c);
+          const nearby = localContext(c) || directHeading || context;
+          const nestedHeading = browserUseOrderedHeadingContext(
+            c.children,
+            nearby,
+            headingContext,
+            collect,
+          );
+          return directHeading || nestedHeading;
         };
         collect(n.contentDocument);
         n.hiddenElements.sort((a, b) => Number(a.pages) - Number(b.pages));
         n.hiddenElements = n.hiddenElements.slice(0, 10);
         n.hiddenContent = n.hiddenElements.length === 0 && anyHidden;
       }
-      n.children.forEach(hints);
-      if (n.contentDocument) hints(n.contentDocument);
+      for (const child of n.children) await hints(child);
+      if (n.contentDocument) await hints(n.contentDocument);
     };
-    hints(root);
+    await hints(root);
     const scroll = await page.evaluate(() => ({
       above: window.scrollY > 0,
       below: document.documentElement.scrollHeight - window.innerHeight - window.scrollY > 0,

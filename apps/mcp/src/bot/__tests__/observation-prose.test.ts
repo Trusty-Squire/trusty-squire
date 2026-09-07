@@ -7,8 +7,8 @@ import { chromium, type Browser, type Frame, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { BrowserController, type InteractiveElement } from "../browser.js";
 import { captureBrowserUseDOM } from "../browser-use-capture.js";
-import { serializeBrowserUseDOM } from "../browser-use-serializer.js";
-import { buildSafeControlsV2 } from "../compact-observation-v2.js";
+import { serializeBrowserUseDOM, type BrowserUseNode } from "../browser-use-serializer.js";
+import { buildSafeControlsV2, StableObservationRefs } from "../compact-observation-v2.js";
 let browser: Browser;
 const transparentFrameSecurity = async (): Promise<{ opaque: boolean }> => ({ opaque: false });
 const captureThroughController = async (page: Page) => {
@@ -64,6 +64,54 @@ describe("interleaved observation DOM", () => {
       await page.close();
     }
   });
+  it("surfaces actual selection evidence while a stateless card stays reachable with its original ref", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(
+        readFileSync(
+          new URL(
+            "../../../../../fixtures/observation-efficiency/selectable-cards.html",
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      );
+      const refs = new StableObservationRefs();
+      const capture = await captureThroughController(page);
+      const ref = (n: BrowserUseNode): string => refs.get("doc", n.id);
+      const before = serializeBrowserUseDOM(capture.root, { ref });
+      const row = (dom: string, id: string): string =>
+        dom.split("\n").find((line) => line.includes(`id=${id} `))!;
+      const stateless = row(before.dom, "stateless");
+      expect(stateless).not.toMatch(
+        /(?:aria-pressed|aria-selected|data-state|selected|state_icons)=/,
+      );
+      const stable = stateless.match(/\[([^\]]+)\]/)![1]!;
+      const boundNode = [...capture.nodeElements].find(
+        ([id]) => refs.get("doc", id) === stable,
+      )![1];
+      await page.locator(boundNode.selector).click();
+      for (const id of ["pressed", "classified", "icon", "selected", "data"])
+        await page.locator(`#${id}`).click();
+      const after = serializeBrowserUseDOM((await captureThroughController(page)).root, { ref });
+      expect(row(after.dom, "stateless")).toBe(stateless);
+      expect(row(before.dom, "pressed")).toContain("aria-pressed=false");
+      expect(row(after.dom, "pressed")).toContain("aria-pressed=true");
+      expect(row(after.dom, "selected")).toContain("aria-selected=true");
+      expect(row(after.dom, "data")).toContain("data-state=checked");
+      expect(row(after.dom, "classified")).toContain("border-selected");
+      expect(row(after.dom, "icon")).toContain('state_icons=["check-icon"]');
+      expect(after.refs).toContain(stable);
+      expect(
+        await page.evaluate(
+          () => (window as unknown as { cardClicks: Record<string, number> }).cardClicks.stateless,
+        ),
+      ).toBe(1);
+      expect(row(after.dom, "classified")).not.toContain("selected=true");
+    } finally {
+      await page.close();
+    }
+  });
   it("keeps hierarchy and prose and retrieves a below-the-fold control from the whole document", async () => {
     const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
     try {
@@ -84,6 +132,114 @@ describe("interleaved observation DOM", () => {
       const after = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
       expect(serializeBrowserUseDOM(after.root).dom).toContain("Create workspace below");
       expect(after.moreAbove).toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
+  it("uses only capped local context for below-fold iframe controls", async () => {
+    const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
+    try {
+      await page.setContent('<iframe id="support" style="width: 400px; height: 100px"></iframe>');
+      const frame = await (await page.locator("#support").elementHandle())!.contentFrame();
+      const local = "Local support preference";
+      await frame!.setContent(
+        `<section>Whole section context must not be inherited <div style="margin-top: 800px">${local}<span><button id="below"></button></span></div></section>`,
+      );
+      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const findFrame = (node: BrowserUseNode): BrowserUseNode | undefined =>
+        node.nodeName === "IFRAME"
+          ? node
+          : node.children.map(findFrame).find((value) => value !== undefined) ||
+            (node.contentDocument ? findFrame(node.contentDocument) : undefined);
+      const hint = findFrame(capture.root)?.hiddenElements.find(
+        (element) => element.tag === "button",
+      );
+      expect(hint?.text).toBe(local);
+      expect(hint?.text).not.toContain("Whole section context");
+    } finally {
+      await page.close();
+    }
+  });
+  it("keeps CSS-hidden descendants out of fallback context", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(
+        '<div>Notification preferences<div style="display:none">private tier</div><input type="checkbox"></div>',
+      );
+      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const dom = serializeBrowserUseDOM(capture.root).dom;
+      const input = dom.split("\n").find((line) => line.includes("<input"));
+      expect(input).toContain("context=Notification preferences");
+      expect(dom).not.toContain("private tier");
+    } finally {
+      await page.close();
+    }
+  });
+  it("rejects oversized iframe containers before inheriting their text", async () => {
+    const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
+    try {
+      await page.setContent('<iframe id="support" style="width: 400px; height: 100px"></iframe>');
+      const frame = await (await page.locator("#support").elementHandle())!.contentFrame();
+      const broad = "Oversized generic container ".repeat(4);
+      await frame!.setContent(
+        `<div style="margin-top: 800px">${broad}<span><button id="below"></button></span></div>`,
+      );
+      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const findFrame = (node: BrowserUseNode): BrowserUseNode | undefined =>
+        node.nodeName === "IFRAME"
+          ? node
+          : node.children.map(findFrame).find((value) => value !== undefined) ||
+            (node.contentDocument ? findFrame(node.contentDocument) : undefined);
+      const hint = findFrame(capture.root)?.hiddenElements.find(
+        (element) => element.tag === "button",
+      );
+      expect(hint?.text).toBe("(no label)");
+      expect(hint?.text).not.toContain("Oversized generic container");
+    } finally {
+      await page.close();
+    }
+  });
+  it("uses captured heading context when an iframe action has no snapshot label", async () => {
+    const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
+    try {
+      await page.setContent('<iframe id="support" style="width: 400px; height: 100px"></iframe>');
+      const frame = await (await page.locator("#support").elementHandle())!.contentFrame();
+      await frame!.setContent(
+        '<section><header><h2>Billing</h2></header><div style="margin-top: 800px"><span><button id="below"></button></span></div></section>',
+      );
+      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const findFrame = (node: BrowserUseNode): BrowserUseNode | undefined =>
+        node.nodeName === "IFRAME"
+          ? node
+          : node.children.map(findFrame).find((value) => value !== undefined) ||
+            (node.contentDocument ? findFrame(node.contentDocument) : undefined);
+      const hint = findFrame(capture.root)?.hiddenElements.find(
+        (element) => element.tag === "button",
+      );
+      expect(hint?.text).toBe("Billing");
+    } finally {
+      await page.close();
+    }
+  });
+  it("does not use hidden iframe descendants as an action label fallback", async () => {
+    const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
+    try {
+      await page.setContent('<iframe id="support" style="width: 400px; height: 100px"></iframe>');
+      const frame = await (await page.locator("#support").elementHandle())!.contentFrame();
+      await frame!.setContent(
+        '<div style="margin-top: 800px"><button id="below"><span style="display:none">private tier</span></button></div>',
+      );
+      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
+      const findFrame = (node: BrowserUseNode): BrowserUseNode | undefined =>
+        node.nodeName === "IFRAME"
+          ? node
+          : node.children.map(findFrame).find((value) => value !== undefined) ||
+            (node.contentDocument ? findFrame(node.contentDocument) : undefined);
+      const hint = findFrame(capture.root)?.hiddenElements.find(
+        (element) => element.tag === "button",
+      );
+      expect(hint?.text).toBe("(no label)");
+      expect(serializeBrowserUseDOM(capture.root).dom).toContain('<button> "(no label)"');
     } finally {
       await page.close();
     }

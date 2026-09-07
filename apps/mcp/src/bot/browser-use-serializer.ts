@@ -1,3 +1,4 @@
+import { browserUsePaintOrder } from "./browser-use-paint-order.js";
 /**
  * TypeScript port of browser-use 0.13.10's DOMTreeSerializer.
  * Oracle: scripts/capture-browser-use.py; fixtures/browser-use/*.txt.
@@ -20,6 +21,8 @@ export interface BrowserUseNode {
   snapshot: boolean;
   bounds: DOMBounds | null;
   cursor: string | null;
+  paintOrder?: number | null;
+  computedStyles?: Record<string, string> | null;
   scrollable: boolean;
   showScroll: boolean;
   scrollText: string;
@@ -28,7 +31,12 @@ export interface BrowserUseNode {
   axProperties: Array<{ name: string; value: unknown }>;
   axChildIds: unknown[] | null;
   shadowType: string | null;
-  hiddenElements: Array<{ tag: string; text: string; pages: number | string }>;
+  hiddenElements: Array<{
+    tag: string;
+    text: string;
+    pages: number | string;
+    interactive?: boolean;
+  }>;
   hiddenContent: boolean;
   children: BrowserUseNode[];
   contentDocument: BrowserUseNode | null;
@@ -41,6 +49,9 @@ interface Simplified {
   shadowHost: boolean;
   compound: string;
   isNew: boolean;
+  code?: string;
+  codeActions?: boolean;
+  verbatim?: boolean;
 }
 export const DEFAULT_CONTAINMENT_THRESHOLD = 0.99;
 const DISABLED = new Set(["style", "script", "head", "meta", "link", "title"]);
@@ -120,6 +131,17 @@ const ATTRIBUTES = new Set([
 ]);
 const tag = (n: BrowserUseNode): string => (n.nodeType === 1 ? n.nodeName.toLowerCase() : "");
 const formTags = new Set(["input", "select", "textarea"]);
+const broadContextTags = new Set([
+  "article",
+  "aside",
+  "body",
+  "footer",
+  "header",
+  "html",
+  "main",
+  "nav",
+  "section",
+]);
 const interactiveRoles = new Set([
   "button",
   "link",
@@ -228,6 +250,97 @@ export function browserUseInteractive(n: BrowserUseNode): boolean {
     return true;
   return n.cursor === "pointer";
 }
+export function browserUseLocalContextContainer(
+  n: BrowserUseNode,
+  hasActionableDescendant: boolean,
+): boolean {
+  const t = tag(n);
+  return (
+    ["tr", "li", "fieldset", "label"].includes(t) ||
+    n.attributes.role === "row" ||
+    (hasActionableDescendant && !broadContextTags.has(t))
+  );
+}
+export function browserUseBoundedContextText(n: BrowserUseNode, limit: number): string | null {
+  const characters: string[] = [];
+  let textStarted = false,
+    pendingSpace = false,
+    traversed = 0;
+  const append = (character: string): boolean => {
+    if (++traversed > limit) return false;
+    if (/\s/.test(character)) {
+      pendingSpace ||= textStarted;
+      return true;
+    }
+    if (pendingSpace) {
+      characters.push(" ");
+      pendingSpace = false;
+    }
+    characters.push(character);
+    textStarted = true;
+    return characters.length <= limit;
+  };
+  const rendered = (current: BrowserUseNode): boolean => {
+    if (![1, 3].includes(current.nodeType)) return true;
+    const styles = current.computedStyles;
+    return (
+      current.snapshot &&
+      !DISABLED.has(tag(current)) &&
+      styles?.display !== "none" &&
+      styles?.visibility !== "hidden" &&
+      !(Number(styles?.opacity ?? "1") <= 0)
+    );
+  };
+  const visit = (current: BrowserUseNode): boolean => {
+    if (!rendered(current)) return true;
+    if (current.nodeType === 3) {
+      for (const character of current.value) if (!append(character)) return false;
+      return true;
+    }
+    let sawChild = false;
+    for (const child of current.children) {
+      if (!rendered(child)) continue;
+      if (sawChild && textStarted) pendingSpace = true;
+      sawChild = true;
+      if (!visit(child)) return false;
+    }
+    return true;
+  };
+  return visit(n) ? characters.join("") : null;
+}
+export function browserUseBoundedRawText(n: BrowserUseNode, limit: number): string {
+  const characters: string[] = [];
+  const visit = (current: BrowserUseNode): boolean => {
+    if (current.nodeType === 3) {
+      for (const character of current.value) {
+        if (characters.length === limit) return false;
+        characters.push(character);
+      }
+      return true;
+    }
+    for (const child of current.children) if (!visit(child)) return false;
+    return true;
+  };
+  return visit(n) ? characters.join("") : characters.join("") + "...";
+}
+export function browserUseOrderedHeadingContext<T>(
+  children: readonly T[],
+  enclosing: string,
+  heading: (node: T) => string | null,
+  visit: (node: T, context: string) => string | null,
+): string | null {
+  let context = enclosing,
+    lastHeading: string | null = null;
+  for (const child of children) {
+    const directHeading = heading(child);
+    const nestedHeading = visit(child, directHeading || context);
+    if (nestedHeading) {
+      context = nestedHeading;
+      lastHeading = nestedHeading;
+    }
+  }
+  return lastHeading;
+}
 function propagates(n: BrowserUseNode): boolean {
   const t = tag(n),
     r = n.attributes.role;
@@ -268,10 +381,14 @@ function exclude(n: BrowserUseNode, bounds: DOMBounds): boolean {
     !["button", "link", "checkbox", "radio", "tab", "menuitem", "option"].includes(a.role ?? "")
   );
 }
-function attributes(n: BrowserUseNode): string {
+function attributes(n: BrowserUseNode, localState = false): string {
   const a: Record<string, string> = {};
   for (const [k, v] of Object.entries(n.attributes))
-    if (ATTRIBUTES.has(k) && v.trim()) a[k] = v.trim();
+    if (
+      (ATTRIBUTES.has(k) || (localState && ["aria-pressed", "aria-selected"].includes(k))) &&
+      v.trim()
+    )
+      a[k] = v.trim();
   const t = tag(n),
     type = (n.attributes.type ?? "").toLowerCase();
   const formats: Record<string, string> = {
@@ -479,25 +596,77 @@ function imageContext(n: Simplified): string {
   return result.join(" ");
 }
 
+function codeAction(c: BrowserUseNode): boolean {
+  const plainMarkup =
+    ["pre", "code", "span", "div"].includes(tag(c)) &&
+    Object.keys(c.attributes).every((k) => ["class", "style", "id"].includes(k));
+  const actual = plainMarkup ? { ...c, bounds: null } : c;
+  return (
+    c.nodeType === 11 ||
+    browserUseInteractive(actual) ||
+    c.scrollable ||
+    c.shadowType !== null ||
+    c.contentDocument !== null
+  );
+}
+
+/** Syntax markup is presentation. Explicit action semantics always win. */
+function codeText(
+  n: BrowserUseNode,
+  paintedOver?: ReadonlySet<BrowserUseNode>,
+): { value: string; actionable: boolean } | null {
+  if (!["pre", "code"].includes(tag(n)) || !n.visible) return null;
+  let actionable = false;
+  const collect = (c: BrowserUseNode, root = false): string => {
+    if (c.nodeType === 3)
+      return !paintedOver?.has(c) && (c.visible || /^\s*$/.test(c.value)) ? c.value : "";
+    if (c.nodeType === 11) actionable = true;
+    if (c.nodeType !== 1 || DISABLED.has(tag(c))) return "";
+    if (!root && paintedOver?.has(c)) return "";
+    if (codeAction(c)) actionable = true;
+    return c.children.map((child) => collect(child)).join("");
+  };
+  const value = collect(n, true);
+  return { value, actionable };
+}
+
 /** No text budget or reordering: filtering preserves the original DOM sequence. */
 export function serializeBrowserUseDOM(
   root: BrowserUseNode,
   options: {
     ref?: (node: BrowserUseNode) => string | { ref: string; targetable: boolean };
     previous?: ReadonlySet<string>;
+    /** Oracle comparison only: omit local byte filters/reachability exceptions. */
+    canonical?: boolean;
   } = {},
 ): { dom: string; refs: string[] } {
+  const efficient = !options.canonical;
   const targets = new Map<Simplified, { ref: string; targetable: boolean }>();
-  const simplify = (n: BrowserUseNode): Simplified | null => {
+  const actionDescendants = new Map<BrowserUseNode, boolean>();
+  const containsAction = (node: BrowserUseNode): boolean => {
+    if (!actionDescendants.has(node))
+      actionDescendants.set(
+        node,
+        browserUseInteractive(node) || node.children.some(containsAction),
+      );
+    return actionDescendants.get(node)!;
+  };
+  const simplify = (
+    n: BrowserUseNode,
+    preserveActionText = false,
+    insideCode = false,
+  ): Simplified | null => {
     if (n.nodeType === 9) {
       for (const c of n.children) {
-        const s = simplify(c);
+        const s = simplify(c, preserveActionText, insideCode);
         if (s) return s;
       }
       return null;
     }
     if (n.nodeType === 3)
-      return n.snapshot && n.visible && n.value.trim().length > 1
+      return n.snapshot &&
+        (n.visible || (preserveActionText && /^\s*$/.test(n.value))) &&
+        (preserveActionText || n.value.trim().length > 1)
         ? {
             original: n,
             children: [],
@@ -506,23 +675,41 @@ export function serializeBrowserUseDOM(
             shadowHost: false,
             compound: "",
             isNew: false,
+            verbatim: preserveActionText,
           }
         : null;
     if (n.nodeType !== 1 && n.nodeType !== 11) return null;
     const t = tag(n);
     if (
       DISABLED.has(t) ||
-      SVG.has(t) ||
+      (SVG.has(t) && !(efficient && containsAction(n))) ||
       n.attributes["data-browser-use-exclude"]?.toLowerCase() === "true"
     )
       return null;
-    const children = (
+    const code = efficient && !insideCode && !browserUseInteractive(n) ? codeText(n) : null;
+    let children = (
       (t === "iframe" || t === "frame") && n.contentDocument
         ? n.contentDocument.children
         : n.children
     )
-      .map(simplify)
+      .map((child) =>
+        simplify(
+          child,
+          preserveActionText ||
+            (efficient && (code?.actionable === true || browserUseInteractive(n))),
+          insideCode || code !== null,
+        ),
+      )
       .filter((c): c is Simplified => c !== null);
+    const actionContent = (s: Simplified): Simplified | null => {
+      if (codeAction(s.original)) return s;
+      const actionChildren = s.children
+        .map(actionContent)
+        .filter((child): child is Simplified => child !== null);
+      return actionChildren.length ? { ...s, children: actionChildren } : null;
+    };
+    if (code?.actionable)
+      children = children.map(actionContent).filter((child): child is Simplified => child !== null);
     const shadowHost = n.children.some((c) => c.nodeType === 11);
     if (
       !(
@@ -539,6 +726,7 @@ export function serializeBrowserUseDOM(
       excluded: false,
       interactive: false,
       shadowHost,
+      ...(code === null ? {} : { code: code.value, codeActions: code.actionable }),
       compound: compounds(n),
       isNew: false,
     };
@@ -552,6 +740,7 @@ export function serializeBrowserUseDOM(
     n.children.forEach((c) => filter(c, next));
   };
   filter(tree, null);
+  const paintedOver = browserUsePaintOrder(tree);
   const refs: string[] = [];
   const hasInteractive = (n: Simplified): boolean =>
     n.children.some((c) => browserUseInteractive(c.original) || hasInteractive(c));
@@ -559,7 +748,7 @@ export function serializeBrowserUseDOM(
     const o = n.original,
       t = tag(o),
       a = o.attributes;
-    if (!n.excluded) {
+    if (n.code === undefined && !n.excluded && (!paintedOver.has(o) || efficient)) {
       if (o.scrollable)
         n.interactive =
           ["listbox", "menu", "combobox", "menubar", "tree", "grid"].includes(a.role ?? "") ||
@@ -583,16 +772,161 @@ export function serializeBrowserUseDOM(
       const target = typeof resolved === "string" ? { ref: resolved, targetable: true } : resolved;
       targets.set(n, target);
       const ref = target.ref;
-      refs.push(ref);
+      if (!refs.includes(ref)) refs.push(ref);
       n.isNew = !!n.compound || (!!options.previous?.size && !options.previous.has(ref));
     }
-    n.children.forEach((c) => assign(c, inShadow || o.nodeType === 11));
+    if (n.code === undefined || n.codeActions)
+      n.children.forEach((c) => assign(c, inShadow || o.nodeType === 11));
   };
   assign(tree, false);
+  // Compare unscreened content, never let redaction make different rows identical.
+  // "Near identical" is deliberately limited to whitespace differences; numbers,
+  // names, prices, and statuses remain meaningful differences.
+  const protectedCache = new Map<Simplified, boolean>();
+  const protectedTree = (n: Simplified): boolean => {
+    if (!protectedCache.has(n))
+      protectedCache.set(
+        n,
+        n.interactive ||
+          browserUseInteractive(n.original) ||
+          n.original.scrollable ||
+          n.original.nodeType === 11 ||
+          ["iframe", "frame"].includes(tag(n.original)) ||
+          n.children.some(protectedTree),
+      );
+    return protectedCache.get(n)!;
+  };
+  const keyCache = new Map<Simplified, number>();
+  const structures = new Map<string, number>();
+  const repetitionKey = (n: Simplified): number => {
+    if (!keyCache.has(n)) {
+      const signature = JSON.stringify([
+        n.code,
+        n.original.nodeType,
+        n.original.nodeName,
+        n.original.value.replace(/\s+/g, " ").trim(),
+        Object.entries(n.original.attributes)
+          .filter(([key]) => !["id", "class", "style"].includes(key))
+          .sort(([a], [b]) => a.localeCompare(b)),
+        n.original.visible,
+        paintedOver.has(n.original),
+        n.children.map(repetitionKey),
+      ]);
+      const key = structures.get(signature) ?? structures.size;
+      structures.set(signature, key);
+      keyCache.set(n, key);
+    }
+    return keyCache.get(n)!;
+  };
+  const contexts = new Map<Simplified, string>();
+  const genericContextMaxChars = 120;
+  const containsActionableDescendant = (n: Simplified): boolean =>
+    n.children.some((child) => containsAction(child.original));
+  const headingContext = (n: Simplified): string | null =>
+    /^h[1-6]$/.test(tag(n.original))
+      ? browserUseBoundedContextText(n.original, genericContextMaxChars)
+      : null;
+  const contextualize = (n: Simplified, enclosing = ""): string | null => {
+    const o = n.original,
+      t = tag(o);
+    const eligible = browserUseLocalContextContainer(o, containsActionableDescendant(n));
+    const text = eligible ? browserUseBoundedContextText(o, genericContextMaxChars) : null;
+    const container = eligible && text !== null;
+    const directHeading = headingContext(n);
+    let context = container ? text || enclosing : directHeading || enclosing;
+    contexts.set(n, context);
+    if (["iframe", "frame"].includes(t)) context = "";
+    const nestedHeading = browserUseOrderedHeadingContext(
+      n.children,
+      context,
+      headingContext,
+      contextualize,
+    );
+    return directHeading || nestedHeading;
+  };
+  if (efficient) contextualize(tree);
+  const emittedTargets = new Set<string>();
+  const stateIconCache = new Map<BrowserUseNode, string[]>();
+  const selectionToken = (value: string | undefined): boolean =>
+    /(?:^|[-_\s])(?:check(?:ed|mark)?|selected|tick)(?:$|[-_\s])/i.test(value ?? "");
+  const stateIconEvidence = (child: BrowserUseNode): string | null => {
+    const namedEvidence = [
+      child.attributes["aria-label"],
+      child.attributes["data-icon"],
+      child.attributes.class,
+    ].find(selectionToken);
+    if (namedEvidence) return namedEvidence;
+    const ariaState = ["aria-checked", "aria-pressed", "aria-selected"]
+      .map((attribute) => [attribute, child.attributes[attribute]?.trim()] as const)
+      .find(([, value]) => value);
+    if (ariaState) return `${ariaState[0]}=${ariaState[1]}`;
+    const dataState = child.attributes["data-state"]?.trim();
+    if (selectionToken(dataState)) return `data-state=${dataState}`;
+    const glyph = browserUseBoundedContextText(child, 4)?.replace(/\s+/g, "");
+    return glyph && /^[✓✔☑✅]+$/.test(glyph) ? glyph : null;
+  };
+  const stateIcons = (node: BrowserUseNode): string[] => {
+    if (!stateIconCache.has(node)) {
+      const icons: string[] = [];
+      const collect = (child: BrowserUseNode): void => {
+        if (!child.visible || child.contentDocument) return;
+        if (browserUseInteractive(child)) return;
+        const evidence = stateIconEvidence(child);
+        if (evidence) {
+          icons.push(evidence);
+          return;
+        }
+        child.children.forEach(collect);
+      };
+      node.children.forEach(collect);
+      stateIconCache.set(node, icons);
+    }
+    return stateIconCache.get(node)!;
+  };
+  const selectionClass = (node: BrowserUseNode): string | null => {
+    const className = node.attributes.class?.trim();
+    return /(?:^|[-_\s])(?:selected|checked|tick)(?:$|[-_\s])/i.test(className ?? "")
+      ? className!
+      : null;
+  };
+  const selectionEvidence = (node: BrowserUseNode) => ({
+    className: selectionClass(node),
+    icons: stateIcons(node),
+    state: ["aria-checked", "aria-pressed", "aria-selected", "data-state"].some((attribute) =>
+      node.attributes[attribute]?.trim(),
+    ),
+  });
   const render = (n: Simplified, depth: number): string => {
     const o = n.original,
       t = tag(o),
       indent = "\t".repeat(depth);
+    if (n.code !== undefined) {
+      const code = codeText(o, paintedOver)?.value || (paintedOver.has(o) ? "" : n.code);
+      const actions = n.codeActions
+        ? n.children
+            .map((child) => render(child, depth + 1))
+            .filter(Boolean)
+            .join("\n")
+        : "";
+      if (!code) return actions;
+      return [`${indent}<${t}> ${JSON.stringify(code)}`, actions].filter(Boolean).join("\n");
+    }
+    // A duplicate binding cannot add reachability. Only omit an empty form row
+    // when its exact action identity was already emitted; never infer equivalence
+    // from matching labels, checked state, values or position.
+    const target = targets.get(n);
+    if (
+      efficient &&
+      target?.targetable &&
+      formTags.has(t) &&
+      n.children.length === 0 &&
+      !["aria-label", "title", "placeholder", "name", "id"].some((key) =>
+        o.attributes[key]?.trim(),
+      ) &&
+      emittedTargets.has(target.ref)
+    )
+      return "";
+    if (target) emittedTargets.add(target.ref);
     if (n.excluded)
       return n.children
         .map((c) => render(c, depth))
@@ -607,11 +941,35 @@ export function serializeBrowserUseDOM(
       ? `${n.isNew ? "*" : ""}${o.showScroll && t !== "svg" ? "|scroll element[" : "["}${targets.get(n)!.ref}]`
       : "";
     if (o.nodeType === 1) {
-      let attrs = attributes(o);
+      let attrs = attributes(o, efficient);
+      if (efficient && n.interactive) {
+        const evidence = selectionEvidence(o);
+        if (evidence.className || evidence.icons.length || evidence.state) {
+          if (evidence.className)
+            attrs += (attrs ? " " : "") + `state_class=${JSON.stringify(evidence.className)}`;
+          if (evidence.icons.length)
+            attrs += (attrs ? " " : "") + `state_icons=${JSON.stringify(evidence.icons)}`;
+        }
+      }
+      if (
+        efficient &&
+        n.interactive &&
+        contexts.get(n) &&
+        !["aria-label", "title", "placeholder", "ax_name"].some(
+          (key) => (o.attributes[key] ?? "").length > 0,
+        ) &&
+        browserUseBoundedRawText(o, 1) === ""
+      )
+        attrs += (attrs ? " " : "") + `context=${cap(contexts.get(n)!)}`;
       if (n.interactive && targets.get(n)?.targetable === false)
         attrs += (attrs ? " " : "") + "not-targetable=true";
-      if (t === "svg")
-        return `${indent}${shadow}${marker}<svg${attrs ? " " + attrs : ""} /> <!-- SVG content collapsed -->`;
+      if (t === "svg" && !(efficient && hasInteractive(n)))
+        return efficient &&
+          !n.interactive &&
+          (paintedOver.has(o) ||
+            !(o.attributes["aria-label"] || o.attributes.alt || o.attributes.title)?.trim())
+          ? ""
+          : `${indent}${shadow}${marker}<svg${attrs ? " " + attrs : ""} /> <!-- SVG content collapsed -->`;
       if (n.interactive || o.scrollable || t === "iframe" || t === "frame") {
         next++;
         if (n.interactive) {
@@ -638,19 +996,43 @@ export function serializeBrowserUseDOM(
         indent + (o.shadowType?.toLowerCase() === "closed" ? "Closed Shadow" : "Open Shadow"),
       );
       next++;
-    } else if (o.nodeType === 3 && o.snapshot && o.visible && o.value.trim().length > 1)
-      lines.push(indent + o.value.trim());
-    lines.push(...n.children.map((c) => render(c, next)).filter(Boolean));
+    } else if (
+      o.nodeType === 3 &&
+      o.snapshot &&
+      (o.visible || n.verbatim) &&
+      !paintedOver.has(o) &&
+      (n.verbatim || o.value.trim().length > 1)
+    )
+      lines.push(indent + (n.verbatim ? o.value : o.value.trim()));
+    for (let i = 0; i < n.children.length; i++) {
+      const child = n.children[i]!;
+      const line = render(child, next);
+      if (!line) continue;
+      let count = 1;
+      if (efficient && !protectedTree(child)) {
+        const key = repetitionKey(child);
+        while (
+          i + count < n.children.length &&
+          !protectedTree(n.children[i + count]!) &&
+          repetitionKey(n.children[i + count]!) === key
+        )
+          count++;
+      }
+      lines.push(line + (count > 1 ? ` [repeated ×${count}]` : ""));
+      i += count - 1;
+    }
     if (o.nodeType === 11 && n.children.length) lines.push(indent + "Shadow End");
     if (t === "iframe" || t === "frame") {
-      if (o.hiddenElements.length) {
-        lines.push(
-          `${indent}... (${o.hiddenElements.length} more elements below - scroll to reveal):`,
-        );
-        for (const e of o.hiddenElements)
-          lines.push(
-            `${indent}    <${e.tag}> "${Array.from(e.text).slice(0, 40).join("")}" ~${e.pages} pages down`,
-          );
+      const hidden = o.hiddenElements.filter(
+        (e) =>
+          !efficient ||
+          e.interactive !== false ||
+          (e.text.trim() !== "" && e.text.trim() !== "(no label)"),
+      );
+      if (hidden.length) {
+        lines.push(`${indent}... (${hidden.length} more elements below - scroll to reveal):`);
+        for (const e of hidden)
+          lines.push(`${indent}    <${e.tag}> "${cap(e.text, 40)}" ~${e.pages} pages down`);
       } else if (o.hiddenContent)
         lines.push(`${indent}... (more content below viewport - scroll to reveal)`);
     }

@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { createHmac, randomBytes } from "node:crypto";
 import type { InteractiveElement } from "./browser.js";
 
 export const OBSERVE_V2_MAX_WIRE_BYTES = 4_096;
@@ -159,9 +160,47 @@ export interface SafeObservationBaselineV2 {
   renderedRefs?: string[];
 }
 
-/** `@e:` + a truncated session-secret HMAC of (document epoch, fingerprint). */
-export const COMPACT_V2_HANDLE_LENGTH = 10;
+export const COMPACT_V2_HANDLE_LENGTH = 11;
 const COMPACT_V2_HANDLE_RE = new RegExp(`^@e:[A-Za-z0-9_-]{${COMPACT_V2_HANDLE_LENGTH}}$`);
+
+export class StableObservationRefs {
+  private document: string | undefined;
+  private generation = 0;
+  private refs = new Map<string, string>();
+  private identities = new Map<string, string>();
+  constructor(private readonly secret: Buffer<ArrayBufferLike> = randomBytes(32)) {}
+  get(document: string, identity: string): string {
+    if (this.document !== document) {
+      this.document = document;
+      this.generation++;
+      this.refs.clear();
+      this.identities.clear();
+    }
+    let ref = this.refs.get(identity);
+    if (ref === undefined) {
+      for (let collision = 0; ; collision++) {
+        const candidate = `@e:${createHmac("sha256", this.secret)
+          .update(document)
+          .update("\u0000")
+          .update(String(this.generation))
+          .update("\u0000")
+          .update(identity)
+          .update("\u0000")
+          .update(String(collision))
+          .digest("base64url")
+          .slice(0, COMPACT_V2_HANDLE_LENGTH)}`;
+        const owner = this.identities.get(candidate);
+        if (owner === undefined || owner === identity) {
+          ref = candidate;
+          this.identities.set(ref, identity);
+          break;
+        }
+      }
+      this.refs.set(identity, ref);
+    }
+    return ref;
+  }
+}
 const COMPACT_V2_LABEL_RE = /^@[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export function isCompactV2Handle(target: string): boolean {
@@ -177,7 +216,7 @@ export function isCompactV2Label(target: string): boolean {
  * Resolve a handle only when it is well-formed AND a member of the current
  * snapshot's action map. Callers must never turn an unknown @e: value into a
  * label or legacy-ref lookup. The handle is document-scoped by construction
- * (the epoch is hashed into it), so a ref from a replaced document finds no
+ * (the allocator retires its document map), so a ref from a replaced document finds no
  * live match rather than resolving onto whatever now occupies its position.
  */
 export function compactV2LegacyRefForHandle(

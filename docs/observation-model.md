@@ -231,14 +231,15 @@ and where it is deliberately narrower or more conservative than §4.1 above.
 | --- | --- |
 | Fingerprint (DOM id / structural fallback, framework-random id rejection) | `element-fingerprint.ts` |
 | Handle minting, epoch, target authorization, live re-resolution | `provision-session.ts` |
-| Skeleton rows, `@label` aliases, wire encoding, size budget | `compact-observation-v2.ts` |
+| Browser-use DOM serialization and its contract | `browser-use-serializer.ts`; `browser-use-serializer-port.md` |
+| Control-query rows and `@label` aliases | `compact-observation-v2.ts` |
 
 ### Identity
 
-- **Ref** — `@e:<10 base64url chars>`, a truncated session-secret HMAC over
-  `(epoch.doc, fingerprint)`. Opaque, unforgeable, and unlinkable across
-  sessions. It is *not* an index: it is derived from the element, so
-  re-serializing the same page mints the same ref.
+- **Ref** — the current wire shape, 66-bit capability construction, document lifetime,
+  and additional authorization checks are owned by
+  [`browser-use-serializer-port.md`](browser-use-serializer-port.md). This model retains
+  only the durable-fingerprint rationale below.
 - **Fingerprint** — four tiers, each consulted only when the one above it does
   not identify the element uniquely within the inventory: (1) the DOM `id` when
   present, unique on the page, and not framework-random; (2)

@@ -30,14 +30,23 @@ describe("canonical browser-use 0.13.10 fixture oracle", () => {
       ).toBe(fixture.sha256);
       const actual = serializeBrowserUseDOM(fixture.root, {
         ref: (n) => "@e:" + n.id,
+        canonical: true,
       }).dom;
       expect(identity(actual)).toBe(identity(expected));
     });
-  it("emits the HN username verbatim", () => {
+  it("emits an injected token-shaped username verbatim", () => {
     const { root } = JSON.parse(readFileSync(`${fixtures}hacker-news.json`, "utf8")) as {
       root: BrowserUseNode;
     };
-    expect(serializeBrowserUseDOM(root).dom).toContain("usernametaken29");
+    const username = "usernametaken29";
+    // The capture is intentionally volatile; inject the behavior under test
+    // instead of coupling this no-redaction check to its live username.
+    const firstVisibleText = (node: BrowserUseNode): BrowserUseNode | undefined =>
+      node.nodeType === 3 && node.visible && node.snapshot && node.value.trim().length > 1
+        ? node
+        : node.children.map(firstVisibleText).find(Boolean);
+    firstVisibleText(root)!.value = username;
+    expect(serializeBrowserUseDOM(root).dom).toContain(username);
   });
   it.each(["title", "aria-label", "image_alt"])(
     "keeps canonical truncation without rewriting credential-shaped spans in %s",
@@ -68,7 +77,7 @@ describe("canonical browser-use 0.13.10 fixture oracle", () => {
   });
   it("preserves the canonical hidden iframe hint cutoff without redaction", () => {
     const token = "f9a062f02fadf5";
-    const dom = serializeBrowserUseDOM({
+    const iframe: BrowserUseNode = {
       id: "iframe",
       nodeType: 1,
       nodeName: "IFRAME",
@@ -92,7 +101,11 @@ describe("canonical browser-use 0.13.10 fixture oracle", () => {
       hiddenContent: false,
       children: [],
       contentDocument: null,
-    }).dom;
-    expect(dom).toContain('"' + `Copy access token to clipboard: ${token}`.slice(0, 40) + '"');
+    };
+    const expected = '"' + `Copy access token to clipboard: ${token}`.slice(0, 40) + '..."';
+    // The pinned canonical port and production serializer both retain the
+    // capped iframe hint verbatim, including its truncation marker.
+    expect(serializeBrowserUseDOM(iframe, { canonical: true }).dom).toContain(expected);
+    expect(serializeBrowserUseDOM(iframe).dom).toContain(expected);
   });
 });

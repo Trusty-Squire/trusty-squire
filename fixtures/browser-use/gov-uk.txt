@@ -1,36 +1,34 @@
 |scroll element|<html /> (0.0 pages above, 2.8 pages below)
 	Cookies on GOV.UK
-	[121]<div />
+	[124]<div />
 		We use some essential cookies to make this website work.
 		We’d like to set additional cookies to understand how you use GOV.UK, remember your settings and improve government services.
 		We also use cookies set by other sites to help us deliver content from their services.
-	[14]<button type=submit />
+	[17]<button type=submit />
 		Accept additional cookies
-	[10]<button type=submit />
+	[12]<button type=submit />
 		Reject additional cookies
-	[12]<a />
+	[14]<a />
 		View cookies
-	[16]<a />
-		Skip to main content
-	[180]<a id=logo aria-label=Go to the GOV.UK homepage />
-		[182]<svg role=img aria-label=GOV.UK /> <!-- SVG content collapsed -->
+	[183]<a id=logo aria-label=Go to the GOV.UK homepage />
+		[185]<svg role=img aria-label=GOV.UK /> <!-- SVG content collapsed -->
 	Navigation menu
-	[18]<button aria-label=Show navigation menu id=super-navigation-menu-toggle expanded=false />
+	[21]<button aria-label=Show navigation menu id=super-navigation-menu-toggle expanded=false />
 		Menu
-	[406]<div />
-		[19]<button id=super-search-menu-toggle aria-label=Show search menu expanded=false />
+	[409]<div />
+		[22]<button id=super-search-menu-toggle aria-label=Show search menu expanded=false />
 			Search GOV.UK
-	[519]<li level=1 />
-		[521]<a />
+	[521]<li level=1 />
+		[523]<a />
 			Home
 	Benefits
 	Includes eligibility, appeals, tax credits and Universal Credit
 	Most viewed
-	[577]<span />
-		[579]<svg /> <!-- SVG content collapsed -->
-	[594]<a />
+	[578]<span />
+		[580]<svg /> <!-- SVG content collapsed -->
+	[595]<a />
 		Sign in to your Universal Credit account
-	[604]<span />
-		[606]<svg /> <!-- SVG content collapsed -->
-	[621]<a />
+	[605]<span />
+		[607]<svg /> <!-- SVG content collapsed -->
+	[622]<a />
 		Universal Credit

@@ -49,7 +49,7 @@ import {
   checkoutStageFromUrlV2,
   compactV2LegacyRefForHandle,
   compactV2DegradeMetadata,
-  COMPACT_V2_HANDLE_LENGTH,
+  StableObservationRefs,
   isCompactV2Handle,
   isCompactV2Label,
   controlMatchesPrivateQueryV2,
@@ -387,6 +387,8 @@ export interface Observation {
   generation?: number;
   safe_table?: SafeControlV2[];
   dom?: string;
+  /** The current rendered DOM equals the retained same-document view. */
+  dom_unchanged?: true;
   more_above?: boolean;
   more_below?: boolean;
   semantic?: SafePageSemanticsV2;
@@ -3987,27 +3989,30 @@ function compactV2EpochDoc(session: Session): string {
     .digest("base64url");
 }
 
-/**
- * Mint the durable, document-scoped handle for every element in one inventory.
- * The session HMAC makes a handle unforgeable and unlinkable across sessions;
- * folding the epoch's `doc` into it is what makes a ref die on a real
- * navigation without any snapshot bookkeeping — a handle simply stops being
- * producible by any live element once the document is replaced.
- */
+// Weak ownership keeps allocator lifetime bound to the session without retaining
+// closed sessions. One namespace/counter serves both action and display refs.
+const observationRefs = new WeakMap<Session, StableObservationRefs>();
+function compactV2StableRef(session: Session, doc: string, identity: string): string {
+  let refs = observationRefs.get(session);
+  if (!refs) {
+    refs = new StableObservationRefs(session.compactV2Secret);
+    observationRefs.set(session, refs);
+  }
+  return refs.get(doc, identity);
+}
+
+/** Preserve existing fingerprint and live-resolution semantics with shorter keys. */
 function compactV2Handles(
   session: Session,
   elements: readonly InteractiveElement[],
 ): Map<InteractiveElement, string> {
   const doc = compactV2EpochDoc(session);
-  const handles = new Map<InteractiveElement, string>();
-  for (const [element, fingerprint] of elementFingerprints(elements)) {
-    const digest = createHmac("sha256", session.compactV2Secret)
-      .update(`${doc}\u001f${fingerprint}`)
-      .digest("base64url")
-      .slice(0, COMPACT_V2_HANDLE_LENGTH);
-    handles.set(element, `@e:${digest}`);
-  }
-  return handles;
+  return new Map(
+    [...elementFingerprints(elements)].map(([element, fingerprint]) => [
+      element,
+      compactV2StableRef(session, doc, `action\u001f${fingerprint}`),
+    ]),
+  );
 }
 
 /** The live skeleton for an element inventory, under the session's epoch. */
@@ -4152,14 +4157,11 @@ function compactV2Observation(
       const element = capture.nodeElements.get(node.id);
       const ref = element === undefined ? undefined : handles.get(element);
       if (ref !== undefined) return ref;
-      // Display-only identity: never add this ref to the action/query map.
-      // Domain separation and the document epoch keep it stable and prevent it
-      // from aliasing a real control, even if a DOM backend id is later reused.
-      const digest = createHmac("sha256", session.compactV2Secret)
-        .update(`unbound\u001f${epochDoc}\u001f${node.id}`)
-        .digest("base64url")
-        .slice(0, COMPACT_V2_HANDLE_LENGTH);
-      return { ref: `@e:${digest}`, targetable: false };
+      // Display-only identities share the allocator but not the action namespace.
+      return {
+        ref: compactV2StableRef(session, epochDoc, `unbound\u001f${node.id}`),
+        targetable: false,
+      };
     },
     ...(sameDocument ? { previous: new Set(previous.renderedRefs ?? []) } : {}),
   });
@@ -4196,7 +4198,7 @@ function compactV2Observation(
     url: session.browser.currentUrl(),
     stage,
     ...(sameDocument ? { delta: true } : {}),
-    ...(changed ? { dom } : {}),
+    ...(changed ? { dom } : { dom_unchanged: true as const }),
     ...(removed.length ? { removed } : {}),
     more_above: capture.moreAbove,
     more_below: capture.moreBelow,

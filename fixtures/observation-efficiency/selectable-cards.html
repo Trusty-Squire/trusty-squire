@@ -1,0 +1,19 @@
+<!doctype html>
+<style>.card { padding: 20px; width: 220px; cursor: pointer; } svg { width: 60px; height: 60px; cursor: default; }</style>
+<div id="stateless" class="card">Product Analytics</div>
+<div id="pressed" class="card" aria-pressed="false">Session Replay</div>
+<div id="classified" class="card border-neutral">Feature Flags</div>
+<div id="icon" class="card">Experiments</div>
+<div id="selected" class="card" aria-selected="false">Surveys</div>
+<div id="data" class="card" data-state="unchecked">Data Warehouse</div>
+<script>
+  window.cardClicks = {};
+  for (const card of document.querySelectorAll('.card')) card.addEventListener('click', () => {
+    window.cardClicks[card.id] = (window.cardClicks[card.id] || 0) + 1;
+    if (card.id === 'pressed') card.setAttribute('aria-pressed', card.getAttribute('aria-pressed') === 'false' ? 'true' : 'false');
+    if (card.id === 'classified') card.classList.toggle('border-selected');
+    if (card.id === 'icon') card.insertAdjacentHTML('beforeend', '<svg class="check-icon" aria-hidden="true"><path d="M1 8l4 4 8-8" /></svg>');
+    if (card.id === 'selected') card.setAttribute('aria-selected', 'true');
+    if (card.id === 'data') card.setAttribute('data-state', 'checked');
+  });
+</script>

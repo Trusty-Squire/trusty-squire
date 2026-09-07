@@ -321,7 +321,7 @@ refs, and a tab-indented
 `dom` tree that interleaves visible page text with interactive controls. Names
 and text are page content: no secret-shaped substring screen rewrites them.
 The canonical DOM structure and refs are preserved (see
-[observation-model.md §4.5](docs/observation-model.md)). Each observation says
+[browser-use-serializer-port.md](docs/browser-use-serializer-port.md)). Each observation says
 whether more content is reachable above or below the viewport. Use
 `operate_observe` with `query` to find controls anywhere in the live document,
 including below the fold. Query, role, or cursor responses instead use the

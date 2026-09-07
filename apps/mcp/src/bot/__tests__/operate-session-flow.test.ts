@@ -4154,7 +4154,7 @@ describe("Compact V2 action-map boundary", () => {
 
   it("pages the map cursor with query/role filters and keeps filtered pages bound to their filter", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
-    h.elements = Array.from({ length: 150 }, (_, index) =>
+    h.elements = Array.from({ length: 250 }, (_, index) =>
       elem({
         index,
         tag: "button",
@@ -4207,7 +4207,7 @@ describe("Compact V2 action-map boundary", () => {
 
   it("pages across a volatile query-token change on the same origin+path", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
-    h.elements = Array.from({ length: 150 }, (_, index) =>
+    h.elements = Array.from({ length: 250 }, (_, index) =>
       elem({
         index,
         tag: "button",
@@ -4219,20 +4219,26 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkouts/c/token",
     });
-    const pageCursor = (
-      (await observeQuery(started.session_id, "")).overflow as { next_cursor: string }
-    ).next_cursor;
+    const firstPage = await observeQuery(started.session_id, "");
+    const pageCursor = (firstPage.overflow as { next_cursor: string }).next_cursor;
     // Live checkouts (e.g. Shopify) rotate a query token on every step
     // re-render without a real navigation; paging must survive it.
     h.currentUrl = "https://shop.example.com/checkouts/c/token?_r=revalidated";
     const nextPage = await observeQuery(started.session_id, "", undefined, pageCursor);
     expect((nextPage.safe_table as unknown[]).length).toBeGreaterThan(0);
-    expect(nextPage.overflow).toBeUndefined();
+    const finalCursor = (nextPage.overflow as { next_cursor: string }).next_cursor;
+    const finalPage = await observeQuery(started.session_id, "", undefined, finalCursor);
+    const rows = [firstPage, nextPage, finalPage].flatMap(
+      (page) => page.safe_table as Array<[string, ...unknown[]]>,
+    );
+    expect(rows).toHaveLength(250);
+    expect(new Set(rows.map(([ref]) => ref)).size).toBe(250);
+    expect(finalPage.overflow).toBeUndefined();
   });
 
   it("pages across a benign form re-render, retiring cursors but not refs", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
-    h.elements = Array.from({ length: 150 }, (_, index) =>
+    h.elements = Array.from({ length: 250 }, (_, index) =>
       elem({
         index,
         tag: "button",
@@ -4270,7 +4276,7 @@ describe("Compact V2 action-map boundary", () => {
 
   it("still invalidates overflow cursors on a cross-document or cross-path navigation", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
-    h.elements = Array.from({ length: 150 }, (_, index) =>
+    h.elements = Array.from({ length: 250 }, (_, index) =>
       elem({
         index,
         tag: "button",
@@ -5068,6 +5074,66 @@ describe("Compact V2 action-map boundary", () => {
     const removed = await observe(started.session_id);
     expect(removed.removed).toEqual([fallback]);
     expect(domRefs(removed)).toEqual(actionable);
+  });
+
+  it("keeps a short ref stable across successive observations and clicks with the earlier ref", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [
+      elem({
+        tag: "input",
+        type: "checkbox",
+        id: "keep",
+        visibleText: "Keep control",
+        selector: "#keep",
+        checked: false,
+      }),
+    ];
+    const started = await startHarnessProvisionSession({
+      browser: new BrowserController(),
+      observationFormat: "browser-use-dom",
+      serviceUrl: "https://app.example.com/dashboard",
+    });
+    const original = domRefs(started)[0]!;
+    expect(original).toMatch(/^@e:[A-Za-z0-9_-]{11}$/);
+    h.elements.unshift(
+      elem({ index: 1, id: "inserted", visibleText: "Inserted control", selector: "#inserted" }),
+    );
+    h.prose = ["A changed page around an unchanged control"];
+    const updated = await observe(started.session_id);
+    expect(domRefs(updated)).toContain(original);
+    expect(updated.removed ?? []).not.toContain(original);
+    await act(started.session_id, { kind: "click", target: original }, "none");
+    expect(h.clickCalls).toBe(1);
+    expect(
+      (h.elements as InteractiveElement[]).find((element) => element.id === "keep")?.checked,
+    ).toBe(true);
+  });
+
+  it("explicitly marks an unchanged delta and distinguishes a newly blank page", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [elem({ id: "continue", visibleText: "Continue", selector: "#continue" })];
+    h.prose = ["Waiting for the protection check"];
+    const started = await startHarnessProvisionSession({
+      browser: new BrowserController(),
+      observationFormat: "browser-use-dom",
+      serviceUrl: "https://app.example.com/protect",
+    });
+    expect(started.dom).toContain("Waiting for the protection check");
+    expect(started).not.toHaveProperty("dom_unchanged");
+    const revision = paymentSession(started.session_id).compactV2Index!.epoch.rev;
+    const unchanged = await observe(started.session_id);
+    expect(unchanged).toMatchObject({ delta: true, dom_unchanged: true });
+    expect(unchanged).not.toHaveProperty("dom");
+    expect(unchanged).not.toHaveProperty("removed");
+    expect(paymentSession(started.session_id).compactV2Index!.epoch.rev).toBe(revision);
+    h.elements = [];
+    h.prose = [];
+    const blank = await observe(started.session_id);
+    expect(blank).toMatchObject({ delta: true, dom: "", removed: domRefs(started) });
+    expect(blank).not.toHaveProperty("dom_unchanged");
+    const stillBlank = await observe(started.session_id);
+    expect(stillBlank).toMatchObject({ delta: true, dom_unchanged: true });
+    expect(stillBlank).not.toHaveProperty("dom");
   });
 
   it("surfaces a failed DOM capture instead of silently emitting an empty observation", async () => {
