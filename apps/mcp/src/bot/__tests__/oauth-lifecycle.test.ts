@@ -680,7 +680,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const expectedReturnUrl = "https://console.product.test/projects";
     const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
     const previousCooldown = process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
-    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "1600";
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "4000";
     process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
     await context.route("https://product.test/**", (route) =>
       route.fulfill({
@@ -704,12 +704,20 @@ describe("BrowserController OAuth popup lifecycle", () => {
     );
     await product.goto("https://product.test/login");
     const controller = BrowserController.fromHarnessPage(product);
+    vi.spyOn(
+      controller as unknown as {
+        waitForOAuthLifecycle: (...args: unknown[]) => Promise<Page | null>;
+      },
+      "waitForOAuthLifecycle",
+    ).mockResolvedValueOnce(null);
     let releaseConsent!: () => void;
+    let consentStarted = false;
     const consentGate = new Promise<boolean>((resolve) => {
       releaseConsent = () => resolve(true);
     });
     vi.spyOn(controller, "advanceOAuthConsent").mockImplementation(async () => {
       await product.goto("https://console.product.test/projects");
+      consentStarted = true;
       return await consentGate;
     });
     let sessionId: string | undefined;
@@ -731,6 +739,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         target: oauthRef!,
         provider: "google",
       });
+      expect(consentStarted).toBe(true);
       expect(result.url).toBe("https://console.product.test/projects");
       expect(result.oauth).toBeUndefined();
       if (format === "compact-v2") expect(result).toMatchObject({ format: "compact-v2" });
