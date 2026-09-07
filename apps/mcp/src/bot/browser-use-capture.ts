@@ -63,8 +63,8 @@ export async function captureBrowserUseDOM(
   page: Page,
   existing: readonly InteractiveElement[],
   framePath: (frame: Frame) => string | null,
+  frameSecurity: (frame: Frame) => Promise<{ opaque: boolean }>,
 ): Promise<BrowserUseCapture> {
-  const elements = existing.filter((e) => e.frameOpaque !== true).map((e) => ({ ...e }));
   const nodeElements = new Map<string, InteractiveElement>();
   const opaqueFrames = new Map<Frame, boolean>();
   const viewMetadata = new Map<
@@ -73,26 +73,34 @@ export async function captureBrowserUseDOM(
   >();
   let moreAbove = false,
     moreBelow = false;
+  const classifyFrame = async (frame: Frame): Promise<void> => {
+    if (frame === page.mainFrame()) {
+      opaqueFrames.set(frame, false);
+      return;
+    }
+    if (opaqueFrames.has(frame)) return;
+    try {
+      opaqueFrames.set(frame, (await frameSecurity(frame)).opaque);
+    } catch {
+      opaqueFrames.set(frame, true);
+    }
+  };
+  await Promise.all(page.frames().map(classifyFrame));
+  const opaqueFramePaths = new Set(
+    [...opaqueFrames]
+      .filter(([, opaque]) => opaque)
+      .map(([frame]) => framePath(frame)),
+  );
+  const elements = existing
+    .filter((e) => e.frameOpaque !== true && !opaqueFramePaths.has(e.framePath ?? null))
+    .map((e) => ({ ...e }));
   const cdp = await page.context().newCDPSession(page);
   const sessions: CDPSession[] = [cdp];
   const existingBySelector = new Map(elements.map((e) => [pathKey(e.framePath, e.selector), e]));
-  const sandboxIsOpaque = (sandbox: string | undefined): boolean =>
-    sandbox !== undefined && !sandbox.toLowerCase().split(/\s+/).includes("allow-same-origin");
-  const frameUrlIsOpaque = (frame: Frame): boolean => {
-    if (frame === page.mainFrame()) return false;
-    const url = frame.url();
-    if (url === "" || url === "about:blank" || url === "about:srcdoc") return true;
-    try {
-      return new URL(url).origin === "null";
-    } catch {
-      return true;
-    }
-  };
   const capture = async (
     client: CDPSession,
     prefix: string,
     owningFrame: Frame,
-    owningFrameOpaque = false,
   ): Promise<BrowserUseNode> => {
     const [dom, snapshot, ax, frames] = await Promise.all([
       client.send("DOM.getDocument", { depth: -1, pierce: true }),
@@ -147,6 +155,7 @@ export async function captureBrowserUseDOM(
       }
     };
     bindFrames(frames.frameTree, owningFrame);
+    await Promise.all([...frameById.values()].map(classifyFrame));
     for (const frameId of frameIds.slice(1)) {
       const tree = await client.send("Accessibility.getFullAXTree", { frameId });
       for (const n of tree.nodes)
@@ -210,7 +219,6 @@ export async function captureBrowserUseDOM(
     const rawById = new Map<string, RawNode>();
     const nodeFrame = new Map<string, Frame>();
     const selectorsById = new Map<string, string>();
-    opaqueFrames.set(owningFrame, owningFrameOpaque || frameUrlIsOpaque(owningFrame));
     const build = (
       raw: RawNode,
       parents: Array<{ raw: RawNode; layout: Layout }>,
@@ -350,12 +358,6 @@ export async function captureBrowserUseDOM(
         n.children.push(build(shadow, chain, n, selector + " >> css=", frame));
       if (raw.contentDocument) {
         const contentFrame = frameById.get(raw.frameId ?? "") ?? frame;
-        opaqueFrames.set(
-          contentFrame,
-          (opaqueFrames.get(frame) ?? frameUrlIsOpaque(frame)) ||
-            sandboxIsOpaque(a.sandbox) ||
-            frameUrlIsOpaque(contentFrame),
-        );
         n.contentDocument = build(
           raw.contentDocument,
           chain,
@@ -376,7 +378,7 @@ export async function captureBrowserUseDOM(
       if (
         !el &&
         !inClosedShadow &&
-        opaqueFrames.get(frame) !== true &&
+        opaqueFrames.get(frame) === false &&
         n.nodeType === 1 &&
         (browserUseInteractive(n) || n.scrollable)
       ) {
@@ -455,9 +457,6 @@ export async function captureBrowserUseDOM(
             child,
             `${framePath(frame)}:`,
             frame,
-            (opaqueFrames.get(frame) ?? frameUrlIsOpaque(frame)) ||
-              sandboxIsOpaque(n.attributes.sandbox) ||
-              frameUrlIsOpaque(frame),
           );
         }
       }

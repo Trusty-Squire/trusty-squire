@@ -3,12 +3,19 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 // The former separate-prose-channel tests now exercise its replacement through
 // real Chrome: CDP capture -> canonical serializer -> shared substring screen.
-import { chromium, type Browser } from "playwright";
+import { chromium, type Browser, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { BrowserController } from "../browser.js";
 import { captureBrowserUseDOM } from "../browser-use-capture.js";
 import { serializeBrowserUseDOM } from "../browser-use-serializer.js";
 import { buildSafeControlsV2, screenBrowserUseValueV2 } from "../compact-observation-v2.js";
 let browser: Browser;
+const transparentFrameSecurity = async (): Promise<{ opaque: boolean }> => ({ opaque: false });
+const captureThroughController = async (page: Page) => {
+  const controller = new BrowserController({ humanize: false });
+  (controller as unknown as { page: Page }).page = page;
+  return controller.extractBrowserUseObservation();
+};
 beforeAll(async () => {
   browser = await chromium.launch({ headless: true });
 });
@@ -22,7 +29,7 @@ describe("interleaved observation DOM", () => {
       await page.setContent(
         '<!doctype html><html><body><p>Account overview</p><button><span>Continue signup</span></button><div style="height:1800px"></div><button id="below">Create workspace below</button></body></html>',
       );
-      const capture = await captureBrowserUseDOM(page, [], () => null);
+      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
       const dom = serializeBrowserUseDOM(capture.root).dom;
       expect(dom).toContain("Account overview");
       expect(dom).toMatch(/\[main:\d+\]<button \/>\n\tContinue signup/);
@@ -33,7 +40,7 @@ describe("interleaved observation DOM", () => {
       expect(below?.visibleText).toContain("Create workspace below");
       expect(below?.inViewport).toBe(false);
       await page.locator(below!.selector).scrollIntoViewIfNeeded();
-      const after = await captureBrowserUseDOM(page, [], () => null);
+      const after = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
       expect(serializeBrowserUseDOM(after.root).dom).toContain("Create workspace below");
       expect(after.moreAbove).toBe(true);
     } finally {
@@ -51,7 +58,7 @@ describe("interleaved observation DOM", () => {
         '<!doctype html><html><body><div style="height:1800px"></div><button id="below">Still below the fold</button><div style="height:1200px"></div></body></html>',
       );
       await page.evaluate(() => window.scrollTo(0, 600));
-      const capture = await captureBrowserUseDOM(page, [], () => null);
+      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
       const below = capture.elements.find((element) => element.id === "below");
       expect(below?.inViewport).toBe(false);
       expect(serializeBrowserUseDOM(capture.root).dom).not.toContain("Still below the fold");
@@ -76,7 +83,7 @@ describe("interleaved observation DOM", () => {
     const page = await browser.newPage();
     try {
       await page.goto(`http://127.0.0.1:${(server.address() as AddressInfo).port}/`);
-      const capture = await captureBrowserUseDOM(page, [], (frame) => frame.url());
+      const capture = await captureThroughController(page);
       const output = serializeBrowserUseDOM(capture.root, {
         ref: (node) => {
           const element = capture.nodeElements.get(node.id);
@@ -122,7 +129,7 @@ describe("interleaved observation DOM", () => {
     const page = await browser.newPage();
     try {
       await page.goto(`http://127.0.0.1:${(server.address() as AddressInfo).port}/`);
-      const capture = await captureBrowserUseDOM(page, [], (frame) => frame.url());
+      const capture = await captureThroughController(page);
       const handles = new Map(capture.elements.map((element) => [element, `@e:${element.index}`]));
       const safe = buildSafeControlsV2({
         elements: capture.elements,
@@ -164,6 +171,60 @@ describe("interleaved observation DOM", () => {
       );
     }
   });
+  it("keeps active-origin opaque controls visible but outside action and query maps", async () => {
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "text/html");
+      response.end(
+        request.url === "/normal"
+          ? '<span id="normal-action" onclick="window.clicked = true">Normal frame action</span>'
+          : request.url === "/opaque"
+            ? '<span id="opaque-action" onclick="window.clicked = true">Active-origin opaque action</span>'
+            : '<iframe src="/normal"></iframe><iframe id="opaque-frame" sandbox="allow-scripts" src="/opaque"></iframe>',
+      );
+    });
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const page = await browser.newPage();
+    try {
+      await page.goto(`http://127.0.0.1:${(server.address() as AddressInfo).port}/`);
+      await page.locator("#opaque-frame").evaluate((frame) => frame.removeAttribute("sandbox"));
+
+      const capture = await captureThroughController(page);
+      const handles = new Map(capture.elements.map((element) => [element, `@e:${element.index}`]));
+      const safe = buildSafeControlsV2({
+        elements: capture.elements,
+        legacyRefs: handles,
+        handles,
+        pageOrigin: new URL(page.url()).origin,
+        canonical: true,
+      });
+      const output = serializeBrowserUseDOM(capture.root, {
+        ref: (node) => {
+          const element = capture.nodeElements.get(node.id);
+          return element ? handles.get(element)! : { ref: `@e:unbound_${node.id}`, targetable: false };
+        },
+      });
+
+      expect(capture.elements.map((element) => element.id)).toContain("normal-action");
+      expect(capture.elements.some((element) => element.id === "opaque-action")).toBe(false);
+      expect(
+        safe.rows.map(
+          (row) => capture.elements.find((element) => handles.get(element) === row.ref)?.id,
+        ),
+      ).toContain("normal-action");
+      expect(output.dom).toContain("Active-origin opaque action");
+      expect(output.dom).toContain("not-targetable=true");
+      await page
+        .frames()
+        .find((frame) => frame.url().endsWith("/normal"))!
+        .locator("#normal-action")
+        .click();
+    } finally {
+      await page.close();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
   it("keeps null-origin frame controls visible but outside action and query maps", async () => {
     const page = await browser.newPage();
     try {
@@ -179,7 +240,7 @@ describe("interleaved observation DOM", () => {
         '<span id="blank-action" onclick="window.clicked = true">Blank opaque action</span>',
       );
 
-      const capture = await captureBrowserUseDOM(page, [], (frame) => frame.url());
+      const capture = await captureThroughController(page);
       const handles = new Map(capture.elements.map((element) => [element, `@e:${element.index}`]));
       const safe = buildSafeControlsV2({
         elements: capture.elements,
@@ -221,7 +282,7 @@ describe("interleaved observation DOM", () => {
       await page.setContent(
         readFileSync(new URL("./fixtures/shadow-unbound.html", import.meta.url), "utf8"),
       );
-      const capture = await captureBrowserUseDOM(page, [], () => null);
+      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
       const output = serializeBrowserUseDOM(capture.root, {
         ref: (node) => {
           const element = capture.nodeElements.get(node.id);
@@ -255,7 +316,7 @@ describe("interleaved observation DOM", () => {
       await page.setContent(
         `<div role="button" style="width:600px;height:300px"><span>Context text</span><input aria-label="Email"><span onclick="void 0">Separate action</span><span role="button" aria-label="Copy ${token}">Token ${token}</span></div>`,
       );
-      const capture = await captureBrowserUseDOM(page, [], () => null);
+      const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
       const ref = (node: { id: string }): string => `@e:f9a062f02fadf5_${node.id}`;
       const original = serializeBrowserUseDOM(capture.root, { ref });
       const screened = serializeBrowserUseDOM(capture.root, {

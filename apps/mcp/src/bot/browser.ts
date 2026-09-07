@@ -7523,7 +7523,12 @@ export class BrowserController {
   async extractBrowserUseObservation(): Promise<BrowserUseCapture> {
     if (!this.page) throw new Error("Browser not started");
     const elements = await this.extractInteractiveElements();
-    return captureBrowserUseDOM(this.page, elements, (frame) => this.framePath(frame));
+    return captureBrowserUseDOM(
+      this.page,
+      elements,
+      (frame) => this.framePath(frame),
+      (frame) => this.frameSecurity(frame),
+    );
   }
 
   /**
