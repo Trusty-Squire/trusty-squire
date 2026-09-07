@@ -80,6 +80,14 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("credential fetch approval page", () => {
+  it("styles the approval and denial controls with the shared button classes", async () => {
+    render(<CredentialFetchApprovalPage />);
+    const deny = await screen.findByRole("button", { name: "Deny" });
+    expect(deny.classList.contains("btn-deny")).toBe(true);
+    const approve = screen.getByRole("button", { name: "Approve reveal" });
+    expect(approve.classList.contains("btn-primary")).toBe(true);
+  });
+
   it("names the exact credential and field, and warns what approving costs", async () => {
     render(<CredentialFetchApprovalPage />);
     expect(await screen.findByText("AWS · prod")).toBeTruthy();
@@ -160,6 +168,7 @@ describe("credential fetch approval page", () => {
     const user = userEvent.setup();
     await user.click(await screen.findByRole("button", { name: "Approve reveal" }));
     expect(api.apiPost).not.toHaveBeenCalled();
-    expect(await screen.findByRole("button", { name: /set up passkey/i })).toBeTruthy();
+    const setup = await screen.findByRole("button", { name: /set up passkey/i });
+    expect(setup.classList.contains("btn-primary")).toBe(true);
   });
 });
