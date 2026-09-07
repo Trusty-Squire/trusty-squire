@@ -75,8 +75,8 @@ prices, statuses, meaningful attributes and all interactive descendants prevent
 collapse. Structural keys are interned bottom-up rather than recursively escaped.
 
 Unlabelled, non-interactive SVG rows are omitted. Interactive SVG descendants
-remain visible. Unlabelled iframe hints inherit enclosing text when available;
-only explicitly non-interactive empty hints may be omitted. Unlabelled form rows inherit enclosing row/heading text when available. A row
+remain visible. Unlabelled iframe hints inherit only bounded local container text;
+oversized containers supply no inherited hint. Only explicitly non-interactive empty hints may be omitted. Unlabelled form rows inherit enclosing row/heading text when available. A row
 may be omitted only if its exact target ref has already been emitted.
 Distinct checkboxes survive regardless of how similar they look. This does not
 infer that a second checkbox is a proxy from appearance alone.
@@ -87,9 +87,9 @@ controls, listeners, focusability and scrolling prevent coalescing their action
 surface. The canonical small-icon class/geometry heuristic is not evidence that
 a syntax-highlight span is a control.
 
-Selectable generic cards emit authored `aria-pressed`/`aria-selected` and existing
-`data-state` values, plus raw screened `state_class` and visible child `state_icons`
-evidence where present. These are DOM facts, not inferred selected booleans.
+Selectable controls emit authored `aria-pressed`/`aria-selected` and existing
+`data-state` values, plus raw screened `state_class` for selection classes and visible
+check, selected, or tick child `state_icons` evidence. These are DOM facts, not inferred selected booleans.
 Stateless cards keep stable action refs but selection is undetectable by design;
 an unrelated button enabling cannot establish which card is selected.
 

@@ -13,26 +13,27 @@ pnpm --filter @trusty-squire/mcp test:fast
 
 The measurement command loads the actual baseline serializer from git and runs
 both implementations on the **same newly captured DOM input**. Baseline refs are
-10-character opaque hashes; new refs are 11-character production capabilities. Numbers
-are UTF-8 bytes of the emitted `dom`, before the unchanged text screen, excluding
+10-character opaque hashes; new refs are intentionally 11-character production capabilities.
+Its per-page columns isolate the one-byte-per-rendered-ref width cost from all other serializer
+changes. Numbers are UTF-8 bytes of the emitted `dom`, before the unchanged text screen, excluding
 the common response envelope. The measurement allocates refs by captured node
 identity when rendered; it does not simulate whole-document query inventory or
 a long-running session's document invalidation. They are not comparisons between different live
 page loads. Numeric backend IDs in the Python oracle are normalized only by the
 fixture comparison, not used as the baseline runtime refs.
 
-| Page / reproduction | Before bytes | After bytes | Saved | Reduction |
-| --- | ---: | ---: | ---: | ---: |
-| ipinfo | 7627 | 15903 | -8276 | -108.5% |
-| mdn | 5390 | 6240 | -850 | -15.8% |
-| hacker-news | 19376 | 20001 | -625 | -3.2% |
-| wikipedia | 6422 | 7068 | -646 | -10.1% |
-| github | 4431 | 7157 | -2726 | -61.5% |
-| gov-uk | 1434 | 1907 | -473 | -33.0% |
-| Highlighted code (synthetic Vouchflow case) | 515 | 73 | 442 | 85.8% |
-| 12 repeated checkbox bindings (synthetic Resend case) | 1151 | 587 | 564 | 49.0% |
-| 24 distinct unlabelled checkboxes (reachability control) | 1151 | 1175 | -24 | -2.1% |
-| Six hero cards and decorative SVGs (synthetic Xata case) | 653 | 84 | 569 | 87.1% |
+| Page / reproduction | Baseline bytes | Current with 10-char refs | Current with 11-char refs | Ref-width change | Other serializer change | Total change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| ipinfo | 7627 | 8232 | 8368 | 136 | 605 | 741 |
+| mdn | 5390 | 5613 | 5693 | 80 | 223 | 303 |
+| hacker-news | 19376 | 26020 | 26569 | 549 | 6644 | 7193 |
+| wikipedia | 6422 | 6813 | 6896 | 83 | 391 | 474 |
+| github | 4431 | 4498 | 4580 | 82 | 67 | 149 |
+| gov-uk | 1434 | 1720 | 1742 | 22 | 286 | 308 |
+| Highlighted code (synthetic Vouchflow case) | 515 | 73 | 73 | 0 | -442 | -442 |
+| 12 repeated checkbox bindings (synthetic Resend case) | 1151 | 575 | 587 | 12 | -576 | -564 |
+| 24 distinct unlabelled checkboxes (reachability control) | 1151 | 1151 | 1175 | 24 | 0 | 24 |
+| Six hero cards and decorative SVGs (synthetic Xata case) | 653 | 84 | 84 | 0 | -569 | -569 |
 
 The six named pages are the pinned live corpus, regenerated with
 `browser-use==0.13.10`, 1280 × 800, viewport threshold 0 and paint-order filtering
@@ -53,8 +54,11 @@ without an identity relationship could remove an independent action.
 Production refs use 11 base64url characters, preserving 66 bits of session-secret
 HMAC output. A million arbitrary capability guesses succeeds with probability below
 1 in 70 trillion, and a million independently minted refs has collision probability
-below 1 in 100 million; a collision is retried before emission. The extra character
-is deliberately retained over a shorter counter because refs authorize actions.
+below 1 in 100 million; a collision is retried before emission. The one-byte increase
+over the baseline's 10-character payload is deliberately retained because refs authorize actions.
+The per-page table attributes 136, 80, 549, 83, 82, and 22 bytes respectively to that
+width change; the remaining growth is serializer output, principally Hacker News's
+6,644-byte difference, rather than the capability length.
 
 ## Deliberate divergence from canonical browser-use
 
