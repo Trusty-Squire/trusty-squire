@@ -159,9 +159,32 @@ export interface SafeObservationBaselineV2 {
   renderedRefs?: string[];
 }
 
-/** `@e:` + a truncated session-secret HMAC of (document epoch, fingerprint). */
-export const COMPACT_V2_HANDLE_LENGTH = 10;
-const COMPACT_V2_HANDLE_RE = new RegExp(`^@e:[A-Za-z0-9_-]{${COMPACT_V2_HANDLE_LENGTH}}$`);
+/** Session-allocated base36 identities; never observation positions. */
+const COMPACT_V2_HANDLE_RE = /^@e:[a-z0-9]+$/;
+
+/** Holds only the current document's identities, with a session-long counter.
+ * Clearing a document never recycles a ref, including a return to an old URL.
+ * These are lookup keys, not credentials; action authorization still requires
+ * membership in the observed map and live fingerprint re-resolution.
+ */
+export class StableObservationRefs {
+  private document: string | undefined;
+  private next = 0;
+  private refs = new Map<string, string>();
+  get(document: string, identity: string): string {
+    if (this.document !== document) {
+      this.document = document;
+      this.refs.clear();
+    }
+    let ref = this.refs.get(identity);
+    if (ref === undefined) {
+      if (this.next >= Number.MAX_SAFE_INTEGER) throw new Error("observation_ref_exhausted");
+      ref = `@e:${(++this.next).toString(36)}`;
+      this.refs.set(identity, ref);
+    }
+    return ref;
+  }
+}
 const COMPACT_V2_LABEL_RE = /^@[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export function isCompactV2Handle(target: string): boolean {
@@ -177,7 +200,7 @@ export function isCompactV2Label(target: string): boolean {
  * Resolve a handle only when it is well-formed AND a member of the current
  * snapshot's action map. Callers must never turn an unknown @e: value into a
  * label or legacy-ref lookup. The handle is document-scoped by construction
- * (the epoch is hashed into it), so a ref from a replaced document finds no
+ * (the allocator retires its document map), so a ref from a replaced document finds no
  * live match rather than resolving onto whatever now occupies its position.
  */
 export function compactV2LegacyRefForHandle(

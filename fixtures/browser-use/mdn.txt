@@ -1,181 +1,180 @@
 Open Shadow
-	[508]<div image_alt=Google Cloud image_src=aHR0cHM6Ly9zdGF0aWM0LmJ1eXNlbGxhZHMubmV0L3V1LzIvMTc2NDc2LzE3ODU0MTg3MzMtZ29vZ2xlLWNsb3VkLTEyOHgxMjgu... />
-		[407]<img alt=Google Cloud image_alt=Google Cloud image_src=aHR0cHM6Ly9zdGF0aWM0LmJ1eXNlbGxhZHMubmV0L3V1LzIvMTc2NDc2LzE3ODU0MTg3MzMtZ29vZ2xlLWNsb3VkLTEyOHgxMjgu... />
-		[405]<span />
-			Future-proof infrastructure. Powerful data & analytics. No ops, just code.
-	[406]<span />
+	[505]<div image_alt=Google Cloud image_src=aHR0cHM6Ly9zdGF0aWM0LmJ1eXNlbGxhZHMubmV0L3V1LzIvMTc2NDc2LzE3ODU0MTg3MzMtZ29vZ2xlLWNsb3VkLTEyOHgxMjgu... />
+		[404]<img alt=Google Cloud image_alt=Google Cloud image_src=aHR0cHM6Ly9zdGF0aWM0LmJ1eXNlbGxhZHMubmV0L3V1LzIvMTc2NDc2LzE3ODU0MTg3MzMtZ29vZ2xlLWNsb3VkLTEyOHgxMjgu... />
+		[402]<span />
+			Deploy a java app, dynamic website, or ecommerce app in minutes with prebuilt samples.
+	[403]<span />
 		Start Free
 	Open Shadow
-		[519]<a />
+		[516]<a />
 			Ad
 	Shadow End
 	Open Shadow
-		[526]<a />
+		[523]<a />
 			Don't want to see ads?
 	Shadow End
 Shadow End
-[541]<a />
-[591]<button expanded=false />
+[538]<a />
+[588]<button expanded=false />
 	HTML
-[708]<button expanded=false />
+[705]<button expanded=false />
 	CSS
-[840]<button expanded=false />
+[837]<button expanded=false />
 	JavaScript
-[944]<button expanded=false />
+[941]<button expanded=false />
 	Web APIs
-[1056]<button expanded=false />
+[1053]<button expanded=false />
 	All
-[1168]<button expanded=false />
+[1165]<button expanded=false />
 	Learn
-[1280]<button expanded=false />
+[1277]<button expanded=false />
 	Tools
-[1355]<button expanded=false />
+[1352]<button expanded=false />
 	About
-[1403]<a />
+[1400]<a />
 	Blog
-[1409]<div />
+[1406]<div />
 	Open Shadow
-		[1416]<button title=Search the site />
+		[1413]<button title=Search the site />
 	Shadow End
 Open Shadow
-	|SHADOW(open)|[1431]<mdn-button />
+	|SHADOW(open)|[1428]<mdn-button />
 		Log in
 		Open Shadow
-			[1434]<a />
+			[1431]<a />
 		Shadow End
 Shadow End
-[1553]<a />
+[1550]<a />
 	Web
-[1562]<a />
+[1559]<a />
 	Web APIs
-[1571]<a />
+[1568]<a />
 	Fetch API
 Open Shadow
-	[1596]<button aria-label=Switch color theme expanded=false />
+	[1593]<button aria-label=Switch color theme expanded=false />
 		Theme
 Shadow End
 Open Shadow
-	[1669]<button expanded=false />
+	[1666]<button expanded=false />
 		English (US)
 Shadow End
 Fetch API
 The Fetch API provides an interface for fetching resources (including across the network). It is a more powerful and flexible replacement for
-[1884]<a />
-	[1885]<code />
+[1881]<a />
+	[1882]<code />
 		XMLHttpRequest
 In this article
-[1902]<a />
+[1899]<a />
 	Concepts and usage
-[1907]<a />
+[1904]<a />
 	Interfaces
-[1912]<a />
+[1909]<a />
 	HTTP headers
-[1917]<a />
+[1914]<a />
 	Specifications
-[1922]<a />
+[1919]<a />
 	Browser compatibility
-[1927]<a />
+[1924]<a />
 	See also
 Open Shadow
-	[1939]<a image_alt=Google Cloud image_src=aHR0cHM6Ly9zdGF0aWM0LmJ1eXNlbGxhZHMubmV0L3V1LzIvMTc2NDc2LzE3ODU0MjE4NzEtR3JhZGllbnRfU3VwZXJfQ2xvdWRf... />
-		[403]<div />
-			[1942]<strong />
-				Free Testing and Cost Control
-			[1946]<span />
-				Start your AI journey with free access to leading cloud products and services.
-			[1950]<span />
+	[1936]<a image_alt=ImageKit.io image_src=aHR0cHM6Ly9zdGF0aWM0LmJ1eXNlbGxhZHMubmV0L3V1LzIvMTY5MTc3LzE3NjA5ODk4NDctTUROX2FkLTAxLW1pbi5qcGc%3D.n... />
+		[400]<div />
+			Image & Video API
+			[1943]<span />
+				Real-time URL transforms, global CDN delivery & easy integration with existing storage.
+			[1947]<span />
 				Start Free
 	Open Shadow
-		[1958]<a />
+		[1955]<a />
 			Ad
 	Shadow End
 Shadow End
-[1980]<a />
+[1977]<a />
 	Concepts and usage
 The Fetch API uses
-[1987]<a />
-	[1988]<code />
+[1984]<a />
+	[1985]<code />
 		Request
 and
-[1991]<a />
-	[1992]<code />
+[1988]<a />
+	[1989]<code />
 		Response
 objects (and other things involved with network requests), as well as related concepts such as CORS and the HTTP Origin header semantics.
 For making a request and fetching a resource, use the
-[1998]<a title=fetch() />
-	[1999]<code />
+[60]<a title=fetch() />
+	[1995]<code />
 		fetch()
 method. It is a global method in both
-[2002]<a />
-	[2003]<code />
+[1998]<a />
+	[1999]<code />
 		Window
 and
-[2006]<a title=Worker />
-	[2007]<code />
+[2002]<a title=Worker />
+	[2003]<code />
 		Worker
 contexts. This makes it available in pretty much any context you might want to fetch resources in.
 The
 fetch()
 method takes one mandatory argument, the path to the resource you want to fetch. It returns a
-[2015]<a />
-	[2016]<code />
+[2011]<a />
+	[2012]<code />
 		Promise
 that resolves to the
-[2019]<a />
-	[2020]<code />
+[2015]<a />
+	[2016]<code />
 		Response
 to that request — as soon as the server responds with headers —
 even if the server response is an HTTP error status
 . You can also optionally pass in an
 init
 options object as the second argument (see
-[2029]<a />
-	[2030]<code />
+[2025]<a />
+	[2026]<code />
 		Request
 ).
 Once a
-[2036]<a />
-	[2037]<code />
+[2032]<a />
+	[2033]<code />
 		Response
 is retrieved, there are a number of methods available to define what the body content is and how it should be handled.
 |scroll element|<aside id=main-sidebar /> (0.0 pages above, 0.1 pages below)
 	Open Shadow
 		Filter sidebar
-		|SHADOW(open)|[7]<input id=input autocomplete=off type=text placeholder=Filter />
+		|SHADOW(open)|[3]<input id=input autocomplete=off type=text placeholder=Filter />
 	Shadow End
-	[15283]<a />
+	[15279]<a />
 		Fetch API
-	|SHADOW(open)|*[15286]<details compound_components=(name=Toggle Disclosure,role=button),(name=Content Area,role=region) />
-		[15287]<summary expanded=true />
-			[15288]<span />
+	|SHADOW(open)|*[15282]<details compound_components=(name=Toggle Disclosure,role=button),(name=Content Area,role=region) />
+		[15283]<summary expanded=true />
+			[15284]<span />
 				Guides
-		[15292]<a />
+		[15288]<a />
 			Using the Fetch API
-		[15295]<a />
+		[15291]<a />
 			Using Deferred Fetch
-	|SHADOW(open)|*[15298]<details compound_components=(name=Toggle Disclosure,role=button),(name=Content Area,role=region) />
-		[15299]<summary expanded=true />
-			[15300]<span />
+	|SHADOW(open)|*[15294]<details compound_components=(name=Toggle Disclosure,role=button),(name=Content Area,role=region) />
+		[15295]<summary expanded=true />
+			[15296]<span />
 				Interfaces
-		[15304]<a />
+		[15300]<a />
 			DeferredRequestInit
-			[29]<span role=img title=Experimental. Expect behavior to change in the future. aria-label=Experimental />
-		[15308]<a />
+			[25]<span role=img title=Experimental. Expect behavior to change in the future. aria-label=Experimental />
+		[15304]<a />
 			FetchLaterResult
-			[30]<span role=img title=Experimental. Expect behavior to change in the future. aria-label=Experimental />
-		[15312]<a />
+			[26]<span role=img title=Experimental. Expect behavior to change in the future. aria-label=Experimental />
+		[15308]<a />
 			Headers
-		[15316]<a />
+		[15312]<a />
 			Request
-		[15320]<a />
+		[15316]<a />
 			RequestInit
-		[15324]<a />
+		[15320]<a />
 			Response
-	|SHADOW(open)|*[15328]<details compound_components=(name=Toggle Disclosure,role=button),(name=Content Area,role=region) />
-		[15329]<summary expanded=true />
-			[15330]<span />
+	|SHADOW(open)|*[15324]<details compound_components=(name=Toggle Disclosure,role=button),(name=Content Area,role=region) />
+		[15325]<summary expanded=true />
+			[15326]<span />
 				Methods
-		[15334]<a />
+		[15330]<a />
 			Window
-			[15337]<wbr />
+			[15333]<wbr />
 			.fetch()

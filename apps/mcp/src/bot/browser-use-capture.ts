@@ -41,6 +41,7 @@ interface Layout {
   scroll: DOMBounds | null;
   client: DOMBounds | null;
   styles: Record<string, string>;
+  paintOrder?: number | undefined;
   inputValue?: string;
   checked?: boolean;
 }
@@ -98,7 +99,11 @@ export async function captureBrowserUseDOM(
   ): Promise<BrowserUseNode> => {
     const [dom, snapshot, ax, frames] = await Promise.all([
       client.send("DOM.getDocument", { depth: -1, pierce: true }),
-      client.send("DOMSnapshot.captureSnapshot", { computedStyles: STYLES, includeDOMRects: true }),
+      client.send("DOMSnapshot.captureSnapshot", {
+        computedStyles: STYLES,
+        includeDOMRects: true,
+        includePaintOrder: true,
+      }),
       client.send("Accessibility.getFullAXTree"),
       client.send("Page.getFrameTree"),
     ]);
@@ -117,6 +122,7 @@ export async function captureBrowserUseDOM(
       nodes.backendNodeId?.forEach((id, i) => {
         const li = layoutIndices.get(i);
         layouts.set(id, {
+          paintOrder: li === undefined ? undefined : layout.paintOrders?.[li],
           bounds: li === undefined ? null : rect(layout.bounds[li]),
           client: li === undefined ? null : rect(layout.clientRects?.[li]),
           scroll: li === undefined ? null : rect(layout.scrollRects?.[li]),
@@ -363,6 +369,8 @@ export async function captureBrowserUseDOM(
         snapshot: !!l,
         bounds: l?.bounds ?? null,
         cursor: l?.styles.cursor ?? null,
+        paintOrder: l?.paintOrder ?? null,
+        computedStyles: l?.styles ?? null,
         scrollable,
         showScroll,
         scrollText: t === "iframe" ? "scroll" : scrollParts.join(" "),
@@ -518,7 +526,9 @@ export async function captureBrowserUseDOM(
       if (["IFRAME", "FRAME"].includes(n.nodeName) && n.contentDocument) {
         const viewportHeight = viewMetadata.get(n.id)?.layout?.client?.height ?? 0;
         let anyHidden = false;
-        const collect = (c: BrowserUseNode): void => {
+        const textContent = (c: BrowserUseNode): string =>
+          c.nodeType === 3 ? c.value : c.children.map(textContent).join(" ");
+        const collect = (c: BrowserUseNode, context = ""): void => {
           const meta = viewMetadata.get(c.id),
             l = meta?.layout;
           const hidden =
@@ -531,15 +541,18 @@ export async function captureBrowserUseDOM(
           if (hidden && browserUseInteractive(c))
             n.hiddenElements.push({
               tag: c.nodeName.toLowerCase(),
+              interactive: true,
               text:
                 meta?.name ||
                 c.attributes.placeholder ||
                 c.attributes.title ||
                 c.attributes["aria-label"] ||
+                context ||
                 "(no label)",
               pages: viewportHeight > 0 ? (c.bounds!.y / viewportHeight).toFixed(1) : 0,
             });
-          c.children.forEach(collect);
+          const nearby = textContent(c).replace(/\s+/g, " ").trim() || context;
+          c.children.forEach((child) => collect(child, nearby));
         };
         collect(n.contentDocument);
         n.hiddenElements.sort((a, b) => Number(a.pages) - Number(b.pages));

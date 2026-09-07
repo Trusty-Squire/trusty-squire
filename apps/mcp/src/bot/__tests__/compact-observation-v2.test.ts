@@ -478,7 +478,7 @@ describe("compact observation v2", () => {
     const current = new Map([["@e:hhhhhhhhh1", "@e:legacy_current"]]);
     expect(compactV2LegacyRefForHandle(current, "@e:hhhhhhhhh1")).toBe("@e:legacy_current");
     expect(compactV2LegacyRefForHandle(current, "@e:hhhhhhhhh2")).toBeNull(); // not a member
-    expect(compactV2LegacyRefForHandle(current, "@e:short")).toBeNull(); // malformed
+    expect(compactV2LegacyRefForHandle(current, "@e:short")).toBeNull(); // not a member
     expect(compactV2LegacyRefForHandle(current, "@e:1.1")).toBeNull(); // legacy index form
     expect(compactV2LegacyRefForHandle(current, "@private-merchant-copy")).toBeNull(); // a label
   });

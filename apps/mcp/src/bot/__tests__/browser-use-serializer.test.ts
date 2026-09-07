@@ -30,6 +30,7 @@ describe("canonical browser-use 0.13.10 fixture oracle", () => {
       ).toBe(fixture.sha256);
       const actual = serializeBrowserUseDOM(fixture.root, {
         ref: (n) => "@e:" + n.id,
+        canonical: true,
       }).dom;
       expect(identity(actual)).toBe(identity(expected));
     });

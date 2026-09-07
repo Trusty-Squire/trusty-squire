@@ -40,6 +40,8 @@ def capture_node(node):
         "snapshot": snap is not None,
         "bounds": snap.bounds.to_dict() if snap and snap.bounds else None,
         "cursor": snap.cursor_style if snap else None,
+        "paintOrder": snap.paint_order if snap else None,
+        "computedStyles": snap.computed_styles if snap else None,
         "scrollable": bool(node.is_actually_scrollable),
         "showScroll": node.should_show_scroll_info,
         "scrollText": node.get_scroll_info_text(),
@@ -78,9 +80,8 @@ async def main():
                 continue
             await browser.navigate_to(url)
             await asyncio.sleep(3)
-            # Paint order is the binding review's named follow-up. Viewport
-            # threshold 0 scopes the canonical capture to the actual viewport.
-            service = DomService(browser, viewport_threshold=0, paint_order_filtering=False, cross_origin_iframes=True)
+            # Keep canonical paint-order filtering enabled; record its snapshot inputs.
+            service = DomService(browser, viewport_threshold=0, paint_order_filtering=True, cross_origin_iframes=True)
             state, tree, _ = await service.get_serialized_dom_tree()
             actual = state.llm_representation()
             target = output / f"{slug}.txt"
@@ -94,7 +95,7 @@ async def main():
             payload = {
                 "browserUse": PIN, "capturedAt": datetime.now(timezone.utc).isoformat(),
                 "url": url, "viewport": {"width": 1280, "height": 800},
-                "paintOrderFiltering": False, "viewportThreshold": 0, "crossOriginIframes": True,
+                "paintOrderFiltering": True, "viewportThreshold": 0, "crossOriginIframes": True,
                 "sha256": hashlib.sha256(actual.encode()).hexdigest(),
                 "root": capture_node(tree),
             }

@@ -1,154 +1,151 @@
-[70]<a />
-	Skip to content
-[72]<div />
-	Navigation Menu
-	[455]<div />
-		[460]<a aria-label=Homepage />
-	[77]<button expanded=false />
-		Platform
-	[78]<button expanded=false />
-		Solutions
-	[79]<button expanded=false />
-		Resources
-	[80]<button expanded=false />
-		Open Source
-	[81]<button expanded=false />
-		Enterprise
-	[1017]<a />
-		Pricing
-	[5]<div />
-		[82]<button aria-label=Search or jump to, type / to search expanded=false />
-	[1030]<a />
-		Sign in
-	[7]<a />
-		Sign up
-	[8]<button />
-		[1040]<span />
-			[1041]<span />
+Skip to content
+Navigation Menu
+[435]<div />
+	[440]<a aria-label=Homepage />
+[57]<button expanded=false />
+	Platform
+[58]<button expanded=false />
+	Solutions
+[59]<button expanded=false />
+	Resources
+[60]<button expanded=false />
+	Open Source
+[61]<button expanded=false />
+	Enterprise
+[998]<a />
+	Pricing
+[62]<button aria-label=Search or jump to, type / to search expanded=false />
+[1013]<a />
+	Sign in
+[1017]<a />
+	Sign up
+[63]<button />
+	[1024]<span />
+		[1025]<span />
 Anthropic
-|SHADOW(open)|*[88]<details compound_components=(name=Toggle Disclosure,role=button),(name=Content Area,role=region) />
-	[1185]<summary title=Label: Verified expanded=false />
+|SHADOW(open)|*[69]<details compound_components=(name=Toggle Disclosure,role=button),(name=Content Area,role=region) />
+	[1169]<summary title=Label: Verified expanded=false />
 		Verified
-[1232]<svg /> <!-- SVG content collapsed -->
-[1237]<a />
+[1216]<svg /> <!-- SVG content collapsed -->
+[1221]<a />
 	85.3k
 	followers
-[1246]<svg /> <!-- SVG content collapsed -->
+[1230]<svg /> <!-- SVG content collapsed -->
 United States of America
-[1257]<svg /> <!-- SVG content collapsed -->
-[1262]<a title=https://anthropic.com />
+[1241]<svg /> <!-- SVG content collapsed -->
+[1246]<a title=https://anthropic.com />
 	https://anthropic.com
-[1284]<a />
+[1268]<a />
 	Overview
-[1296]<a />
+[1280]<a />
 	Repositories
 	106
-[58]<a />
+[40]<a />
 	Projects
-[61]<a />
+[43]<a />
 	Packages
-[64]<a />
+[46]<a />
 	People
 Popular repositories
 Loading
-[1440]<span />
-	[91]<a id=1061953414 />
+[1424]<span />
+	[72]<a id=1061953414 />
 		skills
-[9]<span />
+[1436]<span />
 	Public
 Public repository for Agent Skills
-[1463]<span />
+[1448]<span />
 Python
-[1469]<a />
-	[1471]<svg aria-label=stars role=img /> <!-- SVG content collapsed -->
+[1454]<a />
+	[1456]<svg aria-label=stars role=img /> <!-- SVG content collapsed -->
 	175k
-[1477]<a />
-	[1479]<svg aria-label=forks role=img /> <!-- SVG content collapsed -->
+[1462]<a />
+	[1464]<svg aria-label=forks role=img /> <!-- SVG content collapsed -->
 	20.7k
-[93]<a id=937253475 />
+[74]<a id=937253475 />
 	claude-code
-[12]<span />
+[1494]<span />
 	Public
 Claude Code is an agentic coding tool that lives in your terminal, understands your codebase, and helps you code faster by executing routine tasks, explaining complex code, and handling git workflo…
-[13]<span />
+[1505]<span />
 Python
-[1522]<a />
-	[14]<svg aria-label=stars role=img /> <!-- SVG content collapsed -->
+[1511]<a />
+	[1513]<svg aria-label=stars role=img /> <!-- SVG content collapsed -->
 	144k
-[1529]<a />
-	[15]<svg aria-label=forks role=img /> <!-- SVG content collapsed -->
-	23k
-[95]<a id=678973052 />
+[1519]<a />
+	[1521]<svg aria-label=forks role=img /> <!-- SVG content collapsed -->
+	23.1k
+[76]<a id=678973052 />
 	claude-cookbooks
-[16]<span />
+[1551]<span />
 	Public
 A collection of notebooks/recipes showcasing some fun and effective ways of using Claude.
-[1571]<span />
+[1563]<span />
 Jupyter Notebook
-[1577]<a />
-	[1579]<svg aria-label=stars role=img /> <!-- SVG content collapsed -->
+[1569]<a />
+	[1571]<svg aria-label=stars role=img /> <!-- SVG content collapsed -->
 	52.5k
-[1585]<a />
-	[1587]<svg aria-label=forks role=img /> <!-- SVG content collapsed -->
+[1577]<a />
+	[1579]<svg aria-label=forks role=img /> <!-- SVG content collapsed -->
 	6.3k
-[97]<a id=781022269 />
+[78]<a id=781022269 />
 	prompt-eng-interactive-tutorial
-[19]<span />
+[1609]<span />
 	Public
 Anthropic's Interactive Prompt Engineering Tutorial
-[20]<span />
+[1621]<span />
 Jupyter Notebook
-[1631]<a />
-	[21]<svg aria-label=stars role=img /> <!-- SVG content collapsed -->
+[1627]<a />
+	[1629]<svg aria-label=stars role=img /> <!-- SVG content collapsed -->
 	38.1k
-[4]<a />
-	[22]<svg aria-label=forks role=img /> <!-- SVG content collapsed -->
+[1635]<a />
+	[1637]<svg aria-label=forks role=img /> <!-- SVG content collapsed -->
 	4.2k
-[99]<a id=1100776768 />
+[80]<a id=1100776768 />
 	claude-plugins-official
-[1668]<span />
+[1667]<span />
 	Public
 Official, Anthropic-managed directory of high quality Claude Code Plugins.
-[1680]<span />
+[1679]<span />
 Python
-[1686]<a />
-	[1688]<svg aria-label=stars role=img /> <!-- SVG content collapsed -->
+[1685]<a />
+	[1687]<svg aria-label=stars role=img /> <!-- SVG content collapsed -->
 	36k
-[1694]<a />
-	[1696]<svg aria-label=forks role=img /> <!-- SVG content collapsed -->
+[1693]<a />
+	[1695]<svg aria-label=forks role=img /> <!-- SVG content collapsed -->
 	4k
-[101]<a id=1165056385 />
+[82]<a id=1165056385 />
 	financial-services
-[1726]<span />
+[1725]<span />
 	Public
-[1738]<span />
+[1737]<span />
 Python
-[1744]<a />
-	[1746]<svg aria-label=stars role=img /> <!-- SVG content collapsed -->
+[1743]<a />
+	[1745]<svg aria-label=stars role=img /> <!-- SVG content collapsed -->
 	34.7k
-[1752]<a />
-	[1754]<svg aria-label=forks role=img /> <!-- SVG content collapsed -->
+[1751]<a />
+	[1753]<svg aria-label=forks role=img /> <!-- SVG content collapsed -->
 	5.2k
-[1771]<svg /> <!-- SVG content collapsed -->
+[1770]<svg /> <!-- SVG content collapsed -->
 Repositories
-[3648]<a />
+[3585]<a />
 	People
 This organization has no public members. You must be a member to see who’s a part of this organization.
 Top languages
-[3667]<a />
+[3604]<a />
 	Python
-[3678]<a />
+[3615]<a />
 	TypeScript
-[3689]<a />
+[3626]<a />
 	Go
-[3700]<a />
+[3637]<a />
 	Rust
-[68]<a />
+[3648]<a />
 	C++
 Most used topics
-[3736]<a title=Topic: anthropic />
+[3673]<a title=Topic: anthropic />
 	anthropic
-[3739]<a title=Topic: claude />
+[3676]<a title=Topic: claude />
 	claude
-[3742]<a title=Topic: mcp />
+[3679]<a title=Topic: mcp />
 	mcp

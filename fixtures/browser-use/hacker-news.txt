@@ -26,804 +26,810 @@
 		[102]<a id=up_49593563 />
 	[103]<td />
 		[105]<a />
-			Keep Our Servers Running: Your Recurring Donation Goes 3X This September
+			Keep Our Servers Running
 		[109]<a />
 			blog.archive.org
 [113]<tr />
 	[114]<td />
 	[115]<td />
 		[117]<span id=score_49593563 />
-			87 points
+			556 points
 		by
 		[120]<a />
 			sonicrocketman
 		[123]<span title=2026-09-07T03:29:51.000000Z />
 			[124]<a />
-				1 hour ago
+				8 hours ago
 		[129]<a />
 			hide
 		[132]<a />
-			21 comments
+			122 comments
 [134]<tr />
-[135]<tr id=49591876 />
+[135]<tr id=49596055 />
 	[136]<td />
 		[137]<span />
 			2.
 	[139]<td />
-		[141]<a id=up_49591876 />
+		[141]<a id=up_49596055 />
 	[142]<td />
 		[144]<a />
-			Making a Python interpreter in 1024 bytes
+			Caltech Mathathon – first hackathon ever devoted to research level mathematics
 		[148]<a />
-			austinhenley.com
+			mathathonchallenge.com
 [152]<tr />
 	[153]<td />
 	[154]<td />
-		[156]<span id=score_49591876 />
-			146 points
+		[156]<span id=score_49596055 />
+			36 points
 		by
-		[35]<a />
-			azhenley
-		[161]<span title=2026-09-06T23:14:08.000000Z />
-			[162]<a />
-				5 hours ago
-		[167]<a />
-			hide
-		[170]<a />
-			56 comments
-[172]<tr />
-[173]<tr id=49564609 />
-	[174]<td />
-		[175]<span />
-			3.
-	[177]<td />
-		[179]<a id=up_49564609 />
-	[180]<td />
-		[182]<a />
-			The NX bit is not just about security
-		[186]<a />
-			purplesyringa.moe
-[190]<tr />
-	[191]<td />
-	[192]<td />
-		[194]<span id=score_49564609 />
-			42 points
-		by
-		[197]<a />
-			torutofu
-		[200]<span title=2026-09-04T13:47:25.000000Z />
-			[201]<a />
-				4 hours ago
-		[206]<a />
-			hide
-		[209]<a />
-			30 comments
-[211]<tr />
-[212]<tr id=49590611 />
-	[213]<td />
-		[214]<span />
-			4.
-	[216]<td />
-		[218]<a id=up_49590611 />
-	[219]<td />
-		[221]<a />
-			It took a year to ship WebAssembly in Anubis
-		[225]<a />
-			techaro.lol
-[229]<tr />
-	[230]<td />
-	[231]<td />
-		[233]<span id=score_49590611 />
-			187 points
-		by
-		[236]<a />
-			xena
-		[239]<span title=2026-09-06T20:32:38.000000Z />
-			[240]<a />
-				8 hours ago
-		[245]<a />
-			hide
-		[248]<a />
-			103 comments
-[250]<tr />
-[251]<tr id=49550276 />
-	[252]<td />
-		[253]<span />
-			5.
-	[255]<td />
-		[257]<a id=up_49550276 />
-	[258]<td />
-		[260]<a />
-			I'm a seeing-eye dog for a computer
-		[264]<a />
-			claytonwramsey.com
-[268]<tr />
-	[269]<td />
-	[270]<td />
-		[272]<span id=score_49550276 />
-			12 points
-		by
-		[275]<a />
-			claytonwramsey
-		[278]<span title=2026-09-03T14:20:06.000000Z />
-			[279]<a />
+		[159]<a />
+			astroanax
+		[162]<span title=2026-09-07T09:26:53.000000Z />
+			[163]<a />
 				2 hours ago
-		[284]<a />
+		[168]<a />
 			hide
-		[287]<a />
-			discuss
-[289]<tr />
-[290]<tr id=49585644 />
-	[291]<td />
-		[292]<span />
-			6.
-	[294]<td />
-		[296]<a id=up_49585644 />
-	[297]<td />
-		[299]<a />
-			Your intellectual fly is open when you use an LLM to author a post (2025)
-		[303]<a />
-			dtrace.org
-[307]<tr />
-	[308]<td />
-	[309]<td />
-		[311]<span id=score_49585644 />
-			600 points
+		[171]<a />
+			2 comments
+[173]<tr />
+[174]<tr id=49595865 />
+	[175]<td />
+		[176]<span />
+			3.
+	[178]<td />
+		[180]<a id=up_49595865 />
+	[181]<td />
+		[183]<a />
+			Live map of public transport in Belgium
+		[187]<a />
+			openbaarvervoerbelgie.be
+[191]<tr />
+	[192]<td />
+	[193]<td />
+		[195]<span id=score_49595865 />
+			60 points
 		by
-		[314]<a />
-			cyb0rg0
-		[318]<a />
-			16 hours ago
-		[323]<a />
+		[198]<a />
+			coinfused
+		[201]<span title=2026-09-07T09:02:47.000000Z />
+			[202]<a />
+				2 hours ago
+		[207]<a />
 			hide
-		[326]<a />
-			393 comments
-[328]<tr />
-[329]<tr id=49577129 />
-	[330]<td />
-		[331]<span />
-			7.
-	[333]<td />
-		[335]<a id=up_49577129 />
-	[336]<td />
-		[338]<a />
-			Ask HN: Fable hacked my piano, can I release the results?
-[340]<tr />
-	[341]<td />
-	[342]<td />
-		[344]<span id=score_49577129 />
-			35 points
-		by
-		[347]<a />
-			jmpman
-		[350]<span title=2026-09-05T14:54:44.000000Z />
-			[351]<a />
-				4 hours ago
-		[356]<a />
-			hide
-		[359]<a />
-			20 comments
-[361]<tr />
-[362]<tr id=49588988 />
-	[363]<td />
-		[364]<span />
-			8.
-	[366]<td />
-		[368]<a id=up_49588988 />
-	[369]<td />
-		[371]<a />
-			Nitter and XCancel resume service after legal advice
-		[375]<a />
-			github.com/zedeus
-[379]<tr />
-	[380]<td />
-	[381]<td />
-		[383]<span id=score_49588988 />
-			558 points
-		by
-		[386]<a />
-			zImPatrick
-		[390]<a />
-			10 hours ago
-		[395]<a />
-			hide
-		[398]<a />
-			281 comments
-[400]<tr />
-[401]<tr id=49554622 />
-	[402]<td />
-		[403]<span />
-			9.
-	[405]<td />
-		[407]<a id=up_49554622 />
-	[408]<td />
-		[410]<a />
-			Babylonian Lamb Stew with Beets (1750–1730 BCE)
-		[414]<a />
-			yale.edu
-[418]<tr />
-	[419]<td />
-	[420]<td />
-		[422]<span id=score_49554622 />
-			122 points
-		by
-		[425]<a />
-			yubblegum
-		[429]<a />
-			12 hours ago
-		[434]<a />
-			hide
-		[437]<a />
-			63 comments
-[439]<tr />
-[440]<tr id=49590738 />
-	[441]<td />
-		[442]<span />
-			10.
-	[444]<td />
-		[446]<a id=up_49590738 />
-	[447]<td />
-		[449]<a />
-			Show HN: Mador – Make any DOM reactive with a tiny 80-line Proxy state tuple
-		[453]<a />
-			github.com/marsbos
-[457]<tr />
-	[458]<td />
-	[459]<td />
-		[461]<span id=score_49590738 />
-			82 points
-		by
-		[464]<a />
-			bosmarcel
-		[467]<span title=2026-09-06T20:45:13.000000Z />
-			[468]<a />
-				7 hours ago
-		[473]<a />
-			hide
-		[476]<a />
+		[210]<a />
 			22 comments
-[478]<tr />
-[479]<tr id=49589914 />
-	[480]<td />
-		[481]<span />
-			11.
-	[483]<td />
-		[485]<a id=up_49589914 />
-	[40]<td />
-		[487]<a />
-			Ask HN: How do you manage skills files?
-[489]<tr />
-	[490]<td />
-	[491]<td />
-		[493]<span id=score_49589914 />
+[212]<tr />
+[213]<tr id=49596054 />
+	[214]<td />
+		[215]<span />
+			4.
+	[217]<td />
+		[219]<a id=up_49596054 />
+	[220]<td />
+		[222]<a />
+			Speculative Decoding in vLLM on AMD GPUs
+		[224]<span />
+			[226]<a />
+				vllm.ai
+[230]<tr />
+	[231]<td />
+	[232]<td />
+		[234]<span id=score_49596054 />
 			30 points
 		by
-		[496]<a />
-			imadtaieber
-		[499]<span title=2026-09-06T19:27:10.000000Z />
-			[500]<a />
-				5 hours ago
-		[505]<a />
+		[237]<a />
+			ankitg12
+		[240]<span title=2026-09-07T09:26:41.000000Z />
+			[241]<a />
+				2 hours ago
+		[246]<a />
 			hide
-		[508]<a />
-			23 comments
-[510]<tr />
-[511]<tr id=49590595 />
-	[512]<td />
-		[513]<span />
-			12.
-	[515]<td />
-		[517]<a id=up_49590595 />
-	[518]<td />
-		[520]<a />
-			Harnessing the Universal Geometry of Embeddings
-		[524]<a />
-			arxiv.org
-[528]<tr />
-	[529]<td />
-	[530]<td />
-		[532]<span id=score_49590595 />
-			59 points
-		by
-		[535]<a />
-			ur-whale
-		[538]<span title=2026-09-06T20:31:20.000000Z />
-			[539]<a />
-				8 hours ago
-		[544]<a />
-			hide
-		[547]<a />
-			19 comments
-[549]<tr />
-[550]<tr id=49592366 />
-	[551]<td />
-		[552]<span />
-			13.
-	[554]<td />
-		[556]<a id=up_49592366 />
-	[557]<td />
-		[559]<a />
-			MathKernel: An evidence-aware multi-engine mathematics kernel and MCP server
-		[563]<a />
-			github.com/staatsgeheim
-[567]<tr />
-	[568]<td />
-	[569]<td />
-		[571]<span id=score_49592366 />
-			20 points
-		by
-		[574]<a />
-			staatsgeheim
-		[577]<span title=2026-09-07T00:21:01.000000Z />
-			[578]<a />
-				4 hours ago
-		[583]<a />
-			hide
-		[586]<a />
+		[249]<a />
 			5 comments
-[588]<tr />
-[589]<tr id=49588080 />
-	[590]<td />
-		[591]<span />
-			14.
-	[593]<td />
-		[595]<a id=up_49588080 />
-	[596]<td />
-		[598]<a />
-			An Alien Mind
-		[602]<a />
-			openai.com
-[606]<tr />
-	[607]<td />
-	[608]<td />
-		[610]<span id=score_49588080 />
-			363 points
+[251]<tr />
+[252]<tr id=49596274 />
+	[253]<td />
+		[254]<span />
+			5.
+	[256]<td />
+		[258]<a id=up_49596274 />
+	[259]<td />
+		[261]<a />
+			Impedance Matching
+		[265]<a />
+			edge.org
+[269]<tr />
+	[270]<td />
+	[271]<td />
+		[273]<span id=score_49596274 />
+			18 points
 		by
-		[613]<a />
-			tosh
-		[617]<a />
-			12 hours ago
-		[622]<a />
+		[276]<a />
+			muti
+		[279]<span title=2026-09-07T09:52:26.000000Z />
+			[280]<a />
+				1 hour ago
+		[285]<a />
 			hide
-		[625]<a />
-			315 comments
-[627]<tr />
-[628]<tr id=49592840 />
-	[629]<td />
-		[630]<span />
-			15.
-	[632]<td />
-		[634]<a id=up_49592840 />
-	[635]<td />
-		[637]<a />
-			Show HN: GET Together – A social network where you don't need POST to Post
-		[641]<a />
-			gettogether.dev
-[645]<tr />
-	[646]<td />
-	[647]<td />
-		[649]<span id=score_49592840 />
-			15 points
+		[288]<a />
+			5 comments
+[290]<tr />
+[291]<tr id=49594878 />
+	[292]<td />
+		[293]<span />
+			6.
+	[295]<td />
+		[297]<a id=up_49594878 />
+	[298]<td />
+		[300]<a />
+			LG smart TVs caught logging audio with screen off and snooping on local devices
+		[304]<a />
+			notebookcheck.net
+[308]<tr />
+	[309]<td />
+	[310]<td />
+		[312]<span id=score_49594878 />
+			267 points
 		by
-		[652]<a />
-			nchudleigh
-		[655]<span title=2026-09-07T01:41:11.000000Z />
-			[656]<a />
-				3 hours ago
-		[661]<a />
-			hide
-		[664]<a />
-			7 comments
-[666]<tr />
-[667]<tr id=49590512 />
-	[668]<td />
-		[669]<span />
-			16.
-	[671]<td />
-		[673]<a id=up_49590512 />
-	[674]<td />
-		[676]<a />
-			GrapheneOS Overhauled Default Apps and Secure Clipboard
-		[680]<a />
-			grapheneos.social
-[684]<tr />
-	[685]<td />
-	[686]<td />
-		[688]<span id=score_49590512 />
-			231 points
-		by
-		[691]<a />
-			Cider9986
-		[694]<span title=2026-09-06T20:24:00.000000Z />
-			[695]<a />
-				8 hours ago
-		[700]<a />
-			hide
-		[703]<a />
-			166 comments
-[705]<tr />
-[706]<tr id=49588483 />
-	[707]<td />
-		[708]<span />
-			17.
-	[710]<td />
-		[34]<a id=up_49588483 />
-	[712]<td />
-		[714]<a />
-			YouTube had a bug – I used ChatGPT to investigate
-		[718]<a />
-			thezilber.com
-[722]<tr />
-	[723]<td />
-	[724]<td />
-		[726]<span id=score_49588483 />
-			10 points
-		by
-		[729]<a />
-			theZilber
-		[732]<span title=2026-09-06T17:01:39.000000Z />
-			[36]<a />
-				3 hours ago
-		[737]<a />
-			hide
-		[740]<a />
-			7 comments
-[742]<tr />
-[743]<tr id=49590946 />
-	[744]<td />
-		[745]<span />
-			18.
-	[747]<td />
-		[749]<a id=up_49590946 />
-	[750]<td />
-		[752]<a />
-			Signing TLS handshakes inside a TPM
-		[756]<a />
-			bschaatsbergen.com
-[760]<tr />
-	[761]<td />
-	[762]<td />
-		[764]<span id=score_49590946 />
-			9 points
-		by
-		[767]<a />
-			bschaatsbergen
-		[770]<span title=2026-09-06T21:05:21.000000Z />
-			[771]<a />
-				3 hours ago
-		[776]<a />
-			hide
-		[779]<a />
-			4 comments
-[781]<tr />
-[782]<tr id=49587217 />
-	[783]<td />
-		[784]<span />
-			19.
-	[786]<td />
-		[788]<a id=up_49587217 />
-	[789]<td />
-		[791]<a />
-			Research acceleration: The view inside OpenAI
-		[795]<a />
-			openai.com
-[799]<tr />
-	[800]<td />
-	[801]<td />
-		[803]<span id=score_49587217 />
-			133 points
-		by
-		[806]<a />
-			iamsyr
-		[810]<a />
-			13 hours ago
-		[815]<a />
-			hide
-		[818]<a />
-			87 comments
-[820]<tr />
-[821]<tr id=49583440 />
-	[822]<td />
-		[823]<span />
-			20.
-	[825]<td />
-		[827]<a id=up_49583440 />
-	[828]<td />
-		[830]<a />
-			Ask HN: Would you read a statistics textbook?
-[832]<tr />
-	[833]<td />
-	[834]<td />
-		[836]<span id=score_49583440 />
-			16 points
-		by
-		[839]<a />
-			usernametaken29
-		[842]<span title=2026-09-06T04:52:18.000000Z />
-			[843]<a />
+		[315]<a />
+			chris_overseas
+		[318]<span title=2026-09-07T07:03:20.000000Z />
+			[319]<a />
 				4 hours ago
-		[848]<a />
+		[324]<a />
 			hide
-		[851]<a />
-			9 comments
-[853]<tr />
-[854]<tr id=49586698 />
-	[855]<td />
-		[856]<span />
-			21.
-	[858]<td />
-		[860]<a id=up_49586698 />
-	[861]<td />
-		[863]<a />
-			Asahi Linux on M3
-		[867]<a />
-			asahilinux.org
-[871]<tr />
-	[872]<td />
-	[873]<td />
-		[875]<span id=score_49586698 />
-			390 points
+		[327]<a />
+			155 comments
+[329]<tr />
+[330]<tr id=49596119 />
+	[331]<td />
+		[332]<span />
+			7.
+	[334]<td />
+		[336]<a id=up_49596119 />
+	[337]<td />
+		[339]<a />
+			'You Can See Everything' Review: Nathan Fielder's Doc About Elizabeth Holmes
+		[343]<a />
+			variety.com
+[347]<tr />
+	[348]<td />
+	[349]<td />
+		[351]<span id=score_49596119 />
+			70 points
 		by
-		[878]<a />
-			mdp2021
-		[882]<a />
-			14 hours ago
-		[887]<a />
+		[354]<a />
+			cianmm
+		[357]<span title=2026-09-07T09:33:39.000000Z />
+			[358]<a />
+				2 hours ago
+		[363]<a />
 			hide
-		[890]<a />
-			229 comments
-[892]<tr />
-[893]<tr id=49587636 />
-	[894]<td />
-		[895]<span />
-			22.
-	[897]<td />
-		[899]<a id=up_49587636 />
-	[900]<td />
-		[902]<a />
-			NetBSD 9.5 released and EOL for NetBSD-9
-		[906]<a />
-			netbsd.org
-[910]<tr />
-	[911]<td />
-	[912]<td />
-		[914]<span id=score_49587636 />
-			122 points
+		[366]<a />
+			32 comments
+[368]<tr />
+[369]<tr id=49596955 />
+	[370]<td />
+		[371]<span />
+			8.
+	[373]<td />
+		[375]<a id=up_49596955 />
+	[376]<td />
+		[378]<a />
+			US refuses payout for soldiers who died in Iran 'because it isn't a war'
+		[382]<a />
+			telegraph.co.uk
+[386]<tr />
+	[387]<td />
+	[388]<td />
+		[390]<span id=score_49596955 />
+			29 points
 		by
-		[917]<a />
-			jaypatelani
-		[921]<a />
-			12 hours ago
-		[926]<a />
+		[393]<a />
+			embedding-shape
+		[397]<a />
+			17 minutes ago
+		[402]<a />
 			hide
-		[929]<a />
-			11 comments
-[931]<tr />
-[932]<tr id=49540637 />
-	[933]<td />
-		[934]<span />
-			23.
-	[936]<td />
-		[938]<a id=up_49540637 />
-	[939]<td />
-		[941]<a />
-			Black Hole of Los Alamos: Seller of surplus nuclear research materials (2011)
-		[945]<a />
-			atlasobscura.com
-[949]<tr />
-	[950]<td />
-	[951]<td />
-		[953]<span id=score_49540637 />
-			49 points
-		by
-		[956]<a />
-			Bluestein
-		[959]<span title=2026-09-02T18:47:55.000000Z />
-			[960]<a />
-				9 hours ago
-		[965]<a />
-			hide
-		[968]<a />
-			13 comments
-[970]<tr />
-[971]<tr id=49555114 />
-	[972]<td />
-		[973]<span />
-			24.
-	[975]<td />
-		[977]<a id=up_49555114 />
-	[978]<td />
-		[980]<a />
-			Every Novel Is Boring–Until It Isn't
-		[984]<a />
-			publicbooks.org
-[988]<tr />
-	[989]<td />
-	[990]<td />
-		[992]<span id=score_49555114 />
-			25 points
-		by
-		[995]<a />
-			samclemens
-		[998]<span title=2026-09-03T19:10:02.000000Z />
-			[999]<a />
-				5 hours ago
-		[1004]<a />
-			hide
-		[1007]<a />
-			20 comments
-[1009]<tr />
-[1010]<tr id=49561514 />
-	[1011]<td />
-		[1012]<span />
-			25.
-	[1014]<td />
-		[1016]<a id=up_49561514 />
-	[1017]<td />
-		[1019]<a />
-			Reverse engineering the storage format for an undocumented database
-		[1023]<a />
-			glazer.ee
-[1027]<tr />
-	[1028]<td />
-	[1029]<td />
-		[1031]<span id=score_49561514 />
-			35 points
-		by
-		[1034]<a />
-			pintprint
-		[1037]<span title=2026-09-04T07:17:00.000000Z />
-			[1038]<a />
-				7 hours ago
-		[1043]<a />
-			hide
-		[1046]<a />
+		[405]<a />
 			3 comments
-[1048]<tr />
-[1049]<tr id=49587903 />
-	[1050]<td />
-		[1051]<span />
-			26.
-	[1053]<td />
-		[1055]<a id=up_49587903 />
-	[1056]<td />
-		[1058]<a />
-			Research carried out using NetBSD
-		[1062]<a />
-			netbsd.org
-[1066]<tr />
-	[1067]<td />
-	[1068]<td />
-		[1070]<span id=score_49587903 />
-			86 points
+[407]<tr />
+[408]<tr id=49591876 />
+	[409]<td />
+		[410]<span />
+			9.
+	[412]<td />
+		[414]<a id=up_49591876 />
+	[415]<td />
+		[417]<a />
+			Making a Python interpreter in 1024 bytes
+		[421]<a />
+			austinhenley.com
+[425]<tr />
+	[426]<td />
+	[427]<td />
+		[429]<span id=score_49591876 />
+			246 points
 		by
-		[1073]<a />
-			Bluestein
-		[1077]<a />
+		[432]<a />
+			azhenley
+		[436]<a />
 			12 hours ago
-		[1082]<a />
+		[441]<a />
 			hide
-		[1085]<a />
-			23 comments
-[1087]<tr />
-[1088]<tr id=49588466 image_src=s.gif />
-	[1089]<td />
-		[1090]<span />
+		[444]<a />
+			86 comments
+[446]<tr />
+[447]<tr id=49596976 />
+	[448]<td />
+		[449]<span />
+			10.
+	[451]<td />
+		[453]<a id=up_49596976 />
+	[454]<td />
+		[456]<a />
+			Apparently CodePen 2.0 sends data to their servers as you type
+[458]<tr />
+	[459]<td />
+	[460]<td />
+		[462]<span id=score_49596976 />
+			6 points
+		by
+		[465]<a />
+			maxim-fin
+		[469]<a />
+			15 minutes ago
+		[474]<a />
+			hide
+		[477]<a />
+			discuss
+[479]<tr />
+[480]<tr id=49589914 />
+	[481]<td />
+		[482]<span />
+			11.
+	[484]<td />
+		[486]<a id=up_49589914 />
+	[40]<td />
+		[488]<a />
+			Ask HN: How do you manage skills files?
+[490]<tr />
+	[491]<td />
+	[492]<td />
+		[494]<span id=score_49589914 />
+			162 points
+		by
+		[497]<a />
+			imadtaieber
+		[501]<a />
+			12 hours ago
+		[506]<a />
+			hide
+		[509]<a />
+			136 comments
+[511]<tr />
+[512]<tr id=49590611 />
+	[513]<td />
+		[514]<span />
+			12.
+	[516]<td />
+		[518]<a id=up_49590611 />
+	[519]<td />
+		[521]<a />
+			It took a year to ship WebAssembly in Anubis
+		[525]<a />
+			techaro.lol
+[529]<tr />
+	[530]<td />
+	[531]<td />
+		[533]<span id=score_49590611 />
+			285 points
+		by
+		[536]<a />
+			xena
+		[540]<a />
+			15 hours ago
+		[545]<a />
+			hide
+		[548]<a />
+			138 comments
+[550]<tr />
+[551]<tr id=49550436 />
+	[552]<td />
+		[553]<span />
+			13.
+	[555]<td />
+		[557]<a id=up_49550436 />
+	[558]<td />
+		[560]<a />
+			I Connected My Withings Body+ to Home Assistant with an ESP32
+		[564]<a />
+			didac.dev
+[568]<tr />
+	[569]<td />
+	[570]<td />
+		[572]<span id=score_49550436 />
+			6 points
+		by
+		[575]<a />
+			sabatesduran
+		[578]<span title=2026-09-03T14:33:01.000000Z />
+			[579]<a />
+				2 hours ago
+		[584]<a />
+			hide
+		[587]<a />
+			discuss
+[589]<tr />
+[590]<tr id=49595360 />
+	[591]<td />
+		[592]<span />
+			14.
+	[594]<td />
+		[596]<a id=up_49595360 />
+	[597]<td />
+		[599]<a />
+			Programming is Art
+		[603]<a />
+			orchidfiles.com
+[607]<tr />
+	[608]<td />
+	[609]<td />
+		[611]<span id=score_49595360 />
+			89 points
+		by
+		[614]<a />
+			theorchid
+		[617]<span title=2026-09-07T08:05:00.000000Z />
+			[618]<a />
+				3 hours ago
+		[623]<a />
+			hide
+		[626]<a />
+			93 comments
+[628]<tr />
+[629]<tr id=49592840 />
+	[630]<td />
+		[631]<span />
+			15.
+	[633]<td />
+		[635]<a id=up_49592840 />
+	[636]<td />
+		[638]<a />
+			Show HN: GET Together – A social network where you don't need POST to Post
+		[642]<a />
+			gettogether.dev
+[646]<tr />
+	[647]<td />
+	[648]<td />
+		[650]<span id=score_49592840 />
+			70 points
+		by
+		[653]<a />
+			nchudleigh
+		[656]<span title=2026-09-07T01:41:11.000000Z />
+			[657]<a />
+				9 hours ago
+		[662]<a />
+			hide
+		[665]<a />
+			32 comments
+[667]<tr />
+[668]<tr id=49594008 />
+	[669]<td />
+		[670]<span />
+			16.
+	[672]<td />
+		[674]<a id=up_49594008 />
+	[675]<td />
+		[677]<a />
+			Show HN: Engrim – A universal, local-first SQLite memory engine for AI CLIs
+		[681]<a />
+			github.com/timgordontg
+[685]<tr />
+	[686]<td />
+	[687]<td />
+		[689]<span id=score_49594008 />
+			46 points
+		by
+		[692]<a />
+			timgordontg
+		[695]<span title=2026-09-07T04:49:36.000000Z />
+			[696]<a />
+				6 hours ago
+		[701]<a />
+			hide
+		[704]<a />
+			11 comments
+[706]<tr />
+[707]<tr id=49577129 />
+	[708]<td />
+		[709]<span />
+			17.
+	[711]<td />
+		[713]<a id=up_49577129 />
+	[714]<td />
+		[716]<a />
+			Ask HN: Fable hacked my piano, can I release the results?
+[718]<tr />
+	[719]<td />
+	[720]<td />
+		[722]<span id=score_49577129 />
+			174 points
+		by
+		[725]<a />
+			jmpman
+		[729]<a />
+			11 hours ago
+		[734]<a />
+			hide
+		[737]<a />
+			110 comments
+[739]<tr />
+[740]<tr id=49588988 />
+	[741]<td />
+		[742]<span />
+			18.
+	[744]<td />
+		[746]<a id=up_49588988 />
+	[747]<td />
+		[749]<a />
+			Nitter and XCancel resume service after legal advice
+		[753]<a />
+			github.com/zedeus
+[757]<tr />
+	[758]<td />
+	[759]<td />
+		[761]<span id=score_49588988 />
+			767 points
+		by
+		[764]<a />
+			zImPatrick
+		[768]<a />
+			17 hours ago
+		[773]<a />
+			hide
+		[776]<a />
+			338 comments
+[778]<tr />
+[779]<tr id=49594251 />
+	[780]<td />
+		[781]<span />
+			19.
+	[783]<td />
+		[785]<a id=up_49594251 />
+	[786]<td />
+		[788]<a />
+			Switzerland's Federal Government Is Replacing Microsoft on 3k Computers
+		[792]<a />
+			itsfoss.com
+[796]<tr />
+	[797]<td />
+	[798]<td />
+		[800]<span id=score_49594251 />
+			196 points
+		by
+		[803]<a />
+			ivell
+		[806]<span title=2026-09-07T05:33:25.000000Z />
+			[807]<a />
+				6 hours ago
+		[812]<a />
+			hide
+		[815]<a />
+			153 comments
+[817]<tr />
+[818]<tr id=49590512 />
+	[819]<td />
+		[820]<span />
+			20.
+	[822]<td />
+		[824]<a id=up_49590512 />
+	[825]<td />
+		[827]<a />
+			GrapheneOS Overhauled Default Apps and Secure Clipboard
+		[831]<a />
+			grapheneos.social
+[835]<tr />
+	[836]<td />
+	[837]<td />
+		[839]<span id=score_49590512 />
+			308 points
+		by
+		[842]<a />
+			Cider9986
+		[846]<a />
+			15 hours ago
+		[851]<a />
+			hide
+		[854]<a />
+			216 comments
+[856]<tr />
+[857]<tr id=49591793 />
+	[858]<td />
+		[859]<span />
+			21.
+	[861]<td />
+		[863]<a id=up_49591793 />
+	[864]<td />
+		[866]<a />
+			Is mathematics about to enter the conservatory?
+		[35]<a />
+			mbmccoy.dev
+[873]<tr />
+	[874]<td />
+	[875]<td />
+		[877]<span id=score_49591793 />
+			63 points
+		by
+		[880]<a />
+			_alternator_
+		[884]<a />
+			12 hours ago
+		[889]<a />
+			hide
+		[892]<a />
+			77 comments
+[894]<tr />
+[895]<tr id=49590595 />
+	[896]<td />
+		[897]<span />
+			22.
+	[899]<td />
+		[901]<a id=up_49590595 />
+	[902]<td />
+		[904]<a />
+			Harnessing the Universal Geometry of Embeddings
+		[908]<a />
+			arxiv.org
+[912]<tr />
+	[913]<td />
+	[914]<td />
+		[916]<span id=score_49590595 />
+			85 points
+		by
+		[919]<a />
+			ur-whale
+		[923]<a />
+			15 hours ago
+		[928]<a />
+			hide
+		[931]<a />
+			30 comments
+[933]<tr />
+[934]<tr id=49593971 />
+	[935]<td />
+		[936]<span />
+			23.
+	[938]<td />
+		[940]<a id=up_49593971 />
+	[941]<td />
+		[943]<a />
+			TiVo to charge money for skipping commercials in your own recordings
+		[947]<a />
+			cordcuttersnews.com
+[951]<tr />
+	[952]<td />
+	[953]<td />
+		[955]<span id=score_49593971 />
+			99 points
+		by
+		[958]<a />
+			dmitrygr
+		[961]<span title=2026-09-07T04:41:01.000000Z />
+			[962]<a />
+				6 hours ago
+		[967]<a />
+			hide
+		[970]<a />
+			53 comments
+[972]<tr />
+[973]<tr id=49593066 />
+	[974]<td />
+		[975]<span />
+			24.
+	[977]<td />
+		[979]<a id=up_49593066 />
+	[980]<td />
+		[982]<a />
+			Has anybody seen my keys? A key-hierarchy strategy for rack-level security
+		[986]<a />
+			oxide.computer
+[990]<tr />
+	[991]<td />
+	[992]<td />
+		[994]<span id=score_49593066 />
+			37 points
+		by
+		[997]<a />
+			cyb0rg0
+		[1000]<span title=2026-09-07T02:14:59.000000Z />
+			[1001]<a />
+				9 hours ago
+		[1006]<a />
+			hide
+		[1009]<a />
+			3 comments
+[1011]<tr />
+[1012]<tr id=49586698 />
+	[1013]<td />
+		[1014]<span />
+			25.
+	[1016]<td />
+		[1018]<a id=up_49586698 />
+	[1019]<td />
+		[1021]<a />
+			Asahi Linux on M3
+		[1025]<a />
+			asahilinux.org
+[1029]<tr />
+	[1030]<td />
+	[1031]<td />
+		[1033]<span id=score_49586698 />
+			498 points
+		by
+		[1036]<a />
+			mdp2021
+		[1040]<a />
+			21 hours ago
+		[1045]<a />
+			hide
+		[1048]<a />
+			304 comments
+[1050]<tr />
+[1051]<tr id=49587217 />
+	[1052]<td />
+		[1053]<span />
+			26.
+	[1055]<td />
+		[1057]<a id=up_49587217 />
+	[1058]<td />
+		[1060]<a />
+			Research acceleration: The view inside OpenAI
+		[1064]<a />
+			openai.com
+[1068]<tr />
+	[1069]<td />
+	[1070]<td />
+		[1072]<span id=score_49587217 />
+			184 points
+		by
+		[1075]<a />
+			iamsyr
+		[1079]<a />
+			20 hours ago
+		[1084]<a />
+			hide
+		[36]<a />
+			133 comments
+[1088]<tr />
+[1089]<tr id=49537143 />
+	[1090]<td />
+		[1091]<span />
 			27.
-	[1092]<td image_src=s.gif />
 	[1093]<td />
-		[1095]<a />
-			Opalite Health (YC W26) Is Hiring – Founding GTM
-		[1099]<a />
-			ycombinator.com
-[1103]<tr />
-	[1104]<td />
-	[1105]<td />
-		[1107]<a />
-			11 hours ago
-		[1110]<a />
-			hide
-[1112]<tr />
-[1113]<tr id=49542123 />
-	[1114]<td />
-		[1115]<span />
-			28.
-	[1117]<td />
-		[1119]<a id=up_49542123 />
-	[1120]<td />
+		[1095]<a id=up_49537143 />
+	[1096]<td />
+		[1098]<a />
+			Show HN: Think Turing Complete, but you write the circuits in TypeScript (WIP)
+		[1102]<a />
+			simten.dev
+[1106]<tr />
+	[1107]<td />
+	[1108]<td />
+		[1110]<span id=score_49537143 />
+			6 points
+		by
+		[1113]<a />
+			charlesfrisbee
+		[1116]<span title=2026-09-02T14:47:09.000000Z />
+			[1117]<a />
+				3 hours ago
 		[1122]<a />
-			Vidact – a compiler that turns React into direct DOM operations
-		[1126]<a />
-			vidact.dev
-[1130]<tr />
-	[1131]<td />
+			hide
+		[1125]<a />
+			2 comments
+[1127]<tr />
+[1128]<tr id=49596221 />
+	[1129]<td />
+		[1130]<span />
+			28.
 	[1132]<td />
-		[1134]<span id=score_49542123 />
-			58 points
-		by
+		[1134]<a id=up_49596221 />
+	[1135]<td />
 		[1137]<a />
-			mohebifar
+			25 years ago, two strangers met in the twin towers and escaped on 9/11
 		[1141]<a />
-			11 hours ago
-		[1146]<a />
-			hide
-		[1149]<a />
-			28 comments
-[1151]<tr />
-[1152]<tr id=49586898 />
-	[1153]<td />
-		[1154]<span />
-			29.
-	[1156]<td />
-		[1158]<a id=up_49586898 />
-	[1159]<td />
+			theguardian.com
+[1145]<tr />
+	[1146]<td />
+	[1147]<td />
+		[1149]<span id=score_49596221 />
+			8 points
+		by
+		[1152]<a />
+			ljf
+		[1155]<span title=2026-09-07T09:45:38.000000Z />
+			[1156]<a />
+				1 hour ago
 		[1161]<a />
-			A/I shuts down
-		[1165]<a />
-			keepitfree.ai
-[1169]<tr />
-	[1170]<td />
+			hide
+		[1164]<a />
+			discuss
+[1166]<tr />
+[1167]<tr id=49588080 />
+	[1168]<td />
+		[1169]<span />
+			29.
 	[1171]<td />
-		[1173]<span id=score_49586898 />
-			550 points
-		by
+		[1173]<a id=up_49588080 />
+	[1174]<td />
 		[1176]<a />
-			captainmuon
+			An Alien Mind
 		[1180]<a />
-			14 hours ago
-		[1185]<a />
-			hide
-		[1188]<a />
-			435 comments
-[1190]<tr />
-[1191]<tr id=49591672 />
-	[1192]<td />
-		[1193]<span />
-			30.
-	[1195]<td />
-		[1197]<a id=up_49591672 />
-	[1198]<td />
-		[1200]<a />
-			Hackers have withdrawn ~4k BTC (~$320M) from the Liquid Federation wallet
-		[1204]<a />
-			twitter.com/liquid_btc
-[1208]<tr />
-	[1209]<td />
-	[1210]<td />
-		[1212]<span id=score_49591672 />
-			94 points
+			openai.com
+[1184]<tr />
+	[1185]<td />
+	[1186]<td />
+		[1188]<span id=score_49588080 />
+			421 points
 		by
-		[1215]<a />
-			felipelalli
-		[1218]<span title=2026-09-06T22:43:25.000000Z />
-			[1219]<a />
-				5 hours ago
-		[1224]<a />
+		[1191]<a />
+			tosh
+		[1195]<a />
+			19 hours ago
+		[1200]<a />
 			hide
-		[1227]<a />
-			54 comments
-[1229]<tr />
-[1230]<tr />
-[1231]<tr />
-	[1232]<td />
-	[1233]<td />
-		[1234]<a />
+		[1203]<a />
+			380 comments
+[1205]<tr />
+[1206]<tr id=49554622 />
+	[1207]<td />
+		[1208]<span />
+			30.
+	[1210]<td />
+		[34]<a id=up_49554622 />
+	[1212]<td />
+		[1214]<a />
+			Babylonian Lamb Stew with Beets (1750–1730 BCE)
+		[1218]<a />
+			yale.edu
+[1222]<tr />
+	[1223]<td />
+	[1224]<td />
+		[1226]<span id=score_49554622 />
+			151 points
+		by
+		[1229]<a />
+			yubblegum
+		[1233]<a />
+			19 hours ago
+		[1238]<a />
+			hide
+		[1241]<a />
+			120 comments
+[1243]<tr />
+[1244]<tr />
+[1245]<tr />
+	[1246]<td />
+	[1247]<td />
+		[1248]<a />
 			More
-[1247]<a />
+[1261]<a />
 	Guidelines
-[1250]<a />
+[1264]<a />
 	FAQ
-[1253]<a />
+[1267]<a />
 	Lists
-[1256]<a />
+[1270]<a />
 	API
-[1259]<a />
+[1273]<a />
 	Security
-[1262]<a />
+[1276]<a />
 	Legal
-[1265]<a />
+[1279]<a />
 	Apply to YC
-[1268]<a />
+[1282]<a />
 	Contact
 Search:
 |SHADOW(open)|[38]<input type=text name=q autocomplete=off />

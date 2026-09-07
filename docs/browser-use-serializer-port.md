@@ -1,6 +1,6 @@
 # Canonical DOM serialization
 
-`browser-use-dom` observations use the TypeScript port of browser-use 0.13.10 in
+Compact-v2 observations use the TypeScript port of browser-use 0.13.10 in
 `apps/mcp/src/bot/browser-use-serializer.ts`. `browser-use-capture.ts` adapts
 Chrome's DOM, layout snapshot and accessibility trees to its input. Python is
 used only by the committed fixture generator, never by the MCP runtime.
@@ -13,16 +13,22 @@ meet one. The exact output contract is the mechanically generated corpus in
 
 ## Identity, deltas and query
 
-`[@e:...]` uses the existing document-scoped stable refs instead of canonical
-browser-use's numeric identities. Those refs remain actionable after another
+`[@e:1]` uses session-allocated base36 identities instead of canonical
+browser-use's per-observation indices. `StableObservationRefs` maps the existing
+fingerprint to a short ref for the lifetime of its document; a session-long
+counter never reuses a ref, including after navigation. Display-only refs use
+a separate identity namespace in that same allocator. Action authorization still
+requires the observed map and live fingerprint match; refs are lookup keys, not
+credentials. Those refs remain actionable after another
 observation of the same document. A changed view sends its complete `dom` tree;
 `delta: true` identifies an existing document, and `removed` names refs that left
-the rendered view. An unchanged view omits `dom`, retaining the consumer's prior
-view. Query operates on the full document inventory, including controls outside
-the viewport. Query, role, and cursor responses use the separate
-`browser-use-control-query` paged control-map format and aliases; they are not
-DOM-tree observations. Its complete grammar is in the registered
-`operate_observe` description.
+the rendered view. An unchanged view emits `dom_unchanged: true` and omits `dom`, retaining the
+consumer's prior view. A newly blank view still emits `dom: ""` with no unchanged
+signal. `unchanged` remains the legacy numeric count; the DOM signal has its
+own name. This is wire clarity only; change detection, revisions and removals
+retain their existing semantics. Query operates on the full document inventory, including controls outside
+the viewport, and retains its existing paged search-result format and aliases.
+Query results are not a second DOM observation serializer.
 
 Every DOM observation includes `more_above` and `more_below`. The existing scroll
 action remains reachable. A below-fold control can be found with
@@ -54,12 +60,40 @@ The containment threshold is exactly 0.99; text, form fields/labels, nested
 propagating controls, explicit onclick handlers, meaningful aria-labels and
 interactive roles retain canonical carve-outs.
 
-**Named immediate follow-up: browser-use paint-order removal.** This phase does
-not claim occlusion equivalence. Implement canonical `PaintOrderRemover` together
-with the required paint-order snapshot data, then regenerate the canonical
-fixtures with paint-order filtering enabled. Do not approximate it with a center
-point hit test. The current canonical captures explicitly disable this filter,
-as authorized by the binding engineering review.
+`browser-use-paint-order.ts` ports the pinned `PaintOrderRemover`: full rectangle
+union coverage, descending paint-order batches (equal orders cannot cover one
+another), separate iframe documents, transparent-background exclusion, opacity
+threshold 0.8, and the upstream 5000-rectangle insertion cap. Capture requests
+`includePaintOrder` and retains computed styles. No hit-test approximation.
+
+Production adds explicit byte-efficiency/reachability differences after the
+canonical port. Covered interactive controls remain addressable, even though
+upstream suppresses their indices. Consecutive inert sibling subtrees with the
+same structure and text collapse with `[repeated ×N]`; only whitespace differences
+and presentation attributes (`id`, `class`, `style`) are ignored. Numbers, names,
+prices, statuses, meaningful attributes and all interactive descendants prevent
+collapse. Structural keys are interned bottom-up rather than recursively escaped.
+
+Unlabelled, non-interactive SVG rows are omitted. Interactive SVG descendants
+remain visible. Unlabelled iframe hints inherit enclosing text when available;
+only explicitly non-interactive empty hints may be omitted. Unlabelled form rows inherit enclosing row/heading text when available. A row
+may be omitted only if its exact target ref has already been emitted.
+Distinct checkboxes survive regardless of how similar they look. This does not
+infer that a second checkbox is a proxy from appearance alone.
+
+Plain `pre`/`code` syntax markup becomes one quoted text row, preserving original
+spaces, line breaks and punctuation (including single-character tokens). Explicit
+controls, listeners, focusability and scrolling prevent coalescing their action
+surface. The canonical small-icon class/geometry heuristic is not evidence that
+a syntax-highlight span is a control.
+
+The internal `canonical: true` test option disables these local differences;
+production never selects it. Canonical fixtures are regenerated verbatim using
+the pinned Python script with paint-order filtering enabled. The fixture equality
+test still normalizes only identity. Production efficiency and reachability are
+tested separately against those same captured inputs and executable regressions.
+See [byte measurements](observation-byte-efficiency.md) for reproducible before/after
+numbers and the distinction between live captures and synthetic reproductions.
 
 Recorded observation recipes are incompatible with the new DOM representation.
 The existing 54-test recipe suite passes, so no recipe assertions were removed
@@ -67,8 +101,9 @@ or quarantined. Unrelated behavior and payment suites remain required.
 
 ## Validation
 
-- `browser-use-serializer.test.ts` compares the six generated captures, allowing
-  only identity substitution.
+- `browser-use-serializer.test.ts` compares the six generated captures in canonical
+  mode, allowing only identity substitution. `observation-byte-efficiency.test.ts`
+  covers the local differences.
 - `observation-prose.test.ts` now exercises the replacement through real Chrome,
   including hierarchy, containment, verbatim page content, frame bindings and below-fold reachability.
 - `operate-session-flow.test.ts` covers whole-document query, scroll reachability,

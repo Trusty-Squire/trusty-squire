@@ -1,122 +1,119 @@
 Jump to content
-[307]<nav aria-label=Site />
-	[309]<div id=vector-main-menu-dropdown title=Main menu />
-		[61]<label id=vector-main-menu-dropdown-label />
-			[31]<span />
+[306]<nav aria-label=Site />
+	[308]<div id=vector-main-menu-dropdown title=Main menu />
+		[59]<label id=vector-main-menu-dropdown-label />
+			[29]<span />
 			Main menu
-		|scroll element[62]<div /> (0.0 pages above, 14.1 pages below)
-[411]<a image_alt=Wikipedia image_src=wikipedia-wordmark-en-25.svg image_alt=The Free Encyclopedia image_src=wikipedia-tagline-en-25.svg />
-[65]<div id=p-search role=search />
-	[431]<div />
-		[433]<div />
-			[35]<form id=searchform />
-				[436]<div id=simpleSearch />
-					|SHADOW(open)|[36]<input autocomplete=off type=search placeholder=Search Wikipedia aria-label=Search Wikipedia title=Search Wikipedia [alt-f] id=searchInput keyshortcuts=Alt+f />
-					[8]<span />
-				[446]<button />
-					Search
-[508]<li id=pt-sitesupport-2 level=1 />
-	[509]<a />
+		|scroll element|<div /> (0.0 pages above, 14.1 pages below)
+[410]<a image_alt=Wikipedia image_src=wikipedia-wordmark-en-25.svg image_alt=The Free Encyclopedia image_src=wikipedia-tagline-en-25.svg />
+[63]<div id=p-search role=search />
+	[430]<div />
+		|SHADOW(open)|[33]<input autocomplete=off type=search placeholder=Search Wikipedia aria-label=Search Wikipedia title=Search Wikipedia [alt-f] id=searchInput keyshortcuts=Alt+f />
+		[8]<span />
+		[445]<button />
+			Search
+[507]<li id=pt-sitesupport-2 level=1 />
+	[508]<a />
 		Donate
-[515]<a title=You are encouraged to create an account and log in; however, it is not mandatory />
+[514]<a title=You are encouraged to create an account and log in; however, it is not mandatory />
 	Create account
-[520]<li id=pt-login-2 level=1 />
-	[521]<a title=You're encouraged to log in; however, it's not mandatory. [alt-o] keyshortcuts=Alt+o />
+[519]<li id=pt-login-2 level=1 />
+	[520]<a title=You're encouraged to log in; however, it's not mandatory. [alt-o] keyshortcuts=Alt+o />
 		Log in
-[71]<div id=vector-toc />
+[69]<div id=vector-toc />
 	Contents
-	[73]<button aria-label=Hide Contents />
+	[71]<button aria-label=Hide Contents />
 		hide
-	[625]<a />
-		[627]<div />
+	[624]<a />
+		[626]<div />
 			(Top)
-	[634]<a />
+	[633]<a />
 		Overview
-	[652]<a />
+	[651]<a />
 		Providers
-	[670]<a />
+	[669]<a />
 		Validation standards
-	[688]<a />
+	[687]<a />
 		Validation weaknesses
-	[706]<a />
+	[705]<a />
 		Issuing a certificate
-	[718]<button expanded=true />
+	[717]<button expanded=true />
 		Toggle Issuing a certificate subsection
-	[729]<a />
+	[728]<a />
 		Example
-	[747]<a />
+	[746]<a />
 		Security
-	[765]<a />
+	[764]<a />
 		Certificate revocation
-	[785]<a />
+	[784]<a />
 		Industry organizations
-	[797]<button expanded=true />
+	[796]<button expanded=true />
 		Toggle Industry organizations subsection
-	[808]<a />
+	[807]<a />
 		Baseline requirements
-	[828]<a />
+	[827]<a />
 		CA compromise
-	[846]<a />
+	[845]<a />
 		Key storage
-	[864]<a />
+	[863]<a />
 		Implementation weakness of the trusted third party scheme
-	[882]<a />
+	[881]<a />
 		See also
-	[900]<a />
+	[899]<a />
 		References
-	[918]<a />
+	[917]<a />
 		Works cited
-	[936]<a />
+	[935]<a />
 		External links
 Certificate authority
-[76]<label id=p-lang-btn-label />
-	[19]<span />
+[74]<label id=p-lang-btn-label />
+	[17]<span />
 	24 languages
-[1122]<li id=ca-nstab-main level=1 />
-	[1123]<a title=View the content page [alt-c] keyshortcuts=Alt+c />
+[1121]<li id=ca-nstab-main level=1 />
+	[1122]<a title=View the content page [alt-c] keyshortcuts=Alt+c />
 		Article
-[1129]<li id=ca-talk level=1 />
-	[1130]<a title=Discuss improvements to the content page [alt-t] keyshortcuts=Alt+t />
+[1128]<li id=ca-talk level=1 />
+	[1129]<a title=Discuss improvements to the content page [alt-t] keyshortcuts=Alt+t />
 		Talk
-[1170]<li id=ca-view level=1 />
-	[1171]<a />
+[1169]<li id=ca-view level=1 />
+	[1170]<a />
 		Read
-[1177]<li id=ca-edit level=1 />
-	[1178]<a title=Edit this page [alt-e] keyshortcuts=Alt+e />
+[1176]<li id=ca-edit level=1 />
+	[1177]<a title=Edit this page [alt-e] keyshortcuts=Alt+e />
 		Edit
-[1185]<a title=Past revisions of this page [alt-h] keyshortcuts=Alt+h />
+[1184]<a title=Past revisions of this page [alt-h] keyshortcuts=Alt+h />
 	View history
-[1195]<nav aria-label=Page tools />
-	[1197]<div id=vector-page-tools-dropdown />
-		[80]<label id=vector-page-tools-dropdown-label />
-			[23]<span />
+[1194]<nav aria-label=Page tools />
+	[1196]<div id=vector-page-tools-dropdown />
+		[78]<label id=vector-page-tools-dropdown-label />
+			[21]<span />
 			Tools
-		|scroll element[81]<div /> (0.0 pages above, 15.7 pages below)
+		|scroll element|<div /> (0.0 pages above, 15.7 pages below)
 Appearance
-[89]<button aria-label=Hide Appearance />
+[87]<button aria-label=Hide Appearance />
 	hide
 Text
-[1385]<span />
+[1384]<span />
 Small
-[1391]<span />
+[1390]<span />
 Standard
-[1397]<span />
+[1396]<span />
 Large
 Width
-[1412]<span />
+[1411]<span />
 Standard
-[1418]<span />
+[1417]<span />
 Wide
 Color
-[1435]<span />
+[1434]<span />
 Automatic
-[1441]<span />
+[1440]<span />
 Light
-[1447]<span />
+[1446]<span />
 Dark
 From Wikipedia, the free encyclopedia
 In
-[1486]<a title=Cryptography id=mwBA />
+[1485]<a title=Cryptography id=mwBA />
 	cryptography
 , a
 certificate authority
@@ -124,37 +121,37 @@ or
 certification authority
 CA
 ) is an entity that stores, signs, and issues
-[1498]<a title=Public key certificate id=mwCA />
+[1497]<a title=Public key certificate id=mwCA />
 	digital certificates
 .  A digital certificate certifies the ownership of a public key by the named subject of the certificate.  This allows others (relying parties) to rely upon signatures or on assertions made about the private key that corresponds to the certified public key. A CA acts as a trusted third party—trusted both by the subject (owner) of the certificate and by the party relying upon the certificate.
-[90]<sup id=cite_ref-1 />
-	[91]<a id=mwCQ />
+[88]<sup id=cite_ref-1 />
+	[89]<a id=mwCQ />
 The format of these certificates is specified by the
-[1508]<a title=X.509 id=mwDQ />
+[1507]<a title=X.509 id=mwDQ />
 	X.509
 or
-[1511]<a title=EMV id=mwDg />
+[1510]<a title=EMV id=mwDg />
 	EMV
 standard.
 One particularly common use for certificate authorities is to sign certificates used in
-[1516]<a title=HTTPS id=mwEA />
+[1515]<a title=HTTPS id=mwEA />
 	HTTPS
 , the secure browsing protocol for the World Wide Web. Another common use is in issuing identity cards by national governments for use in electronically signing documents.
-[92]<sup id=cite_ref-2 />
-	[93]<a id=mwEQ />
+[90]<sup id=cite_ref-2 />
+	[91]<a id=mwEQ />
 Overview
-[1531]<span />
-	[1534]<a title=Edit section: Overview />
-		[1537]<span />
+[1530]<span />
+	[1533]<a title=Edit section: Overview />
+		[1536]<span />
 			edit
 Trusted certificates can be used to create
-[1543]<a title=Transport Layer Security id=mwGA />
+[1542]<a title=Transport Layer Security id=mwGA />
 	secure connections
 to a server via the Internet.  A certificate is essential in order to circumvent a malicious party which happens to be on the route to a target server which acts as if it were the target. Such a scenario is commonly referred to as a
-[1546]<a title=Man-in-the-middle attack id=mwGQ />
+[13]<a title=Man-in-the-middle attack id=mwGQ />
 	man-in-the-middle attack
 .  The client uses the CA certificate to authenticate the CA signature on the server certificate, as part of the authorizations before launching a secure connection.
-[94]<sup id=cite_ref-3 />
-	[95]<a id=mwGg />
+[92]<sup id=cite_ref-3 />
+	[93]<a id=mwGg />
 Usually, client software—for example, browsers—include a set of trusted CA certificates.  This makes sense, as many users need to trust their client software. A malicious or compromised client can skip any security check and still fool its users into believing otherwise.
 The clients of a CA are server supervisors who call for a certificate that their servers will bestow to users.  Commercial CAs charge money to issue certificates, and their customers anticipate the CA's certificate to be contained within the majority of web browsers, so that safe connections to the certified servers work efficiently out-of-the-box.  The quantity of web browsers, other devices, and applications which trust a particular certificate authority is referred to as ubiquity.
