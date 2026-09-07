@@ -1,160 +1,117 @@
-// The compact-v2 text channel's GENUINE extraction path, against a real
-// Chromium rendering a real document — no stub. This is the coverage gap that
-// shipped the channel inert in 1.1.14-rc.3 (2026-09-06): the flow suite stubs
-// `extractObservationProse`, so nothing noticed that
-// `page.evaluate(extractObservationProseItems)` throws
-// `ReferenceError: OBSERVATION_PROSE_MAX_ITEMS is not defined` on every real
-// page (the serialized function referenced module-scope constants that do not
-// travel into the page), while the observation's catch swallowed the throw and
-// every observation emitted `text: ""`.
-//
-// These tests pin two things:
-// 1. The extractor is self-contained: `page.evaluate(extractObservationProseItems)`
-//    is the exact production call and only works if the function's source text
-//    carries every identifier it references. If anyone moves a constant back
-//    out to module scope, the evaluate below throws and these tests fail.
-// 2. The full wire path with the real extractor — extract → screen →
-//    encodeV2Page — emits the prose as `text` on the FIRST observation for a
-//    document, with control labels excluded (the action map's job) and
-//    credential-shaped prose screened through the shared redactor.
-import { existsSync } from "node:fs";
-import { chromium, type Browser, type Page } from "playwright";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+// The former separate-prose-channel tests now exercise its replacement through
+// real Chrome: CDP capture -> canonical serializer -> shared substring screen.
+import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { extractObservationProseItems } from "../browser.js";
-import {
-  encodeV2Page,
-  screenObservationProseV2,
-  type SafeControlV2,
-} from "../compact-observation-v2.js";
-
-let chromiumAvailable = false;
-try {
-  chromiumAvailable = existsSync(chromium.executablePath());
-} catch {
-  chromiumAvailable = false;
-}
-
-let sharedBrowser: Browser | undefined;
-
-// Credential-shaped test fixtures are assembled at runtime from harmless
-// fragments so no complete token literal appears in this source file (GitHub
-// secret scanning false-positived on test data — PR #681). The assembled
-// value is byte-identical to the token shape the ipinfo dogfood leaked; do
-// NOT inline it back into a single string literal.
-const hexToken = (body: string): string => "f9a062f02fad" + body;
-
+import { captureBrowserUseDOM } from "../browser-use-capture.js";
+import { serializeBrowserUseDOM } from "../browser-use-serializer.js";
+import { redactObservationProseV2 } from "../compact-observation-v2.js";
+let browser: Browser;
 beforeAll(async () => {
-  if (chromiumAvailable) sharedBrowser = await chromium.launch({ headless: true });
+  browser = await chromium.launch({ headless: true });
 });
-
 afterAll(async () => {
-  await sharedBrowser?.close();
+  await browser?.close();
 });
-
-async function newRealPage(): Promise<Page> {
-  if (sharedBrowser === undefined) throw new Error("Chromium test browser was not started");
-  const context = await sharedBrowser.newContext();
-  return await context.newPage();
-}
-
-const DASHBOARD_HTML = `<!doctype html>
-<html>
-<head><title>API Tokens · Example</title></head>
-<body>
-  <h1>API Tokens</h1>
-  <p>Treat your token like a password: anyone holding it can act as you.</p>
-  <p>Live token: ${hexToken("df5")} — copy it now.</p>
-  <ul>
-    <li>Free plan includes 50,000 requests per month.</li>
-    <li>Paid plan raises the ceiling.</li>
-  </ul>
-  <nav>
-    <a href="/docs">Documentation</a>
-    <button id="copy">Copy token</button>
-  </nav>
-  <p style="display:none">Hidden teaser text must never reach the channel.</p>
-  <div role="alert">Rate limit nearly reached.</div>
-  <p>${"Long paragraph ".repeat(30)}</p>
-</body>
-</html>`;
-
-describe.skipIf(!chromiumAvailable)("compact-v2 text channel (real extractor)", () => {
-  it("extracts prose through the production page.evaluate call without throwing", async () => {
-    const page = await newRealPage();
-    await page.setContent(DASHBOARD_HTML);
-    // The exact call browser.ts makes. If extractObservationProseItems ever
-    // references something outside its own source text again, this throws
-    // ReferenceError instead of returning prose — the shipped-inert failure.
-    const items = await page.evaluate(extractObservationProseItems);
-    expect(items.length).toBeGreaterThan(0);
-    expect(items).toContain("API Tokens");
-    expect(items).toContain("Treat your token like a password: anyone holding it can act as you.");
-    expect(items).toContain("Free plan includes 50,000 requests per month.");
-    expect(items).toContain("Rate limit nearly reached.");
-    // Interactive-control labels are the action map's job, not the channel's.
-    expect(items).not.toContain("Copy token");
-    expect(items).not.toContain("Documentation");
-    // Hidden content stays out.
-    expect(items.join("\n")).not.toContain("Hidden teaser text");
-    // Items are bounded.
-    for (const item of items) expect(item.length).toBeLessThanOrEqual(200);
-    await page.context().close();
+describe("interleaved observation DOM", () => {
+  it("keeps hierarchy and prose and retrieves a below-the-fold control from the whole document", async () => {
+    const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
+    try {
+      await page.setContent(
+        '<!doctype html><html><body><p>Account overview</p><button><span>Continue signup</span></button><div style="height:1800px"></div><button id="below">Create workspace below</button></body></html>',
+      );
+      const capture = await captureBrowserUseDOM(page, [], () => null);
+      const dom = serializeBrowserUseDOM(capture.root).dom;
+      expect(dom).toContain("Account overview");
+      expect(dom).toMatch(/\[main:\d+\]<button \/>\n\tContinue signup/);
+      expect(dom).not.toContain("Create workspace below");
+      expect(capture.moreBelow).toBe(true);
+      expect(capture.moreAbove).toBe(false);
+      const below = capture.elements.find((e) => e.id === "below");
+      expect(below?.visibleText).toContain("Create workspace below");
+      expect(below?.inViewport).toBe(false);
+      await page.locator(below!.selector).scrollIntoViewIfNeeded();
+      const after = await captureBrowserUseDOM(page, [], () => null);
+      expect(serializeBrowserUseDOM(after.root).dom).toContain("Create workspace below");
+      expect(after.moreAbove).toBe(true);
+    } finally {
+      await page.close();
+    }
   });
-
-  it("extracts fresh prose for a second document in the same tab (first observation per document)", async () => {
-    const page = await newRealPage();
-    await page.setContent(DASHBOARD_HTML);
-    const first = await page.evaluate(extractObservationProseItems);
-    expect(first).toContain("API Tokens");
-    await page.setContent(
-      `<!doctype html><html><body><h1>Teams</h1><p>Invite teammates to your workspace.</p></body></html>`,
-    );
-    // A new document must be extracted on its own merits — no reliance on any
-    // state the first document established (page-side or sticky baselines).
-    const second = await page.evaluate(extractObservationProseItems);
-    expect(second).toContain("Teams");
-    expect(second).toContain("Invite teammates to your workspace.");
-    expect(second).not.toContain("API Tokens");
-    await page.context().close();
-  });
-
-  it("carries the real extractor's output to the wire on the first observation for a document", async () => {
-    const page = await newRealPage();
-    await page.setContent(DASHBOARD_HTML);
-    const prose = await page.evaluate(extractObservationProseItems);
-    // The shared screen from PR #678 runs on the genuine extractor output: the
-    // reflected live token must reach the wire redacted, the real copy intact.
-    const screened = screenObservationProseV2(prose);
-    expect(screened).toContain(
-      "Treat your token like a password: anyone holding it can act as you.",
-    );
-    expect(screened.some((item) => item.includes(hexToken("df5")))).toBe(false);
-    expect(screened.some((item) => item.includes("[redacted]"))).toBe(true);
-    // First observation for a document = a full paged map, and the text
-    // channel rides it whenever prose exists. Rows stay primary: encode with a
-    // representative row and assert the text channel is present alongside it.
-    const rows: SafeControlV2[] = [
-      {
-        ref: "@e:copy",
-        role: "button",
-        visibility: "viewport",
-        label: "@copy-token",
-        frame: "main",
-      },
-    ];
-    const { payload } = encodeV2Page({
-      sessionId: "sess-test",
-      stage: "browse",
-      pageUrl: "https://app.example.com/dashboard/token",
-      semantics: { title: "API Tokens · Example", headings: ["API Tokens"] },
-      rows,
-      cursorFor: () => "cursor",
-      pageText: screened,
+  it("binds controls in same-origin and cross-origin frames to their own documents", async () => {
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "text/html");
+      response.end(
+        request.url === "/child"
+          ? '<button id="child">Cross origin action</button>'
+          : `<iframe srcdoc='<button id="same">Same origin action</button>'></iframe><iframe src="http://localhost:${(server.address() as AddressInfo).port}/child"></iframe>`,
+      );
     });
-    expect(payload.safe_table).toHaveLength(1);
-    expect(typeof payload.text).toBe("string");
-    expect(payload.text).toContain("API Tokens");
-    expect(payload.text).toContain("Treat your token like a password");
-    await page.context().close();
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const page = await browser.newPage();
+    try {
+      await page.goto(`http://127.0.0.1:${(server.address() as AddressInfo).port}/`);
+      const capture = await captureBrowserUseDOM(page, [], (frame) => frame.url());
+      const output = serializeBrowserUseDOM(capture.root, {
+        ref: (node) => {
+          const element = capture.nodeElements.get(node.id);
+          expect(element, `unbound frame control ${node.id}`).toBeDefined();
+          return `@e:${element!.index}`;
+        },
+      });
+      expect(output.dom).toContain("Same origin action");
+      expect(output.dom).toContain("Cross origin action");
+      const child = capture.elements.find((element) => element.id === "child")!;
+      const same = capture.elements.find((element) => element.id === "same")!;
+      expect(child.frameUrl).toContain("http://localhost:");
+      expect(same.frameUrl).toBe("about:srcdoc");
+      await page
+        .frames()
+        .find((frame) => frame.url() === child.frameUrl)!
+        .locator(child.selector)
+        .click();
+      await page
+        .frames()
+        .find((frame) => frame.url() === same.frameUrl)!
+        .locator(same.selector)
+        .click();
+    } finally {
+      await page.close();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+  it("preserves contained input, onclick, aria-label and text; screens every rendered line", async () => {
+    const page = await browser.newPage();
+    try {
+      const token = "f9a062f02fad" + "f5";
+      await page.setContent(
+        `<div role="button" style="width:600px;height:300px"><span>Context text</span><input aria-label="Email"><span onclick="void 0">Separate action</span><span role="button" aria-label="Copy ${token}">Token ${token}</span></div>`,
+      );
+      const capture = await captureBrowserUseDOM(page, [], () => null);
+      const ref = (node: { id: string }): string => `@e:f9a062f02fadf5_${node.id}`;
+      const original = serializeBrowserUseDOM(capture.root, { ref });
+      const screened = serializeBrowserUseDOM(capture.root, {
+        ref,
+        screen: redactObservationProseV2,
+      });
+      const dom = screened.dom;
+      // The synthetic token occurs in both a naming attribute and a text node.
+      // Structural refs deliberately contain the same shape and must survive.
+      expect(screened.refs).toEqual(original.refs);
+      const withoutRefs = (value: string): string => value.replace(/\[@e:[^\]]+\]</g, "[REF]<");
+      expect(withoutRefs(dom)).toBe(withoutRefs(original.dom).replaceAll(token, "[redacted]"));
+      expect(dom.split("\n")).toHaveLength(original.dom.split("\n").length);
+      expect(dom).toContain("Context text");
+      expect(dom).toContain("<input");
+      expect(dom).toContain("Separate action");
+      expect(dom).toContain("aria-label=Copy [redacted]");
+      expect(dom).toContain("Token [redacted]");
+      expect(withoutRefs(dom)).not.toContain(token);
+    } finally {
+      await page.close();
+    }
   });
 });

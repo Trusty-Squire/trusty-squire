@@ -1,3 +1,5 @@
+import type { BrowserUseCapture } from "./browser-use-capture.js";
+import { serializeBrowserUseDOM } from "./browser-use-serializer.js";
 // Phase 1 — the session-holding "thick tools" surface a frontier host agent
 // drives. MCP tool calls are stateless, but a provision run needs ONE live
 // browser held across many calls; this module is that registry + the
@@ -51,11 +53,7 @@ import {
   isCompactV2Handle,
   isCompactV2Label,
   controlMatchesPrivateQueryV2,
-  diffSafeControlsV2,
-  equalObservationProseV2,
-  equalSafePageSemanticsV2,
-  encodeV2Delta,
-  encodeV2Page,
+  encodeV2QueryPage,
   compactV2AuditHost,
   compactV2AuditUrl,
   compactV2AuditValue,
@@ -63,7 +61,7 @@ import {
   safeDescriptionV2,
   safeOriginV2,
   safePageSemanticsV2,
-  screenObservationProseV2,
+  redactObservationProseV2,
   sealRetainedInteractiveElementsV2,
   safeStageV2,
   type SafeControlV2,
@@ -265,10 +263,8 @@ export interface Observation {
   // Registry route guidance, present ONLY on the first (start) observation when
   // a skill exists for the service. The host agent reads it before driving.
   hint?: string;
-  // V1 layout-aware page prose (innerText), capped to keep tool payloads
-  // bounded. Compact V2 emits bounded SCREENED page prose: headings, copy,
-  // errors, and selected-state text, redacted through the shared secret-shape
-  // primitive and degraded item-by-item — never at the action map's expense.
+  // V1 compatibility only. Compact-v2 omits this property entirely and
+  // emits the canonical interleaved `dom` representation instead.
   text: string;
   // Domain-aware steering for the host planner. This is not a script; it is
   // guardrail context for states the raw page text routinely misleads agents on.
@@ -390,6 +386,9 @@ export interface Observation {
   stage?: SafeStageV2;
   generation?: number;
   safe_table?: SafeControlV2[];
+  dom?: string;
+  more_above?: boolean;
+  more_below?: boolean;
   semantic?: SafePageSemanticsV2;
   overflow?: { remaining: number; next_cursor: string };
   hint_overflow?: { remaining: number; next_cursor: string };
@@ -4026,6 +4025,7 @@ function compactV2LiveControls(
     handles: compactV2Handles(session, elements),
     pageOrigin,
     pageUrl: session.browser.currentUrl(),
+    canonical: session.compactV2Mode === "on",
   });
 }
 
@@ -4078,7 +4078,6 @@ function compactV2HintPage(
   const payload = {
     format: "compact-v2",
     url: "",
-    text: "",
     session_id: session.id,
     stage: index.stage,
     hint,
@@ -4115,11 +4114,10 @@ function compactV2PublicObservation(
 ): Observation {
   if (session.compactV2Mode !== "on") return legacy();
   session.compactV2Active = true;
-  const payload: Observation = {
-    format: "compact-v2",
+  const payload = {
+    format: "compact-v2" as const,
     session_id: session.id,
     url: fields.url ?? session.browser.currentUrl(),
-    text: "",
     stage: fields.stage,
     ...(fields.guidance === undefined ? {} : { guidance: fields.guidance }),
     ...(fields.oauth === undefined ? {} : { oauth: fields.oauth }),
@@ -4135,48 +4133,37 @@ function compactV2PublicObservation(
 function compactV2Observation(
   session: Session,
   generation: number,
-  elements: readonly InteractiveElement[],
+  capture: BrowserUseCapture,
   semanticSource: ObservationSemanticSourceV2,
-  proseSource?: readonly string[],
   startMetadata?: CompactV2StartMetadata,
-  /** Concrete reason the prose extractor failed; surfaced as `text_unavailable`. */
-  proseUnavailable?: string,
 ): Observation {
-  if (startMetadata?.hintPages !== undefined) {
+  const elements = capture.elements;
+  if (startMetadata?.hintPages !== undefined)
     session.compactV2HintPages = [...startMetadata.hintPages];
-  }
   const stage = safeStageV2(session.browser.currentUrl(), elements);
   const semantics = safePageSemanticsV2(semanticSource);
-  // The text channel is screened through the same shared redactor as label
-  // aliases (screenObservationProseV2 → looksLikeSecretShapedName shapes +
-  // run entropy); an unavailability here never touches the action map.
-  const prose = proseSource === undefined ? undefined : screenObservationProseV2(proseSource);
   const epochDoc = compactV2EpochDoc(session);
   const previous = session.compactV2Previous;
   const sameDocument = previous !== null && previous.epoch.doc === epochDoc;
   const safe = compactV2LiveControls(session, elements);
-  let delta = sameDocument ? diffSafeControlsV2(previous, stage, safe.rows) : null;
-  const privateBindingsChanged =
-    sameDocument &&
-    (session.compactV2Refs.size !== safe.byRef.size ||
-      [...safe.byRef].some(([ref, legacy]) => session.compactV2Refs.get(ref) !== legacy));
-  const requiresResync =
-    !sameDocument ||
-    delta === null ||
-    delta.stageChanged ||
-    privateBindingsChanged ||
-    delta.added.length > 0 ||
-    delta.changed.length > 0 ||
-    delta.removed.length > 0;
-  if (requiresResync) delta = null;
-  // The epoch's DOM-mutation counter advances only when the skeleton actually
-  // changed. Refs are fingerprint-derived and survive it; paging cursors are
-  // positional and bound to it, so a cursor minted before a re-render dies.
-  const epoch: ObservationEpochV2 = {
-    doc: epochDoc,
-    rev: sameDocument && !requiresResync ? previous.epoch.rev : generation,
-  };
-  const index: SafeObservationIndexV2 = {
+  const handles = compactV2Handles(session, elements);
+  const rendered = serializeBrowserUseDOM(capture.root, {
+    screen: redactObservationProseV2,
+    ref: (node) => {
+      const element = capture.nodeElements.get(node.id);
+      const ref = element === undefined ? undefined : handles.get(element);
+      if (ref === undefined) throw new Error(`observation_node_unbound: ${node.id}`);
+      return ref;
+    },
+    ...(sameDocument ? { previous: new Set(previous.renderedRefs ?? []) } : {}),
+  });
+  // Screen emitted names and text lines. Preserve whitespace,
+  // line ordering and indentation; no prose extraction or byte-budget pruning.
+  const dom = rendered.dom;
+  const changed = !sameDocument || previous.dom !== dom;
+  const epoch = { doc: epochDoc, rev: changed ? generation : previous.epoch.rev };
+  session.compactV2Active = true;
+  session.compactV2Index = {
     epoch,
     stage,
     semantics,
@@ -4184,98 +4171,48 @@ function compactV2Observation(
     byRef: safe.byRef,
     expiresAt: Date.now() + 5 * 60_000,
   };
-  // Raw DOM values fall out of scope here.
-  // Only this enum-only index survives to delta/query/action resolution.
-  session.compactV2Active = true;
-  session.compactV2Index = index;
   session.compactV2Refs = safe.byRef;
   session.compactV2Previous = {
     epoch,
     stage,
     semantics,
     byRef: new Map(safe.rows.map((row) => [row.ref, row])),
+    dom,
+    renderedRefs: rendered.refs,
   };
   session.prevObserve = null;
-  // The baseline records the prose the consumer ACTUALLY received (the encode
-  // may have degraded the text channel to a subset under the wire budget), so
-  // a repeat observation re-offers the text whenever the consumer holds less
-  // than the page currently renders — sticky only up to what was emitted.
-  const recordEmittedProse = (payload: { text?: unknown }): void => {
-    const text = typeof payload.text === "string" ? payload.text : "";
-    if (text.length === 0 || session.compactV2Previous === null) return;
-    session.compactV2Previous.prose = text.split("\n");
-  };
-  if (previous !== null && !requiresResync && delta !== null) {
-    const encodedDelta = encodeV2Delta({
-      sessionId: session.id,
-      stage,
-      pageUrl: session.browser.currentUrl(),
-      // The first V2 page establishes semantic essentials. On a delta they
-      // are sticky, so resend only a sealed semantic change rather than the
-      // same title/heading on every harmless re-observe.
-      semantics: equalSafePageSemanticsV2(previous.semantics, semantics) ? undefined : semantics,
-      // Sticky like semantics: resend prose only when its screened form changed.
-      ...(prose !== undefined && prose.length > 0 && !equalObservationProseV2(previous.prose, prose)
-        ? { pageText: prose }
-        : {}),
-      ...(proseUnavailable === undefined ? {} : { textUnavailable: proseUnavailable }),
-      delta,
-    });
-    // A high-churn delta is less useful than a fresh paged map.  This also
-    // guarantees any overflow remains in the MCP cursor protocol.
-    if (encodedDelta !== null) {
-      recordEmittedProse(encodedDelta);
-      return encodedDelta as unknown as Observation;
-    }
-  }
-  const page = encodeV2Page({
-    sessionId: session.id,
-    stage: index.stage,
-    pageUrl: session.browser.currentUrl(),
-    semantics,
-    rows: index.rows,
-    // Full pages re-establish the whole view; the text channel rides along
-    // and degrades item-by-item inside the encode, never at the map's expense.
-    ...(prose === undefined || prose.length === 0 ? {} : { pageText: prose }),
-    ...(proseUnavailable === undefined ? {} : { textUnavailable: proseUnavailable }),
-    cursorFor: (offset) =>
-      compactV2Cursor(session, epoch.rev, offset, compactV2ControlCursorScope(session)),
-    ...(startMetadata === undefined
-      ? {}
-      : {
-          startMetadata: {
-            ...(session.compactV2HintPages[0] === undefined
-              ? {}
-              : { hint: session.compactV2HintPages[0] }),
-            ...(startMetadata.userEmail === undefined
-              ? {}
-              : { userEmail: startMetadata.userEmail }),
-            ...(session.compactV2HintPages.length <= 1
-              ? {}
-              : {
-                  hintOverflow: {
-                    remaining: session.compactV2HintPages.length - 1,
-                    next_cursor: compactV2Cursor(
-                      session,
-                      epoch.rev,
-                      1,
-                      compactV2HintCursorScope(session),
-                    ),
-                  },
-                }),
+  const removed = sameDocument
+    ? (previous.renderedRefs ?? []).filter((ref) => !rendered.refs.includes(ref))
+    : [];
+  return {
+    format: "compact-v2",
+    session_id: session.id,
+    url: session.browser.currentUrl(),
+    stage,
+    ...(sameDocument ? { delta: true } : {}),
+    ...(changed ? { dom } : {}),
+    ...(removed.length ? { removed } : {}),
+    more_above: capture.moreAbove,
+    more_below: capture.moreBelow,
+    ...(startMetadata?.hintPages?.[0] ? { hint: startMetadata.hintPages[0] } : {}),
+    ...(startMetadata?.userEmail ? { user_email: startMetadata.userEmail } : {}),
+    ...(session.compactV2HintPages.length > 1 && startMetadata
+      ? {
+          hint_overflow: {
+            remaining: session.compactV2HintPages.length - 1,
+            next_cursor: compactV2Cursor(session, epoch.rev, 1, compactV2HintCursorScope(session)),
           },
-        }),
-  });
-  recordEmittedProse(page.payload);
-  return page.payload as unknown as Observation;
+        }
+      : {}),
+  } as unknown as Observation;
 }
 
-function exerciseCompactV2Shadow(
+async function exerciseCompactV2Shadow(
   session: Session,
   generation: number,
   elements: readonly InteractiveElement[],
   semanticSource: ObservationSemanticSourceV2,
-): void {
+): Promise<void> {
   const saved = {
     compactV2Active: session.compactV2Active,
     compactV2Index: session.compactV2Index,
@@ -4284,7 +4221,12 @@ function exerciseCompactV2Shadow(
     prevObserve: session.prevObserve,
   };
   try {
-    compactV2Observation(session, generation, elements, semanticSource);
+    compactV2Observation(
+      session,
+      generation,
+      await session.browser.extractBrowserUseObservation(),
+      semanticSource,
+    );
   } catch {
   } finally {
     session.compactV2Active = saved.compactV2Active;
@@ -4348,7 +4290,7 @@ export async function observeQuery(
     if (parsed.rev !== index.epoch.rev) throw new Error("stale_cursor");
     offset = filterBound || unfiltered ? parsed.offset : 0;
   }
-  const liveElements = await session.browser.extractInteractiveElements();
+  const liveElements = (await session.browser.extractBrowserUseObservation()).elements;
   const liveSafe = compactV2LiveControls(session, liveElements);
   const liveUnchanged =
     liveSafe.rows.length === index.rows.length &&
@@ -4383,13 +4325,12 @@ export async function observeQuery(
       stage: pagingStage,
       semantics: index.semantics,
       byRef: new Map(liveSafe.rows.map((row) => [row.ref, row])),
-      // A query page carries no text channel, so the consumer keeps whatever
-      // prose it already holds for this same document; carry it forward
-      // rather than forcing one spurious full prose resend on the next
-      // observe.
-      ...(session.compactV2Previous?.prose === undefined
+      ...(session.compactV2Previous?.dom === undefined
         ? {}
-        : { prose: session.compactV2Previous.prose }),
+        : { dom: session.compactV2Previous.dom }),
+      ...(session.compactV2Previous?.renderedRefs === undefined
+        ? {}
+        : { renderedRefs: session.compactV2Previous.renderedRefs }),
     };
   }
   const liveByLegacy = new Map<string, InteractiveElement>();
@@ -4425,7 +4366,7 @@ export async function observeQuery(
       (role === undefined || row.role === role)
     );
   });
-  const page = encodeV2Page({
+  const page = encodeV2QueryPage({
     sessionId: session.id,
     stage: pagingStage,
     pageUrl: session.browser.currentUrl(),
@@ -4481,7 +4422,9 @@ async function observeSession(
     widenAllowedHostsFromCurrentUrl(session);
     session.generation += 1;
     const generation = session.generation;
-    const elements = await session.browser.extractInteractiveElements();
+    const capture =
+      session.compactV2Mode === "on" ? await session.browser.extractBrowserUseObservation() : null;
+    const elements = capture?.elements ?? (await session.browser.extractInteractiveElements());
     retainSessionElements(session, elements);
     let semanticSource: ObservationSemanticSourceV2 = { title: "", headings: [] };
     try {
@@ -4490,35 +4433,13 @@ async function observeSession(
       // Semantic context is optional availability-wise; it is independently
       // sealed below and never changes action-map safety.
     }
-    // Same for the text channel's prose source: availability-optional, and it
-    // fills only the wire budget the action map leaves unused. A failure here
-    // must NOT fail open: the map is unaffected, but the channel carries a
-    // concrete `text_unavailable` reason to the wire so an extractor error is
-    // distinguishable from a page with no prose (the 2026-09-06 inert text
-    // channel shipped green because this catch swallowed the throw silently).
-    let proseSource: string[] = [];
-    let proseUnavailable: string | undefined;
-    try {
-      proseSource = await session.browser.extractObservationProse();
-    } catch (err) {
-      proseUnavailable = (err instanceof Error ? err.message : String(err)).slice(0, 200);
-    }
-    // Native TypeScript compact serializer over TS's own CDP-derived DOM
-    // inventory. Its allowlist seal runs before any retained/emitted view; no
-    // Python subprocess or externally provisioned runtime participates.
     const v2Mode = session.compactV2Mode;
     if (v2Mode === "on") {
-      return compactV2Observation(
-        session,
-        generation,
-        elements,
-        semanticSource,
-        proseSource,
-        startMetadata,
-        proseUnavailable,
-      );
+      if (capture === null) throw new Error("observation_capture_missing");
+      return compactV2Observation(session, generation, capture, semanticSource, startMetadata);
     }
-    if (v2Mode === "shadow") exerciseCompactV2Shadow(session, generation, elements, semanticSource);
+    if (v2Mode === "shadow")
+      await exerciseCompactV2Shadow(session, generation, elements, semanticSource);
     session.compactV2Active = false;
     invalidateCompactV2Snapshot(session);
     const text = await session.browser.extractVisibleText();
@@ -5087,7 +5008,10 @@ async function executeAct(
           });
           break;
         }
-        const fresh = await browser.extractInteractiveElements();
+        const fresh =
+          session.compactV2Mode === "on"
+            ? (await browser.extractBrowserUseObservation()).elements
+            : await browser.extractInteractiveElements();
         retainSessionElements(session, fresh);
         // resolveTarget recomputes identities (incl. volatile positional-group
         // fingerprints) from these FRESH elements, so a ref whose group fingerprint
@@ -5127,7 +5051,10 @@ async function executeAct(
         // Re-resolve against FRESH elements — the target may be the <select> or
         // its <label>. Main-frame execution uses selectOption; frame execution
         // uses selectInFrame. text is the fuzzy option matcher in both paths.
-        const fresh = await browser.extractInteractiveElements();
+        const fresh =
+          session.compactV2Mode === "on"
+            ? (await browser.extractBrowserUseObservation()).elements
+            : await browser.extractInteractiveElements();
         retainSessionElements(session, fresh);
         const el =
           compactV2Authorization === undefined
@@ -5281,7 +5208,10 @@ async function executeAct(
           break;
         }
         // Re-resolve against FRESH elements every act — never trust a stale index.
-        const fresh = await browser.extractInteractiveElements();
+        const fresh =
+          session.compactV2Mode === "on"
+            ? (await browser.extractBrowserUseObservation()).elements
+            : await browser.extractInteractiveElements();
         retainSessionElements(session, fresh);
         // resolveTarget recomputes identities (incl. volatile positional-group
         // fingerprints) from these FRESH elements, so a ref whose group fingerprint
@@ -5439,7 +5369,10 @@ async function executeAct(
                 // field itself can be empty, so the recorded literal is "" —
                 // that field won't cleanly template into a saved recipe, but
                 // the live run is unaffected.
-                const refreshed = await browser.extractInteractiveElements();
+                const refreshed =
+                  session.compactV2Mode === "on"
+                    ? (await browser.extractBrowserUseObservation()).elements
+                    : await browser.extractInteractiveElements();
                 retainSessionElements(session, refreshed);
                 const liveField = refreshed.find((field) => field.selector === el.selector);
                 const liveValue =
@@ -5489,7 +5422,10 @@ async function executeAct(
         // Atomic OAuth deliberately accepts only the observed stable ref. A raw
         // locator would lose the same stale-reference guarantees as every other
         // action before the provider transition begins.
-        const fresh = await browser.extractInteractiveElements();
+        const fresh =
+          session.compactV2Mode === "on"
+            ? (await browser.extractBrowserUseObservation()).elements
+            : await browser.extractInteractiveElements();
         retainSessionElements(session, fresh);
         const el =
           compactV2Authorization === undefined

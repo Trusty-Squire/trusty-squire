@@ -10,15 +10,12 @@ import {
   isCompactV2Label,
   looksLikeSecretShapedName,
   controlMatchesPrivateQueryV2,
-  diffSafeControlsV2,
   disambiguateDuplicateLabelsV2,
-  equalSafePageSemanticsV2,
-  encodeV2Delta,
-  encodeV2Page,
+  encodeV2QueryPage,
   safePageSemanticsV2,
   safeDescriptionV2,
   safeOriginV2,
-  screenObservationProseV2,
+  redactObservationProseV2,
   sealRetainedInteractiveElementsV2,
   safeStageV2,
 } from "../compact-observation-v2.js";
@@ -193,7 +190,7 @@ describe("compact observation v2", () => {
         expect.objectContaining({ ref: "@e:6b3eXuaBV7", role: "button" }),
       );
       expect(safe.rows[0]?.label).toBe(REDACTED_SECRET_LABEL_V2);
-      const page = encodeV2Page({
+      const page = encodeV2QueryPage({
         sessionId: "session",
         stage: "browse",
         rows: safe.rows,
@@ -213,7 +210,7 @@ describe("compact observation v2", () => {
         pageOrigin: "https://ipinfo.invalid",
       });
       expect(safe.rows[0]?.label).toBe(REDACTED_SECRET_LABEL_V2);
-      const page = encodeV2Page({
+      const page = encodeV2QueryPage({
         sessionId: "session",
         stage: "browse",
         rows: safe.rows,
@@ -244,7 +241,7 @@ describe("compact observation v2", () => {
         expect(safe.rows[0], visibleText).toEqual(
           expect.objectContaining({ ref: "@e:preamble", role: "button" }),
         );
-        const page = encodeV2Page({
+        const page = encodeV2QueryPage({
           sessionId: "session",
           stage: "browse",
           rows: safe.rows,
@@ -256,7 +253,7 @@ describe("compact observation v2", () => {
       }
     });
 
-    it("keeps the redacted row actionable through a delta upsert", () => {
+    it("keeps a redacted query result actionable", () => {
       const copyToken = element({ visibleText: token });
       const safe = buildSafeControlsV2({
         elements: [copyToken],
@@ -264,10 +261,11 @@ describe("compact observation v2", () => {
         handles: new Map([[copyToken, "@e:6b3eXuaBV7"]]),
         pageOrigin: "https://ipinfo.invalid",
       });
-      const payload = encodeV2Delta({
+      const { payload } = encodeV2QueryPage({
         sessionId: "session",
         stage: "browse",
-        delta: { stageChanged: true, added: safe.rows, changed: [], removed: [] },
+        rows: safe.rows,
+        cursorFor: () => "cursor",
       });
       expect(payload).not.toBeNull();
       expect(payload!.safe_table).toEqual([["@e:6b3eXuaBV7", "b", REDACTED_SECRET_LABEL_V2]]);
@@ -393,14 +391,14 @@ describe("compact observation v2", () => {
 
   it("emits the live page URL, path and query included", () => {
     const url = "https://ipinfo.io/signup?token=private-url-token-123456789";
-    const page = encodeV2Page({
+    const page = encodeV2QueryPage({
       sessionId: "session",
       stage: "browse",
       pageUrl: url,
       rows: [],
       cursorFor: (offset) => `cursor-${offset}`,
     });
-    expect(page.payload).toMatchObject({ url, text: "" });
+    expect(page.payload).toMatchObject({ url });
   });
 
   it("prioritizes signup actions over unlabeled landing-page navigation", () => {
@@ -428,7 +426,7 @@ describe("compact observation v2", () => {
       frame: "main" as const,
       action: "continue" as const,
     }));
-    const page = encodeV2Page({
+    const page = encodeV2QueryPage({
       sessionId: "session",
       stage: "browse",
       rows,
@@ -453,7 +451,7 @@ describe("compact observation v2", () => {
     );
     // A hint this dense is dropped by the graceful metadata degradation — the
     // observation itself must never fail on real-world metadata.
-    const page = encodeV2Page({
+    const page = encodeV2QueryPage({
       sessionId: "session",
       stage: "browse",
       rows: [],
@@ -483,7 +481,7 @@ describe("compact observation v2", () => {
     const idToken = "a".repeat(OBSERVE_V2_MAX_WIRE_BYTES + 256);
     const pageUrl = `https://merchant.invalid/auth/callback?id_token=${idToken}`;
     expect(Buffer.byteLength(pageUrl, "utf8")).toBeGreaterThan(OBSERVE_V2_MAX_WIRE_BYTES);
-    const page = encodeV2Page({
+    const page = encodeV2QueryPage({
       sessionId: "session",
       stage: "auth",
       pageUrl,
@@ -522,7 +520,7 @@ describe("compact observation v2", () => {
       legacyRefs: new Map(dense.map((control, index) => [control, `@e:legacy_${index}`])),
       pageOrigin: "https://merchant.invalid",
     });
-    const page = encodeV2Page({
+    const page = encodeV2QueryPage({
       sessionId: "session",
       stage: "browse",
       semantics: { title: "Dense sample", headings: ["First controls"] },
@@ -1122,7 +1120,7 @@ describe("compact observation v2", () => {
   });
 
   it("keeps compact control state and finite action semantics on the wire", () => {
-    const page = encodeV2Page({
+    const page = encodeV2QueryPage({
       sessionId: "session",
       stage: "form",
       rows: [
@@ -1144,144 +1142,17 @@ describe("compact observation v2", () => {
       ["@e:1.1", "c", "@terms|s=u|a=continue|f=email|q=1/2|x=s"],
     ]);
   });
-
-  it("uses a tiny sealed delta when the safe map is unchanged", () => {
-    const page = encodeV2Delta({
-      sessionId: "session",
-      stage: "form",
-      delta: { added: [], changed: [], removed: [], stageChanged: false },
-    });
-    expect(page).toEqual({
-      format: "compact-v2",
-      url: "",
-      text: "",
-      session_id: "session",
-      delta: true,
-    });
-    expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThan(128);
-  });
-
-  it("keeps controls on the first page and sends no rows for its unchanged re-observe", () => {
-    const first = encodeV2Page({
-      sessionId: "session",
-      stage: "browse",
-      semantics: { title: "Sample", headings: ["Choose an option"] },
-      rows: [
-        {
-          ref: "@e:first-control",
-          role: "button",
-          visibility: "viewport",
-          frame: "main",
-          label: "@continue",
-        },
-      ],
-      cursorFor: (offset) => `cursor-${offset}`,
-    });
-    expect(first.payload.safe_table).toEqual([["@e:first-control", "b", "@continue"]]);
-    const repeat = encodeV2Delta({
-      sessionId: "session",
-      stage: "browse",
-      delta: { added: [], changed: [], removed: [], stageChanged: false },
-    });
-    expect(repeat).toEqual({
-      format: "compact-v2",
-      url: "",
-      text: "",
-      session_id: "session",
-      delta: true,
-    });
-    expect(Buffer.byteLength(JSON.stringify(repeat), "utf8")).toBeLessThan(128);
-  });
-
-  it("keeps unchanged semantic essentials sticky instead of repeating them in every delta", () => {
-    const semantics = { title: "Example storefront", headings: ["Create your account"] };
-    expect(
-      equalSafePageSemanticsV2(semantics, { ...semantics, headings: ["Create your account"] }),
-    ).toBe(true);
-    expect(
-      equalSafePageSemanticsV2(semantics, {
-        title: "Different page",
-        headings: ["Create your account"],
-      }),
-    ).toBe(false);
-    const delta = encodeV2Delta({
-      sessionId: "session",
-      stage: "form",
-      semantics: undefined,
-      delta: { added: [], changed: [], removed: [], stageChanged: false },
-    });
-    expect(delta).toEqual({
-      format: "compact-v2",
-      url: "",
-      text: "",
-      session_id: "session",
-      delta: true,
-    });
-    expect(Buffer.byteLength(JSON.stringify(delta), "utf8")).toBeLessThan(128);
-  });
-
-  it("emits an explicit semantic clear when the sealed semantics become empty", () => {
-    const delta = encodeV2Delta({
-      sessionId: "session",
-      stage: "form",
-      semantics: {},
-      delta: { added: [], changed: [], removed: [], stageChanged: false },
-    });
-    expect(delta).toEqual({
-      format: "compact-v2",
-      url: "",
-      text: "",
-      session_id: "session",
-      delta: true,
-      semantic: {},
-    });
-  });
-
-  it("emits only safe upserts and removed refs for a structural delta", () => {
-    const planted = "4111111111111111 CVV=123 merchant=Northwind";
-    const before = {
-      ref: "@e:before",
-      role: "button" as const,
-      visibility: "viewport" as const,
-      frame: "main" as const,
-      action: "continue" as const,
-    };
-    const changed = { ...before, action: "submit" as const };
-    const added = { ...before, ref: "@e:added", field: "email" as const };
-    const delta = diffSafeControlsV2(
-      {
-        epoch: { doc: "same-document", rev: 1 },
-        stage: "form",
-        semantics: {},
-        byRef: new Map([
-          [before.ref, before],
-          ["@e:removed", before],
-        ]),
-      },
-      "form",
-      [changed, added],
-    );
-    const page = encodeV2Delta({ sessionId: "session", stage: "form", delta });
-    const wire = JSON.stringify(page);
-    expect(wire).toContain("safe_table");
-    expect(wire).toContain("@e:added");
-    expect(wire).toContain("@e:removed");
-    expect(wire).not.toContain(planted);
-    expect(wire).not.toContain("Northwind");
-  });
 });
 
-describe("compact observation v2 text channel", () => {
-  const liveToken = "f9a062f02fadf5";
-
-  const pageWithRows = (overrides: Partial<Parameters<typeof encodeV2Page>[0]> = {}) => {
+describe("compact-v2 query pages and shared substring screen", () => {
+  const pageWithRows = (overrides: Partial<Parameters<typeof encodeV2QueryPage>[0]> = {}) => {
     const el = element({ visibleText: "Continue" });
     const safe = safeControls({
       elements: [el],
       legacyRefs: new Map([[el, "@e:continue"]]),
       pageOrigin: "https://shop.example.com",
     });
-    return encodeV2Page({
+    return encodeV2QueryPage({
       sessionId: "session",
       stage: "browse",
       rows: safe.rows,
@@ -1290,77 +1161,9 @@ describe("compact observation v2 text channel", () => {
     });
   };
 
-  it("emits screened page prose in the text field instead of an empty string", () => {
-    const page = pageWithRows({
-      pageText: [
-        "ipinfo makes data actionable",
-        "Your token was created. Treat it like a password.",
-        "Free plan: 50,000 requests per month",
-      ],
-    });
-    expect(page.payload.text).toContain("ipinfo makes data actionable");
-    expect(page.payload.text).toContain("Your token was created. Treat it like a password.");
-  });
-
-  it("redacts a secret-shaped token reflected into page prose via the shared redactor", () => {
-    const page = pageWithRows({
-      pageText: [
-        `Your API token ${liveToken} has been created.`,
-        "Rate limit: 50,000 requests per month",
-      ],
-    });
-    const text = page.payload.text as string;
-    expect(text).toContain("[redacted]");
-    expect(text).toContain("Your API token [redacted] has been created.");
-    expect(text).toContain("Rate limit: 50,000 requests per month");
-    // Nothing secret-shaped survives anywhere on the wire.
-    expect(JSON.stringify(page.payload)).not.toContain(liveToken);
-  });
-
-  it("keeps ordinary UI copy verbatim — prose screening never eats words", () => {
-    const page = pageWithRows({
-      pageText: [
-        "View plans and pricing for teams of every size",
-        "1.1.1.1 and 8.8.8.8 are public DNS resolvers",
-      ],
-    });
-    const text = page.payload.text as string;
-    expect(text).toContain("View plans and pricing for teams of every size");
-    expect(text).toContain("1.1.1.1 and 8.8.8.8 are public DNS resolvers");
-  });
-
-  it("under a tight budget degrades the text to empty while the action map stays intact", () => {
-    // Fill the budget with rows first: they pack until the wire cap is
-    // actually reached, so whatever remains cannot fit a full prose item.
-    const rows = Array.from({ length: 140 }, (_, i) =>
-      element({ visibleText: `Continue action button number ${i}` }),
-    );
-    const safe = safeControls({
-      elements: rows,
-      legacyRefs: new Map(rows.map((el, i) => [el, `@e:row-${i}`])),
-      pageOrigin: "https://shop.example.com",
-    });
-    const page = encodeV2Page({
-      sessionId: "session",
-      stage: "browse",
-      rows: safe.rows,
-      cursorFor: (offset) => `cursor-${offset}`,
-      pageText: ["x".repeat(180)],
-    });
-    const packedRows = page.payload.safe_table as unknown[];
-    expect(packedRows.length).toBeGreaterThan(0);
-    // The map consumed the budget; prose degraded to nothing — never the map.
-    expect(packedRows.length).toBeLessThan(rows.length);
-    expect(page.payload.text).toBe("");
-    // A page with room to spare carries the prose instead.
-    const roomy = encodeV2Page({
-      sessionId: "session",
-      stage: "browse",
-      rows: safe.rows.slice(0, 2),
-      cursorFor: (offset) => `cursor-${offset}`,
-      pageText: ["prose with room to spare"],
-    });
-    expect(roomy.payload.text).toBe("prose with room to spare");
+  it("query pages have no separate text channel", () => {
+    expect(pageWithRows().payload).not.toHaveProperty("text");
+    expect(pageWithRows().payload).not.toHaveProperty("text_unavailable");
   });
 
   it("attaches a screened region context to uninformative label slugs", () => {
@@ -1395,42 +1198,7 @@ describe("compact observation v2 text channel", () => {
     expect(safe.rows[1]!.label).toBe("@1w");
   });
 
-  it("carries prose on a delta only when the caller saw it change, and never nulls the delta for text", () => {
-    const previous = {
-      epoch: { doc: "d", rev: 1 },
-      stage: "browse" as const,
-      semantics: { title: "T" },
-      byRef: new Map(),
-    };
-    const delta = diffSafeControlsV2(previous, "browse", [
-      {
-        ref: "@e:new",
-        role: "button",
-        label: "@new-button",
-        visibility: "viewport",
-        frame: "main",
-      },
-    ]);
-    const withText = encodeV2Delta({
-      sessionId: "session",
-      stage: "browse",
-      delta,
-      pageText: [`Your API token ${liveToken} was copied to the clipboard.`],
-    });
-    expect(withText).not.toBeNull();
-    expect(withText?.text).toContain("Your API token [redacted] was copied to the clipboard.");
-    // A prose blob far larger than the remaining budget degrades to text: ""
-    // rather than forcing a full-resync null.
-    const oversized = encodeV2Delta({
-      sessionId: "session",
-      stage: "browse",
-      delta,
-      pageText: Array.from({ length: 48 }, (_, i) => `prose ${i} ` + "y".repeat(200)),
-    });
-    expect(oversized).not.toBeNull();
-  });
-
-  it("screenObservationProseV2 redacts grouped credentials exactly when the label screen would", () => {
+  it("redactObservationProseV2 redacts grouped credentials exactly when the label screen would", () => {
     // Hyphen/underscore-grouped credentials (UUIDs, grouped base64url) must
     // not survive prose because grouping kept every plain run under the
     // 12-char floor — the same strings screen as labels.
@@ -1442,25 +1210,20 @@ describe("compact observation v2 text channel", () => {
     for (const item of grouped) {
       expect(looksLikeSecretShapedName(item)).toBe(true);
     }
-    expect(screenObservationProseV2(grouped)).toEqual([
+    expect(grouped.map(redactObservationProseV2)).toEqual([
       "Your key: [redacted] — keep it safe.",
       "Token [redacted] has been created.",
       "License [redacted] expired.",
     ]);
     // Ordinary grouped copy with short or low-entropy segments survives.
-    expect(screenObservationProseV2(["See SKU-12345 and task-management-101."])).toEqual([
+    expect(["See SKU-12345 and task-management-101."].map(redactObservationProseV2)).toEqual([
       "See SKU-12345 and task-management-101.",
     ]);
   });
 
-  it("screenObservationProseV2 drops empties and duplicates", () => {
-    expect(
-      screenObservationProseV2([
-        "Same line",
-        "same line",
-        "   ",
-        "Your API token f9a062f02fadf5 has been created.",
-      ]),
-    ).toEqual(["Same line", "Your API token [redacted] has been created."]);
+  it("preserves whitespace and repeated text for the canonical renderer", () => {
+    expect(redactObservationProseV2("\tRepeated  words\n\tRepeated  words")).toBe(
+      "\tRepeated  words\n\tRepeated  words",
+    );
   });
 });

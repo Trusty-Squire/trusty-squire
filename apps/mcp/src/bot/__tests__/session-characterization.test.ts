@@ -1,3 +1,4 @@
+import { mockBrowserUseCapture } from "./browser-use-test-capture.js";
 // Phase 0 of the operator session-management restructure: a characterization
 // ORACLE, not new behavior. It pins what the driving agent and the internal
 // callers actually see today so the mechanical extractions that follow
@@ -97,6 +98,10 @@ vi.mock("../browser.js", async (importOriginal) => {
       async extractInteractiveElements(): Promise<unknown[]> {
         return h.elements;
       }
+      async extractBrowserUseObservation() {
+        return mockBrowserUseCapture(h.elements as InteractiveElement[]);
+      }
+
       async extractObservationSemantics(): Promise<{ title: string; headings: string[] }> {
         return { title: "", headings: [] };
       }
@@ -481,21 +486,17 @@ describe("characterization: session lifecycle ordering", () => {
 
 // The COMPLETE agent-visible key set of each observation payload. Asserted as
 // a whole set (not "contains") so a silently added or dropped field fails.
-// `text_unavailable` is the 2026-09-06 diagnostic: this harness's browser stub
-// has no `extractObservationProse`, so the availability-optional prose channel
-// surfaces its concrete failure reason on both full and delta payloads.
-const FIRST_V2_KEYS = [
+// The separate text channel is absent from both full and delta payloads.
+const FIRST_V2_KEYS = ["dom", "format", "more_above", "more_below", "session_id", "stage", "url"];
+const REOBSERVE_V2_KEYS = [
+  "delta",
   "format",
-  "safe_table",
+  "more_above",
+  "more_below",
   "session_id",
   "stage",
-  "text",
-  "text_unavailable",
   "url",
 ];
-// A repeat compact-v2 read on an unchanged page collapses to a delta: no
-// safe_table and no stage.
-const REOBSERVE_V2_KEYS = ["delta", "format", "session_id", "text", "text_unavailable", "url"];
 const V1_COMPACT_KEYS = [
   "delta",
   "elements_total",
@@ -516,7 +517,7 @@ const V1_FULL_KEYS = [
   "text",
   "url",
 ];
-const QUERY_KEYS = ["format", "safe_table", "session_id", "stage", "text", "url"];
+const QUERY_KEYS = ["format", "safe_table", "session_id", "stage", "url"];
 
 function el(over: Partial<InteractiveElement>): InteractiveElement {
   return {

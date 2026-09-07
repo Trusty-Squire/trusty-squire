@@ -93,11 +93,11 @@ actually renders:
   origins are verbatim. A password field's value, an operator-injected vault
   value, a filled card number and CVV, a rendered API key, recovery code, TOTP,
   or JWT are all ordinary page content. (One bounded exception, owner's
-  2026-09-06 Finding-2 order: compact-v2's extracted page-prose `text` channel
-  rewrites secret-shaped substrings — see the carve-outs below.)
-- Compact-v2's `url` is the live page URL, path and query included. Its rows
-  still omit field values — that is a payload SIZE budget, not a seal; read a
-  value with `operate_screenshot`, `extract`, or a V1 session.
+  2026-09-07 serializer order: compact-v2's emitted names and interleaved text
+  rewrite secret-shaped substrings — see the carve-outs below.)
+- Compact-v2's `url` is the live page URL, path and query included. Its DOM
+  attributes follow canonical browser-use's selection and ordering; see the
+  pinned serializer contract in `browser-use-serializer-port.md`.
 - `extract` returns every labeled candidate the page shows, including one that
   still looks masked (it is ranked behind a revealed sibling, never refused).
   The `no_legit_credential` and "the secret is still masked/hidden" refusals are
@@ -116,39 +116,17 @@ segments ≥4 chars scored as one joined run — `looksLikeSecretShapedName` in
 `compact-observation-v2.ts`) and emits `@redacted-secret` instead, keeping the
 row's ref, role, and every non-secret fact so the control stays actionable.
 Values, screenshots, and extracts remain verbatim, and ordinary labels
-(`@8-8-8-8`, `@bmbmlite`) are tuned to survive verbatim. Later the same day the
-owner's Finding-2 order extended this one shared screen to the compact-v2
-page-text channel — the bounded, budget-degraded, sticky `text` field documented
-just below — whose extracted prose rewrites only secret-shaped substrings to
-`[redacted]`. That is the channel's own documented wire contract, not a read
-seal and not a precedent for any other shape-matching screen.
+(`@8-8-8-8`, `@bmbmlite`) are tuned to survive verbatim. The subsequent canonical
+DOM port applies that shared substring screen to emitted names and interleaved
+text, preserving surrounding copy and indentation.
+See the current contract below.
 
-**The same run's Finding 2 — compact-v2 comprehensibility (2026-09-06).**
-Finding 1 made the map safe; Finding 2 makes it *comprehensible*:
+**Canonical DOM port (2026-09-07).** The separate page-text channel and its
+prose extractor have been deleted. Interleaved text, hierarchy, viewport scoping,
+containment, stable ref identity and the mandatory name/text screen now follow
+[`browser-use-serializer-port.md`](browser-use-serializer-port.md). The generated
+canonical fixture corpus, not a byte count, is the acceptance oracle.
 
-- **Screened page-text channel.** The observation's `text` field was always
-  `""` — the agent got the control map but not the page's prose (headings,
-  intro copy, alerts), so a /dashboard/token page looked like an unlabeled
-  wall. The browser extractor (`extractObservationProse` in `browser.ts`)
-  now returns a bounded list of salient prose items (headings, paragraphs,
-  list items, alerts/live regions — skipping interactive-control
-  descendants, whose labels are the map's job). `screenObservationProseV2`
-  screens each item through the SAME shared primitive as the label alias
-  (`looksLikeSecretShapedName` + run-entropy predicate) by redacting only the
-  secret-shaped substrings to `[redacted]`, so "Your API token [redacted] was
-  copied to the clipboard" keeps its context. Prose fills whatever wire
-  budget the action map leaves over (rows pack first — the map is never
-  starved for text's sake), degrades item-by-item from the tail, and is
-  sticky: a delta resends prose only when it differs from what was last
-  actually emitted (the degraded subset, not the full screened list), so a
-  degraded page is re-sent whole on the next unchanged-rows observe rather
-  than leaving the consumer with a permanent subset. Prose extraction is
-  availability-optional: a failed extraction surfaces as a bounded
-  `text_unavailable` reason on the payload instead of failing open with a
-  silent empty `text`, while a genuinely prose-free page still emits the
-  empty `text`. The page-side extractor (`extractObservationProseItems` in
-  `browser.ts`) must stay self-contained — `page.evaluate` serializes only
-  its source, and the module closure does not travel.
 - **Duplicate-label ordinals.** Two controls legitimately sharing an
   accessible name (two `@curl-example` copy buttons) both emitted the same
   label, so `@curl-example` was a dead ambiguous target forever. Labels are

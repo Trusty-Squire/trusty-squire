@@ -613,15 +613,14 @@ the page renders — field values, labels, the live URL (path and query included
 card material, and rendered API keys alike. The masking layer
 (`redactObservationText` / `present*` / `Session.sealedFieldKeys`), compact-v2's
 content screens, and `provision-drive.ts`'s compact-v2 tool-result seal
-(`compactV2ThickResult`) are deleted. Compact-v2 omits field values from its rows and emits page `text`
-only through the narrow carve-out below — that is a payload SIZE budget, not a
-seal. §4.5 of the doc and `AGENTS.md` §16 own the rule; do not add a seal back.
+(`compactV2ThickResult`) are deleted. Compact-v2 now follows the pinned canonical
+DOM serializer with the narrow name/text substring screen described below. §4.5 of the doc and `AGENTS.md` §16 own the rule; do not add a seal back.
 One narrow compact-v2 screening carve-out (2026-09-06, ipinfo Findings 1–2):
 the label alias (`controlLabelV2`) screens credential-shaped accessible names
-into `@redacted-secret`, and the bounded page-prose `text` channel runs its
-extracted prose through the same shared redactor, rewriting only secret-shaped
-substrings to `[redacted]`. Both are code-derived target/wire-shape contracts,
-not read seals — see §4.5 and `AGENTS.md` §16 for the owner contract.
+into `@redacted-secret`. The canonical browser-use DOM port applies that shared
+substring screen to emitted names and interleaved text; the separate page-text
+field and prose extractor are deleted. See `docs/browser-use-serializer-port.md`.
+This is a wire-shape contract; see §4.5 and `AGENTS.md` §16.
 
 ### Operator Recipe registry (replay-serve-live-domainlock)
 

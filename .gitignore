@@ -21,6 +21,8 @@ Thumbs.db
 
 .turbo/
 .cache/
+.local/
+.tmp/
 
 # Demo orchestrator runtime
 .demo-logs/

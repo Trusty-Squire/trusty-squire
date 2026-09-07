@@ -1,3 +1,5 @@
+import type { InteractiveElement } from "../browser.js";
+import { mockBrowserUseCapture } from "./browser-use-test-capture.js";
 // Functional tests for the operator-surface session state machine — the
 // stateful flows the pure-helper unit tests can't reach. The real
 // BrowserController + google-login are mocked so we exercise startProvisionSession
@@ -126,13 +128,11 @@ const h = vi.hoisted(() => ({
   visibleTextQueue: [] as string[],
   visibleTextGate: null as Promise<void> | null,
   extractVisibleTextCalls: 0,
-  // Compact-v2 text channel: the prose list extractObservationProse() returns
-  // (with the same queue-scripting option as visibleText).
+  // Text nodes in the synthetic canonical DOM capture, with queued updates.
   prose: [] as string[],
   proseQueue: [] as string[][],
   proseExtractCalls: 0,
-  // When non-null, extractObservationProse() throws this message — scripts a
-  // failed page-side extractor so tests can pin the surfaced diagnostic.
+  // When non-null, canonical DOM capture throws this concrete error.
   proseError: null as string | null,
   openFirstMailResult: false,
   // fill_card cart-total-carry-forward (Session.lastCartCheckout): null means
@@ -341,12 +341,11 @@ vi.mock("../browser.js", async (importOriginal) => ({
       if (h.visibleTextQueue.length > 0) return h.visibleTextQueue.shift()!;
       return h.visibleText;
     }
-    async extractObservationProse(): Promise<string[]> {
-      h.proseExtractCalls += 1;
+    async extractBrowserUseObservation() {
+      const elements = await this.extractInteractiveElements();
       if (h.proseError !== null) throw new Error(h.proseError);
-      if (h.oauthReadError !== null) throw new Error(h.oauthReadError);
-      if (h.proseQueue.length > 0) return h.proseQueue.shift() ?? h.prose;
-      return h.prose;
+      const text = h.proseQueue.length > 0 ? (h.proseQueue.shift() ?? h.prose) : h.prose;
+      return mockBrowserUseCapture(elements as InteractiveElement[], text);
     }
     async revealMaskedCredentials(): Promise<void> {}
     async extractLabeledCredentialCandidates(): Promise<unknown[]> {
@@ -3139,8 +3138,9 @@ describe("3.1 — autocomplete-aware type fill", () => {
     h.shippingMethodsLoadOnAutocompleteCommit = true;
 
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table;
+    const rows = (await observeQuery(started.session_id, "")).safe_table as Array<
+      [string, string, string?]
+    >;
     const addressRef = rows.find((row) => row[1] === "s" && row[2]?.includes("f=address"))?.[0];
 
     // The old observation exposed both controls as f=address, allowing the
@@ -3638,8 +3638,9 @@ describe("operate session — OAuth lifecycle", () => {
       oauthAwaitingHumanMessage("https://app.example.com", 30_000),
     );
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
-    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table;
+    const rows = (await observeQuery(started.session_id, "")).safe_table as Array<
+      [string, string, string?]
+    >;
     const oauthRef = rows[0]?.[0];
     expect(oauthRef).toBeDefined();
     const pending = await act(started.session_id, { kind: "oauth_login", target: oauthRef! });
@@ -3836,8 +3837,7 @@ describe("Compact V2 action-map boundary", () => {
       const started = await startProvisionSession({
         serviceUrl: "https://shop.example.com/signup",
       });
-      const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
-        .safe_table[0]![0];
+      const handle = domRefs(started)[0]!;
       await act(started.session_id, { kind: "click", target: handle });
 
       const session = paymentSession(started.session_id);
@@ -3893,8 +3893,7 @@ describe("Compact V2 action-map boundary", () => {
       const started = await startProvisionSession({
         serviceUrl: "https://shop.example.com/signup",
       });
-      const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
-        .safe_table[0]![0];
+      const handle = domRefs(started)[0]!;
       const rawValue = "correct horse battery staple";
       await act(started.session_id, {
         kind: "type",
@@ -3941,7 +3940,7 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
-    const handle = (started as unknown as { safe_table: Array<[string]> }).safe_table[0]![0];
+    const handle = domRefs(started)[0]!;
 
     await act(started.session_id, {
       kind: "select",
@@ -4076,8 +4075,7 @@ describe("Compact V2 action-map boundary", () => {
       hint: expect.stringContaining("Complete the storefront form."),
       user_email: "operator@example.test",
     });
-    const firstRef = (started as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table[0]?.[0];
+    const firstRef = domRefs(started)[0]!;
     expect(firstRef).toMatch(/^@e:/);
 
     // V2's sealed membership check runs before locator parsing, so a CSS/text
@@ -4097,8 +4095,7 @@ describe("Compact V2 action-map boundary", () => {
     );
     expect(h.clickCalls).toBe(0);
 
-    const freshRef = (afterGoto as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table[0]?.[0];
+    const freshRef = domRefs(afterGoto)[0]!;
     expect(freshRef).toMatch(/^@e:/);
     await act(started.session_id, { kind: "click", target: freshRef! });
     expect(h.clickCalls).toBe(1);
@@ -4141,8 +4138,7 @@ describe("Compact V2 action-map boundary", () => {
       const started = await startProvisionSession({
         serviceUrl: "https://shop.example.com/checkout",
       });
-      const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
-        .safe_table[0]![0];
+      const ref = domRefs(started)[0]!;
       now += 5 * 60_000 + 1;
       await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
         "stale_ref",
@@ -4167,7 +4163,9 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/products",
     });
-    const pageCursor = (started.overflow as { next_cursor: string }).next_cursor;
+    const pageCursor = (
+      (await observeQuery(started.session_id, "")).overflow as { next_cursor: string }
+    ).next_cursor;
     // A filter riding on the MAP cursor means "search the whole map for this":
     // it resolves the filtered lookup instead of rejecting with invalid_cursor
     // (the live Xata failure).
@@ -4216,7 +4214,9 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkouts/c/token",
     });
-    const pageCursor = (started.overflow as { next_cursor: string }).next_cursor;
+    const pageCursor = (
+      (await observeQuery(started.session_id, "")).overflow as { next_cursor: string }
+    ).next_cursor;
     // Live checkouts (e.g. Shopify) rotate a query token on every step
     // re-render without a real navigation; paging must survive it.
     h.currentUrl = "https://shop.example.com/checkouts/c/token?_r=revalidated";
@@ -4239,7 +4239,9 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkouts/c/token",
     });
-    const pageCursor = (started.overflow as { next_cursor: string }).next_cursor;
+    const pageCursor = (
+      (await observeQuery(started.session_id, "")).overflow as { next_cursor: string }
+    ).next_cursor;
     // A validation state appears on a live field between pages: the element
     // set no longer byte-matches the frozen snapshot, but paging must
     // re-serialize the same document instead of failing with stale_cursor.
@@ -4256,7 +4258,7 @@ describe("Compact V2 action-map boundary", () => {
     );
     // A ref issued before the re-render is NOT positional and stays valid:
     // the element it names is still there and unchanged.
-    const firstPageRef = (started as unknown as { safe_table: Array<[string]> }).safe_table[0]![0];
+    const firstPageRef = domRefs(started)[0]!;
     await act(started.session_id, { kind: "click", target: firstPageRef });
     expect(h.clickCalls).toBe(1);
   });
@@ -4275,7 +4277,9 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkouts/c/token",
     });
-    const pageCursor = (started.overflow as { next_cursor: string }).next_cursor;
+    const pageCursor = (
+      (await observeQuery(started.session_id, "")).overflow as { next_cursor: string }
+    ).next_cursor;
 
     // A replaced main document on the same URL still invalidates.
     h.mainDocumentEpoch += 1;
@@ -4288,7 +4292,9 @@ describe("Compact V2 action-map boundary", () => {
     // page key must change and the cursor must die — refs never leak across
     // documents.
     const reObserved = await observe(started.session_id);
-    const freshCursor = (reObserved.overflow as { next_cursor: string }).next_cursor;
+    const freshCursor = (
+      (await observeQuery(reObserved.session_id, "")).overflow as { next_cursor: string }
+    ).next_cursor;
     h.currentUrl = "https://shop.example.com/checkouts/c/other?_r=x";
     h.mainDocumentEpoch += 1;
     await expect(observeQuery(started.session_id, "", undefined, freshCursor)).rejects.toThrow(
@@ -4440,7 +4446,7 @@ describe("Compact V2 action-map boundary", () => {
     });
     h.elements = [email];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
-    const handle = (started as unknown as { safe_table: Array<[string]> }).safe_table[0]![0];
+    const handle = domRefs(started)[0]!;
 
     // A live re-render adds a control. The observed field is untouched, so its
     // ref must still act — that is the whole point of fingerprint identity.
@@ -4459,7 +4465,7 @@ describe("Compact V2 action-map boundary", () => {
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
-    const handle = (started as unknown as { safe_table: Array<[string]> }).safe_table[0]![0];
+    const handle = domRefs(started)[0]!;
 
     h.mainDocumentEpoch += 1;
 
@@ -4506,19 +4512,7 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkouts/cn/2iRZ0Tt8lYFMqW9sc9uCyR/information",
     });
-    const page = started as unknown as {
-      safe_table: Array<[string, string, string?]>;
-      overflow?: { next_cursor: string };
-    };
-    // Five fields fit on one budget-packed page; an overflow continuation is
-    // only exercised when the page actually overflows.
-    const rest =
-      page.overflow === undefined
-        ? { safe_table: [] as Array<[string, string, string?]> }
-        : ((await observeQuery(started.session_id, "", undefined, page.overflow.next_cursor)) as {
-            safe_table: Array<[string, string, string?]>;
-          });
-    const refs = [...page.safe_table, ...rest.safe_table].map((row) => row[0]);
+    const refs = domRefs(started);
     expect(refs).toHaveLength(fields.length);
 
     // The re-render: siblings reordered, every screenPath ordinal shifted, and
@@ -4546,8 +4540,7 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkouts/cn/2iRZ0Tt8lYFMqW9sc9uCyR/information",
     });
-    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table[0]![0];
+    const handle = domRefs(started)[0]!;
 
     // An SPA pushState off the checkout, with NO document replacement: the
     // normalized origin+pathname backstop is the only thing standing between
@@ -4568,8 +4561,7 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkouts/c/spring-sale-guide",
     });
-    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table[0]![0];
+    const handle = domRefs(started)[0]!;
 
     // Only a MINTED-looking token is treated as volatile. A readable slug is a
     // real page name, so a same-document route change between two of them must
@@ -4590,8 +4582,7 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkouts/cn/2iRZ0Tt8lYFMqW9sc9uCyR/information",
     });
-    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table[0]![0];
+    const handle = domRefs(started)[0]!;
 
     // Two different checkouts normalize onto the same page key on purpose, so
     // the document-identity half of the epoch is what keeps them isolated.
@@ -4620,10 +4611,8 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/account" });
     const serialized = JSON.stringify(started);
 
-    expect(serialized).toContain("a=destructive");
-    expect(serialized).toContain("a=continue");
-    expect(serialized).not.toContain("Delete account");
-    expect(serialized).not.toContain("Keep account");
+    expect(serialized).toContain("Delete account");
+    expect(serialized).toContain("Keep account");
   });
 
   it("keeps a ref through a selector-only re-render of the same control", async () => {
@@ -4632,8 +4621,7 @@ describe("Compact V2 action-map boundary", () => {
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#step-one" }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
-    const oldHandle = (started as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table[0]![0];
+    const oldHandle = domRefs(started)[0]!;
 
     // A framework re-render swaps the CSS-in-JS selector. The control's
     // identity — frame, path, role, accessible name — is unchanged, so the
@@ -4642,8 +4630,8 @@ describe("Compact V2 action-map boundary", () => {
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#step-two" }),
     ];
     const refreshed = await observe(started.session_id);
-    const newHandle = (refreshed as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table[0]![0];
+    const newHandle = domRefs(refreshed)[0] ?? oldHandle;
+    expect(refreshed.dom).toBeUndefined();
     expect(newHandle).toBe(oldHandle);
     await act(started.session_id, { kind: "click", target: oldHandle });
     expect(h.clickCalls).toBe(1);
@@ -4661,8 +4649,7 @@ describe("Compact V2 action-map boundary", () => {
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
-    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table[0]![0];
+    const handle = domRefs(started)[0]!;
 
     h.elements = [
       elem({
@@ -4762,8 +4749,9 @@ describe("Compact V2 action-map boundary", () => {
     ];
 
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
-    const facts = (started as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table[0]![2]!;
+    const facts = (
+      (await observeQuery(started.session_id, "")).safe_table as Array<[string, string, string?]>
+    )[0]![2]!;
     // Merchant copy reaches the wire under the payment-only policy, but only as
     // a slug: controlLabelV2's [a-z0-9-] charset drops the `|` and `=` the page
     // tried to forge owned facts with, so the only fact here is the owned one.
@@ -4801,8 +4789,7 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
-    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table[0]![0];
+    const ref = domRefs(started)[0]!;
     await verifyPostcondition(started.session_id, {
       kind: "observe_artifact",
       describe: "Checkout remains visible",
@@ -4820,7 +4807,7 @@ describe("Compact V2 action-map boundary", () => {
     h.visibleText = "Review order";
     const serviceUrl = "https://shop.example.com/checkout/review?token=private-url-token-123456789";
     const started = await startProvisionSession({ serviceUrl });
-    expect(started).toMatchObject({ format: "compact-v2", url: serviceUrl, text: "" });
+    expect(started).toMatchObject({ format: "compact-v2", url: serviceUrl });
     await expect(
       verifyPostcondition(started.session_id, {
         kind: "execute_capability",
@@ -4947,126 +4934,82 @@ describe("Compact V2 action-map boundary", () => {
     }
   });
 
-  it("carries screened page prose in the compact-v2 text channel", async () => {
+  it("interleaves screened text, preserves refs and omits the deleted text channel", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
     ];
-    h.prose = [
-      "Your token was created. Treat it like a password.",
-      "Live token: f9a062f02fadf5 — copy it now.",
-    ];
+    const token = "f9a062f02fad" + "f5";
+    h.prose = [`Your token ${token} was created.`];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
       observationFormat: "compact-v2",
       serviceUrl: "https://app.example.com/dashboard",
     });
-    expect(started.format).toBe("compact-v2");
-    expect(started.text).toContain("Your token was created. Treat it like a password.");
-    // A token reflected into page prose is redacted by the shared primitive.
-    expect(started.text).toContain("[redacted]");
-    expect(started.text).not.toContain("f9a062f02fadf5");
-    // Sticky: an unchanged re-observe does not resend the same prose.
-    const again = await observe(started.session_id, "compact");
-    expect(again.text).toBe("");
-    // A changed prose payload rides the delta, screened like the first emit.
+    expect(started).not.toHaveProperty("text");
+    expect(started).not.toHaveProperty("safe_table");
+    expect(started.dom).toContain("Your token [redacted] was created.");
+    expect(started.dom).toContain("\n\tContinue");
+    const ref = domRefs(started)[0]!;
+    expect(ref).toMatch(/^@e:/);
+    const again = await observe(started.session_id);
+    expect(again.dom).toBeUndefined();
     h.prose = ["Rate limit reached: upgrade to view more requests."];
-    const changed = await observe(started.session_id, "compact");
-    expect(changed.text).toBe("Rate limit reached: upgrade to view more requests.");
+    const changed = await observe(started.session_id);
+    expect(changed.dom).toContain(h.prose[0]);
+    expect(domRefs(changed)).toEqual([ref]);
+    await act(started.session_id, { kind: "click", target: ref }, "none");
+    expect(h.clickCalls).toBe(1);
   });
 
-  it("surfaces a concrete text_unavailable reason when the prose extractor throws", async () => {
-    // The 2026-09-06 inert text channel: the page-side extractor threw on
-    // every real page and the observation swallowed it, so a failed channel
-    // was indistinguishable from a page with no prose. The channel must fail
-    // LOUD: the map is unaffected, but the wire carries the concrete reason.
+  it("removes departed refs without reindexing surviving controls", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = [
-      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
+      elem({ tag: "button", role: "button", visibleText: "First action", selector: "#first" }),
+      elem({ tag: "button", role: "button", visibleText: "Second action", selector: "#second" }),
     ];
-    h.prose = ["This page would have prose, but extraction fails."];
-    h.proseError = "page.evaluate: ReferenceError: OBSERVATION_PROSE_MAX_ITEMS is not defined";
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
       observationFormat: "compact-v2",
       serviceUrl: "https://app.example.com/dashboard",
     });
-    const payload = started as unknown as Record<string, unknown>;
-    expect(started.text).toBe("");
-    expect(payload.text_unavailable).toContain("ReferenceError");
-    expect(payload.text_unavailable).toContain("OBSERVATION_PROSE_MAX_ITEMS");
-    // The action map survives the failed channel untouched.
-    const rows = (started as unknown as { safe_table: unknown[] }).safe_table;
-    expect(rows).toHaveLength(1);
-    // A later delta keeps the diagnostic until the channel recovers.
-    h.elements = [
-      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
-      elem({ tag: "button", role: "button", visibleText: "Cancel", selector: "#cancel" }),
-    ];
-    const delta = await observe(started.session_id, "compact");
-    expect((delta as unknown as Record<string, unknown>).text_unavailable).toContain(
-      "ReferenceError",
-    );
-    // Recovery: the channel comes back and the reason disappears.
+    const [first, second] = domRefs(started);
+    h.elements = h.elements.slice(1);
+    const changed = await observe(started.session_id);
+    expect(changed.removed).toEqual([first]);
+    expect(domRefs(changed)).toEqual([second]);
+    expect(changed.dom).toContain("Second action");
+    await act(started.session_id, { kind: "click", target: second! }, "none");
+    expect(h.clickCalls).toBe(1);
+  });
+
+  it("surfaces a failed DOM capture instead of silently emitting an empty observation", async () => {
+    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
+    h.elements = [elem({ visibleText: "Continue", selector: "#continue" })];
+    const started = await startHarnessProvisionSession({
+      browser: new BrowserController(),
+      observationFormat: "compact-v2",
+      serviceUrl: "https://app.example.com/dashboard",
+    });
+    h.proseError = "DOMSnapshot.captureSnapshot failed";
+    await expect(observe(started.session_id)).rejects.toThrow("DOMSnapshot.captureSnapshot failed");
     h.proseError = null;
-    h.prose = ["Extraction recovered."];
-    const recovered = await observe(started.session_id, "compact");
-    expect(recovered.text).toContain("Extraction recovered.");
-    expect((recovered as unknown as Record<string, unknown>).text_unavailable).toBeUndefined();
+    h.prose = ["Recovered page"];
+    expect((await observe(started.session_id)).dom).toContain("Recovered page");
   });
 
-  it("emits no text_unavailable for a page that legitimately has no prose", async () => {
+  it("never drops interleaved content to meet a byte count", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
-    h.elements = [
-      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
-    ];
-    h.prose = [];
+    h.elements = [elem({ visibleText: "Continue", selector: "#continue" })];
+    h.prose = ["Long readable content. ".repeat(600)];
     const started = await startHarnessProvisionSession({
       browser: new BrowserController(),
       observationFormat: "compact-v2",
       serviceUrl: "https://app.example.com/dashboard",
     });
-    expect(started.text).toBe("");
-    expect((started as unknown as Record<string, unknown>).text_unavailable).toBeUndefined();
-  });
-
-  it("re-offers the full text channel after a budget-degraded resync page", async () => {
-    process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
-    h.elements = [
-      elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
-    ];
-    const bulkyTwo = `Prose item two: ${"x".repeat(1200)}`;
-    const bulkyThree = `Prose item three: ${"y".repeat(1200)}`;
-    h.prose = ["Prose item one.", bulkyTwo, bulkyThree];
-    const started = await startHarnessProvisionSession({
-      browser: new BrowserController(),
-      observationFormat: "compact-v2",
-      serviceUrl: "https://app.example.com/dashboard",
-    });
-    // Baseline: a small map leaves budget for the whole text channel, so the
-    // consumer holds all three items.
-    expect(started.text).toContain("Prose item one.");
-    expect(started.text).toContain("Prose item three:");
-    // A row change forces a fresh paged map whose rows consume the wire
-    // budget; the text channel degrades on that resync page. (48 rows: the
-    // 2026-09-06 word-boundary label cut shortened each slug by a few bytes,
-    // so 40 rows no longer overflow the text budget.)
-    h.elements = Array.from({ length: 48 }, (_, i) =>
-      elem({
-        tag: "button",
-        role: "button",
-        visibleText: `Dynamically rendered section control number ${i} with a long descriptive name`,
-        selector: `#dyn-${i}`,
-      }),
-    );
-    const resync = await observe(started.session_id, "compact");
-    expect(resync.text.length).toBeLessThan(bulkyTwo.length);
-    // The rows are now unchanged, so the delta is small: the consumer only
-    // ever received a degraded subset, so the full prose must be re-offered
-    // instead of being suppressed as "unchanged" against the stored list.
-    const again = await observe(started.session_id, "compact");
-    expect(again.text).toContain("Prose item one.");
-    expect(again.text).toContain("Prose item three:");
+    expect(started.dom).toContain(h.prose[0]!.trim());
+    expect(domRefs(started)).toHaveLength(1);
+    expect(started).not.toHaveProperty("text");
   });
 
   it("keeps harness V1 consumers explicit while bounding opt-in V2 metadata", async () => {
@@ -5107,14 +5050,12 @@ describe("Compact V2 action-map boundary", () => {
       elem({ tag: "button", role: "button", visibleText: "Continue", selector: "#continue" }),
     ];
     const started = await startProvisionSession({ serviceUrl: secretUrl });
-    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table[0]![0];
+    const ref = domRefs(started)[0]!;
 
     const ack = await act(started.session_id, { kind: "scroll", direction: "down" }, "none");
     expect(ack).toMatchObject({
       format: "compact-v2",
       url: secretUrl,
-      text: "",
       observed: "none",
     });
     expect(ack.elements).toBeUndefined();
@@ -5136,7 +5077,6 @@ describe("Compact V2 action-map boundary", () => {
     expect(transition).toMatchObject({
       format: "compact-v2",
       url: secretUrl,
-      text: "",
       stage: "auth",
       oauth: {
         state: "in_progress",
@@ -5172,8 +5112,7 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
-    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table[0]![0];
+    const ref = domRefs(started)[0]!;
     h.clickError = new Error("dispatch failed after click");
     await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
       "action_failed",
@@ -5193,8 +5132,7 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
-    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table[0]![0];
+    const ref = domRefs(started)[0]!;
     await expect(captchaGate(started.session_id)).resolves.toMatchObject({ found: false });
     await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
       "stale_ref",
@@ -5209,8 +5147,7 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
-    const ref = (started as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table[0]![0];
+    const ref = domRefs(started)[0]!;
     await activeProvisionBrowserForPayment(paymentSession(started.session_id));
     await expect(act(started.session_id, { kind: "click", target: ref })).rejects.toThrow(
       "stale_ref",
@@ -5231,8 +5168,7 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
-    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table[0]![0];
+    const handle = domRefs(started)[0]!;
     await expect(formSelectMany(started.session_id, { Country: "Korea" })).rejects.toThrow(
       "stale_ref",
     );
@@ -5282,8 +5218,9 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
-    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table;
+    const rows = (await observeQuery(started.session_id, "")).safe_table as Array<
+      [string, string, string?]
+    >;
     const variantHandle = rows.find(([, , description]) =>
       description?.startsWith("@variant"),
     )?.[0];
@@ -5341,8 +5278,9 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
-    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table;
+    const rows = (await observeQuery(started.session_id, "")).safe_table as Array<
+      [string, string, string?]
+    >;
     const variantHandle = rows.find(([, , description]) =>
       description?.startsWith("@variant"),
     )?.[0];
@@ -5374,8 +5312,7 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
-    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table[0]![0];
+    const handle = domRefs(started)[0]!;
     h.selectError = new Error(
       'select <select> #private-variant-selector: option "Private option" was not found',
     );
@@ -5403,8 +5340,7 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
-    const handle = (started as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table[0]![0];
+    const handle = domRefs(started)[0]!;
     h.selectError = new Error(
       'select <select> #shipping-frame: option "Private option" was not found',
     );
@@ -5445,8 +5381,9 @@ describe("Compact V2 action-map boundary", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
-    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table;
+    const rows = (await observeQuery(started.session_id, "")).safe_table as Array<
+      [string, string, string?]
+    >;
     const externalHandle = rows.find(([, , facts]) => facts?.startsWith("@external-variant"))?.[0];
     const sizeHandle = rows.find(([, , facts]) => facts?.startsWith("@size"))?.[0];
 
@@ -5532,8 +5469,9 @@ describe("Compact V2 checkout copy stays unredacted", () => {
     h.elements = shopifyCheckoutFixture();
 
     const started = await startProvisionSession({ serviceUrl: checkoutUrl });
-    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table;
+    const rows = (await observeQuery(started.session_id, "")).safe_table as Array<
+      [string, string, string?]
+    >;
 
     // Both shipping-rate options are in the map with role radio and their
     // price-bearing labels; the standard option carries its checked state.
@@ -5661,9 +5599,7 @@ describe("Compact V2 durable ref identity", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
-    const refs = (
-      started as unknown as { safe_table: Array<[string, string, string?]> }
-    ).safe_table.map(([ref]) => ref);
+    const refs = domRefs(started);
     expect(refs).toHaveLength(4);
 
     const values = ["Ada", "ada@example.com", "Cambridge", "CB2 1TN"];
@@ -5690,7 +5626,7 @@ describe("Compact V2 durable ref identity", () => {
       elem({ tag: "button", role: "button", id: ":r3:", visibleText: "Continue", selector: "#a" }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/form" });
-    const ref = (started as unknown as { safe_table: Array<[string]> }).safe_table[0]![0];
+    const ref = domRefs(started)[0]!;
 
     // React re-runs useId: the id is different every render, so it must not be
     // part of the fingerprint.
@@ -5723,8 +5659,9 @@ describe("Compact V2 durable ref identity", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/products",
     });
-    const rows = (started as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table;
+    const rows = (await observeQuery(started.session_id, "")).safe_table as Array<
+      [string, string, string?]
+    >;
     // Deterministic ordinals: the first occurrence keeps the base slug, later
     // occurrences gain -2, -3, … so every row is individually addressable.
     expect(rows.map(([, , facts]) => facts)).toEqual([
@@ -5752,12 +5689,13 @@ describe("Compact V2 durable ref identity", () => {
     expect(h.clickCalls).toBe(1);
   });
 
-  it("keeps the default observation bounded on a large product grid", async () => {
+  it("scopes a large product grid to the viewport without dropping query reachability", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     // 240 controls: a long storefront grid plus a full checkout form.
     h.elements = Array.from({ length: 240 }, (_, index) =>
       elem({
         index,
+        inViewport: index < 12,
         tag: index % 3 === 0 ? "button" : "input",
         type: index % 3 === 0 ? "button" : "text",
         role: index % 3 === 0 ? "button" : "textbox",
@@ -5770,18 +5708,15 @@ describe("Compact V2 durable ref identity", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/products",
     });
-    const bytes = Buffer.byteLength(JSON.stringify(started), "utf8");
-    expect(bytes).toBeLessThanOrEqual(OBSERVE_V2_MAX_WIRE_BYTES);
-    // Bounded, not proportional to the page: the rest is behind overflow.
-    expect((started as unknown as { safe_table: unknown[] }).safe_table.length).toBeLessThan(120);
-    expect((started.overflow as { remaining: number }).remaining).toBeGreaterThan(100);
-
+    expect(domRefs(started)).toHaveLength(12);
+    expect(started.more_below).toBe(true);
+    const query = await observeQuery(started.session_id, "");
     // Paging stays bounded too.
     const page = await observeQuery(
       started.session_id,
       "",
       undefined,
-      (started.overflow as { next_cursor: string }).next_cursor,
+      (query.overflow as { next_cursor: string }).next_cursor,
     );
     expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThanOrEqual(
       OBSERVE_V2_MAX_WIRE_BYTES,
@@ -5999,8 +5934,9 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
 
     const observation = await observe(started.session_id);
     expect(observation.format).toBe("compact-v2");
-    const table = (observation as unknown as { safe_table: Array<[string, string, string?]> })
-      .safe_table;
+    const table = (await observeQuery(observation.session_id, "")).safe_table as Array<
+      [string, string, string?]
+    >;
     expect(table).toHaveLength(2);
     // The row is NOT dropped — but its accessible name is credential-shaped
     // (a reflected vault value), so the label alias redacts per the 2026-09-06
@@ -6495,7 +6431,7 @@ describe("operate session — live-profile precondition gate", () => {
     });
     expect(obs.needs_user).toBeDefined();
     expect(obs.needs_user?.wall).toBe("google_session");
-    expect(obs).toMatchObject({ format: "compact-v2", stage: "auth", url: "", text: "" });
+    expect(obs).toMatchObject({ format: "compact-v2", stage: "auth", url: "" });
     expect(obs.elements).toBeUndefined();
     expect(h.startCalls).toBe(1);
     expect(h.started).toBe(0); // the rejected profile is closed before handoff
@@ -9971,25 +9907,17 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
     ];
   }
 
-  function rowLabel(row: unknown): string {
-    return (Array.isArray(row) && typeof row[2] === "string" ? row[2] : "") as string;
-  }
-
-  it("keeps below-the-fold actionable controls in the default action map", async () => {
+  it("retrieves below-the-fold controls through whole-document query", async () => {
     process.env.TRUSTY_SQUIRE_OBSERVE_V2 = "on";
     h.elements = xataShapedElements();
-    const started = (await startProvisionSession({
-      serviceUrl: "https://xata.example.com/login",
-    })) as unknown as { safe_table: Array<[string, string, string?]>; overflow?: unknown };
-
-    const facts = started.safe_table.map(rowLabel);
-    // The primary CTA sits below a large content block; it must still be in
-    // the default map, not stranded in overflow.
-    expect(facts.some((value) => value.includes("@continue"))).toBe(true);
-    expect(facts.some((value) => value.includes("@region"))).toBe(true);
-    expect(facts.some((value) => value.includes("@use-case") || value.includes("@tell-us"))).toBe(
-      true,
-    );
+    const started = await startProvisionSession({ serviceUrl: "https://xata.example.com/login" });
+    expect(started.more_below).toBe(true);
+    expect(started.dom).not.toContain("Continue");
+    const result = await observeQuery(started.session_id, "Continue");
+    expect(result.safe_table).toHaveLength(1);
+    const ref = (result.safe_table as Array<[string]>)[0]![0];
+    await act(started.session_id, { kind: "click", target: ref }, "none");
+    expect(h.clickCalls).toBe(1);
   });
 
   it("pages overflow deterministically and accepts query/role filters without invalid_cursor", async () => {
@@ -10011,12 +9939,13 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
       safe_table: Array<[string]>;
       overflow?: { next_cursor: string };
     };
-    const mapCursor = started.overflow?.next_cursor;
+    const firstQuery = await observeQuery(started.session_id, "");
+    const mapCursor = (firstQuery.overflow as { next_cursor: string } | undefined)?.next_cursor;
     expect(mapCursor).toBeDefined();
 
     // Enumerate the entire map through overflow paging. Every control appears
     // exactly once and paging never fails.
-    const seen = new Set<string>(started.safe_table.map((row) => row[0]!));
+    const seen = new Set<string>((firstQuery.safe_table as Array<[string]>).map((row) => row[0]!));
     const pagedCursors: string[] = [];
     let cursor = mapCursor;
     let guard = 0;
@@ -10129,8 +10058,7 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
     const started = await startProvisionSession({
       serviceUrl: "https://xata.example.com/login",
     });
-    const firstRef = ((started as unknown as { safe_table: Array<[string]> }).safe_table[0] ??
-      [])[0];
+    const firstRef = domRefs(started)[0];
 
     // An OAuth callback URL with long provider parameters — the shape that
     // ended the live Xata session with "compact-v2 budget metadata exceeded".
@@ -10158,7 +10086,7 @@ describe("compact-v2 serializer reachability — Xata-shaped login page (P1)", (
     >;
     expect(observation.format).toBe("compact-v2");
     const wire = JSON.stringify(observation);
-    expect(wire).toContain("Fresh CTA".toLowerCase().replace(" ", "-"));
+    expect(wire).toContain("Fresh CTA");
     expect(firstRef === undefined || typeof firstRef === "string").toBe(true);
   });
 });
@@ -10307,3 +10235,9 @@ describe("flat operator verbs", () => {
     expect(h.closeCalls).toBe(1);
   });
 });
+
+function domRefs(observation: { dom?: string }): string[] {
+  return [...(observation.dom ?? "").matchAll(/\[(@e:[A-Za-z0-9_-]+)\]</g)].map(
+    (match) => match[1]!,
+  );
+}

@@ -1,3 +1,4 @@
+import { mockBrowserUseCapture } from "./browser-use-test-capture.js";
 // Step 4/5 of the multi-session browser broker migration (audit slice): the
 // TRUSTY_SQUIRE_EXPERIMENTAL_MULTISESSION flag. Two concerns, pinned here:
 //
@@ -111,6 +112,10 @@ vi.mock("../browser.js", async (importOriginal) => {
     async extractInteractiveElements(): Promise<unknown[]> {
       return [];
     }
+    async extractBrowserUseObservation() {
+      return mockBrowserUseCapture([]);
+    }
+
     async extractObservationSemantics(): Promise<{ title: string; headings: string[] }> {
       return { title: "", headings: [] };
     }
