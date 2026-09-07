@@ -13406,7 +13406,15 @@ export class BrowserController {
     };
     const onContextRequest = (request: Request): void => {
       if (!actionStarted || !request.isNavigationRequest()) return;
-      if (request.frame().parentFrame() !== null) return;
+      try {
+        if (request.frame().parentFrame() !== null) return;
+      } catch {
+        // Playwright emits a popup's first navigation request before it
+        // creates the frame. This is precisely where a fast HTTP redirect
+        // still carries the authorization request's redirect_uri.
+        captureExpectedReturnUrl(request.url());
+        return;
+      }
       captureExpectedReturnUrl(request.url());
     };
     let resolveProductNavigation: () => void = () => undefined;

@@ -5,6 +5,8 @@
 // involved: the fixture drives the same popup/redirect/close lifecycle locally.
 
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type Page } from "playwright";
 import {
   BrowserController,
@@ -464,7 +466,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       const controller = BrowserController.fromHarnessPage(product);
       try {
         await expect(controller.loginWithOAuth("#oauth", 500)).resolves.toBeUndefined();
-        expect(controller.currentUrl()).toBe(expectedReturnUrl);
+        expect(controller.completedOAuthPage()?.url()).toBe(expectedReturnUrl);
       } finally {
         await context.close();
       }
@@ -476,9 +478,21 @@ describe("BrowserController OAuth popup lifecycle", () => {
     async (topology) => {
       const context = await browser.newContext();
       const product = await context.newPage();
-      const expectedReturnUrl = "https://console.product.test/projects";
+      let expectedReturnUrl = "";
+      const provider = createServer((request, response) => {
+        if (request.url?.startsWith("/provider")) {
+          response.writeHead(302, { location: expectedReturnUrl });
+          response.end();
+          return;
+        }
+        response.writeHead(200, { "content-type": "text/html" });
+        response.end("<main>Projects</main>");
+      });
+      await new Promise<void>((resolve) => provider.listen(0, "127.0.0.1", resolve));
+      const { port } = provider.address() as AddressInfo;
+      expectedReturnUrl = `http://127.0.0.1:${port}/projects`;
       const providerUrl =
-        `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`;
+        `http://127.0.0.1:${port}/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`;
       await context.route("https://product.test/**", (route) =>
         route.fulfill({
           contentType: "text/html",
@@ -487,19 +501,16 @@ describe("BrowserController OAuth popup lifecycle", () => {
           }(${JSON.stringify(providerUrl)})'>Continue</button>`,
         }),
       );
-      await context.route("https://accounts.google.com/**", (route) =>
-        route.fulfill({ status: 302, headers: { location: expectedReturnUrl } }),
-      );
-      await context.route("https://console.product.test/**", (route) =>
-        route.fulfill({ contentType: "text/html", body: "<main>Projects</main>" }),
-      );
       await product.goto("https://product.test/login");
       const controller = BrowserController.fromHarnessPage(product);
       try {
         await expect(controller.loginWithOAuth("#oauth", 500)).resolves.toBeUndefined();
-        expect(controller.currentUrl()).toBe(expectedReturnUrl);
+        expect(controller.completedOAuthPage()?.url()).toBe(expectedReturnUrl);
       } finally {
         await context.close();
+        await new Promise<void>((resolve, reject) =>
+          provider.close((error) => (error === undefined ? resolve() : reject(error))),
+        );
       }
     },
   );
