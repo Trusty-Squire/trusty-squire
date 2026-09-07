@@ -872,12 +872,9 @@ export function serializeBrowserUseDOM(
         const evidence = selectionEvidence(o);
         if (evidence.className || evidence.icons.length || evidence.state) {
           if (evidence.className)
-            attrs +=
-              (attrs ? " " : "") + `state_class=${JSON.stringify(evidence.className)}`;
+            attrs += (attrs ? " " : "") + `state_class=${JSON.stringify(evidence.className)}`;
           if (evidence.icons.length)
-            attrs +=
-              (attrs ? " " : "") +
-              `state_icons=${JSON.stringify(evidence.icons)}`;
+            attrs += (attrs ? " " : "") + `state_icons=${JSON.stringify(evidence.icons)}`;
         }
       }
       if (

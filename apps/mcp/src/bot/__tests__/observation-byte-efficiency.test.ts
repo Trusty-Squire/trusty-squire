@@ -304,9 +304,9 @@ describe("observation byte efficiency", () => {
     expect(
       serializeBrowserUseDOM(card(node("SPAN", { attributes: { class: "check-icon" } }))).dom,
     ).toContain('state_icons=["check-icon"]');
-    expect(
-      serializeBrowserUseDOM(card(node("I", { children: [text("✓")] }))).dom,
-    ).toContain('state_icons=["✓"]');
+    expect(serializeBrowserUseDOM(card(node("I", { children: [text("✓")] }))).dom).toContain(
+      'state_icons=["✓"]',
+    );
     for (const icon of [
       node("SPAN", { attributes: { class: "brand-logo" } }),
       node("I", { attributes: { class: "chevron" } }),

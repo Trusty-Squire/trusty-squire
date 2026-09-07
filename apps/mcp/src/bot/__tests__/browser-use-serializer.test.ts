@@ -102,8 +102,7 @@ describe("canonical browser-use 0.13.10 fixture oracle", () => {
       children: [],
       contentDocument: null,
     };
-    const expected =
-      '"' + `Copy access token to clipboard: ${token}`.slice(0, 40) + '..."';
+    const expected = '"' + `Copy access token to clipboard: ${token}`.slice(0, 40) + '..."';
     // The pinned canonical port and production serializer both retain the
     // capped iframe hint verbatim, including its truncation marker.
     expect(serializeBrowserUseDOM(iframe, { canonical: true }).dom).toContain(expected);

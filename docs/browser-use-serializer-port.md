@@ -90,7 +90,8 @@ a syntax-highlight span is a control.
 
 Selectable controls emit authored `aria-pressed`/`aria-selected` and existing
 `data-state` values, plus raw screened `state_class` for selection classes and visible
-check, selected, or tick child `state_icons` evidence. These are DOM facts, not inferred selected booleans.
+check, selected, tick, or authored ARIA-state child `state_icons` evidence. These are
+DOM facts, not inferred selected booleans.
 Stateless cards keep stable action refs but selection is undetectable by design;
 an unrelated button enabling cannot establish which card is selected.
 

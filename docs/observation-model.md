@@ -231,7 +231,8 @@ and where it is deliberately narrower or more conservative than §4.1 above.
 | --- | --- |
 | Fingerprint (DOM id / structural fallback, framework-random id rejection) | `element-fingerprint.ts` |
 | Handle minting, epoch, target authorization, live re-resolution | `provision-session.ts` |
-| Skeleton rows, `@label` aliases, wire encoding, size budget | `compact-observation-v2.ts` |
+| Browser-use DOM serialization and its contract | `browser-use-serializer.ts`; `browser-use-serializer-port.md` |
+| Control-query rows and `@label` aliases | `compact-observation-v2.ts` |
 
 ### Identity
 

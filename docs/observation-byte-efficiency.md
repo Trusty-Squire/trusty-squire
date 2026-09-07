@@ -62,16 +62,11 @@ width change; the remaining growth is serializer output, principally Hacker News
 
 ## Deliberate divergence from canonical browser-use
 
-The six canonical comparisons still pass with only identity normalized. The
-internal canonical mode runs the ported upstream paint-order behavior. Production
-also keeps covered controls reachable; removes empty decorative SVGs; collapses
-consecutive inert repeated subtrees; coalesces plain highlighted code; supplies
-nearby context for empty iframe hints and unlabelled form rows; and omits already-emitted unlabelled form
-bindings. Unchanged deltas now explicitly emit `dom_unchanged: true`, distinguishing
-them from newly empty `dom: ""` views without changing delta semantics. The separate name preserves the legacy
-numeric `unchanged` field. No distinct interactive ref is removed by sibling collapse or form
-binding deduplication. Code coalescing ignores only the geometry/class heuristic
-on plain syntax markup, never explicit action semantics.
+The six canonical comparisons still pass with only identity normalized. Their
+production differences, including reachability, filtering, context, selection
+evidence, and the explicit unchanged-DOM signal, are owned by
+[the serializer-port contract](browser-use-serializer-port.md). The table above
+measures production output.
 
 The screen is unchanged. `usernametaken29` remains a documented lowercase-plus-
 digits false positive, covered by the HN-based regression. Tool descriptions,
@@ -103,14 +98,10 @@ the `format` label, OAuth, vault behavior and payment approval are unchanged.
 
 ## Multi-select card evidence (PostHog follow-up)
 
-Production emits authored `aria-pressed`, `aria-selected` and `data-state` values.
-Actionable controls with an actual selection class expose its full screened `state_class`; controls with a visible
-check, selected, or tick child expose `state_icons`; this includes SVGs, image-role nodes,
-check spans, icon-font elements, ARIA state elements, and genuine check glyphs. Logos,
-chevrons, spinners, and other glyphs expose no selection state. These facts describe the DOM, not a guessed boolean
-selection state. The class list is intentionally not truncated: a distinguishing
-utility class may occur at its end. Opaque capability refs deliberately outweigh
-the prior counter-based corpus reductions; the table above was rerun after restoring them.
+The allowed selection evidence and the exclusion of decorative icons are owned by
+[the serializer-port contract](browser-use-serializer-port.md). Opaque capability
+refs deliberately outweigh the prior counter-based corpus reductions; the table
+above was rerun after restoring them.
 
 A stateless card is **undetectable by design**: clicking it may be reachable via a
 stable ref, but no local selection state can be inferred when its DOM is unchanged.

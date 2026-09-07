@@ -69,7 +69,10 @@ describe("interleaved observation DOM", () => {
     try {
       await page.setContent(
         readFileSync(
-          new URL("../../../../../fixtures/observation-efficiency/selectable-cards.html", import.meta.url),
+          new URL(
+            "../../../../../fixtures/observation-efficiency/selectable-cards.html",
+            import.meta.url,
+          ),
           "utf8",
         ),
       );
@@ -80,9 +83,13 @@ describe("interleaved observation DOM", () => {
       const row = (dom: string, id: string): string =>
         dom.split("\n").find((line) => line.includes(`id=${id} `))!;
       const stateless = row(before.dom, "stateless");
-      expect(stateless).not.toMatch(/(?:aria-pressed|aria-selected|data-state|selected|state_icons)=/);
+      expect(stateless).not.toMatch(
+        /(?:aria-pressed|aria-selected|data-state|selected|state_icons)=/,
+      );
       const stable = stateless.match(/\[([^\]]+)\]/)![1]!;
-      const boundNode = [...capture.nodeElements].find(([id]) => refs.get("doc", id) === stable)![1];
+      const boundNode = [...capture.nodeElements].find(
+        ([id]) => refs.get("doc", id) === stable,
+      )![1];
       await page.locator(boundNode.selector).click();
       for (const id of ["pressed", "classified", "icon", "selected", "data"])
         await page.locator(`#${id}`).click();
