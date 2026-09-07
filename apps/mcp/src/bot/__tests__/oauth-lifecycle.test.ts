@@ -555,242 +555,210 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
-  it.each(["compact-v2", "legacy"])(
-    "binds type and select refs to a same-tab OAuth return (%s)",
-    async (format) => {
-      const context = await browser.newContext();
-      const product = await context.newPage();
-      const expectedReturnUrl = "https://console.product.test/projects";
-      await context.route("https://product.test/**", (route) =>
-        route.fulfill({
-          contentType: "text/html",
-          body: `<button id="oauth" onclick='location.href=${JSON.stringify(
-            `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
-          )}'>Continue</button>`,
-        }),
-      );
-      await context.route("https://accounts.google.com/**", (route) =>
-        route.fulfill({
-          contentType: "text/html",
-          body: `<script>setTimeout(() => location.href=${JSON.stringify(expectedReturnUrl)}, 50)</script>`,
-        }),
-      );
-      await context.route("https://console.product.test/**", (route) =>
-        route.fulfill({
-          contentType: "text/html",
-          body: '<main>Projects</main><input id="project-name" value=""><select id="region"><option>Provider</option><option>Product</option></select>',
-        }),
-      );
-      await product.goto("https://product.test/login");
-      const controller = BrowserController.fromHarnessPage(product);
-      let sessionId: string | undefined;
-      try {
-        const started = await startHarnessProvisionSession({
-          browser: controller,
-          serviceUrl: "https://product.test/login",
-          ...(format === "compact-v2" ? { observationFormat: "compact-v2" as const } : {}),
-        });
-        sessionId = started.session_id;
-        const oauthRef =
-          format === "compact-v2"
-            ? started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0]
-            : parseElementsTable(started.el_table ?? "")[0]?.ref;
-        expect(oauthRef).toBeDefined();
-        const result = await act(sessionId, {
-          kind: "oauth_login",
-          target: oauthRef!,
-          provider: "google",
-        });
-        const refs =
-          format === "compact-v2"
-            ? [...(result.dom ?? "").matchAll(/\[(@e:[^\]]+)\]</g)].map((match) => match[1]!)
-            : parseElementsTable(result.el_table ?? "").map((element) => element.ref);
-        const [typeRef, selectRef] = refs;
-        expect(typeRef).toBeDefined();
-        expect(selectRef).toBeDefined();
-        await act(sessionId, { kind: "type", target: typeRef!, text: "product" });
-        await act(sessionId, { kind: "select", target: selectRef!, text: "Product" });
-        expect(await product.locator("#project-name").inputValue()).toBe("product");
-        expect(await product.locator("#region").inputValue()).toBe("Product");
-      } finally {
-        if (sessionId) await finishProvisionSession(sessionId);
-        await context.close();
-      }
-    },
-  );
-
-  it.each(["compact-v2", "legacy"])(
-    "observes a normal popup return from its completed page (%s)",
-    async (format) => {
-      const context = await browser.newContext();
-      const product = await context.newPage();
-      const expectedReturnUrl = "https://console.product.test/projects";
-      await context.route("https://product.test/**", (route) =>
-        route.fulfill({
-          contentType: "text/html",
-          body: `<button id="oauth" onclick='window.open(${JSON.stringify(
-            `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
-          )})'>Continue</button>`,
-        }),
-      );
-      await context.route("https://accounts.google.com/**", (route) =>
-        route.fulfill({
-          contentType: "text/html",
-          body: `<script>location.replace(${JSON.stringify(expectedReturnUrl)})</script>`,
-        }),
-      );
-      await context.route("https://console.product.test/**", (route) =>
-        route.fulfill({
-          contentType: "text/html",
-          body: '<main>Projects</main><button id="new-project">New project</button>',
-        }),
-      );
-      await product.goto("https://product.test/login");
-      const controller = BrowserController.fromHarnessPage(product);
-      let sessionId: string | undefined;
-      try {
-        const started = await startHarnessProvisionSession({
-          browser: controller,
-          serviceUrl: "https://product.test/login",
-          ...(format === "compact-v2" ? { observationFormat: "compact-v2" as const } : {}),
-        });
-        sessionId = started.session_id;
-        const oauthRef =
-          format === "compact-v2"
-            ? started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0]
-            : parseElementsTable(started.el_table ?? "")[0]?.ref;
-        expect(oauthRef).toBeDefined();
-        const result = await act(sessionId, {
-          kind: "oauth_login",
-          target: oauthRef!,
-          provider: "google",
-        });
-        expect(result.url).toBe(expectedReturnUrl);
-        if (format === "compact-v2") expect(result.dom).toContain("New project");
-        else expect(result.el_table).toContain("New project");
-      } finally {
-        if (sessionId) await finishProvisionSession(sessionId);
-        await context.close();
-      }
-    },
-  );
-
-  it.each(["compact-v2", "legacy"])(
-    "rechecks completion when the outer action deadline wins during consent work (%s)",
-    async (format) => {
-      const context = await browser.newContext();
-      const product = await context.newPage();
-      const expectedReturnUrl = "https://console.product.test/projects";
-      const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
-      const previousCooldown = process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
-      process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "4000";
-      process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
-      await context.route("https://product.test/**", (route) =>
-        route.fulfill({
-          contentType: "text/html",
-          body: `<button id="oauth" onclick='window.open(${JSON.stringify(
-            `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
-          )})'>Continue</button>`,
-        }),
-      );
-      await context.route("https://accounts.google.com/**", (route) =>
-        route.fulfill({
-          contentType: "text/html",
-          body: '<main>Consent</main><input id="project-name" required autocomplete="shipping address-line1" value="provider" onchange="document.body.dataset.shippingCommitted=\'provider\'"><select id="region"><option>Provider</option><option>Product</option></select>',
-        }),
-      );
-      await context.route("https://console.product.test/**", (route) =>
-        route.fulfill({
-          contentType: "text/html",
-          body: '<main>Projects</main><input id="project-name" required autocomplete="shipping address-line1" value="" onchange="document.body.dataset.shippingCommitted=\'product\'"><select id="region"><option>Provider</option><option>Product</option></select><button id="new-project" onclick="document.body.dataset.projectClicked=\'yes\'">New project</button>',
-        }),
-      );
-      await product.goto("https://product.test/login");
-      const controller = BrowserController.fromHarnessPage(product);
-      vi.spyOn(
-        controller as unknown as {
-          waitForOAuthLifecycle: (...args: unknown[]) => Promise<Page | null>;
-        },
-        "waitForOAuthLifecycle",
-      ).mockResolvedValueOnce(null);
-      let releaseConsent!: () => void;
-      let consentStarted = false;
-      const consentGate = new Promise<boolean>((resolve) => {
-        releaseConsent = () => resolve(true);
-      });
-      vi.spyOn(controller, "advanceOAuthConsent").mockImplementation(async () => {
-        await product.goto("https://console.product.test/projects");
-        consentStarted = true;
-        return await consentGate;
-      });
-      let sessionId: string | undefined;
-      try {
-        const started = await startHarnessProvisionSession({
-          browser: controller,
-          serviceUrl: "https://product.test/login",
-          ...(format === "compact-v2" ? { observationFormat: "compact-v2" as const } : {}),
-        });
-        sessionId = started.session_id;
-        const refFrom = (observation: { dom?: string; el_table?: string }): string | undefined =>
-          format === "compact-v2"
-            ? observation.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0]
-            : parseElementsTable(observation.el_table ?? "")[0]?.ref;
-        const oauthRef = refFrom(started);
-        expect(oauthRef).toBeDefined();
-        const result = await act(sessionId, {
-          kind: "oauth_login",
-          target: oauthRef!,
-          provider: "google",
-        });
-        expect(consentStarted).toBe(true);
-        expect(result.url).toBe("https://console.product.test/projects");
-        expect(result.oauth).toBeUndefined();
-        if (format === "compact-v2") expect(result).toMatchObject({ format: "compact-v2" });
-        else expect(result.format).toBeUndefined();
-        const productRefs =
-          format === "compact-v2"
-            ? [...(result.dom ?? "").matchAll(/\[(@e:[^\]]+)\]</g)].map((match) => match[1]!)
-            : parseElementsTable(result.el_table ?? "").map((element) => element.ref);
-        const [typeRef, selectRef, productRef] = productRefs;
-        expect(typeRef).toBeDefined();
-        expect(selectRef).toBeDefined();
-        expect(productRef).toBeDefined();
-        await act(sessionId, { kind: "type", target: typeRef!, text: "product" });
-        await act(sessionId, { kind: "select", target: selectRef!, text: "Product" });
-        await act(sessionId, { kind: "click", target: productRef! });
-        expect(await product.locator("#project-name").inputValue()).toBe("product");
-        expect(await product.locator("#region").inputValue()).toBe("Product");
-        const provider = (controller as unknown as { page: Page }).page;
-        expect(await provider.locator("#project-name").inputValue()).toBe("provider");
-        expect(await provider.locator("#region").inputValue()).toBe("Provider");
-        expect(await product.locator("body").getAttribute("data-shipping-committed")).toBe(
-          "product",
-        );
-        expect(await provider.locator("body").getAttribute("data-shipping-committed")).toBeNull();
-        expect(await product.locator("body").getAttribute("data-project-clicked")).toBe("yes");
-        expect((controller as unknown as { page: Page }).page.url()).toBe(
+  it("binds type and select refs to a same-tab OAuth return", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects";
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<button id="oauth" onclick='location.href=${JSON.stringify(
           `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
-        );
-        releaseConsent();
-        await vi.waitFor(() =>
-          expect((controller as unknown as { page: Page }).page.url()).toBe(expectedReturnUrl),
-        );
-        const settled = await observe(sessionId);
-        expect(settled.url).toBe(expectedReturnUrl);
-        if (format === "compact-v2") expect(settled).toMatchObject({ format: "compact-v2" });
-        else expect(settled.format).toBeUndefined();
-      } finally {
-        releaseConsent();
-        if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
-        else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
-        if (previousCooldown === undefined)
-          delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
-        else process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = previousCooldown;
-        if (sessionId) await finishProvisionSession(sessionId);
-        await context.close();
-      }
-    },
-  );
+        )}'>Continue</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<script>setTimeout(() => location.href=${JSON.stringify(expectedReturnUrl)}, 50)</script>`,
+      }),
+    );
+    await context.route("https://console.product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: '<main>Projects</main><input id="project-name" value=""><select id="region"><option>Provider</option><option>Product</option></select>',
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    let sessionId: string | undefined;
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: "https://product.test/login",
+      });
+      sessionId = started.session_id;
+      const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+      expect(oauthRef).toBeDefined();
+      const result = await act(sessionId, {
+        kind: "oauth_login",
+        target: oauthRef!,
+        provider: "google",
+      });
+      const refs = parseElementsTable(result.el_table ?? "").map((element) => element.ref);
+      const [typeRef, selectRef] = refs;
+      expect(typeRef).toBeDefined();
+      expect(selectRef).toBeDefined();
+      await act(sessionId, { kind: "type", target: typeRef!, text: "product" });
+      await act(sessionId, { kind: "select", target: selectRef!, text: "Product" });
+      expect(await product.locator("#project-name").inputValue()).toBe("product");
+      expect(await product.locator("#region").inputValue()).toBe("Product");
+    } finally {
+      if (sessionId) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
+
+  it("observes a normal popup return from its completed page", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects";
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<button id="oauth" onclick='window.open(${JSON.stringify(
+          `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+        )})'>Continue</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<script>location.replace(${JSON.stringify(expectedReturnUrl)})</script>`,
+      }),
+    );
+    await context.route("https://console.product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: '<main>Projects</main><button id="new-project">New project</button>',
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    let sessionId: string | undefined;
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: "https://product.test/login",
+      });
+      sessionId = started.session_id;
+      const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+      expect(oauthRef).toBeDefined();
+      const result = await act(sessionId, {
+        kind: "oauth_login",
+        target: oauthRef!,
+        provider: "google",
+      });
+      expect(result.url).toBe(expectedReturnUrl);
+      expect(result.el_table).toContain("New project");
+    } finally {
+      if (sessionId) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
+
+  it("rechecks completion when the outer action deadline wins during consent work", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects";
+    const previousTimeout = process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+    const previousCooldown = process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+    process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = "4000";
+    process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = "0";
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<button id="oauth" onclick='window.open(${JSON.stringify(
+          `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+        )})'>Continue</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: '<main>Consent</main><input id="project-name" required autocomplete="shipping address-line1" value="provider" onchange="document.body.dataset.shippingCommitted=\'provider\'"><select id="region"><option>Provider</option><option>Product</option></select>',
+      }),
+    );
+    await context.route("https://console.product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: '<main>Projects</main><input id="project-name" required autocomplete="shipping address-line1" value="" onchange="document.body.dataset.shippingCommitted=\'product\'"><select id="region"><option>Provider</option><option>Product</option></select><button id="new-project" onclick="document.body.dataset.projectClicked=\'yes\'">New project</button>',
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    vi.spyOn(
+      controller as unknown as {
+        waitForOAuthLifecycle: (...args: unknown[]) => Promise<Page | null>;
+      },
+      "waitForOAuthLifecycle",
+    ).mockResolvedValueOnce(null);
+    let releaseConsent!: () => void;
+    let consentStarted = false;
+    const consentGate = new Promise<boolean>((resolve) => {
+      releaseConsent = () => resolve(true);
+    });
+    vi.spyOn(controller, "advanceOAuthConsent").mockImplementation(async () => {
+      await product.goto("https://console.product.test/projects");
+      consentStarted = true;
+      return await consentGate;
+    });
+    let sessionId: string | undefined;
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: "https://product.test/login",
+      });
+      sessionId = started.session_id;
+      const refFrom = (observation: { dom?: string; el_table?: string }): string | undefined =>
+        parseElementsTable(observation.el_table ?? "")[0]?.ref;
+      const oauthRef = refFrom(started);
+      expect(oauthRef).toBeDefined();
+      const result = await act(sessionId, {
+        kind: "oauth_login",
+        target: oauthRef!,
+        provider: "google",
+      });
+      expect(consentStarted).toBe(true);
+      expect(result.url).toBe("https://console.product.test/projects");
+      expect(result.oauth).toBeUndefined();
+      expect(result.format).toBeUndefined();
+      const productRefs = parseElementsTable(result.el_table ?? "").map((element) => element.ref);
+      const [typeRef, selectRef, productRef] = productRefs;
+      expect(typeRef).toBeDefined();
+      expect(selectRef).toBeDefined();
+      expect(productRef).toBeDefined();
+      await act(sessionId, { kind: "type", target: typeRef!, text: "product" });
+      await act(sessionId, { kind: "select", target: selectRef!, text: "Product" });
+      await act(sessionId, { kind: "click", target: productRef! });
+      expect(await product.locator("#project-name").inputValue()).toBe("product");
+      expect(await product.locator("#region").inputValue()).toBe("Product");
+      const provider = (controller as unknown as { page: Page }).page;
+      expect(await provider.locator("#project-name").inputValue()).toBe("provider");
+      expect(await provider.locator("#region").inputValue()).toBe("Provider");
+      expect(await product.locator("body").getAttribute("data-shipping-committed")).toBe("product");
+      expect(await provider.locator("body").getAttribute("data-shipping-committed")).toBeNull();
+      expect(await product.locator("body").getAttribute("data-project-clicked")).toBe("yes");
+      expect((controller as unknown as { page: Page }).page.url()).toBe(
+        `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+      );
+      releaseConsent();
+      await vi.waitFor(() =>
+        expect((controller as unknown as { page: Page }).page.url()).toBe(expectedReturnUrl),
+      );
+      const settled = await observe(sessionId);
+      expect(settled.url).toBe(expectedReturnUrl);
+      expect(settled.format).toBeUndefined();
+    } finally {
+      releaseConsent();
+      if (previousTimeout === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_ACTION_TIMEOUT_MS = previousTimeout;
+      if (previousCooldown === undefined) delete process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS;
+      else process.env.TRUSTY_SQUIRE_OAUTH_LOGIN_COOLDOWN_MS = previousCooldown;
+      if (sessionId) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
 
   it.each([
     "https://auth.product.test/consent",
@@ -1021,71 +989,64 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
-  it.each(["compact-v2", "legacy"])(
-    "returns a terminal completion snapshot after an observed popup return closes (%s)",
-    async (format) => {
-      const context = await browser.newContext();
-      const product = await context.newPage();
-      const expectedReturnUrl = "https://console.product.test/projects";
-      await context.route("https://product.test/**", (route) =>
-        route.fulfill({
-          contentType: "text/html",
-          body: `<main>Login</main><button id="oauth" onclick='window.open(${JSON.stringify(
-            `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
-          )})'>Continue</button>`,
-        }),
-      );
-      await context.route("https://accounts.google.com/**", (route) =>
-        route.fulfill({
-          contentType: "text/html",
-          body: `<script>location.href=${JSON.stringify(expectedReturnUrl)}</script>`,
-        }),
-      );
-      await context.route("https://console.product.test/**", (route) =>
-        route.fulfill({
-          contentType: "text/html",
-          body: "<main>Projects</main><script>window.close()</script>",
-        }),
-      );
-      await product.goto("https://product.test/login");
-      const controller = BrowserController.fromHarnessPage(product);
-      let sessionId: string | undefined;
-      try {
-        const started = await startHarnessProvisionSession({
-          browser: controller,
-          serviceUrl: "https://product.test/login",
-          ...(format === "compact-v2" ? { observationFormat: "compact-v2" as const } : {}),
-        });
-        sessionId = started.session_id;
-        const oauthRef =
-          format === "compact-v2"
-            ? started.dom?.match(/@e:[A-Za-z0-9_-]+/)?.[0]
-            : parseElementsTable(started.el_table ?? "")[0]?.ref;
-        expect(oauthRef).toBeDefined();
-        const result = await act(sessionId, {
-          kind: "oauth_login",
-          target: oauthRef!,
-          provider: "google",
-        });
-        expect(result).toMatchObject({
-          url: expectedReturnUrl,
-          terminal: {
-            state: "oauth_completed",
-            refs: "unavailable",
-            next_action: "operate_observe",
-          },
-        });
-        expect(result.el_table).toBeUndefined();
-        expect(result.dom).toBeUndefined();
-        const handoff = await observe(sessionId);
-        expect(handoff.url).toBe("https://product.test/login");
-        expect(handoff.terminal).toBeUndefined();
-      } finally {
-        if (sessionId) await finishProvisionSession(sessionId);
-        await context.close();
-      }
-    },
-  );
+  it("returns a terminal completion snapshot after an observed popup return closes", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const expectedReturnUrl = "https://console.product.test/projects";
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<main>Login</main><button id="oauth" onclick='window.open(${JSON.stringify(
+          `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
+        )})'>Continue</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<script>location.href=${JSON.stringify(expectedReturnUrl)}</script>`,
+      }),
+    );
+    await context.route("https://console.product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: "<main>Projects</main><script>window.close()</script>",
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    let sessionId: string | undefined;
+    try {
+      const started = await startHarnessProvisionSession({
+        browser: controller,
+        serviceUrl: "https://product.test/login",
+      });
+      sessionId = started.session_id;
+      const oauthRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+      expect(oauthRef).toBeDefined();
+      const result = await act(sessionId, {
+        kind: "oauth_login",
+        target: oauthRef!,
+        provider: "google",
+      });
+      expect(result).toMatchObject({
+        url: expectedReturnUrl,
+        terminal: {
+          state: "oauth_completed",
+          refs: "unavailable",
+          next_action: "operate_observe",
+        },
+      });
+      expect(result.el_table).toBeUndefined();
+      expect(result.dom).toBeUndefined();
+      const handoff = await observe(sessionId);
+      expect(handoff.url).toBe("https://product.test/login");
+      expect(handoff.terminal).toBeUndefined();
+    } finally {
+      if (sessionId) await finishProvisionSession(sessionId);
+      await context.close();
+    }
+  });
 
   it("keeps a popup pending after its observed return navigates to a challenge", async () => {
     const context = await browser.newContext();
