@@ -138,9 +138,20 @@ export async function captureBrowserUseDOM(
     );
     const frameIds: string[] = [];
     const frameById = new Map<string, Frame>();
+    const framePathById = new Map<string, string | null>();
+    const unboundFrames = new Set<Frame>();
+    const isFrameUnbound = (frame: Frame): boolean => {
+      let current: Frame | null = frame;
+      while (current !== null) {
+        if (unboundFrames.has(current)) return true;
+        current = current.parentFrame();
+      }
+      return false;
+    };
     const bindFrames = (tree: FrameTree, frame: Frame): void => {
       frameIds.push(tree.frame.id);
       frameById.set(tree.frame.id, frame);
+      framePathById.set(tree.frame.id, frame === page.mainFrame() ? null : framePath(frame));
       const available = new Set(frame.childFrames());
       for (const child of tree.childFrames ?? []) {
         const matched = [...available].find((candidate) => candidate.url() === child.frame.url);
@@ -152,66 +163,91 @@ export async function captureBrowserUseDOM(
     };
     bindFrames(frames.frameTree, owningFrame);
     await Promise.all([...frameById.values()].map(classifyFrame));
+    const forgetFrame = (frameId: string): void => {
+      const frame = frameById.get(frameId);
+      if (frame) unboundFrames.add(frame);
+      const path = framePathById.get(frameId);
+      const belongsToFailedFrame = (candidate: string | null | undefined): boolean =>
+        path === null ? true : candidate === path || candidate?.startsWith(`${path}/`) === true;
+      for (let i = elements.length - 1; i >= 0; i -= 1)
+        if (belongsToFailedFrame(elements[i]!.framePath)) elements.splice(i, 1);
+      for (const [key, element] of existingBySelector)
+        if (belongsToFailedFrame(element.framePath)) existingBySelector.delete(key);
+    };
     for (const frameId of frameIds.slice(1)) {
-      const tree = await client.send("Accessibility.getFullAXTree", { frameId });
-      for (const n of tree.nodes)
-        if (n.backendDOMNodeId !== undefined) axs.set(n.backendDOMNodeId, n);
+      try {
+        const tree = await client.send("Accessibility.getFullAXTree", { frameId });
+        for (const n of tree.nodes)
+          if (n.backendDOMNodeId !== undefined) axs.set(n.backendDOMNodeId, n);
+      } catch {
+        forgetFrame(frameId);
+      }
     }
     const listeners = new Set<number>();
     const bindings = new Map<number, InteractiveElement>();
     for (const frameId of frameIds) {
-      const context = await client.send("Page.createIsolatedWorld", {
-        frameId,
-        worldName: "trusty-squire-observation",
-      });
       const frame = frameById.get(frameId) ?? owningFrame;
-      const path = frame === page.mainFrame() ? null : framePath(frame);
+      if (isFrameUnbound(frame)) continue;
+      const path = framePathById.get(frameId) ?? (frame === page.mainFrame() ? null : framePath(frame));
       const candidates = elements.filter((e) => (e.framePath ?? null) === path);
-      // Return exact DOM objects. describeNode binds existing action selectors to
-      // backend identities without guessing from tag names or accessible names.
-      const selectors = candidates.map((e) => e.selector);
-      const objects = await client.send("Runtime.evaluate", {
-        expression: `(() => { const roots=[document]; for(let i=0;i<roots.length;i++) for(const e of roots[i].querySelectorAll('*')) if(e.shadowRoot) roots.push(e.shadowRoot); return ${JSON.stringify(selectors)}.map(s => { const p=s.split(' >> nth='); const found=roots.flatMap(r=>{try{return [...r.querySelectorAll(p[0])]}catch{return []}}); return found[Number(p[1]||0)] || null; }); })()`,
-        contextId: context.executionContextId,
-        objectGroup: "ts-observation",
-      });
-      if (objects.result.objectId) {
-        const props = await client.send("Runtime.getProperties", {
-          objectId: objects.result.objectId,
-          ownProperties: true,
+      const frameBindings = new Map<number, InteractiveElement>();
+      const frameListeners = new Set<number>();
+      try {
+        const context = await client.send("Page.createIsolatedWorld", {
+          frameId,
+          worldName: "trusty-squire-observation",
         });
-        const indexed = props.result.filter((p) => /^\d+$/.test(p.name) && p.value?.objectId);
-        for (let i = 0; i < indexed.length; i += 8)
-          await Promise.all(
-            indexed.slice(i, i + 8).map(async (p) => {
-              const d = await client.send("DOM.describeNode", { objectId: p.value!.objectId! });
-              const el = candidates[Number(p.name)];
-              if (el) bindings.set(d.node.backendNodeId, el);
-            }),
-          );
-      }
-      const clickObjects = await client.send("Runtime.evaluate", {
-        expression: `(() => { if(typeof getEventListeners!=='function')return null; const all=document.querySelectorAll('*'); if(all.length>10000)return null; const found=[]; for(const el of all){const l=getEventListeners(el);if(l.click||l.mousedown||l.mouseup||l.pointerdown||l.pointerup){found.push(el);if(found.length>100)return null;}} return found;})()`,
-        contextId: context.executionContextId,
-        includeCommandLineAPI: true,
-        objectGroup: "ts-observation",
-      });
-      if (clickObjects.result.objectId) {
-        const props = await client.send("Runtime.getProperties", {
-          objectId: clickObjects.result.objectId,
-          ownProperties: true,
+        // Return exact DOM objects. describeNode binds existing action selectors to
+        // backend identities without guessing from tag names or accessible names.
+        const selectors = candidates.map((e) => e.selector);
+        const objects = await client.send("Runtime.evaluate", {
+          expression: `(() => { const roots=[document]; for(let i=0;i<roots.length;i++) for(const e of roots[i].querySelectorAll('*')) if(e.shadowRoot) roots.push(e.shadowRoot); return ${JSON.stringify(selectors)}.map(s => { const p=s.split(' >> nth='); const found=roots.flatMap(r=>{try{return [...r.querySelectorAll(p[0])]}catch{return []}}); return found[Number(p[1]||0)] || null; }); })()`,
+          contextId: context.executionContextId,
+          objectGroup: "ts-observation",
         });
-        const indexed = props.result.filter((p) => /^\d+$/.test(p.name) && p.value?.objectId);
-        for (let i = 0; i < indexed.length; i += 8)
-          await Promise.all(
-            indexed.slice(i, i + 8).map(async (p) => {
-              const d = await client.send("DOM.describeNode", { objectId: p.value!.objectId! });
-              listeners.add(d.node.backendNodeId);
-            }),
-          );
+        if (objects.result.objectId) {
+          const props = await client.send("Runtime.getProperties", {
+            objectId: objects.result.objectId,
+            ownProperties: true,
+          });
+          const indexed = props.result.filter((p) => /^\d+$/.test(p.name) && p.value?.objectId);
+          for (let i = 0; i < indexed.length; i += 8)
+            await Promise.all(
+              indexed.slice(i, i + 8).map(async (p) => {
+                const d = await client.send("DOM.describeNode", { objectId: p.value!.objectId! });
+                const el = candidates[Number(p.name)];
+                if (el) frameBindings.set(d.node.backendNodeId, el);
+              }),
+            );
+        }
+        const clickObjects = await client.send("Runtime.evaluate", {
+          expression: `(() => { if(typeof getEventListeners!=='function')return null; const all=document.querySelectorAll('*'); if(all.length>10000)return null; const found=[]; for(const el of all){const l=getEventListeners(el);if(l.click||l.mousedown||l.mouseup||l.pointerdown||l.pointerup){found.push(el);if(found.length>100)return null;}} return found;})()`,
+          contextId: context.executionContextId,
+          includeCommandLineAPI: true,
+          objectGroup: "ts-observation",
+        });
+        if (clickObjects.result.objectId) {
+          const props = await client.send("Runtime.getProperties", {
+            objectId: clickObjects.result.objectId,
+            ownProperties: true,
+          });
+          const indexed = props.result.filter((p) => /^\d+$/.test(p.name) && p.value?.objectId);
+          for (let i = 0; i < indexed.length; i += 8)
+            await Promise.all(
+              indexed.slice(i, i + 8).map(async (p) => {
+                const d = await client.send("DOM.describeNode", { objectId: p.value!.objectId! });
+                frameListeners.add(d.node.backendNodeId);
+              }),
+            );
+        }
+        for (const [backendNodeId, element] of frameBindings)
+          bindings.set(backendNodeId, element);
+        for (const backendNodeId of frameListeners) listeners.add(backendNodeId);
+      } catch {
+        forgetFrame(frameId);
       }
     }
-    await client.send("Runtime.releaseObjectGroup", { objectGroup: "ts-observation" });
+    await client.send("Runtime.releaseObjectGroup", { objectGroup: "ts-observation" }).catch(() => undefined);
     const rawById = new Map<string, RawNode>();
     const nodeFrame = new Map<string, Frame>();
     const selectorsById = new Map<string, string>();
@@ -367,6 +403,7 @@ export async function captureBrowserUseDOM(
       // nodes for display, but do not manufacture an unusable action binding.
       if (
         !el &&
+        !isFrameUnbound(frame) &&
         !inClosedShadow &&
         opaqueFrames.get(frame) === false &&
         n.nodeType === 1 &&

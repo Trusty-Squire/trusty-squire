@@ -3,8 +3,8 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 // The former separate-prose-channel tests now exercise its replacement through
 // real Chrome: CDP capture -> canonical serializer -> shared substring screen.
-import { chromium, type Browser, type Page } from "playwright";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { chromium, type Browser, type Frame, type Page } from "playwright";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { BrowserController } from "../browser.js";
 import { captureBrowserUseDOM } from "../browser-use-capture.js";
 import { serializeBrowserUseDOM } from "../browser-use-serializer.js";
@@ -112,6 +112,111 @@ describe("interleaved observation DOM", () => {
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
       );
+    }
+  });
+  it("keeps a captured child frame visible when its CDP binding world disappears", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(
+        '<button id="main" onclick="document.body.dataset.main = \'clicked\'">Main action</button><iframe srcdoc="<button id=child>Child action</button>"></iframe>',
+      );
+      const context = page.context();
+      const session = await context.newCDPSession(page);
+      const send = session.send.bind(session) as (
+        method: string,
+        params?: Record<string, unknown>,
+      ) => Promise<unknown>;
+      let childFrameId: string | undefined;
+      const intercepted = new Proxy(session, {
+        get(target, property, receiver) {
+          if (property === "send")
+            return async (method: string, params?: Record<string, unknown>): Promise<unknown> => {
+              if (method === "Page.createIsolatedWorld" && params?.frameId === childFrameId)
+                throw new Error("No frame with given id");
+              const result = await send(method, params);
+              if (method === "Page.getFrameTree") {
+                const tree = result as {
+                  frameTree: { childFrames?: Array<{ frame: { id: string } }> };
+                };
+                childFrameId = tree.frameTree.childFrames?.[0]?.frame.id;
+              }
+              return result;
+            };
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const newCDPSession = vi
+        .spyOn(context, "newCDPSession")
+        .mockResolvedValue(intercepted);
+      const framePath = (frame: Frame): string | null => {
+        const indexes: number[] = [];
+        let current: Frame | null = frame;
+        while (current !== null) {
+          const parent = current.parentFrame();
+          if (parent === null) break;
+          indexes.unshift(parent.childFrames().indexOf(current));
+          current = parent;
+        }
+        return indexes.length ? indexes.join("/") : null;
+      };
+      const staleChild: InteractiveElement = {
+        index: 99,
+        tag: "button",
+        type: null,
+        id: "child",
+        name: null,
+        placeholder: null,
+        ariaLabel: null,
+        role: "button",
+        labelText: null,
+        visibleText: "Child action",
+        selector: "#child",
+        visible: true,
+        inViewport: true,
+        inConsentWidget: false,
+        framePath: "0",
+      };
+      let capture: Awaited<ReturnType<typeof captureBrowserUseDOM>>;
+      try {
+        capture = await captureBrowserUseDOM(
+          page,
+          [staleChild],
+          framePath,
+          transparentFrameSecurity,
+        );
+      } finally {
+        newCDPSession.mockRestore();
+      }
+
+      const handles = new Map(capture.elements.map((element) => [element, `@e:${element.index}`]));
+      const safe = buildSafeControlsV2({
+        elements: capture.elements,
+        legacyRefs: handles,
+        handles,
+        pageOrigin: new URL(page.url()).origin,
+        canonical: true,
+      });
+      const output = serializeBrowserUseDOM(capture.root, {
+        ref: (node) => {
+          const element = capture.nodeElements.get(node.id);
+          return element === undefined
+            ? { ref: `@e:unbound_${node.id}`, targetable: false }
+            : handles.get(element)!;
+        },
+      });
+
+      expect(childFrameId).toBeDefined();
+      expect(output.dom).toContain("Child action");
+      expect(output.dom).toMatch(/\[@e:unbound_[^\]]+\]<button[^\n]*not-targetable=true/);
+      expect(capture.elements.some((element) => element.id === "child")).toBe(false);
+      expect([...safe.byRef.values()]).not.toContain("#child");
+      const main = capture.elements.find((element) => element.id === "main")!;
+      expect(main).toBeDefined();
+      await page.locator(main.selector).click();
+      expect(await page.locator("body").getAttribute("data-main")).toBe("clicked");
+    } finally {
+      await page.close();
     }
   });
   it("keeps a sandboxed synthesized control visible but outside action and query maps", async () => {
