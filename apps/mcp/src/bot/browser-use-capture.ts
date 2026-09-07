@@ -542,8 +542,7 @@ export async function captureBrowserUseDOM(
           return actionableDescendants.get(c)!;
         };
         const localContext = (c: BrowserUseNode): string | null => {
-          if (!browserUseLocalContextContainer(c, actionableDescendant(c)))
-            return null;
+          if (!browserUseLocalContextContainer(c, actionableDescendant(c))) return null;
           return browserUseBoundedContextText(c, iframeHintContextMaxChars);
         };
         const headingContext = (c: BrowserUseNode): string | null =>

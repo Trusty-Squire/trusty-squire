@@ -144,7 +144,9 @@ describe("interleaved observation DOM", () => {
           ? node
           : node.children.map(findFrame).find((value) => value !== undefined) ||
             (node.contentDocument ? findFrame(node.contentDocument) : undefined);
-      const hint = findFrame(capture.root)?.hiddenElements.find((element) => element.tag === "button");
+      const hint = findFrame(capture.root)?.hiddenElements.find(
+        (element) => element.tag === "button",
+      );
       expect(hint?.text).toBe(local);
       expect(hint?.text).not.toContain("Whole section context");
     } finally {
@@ -166,7 +168,9 @@ describe("interleaved observation DOM", () => {
           ? node
           : node.children.map(findFrame).find((value) => value !== undefined) ||
             (node.contentDocument ? findFrame(node.contentDocument) : undefined);
-      const hint = findFrame(capture.root)?.hiddenElements.find((element) => element.tag === "button");
+      const hint = findFrame(capture.root)?.hiddenElements.find(
+        (element) => element.tag === "button",
+      );
       expect(hint?.text).toBe("(no label)");
       expect(hint?.text).not.toContain("Oversized generic container");
     } finally {
@@ -187,7 +191,9 @@ describe("interleaved observation DOM", () => {
           ? node
           : node.children.map(findFrame).find((value) => value !== undefined) ||
             (node.contentDocument ? findFrame(node.contentDocument) : undefined);
-      const hint = findFrame(capture.root)?.hiddenElements.find((element) => element.tag === "button");
+      const hint = findFrame(capture.root)?.hiddenElements.find(
+        (element) => element.tag === "button",
+      );
       expect(hint?.text).toBe("Billing");
     } finally {
       await page.close();

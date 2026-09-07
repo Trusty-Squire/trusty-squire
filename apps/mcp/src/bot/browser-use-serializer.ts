@@ -764,8 +764,7 @@ export function serializeBrowserUseDOM(
       t = tag(o);
     const text = browserUseBoundedContextText(o, genericContextMaxChars);
     const container =
-      browserUseLocalContextContainer(o, containsActionableDescendant(n)) &&
-      text !== null;
+      browserUseLocalContextContainer(o, containsActionableDescendant(n)) && text !== null;
     const directHeading = headingContext(n);
     let context = container ? text || enclosing : directHeading || enclosing;
     contexts.set(n, context);
@@ -791,7 +790,9 @@ export function serializeBrowserUseDOM(
             child.attributes["aria-label"],
             child.attributes["data-icon"],
             child.attributes.class,
-          ].find((value) => /(?:^|[-_\s])(?:check(?:mark)?|selected|tick)(?:$|[-_\s])/i.test(value ?? ""));
+          ].find((value) =>
+            /(?:^|[-_\s])(?:check(?:mark)?|selected|tick)(?:$|[-_\s])/i.test(value ?? ""),
+          );
           if (evidence) icons.push(evidence);
           return;
         }
@@ -812,8 +813,8 @@ export function serializeBrowserUseDOM(
   const selectionEvidence = (node: BrowserUseNode) => ({
     className: selectionClass(node),
     icons: stateIcons(node),
-    state: ["aria-checked", "aria-pressed", "aria-selected", "data-state"].some(
-      (attribute) => node.attributes[attribute]?.trim(),
+    state: ["aria-checked", "aria-pressed", "aria-selected", "data-state"].some((attribute) =>
+      node.attributes[attribute]?.trim(),
     ),
   });
   const render = (n: Simplified, depth: number): string => {
@@ -860,8 +861,7 @@ export function serializeBrowserUseDOM(
         if (evidence.className || evidence.icons.length || evidence.state) {
           if (evidence.className)
             attrs +=
-              (attrs ? " " : "") +
-              `state_class=${JSON.stringify(evidence.className)}`;
+              (attrs ? " " : "") + `state_class=${JSON.stringify(evidence.className)}`;
           if (evidence.icons.length)
             attrs +=
               (attrs ? " " : "") +
@@ -872,8 +872,9 @@ export function serializeBrowserUseDOM(
         efficient &&
         n.interactive &&
         contexts.get(n) &&
-        !["aria-label", "title", "placeholder", "ax_name"].some((key) => o.attributes[key]?.trim())
-        &&
+        !["aria-label", "title", "placeholder", "ax_name"].some((key) =>
+          o.attributes[key]?.trim(),
+        ) &&
         browserUseBoundedContextText(o, 1) === ""
       )
         attrs += (attrs ? " " : "") + `context=${cap(contexts.get(n)!)}`;

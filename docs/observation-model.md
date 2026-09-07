@@ -235,11 +235,10 @@ and where it is deliberately narrower or more conservative than §4.1 above.
 
 ### Identity
 
-- **Ref** — `@e:<11 base64url characters>`, minted once per document fingerprint by
-  `StableObservationRefs` in `compact-observation-v2.ts` from a session-secret HMAC.
-  Its 66 bits are an opaque action capability, not an observation position; the
-  observed-map and live-fingerprint checks remain additional authorization boundaries. See
-  [`browser-use-serializer-port.md`](browser-use-serializer-port.md).
+- **Ref** — the current wire shape, 66-bit capability construction, document lifetime,
+  and additional authorization checks are owned by
+  [`browser-use-serializer-port.md`](browser-use-serializer-port.md). This model retains
+  only the durable-fingerprint rationale below.
 - **Fingerprint** — four tiers, each consulted only when the one above it does
   not identify the element uniquely within the inventory: (1) the DOM `id` when
   present, unique on the page, and not framework-random; (2)

@@ -35,14 +35,12 @@ function compare(name: string, root: BrowserUseNode): void {
   const a = Buffer.byteLength(before),
     c = Buffer.byteLength(currentAtBaselineRefWidth),
     b = Buffer.byteLength(after);
-  console.log(
-    `| ${name} | ${a} | ${c} | ${b} | ${b - c} | ${c - a} | ${b - a} |`,
-  );
+  process.stdout.write(`| ${name} | ${a} | ${c} | ${b} | ${b - c} | ${c - a} | ${b - a} |\n`);
 }
-console.log(
-  "| Page / reproduction | Baseline bytes | Current with 10-char refs | Current with 11-char refs | Ref-width change | Other serializer change | Total change |",
+process.stdout.write(
+  "| Page / reproduction | Baseline bytes | Current with 10-char refs | Current with 11-char refs | Ref-width change | Other serializer change | Total change |\n",
 );
-console.log("| --- | ---: | ---: | ---: | ---: | ---: | ---: |");
+process.stdout.write("| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n");
 for (const slug of ["ipinfo", "mdn", "hacker-news", "wikipedia", "github", "gov-uk"])
   compare(
     slug,

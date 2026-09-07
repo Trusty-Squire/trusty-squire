@@ -175,10 +175,7 @@ describe("observation byte efficiency", () => {
     const selfPainted = highlighted();
     expect(serializeBrowserUseDOM(selfPainted).dom).toBe(`<pre> ${JSON.stringify(source)}`);
     const externallyCovered = node("BODY", {
-      children: [
-        highlighted(),
-        node("DIV", { paintOrder: 3, computedStyles: opaque }),
-      ],
+      children: [highlighted(), node("DIV", { paintOrder: 3, computedStyles: opaque })],
     });
     expect(serializeBrowserUseDOM(externallyCovered).dom).not.toContain(source);
   });
@@ -219,10 +216,7 @@ describe("observation byte efficiency", () => {
     });
     expect(serializeBrowserUseDOM(compact).dom).toContain("context=Marketing emails");
     const actionableWrapper = node("DIV", {
-      children: [
-        text("Marketing emails"),
-        node("SPAN", { children: [node("BUTTON")] }),
-      ],
+      children: [text("Marketing emails"), node("SPAN", { children: [node("BUTTON")] })],
     });
     expect(serializeBrowserUseDOM(actionableWrapper).dom).toContain("context=Marketing emails");
     const broad = node("DIV", {
@@ -231,14 +225,18 @@ describe("observation byte efficiency", () => {
         node("SPAN", { children: [text("Announcement ".repeat(20))] }),
       ],
     });
-    const inputLine = serializeBrowserUseDOM(broad).dom.split("\n").find((line) => line.includes("<input"));
+    const inputLine = serializeBrowserUseDOM(broad)
+      .dom.split("\n")
+      .find((line) => line.includes("<input"));
     expect(inputLine).not.toContain("context=");
     const wrapped = node("DIV", {
       children: [
         node("DIV", {
           children: [
             node("LABEL", {
-              children: [node("SPAN", { children: [node("INPUT", { attributes: { type: "checkbox" } })] })],
+              children: [
+                node("SPAN", { children: [node("INPUT", { attributes: { type: "checkbox" } })] }),
+              ],
             }),
           ],
         }),
