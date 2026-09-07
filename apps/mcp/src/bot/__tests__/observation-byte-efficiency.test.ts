@@ -218,6 +218,13 @@ describe("observation byte efficiency", () => {
       ],
     });
     expect(serializeBrowserUseDOM(compact).dom).toContain("context=Marketing emails");
+    const actionableWrapper = node("DIV", {
+      children: [
+        text("Marketing emails"),
+        node("SPAN", { children: [node("BUTTON")] }),
+      ],
+    });
+    expect(serializeBrowserUseDOM(actionableWrapper).dom).toContain("context=Marketing emails");
     const broad = node("DIV", {
       children: [
         node("INPUT", { attributes: { type: "checkbox" } }),
@@ -248,7 +255,7 @@ describe("observation byte efficiency", () => {
     const before = serializeBrowserUseDOM(card).dom;
     card.attributes.class = "card border-selected";
     const after = serializeBrowserUseDOM(card).dom;
-    expect(before).toContain('state_class="card border-neutral"');
+    expect(before).not.toContain("state_class=");
     expect(after).toContain('state_class="card border-selected"');
     expect(after).not.toContain("selected=true");
   });
@@ -261,7 +268,7 @@ describe("observation byte efficiency", () => {
     card.attributes.class = "card border-selected";
     card.children.push(node("SVG", { attributes: { class: "check-icon" } }));
     const after = serializeBrowserUseDOM(card).dom;
-    expect(before).toContain('state_class="card border-neutral"');
+    expect(before).not.toContain("state_class=");
     expect(after).toContain('state_class="card border-selected"');
     expect(after).toContain('state_icons=["check-icon"]');
     expect(after).not.toContain("selected=true");
@@ -282,6 +289,24 @@ describe("observation byte efficiency", () => {
     }
     const selected = iconCard("Selected", "check-icon");
     expect(serializeBrowserUseDOM(selected).dom).toContain('state_icons=["Selected"]');
+  });
+  it("emits selection evidence for reachable controls without card tag heuristics", () => {
+    const link = node("A", {
+      attributes: { href: "#", class: "option border-selected" },
+      children: [text("Plan")],
+    });
+    const article = node("ARTICLE", {
+      clickListener: true,
+      attributes: { class: "option border-selected" },
+      children: [text("Plan"), node("SVG", { attributes: { class: "check-icon" } })],
+    });
+    const refs = new StableObservationRefs();
+    const result = serializeBrowserUseDOM(node("DIV", { children: [link, article] }), {
+      ref: (value) => refs.get("doc", value.id),
+    });
+    expect(result.dom).toContain('state_class="option border-selected"');
+    expect(result.dom).toContain('state_icons=["check-icon"]');
+    expect(result.refs).toEqual([refs.get("doc", link.id), refs.get("doc", article.id)]);
   });
   it("never reassigns ids after insertions, removals or navigation", () => {
     const refs = new StableObservationRefs();

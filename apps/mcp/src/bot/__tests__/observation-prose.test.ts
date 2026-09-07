@@ -136,7 +136,7 @@ describe("interleaved observation DOM", () => {
       const frame = await (await page.locator("#support").elementHandle())!.contentFrame();
       const local = "Local support preference ".repeat(4);
       await frame!.setContent(
-        `<section>Whole section context must not be inherited <div style="margin-top: 800px">${local}<button id="below"> </button></div></section>`,
+        `<section>Whole section context must not be inherited <div style="margin-top: 800px">${local}<span><button id="below"> </button></span></div></section>`,
       );
       const capture = await captureBrowserUseDOM(page, [], () => null, transparentFrameSecurity);
       const findFrame = (node: BrowserUseNode): BrowserUseNode | undefined =>

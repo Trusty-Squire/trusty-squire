@@ -129,6 +129,17 @@ const ATTRIBUTES = new Set([
 ]);
 const tag = (n: BrowserUseNode): string => (n.nodeType === 1 ? n.nodeName.toLowerCase() : "");
 const formTags = new Set(["input", "select", "textarea"]);
+const broadContextTags = new Set([
+  "article",
+  "aside",
+  "body",
+  "footer",
+  "header",
+  "html",
+  "main",
+  "nav",
+  "section",
+]);
 const interactiveRoles = new Set([
   "button",
   "link",
@@ -236,6 +247,17 @@ export function browserUseInteractive(n: BrowserUseNode): boolean {
   )
     return true;
   return n.cursor === "pointer";
+}
+export function browserUseLocalContextContainer(
+  n: BrowserUseNode,
+  hasActionableDescendant: boolean,
+): boolean {
+  const t = tag(n);
+  return (
+    ["tr", "li", "fieldset", "label"].includes(t) ||
+    n.attributes.role === "row" ||
+    (hasActionableDescendant && !broadContextTags.has(t))
+  );
 }
 function propagates(n: BrowserUseNode): boolean {
   const t = tag(n),
@@ -682,8 +704,8 @@ export function serializeBrowserUseDOM(
   const contexts = new Map<Simplified, string>();
   const textCache = new Map<Simplified, string>();
   const genericContextMaxChars = 120;
-  const containsForm = (n: Simplified): boolean =>
-    n.children.some((child) => formTags.has(tag(child.original)) || containsForm(child));
+  const containsActionableDescendant = (n: Simplified): boolean =>
+    n.children.some((child) => containsAction(child.original));
   const contextualText = (n: Simplified): string => {
     if (!textCache.has(n))
       textCache.set(
@@ -697,11 +719,8 @@ export function serializeBrowserUseDOM(
       t = tag(o);
     const text = contextualText(n).replace(/\s+/g, " ").trim();
     const container =
-      ["tr", "li", "fieldset", "label"].includes(t) ||
-      o.attributes.role === "row" ||
-      (t === "div" &&
-        containsForm(n) &&
-        Array.from(text).length <= genericContextMaxChars);
+      browserUseLocalContextContainer(o, containsActionableDescendant(n)) &&
+      Array.from(text).length <= genericContextMaxChars;
     let context = container
       ? text || enclosing
       : enclosing;
@@ -738,6 +757,19 @@ export function serializeBrowserUseDOM(
     }
     return stateIconCache.get(node)!;
   };
+  const selectionClass = (node: BrowserUseNode): string | null => {
+    const className = node.attributes.class?.trim();
+    return /(?:^|[-_\s])(?:selected|checked|tick)(?:$|[-_\s])/i.test(className ?? "")
+      ? className!
+      : null;
+  };
+  const selectionEvidence = (node: BrowserUseNode) => ({
+    className: selectionClass(node),
+    icons: stateIcons(node),
+    state: ["aria-checked", "aria-pressed", "aria-selected", "data-state"].some(
+      (attribute) => node.attributes[attribute]?.trim(),
+    ),
+  });
   const render = (n: Simplified, depth: number): string => {
     const o = n.original,
       t = tag(o),
@@ -777,34 +809,26 @@ export function serializeBrowserUseDOM(
       : "";
     if (o.nodeType === 1) {
       let attrs = attributes(o, efficient);
-      if (
-        efficient &&
-        n.interactive &&
-        ((["div", "span", "li", "button"].includes(t) &&
-          (t === "button" ||
-            o.clickListener ||
-            o.cursor === "pointer" ||
-            "tabindex" in o.attributes ||
-            ["button", "option", "checkbox", "radio"].includes(o.attributes.role ?? ""))) ||
-          (t === "a" &&
-            ((o.attributes.class ?? "").split(/\s+/).includes("card") || stateIcons(o).length > 0)))
-      ) {
-        // Raw DOM evidence, never a guessed selected=true. Preserve the entire
-        // class list: a distinguishing Tailwind token may be at its very end.
-        if (o.attributes.class?.trim())
-          attrs +=
-            (attrs ? " " : "") + `state_class=${JSON.stringify(o.attributes.class.trim())}`;
-        const icons = stateIcons(o);
-        if (icons.length)
-          attrs +=
-            (attrs ? " " : "") +
-            `state_icons=${JSON.stringify(icons)}`;
+      if (efficient && n.interactive) {
+        const evidence = selectionEvidence(o);
+        if (evidence.className || evidence.icons.length || evidence.state) {
+          if (evidence.className)
+            attrs +=
+              (attrs ? " " : "") +
+              `state_class=${JSON.stringify(evidence.className)}`;
+          if (evidence.icons.length)
+            attrs +=
+              (attrs ? " " : "") +
+              `state_icons=${JSON.stringify(evidence.icons)}`;
+        }
       }
       if (
         efficient &&
-        formTags.has(t) &&
+        n.interactive &&
         contexts.get(n) &&
         !["aria-label", "title", "placeholder", "ax_name"].some((key) => o.attributes[key]?.trim())
+        &&
+        !contextualText(n).replace(/\s+/g, " ").trim()
       )
         attrs += (attrs ? " " : "") + `context=${cap(contexts.get(n)!)}`;
       if (n.interactive && targets.get(n)?.targetable === false)

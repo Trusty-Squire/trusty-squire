@@ -20,6 +20,7 @@ interface FrameTree {
 import type { InteractiveElement } from "./browser.js";
 import {
   browserUseInteractive,
+  browserUseLocalContextContainer,
   type BrowserUseNode,
   type DOMBounds,
 } from "./browser-use-serializer.js";
@@ -529,14 +530,13 @@ export async function captureBrowserUseDOM(
         let anyHidden = false;
         const textContent = (c: BrowserUseNode): string =>
           c.nodeType === 3 ? c.value : c.children.map(textContent).join(" ");
+        const actionableDescendant = (c: BrowserUseNode): boolean =>
+          c.children.some(
+            (child) => browserUseInteractive(child) || actionableDescendant(child),
+          );
         const localContext = (c: BrowserUseNode): string | null => {
-          const tag = c.nodeName.toLowerCase();
-          if (
-            !["div", "tr", "li", "fieldset", "label"].includes(tag) &&
-            c.attributes.role !== "row"
-          )
+          if (!browserUseLocalContextContainer(c, actionableDescendant(c)))
             return null;
-          if (!c.children.some(browserUseInteractive)) return null;
           const value = textContent(c).replace(/\s+/g, " ").trim();
           return value
             ? Array.from(value).slice(0, iframeHintContextMaxChars).join("")
