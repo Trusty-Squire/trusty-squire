@@ -1,3 +1,4 @@
+import { captureBrowserUseDOM, type BrowserUseCapture } from "./browser-use-capture.js";
 // Browser automation wrapper for universal signup bot
 // Provides simple interface for AI agent to control browser.
 //
@@ -2046,98 +2047,6 @@ function extractObservationVisibleText(): string {
     }
   }
   return text;
-}
-
-// Bounded prose collection for the compact-v2 text channel. The action map
-// answers "what can I click"; this answers "what does the page SAY" — which
-// plan is selected, what an error means, whether a limit was hit (the ipinfo
-// dogfood: `text` was always ""). Structured, visibility-respecting, and
-// deliberately complementing the map: interactive-control labels stay out so
-// the same bytes are not paid for twice.
-/**
- * Serialized into the page by `page.evaluate()` in `extractObservationProse()`:
- * the page receives ONLY this function's source text, not the module's closure.
- * Every identifier it references must therefore be defined inside this function
- * (or be a page global) — a module-scope constant becomes a `ReferenceError` in
- * the page on the first matching element. That exact bug shipped the compact-v2
- * text channel inert (2026-09-06): the bound checks below named module-level
- * constants, every real page threw, the call site's catch swallowed it, and the
- * channel emitted `text: ""` everywhere. Keep this function self-contained.
- */
-export function extractObservationProseItems(): string[] {
-  const OBSERVATION_PROSE_MAX_ITEMS = 48;
-  const OBSERVATION_PROSE_MAX_ITEM_CHARS = 200;
-  const body = document.body;
-  if (!body) return [];
-  const clean = (value: string | null | undefined): string =>
-    (value ?? "")
-      .replace(/[\p{Cc}\p{Cf}]/gu, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-  const visible = (el: Element): boolean => {
-    try {
-      if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
-    } catch {
-      /* older engines: fall through to rect check */
-    }
-    const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
-  };
-  // Prose sources, in rough page-order via a single walk. Headings structure
-  // the page; paragraphs and list items carry the copy; alerts/live regions
-  // carry errors and validation; aria-selected/pressed/checked carry state
-  // ("which plan is selected"). Interactive-control descendants are excluded
-  // — their text is the action map's job, not the prose channel's.
-  const selector = [
-    "h1",
-    "h2",
-    "h3",
-    "h4",
-    "h5",
-    "h6",
-    '[role="heading"]',
-    "p",
-    "li",
-    "dd",
-    "dt",
-    '[role="alert"]',
-    '[role="status"]',
-    '[aria-live="polite"]',
-    '[aria-live="assertive"]',
-    '[aria-selected="true"]',
-    '[aria-pressed="true"]',
-    '[aria-checked="true"]',
-  ].join(",");
-  const seen = new Set<string>();
-  const items: string[] = [];
-  for (const el of Array.from(body.querySelectorAll(selector))) {
-    if (items.length >= OBSERVATION_PROSE_MAX_ITEMS) break;
-    if (!visible(el)) continue;
-    // Skip items nested inside a richer prose item already collected (a <p>
-    // inside a [role=alert], a <li> inside a selected card): the outer item
-    // reads better and dedupes the bytes.
-    if (el.parentElement?.closest(selector) !== null) continue;
-    // Control labels are the map's job. A <li> that IS a menu item, an
-    // <option> inside a select, a clickable selected card's own label — all
-    // stay out of the prose channel.
-    if (
-      el.closest(
-        "button, a, label, select, option, summary, [role=button], [role=menuitem], [role=option], [role=tab]",
-      ) !== null
-    )
-      continue;
-    const text = clean(el.textContent);
-    if (text.length === 0) continue;
-    const key = text.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    items.push(
-      text.length <= OBSERVATION_PROSE_MAX_ITEM_CHARS
-        ? text
-        : `${text.slice(0, OBSERVATION_PROSE_MAX_ITEM_CHARS - 1)}…`,
-    );
-  }
-  return items;
 }
 
 function elementHasEffectiveVisibleRect(element: Element): boolean {
@@ -7610,16 +7519,16 @@ export class BrowserController {
     return await this.page.evaluate(extractObservationVisibleText);
   }
 
-  /**
-   * Bounded rendered prose for the compact-v2 text channel: headings,
-   * paragraphs, list items, error/validation live regions, and selected-state
-   * text — what the page SAYS, complementing the clickable action map.
-   * Structured items (not one raw blob) so the wire budget can degrade
-   * item-by-item without ever starving the map.
-   */
-  async extractObservationProse(): Promise<string[]> {
+  /** Canonical tree capture, with the existing whole-document action bindings. */
+  async extractBrowserUseObservation(): Promise<BrowserUseCapture> {
     if (!this.page) throw new Error("Browser not started");
-    return await this.page.evaluate(extractObservationProseItems);
+    const elements = await this.extractInteractiveElements();
+    return captureBrowserUseDOM(
+      this.page,
+      elements,
+      (frame) => this.framePath(frame),
+      (frame) => this.frameSecurity(frame),
+    );
   }
 
   /**

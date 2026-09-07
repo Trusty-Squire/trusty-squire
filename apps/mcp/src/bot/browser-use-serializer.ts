@@ -1,0 +1,678 @@
+/**
+ * TypeScript port of browser-use 0.13.10's DOMTreeSerializer.
+ * Oracle: scripts/capture-browser-use.py; fixtures/browser-use/*.txt.
+ * Upstream: https://github.com/browser-use/browser-use (MIT).
+ * Identity is supplied by the caller; all rendering retains DOM order.
+ */
+export interface DOMBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+export interface BrowserUseNode {
+  id: string;
+  nodeType: number;
+  nodeName: string;
+  value: string;
+  attributes: Record<string, string>;
+  visible: boolean;
+  snapshot: boolean;
+  bounds: DOMBounds | null;
+  cursor: string | null;
+  scrollable: boolean;
+  showScroll: boolean;
+  scrollText: string;
+  clickListener: boolean;
+  axRole: string | null;
+  axProperties: Array<{ name: string; value: unknown }>;
+  axChildIds: unknown[] | null;
+  shadowType: string | null;
+  hiddenElements: Array<{ tag: string; text: string; pages: number | string }>;
+  hiddenContent: boolean;
+  children: BrowserUseNode[];
+  contentDocument: BrowserUseNode | null;
+}
+interface Simplified {
+  original: BrowserUseNode;
+  children: Simplified[];
+  excluded: boolean;
+  interactive: boolean;
+  shadowHost: boolean;
+  compound: string;
+  isNew: boolean;
+}
+export const DEFAULT_CONTAINMENT_THRESHOLD = 0.99;
+const DISABLED = new Set(["style", "script", "head", "meta", "link", "title"]);
+const SVG = new Set([
+  "path",
+  "rect",
+  "g",
+  "circle",
+  "ellipse",
+  "line",
+  "polyline",
+  "polygon",
+  "use",
+  "defs",
+  "clipPath",
+  "mask",
+  "pattern",
+  "image",
+  "text",
+  "tspan",
+]);
+const ATTRIBUTES = new Set([
+  "title",
+  "type",
+  "checked",
+  "id",
+  "name",
+  "role",
+  "value",
+  "placeholder",
+  "data-date-format",
+  "alt",
+  "aria-label",
+  "aria-expanded",
+  "data-state",
+  "aria-checked",
+  "aria-valuemin",
+  "aria-valuemax",
+  "aria-valuenow",
+  "aria-placeholder",
+  "pattern",
+  "min",
+  "max",
+  "minlength",
+  "maxlength",
+  "step",
+  "accept",
+  "multiple",
+  "inputmode",
+  "autocomplete",
+  "aria-autocomplete",
+  "list",
+  "data-mask",
+  "data-inputmask",
+  "data-datepicker",
+  "format",
+  "expected_format",
+  "contenteditable",
+  "pseudo",
+  "selected",
+  "expanded",
+  "pressed",
+  "disabled",
+  "invalid",
+  "valuemin",
+  "valuemax",
+  "valuenow",
+  "keyshortcuts",
+  "haspopup",
+  "multiselectable",
+  "required",
+  "valuetext",
+  "level",
+  "busy",
+  "live",
+  "ax_name",
+]);
+const tag = (n: BrowserUseNode): string => (n.nodeType === 1 ? n.nodeName.toLowerCase() : "");
+const formTags = new Set(["input", "select", "textarea"]);
+const interactiveRoles = new Set([
+  "button",
+  "link",
+  "menuitem",
+  "option",
+  "radio",
+  "checkbox",
+  "tab",
+  "textbox",
+  "combobox",
+  "slider",
+  "spinbutton",
+  "search",
+  "searchbox",
+  "row",
+  "cell",
+  "gridcell",
+]);
+const cap = (s: string, n = 100): string =>
+  Array.from(s).length <= n ? s : Array.from(s).slice(0, n).join("") + "...";
+type ScreenValue = (value: string, visibleCodePoints?: number) => string;
+const screenCapped = (value: string, screen: ScreenValue): string =>
+  screen(value, 100) + (Array.from(value).length > 100 ? "..." : "");
+const pyString = (v: unknown): string =>
+  v === null ? "None" : typeof v === "boolean" ? (v ? "True" : "False") : String(v);
+
+export function browserUseInteractive(n: BrowserUseNode): boolean {
+  const t = tag(n),
+    a = n.attributes;
+  if (n.nodeType !== 1 || t === "html" || t === "body") return false;
+  if (n.clickListener) return true;
+  if (
+    (t === "iframe" || t === "frame") &&
+    n.bounds &&
+    n.bounds.width > 100 &&
+    n.bounds.height > 100
+  )
+    return true;
+  const hasForm = (node: BrowserUseNode, depth: number): boolean =>
+    depth > 0 &&
+    node.children.some((c) => c.nodeType === 1 && (formTags.has(tag(c)) || hasForm(c, depth - 1)));
+  if (t === "label" && a.for) return false;
+  if ((t === "label" || t === "span") && hasForm(n, 2)) return true;
+  const search = [
+    "search",
+    "magnify",
+    "glass",
+    "lookup",
+    "find",
+    "query",
+    "search-icon",
+    "search-btn",
+    "search-button",
+    "searchbox",
+  ];
+  if (
+    [
+      a.class ?? "",
+      a.id ?? "",
+      ...Object.entries(a)
+        .filter(([k]) => k.startsWith("data-"))
+        .map(([, v]) => v),
+    ].some((v) => search.some((s) => v.toLowerCase().includes(s)))
+  )
+    return true;
+  for (const p of n.axProperties) {
+    if (["disabled", "hidden"].includes(p.name) && p.value) return false;
+    if (
+      ["focusable", "editable", "settable", "required", "autocomplete", "keyshortcuts"].includes(
+        p.name,
+      ) &&
+      p.value
+    )
+      return true;
+    if (["checked", "expanded", "pressed", "selected"].includes(p.name)) return true;
+  }
+  if (
+    [
+      "button",
+      "input",
+      "select",
+      "textarea",
+      "a",
+      "details",
+      "summary",
+      "option",
+      "optgroup",
+    ].includes(t)
+  )
+    return true;
+  if (
+    ["onclick", "onmousedown", "onmouseup", "onkeydown", "onkeyup", "tabindex"].some((k) => k in a)
+  )
+    return true;
+  if (
+    interactiveRoles.has(a.role ?? "") ||
+    interactiveRoles.has(n.axRole ?? "") ||
+    n.axRole === "listbox"
+  )
+    return true;
+  if (
+    n.bounds &&
+    n.bounds.width >= 10 &&
+    n.bounds.width <= 50 &&
+    n.bounds.height >= 10 &&
+    n.bounds.height <= 50 &&
+    ["class", "role", "onclick", "data-action", "aria-label"].some((k) => k in a)
+  )
+    return true;
+  return n.cursor === "pointer";
+}
+function propagates(n: BrowserUseNode): boolean {
+  const t = tag(n),
+    r = n.attributes.role;
+  return (
+    t === "a" ||
+    t === "button" ||
+    ((t === "div" || t === "span") && (r === "button" || r === "combobox")) ||
+    (t === "input" && r === "combobox")
+  );
+}
+export function browserUseContained(child: DOMBounds, parent: DOMBounds): boolean {
+  const area = child.width * child.height;
+  return (
+    area > 0 &&
+    (Math.max(
+      0,
+      Math.min(child.x + child.width, parent.x + parent.width) - Math.max(child.x, parent.x),
+    ) *
+      Math.max(
+        0,
+        Math.min(child.y + child.height, parent.y + parent.height) - Math.max(child.y, parent.y),
+      )) /
+      area >=
+      DEFAULT_CONTAINMENT_THRESHOLD
+  );
+}
+function exclude(n: BrowserUseNode, bounds: DOMBounds): boolean {
+  const t = tag(n),
+    a = n.attributes;
+  return (
+    n.nodeType !== 3 &&
+    n.bounds !== null &&
+    browserUseContained(n.bounds, bounds) &&
+    !["input", "select", "textarea", "label"].includes(t) &&
+    !propagates(n) &&
+    !("onclick" in a) &&
+    !(a["aria-label"] ?? "").trim() &&
+    !["button", "link", "checkbox", "radio", "tab", "menuitem", "option"].includes(a.role ?? "")
+  );
+}
+function attributes(n: BrowserUseNode, screen: ScreenValue): string {
+  const a: Record<string, string> = {};
+  for (const [k, v] of Object.entries(n.attributes))
+    if (ATTRIBUTES.has(k) && v.trim()) a[k] = v.trim();
+  const t = tag(n),
+    type = (n.attributes.type ?? "").toLowerCase();
+  const formats: Record<string, string> = {
+    date: "YYYY-MM-DD",
+    time: "HH:MM",
+    "datetime-local": "YYYY-MM-DDTHH:MM",
+    month: "YYYY-MM",
+    week: "YYYY-W##",
+  };
+  if (t === "input") {
+    if (formats[type]) a.format = formats[type]!;
+    if (!("placeholder" in a)) {
+      if (formats[type]) a.placeholder = formats[type]!;
+      else if (type === "tel" && !a.pattern) a.placeholder = "123-456-7890";
+      else if (type === "text" || !type) {
+        const attrs = n.attributes;
+        if ("uib-datepicker-popup" in attrs) {
+          if (attrs["uib-datepicker-popup"])
+            a.expected_format = a.format = attrs["uib-datepicker-popup"]!;
+        } else if (
+          ["datepicker", "datetimepicker", "daterangepicker"].some((s) =>
+            (attrs.class ?? "").toLowerCase().includes(s),
+          ) ||
+          "data-datepicker" in attrs
+        )
+          a.placeholder = a.format = attrs["data-date-format"] || "mm/dd/yyyy";
+      }
+    }
+  }
+  const password = t === "input" && type === "password";
+  for (const p of n.axProperties)
+    if (
+      ATTRIBUTES.has(p.name) &&
+      p.value !== null &&
+      !(password && ["value", "valuetext"].includes(p.name))
+    ) {
+      const v = typeof p.value === "boolean" ? String(p.value) : pyString(p.value).trim();
+      if (v) a[p.name] = v;
+    }
+  if (formTags.has(t)) {
+    if (password) delete a.value;
+    else
+      for (const p of n.axProperties)
+        if (["valuetext", "value"].includes(p.name) && p.value && pyString(p.value).trim()) {
+          a.value = pyString(p.value).trim();
+          break;
+        }
+  }
+  const seen = new Set<string>();
+  for (const k of ATTRIBUTES)
+    if (k in a && a[k]!.length > 5) {
+      if (
+        seen.has(a[k]!) &&
+        !["format", "expected_format", "placeholder", "value", "aria-label", "title"].includes(k)
+      )
+        delete a[k];
+      else seen.add(a[k]!);
+    }
+  if (n.axRole && n.nodeName === n.axRole) delete a.role;
+  if (a.type?.toLowerCase() === n.nodeName.toLowerCase()) delete a.type;
+  if (a.invalid?.toLowerCase() === "false") delete a.invalid;
+  if (["false", "0", "no"].includes(a.required?.toLowerCase() ?? "")) delete a.required;
+  if ("expanded" in a && "aria-expanded" in a) delete a["aria-expanded"];
+  return Object.entries(a)
+    .map(([k, v]) => {
+      // The mandatory name screen covers human-readable naming attributes.
+      // IDs, URLs and form values keep canonical semantics; they are not names.
+      const named = [
+        "title",
+        "name",
+        "placeholder",
+        "alt",
+        "aria-label",
+        "aria-placeholder",
+        "ax_name",
+      ].includes(k);
+      return `${k}=${(named ? screenCapped(v, screen) : cap(v)) || "''"}`;
+    })
+    .join(" ");
+}
+function compounds(n: BrowserUseNode): string {
+  const t = tag(n),
+    type = n.attributes.type,
+    a = n.attributes;
+  if (
+    !["input", "select", "details", "audio", "video"].includes(t) ||
+    (t !== "input" && !n.axChildIds?.length)
+  )
+    return "";
+  const c = (name: string, role: string, tail = ""): string => `(name=${name},role=${role}${tail})`;
+  const number = (s: string | undefined, fallback?: number): string | undefined => {
+    const x = s?.trim() ? Number(s) : fallback;
+    return x === undefined || !Number.isFinite(x)
+      ? fallback === undefined
+        ? undefined
+        : fallback.toFixed(1)
+      : Number.isInteger(x)
+        ? x.toFixed(1)
+        : String(x);
+  };
+  const bounds = (min?: string, max?: string): string =>
+    `${min === undefined ? "" : ",min=" + min}${max === undefined ? "" : ",max=" + max}`;
+  if (t === "input") {
+    if (type === "range") return c("Value", "slider", bounds(number(a.min, 0), number(a.max, 100)));
+    if (type === "number")
+      return [
+        c("Increment", "button"),
+        c("Decrement", "button"),
+        c("Value", "textbox", bounds(number(a.min), number(a.max))),
+      ].join(",");
+    if (type === "color") return [c("Hex Value", "textbox"), c("Color Picker", "button")].join(",");
+    if (type === "file") {
+      let value = "None";
+      for (const p of n.axProperties) {
+        if (
+          p.name === "valuetext" &&
+          p.value &&
+          !["", "no file chosen", "no file selected"].includes(String(p.value).trim().toLowerCase())
+        ) {
+          value = String(p.value).trim();
+          break;
+        }
+        if (p.name === "value" && p.value) {
+          value = String(p.value).trim().split(/[\\/]/).pop()!;
+          break;
+        }
+      }
+      return [
+        c("Browse Files", "button"),
+        c("multiple" in a ? "Files Selected" : "File Selected", "textbox", `,current=${value}`),
+      ].join(",");
+    }
+    return "";
+  }
+  if (t === "select") {
+    const opts: Array<{ text: string; value: string }> = [];
+    const walk = (x: BrowserUseNode): void => {
+      if (tag(x) === "option") {
+        const text = x.children
+          .filter((k) => k.nodeType === 3)
+          .map((k) => k.value.trim())
+          .join(" ")
+          .trim();
+        const value = (x.attributes.value ?? "").trim() || text;
+        if (text || value) opts.push({ text, value });
+      } else x.children.forEach(walk);
+    };
+    n.children.forEach(walk);
+    let tail = "";
+    if (opts.length) {
+      tail = `,count=${opts.length},options=${opts
+        .slice(0, 4)
+        .map((o) => cap(o.text || o.value, 30))
+        .join("|")}`;
+      if (opts.length >= 2) {
+        const v = opts
+          .slice(0, 5)
+          .map((o) => o.value)
+          .filter(Boolean);
+        const format = v.every((s) => /^\d+$/.test(s))
+          ? "numeric"
+          : v.every((s) => s.length === 2 && s.toUpperCase() === s && s.toLowerCase() !== s)
+            ? "country/state codes"
+            : v.every((s) => /[/-]/.test(s))
+              ? "date/path format"
+              : v.some((s) => s.includes("@"))
+                ? "email addresses"
+                : "";
+        if (format) tail += `,format=${format}`;
+      }
+    }
+    return [c("Dropdown Toggle", "button"), c("Options", "listbox", tail)].join(",");
+  }
+  if (t === "details")
+    return [c("Toggle Disclosure", "button"), c("Content Area", "region")].join(",");
+  return [
+    c("Play/Pause", "button"),
+    c("Progress", "slider", ",min=0,max=100"),
+    c("Mute", "button"),
+    c("Volume", "slider", ",min=0,max=100"),
+    ...(t === "video" ? [c("Fullscreen", "button")] : []),
+  ].join(",");
+}
+function imageContext(n: Simplified, screen: ScreenValue): string {
+  const result: string[] = [];
+  let visited = 0;
+  const walk = (s: Simplified, root = false): void => {
+    if ((!root && ++visited > 100) || result.length >= 3) return;
+    const o = s.original,
+      a = o.attributes;
+    if (tag(o) === "img") {
+      const parts: string[] = [];
+      for (const [key, name] of [
+        ["alt", "image_alt"],
+        ["title", "image_title"],
+        ["aria-label", "image_label"],
+      ] as const)
+        if ((a[key] ?? "").length <= 4096 && a[key]?.trim())
+          parts.push(`${name}=${screenCapped(a[key]!.trim(), screen)}`);
+      let src = a.src ?? "";
+      if (src.length <= 4096) {
+        src = src.replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, "").replace(/[\t\n\r]/g, "");
+        if (!src.toLowerCase().startsWith("data:")) {
+          src = src.split("?")[0]!.split("#")[0]!.replace(/\/+$/, "").split("/").pop()!;
+          if (src) parts.push(`image_src=${cap(src)}`);
+        }
+      }
+      if (parts.length) result.push(parts.join(" "));
+    }
+    for (const c of s.children) {
+      if (visited >= 100 || result.length >= 3) break;
+      walk(c);
+    }
+  };
+  walk(n, true);
+  return result.join(" ");
+}
+
+/** No text budget or reordering: filtering preserves the original DOM sequence. */
+export function serializeBrowserUseDOM(
+  root: BrowserUseNode,
+  options: {
+    ref?: (node: BrowserUseNode) => string | { ref: string; targetable: boolean };
+    previous?: ReadonlySet<string>;
+    // Receives the full source; an optional limit selects ORIGINAL code points.
+    // Return screened prefix text without an ellipsis (the renderer owns it).
+    screen?: ScreenValue;
+  } = {},
+): { dom: string; refs: string[] } {
+  const screen: ScreenValue =
+    options.screen ??
+    ((value, limit) => (limit === undefined ? value : Array.from(value).slice(0, limit).join("")));
+  const targets = new Map<Simplified, { ref: string; targetable: boolean }>();
+  const simplify = (n: BrowserUseNode): Simplified | null => {
+    if (n.nodeType === 9) {
+      for (const c of n.children) {
+        const s = simplify(c);
+        if (s) return s;
+      }
+      return null;
+    }
+    if (n.nodeType === 3)
+      return n.snapshot && n.visible && n.value.trim().length > 1
+        ? {
+            original: n,
+            children: [],
+            excluded: false,
+            interactive: false,
+            shadowHost: false,
+            compound: "",
+            isNew: false,
+          }
+        : null;
+    if (n.nodeType !== 1 && n.nodeType !== 11) return null;
+    const t = tag(n);
+    if (
+      DISABLED.has(t) ||
+      SVG.has(t) ||
+      n.attributes["data-browser-use-exclude"]?.toLowerCase() === "true"
+    )
+      return null;
+    const children = (
+      (t === "iframe" || t === "frame") && n.contentDocument
+        ? n.contentDocument.children
+        : n.children
+    )
+      .map(simplify)
+      .filter((c): c is Simplified => c !== null);
+    const shadowHost = n.children.some((c) => c.nodeType === 11);
+    if (
+      !(
+        (n.snapshot && n.visible) ||
+        n.scrollable ||
+        children.length ||
+        (t === "input" && n.attributes.type === "file")
+      )
+    )
+      return null;
+    return {
+      original: n,
+      children,
+      excluded: false,
+      interactive: false,
+      shadowHost,
+      compound: compounds(n),
+      isNew: false,
+    };
+  };
+  const tree = simplify(root);
+  if (!tree)
+    return { dom: "Empty DOM tree (you might have to wait for the page to load)", refs: [] };
+  const filter = (n: Simplified, active: DOMBounds | null): void => {
+    n.excluded = active !== null && exclude(n.original, active);
+    const next = propagates(n.original) && n.original.bounds ? n.original.bounds : active;
+    n.children.forEach((c) => filter(c, next));
+  };
+  filter(tree, null);
+  const refs: string[] = [];
+  const hasInteractive = (n: Simplified): boolean =>
+    n.children.some((c) => browserUseInteractive(c.original) || hasInteractive(c));
+  const assign = (n: Simplified, inShadow: boolean): void => {
+    const o = n.original,
+      t = tag(o),
+      a = o.attributes;
+    if (!n.excluded) {
+      if (o.scrollable)
+        n.interactive =
+          ["listbox", "menu", "combobox", "menubar", "tree", "grid"].includes(a.role ?? "") ||
+          t === "select" ||
+          (a.class ?? "")
+            .split(/\s+/)
+            .some((c) => ["dropdown", "dropdown-menu", "select-menu"].includes(c)) ||
+          ((a.class ?? "").split(/\s+/).includes("ui") && (a.class ?? "").includes("dropdown")) ||
+          !hasInteractive(n);
+      else
+        n.interactive =
+          browserUseInteractive(o) &&
+          ((o.snapshot && o.visible) ||
+            (t === "input" && a.type === "file") ||
+            (!o.snapshot &&
+              inShadow &&
+              ["input", "button", "select", "textarea", "a"].includes(t)));
+    }
+    if (n.interactive) {
+      const resolved = options.ref?.(o) ?? o.id;
+      const target = typeof resolved === "string" ? { ref: resolved, targetable: true } : resolved;
+      targets.set(n, target);
+      const ref = target.ref;
+      refs.push(ref);
+      n.isNew = !!n.compound || (!!options.previous?.size && !options.previous.has(ref));
+    }
+    n.children.forEach((c) => assign(c, inShadow || o.nodeType === 11));
+  };
+  assign(tree, false);
+  const render = (n: Simplified, depth: number): string => {
+    const o = n.original,
+      t = tag(o),
+      indent = "\t".repeat(depth);
+    if (n.excluded)
+      return n.children
+        .map((c) => render(c, depth))
+        .filter(Boolean)
+        .join("\n");
+    const lines: string[] = [];
+    let next = depth;
+    const shadow = n.shadowHost
+      ? `|SHADOW(${n.children.some((c) => c.original.shadowType?.toLowerCase() === "closed") ? "closed" : "open"})|`
+      : "";
+    const marker = n.interactive
+      ? `${n.isNew ? "*" : ""}${o.showScroll && t !== "svg" ? "|scroll element[" : "["}${targets.get(n)!.ref}]`
+      : "";
+    if (o.nodeType === 1) {
+      let attrs = attributes(o, screen);
+      if (n.interactive && targets.get(n)?.targetable === false)
+        attrs += (attrs ? " " : "") + "not-targetable=true";
+      if (t === "svg")
+        return `${indent}${shadow}${marker}<svg${attrs ? " " + attrs : ""} /> <!-- SVG content collapsed -->`;
+      if (n.interactive || o.scrollable || t === "iframe" || t === "frame") {
+        next++;
+        if (n.interactive) {
+          const img = imageContext(n, screen);
+          if (img) attrs += (attrs ? " " : "") + img;
+        }
+        if (n.compound) attrs += (attrs ? " " : "") + `compound_components=${screen(n.compound)}`;
+        const prefix =
+          o.showScroll && !n.interactive
+            ? "|scroll element|"
+            : n.interactive
+              ? marker
+              : t === "iframe"
+                ? "|IFRAME|"
+                : t === "frame"
+                  ? "|FRAME|"
+                  : "";
+        lines.push(
+          `${indent}${shadow}${prefix}<${t}${attrs ? " " + attrs : ""} />${o.showScroll && o.scrollText ? " (" + o.scrollText + ")" : ""}`,
+        );
+      }
+    } else if (o.nodeType === 11) {
+      lines.push(
+        indent + (o.shadowType?.toLowerCase() === "closed" ? "Closed Shadow" : "Open Shadow"),
+      );
+      next++;
+    } else if (o.nodeType === 3 && o.snapshot && o.visible && o.value.trim().length > 1)
+      lines.push(indent + screen(o.value.trim()));
+    lines.push(...n.children.map((c) => render(c, next)).filter(Boolean));
+    if (o.nodeType === 11 && n.children.length) lines.push(indent + "Shadow End");
+    if (t === "iframe" || t === "frame") {
+      if (o.hiddenElements.length) {
+        lines.push(
+          `${indent}... (${o.hiddenElements.length} more elements below - scroll to reveal):`,
+        );
+        for (const e of o.hiddenElements)
+          lines.push(`${indent}    <${e.tag}> "${screen(e.text, 40)}" ~${e.pages} pages down`);
+      } else if (o.hiddenContent)
+        lines.push(`${indent}... (more content below viewport - scroll to reveal)`);
+    }
+    return lines.join("\n");
+  };
+  return { dom: render(tree, 0), refs };
+}

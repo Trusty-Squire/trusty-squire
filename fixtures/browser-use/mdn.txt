@@ -1,0 +1,181 @@
+Open Shadow
+	[508]<div image_alt=Google Cloud image_src=aHR0cHM6Ly9zdGF0aWM0LmJ1eXNlbGxhZHMubmV0L3V1LzIvMTc2NDc2LzE3ODU0MTg3MzMtZ29vZ2xlLWNsb3VkLTEyOHgxMjgu... />
+		[407]<img alt=Google Cloud image_alt=Google Cloud image_src=aHR0cHM6Ly9zdGF0aWM0LmJ1eXNlbGxhZHMubmV0L3V1LzIvMTc2NDc2LzE3ODU0MTg3MzMtZ29vZ2xlLWNsb3VkLTEyOHgxMjgu... />
+		[405]<span />
+			Future-proof infrastructure. Powerful data & analytics. No ops, just code.
+	[406]<span />
+		Start Free
+	Open Shadow
+		[519]<a />
+			Ad
+	Shadow End
+	Open Shadow
+		[526]<a />
+			Don't want to see ads?
+	Shadow End
+Shadow End
+[541]<a />
+[591]<button expanded=false />
+	HTML
+[708]<button expanded=false />
+	CSS
+[840]<button expanded=false />
+	JavaScript
+[944]<button expanded=false />
+	Web APIs
+[1056]<button expanded=false />
+	All
+[1168]<button expanded=false />
+	Learn
+[1280]<button expanded=false />
+	Tools
+[1355]<button expanded=false />
+	About
+[1403]<a />
+	Blog
+[1409]<div />
+	Open Shadow
+		[1416]<button title=Search the site />
+	Shadow End
+Open Shadow
+	|SHADOW(open)|[1431]<mdn-button />
+		Log in
+		Open Shadow
+			[1434]<a />
+		Shadow End
+Shadow End
+[1553]<a />
+	Web
+[1562]<a />
+	Web APIs
+[1571]<a />
+	Fetch API
+Open Shadow
+	[1596]<button aria-label=Switch color theme expanded=false />
+		Theme
+Shadow End
+Open Shadow
+	[1669]<button expanded=false />
+		English (US)
+Shadow End
+Fetch API
+The Fetch API provides an interface for fetching resources (including across the network). It is a more powerful and flexible replacement for
+[1884]<a />
+	[1885]<code />
+		XMLHttpRequest
+In this article
+[1902]<a />
+	Concepts and usage
+[1907]<a />
+	Interfaces
+[1912]<a />
+	HTTP headers
+[1917]<a />
+	Specifications
+[1922]<a />
+	Browser compatibility
+[1927]<a />
+	See also
+Open Shadow
+	[1939]<a image_alt=Google Cloud image_src=aHR0cHM6Ly9zdGF0aWM0LmJ1eXNlbGxhZHMubmV0L3V1LzIvMTc2NDc2LzE3ODU0MjE4NzEtR3JhZGllbnRfU3VwZXJfQ2xvdWRf... />
+		[403]<div />
+			[1942]<strong />
+				Free Testing and Cost Control
+			[1946]<span />
+				Start your AI journey with free access to leading cloud products and services.
+			[1950]<span />
+				Start Free
+	Open Shadow
+		[1958]<a />
+			Ad
+	Shadow End
+Shadow End
+[1980]<a />
+	Concepts and usage
+The Fetch API uses
+[1987]<a />
+	[1988]<code />
+		Request
+and
+[1991]<a />
+	[1992]<code />
+		Response
+objects (and other things involved with network requests), as well as related concepts such as CORS and the HTTP Origin header semantics.
+For making a request and fetching a resource, use the
+[1998]<a title=fetch() />
+	[1999]<code />
+		fetch()
+method. It is a global method in both
+[2002]<a />
+	[2003]<code />
+		Window
+and
+[2006]<a title=Worker />
+	[2007]<code />
+		Worker
+contexts. This makes it available in pretty much any context you might want to fetch resources in.
+The
+fetch()
+method takes one mandatory argument, the path to the resource you want to fetch. It returns a
+[2015]<a />
+	[2016]<code />
+		Promise
+that resolves to the
+[2019]<a />
+	[2020]<code />
+		Response
+to that request — as soon as the server responds with headers —
+even if the server response is an HTTP error status
+. You can also optionally pass in an
+init
+options object as the second argument (see
+[2029]<a />
+	[2030]<code />
+		Request
+).
+Once a
+[2036]<a />
+	[2037]<code />
+		Response
+is retrieved, there are a number of methods available to define what the body content is and how it should be handled.
+|scroll element|<aside id=main-sidebar /> (0.0 pages above, 0.1 pages below)
+	Open Shadow
+		Filter sidebar
+		|SHADOW(open)|[7]<input id=input autocomplete=off type=text placeholder=Filter />
+	Shadow End
+	[15283]<a />
+		Fetch API
+	|SHADOW(open)|*[15286]<details compound_components=(name=Toggle Disclosure,role=button),(name=Content Area,role=region) />
+		[15287]<summary expanded=true />
+			[15288]<span />
+				Guides
+		[15292]<a />
+			Using the Fetch API
+		[15295]<a />
+			Using Deferred Fetch
+	|SHADOW(open)|*[15298]<details compound_components=(name=Toggle Disclosure,role=button),(name=Content Area,role=region) />
+		[15299]<summary expanded=true />
+			[15300]<span />
+				Interfaces
+		[15304]<a />
+			DeferredRequestInit
+			[29]<span role=img title=Experimental. Expect behavior to change in the future. aria-label=Experimental />
+		[15308]<a />
+			FetchLaterResult
+			[30]<span role=img title=Experimental. Expect behavior to change in the future. aria-label=Experimental />
+		[15312]<a />
+			Headers
+		[15316]<a />
+			Request
+		[15320]<a />
+			RequestInit
+		[15324]<a />
+			Response
+	|SHADOW(open)|*[15328]<details compound_components=(name=Toggle Disclosure,role=button),(name=Content Area,role=region) />
+		[15329]<summary expanded=true />
+			[15330]<span />
+				Methods
+		[15334]<a />
+			Window
+			[15337]<wbr />
+			.fetch()

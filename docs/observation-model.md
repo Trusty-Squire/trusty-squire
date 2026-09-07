@@ -1,6 +1,9 @@
 # Design: Trusty Squire operator observation model — skeleton + resident DOM + descriptive refs
 
-**Status:** Phase 1 (identity model) shipped. Phase 2 shipped as node-level redaction and was then REMOVED ENTIRELY — see §4.5 and §9; phases 3-4 not started
+**Status:** Current authority for the observation no-seal policy. Compact V2's
+wire, identity, screening, query, and fixture contract is owned by
+[`browser-use-serializer-port.md`](browser-use-serializer-port.md); the remaining
+roadmap material is historical.
 **Scope:** `@trusty-squire/mcp` operator observation/serialization layer (`operate_observe`, `operate_screenshot`, `operate_extract`, the flat acting verbs, and the compact-v2 serializer)
 **Author:** firstmate, from hands-on operator driving (ipinfo signup + whitejade.xyz checkout, rc.19)
 **Related:** PR #624 (interim gap-2 patch: tolerate live re-renders in compact-v2 overflow paging). This doc is the model that makes that patch unnecessary long-term.
@@ -93,81 +96,22 @@ actually renders:
   origins are verbatim. A password field's value, an operator-injected vault
   value, a filled card number and CVV, a rendered API key, recovery code, TOTP,
   or JWT are all ordinary page content. (One bounded exception, owner's
-  2026-09-06 Finding-2 order: compact-v2's extracted page-prose `text` channel
-  rewrites secret-shaped substrings — see the carve-outs below.)
-- Compact-v2's `url` is the live page URL, path and query included. Its rows
-  still omit field values — that is a payload SIZE budget, not a seal; read a
-  value with `operate_screenshot`, `extract`, or a V1 session.
+  2026-09-07 serializer order: compact-v2's emitted names and interleaved text
+  rewrite secret-shaped substrings — see the carve-outs below.)
+- Compact-v2's `url` is the live page URL, path and query included. Its DOM
+  attributes follow canonical browser-use's selection and ordering; see the
+  pinned serializer contract in `browser-use-serializer-port.md`.
 - `extract` returns every labeled candidate the page shows, including one that
   still looks masked (it is ranked behind a revealed sibling, never refused).
   The `no_legit_credential` and "the secret is still masked/hidden" refusals are
   gone.
 
-**One compact-v2 screening carve-out (2026-09-06, ipinfo dogfood Findings 1–2).**
-The compact-v2 label alias is a code-derived target, not a read, and its documented
-contract was always "screened … never a value." The ipinfo run caught that
-contract being false: a site that renders an API key as its copy button's
-accessible name emitted the live token as the label `@f9a062f02fadf5` (and its
-first four characters again inside `@curl-h-authorization-bearer-f9a0`), putting
-the secret into the transcript. `controlLabelV2` now screens the accessible
-name for credential shape (vendor anchors, JWT shape, length + character-class
-+ entropy over unbroken runs and over hyphen/underscore-grouped bodies with all
-segments ≥4 chars scored as one joined run — `looksLikeSecretShapedName` in
-`compact-observation-v2.ts`) and emits `@redacted-secret` instead, keeping the
-row's ref, role, and every non-secret fact so the control stays actionable.
-Values, screenshots, and extracts remain verbatim, and ordinary labels
-(`@8-8-8-8`, `@bmbmlite`) are tuned to survive verbatim. Later the same day the
-owner's Finding-2 order extended this one shared screen to the compact-v2
-page-text channel — the bounded, budget-degraded, sticky `text` field documented
-just below — whose extracted prose rewrites only secret-shaped substrings to
-`[redacted]`. That is the channel's own documented wire contract, not a read
-seal and not a precedent for any other shape-matching screen.
-
-**The same run's Finding 2 — compact-v2 comprehensibility (2026-09-06).**
-Finding 1 made the map safe; Finding 2 makes it *comprehensible*:
-
-- **Screened page-text channel.** The observation's `text` field was always
-  `""` — the agent got the control map but not the page's prose (headings,
-  intro copy, alerts), so a /dashboard/token page looked like an unlabeled
-  wall. The browser extractor (`extractObservationProse` in `browser.ts`)
-  now returns a bounded list of salient prose items (headings, paragraphs,
-  list items, alerts/live regions — skipping interactive-control
-  descendants, whose labels are the map's job). `screenObservationProseV2`
-  screens each item through the SAME shared primitive as the label alias
-  (`looksLikeSecretShapedName` + run-entropy predicate) by redacting only the
-  secret-shaped substrings to `[redacted]`, so "Your API token [redacted] was
-  copied to the clipboard" keeps its context. Prose fills whatever wire
-  budget the action map leaves over (rows pack first — the map is never
-  starved for text's sake), degrades item-by-item from the tail, and is
-  sticky: a delta resends prose only when it differs from what was last
-  actually emitted (the degraded subset, not the full screened list), so a
-  degraded page is re-sent whole on the next unchanged-rows observe rather
-  than leaving the consumer with a permanent subset. Prose extraction is
-  availability-optional: a failed extraction surfaces as a bounded
-  `text_unavailable` reason on the payload instead of failing open with a
-  silent empty `text`, while a genuinely prose-free page still emits the
-  empty `text`. The page-side extractor (`extractObservationProseItems` in
-  `browser.ts`) must stay self-contained — `page.evaluate` serializes only
-  its source, and the module closure does not travel.
-- **Duplicate-label ordinals.** Two controls legitimately sharing an
-  accessible name (two `@curl-example` copy buttons) both emitted the same
-  label, so `@curl-example` was a dead ambiguous target forever. Labels are
-  now disambiguated deterministically at map-build time: the first
-  occurrence keeps the base slug, later ones gain `-2`, `-3`, … — each row
-  individually addressable, no ordinal-dependent fingerprint change.
-- **Lossless hint paging.** The compact-v2 wire budget (4096 bytes / 1024
-  tokens) used to cut the composed session hint at a raw byte boundary — the
-  first page ended mid-URL (`- entry: https://ipin…`), costing an extra
-  paging call and a mis-assembled route. Pages now split at UTF-8 token
-  boundaries (last whitespace within each page's byte cap; a whitespace-free
-  hint falls back to the hard split), making paging lossless.
-- **Region context for opaque labels.** A label slug with no 3+-letter word
-  run (`@as15169`, `@1w`) is unreadable to the agent. Such labels gain the
-  short, screened name of the region they sit in (`@as15169-as-details`); a
-  legible label gains nothing (bytes stay on the map), and a secret-shaped
-  region name is refused as context by the same shared screen — a section
-  that displays a key as its heading never rides into a label as
-  "context".
+**One compact-v2 screening carve-out (2026-09-07).** Compact V2 screens only
+secret-shaped substrings in emitted names and interleaved DOM text. This is a
+wire-shape contract, not a read seal: it preserves surrounding text, line shape,
+and refs, while screenshots, extracts, and field values remain verbatim. The
+canonical DOM serializer, its exact screening boundary, and its fixture oracle
+are owned by [`browser-use-serializer-port.md`](browser-use-serializer-port.md).
 
 **Why.** The seal and the extractor contradicted each other in production: on
 BrowserStack's settings page, with the Access Key revealed, `operate_screenshot`

@@ -87,11 +87,11 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   open the real website and drive it one step at a time. Use `operate_login` for
   OAuth and the username/password lifecycle, and `operate_allow_host` only for
   a host already entitled by the session's startup scope.
-- When a Compact V2 observation returns `overflow.next_cursor`, or the task
-  names a control that is not on the first page, call `operate_observe` with
-  `cursor` or `query`.
-  Matching stays inside the browser and returns only screened opaque handles;
-  follow the [README tool guide](https://github.com/Trusty-Squire/trusty-squire#mcp-tools)
+- When a Compact V2 observation does not render the control you need, call
+  `operate_observe` with `query`. The query searches the whole live document,
+  including below the viewport, and returns actionable refs; use
+  `more_above`/`more_below` with `operate_scroll` to change the viewport.
+  Follow the [README tool guide](https://github.com/Trusty-Squire/trusty-squire#mcp-tools)
   instead of reading a V1 snapshot file.
 - For shopping, add items through the observed cart UI with `operate_click` and
   re-observe the cart before continuing. Follow the

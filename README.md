@@ -315,24 +315,20 @@ DOM-diagnostics pair is excluded from that surface; set
 `TRUSTY_SQUIRE_DIAGNOSTICS=1` in the MCP server environment to opt into the
 22-tool diagnostics profile.
 
-Operate sessions default to Compact V2 observations: a compact
-`format:"compact-v2"` response with the live page URL, a finite stage,
-title/heading semantics, and generation-bound controls in `safe_table`. Labels,
-semantics, and page content are the page's own copy, unscreened — the one
-exception is the label alias, which screens credential-shaped accessible names
-to `@redacted-secret` (see [observation-model.md §4.5](docs/observation-model.md)).
-Page text, DOM values, and snapshot files are omitted as a SIZE budget,
-not as a seal; read a value off the page with `operate_screenshot`,
-`operate_extract`, or a V1 session. Use `operate_observe` with `query` or
-`cursor` to retrieve a named or paged control while matching stays inside the
-live browser. A browser
-action invalidates the current handles; on `reobserve_required`, observe again
-and select a new handle. Exact cursorless `Google` and `GitHub` queries briefly
-refresh controls that hydrate or gain labels after the initial observation, but
-still return only a current handle. `detail:"full"` keeps the V2 format. Maintainers can select the legacy V1 `el_table`/snapshot contract with
-`TRUSTY_SQUIRE_OBSERVE_V2=off`, or exercise V2 without emitting it with
-`shadow`; the detailed wire and migration contract lives in
-[DESIGN-observe-compact.md](docs/DESIGN-observe-compact.md).
+Operate sessions default to Compact V2 observations: a `format:"compact-v2"`
+response with the live page URL, stage, stable `@e:` refs, and a tab-indented
+`dom` tree that interleaves visible page text with interactive controls. Names
+and text are page content except for the narrow secret-shaped substring screen;
+it preserves the DOM structure and refs (see
+[observation-model.md §4.5](docs/observation-model.md)). Each observation says
+whether more content is reachable above or below the viewport. Use
+`operate_observe` with `query` to find controls anywhere in the live document,
+including below the fold, then scroll or act on a returned actionable ref. A
+browser action can require re-observation before a ref is used again.
+`detail:"full"` keeps the V2 format. Maintainers can select the legacy V1
+`el_table`/snapshot contract with `TRUSTY_SQUIRE_OBSERVE_V2=off`, or exercise V2
+without emitting it with `shadow`; the detailed Compact V2 contract lives in
+[browser-use-serializer-port.md](docs/browser-use-serializer-port.md).
 
 - Rejected tool calls return a JSON `error` envelope with a stable `code` and
   message. Malformed and unknown calls fail only that request; they do not stop

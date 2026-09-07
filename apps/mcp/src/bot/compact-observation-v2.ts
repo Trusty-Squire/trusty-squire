@@ -155,33 +155,9 @@ export interface SafeObservationBaselineV2 {
   stage: SafeStageV2;
   semantics: SafePageSemanticsV2;
   byRef: Map<string, SafeControlV2>;
-  /** Screened page prose already emitted for this document (see below). */
-  prose?: string[];
-}
-
-/**
- * Whether a screened prose item list differs from the one already emitted.
- * Like semantics, prose is sticky across deltas: a repeat observation only
- * carries the text channel when its screened representation changed.
- */
-export function equalObservationProseV2(
-  previous: readonly string[] | undefined,
-  current: readonly string[],
-): boolean {
-  if (previous === undefined) return false;
-  return previous.length === current.length && previous.every((item, i) => item === current[i]);
-}
-
-/**
- * Semantic essentials are sticky across V2 deltas. A repeat observation only
- * needs to carry them when their already-sealed representation changed; the
- * consumer retains the prior title/heading just like it retains safe_table.
- */
-export function equalSafePageSemanticsV2(
-  left: SafePageSemanticsV2,
-  right: SafePageSemanticsV2,
-): boolean {
-  return left.title === right.title && (left.headings?.[0] ?? "") === (right.headings?.[0] ?? "");
+  /** Last emitted canonical tree and its rendered stable identities. */
+  dom?: string;
+  renderedRefs?: string[];
 }
 
 /** `@e:` + a truncated session-secret HMAC of (document epoch, fingerprint). */
@@ -360,44 +336,63 @@ const OBSERVATION_PROSE_REDACTION_MARKER = "[redacted]";
  * anything the boolean predicate would have caught is rewritten here.
  */
 export function redactObservationProseV2(item: string): string {
+  return redactObservationValueV2(item);
+}
+
+/** Screen the FULL name, retaining only its original canonical prefix. */
+export function screenBrowserUseValueV2(item: string, visibleCodePoints?: number): string {
+  return redactObservationValueV2(item, visibleCodePoints);
+}
+
+function redactObservationValueV2(item: string, visibleCodePoints?: number): string {
   let redacted = item;
+  const boundary =
+    visibleCodePoints === undefined
+      ? item.length
+      : Array.from(item).slice(0, visibleCodePoints).join("").length;
+  // Track original UTF-16 offsets only for truncated names. Every replacement
+  // character inherits the matched span's start, so a token crossing the cutoff
+  // becomes one complete marker, while text after the cutoff stays absent.
+  let origins =
+    boundary < item.length ? Array.from({ length: item.length }, (_, i) => i) : undefined;
+  const replace = (pattern: RegExp, replacement: (match: string) => string): void => {
+    const prior = origins;
+    const next: number[] = [];
+    let consumed = 0;
+    redacted = redacted.replace(pattern, (match: string, offset: number) => {
+      const value = replacement(match);
+      if (prior) {
+        for (let i = consumed; i < offset; i++) next.push(prior[i]!);
+        for (let i = 0; i < value.length; i++)
+          next.push(value === match ? prior[offset + i]! : prior[offset]!);
+        consumed = offset + match.length;
+      }
+      return value;
+    });
+    if (prior) {
+      for (let i = consumed; i < prior.length; i++) next.push(prior[i]!);
+      origins = next;
+    }
+  };
+  // The detector expressions, order and predicates are unchanged.
   for (const shape of SECRET_NAME_SHAPE_RES) {
-    redacted = redacted.replace(new RegExp(shape.source, "g"), OBSERVATION_PROSE_REDACTION_MARKER);
+    replace(new RegExp(shape.source, "g"), () => OBSERVATION_PROSE_REDACTION_MARKER);
   }
-  redacted = redacted.replace(
-    new RegExp(SECRET_NAME_JWT_RE.source, "g"),
-    OBSERVATION_PROSE_REDACTION_MARKER,
-  );
-  redacted = redacted.replace(SECRET_NAME_GROUP_RUN_RE, (group) => {
+  replace(new RegExp(SECRET_NAME_JWT_RE.source, "g"), () => OBSERVATION_PROSE_REDACTION_MARKER);
+  replace(SECRET_NAME_GROUP_RUN_RE, (group) => {
     const candidate = secretShapedGroupCandidate(group);
     return candidate !== undefined && isSecretShapedRun(candidate)
       ? OBSERVATION_PROSE_REDACTION_MARKER
       : group;
   });
-  redacted = redacted.replace(/[A-Za-z0-9]+/g, (run) =>
+  replace(/[A-Za-z0-9]+/g, (run) =>
     isSecretShapedRun(run) ? OBSERVATION_PROSE_REDACTION_MARKER : run,
   );
-  return redacted.replace(/\s+/g, " ").trim();
-}
-
-/**
- * The text channel's screen: every prose item passes through the shared
- * redactor before it can reach the wire, empties are dropped, and duplicates
- * collapse. A live key reflected into a page paragraph is rewritten to
- * `[redacted]` here — never emitted.
- */
-export function screenObservationProseV2(items: readonly string[]): string[] {
-  const seen = new Set<string>();
-  const screened: string[] = [];
-  for (const item of items) {
-    const redacted = redactObservationProseV2(item);
-    if (redacted.length === 0) continue;
-    const key = redacted.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    screened.push(redacted);
+  if (origins) {
+    const end = origins.findIndex((offset) => offset >= boundary);
+    return end === -1 ? redacted : redacted.slice(0, end);
   }
-  return screened;
+  return redacted;
 }
 
 const LABEL_MAX_CHARS = 32;
@@ -1023,9 +1018,17 @@ export function sealRetainedInteractiveElementsV2(
 }
 
 export function safePageSemanticsV2(source: ObservationSemanticSourceV2): SafePageSemanticsV2 {
-  const title = safeDescriptionV2(source.title);
+  const screenDescription = (value: string): string | undefined => {
+    const normalized = normalizeDescriptionV2(value);
+    if (normalized === undefined) return undefined;
+    const description = safeDescriptionV2(normalized)!;
+    if (normalized.length <= SAFE_DESCRIPTION_MAX_CHARS) return screenBrowserUseValueV2(normalized);
+    const visible = description.slice(0, -1);
+    return screenBrowserUseValueV2(normalized, Array.from(visible).length) + "…";
+  };
+  const title = screenDescription(source.title);
   const headings = source.headings
-    .map((heading) => safeDescriptionV2(heading))
+    .map(screenDescription)
     .filter((value): value is string => value !== undefined)
     .filter((value, index, all) => all.indexOf(value) === index)
     .slice(0, 1);
@@ -1035,86 +1038,6 @@ export function safePageSemanticsV2(source: ObservationSemanticSourceV2): SafePa
   };
 }
 
-export interface SafeObservationDeltaV2 {
-  added: SafeControlV2[];
-  changed: SafeControlV2[];
-  removed: string[];
-  stageChanged: boolean;
-}
-
-/**
- * Diff only the sealed representation.  In particular, raw changes to a
- * field value, card number, live region, or merchant copy cannot cause either
- * the raw data or a page-derived derivative to cross into the delta.
- */
-export function diffSafeControlsV2(
-  previous: SafeObservationBaselineV2,
-  stage: SafeStageV2,
-  rows: readonly SafeControlV2[],
-): SafeObservationDeltaV2 {
-  const current = new Map(rows.map((row) => [row.ref, row]));
-  const added: SafeControlV2[] = [];
-  const changed: SafeControlV2[] = [];
-  for (const row of rows) {
-    const before = previous.byRef.get(row.ref);
-    if (before === undefined) added.push(row);
-    else if (JSON.stringify(wireControl(before)) !== JSON.stringify(wireControl(row)))
-      changed.push(row);
-  }
-  const removed = [...previous.byRef.keys()].filter((ref) => !current.has(ref));
-  return { added, changed, removed, stageChanged: previous.stage !== stage };
-}
-
-/**
- * Encodes a structural V2 delta. `null` deliberately asks the caller to send
- * a paged full resync instead: a delta must never exceed the hard wire budget.
- */
-export function encodeV2Delta(args: {
-  sessionId: string;
-  stage: SafeStageV2;
-  /** Only the screened origin reaches the wire; paths and query strings stay private. */
-  pageUrl?: string;
-  semantics?: SafePageSemanticsV2 | undefined;
-  delta: SafeObservationDeltaV2;
-  /** Screened prose items; emitted only when the caller saw them change. */
-  pageText?: readonly string[];
-  /**
-   * Concrete reason the text channel could not be extracted at all (e.g. the
-   * page-side prose extractor threw). Emitted as `text_unavailable` so a
-   * failed channel is distinguishable from a page with no prose — the text
-   * channel must never fail open with a silent `text: ""`.
-   */
-  textUnavailable?: string;
-}): Record<string, unknown> | null {
-  const payload: Record<string, unknown> = {
-    format: "compact-v2",
-    url: args.pageUrl ?? "",
-    text: "",
-    session_id: args.sessionId,
-    delta: true,
-    ...(args.semantics === undefined ? {} : { semantic: args.semantics }),
-    ...(args.delta.stageChanged ? { stage: args.stage } : {}),
-    ...(args.textUnavailable === undefined ? {} : { text_unavailable: args.textUnavailable }),
-    // `safe_table` follows the established TS delta protocol: rows are
-    // upserts, irrespective of whether their ref is new or changed. This keeps
-    // existing delta consumers compatible while the @e: map itself stays V2.
-    ...(args.delta.added.length + args.delta.changed.length > 0
-      ? { safe_table: [...args.delta.added, ...args.delta.changed].map(wireControl) }
-      : {}),
-    ...(args.delta.removed.length > 0 ? { removed: args.delta.removed } : {}),
-  };
-  // The text channel fills whatever budget the map and fixed metadata left
-  // and degrades item-by-item before anything else is touched. A delta that
-  // cannot fit its prose stays useful without it (the consumer retains the
-  // prior text, sticky like safe_table); it never degrades into a null that
-  // forces a full resync just because prose grew.
-  const screened = screenObservationProseV2(args.pageText ?? []);
-  for (let count = screened.length; count > 0; count -= 1) {
-    const candidate = { ...payload, text: screened.slice(0, count).join("\n") };
-    if (compactV2PayloadWithinBudget(candidate)) return candidate;
-  }
-  return compactV2PayloadWithinBudget(payload) ? payload : null;
-}
 const INTENTS: ReadonlyArray<[SafeIntentV2, RegExp]> = [
   ["add_to_cart", /add\s+(?:to\s+)?(?:cart|bag|basket)/i],
   ["view_cart", /view\s+(?:cart|bag|basket)/i],
@@ -1530,6 +1453,7 @@ export function buildSafeControlsV2(args: {
   handles: ReadonlyMap<InteractiveElement, string>;
   pageOrigin: string;
   pageUrl?: string;
+  canonical?: boolean;
 }): { rows: SafeControlV2[]; byRef: Map<string, string> } {
   const rows: Array<{
     ref: string;
@@ -1541,8 +1465,8 @@ export function buildSafeControlsV2(args: {
     checkoutStageFromUrlV2(args.pageUrl ?? "") !== null ||
     args.elements.some((element) => hasExplicitPaymentFieldSignal(element));
   for (const el of args.elements) {
-    if (el.visible !== true || el.topmost === false) continue;
-    const role = roleOf(el);
+    if (el.visible !== true || (!args.canonical && el.topmost === false)) continue;
+    const role = roleOf(el) ?? (args.canonical ? "button" : null);
     const legacy = args.legacyRefs.get(el);
     const ref = args.handles.get(el);
     if (role === null || legacy === undefined || ref === undefined) continue;
@@ -1592,7 +1516,7 @@ export function buildSafeControlsV2(args: {
   return { rows: safeRows, byRef };
 }
 
-export function encodeV2Page(args: {
+export function encodeV2QueryPage(args: {
   sessionId: string;
   stage: SafeStageV2;
   /** The live page URL, path and query included — the agent needs to know where it is. */
@@ -1601,11 +1525,6 @@ export function encodeV2Page(args: {
   rows: readonly SafeControlV2[];
   cursorFor: (offset: number) => string;
   offset?: number;
-  unchanged?: boolean;
-  /** Screened page prose for the text channel; degraded item-by-item to fit. */
-  pageText?: readonly string[];
-  /** Concrete reason the text channel could not be extracted; see encodeV2Delta. */
-  textUnavailable?: string;
   startMetadata?: {
     hint?: string;
     userEmail?: string;
@@ -1616,7 +1535,6 @@ export function encodeV2Page(args: {
   let fixed: Record<string, unknown> = {
     format: "compact-v2",
     url: args.pageUrl ?? "",
-    text: "",
     session_id: args.sessionId,
     stage: args.stage,
     ...(args.startMetadata?.hint === undefined ? {} : { hint: args.startMetadata.hint }),
@@ -1629,19 +1547,7 @@ export function encodeV2Page(args: {
     ...(args.semantics === undefined || Object.keys(args.semantics).length === 0
       ? {}
       : { semantic: args.semantics }),
-    ...(args.textUnavailable === undefined ? {} : { text_unavailable: args.textUnavailable }),
   };
-  if (args.unchanged === true && offset === 0) {
-    // Fixed metadata degrades before the map is touched; the throw is the
-    // fail-closed guard against hostile code-owned fields, unreachable from
-    // real pages.
-    const degraded = compactV2DegradeMetadata({ ...fixed, delta: true });
-    if (degraded === null) throw new Error("compact-v2 budget metadata exceeded");
-    return {
-      payload: degraded,
-      nextOffset: 0,
-    };
-  }
   const pageWith = (
     table: readonly WireControlV2[],
     nextOffset: number,
@@ -1687,18 +1593,6 @@ export function encodeV2Page(args: {
     nextOffset = offset + 1;
   }
   let payload = pageWith(visible, nextOffset);
-  // The text channel is added only after the map is packed, so prose can
-  // never displace a row: it fills the budget the map left unused and
-  // degrades item-by-item from the tail (headings/page intro survive first).
-  // A payload that cannot fit any prose keeps text: "" — never a map loss.
-  const screened = screenObservationProseV2(args.pageText ?? []);
-  for (let count = screened.length; count > 0; count -= 1) {
-    const candidate = { ...payload, text: screened.slice(0, count).join("\n") };
-    if (compactV2PayloadWithinBudget(candidate)) {
-      payload = candidate;
-      break;
-    }
-  }
   if (!compactV2PayloadWithinBudget(payload)) {
     // Only hostile fixed metadata (a code-owned session id/cursor) lands here;
     // degrade the metadata before ever dropping an actionable row.

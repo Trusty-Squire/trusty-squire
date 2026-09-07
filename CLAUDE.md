@@ -603,25 +603,21 @@ A compact-v2 `@e:` ref is a DURABLE element fingerprint, not a positional
 index: it survives acts and benign re-renders on the same document, so one
 observation can drive a whole multi-field fill. Do not reintroduce
 per-act/per-observe ref churn.
-[`docs/observation-model.md`](docs/observation-model.md) owns the identity
-model (fingerprint, `@label` alias, document epoch), the fail-closed rules
-(`stale_ref` / `ambiguous_target`), the compactness invariant, and the phased
-roadmap. Implementation map is in its §9.
+[`docs/browser-use-serializer-port.md`](docs/browser-use-serializer-port.md)
+owns the canonical DOM rendering, stable-ref, screening, query, and fixture
+contracts. [`docs/observation-model.md`](docs/observation-model.md) §4.5 owns
+the no-seal policy; its remaining roadmap is historical.
 
 **No observation sealing (2026-09-05, owner's order).** Observations return what
 the page renders — field values, labels, the live URL (path and query included),
 card material, and rendered API keys alike. The masking layer
 (`redactObservationText` / `present*` / `Session.sealedFieldKeys`), compact-v2's
 content screens, and `provision-drive.ts`'s compact-v2 tool-result seal
-(`compactV2ThickResult`) are deleted. Compact-v2 omits field values from its rows and emits page `text`
-only through the narrow carve-out below — that is a payload SIZE budget, not a
-seal. §4.5 of the doc and `AGENTS.md` §16 own the rule; do not add a seal back.
-One narrow compact-v2 screening carve-out (2026-09-06, ipinfo Findings 1–2):
-the label alias (`controlLabelV2`) screens credential-shaped accessible names
-into `@redacted-secret`, and the bounded page-prose `text` channel runs its
-extracted prose through the same shared redactor, rewriting only secret-shaped
-substrings to `[redacted]`. Both are code-derived target/wire-shape contracts,
-not read seals — see §4.5 and `AGENTS.md` §16 for the owner contract.
+(`compactV2ThickResult`) are deleted. Compact-v2 follows the pinned canonical
+DOM serializer. Its narrow name/text substring screen and the deleted separate
+page-text field are documented in
+[`docs/browser-use-serializer-port.md`](docs/browser-use-serializer-port.md);
+§4.5 and `AGENTS.md` §16 own the no-seal rule.
 
 ### Operator Recipe registry (replay-serve-live-domainlock)
 

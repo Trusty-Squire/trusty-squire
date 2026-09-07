@@ -522,17 +522,11 @@ file-by-file map live in
 [`docs/observation-model.md`](docs/observation-model.md) §4.5 — read it before
 touching this area.
 
-One narrow compact-v2 screening carve-out (2026-09-06, ipinfo Findings 1–2): the
-compact-v2 label alias screens credential-shaped accessible names into
-`@redacted-secret` (`looksLikeSecretShapedName` in `compact-observation-v2.ts`)
-— a site that renders an API key as its copy button's accessible name had
-emitted the live token as the label. Later the same day, the owner's Finding-2
-order extended that one shared screen to the compact-v2 page-text channel: the
-bounded, budget-degraded, sticky `text` field runs its extracted prose through
-the same redactor, rewriting only secret-shaped substrings to `[redacted]`.
-Both are code-derived target/wire-shape contracts, not read seals: map rows,
-values, screenshots, and extracts remain verbatim, and neither justifies any
-other shape-matching screen.
+Compact-v2's serializer now uses the canonical browser-use DOM port. Its
+secret-shaped substring screen applies to emitted names and text, preserving
+indentation and structural refs. The separate page-text field and prose extractor
+are deleted. The capture, identity, query and fixture contracts are documented in
+[`docs/browser-use-serializer-port.md`](docs/browser-use-serializer-port.md).
 
 ### 17. `await_verification` must score link-picking on anchor TEXT too, and must retry through Gmail's own transient backend error
 
@@ -777,21 +771,8 @@ workspace dependencies are built before the server starts.
 ## `page.evaluate` callbacks must be self-contained
 
 Playwright serializes only the callback's source text into the page — the
-module's closure does not travel. A page-side function that references a
-module-scope constant throws `ReferenceError` in the page on first use while
-compiling fine in Node, and a swallowing `catch` at the call site turns that
-into a silently inert feature. This shipped the compact-v2 text channel
-totally inert (1.1.14-rc.3: `extractObservationProseItems` referenced
-module-level size bounds; every observation emitted `text: ""`). The rule:
-keep every function passed to `page.evaluate` (or wrapped by a method that
-does so, e.g. `BrowserController.extractObservationProse` →
-`extractObservationProseItems` in `apps/mcp/src/bot/browser.ts`) self-contained
-— constants defined inside the function — and regression-test the REAL
-serialization path (`page.evaluate(fn)` against real Chromium, see
-`apps/mcp/src/bot/__tests__/observation-prose.test.ts`); a stubbed
-double on such a method verifies nothing about the page side. A capability
-whose failure is availability-optional must still surface a concrete reason
-(e.g. the `text_unavailable` field) — never fail open with an empty result.
+module's closure does not travel. Keep page callbacks self-contained and test the
+real browser path.
 
 ---
 
