@@ -177,6 +177,124 @@ describe("interleaved observation DOM", () => {
       await page.close();
     }
   });
+  it("keeps same-URL child navigation from rebinding a captured control", async () => {
+    let childLoads = 0;
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "text/html");
+      if (request.url === "/child") {
+        childLoads += 1;
+        response.end(
+          childLoads === 1
+            ? '<button id="shared">Captured child action</button>'
+            : '<button id="shared">Replacement child action</button>',
+        );
+        return;
+      }
+      response.end(
+        '<button id="main" onclick="document.body.dataset.main = \'clicked\'">Main action</button><iframe src="/child"></iframe>',
+      );
+    });
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const page = await browser.newPage();
+    try {
+      const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const childUrl = `${baseUrl}/child`;
+      await page.goto(baseUrl);
+      const context = page.context();
+      const session = await context.newCDPSession(page);
+      const send = session.send.bind(session) as (
+        method: string,
+        params?: Record<string, unknown>,
+      ) => Promise<unknown>;
+      let childFrameId: string | undefined;
+      let navigated = false;
+      const intercepted = new Proxy(session, {
+        get(target, property, receiver) {
+          if (property === "send")
+            return async (method: string, params?: Record<string, unknown>): Promise<unknown> => {
+              if (
+                method === "Page.createIsolatedWorld" &&
+                params?.frameId === childFrameId &&
+                !navigated
+              ) {
+                navigated = true;
+                await page.frames().find((frame) => frame.url() === childUrl)!.goto(childUrl);
+              }
+              const result = await send(method, params);
+              if (method === "Page.getFrameTree") {
+                const tree = result as {
+                  frameTree: { childFrames?: Array<{ frame: { id: string } }> };
+                };
+                childFrameId = tree.frameTree.childFrames?.[0]?.frame.id;
+              }
+              return result;
+            };
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const staleChild = {
+        index: 7,
+        tag: "button",
+        type: null,
+        id: "shared",
+        name: null,
+        placeholder: null,
+        ariaLabel: null,
+        role: "button",
+        labelText: null,
+        visibleText: "Captured child action",
+        selector: "#shared",
+        visible: true,
+        inViewport: true,
+        inConsentWidget: false,
+        framePath: "0",
+      };
+      const newCDPSession = vi
+        .spyOn(context, "newCDPSession")
+        .mockResolvedValue(intercepted);
+      let capture: Awaited<ReturnType<typeof captureBrowserUseDOM>>;
+      try {
+        capture = await captureBrowserUseDOM(
+          page,
+          [staleChild],
+          (frame) => (frame === page.mainFrame() ? null : "0"),
+          transparentFrameSecurity,
+        );
+      } finally {
+        newCDPSession.mockRestore();
+      }
+      const output = serializeBrowserUseDOM(capture.root, {
+        ref: (node) => {
+          const element = capture.nodeElements.get(node.id);
+          return element
+            ? `@e:${element.index}`
+            : { ref: `@e:unbound_${node.id}`, targetable: false };
+        },
+      });
+      const lines = output.dom.split("\n");
+      const capturedTextLine = lines.findIndex((line) => line.includes("Captured child action"));
+      expect(childLoads).toBe(2);
+      expect(capturedTextLine).toBeGreaterThan(0);
+      expect(lines[capturedTextLine - 1]).toMatch(
+        /\[@e:unbound_[^\]]+\]<button[^\n]*not-targetable=true/,
+      );
+      expect(capture.elements.some((element) => element.visibleText === "Captured child action")).toBe(
+        false,
+      );
+      expect(capture.elements.some((element) => element.visibleText === "Replacement child action")).toBe(
+        false,
+      );
+      const main = capture.elements.find((element) => element.visibleText === "Main action")!;
+      await page.locator(main.selector).click();
+      expect(await page.locator("body").getAttribute("data-main")).toBe("clicked");
+    } finally {
+      await page.close();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
   it("keeps the parent observation usable when a child CDP session disappears during capture", async () => {
     const page = await browser.newPage();
     try {

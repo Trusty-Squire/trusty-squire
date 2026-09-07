@@ -53,9 +53,6 @@ export interface BrowserUseCapture {
 }
 const rect = (v: number[] | undefined): DOMBounds | null =>
   v && v.length >= 4 ? { x: v[0]!, y: v[1]!, width: v[2]!, height: v[3]! } : null;
-const pathKey = (frame: string | null | undefined, selector: string): string =>
-  `${frame ?? ""}\0${selector}`;
-
 /** Capture the three canonical Chrome trees. No page mutation and no Python runtime. */
 export async function captureBrowserUseDOM(
   page: Page,
@@ -87,12 +84,13 @@ export async function captureBrowserUseDOM(
   const opaqueFramePaths = new Set(
     [...opaqueFrames].filter(([, opaque]) => opaque).map(([frame]) => framePath(frame)),
   );
-  const elements = existing
+  const inventory = existing
     .filter((e) => e.frameOpaque !== true && !opaqueFramePaths.has(e.framePath ?? null))
     .map((e) => ({ ...e }));
+  const elements: InteractiveElement[] = [];
   const cdp = await page.context().newCDPSession(page);
   const sessions: CDPSession[] = [cdp];
-  const existingBySelector = new Map(elements.map((e) => [pathKey(e.framePath, e.selector), e]));
+  let nextSyntheticIndex = Math.max(-1, ...inventory.map((element) => element.index)) + 1;
   const capture = async (
     client: CDPSession,
     prefix: string,
@@ -177,20 +175,16 @@ export async function captureBrowserUseDOM(
       const path = framePathById.get(frameId);
       const belongsToFailedFrame = (candidate: string | null | undefined): boolean =>
         path === null ? true : candidate === path || candidate?.startsWith(`${path}/`) === true;
-      for (let i = elements.length - 1; i >= 0; i -= 1)
-        if (belongsToFailedFrame(elements[i]!.framePath)) elements.splice(i, 1);
-      for (const [key, element] of existingBySelector)
-        if (belongsToFailedFrame(element.framePath)) existingBySelector.delete(key);
+      for (let i = inventory.length - 1; i >= 0; i -= 1)
+        if (belongsToFailedFrame(inventory[i]!.framePath)) inventory.splice(i, 1);
     };
     for (const frameId of unboundFrameIds) {
       const path = framePathById.get(frameId);
       if (path === undefined) continue;
       const belongsToUnboundFrame = (candidate: string | null | undefined): boolean =>
         candidate === path || candidate?.startsWith(`${path}/`) === true;
-      for (let i = elements.length - 1; i >= 0; i -= 1)
-        if (belongsToUnboundFrame(elements[i]!.framePath)) elements.splice(i, 1);
-      for (const [key, element] of existingBySelector)
-        if (belongsToUnboundFrame(element.framePath)) existingBySelector.delete(key);
+      for (let i = inventory.length - 1; i >= 0; i -= 1)
+        if (belongsToUnboundFrame(inventory[i]!.framePath)) inventory.splice(i, 1);
     }
     for (const frameId of frameIds.slice(1)) {
       try {
@@ -208,7 +202,7 @@ export async function captureBrowserUseDOM(
       if (!frame) continue;
       if (isFrameUnbound(frame)) continue;
       const path = framePathById.get(frameId)!;
-      const candidates = elements.filter((e) => (e.framePath ?? null) === path);
+      const candidates = inventory.filter((e) => (e.framePath ?? null) === path);
       const frameBindings = new Map<number, InteractiveElement>();
       const frameListeners = new Set<number>();
       try {
@@ -266,6 +260,15 @@ export async function captureBrowserUseDOM(
         forgetFrame(frameId);
       }
     }
+    const liveBackendNodeIds = new Set<number>();
+    try {
+      const liveSnapshot = await client.send("DOMSnapshot.captureSnapshot", {
+        computedStyles: [],
+      });
+      for (const document of liveSnapshot.documents)
+        for (const backendNodeId of document.nodes.backendNodeId ?? [])
+          liveBackendNodeIds.add(backendNodeId);
+    } catch {}
     await client.send("Runtime.releaseObjectGroup", { objectGroup: "ts-observation" }).catch(() => undefined);
     const rawById = new Map<string, RawNode>();
     const nodeFrame = new Map<string, Frame | null>();
@@ -422,6 +425,7 @@ export async function captureBrowserUseDOM(
       // nodes for display, but do not manufacture an unusable action binding.
       if (
         !el &&
+        liveBackendNodeIds.has(raw.backendNodeId) &&
         frame !== null &&
         !isFrameUnbound(frame) &&
         !inClosedShadow &&
@@ -440,40 +444,38 @@ export async function captureBrowserUseDOM(
             t = n.nodeName.toLowerCase(),
             selector = selectorsById.get(n.id)!;
           const path = frame === page.mainFrame() ? null : framePath(frame);
-          el = existingBySelector.get(pathKey(path, selector));
-          if (!el) {
-            const text = (x: BrowserUseNode): string =>
-              x.nodeType === 3 ? x.value : x.children.map(text).join(" ");
-            el = {
-              index: elements.length,
-              tag: t,
-              type: a.type ?? null,
-              id: a.id ?? null,
-              name: a.name ?? null,
-              placeholder: a.placeholder ?? null,
-              ariaLabel: a["aria-label"] ?? null,
-              role:
-                a.role ??
-                (["a", "button", "input", "select", "textarea"].includes(t) ? null : "button"),
-              labelText: null,
-              visibleText: text(n).trim() || null,
-              selector,
-              visible: true,
-              inViewport: n.visible,
-              inConsentWidget: false,
-              href: a.href ?? null,
-              title: a.title ?? null,
-              value: a.value ?? null,
-              frameOrigin: frame === page.mainFrame() ? null : new URL(frame.url()).origin,
-              frameUrl: frame === page.mainFrame() ? null : frame.url(),
-              framePath: path,
-            };
-            elements.push(el);
-            existingBySelector.set(pathKey(path, selector), el);
-          }
+          const text = (x: BrowserUseNode): string =>
+            x.nodeType === 3 ? x.value : x.children.map(text).join(" ");
+          el = {
+            index: nextSyntheticIndex++,
+            tag: t,
+            type: a.type ?? null,
+            id: a.id ?? null,
+            name: a.name ?? null,
+            placeholder: a.placeholder ?? null,
+            ariaLabel: a["aria-label"] ?? null,
+            role:
+              a.role ??
+              (["a", "button", "input", "select", "textarea"].includes(t) ? null : "button"),
+            labelText: null,
+            visibleText: text(n).trim() || null,
+            selector,
+            visible: true,
+            inViewport: n.visible,
+            inConsentWidget: false,
+            href: a.href ?? null,
+            title: a.title ?? null,
+            value: a.value ?? null,
+            frameOrigin: frame === page.mainFrame() ? null : new URL(frame.url()).origin,
+            frameUrl: frame === page.mainFrame() ? null : frame.url(),
+            framePath: path,
+          };
         }
       }
-      if (el) nodeElements.set(n.id, el);
+      if (el) {
+        if (!elements.includes(el)) elements.push(el);
+        nodeElements.set(n.id, el);
+      }
       const closed = inClosedShadow || n.shadowType?.toLowerCase() === "closed";
       n.children.forEach((child) => visit(child, closed));
       if (n.contentDocument) visit(n.contentDocument);
