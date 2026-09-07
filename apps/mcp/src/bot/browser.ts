@@ -380,37 +380,6 @@ export class OAuthFailedError extends Error {
   }
 }
 
-// Pure decision at the heart of Fix C's honest outcome classification,
-// applied the instant an OAuth completion wait's deadline elapses. Exported
-// so the exact race it recovers — the deadline firing in the same instant the
-// provider actually hands control back — can be unit-tested without racing
-// real timers: a 2026-09 dogfood run hit precisely this (Google's redirect
-// landed, but the strict wait's confirmation loop had already timed out) and
-// the tool reported a fabricated "session may have expired" failure for an
-// action that had, in fact, just succeeded.
-//
-//   - `transientClosed` at the deadline → the provider page is gone, which is
-//     this codebase's ordinary popup completion signal (waitForOAuthLifecycle
-//     reports the same state as "closed"); settle it the same way.
-//   - `returnedToProductOrigin` at the deadline (same-tab, the page actually
-//     left the product origin and is back on it — the same departure
-//     condition waitForOAuthLifecycle requires) → the provider DID return
-//     control; report completion, not failure.
-//   - otherwise we simply don't know yet → `awaiting_human` (a consent
-//     screen or 2FA challenge is commonly still showing); never asserted as
-//     a cause, just the honest "not done".
-//
-// A real failure is never inferred here: it comes only from an observed OAuth
-// error on the return URL (`oauthErrorFromReturnUrl`).
-export function classifyOAuthTimeout(
-  transientClosed: boolean,
-  returnedToProductOrigin: boolean,
-): "closed" | "returned" | "awaiting_human" {
-  if (transientClosed) return "closed";
-  if (returnedToProductOrigin) return "returned";
-  return "awaiting_human";
-}
-
 // The one observed denial/error signal OAuth defines: the provider redirects
 // back to the relying party carrying `error=<code>` (RFC 6749 §4.1.2.1 in the
 // query; §4.2.2.1 in the fragment for implicit flows). The code is reported
@@ -464,6 +433,11 @@ function oauthRedirectTargetMatches(candidateUrl: string, expectedReturnUrl: str
   } catch {
     return false;
   }
+}
+
+export interface OAuthCompletionEvidence {
+  text: string;
+  url: string;
 }
 
 export function oauthAwaitingHumanMessage(productOrigin: string, budgetMs: number): string {
@@ -13265,7 +13239,7 @@ export class BrowserController {
     settleTimeoutMs = 30_000,
     consentProvider?: OAuthProviderId,
     expectedGoogleAccountEmail?: string | null,
-    registerCompletionCheck?: (check: () => boolean) => void,
+    registerCompletionCheck?: (check: () => Promise<OAuthCompletionEvidence | null>) => void,
   ): Promise<void> {
     const product = this.page;
     const context = this.context;
@@ -13296,34 +13270,42 @@ export class BrowserController {
     const oauthFailedError = (reason: string): OAuthFailedError => new OAuthFailedError(reason);
     let recovery: Page | null = null;
     let providerPage: Page | null = null;
-    let productDeparted = false;
+    let actionStarted = false;
+    let productNavigated = false;
     let expectedReturnUrl: string | null = null;
     let pendingOnProvider = false;
     let lastTransientUrl = productUrl;
     let onTransientNavigation: ((frame: Frame) => void) | null = null;
-    let resolveProductDeparture: () => void = () => undefined;
-    const productDeparturePromise = new Promise<void>((resolve) => {
-      resolveProductDeparture = resolve;
+    let resolveProductNavigation: () => void = () => undefined;
+    const productNavigationPromise = new Promise<void>((resolve) => {
+      resolveProductNavigation = resolve;
     });
     const onProductNavigation = (frame: Frame): void => {
-      if (frame !== product.mainFrame()) return;
-      if (!this.isOAuthOriginalProductUrl(frame.url(), productUrl)) {
-        productDeparted = true;
-        resolveProductDeparture();
-      }
+      if (!actionStarted || frame !== product.mainFrame()) return;
+      productNavigated = true;
+      resolveProductNavigation();
     };
-    // The outer action budget may win while consent/readiness work is still
-    // unwinding. Give it attempt-local, read-only evidence, never a stale flag
-    // from an earlier login or a guess based only on the current URL.
-    registerCompletionCheck?.(() => {
+    const completionEvidence = async (): Promise<OAuthCompletionEvidence | null> => {
       const returnedPage = product;
-      return (
-        productDeparted &&
+      if (
+        !actionStarted ||
+        !productNavigated ||
+        returnedPage.isClosed() ||
+        !this.isOAuthReturnUrl(returnedPage.url(), expectedReturnUrl) ||
+        oauthErrorFromReturnUrl(returnedPage.url()) !== null
+      ) {
+        return null;
+      }
+      const url = returnedPage.url();
+      const text = await returnedPage.evaluate(extractObservationVisibleText).catch(() => null);
+      return text !== null &&
         !returnedPage.isClosed() &&
-        this.isOAuthReturnUrl(returnedPage.url(), productUrl, expectedReturnUrl) &&
-        oauthErrorFromReturnUrl(returnedPage.url()) === null
-      );
-    });
+        returnedPage.url() === url &&
+        this.isOAuthReturnUrl(url, expectedReturnUrl)
+        ? { url, text }
+        : null;
+    };
+    registerCompletionCheck?.(completionEvidence);
     product.on("framenavigated", onProductNavigation);
     try {
       recovery = await context.newPage();
@@ -13359,6 +13341,7 @@ export class BrowserController {
           );
         }
         try {
+          actionStarted = true;
           await this.click(selector);
         } catch (error) {
           if (!product.isClosed()) throw error;
@@ -13368,14 +13351,14 @@ export class BrowserController {
           // A same-tab provider redirect is just as conclusive as a popup.
           // Do not burn two seconds of the OAuth budget waiting for a window
           // that this service will never open.
-          productDeparturePromise.then(() => null),
+          productNavigationPromise.then(() => null),
           this.sleep(Math.min(remainingBudgetMs(), 2_000)).then(() => null),
         ]);
       } finally {
         product.off("popup", onPopup);
         product.off("close", onProductClose);
         resolvePopup(null);
-        resolveProductDeparture();
+        resolveProductNavigation();
       }
       const transient = providerPage ?? product;
       lastTransientUrl = transient.url();
@@ -13387,41 +13370,31 @@ export class BrowserController {
       };
       transient.on("framenavigated", onTransientNavigation);
       expectedReturnUrl ??= oauthRedirectUri(transient.url());
-      if (providerPage === null) {
-        productDeparted = productDeparted || !this.isOAuthOriginalProductUrl(transient.url(), productUrl);
-      }
       const durableProduct = providerPage === null ? recovery : product;
       this.oauthProductPage = durableProduct;
       this.oauthProviderPage = transient;
       this.oauthProviderPageClosed = transient.isClosed();
       this.restoreProductPageWhenOAuthPageCloses(transient, durableProduct);
       this.page = transient;
-      let settled: "closed" | "returned" | null = null;
+      let settled: "returned" | null = null;
       if (consentProvider === undefined) {
         settled = await this.waitForOAuthLifecycle(
-          transient,
           product,
-          productUrl,
           () => expectedReturnUrl,
           remainingBudgetMs(),
-          () => productDeparted,
+          () => productNavigated,
         );
       } else {
         const deadline = oauthDeadline;
         while (settled === null && Date.now() < deadline) {
           const remaining = deadline - Date.now();
           settled = await this.waitForOAuthLifecycle(
-            transient,
             product,
-            productUrl,
             () => expectedReturnUrl,
             Math.min(1_000, remaining),
-            () => productDeparted,
+            () => productNavigated,
           );
-          if (settled !== null || transient.isClosed()) break;
-          if (providerPage === null) {
-            productDeparted = productDeparted || !this.isOAuthOriginalProductUrl(transient.url(), productUrl);
-          }
+          if (settled !== null) break;
           if (Date.now() >= deadline) break;
           const consentBudgetMs = deadline - Date.now();
           const advanced = await this.advanceOAuthConsent(
@@ -13433,7 +13406,7 @@ export class BrowserController {
         }
       }
       const observedUrls = [
-        ...(providerPage !== null || productDeparted
+        ...(providerPage !== null || productNavigated
           ? [transient.isClosed() ? lastTransientUrl : transient.url()]
           : []),
         ...(providerPage !== null && !product.isClosed() && product.url() !== productUrl
@@ -13450,20 +13423,8 @@ export class BrowserController {
         );
       }
       if (settled === null) {
-        // Timed out without a confirmed origin-return. Re-check honestly
-        // rather than assume failure — see classifyOAuthTimeout's doc comment
-        // for the false-negative this recovers.
-        const outcome = classifyOAuthTimeout(
-          transient.isClosed(),
-          !product.isClosed() &&
-            productDeparted &&
-            this.isOAuthReturnUrl(product.url(), productUrl, expectedReturnUrl),
-        );
-        if (outcome === "awaiting_human") {
-          pendingOnProvider = true;
-          throw awaitingHumanError();
-        }
-        settled = outcome;
+        pendingOnProvider = true;
+        throw awaitingHumanError();
       }
       if (providerPage === null && product.isClosed()) {
         const reloaded = await recovery
@@ -13528,42 +13489,24 @@ export class BrowserController {
     });
   }
 
-  private isOAuthOriginalProductUrl(candidateUrl: string, productUrl: string): boolean {
-    try {
-      const candidate = new URL(candidateUrl);
-      const product = new URL(productUrl);
-      return product.origin === "null" ? candidateUrl === productUrl : candidate.origin === product.origin;
-    } catch {
-      return candidateUrl === productUrl;
-    }
-  }
-
-  private isOAuthReturnUrl(
-    candidateUrl: string,
-    productUrl: string,
-    expectedReturnUrl: string | null,
-  ): boolean {
-    if (this.isOAuthOriginalProductUrl(candidateUrl, productUrl)) return true;
+  private isOAuthReturnUrl(candidateUrl: string, expectedReturnUrl: string | null): boolean {
     return expectedReturnUrl !== null && oauthRedirectTargetMatches(candidateUrl, expectedReturnUrl);
   }
 
   private async waitForOAuthLifecycle(
-    page: Page,
     product: Page,
-    productUrl: string,
     expectedReturnUrl: () => string | null,
     timeoutMs: number,
-    productDeparted: () => boolean,
-  ): Promise<"closed" | "returned" | null> {
+    productNavigated: () => boolean,
+  ): Promise<"returned" | null> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      if (page.isClosed()) return "closed";
       const returnedPage = product;
       const url = returnedPage.url();
       if (
-        productDeparted() &&
+        productNavigated() &&
         !returnedPage.isClosed() &&
-        this.isOAuthReturnUrl(url, productUrl, expectedReturnUrl())
+        this.isOAuthReturnUrl(url, expectedReturnUrl())
       ) {
         // A return to the relying party is the OAuth completion signal. A
         // dashboard can keep polling or streaming forever, so networkidle is
@@ -13576,7 +13519,7 @@ export class BrowserController {
         if (
           !ready ||
           returnedPage.isClosed() ||
-          !this.isOAuthReturnUrl(returnedPage.url(), productUrl, expectedReturnUrl())
+          !this.isOAuthReturnUrl(returnedPage.url(), expectedReturnUrl())
         ) {
           return null;
         }
@@ -13585,13 +13528,13 @@ export class BrowserController {
         await this.sleep(Math.min(50, Math.max(1, deadline - Date.now())));
         return !returnedPage.isClosed() &&
           returnedPage.url() === returnedUrl &&
-          this.isOAuthReturnUrl(returnedPage.url(), productUrl, expectedReturnUrl())
+          this.isOAuthReturnUrl(returnedPage.url(), expectedReturnUrl())
           ? "returned"
           : null;
       }
       await this.sleep(50);
     }
-    return page.isClosed() ? "closed" : null;
+    return null;
   }
 
   // Read the page's Rails/OmniAuth CSRF token (<meta name="csrf-token">).

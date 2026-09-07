@@ -34,6 +34,7 @@ import {
   type CheckoutSummary,
   type FrameTarget,
   type InteractiveElement,
+  type OAuthCompletionEvidence,
   type PageTargetSafetySignals,
 } from "./browser.js";
 import type {
@@ -539,7 +540,7 @@ const DEFAULT_OAUTH_LOGIN_LEASE_COOLDOWN_MS = 3_000;
 const DEFAULT_OAUTH_ACTION_TIMEOUT_MS = 30_000;
 
 interface OAuthActionDeadline {
-  completionCheck?: () => boolean;
+  completionCheck?: () => Promise<OAuthCompletionEvidence | null>;
   expiresAt: number;
   timeoutMs: number;
   provider: OAuthProviderId | undefined;
@@ -717,12 +718,11 @@ async function withOAuthActionBoundary(
       try {
         return await withinOAuthActionDeadline(run(deadline), deadline);
       } catch (error) {
-        if (
-          error instanceof OAuthAwaitingHumanError &&
-          error.phase !== "not_attempted" &&
-          deadline.completionCheck?.()
-        ) {
-          return { observation: await observeSession(session), outcome: {} };
+        if (error instanceof OAuthAwaitingHumanError && error.phase !== "not_attempted") {
+          const completion = await deadline.completionCheck?.();
+          if (completion !== undefined && completion !== null) {
+            return { observation: oauthCompletionObservation(session, completion), outcome: {} };
+          }
         }
         throw error;
       }
@@ -4760,6 +4760,22 @@ function oauthAwaitingHumanObservation(
       oauth,
     }),
     { stage: "auth", guidance, oauth, url },
+  );
+}
+
+function oauthCompletionObservation(session: Session, completion: OAuthCompletionEvidence): Observation {
+  session.prevObserve = null;
+  invalidateCompactV2Snapshot(session);
+  const text = completion.text.replace(/\s+/g, " ").trim().slice(0, 4000);
+  return compactV2PublicObservation(
+    session,
+    () => ({
+      session_id: session.id,
+      url: completion.url,
+      text,
+      elements: [],
+    }),
+    { stage: safeStageV2(completion.url, []), url: completion.url },
   );
 }
 

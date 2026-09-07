@@ -216,7 +216,7 @@ describe("operator new-tab adoption", () => {
       const popup = await popupEvent;
       await popup.goto("https://product.test/welcome");
       await popup.close();
-      await login;
+      await expect(login).rejects.toMatchObject({ name: "OAuthAwaitingHumanError" });
       expect(activePage(controller)).toBe(inbox);
       expect(unrelated.isClosed()).toBe(false);
     } finally {

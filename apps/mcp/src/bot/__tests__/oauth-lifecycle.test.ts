@@ -10,7 +10,6 @@ import {
   BrowserController,
   OAuthAwaitingHumanError,
   OAuthFailedError,
-  classifyOAuthTimeout,
   oauthErrorFromReturnUrl,
 } from "../browser.js";
 import {
@@ -139,14 +138,14 @@ describe("BrowserController OAuth popup lifecycle", () => {
       expect(product.isClosed()).toBe(false);
       expect((controller as unknown as { page: Page }).page).toBe(product);
       expect(controller.currentUrl()).toBe(PRODUCT_URL);
-      expect(result.text).toContain("Signed in");
+      expect(result.oauth).toMatchObject({ state: "awaiting_human", next_action: "operate_observe" });
     } finally {
       if (sessionId !== null) await finishProvisionSession(sessionId).catch(() => undefined);
       await context.close().catch(() => undefined);
     }
   }, 20_000);
 
-  it("tracks a popup opened after a delayed provider-button dispatch", async () => {
+  it("keeps a delayed popup dispatch pending without a return destination", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();
     const delayedProductUrl = `data:text/html,${encodeURIComponent(`
@@ -171,7 +170,9 @@ describe("BrowserController OAuth popup lifecycle", () => {
     context.on("page", onPage);
 
     try {
-      await controller.loginWithOAuth("#oauth", 6_000);
+      await expect(controller.loginWithOAuth("#oauth", 6_000)).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
       expect(product.isClosed()).toBe(false);
       expect((controller as unknown as { page: Page }).page).toBe(product);
       expect(await controller.extractVisibleText()).toContain("Signed in");
@@ -198,7 +199,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
-  it("clicks a provider-less SPA OAuth control exactly once without probing its traffic", async () => {
+  it("keeps a provider-less SPA OAuth control pending after its popup closes", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();
     await context.route("https://product.test/login", async (route) => {
@@ -220,14 +221,16 @@ describe("BrowserController OAuth popup lifecycle", () => {
           Number(document.body.dataset.oauthClicks ?? "0") + 1,
         );
         button.disabled = true;
-        window.open("https://accounts.google.com/o/oauth2/v2/auth");
+        window.open("https://accounts.google.com/o/oauth2/v2/auth?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback");
       };
       document.body.append(button);
     });
     const controller = BrowserController.fromHarnessPage(product);
 
     try {
-      await controller.loginWithOAuth("#oauth", 2_000);
+      await expect(controller.loginWithOAuth("#oauth", 2_000)).rejects.toBeInstanceOf(
+        OAuthAwaitingHumanError,
+      );
       expect(await product.locator("#oauth").count()).toBe(1);
       expect(await product.locator("#oauth").isDisabled()).toBe(true);
       expect(await product.locator("body").getAttribute("data-oauth-clicks")).toBe("1");
@@ -247,8 +250,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await route.fulfill({
         contentType: "text/html",
         body: callback
-          ? '<script>window.opener.document.querySelector("#state").textContent="Signed in"; window.close()</script>'
-          : '<main id="state">Signed out</main><button id="oauth" onclick="window.open(\'https://accounts.google.com/chooser\')">Continue</button>',
+          ? '<main id="state">Signed in</main><script>if (window.opener) { window.opener.location.href="https://product.test/callback"; window.close() }</script>'
+          : '<main id="state">Signed out</main><button id="oauth" onclick="window.open(\'https://accounts.google.com/chooser?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback\')">Continue</button>',
       });
     });
     await context.route("https://accounts.google.com/**", async (route) => {
@@ -281,7 +284,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
         "worker@example.com",
       );
       expect(identityAuthUser).toBe("worker@example.com");
-      expect(controller.currentUrl()).toBe("https://product.test/login");
+      expect(controller.currentUrl()).toBe("https://product.test/callback");
     } finally {
       await context.close().catch(() => undefined);
     }
@@ -296,8 +299,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await route.fulfill({
         contentType: "text/html",
         body: callback
-          ? '<script>window.opener.document.querySelector("#state").textContent="Signed in"; window.close()</script>'
-          : '<main id="state">Signed out</main><button id="oauth" onclick="window.open(\'https://accounts.google.com/v3/signin/accountchooser\')">Continue</button>',
+          ? '<main id="state">Signed in</main><script>if (window.opener) { window.opener.location.href="https://product.test/callback"; window.close() }</script>'
+          : '<main id="state">Signed out</main><button id="oauth" onclick="window.open(\'https://accounts.google.com/v3/signin/accountchooser?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback\')">Continue</button>',
       });
     });
     await context.route("https://accounts.google.com/**", async (route) => {
@@ -318,7 +321,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await controller.loginWithOAuth("#oauth", 5_000, "google");
       await expect(product.locator("#state").textContent()).resolves.toBe("Signed in");
       expect(selectedAccount).toBe("only@example.com");
-      expect(controller.currentUrl()).toBe("https://product.test/login");
+      expect(controller.currentUrl()).toBe("https://product.test/callback");
     } finally {
       await context.close().catch(() => undefined);
     }
@@ -333,8 +336,8 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await route.fulfill({
         contentType: "text/html",
         body: callback
-          ? '<script>window.opener.document.querySelector("#state").textContent="Signed in"; window.close()</script>'
-          : '<main id="state">Signed out</main><button id="oauth" onclick="window.open(\'https://accounts.google.com/v3/signin/accountchooser\')">Continue</button>',
+          ? '<main id="state">Signed in</main><script>if (window.opener) { window.opener.location.href="https://product.test/callback"; window.close() }</script>'
+          : '<main id="state">Signed out</main><button id="oauth" onclick="window.open(\'https://accounts.google.com/v3/signin/accountchooser?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback\')">Continue</button>',
       });
     });
     await context.route("https://accounts.google.com/**", async (route) => {
@@ -361,7 +364,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await controller.loginWithOAuth("#oauth", 5_000, "google", "worker@example.com");
       await expect(product.locator("#state").textContent()).resolves.toBe("Signed in");
       expect(selectedAccount).toBe("worker@example.com");
-      expect(controller.currentUrl()).toBe("https://product.test/login");
+      expect(controller.currentUrl()).toBe("https://product.test/callback");
     } finally {
       await context.close().catch(() => undefined);
     }
@@ -521,7 +524,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
-  it("keeps a same-domain MFA sibling pending despite a different initiated destination", async () => {
+  it.each([
+    "https://identity.product.test/mfa",
+    "https://product.test/mfa",
+  ])("keeps %s pending despite a different initiated destination", async (mfaUrl) => {
     const context = await browser.newContext();
     const product = await context.newPage();
     const expectedReturnUrl = "https://console.product.test/projects";
@@ -534,7 +540,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
                 `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(expectedReturnUrl)}`,
               )}'>Continue</button>`
             : route.request().url().startsWith("https://accounts.google.com/")
-              ? '<script>setTimeout(() => location.href="https://identity.product.test/mfa", 50)</script>'
+              ? `<script>setTimeout(() => location.href=${JSON.stringify(mfaUrl)}, 50)</script>`
               : "<main>Approve sign-in</main>",
       }),
     );
@@ -544,6 +550,36 @@ describe("BrowserController OAuth popup lifecycle", () => {
       await expect(controller.loginWithOAuth("#oauth", 800, "google")).rejects.toBeInstanceOf(
         OAuthAwaitingHumanError,
       );
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("completes a popup OAuth return to its same-origin callback", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const callbackUrl = "https://product.test/callback";
+    await context.route("https://product.test/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: route.request().url() === callbackUrl
+          ? "<main>Signed in</main>"
+          : `<button id="oauth" onclick='window.open(${JSON.stringify(
+              `https://accounts.google.com/provider?redirect_uri=${encodeURIComponent(callbackUrl)}`,
+            )})'>Continue</button>`,
+      }),
+    );
+    await context.route("https://accounts.google.com/**", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<script>setTimeout(() => opener.location.href=${JSON.stringify(callbackUrl)}, 50)</script>`,
+      }),
+    );
+    await product.goto("https://product.test/login");
+    const controller = BrowserController.fromHarnessPage(product);
+    try {
+      await expect(controller.loginWithOAuth("#oauth", 1_500, "google")).resolves.toBeUndefined();
+      expect(controller.currentUrl()).toBe(callbackUrl);
     } finally {
       await context.close();
     }
@@ -636,7 +672,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
-  it("never reports failed when the same-tab product page closes at the deadline", async () => {
+  it("keeps the same-tab flow pending when its product page closes", async () => {
     const context = await browser.newContext();
     const product = await context.newPage();
     await context.route("https://product.test/**", async (route) => {
@@ -656,7 +692,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
     try {
       const login = controller.loginWithOAuth("#oauth", budgetMs);
       setTimeout(() => void product.close().catch(() => undefined), budgetMs - 50);
-      await login;
+      await expect(login).rejects.toBeInstanceOf(OAuthAwaitingHumanError);
       expect(product.isClosed()).toBe(true);
       expect(controller.currentUrl()).toBe("https://product.test/login");
     } finally {
@@ -673,10 +709,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
         contentType: "text/html",
         body: callback
           ? "<main>Login cancelled</main>"
-          : '<button id="oauth" onclick="location.href=\'https://provider.test/oauth\'">Login with Provider</button>',
+          : '<button id="oauth" onclick="location.href=\'https://provider.test/oauth?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback\'">Login with Provider</button>',
       });
     });
-    await context.route("https://provider.test/oauth", async (route) => {
+    await context.route("https://provider.test/oauth**", async (route) => {
       await route.fulfill({
         contentType: "text/html",
         body: '<script>setTimeout(() => location.href="https://product.test/callback?error=access_denied&error_description=The+user+denied+access", 20)</script>',
@@ -759,10 +795,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
         contentType: "text/html",
         body: callback
           ? "<main>Signed in</main>"
-          : '<button id="oauth" onclick="location.href=\'https://provider.test/oauth\'">Login with Provider</button>',
+          : '<button id="oauth" onclick="location.href=\'https://provider.test/oauth?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback\'">Login with Provider</button>',
       });
     });
-    await context.route("https://provider.test/oauth", async (route) => {
+    await context.route("https://provider.test/oauth**", async (route) => {
       await route.fulfill({
         contentType: "text/html",
         body: '<script>setTimeout(() => location.href="https://product.test/callback", 20)</script>',
@@ -796,10 +832,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
         contentType: "text/html",
         body: callback
           ? '<main>Signed in</main><script>setInterval(() => fetch("/pulse"), 25)</script>'
-          : '<button id="oauth" onclick="location.href=\'https://provider.test/oauth\'">Login with Provider</button>',
+          : '<button id="oauth" onclick="location.href=\'https://provider.test/oauth?redirect_uri=https%3A%2F%2Fproduct.test%2Fcallback\'">Login with Provider</button>',
       });
     });
-    await context.route("https://provider.test/oauth", async (route) => {
+    await context.route("https://provider.test/oauth**", async (route) => {
       await route.fulfill({
         contentType: "text/html",
         body: '<script>setTimeout(() => location.href="https://product.test/callback", 100)</script>',
@@ -815,32 +851,6 @@ describe("BrowserController OAuth popup lifecycle", () => {
     } finally {
       await context.close().catch(() => undefined);
     }
-  });
-});
-
-// Fix C's honest three-outcome classification, pinned as a pure unit test
-// rather than a live-timer race: reproducing the exact real-world race this
-// recovers (the deadline elapsing in the same instant the provider's
-// redirect lands) deterministically in a real browser would require racing
-// Node's event loop against Playwright's navigation events, which is
-// inherently flaky. The decision itself has no browser dependency, so pin it
-// directly.
-describe("classifyOAuthTimeout (Fix C decision logic)", () => {
-  it("reports completion when the provider returned control despite the timeout", () => {
-    // The exact false-negative from the 2026-09 dogfood: OAuth had actually
-    // completed, but the strict wait's confirmation loop still timed out.
-    expect(classifyOAuthTimeout(false, true)).toBe("returned");
-  });
-
-  it("reports awaiting_human when nothing observed proves either completion or failure", () => {
-    expect(classifyOAuthTimeout(false, false)).toBe("awaiting_human");
-  });
-
-  it("settles a provider page that closed at the deadline exactly like the lifecycle wait does", () => {
-    // A closed provider page is this codebase's ordinary popup completion
-    // signal, never a failure.
-    expect(classifyOAuthTimeout(true, false)).toBe("closed");
-    expect(classifyOAuthTimeout(true, true)).toBe("closed");
   });
 });
 
