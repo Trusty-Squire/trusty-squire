@@ -407,6 +407,32 @@ describe("observation byte efficiency", () => {
     ])
       expect(serializeBrowserUseDOM(card(icon)).dom).not.toContain("state_icons=");
   });
+  it("keeps non-interactive checked markers on their card and excludes nested controls", () => {
+    const card = node("ARTICLE", {
+      clickListener: true,
+      children: [
+        text("Plan"),
+        node("SPAN", { attributes: { "data-state": "checked" } }),
+        node("I", { attributes: { class: "checked" } }),
+      ],
+    });
+    const selected = serializeBrowserUseDOM(card).dom;
+    expect(selected).toContain('state_icons=["data-state=checked","checked"]');
+    const parent = node("DIV", {
+      clickListener: true,
+      children: [
+        text("Plan"),
+        node("BUTTON", {
+          attributes: { "aria-pressed": "true" },
+          children: [text("Favorite")],
+        }),
+      ],
+    });
+    const result = serializeBrowserUseDOM(parent);
+    expect(result.dom).not.toContain("state_icons=");
+    expect(result.dom).toContain("aria-pressed=true");
+    expect(result.refs).toEqual([parent.id, parent.children[1]!.id]);
+  });
   it("emits selection evidence for reachable controls without card tag heuristics", () => {
     const link = node("A", {
       attributes: { href: "#", class: "option border-selected" },

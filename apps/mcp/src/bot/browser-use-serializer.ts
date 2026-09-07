@@ -848,7 +848,7 @@ export function serializeBrowserUseDOM(
   const emittedTargets = new Set<string>();
   const stateIconCache = new Map<BrowserUseNode, string[]>();
   const selectionToken = (value: string | undefined): boolean =>
-    /(?:^|[-_\s])(?:check(?:mark)?|selected|tick)(?:$|[-_\s])/i.test(value ?? "");
+    /(?:^|[-_\s])(?:check(?:ed|mark)?|selected|tick)(?:$|[-_\s])/i.test(value ?? "");
   const stateIconEvidence = (child: BrowserUseNode): string | null => {
     const namedEvidence = [
       child.attributes["aria-label"],
@@ -865,17 +865,31 @@ export function serializeBrowserUseDOM(
     const glyph = browserUseBoundedContextText(child, 4)?.replace(/\s+/g, "");
     return glyph && /^[✓✔☑✅]+$/.test(glyph) ? glyph : null;
   };
+  const independentAction = (child: BrowserUseNode): boolean => {
+    const attributes = child.attributes;
+    return (
+      child.clickListener ||
+      ["button", "input", "select", "textarea", "a", "details", "summary", "option"].includes(
+        tag(child),
+      ) ||
+      ["onclick", "onmousedown", "onmouseup", "onkeydown", "onkeyup", "tabindex"].some(
+        (attribute) => attribute in attributes,
+      ) ||
+      interactiveRoles.has(attributes.role ?? "") ||
+      interactiveRoles.has(child.axRole ?? "")
+    );
+  };
   const stateIcons = (node: BrowserUseNode): string[] => {
     if (!stateIconCache.has(node)) {
       const icons: string[] = [];
       const collect = (child: BrowserUseNode): void => {
         if (!child.visible || child.contentDocument) return;
+        if (independentAction(child)) return;
         const evidence = stateIconEvidence(child);
         if (evidence) {
           icons.push(evidence);
           return;
         }
-        if (child.clickListener || ["button", "input", "select", "a"].includes(tag(child))) return;
         child.children.forEach(collect);
       };
       node.children.forEach(collect);

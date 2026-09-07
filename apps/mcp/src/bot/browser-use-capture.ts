@@ -20,7 +20,6 @@ interface FrameTree {
 import type { InteractiveElement } from "./browser.js";
 import {
   browserUseBoundedContextText,
-  browserUseBoundedRawText,
   browserUseInteractive,
   browserUseLocalContextContainer,
   browserUseOrderedHeadingContext,
@@ -577,7 +576,6 @@ export async function captureBrowserUseDOM(
                 c.attributes.placeholder ||
                 c.attributes.title ||
                 c.attributes["aria-label"] ||
-                browserUseBoundedRawText(c, iframeHintContextMaxChars) ||
                 context ||
                 "(no label)",
               pages: viewportHeight > 0 ? (c.bounds!.y / viewportHeight).toFixed(1) : 0,
